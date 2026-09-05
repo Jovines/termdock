@@ -37,3 +37,16 @@ describe('terminal startup font assets', () => {
     expect(facePackBytes).toBeLessThan(4.5 * 1024 * 1024);
   });
 });
+
+it('keeps critical font preloads below 160 KB and all unicode shards available', () => {
+  const preloads = [...indexHtml.matchAll(/<link[^>]+href="\/fonts\/([^\"]+)"[^>]*>/g)].map((match) => match[1]);
+  expect(preloads.reduce((bytes, file) => bytes + statSync(join(fontRoot, file)).size, 0)).toBeLessThan(160_000);
+  const css = readFileSync(join(here, 'fontFaces.css'), 'utf8');
+  const shards = [...css.matchAll(/url\(['"]?\/fonts\/([^)'" ]+)/g)].map((match) => match[1]);
+  expect(shards.length).toBeGreaterThan(100);
+  expect((css.match(/unicode-range:/g) ?? []).length).toBe(shards.length);
+  for (const file of shards) {
+    expect(file).toMatch(/-[a-f0-9]{12}\.woff2$/);
+    expect(existsSync(join(fontRoot, file))).toBe(true);
+  }
+});

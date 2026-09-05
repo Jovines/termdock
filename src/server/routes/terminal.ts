@@ -1,3 +1,6 @@
+import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
+import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
+import { TerminalOutputDelivery, resolveTerminalReplayCursor, type OutputFrame } from '../utils/terminalOutputDelivery.js';
 import express from 'express';
 import fs from 'fs';
 import os from 'os';
@@ -217,6 +220,10 @@ const TERMDOCK_FRONTEND_SESSION_ID_OPTION = '@termdock-frontend-session-id';
 
 // WebSocket clients per session (separate from SSE clients).
 const wsClients = new Map<string, Map<string, WebSocket>>();
+const outputDeliveries = new WeakMap<WebSocket, TerminalOutputDelivery>();
+const independentTmuxClients = new WeakSet<WebSocket>();
+const independentTmuxReplays = new WeakMap<WebSocket, () => Promise<void>>();
+const TERMINAL_STREAM_EPOCH = crypto.randomUUID();
 
 // Sessions where copy-mode -e just auto-exited at the bottom.
 // Prevents immediate re-entry on subsequent scroll-down commands.
@@ -367,9 +374,6 @@ interface TerminalSession {
   // resize 后滚动前，用 capture-pane 发一份权威屏幕重建，避免错误差分继续
   // 叠加。Promise 链只等待实际 tmux 命令，不使用固定时延。
   tmuxIoChain?: Promise<void>;
-  tmuxScreenSyncClients?: Set<string>;
-  tmuxResizeGeneration?: number;
-  tmuxScreenSyncTimers?: Map<string, ReturnType<typeof setTimeout>>;
 }
 
 type TuiProgressReport = {
@@ -1200,7 +1204,10 @@ function getHistorySince(sessionId: string, sinceSeq: number): {
       : history.chunks.slice();
     return { chunks, lastSeq, outOfWindow: false };
   }
-  if (sinceSeq >= lastSeq) {
+  if (sinceSeq > lastSeq) {
+    return { chunks: history.chunks.slice(), lastSeq, outOfWindow: true };
+  }
+  if (sinceSeq === lastSeq) {
     return { chunks: [], lastSeq, outOfWindow: false };
   }
   const oldestSeq = history.chunks.length > 0 ? history.chunks[0].seq : history.nextSeq;
@@ -2841,102 +2848,6 @@ function enqueueTmuxIo<T>(session: TerminalSession, operation: () => Promise<T> 
   return result;
 }
 
-function markTmuxClientsForScreenSync(sessionId: string, session: TerminalSession): void {
-  if (session.mode !== 'tmux') return;
-  const clients = wsClients.get(sessionId);
-  if (!clients || clients.size === 0) return;
-  const pending = session.tmuxScreenSyncClients ?? new Set<string>();
-  for (const clientId of clients.keys()) pending.add(clientId);
-  session.tmuxScreenSyncClients = pending;
-  session.tmuxResizeGeneration = (session.tmuxResizeGeneration ?? 0) + 1;
-}
-
-function markTmuxClientForScreenSync(session: TerminalSession, clientId: string): void {
-  if (session.mode !== 'tmux') return;
-  const pending = session.tmuxScreenSyncClients ?? new Set<string>();
-  pending.add(clientId);
-  session.tmuxScreenSyncClients = pending;
-  session.tmuxResizeGeneration = (session.tmuxResizeGeneration ?? 0) + 1;
-}
-
-const TMUX_RESIZE_SCREEN_SYNC_DELAY_MS = 180;
-
-function clearTmuxScreenSyncTimer(session: TerminalSession, clientId: string): void {
-  const timer = session.tmuxScreenSyncTimers?.get(clientId);
-  if (timer) clearTimeout(timer);
-  session.tmuxScreenSyncTimers?.delete(clientId);
-  if (session.tmuxScreenSyncTimers?.size === 0) {
-    session.tmuxScreenSyncTimers = undefined;
-  }
-}
-
-function scheduleTmuxScreenSyncAfterResize(
-  sessionId: string,
-  session: TerminalSession,
-  clientId: string,
-): void {
-  if (session.mode !== 'tmux' || !session.tmuxSessionName) return;
-  clearTmuxScreenSyncTimer(session, clientId);
-  const timers = session.tmuxScreenSyncTimers ?? new Map<string, ReturnType<typeof setTimeout>>();
-  const timer = setTimeout(() => {
-    clearTmuxScreenSyncTimer(session, clientId);
-    const ws = wsClients.get(sessionId)?.get(clientId);
-    if (!ws || ws.readyState !== ws.OPEN) return;
-    void enqueueTmuxIo(session, () => syncTmuxScreenBeforeScroll(sessionId, clientId, session, ws));
-  }, TMUX_RESIZE_SCREEN_SYNC_DELAY_MS);
-  timer.unref?.();
-  timers.set(clientId, timer);
-  session.tmuxScreenSyncTimers = timers;
-}
-
-function isTmuxWheelInput(data: string): boolean {
-  return /^(?:\u001b\[<6[45];\d+;\d+[Mm])+$/.test(data);
-}
-
-async function syncTmuxScreenBeforeScroll(
-  sessionId: string,
-  clientId: string,
-  session: TerminalSession,
-  ws: WebSocket,
-): Promise<void> {
-  clearTmuxScreenSyncTimer(session, clientId);
-  if (
-    session.mode !== 'tmux'
-    || !session.tmuxSessionName
-    || !session.tmuxScreenSyncClients?.has(clientId)
-  ) {
-    return;
-  }
-
-  const generation = session.tmuxResizeGeneration ?? 0;
-  try {
-    // capture-pane itself enters tmux's command queue after the tty resize.
-    // Do not call refresh-client here: that emits another incremental repaint
-    // through node-pty which can arrive after this authoritative snapshot and
-    // be applied twice (for example, duplicate Codex "Working" rows).
-    const snapshot = await captureTmuxPane(session.tmuxSessionName);
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'tmux-screen-sync',
-        chunks: buildTmuxScreenSnapshot(snapshot),
-        cols: session.cols,
-        rows: session.rows,
-        generation,
-      }));
-      session.tmuxScreenSyncClients.delete(clientId);
-      if (session.tmuxScreenSyncClients.size === 0) {
-        session.tmuxScreenSyncClients = undefined;
-      }
-    }
-  } catch (error) {
-    // Keep the client marked dirty. Its next wheel event retries the exact
-    // synchronization instead of permanently accepting a partial screen.
-    console.warn(
-      `[tmux-screen-sync] failed session=${sessionId} client=${clientId}: ${getErrorMessage(error)}`,
-    );
-  }
-}
-
 async function isTmuxPaneInMode(target: string, control?: TmuxControl): Promise<boolean> {
   const paneInModeRaw = (await sendTmuxCommand(target, control, [
     'display-message',
@@ -4372,9 +4283,7 @@ async function resolveTmuxClientTty(sessionName: string, preferredClientPid: num
 
   if (preferredClientPid !== null) {
     const matched = rows.find(([clientPid]) => clientPid === String(preferredClientPid));
-    if (matched?.[1]) {
-      return matched[1];
-    }
+    return matched?.[1] || null;
   }
 
   return rows[0][1] || null;
@@ -4925,10 +4834,7 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   }
   session.flowPausedClientTimers.clear();
   session.flowPausedClients.clear();
-  for (const timer of session.tmuxScreenSyncTimers?.values() ?? []) {
-    clearTimeout(timer);
-  }
-  session.tmuxScreenSyncTimers = undefined;
+
   if (session.ptyPausedForFlowControl) {
     applyPtyFlowControl(sessionId, session, false, 'session-cleanup');
   }
@@ -4980,14 +4886,22 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   }
 }
 
-function broadcastToWs(sessionId: string, data: string, excludeClientId?: string): void {
+function broadcastToWs(sessionId: string, data: string, excludeClientId?: string, output?: OutputFrame, eventType?: string): void {
   const clients = wsClients.get(sessionId);
   const session = terminalSessions.get(sessionId);
   if (!clients) return;
   for (const [clientId, ws] of clients.entries()) {
     if (excludeClientId && clientId === excludeClientId) continue;
+    if (independentTmuxClients.has(ws) && (output || eventType === 'pty-size')) continue;
     try {
-      ws.send(data);
+      if (ws.readyState !== ws.OPEN) continue;
+      if (ws.bufferedAmount > 1024 * 1024) {
+        ws.close(1013, 'Output transport is congested');
+        continue;
+      }
+      const delivery = outputDeliveries.get(ws);
+      if (output && delivery) delivery.enqueue(output);
+      else ws.send(data);
     } catch {
       clients.delete(clientId);
       if (session) removeClientFlowPaused(sessionId, session, clientId, 'ws-send-failed');
@@ -4996,7 +4910,8 @@ function broadcastToWs(sessionId: string, data: string, excludeClientId?: string
 }
 
 function broadcastJsonWs(sessionId: string, payload: unknown, excludeClientId?: string): void {
-  broadcastToWs(sessionId, JSON.stringify(payload), excludeClientId);
+  const output = (payload as { type?: string })?.type === 'data' ? payload as OutputFrame : undefined;
+  broadcastToWs(sessionId, JSON.stringify(payload), excludeClientId, output, (payload as { type?: string })?.type);
 }
 
 // 统一的 pty resize 入口：调用 ptyProcess.resize 改变 pty size 之后，把
@@ -5029,15 +4944,11 @@ function applyPtyResize(
   session.autoTitleTerminal.resize(cleanCols, cleanRows);
   session.lastActivity = Date.now();
   if (changed) {
-    markTmuxClientsForScreenSync(sessionId, session);
     broadcastJsonWs(
       sessionId,
       { type: 'pty-size', cols: cleanCols, rows: cleanRows, source },
       originClientId,
     );
-    if (originClientId) {
-      scheduleTmuxScreenSyncAfterResize(sessionId, session, originClientId);
-    }
   }
   return true;
 }
@@ -5376,7 +5287,9 @@ async function spawnTerminalSession(req: express.Request, input: {
     ? getTmuxBinary()
     : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCandidates()[0]);
   const args = mode === 'tmux' && tmuxSessionName
-    ? ['attach-session', '-t', tmuxSessionName]
+    // xterm supports DEC 2026. Declare it on this attached client so tmux
+    // emits real synchronized-output boundaries around its redraw batches.
+    ? ['-T', 'RGB,sync', 'attach-session', '-t', tmuxSessionName]
     : (process.platform === 'win32' ? buildPowerShellCwdHookArgs() : []);
 
   const envPath = buildAugmentedPath();
@@ -7755,6 +7668,25 @@ router.post('/:sessionId/resize', async (req, res) => {
   }
 });
 
+async function switchTmuxBackendSession(sessionId: string, session: TerminalSession, target: string): Promise<TmuxLayout> {
+  if (!target) throw new Error('tmuxSessionName is required');
+  const clientTty = await resolveTmuxClientTty(session.tmuxSessionName!, getPtyProcessPid(session.ptyProcess));
+  if (!clientTty) throw new Error('No tmux client available for current session');
+  await prepareManagedTmuxSession(target, session.cwd);
+  await sendTmuxCommand(session.tmuxSessionName!, session.tmuxControl, ['switch-client', '-c', clientTty, '-t', target]);
+  session.tmuxSessionName = target;
+  session.lastActivity = Date.now();
+  if (updateGlobalBindingForBackendSession(sessionId, {
+    mode: 'tmux', tmuxSessionName: target, cwd: session.cwd, lastActivity: session.lastActivity,
+  })) persistAndBroadcastGlobalState();
+  // Each display must attach to the newly selected task and initialize its
+  // own parser stream; the metadata client's bytes are never a replacement.
+  await Promise.all([...wsClients.get(sessionId)?.values() ?? []].map(ws => independentTmuxReplays.get(ws)?.()));
+  const layout = await getTmuxLayout(target);
+  broadcastEvent(sessionId, { type: 'tmux-layout', layout });
+  return layout;
+}
+
 router.post('/:sessionId/tmux', async (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
@@ -7782,28 +7714,7 @@ router.post('/:sessionId/tmux', async (req, res) => {
         return res.status(400).json({ error: 'tmuxSessionName is required' });
       }
 
-      const preferredClientPid = getPtyProcessPid(session.ptyProcess);
-      const clientTty = await resolveTmuxClientTty(tmuxTarget, preferredClientPid);
-
-      if (!clientTty) {
-        return res.status(500).json({ error: 'No tmux client available for current session' });
-      }
-
-      await prepareManagedTmuxSession(targetSessionName, session.cwd);
-      await sendTmuxCommand(tmuxTarget, session.tmuxControl, ['switch-client', '-c', clientTty, '-t', targetSessionName]);
-      session.tmuxSessionName = targetSessionName;
-      session.lastActivity = Date.now();
-      if (updateGlobalBindingForBackendSession(sessionId, {
-        mode: 'tmux',
-        tmuxSessionName: targetSessionName,
-        cwd: session.cwd,
-        lastActivity: session.lastActivity,
-      })) {
-        persistAndBroadcastGlobalState();
-      }
-
-      const layout = await getTmuxLayout(targetSessionName);
-      broadcastEvent(sessionId, { type: 'tmux-layout', layout });
+      const layout = await switchTmuxBackendSession(sessionId, session, targetSessionName);
       return res.json({ success: true, layout });
     }
 
@@ -8079,14 +7990,62 @@ export function handleTerminalWebSocket(
   ws: WebSocket,
   sessionId: string,
   clientId: string,
-  options: { sinceSeq?: number; pushClientId?: string } = {},
+  options: { sinceSeq?: number; pushClientId?: string; streamEpoch?: string; flowControl?: boolean; independentTmux?: boolean; outputActive?: boolean } = {},
+  initialDimensions?: { cols: number; rows: number },
 ): void {
   const session = terminalSessions.get(sessionId);
   if (!session) {
     ws.close(4001, 'Session not found');
     return;
   }
-  const sinceSeq = options.sinceSeq ?? 0;
+  const initialSince = options.sinceSeq ?? 0;
+  const delivery = new TerminalOutputDelivery((frame) => {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
+  }, options.flowControl === true, 128 * 1024, 512 * 1024, () => {
+    // No ACK may be outstanding (e.g. a single oversized frame). Reconnect
+    // against authoritative history instead of leaving this observer stalled.
+    if (ws.readyState === ws.OPEN) ws.close(1013, 'Output observer exceeded budget');
+  });
+  outputDeliveries.set(ws, delivery);
+  let outputWanted = options.outputActive !== false;
+  let clientPaused = false;
+  let replayRequest: Promise<void> | null = null;
+  let clientCols = session.cols;
+  let clientRows = session.rows;
+  if (initialDimensions && options.independentTmux) {
+    clientCols = initialDimensions.cols;
+    clientRows = initialDimensions.rows;
+  }
+  const ownTmux = session.mode === 'tmux' && options.independentTmux === true;
+  if (ownTmux) independentTmuxClients.add(ws);
+  const attachment = ownTmux ? new TerminalClientAttachment(
+    async (cols, rows) => {
+      const provider = await getPtyProvider();
+      // The metadata observer must not choose the pane size while a browser
+      // owns an attached client. Resolve by exact PID, never another client.
+      const raw = await runTmux(['list-clients', '-t', session.tmuxSessionName!, '-F', '#{client_pid} #{client_tty}']);
+      const metadata = raw.split('\n').map(line => line.trim().split(/\s+/))
+        .find(([pid]) => pid === String(session.ptyProcess.pid));
+      if (metadata?.[1]) await runTmux(['refresh-client', '-t', metadata[1], '-f', 'ignore-size']);
+      const env = buildInteractiveColorEnvironment({ ...process.env, PATH: buildAugmentedPath() });
+      delete env.TMUX;
+      delete env.TMUX_PANE;
+      return provider.spawn(getTmuxBinary(), ['-T', 'RGB,sync', 'attach-session', '-t', session.tmuxSessionName!], {
+        name: 'xterm-256color', cols, rows, cwd: session.cwd || os.homedir(),
+        env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+      });
+    },
+    (data) => {
+      if (ws.readyState !== ws.OPEN) return;
+      if (ws.bufferedAmount > 1024 * 1024) {
+        ws.close(1013, 'Output transport is congested');
+        return;
+      }
+      delivery.enqueue({ type: 'data', data });
+    },
+    () => { if (ws.readyState === ws.OPEN) ws.close(1012, 'Tmux display client detached'); },
+  ) : null;
+
 
   // Register client
   let clients = wsClients.get(sessionId);
@@ -8101,7 +8060,15 @@ export function handleTerminalWebSocket(
     persistAndBroadcastGlobalState();
   }
 
-  void (async () => {
+  const sendReplay = (requestedSince = initialSince, clientEpoch = options.streamEpoch): Promise<void> => {
+    if (replayRequest) return replayRequest;
+    const sinceSeq = resolveTerminalReplayCursor(requestedSince, clientEpoch, TERMINAL_STREAM_EPOCH);
+    delivery.replaying = true;
+    if (attachment) {
+      attachment.close();
+      delivery.setActive(false); // Discard only this observer's obsolete stream.
+    }
+    replayRequest = (async () => {
     // 连接时立即检测一次 activeProgram，避免前端首次显示闪烁
     try {
       if (session.mode === 'shell') {
@@ -8129,7 +8096,15 @@ export function handleTerminalWebSocket(
     let replayChunks: string[] = [];
     let replayLastSeq = 0;
     let replayOutOfWindow = false;
-    if (sinceSeq > 0 && session.mode === 'shell') {
+    if (attachment) {
+      if (ws.readyState !== ws.OPEN) return;
+      delivery.setActive(outputWanted && !clientPaused);
+      if (delivery.active && !await attachment.open(clientCols, clientRows)) return;
+      // A fresh attached client emits initialization and full redraw through
+      // its own PTY. No independent pane snapshot is mixed into that stream.
+      replayChunks = ['\x1bc'];
+      replayOutOfWindow = true;
+    } else if (sinceSeq > 0 && session.mode === 'shell') {
       const since = getHistorySince(sessionId, sinceSeq);
       replayChunks = since.chunks.map((c) => c.data);
       replayLastSeq = since.lastSeq;
@@ -8137,7 +8112,7 @@ export function handleTerminalWebSocket(
     } else {
       // 首次连接：直接补全量 scrollback，并强制让客户端清空已有内容（处理缓存 hydrate）
       try {
-        replayChunks = await getRestoreHistory(sessionId, session);
+        replayChunks = session.mode === 'shell' ? getReconnectionHistory(sessionId) : await getRestoreHistory(sessionId, session);
       } catch (error) {
         console.warn(`[ws] getRestoreHistory failed for ${sessionId}: ${getErrorMessage(error)}`);
         replayChunks = [];
@@ -8146,10 +8121,18 @@ export function handleTerminalWebSocket(
       replayOutOfWindow = replayChunks.length > 0;
     }
 
+    if (ws.readyState !== ws.OPEN) return;
+    // Empty authoritative histories still need to clear an obsolete baseline.
+    if (sinceSeq === 0 && replayChunks.length === 0) {
+      replayChunks = ['\x1bc'];
+      replayOutOfWindow = true;
+    }
     // Send connected event (after initial detection)
     const runtime = (globalThis as Record<string, unknown>).Bun ? 'bun' : 'node';
     ws.send(JSON.stringify({
       type: 'connected',
+      streamEpoch: TERMINAL_STREAM_EPOCH,
+      outputProtocol: options.flowControl ? 2 : undefined,
       runtime,
       ptyBackend: session.ptyBackend || 'unknown',
       mode: session.mode,
@@ -8169,6 +8152,7 @@ export function handleTerminalWebSocket(
       replayLastSeq,
       replayOutOfWindow,
     }));
+    delivery.finishReplay(replayLastSeq);
     // Rich agent state rides its own message (see the SSE path above).
     if (session.agent || session.agentSession || session.agentResumeRecovered) {
       ws.send(JSON.stringify(buildAgentStatusPayload(sessionId, session)));
@@ -8176,7 +8160,18 @@ export function handleTerminalWebSocket(
     if (session.gitStatus) {
       ws.send(JSON.stringify({ type: 'git-status', gitStatus: session.gitStatus }));
     }
-  })();
+    })().catch((error) => {
+      console.warn(`[ws] replay failed session=${sessionId}: ${getErrorMessage(error)}`);
+      if (ws.readyState === ws.OPEN) ws.close(1011, 'Replay unavailable');
+    }).finally(() => { replayRequest = null; });
+    return replayRequest;
+  };
+  if (attachment) independentTmuxReplays.set(ws, async () => {
+    attachment.close();
+    await replayRequest;
+    if (ws.readyState === ws.OPEN) await sendReplay(0);
+  });
+  void sendReplay();
 
   // Tmux layout polling (per-client, like the SSE stream does)
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
@@ -8324,11 +8319,11 @@ export function handleTerminalWebSocket(
         case 'input': {
           if (typeof msg.data === 'string' && msg.data.length > 0) {
             const data = msg.data;
-            if (session.mode === 'tmux') {
+            if (attachment) {
+              session.lastActivity = Date.now();
+              attachment.write(data);
+            } else if (session.mode === 'tmux') {
               await enqueueTmuxIo(session, async () => {
-                if (isTmuxWheelInput(data)) {
-                  await syncTmuxScreenBeforeScroll(sessionId, clientId, session, ws);
-                }
                 session.lastActivity = Date.now();
                 session.ptyProcess.write(data);
               });
@@ -8342,8 +8337,24 @@ export function handleTerminalWebSocket(
         case 'resize': {
           const cols = Number(msg.cols);
           const rows = Number(msg.rows);
-          if (cols > 0 && rows > 0) {
-            const screenSyncGenerationBefore = session.tmuxResizeGeneration ?? 0;
+          if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
+            if (attachment) {
+              const cleanCols = Math.floor(cols), cleanRows = Math.floor(rows);
+              const sameSize = clientCols === cleanCols && clientRows === cleanRows;
+              const ok = attachment.resize(cleanCols, cleanRows);
+              if (ok) {
+                clientCols = cleanCols;
+                clientRows = cleanRows;
+                session.lastActivity = Date.now();
+                if (sameSize) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
+              }
+              if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({
+                type: 'resize-ack', seq: typeof msg.seq === 'number' ? msg.seq : undefined,
+                ok, cols: clientCols, rows: clientRows, screenSyncPending: false,
+              }));
+              break;
+            }
+            const sameSize = session.cols === Math.floor(cols) && session.rows === Math.floor(rows);
             const ok = session.mode === 'tmux'
               ? await enqueueTmuxIo(session, () => applyPtyResize(
                   sessionId,
@@ -8354,31 +8365,18 @@ export function handleTerminalWebSocket(
                   clientId,
                 ))
               : applyPtyResize(sessionId, session, cols, rows, `ws-resize:${clientId}`, clientId);
-            // A forced same-size resize is the client's explicit redraw
-            // request. There is no geometry change for applyPtyResize to mark,
-            // but the client still needs an authoritative grid (including the
-            // cursor position) rather than waiting for the TUI to emit output.
-            if (
-              ok
-              && session.mode === 'tmux'
-              && (session.tmuxResizeGeneration ?? 0) === screenSyncGenerationBefore
-            ) {
-              markTmuxClientForScreenSync(session, clientId);
-              scheduleTmuxScreenSyncAfterResize(sessionId, session, clientId);
+            // Same-size requests explicitly recover the display; actual geometry
+            // changes already cause tmux to redraw its attached client.
+            if (ok && session.mode === 'tmux' && sameSize) {
+              await enqueueTmuxIo(session, () => redrawTmuxClient(runTmux, session.tmuxSessionName!, session.ptyProcess.pid));
             }
-            const screenSyncGeneration = session.tmuxResizeGeneration ?? 0;
-            const screenSyncPending = ok
-              && session.mode === 'tmux'
-              && screenSyncGeneration > screenSyncGenerationBefore
-              && session.tmuxScreenSyncClients?.has(clientId) === true;
             ws.send(JSON.stringify({
               type: 'resize-ack',
               seq: typeof msg.seq === 'number' ? msg.seq : undefined,
               ok,
               cols: session.cols,
               rows: session.rows,
-              screenSyncPending,
-              screenSyncGeneration: screenSyncPending ? screenSyncGeneration : undefined,
+              screenSyncPending: false,
             }));
           }
           break;
@@ -8389,10 +8387,13 @@ export function handleTerminalWebSocket(
             ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: false, error: 'Not in tmux mode' }));
             break;
           }
+          if (msg.action === 'switch-session') {
+            const target = typeof msg.tmuxSessionName === 'string' ? msg.tmuxSessionName.trim() : '';
+            await enqueueTmuxIo(session, () => switchTmuxBackendSession(sessionId, session, target));
+            if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: true }));
+            break;
+          }
           const result = await enqueueTmuxIo(session, async () => {
-            if (msg.action === 'scroll') {
-              await syncTmuxScreenBeforeScroll(sessionId, clientId, session, ws);
-            }
             return executeTmuxAction(
               session.tmuxSessionName!,
               msg.action as string,
@@ -8412,7 +8413,9 @@ export function handleTerminalWebSocket(
         case 'focus': {
           const focused = msg.focused === true;
           const reason = typeof msg.reason === 'string' ? msg.reason : 'client-focus';
-          updateClientFocusState(sessionId, session, clientId, focused, reason);
+          if (attachment) {
+            if (session.focusTrackingRequested) attachment.write(getFocusSequence(focused));
+          } else updateClientFocusState(sessionId, session, clientId, focused, reason);
           break;
         }
         case 'viewing': {
@@ -8427,10 +8430,34 @@ export function handleTerminalWebSocket(
           }
           break;
         }
+        case 'output-subscription': {
+          if (!options.flowControl || typeof msg.active !== 'boolean') break;
+          outputWanted = msg.active;
+          const resumed = delivery.setActive(outputWanted && !clientPaused);
+          if (!delivery.active) attachment?.close();
+          if (resumed && delivery.active) {
+            void sendReplay(typeof msg.since === 'number' ? msg.since : 0, typeof msg.epoch === 'string' ? msg.epoch : undefined);
+          }
+          break;
+        }
+        case 'output-ack': {
+          if (!options.flowControl || typeof msg.flowSeq !== 'number') break;
+          delivery.acknowledge(msg.flowSeq);
+          if (delivery.needsReplay && delivery.active) {
+            void sendReplay(typeof msg.since === 'number' ? msg.since : 0, typeof msg.epoch === 'string' ? msg.epoch : undefined);
+          }
+          break;
+        }
         case 'flow-control': {
           if (typeof msg.paused === 'boolean') {
             const reason = typeof msg.reason === 'string' ? msg.reason : 'client-flow-control';
-            setClientFlowPaused(sessionId, session, clientId, msg.paused, reason);
+            if (options.flowControl) {
+              const wasPaused = clientPaused;
+              clientPaused = msg.paused;
+              delivery.setActive(outputWanted && !clientPaused);
+              if (!delivery.active) attachment?.close();
+              if (wasPaused && delivery.active) void sendReplay(0);
+            } else setClientFlowPaused(sessionId, session, clientId, msg.paused, reason);
           }
           break;
         }
@@ -8463,6 +8490,7 @@ export function handleTerminalWebSocket(
 
   // Cleanup on close
   ws.on('close', () => {
+    attachment?.close();
     if (tmuxInterval) clearInterval(tmuxInterval);
     if (activeProgramInterval) clearInterval(activeProgramInterval);
     const clients = wsClients.get(sessionId);
@@ -8472,8 +8500,7 @@ export function handleTerminalWebSocket(
         wsClients.delete(sessionId);
       }
     }
-    removeClientFocus(sessionId, session, clientId);
-    clearTmuxScreenSyncTimer(session, clientId);
+    if (!attachment) removeClientFocus(sessionId, session, clientId);
     if (options.pushClientId) {
       setClientViewingSession(options.pushClientId, sessionId, false);
     }

@@ -1,3 +1,4 @@
+import { trimCache } from '../utils/cacheBudget';
 import { create } from 'zustand';
 import { getSettings, updateSettings, type FileEntry, type FileSortMode, type FileWatchEvent, type GitChangedFile } from '../terminal/api';
 import { clearCache, readCache, writeCache } from '../utils/localStorageCache';
@@ -735,6 +736,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       markSplitSidebarStateInitialized(splitWorkspaceId);
     }
 
+    trimCache(projectStateCache, 12, new Set(contextKey ? [contextKey] : []));
     const cached = contextKey ? projectStateCache.get(contextKey) : undefined;
     const persistedRightTab = contextKey ? readRightSidebarTabCache()[contextKey] : undefined;
     const widthCache = readRightSidebarWidthCache();
@@ -818,6 +820,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       writeCache(RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY, nextWidthCache);
     }
     if (splitState) writeExplorerRootCache(explorerRootCache);
+    trimCache(projectStateCache, 12, new Set(state.contextKey ? [state.contextKey] : []));
     return { projectStateCache, explorerRootCache };
   }),
 
@@ -973,7 +976,9 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   setDirectoryCache: (path, entries) =>
     set((s) => {
       const next = new Map(s.directoryCache);
+      next.delete(path);
       next.set(path, entries);
+      trimCache(next, 128, new Set([...s.expandedPaths, path, s.explorerRoot ?? s.rootPath ?? '']));
       return { directoryCache: next };
     }),
 

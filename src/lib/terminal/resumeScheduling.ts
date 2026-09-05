@@ -3,20 +3,32 @@ export const BACKGROUND_RESUME_STAGGER_MS = 120;
 export const FOREGROUND_RESUME_COALESCE_MS = 250;
 export const VISIBLE_RECONNECT_WATCHDOG_MS = 60_000;
 
-export function selectNextViewportWarmBatch(options: {
-  orderedSessionIds: readonly string[];
+/** Keep all visible split panes, then at most three viewports in total.
+ * Recompute from the current slide, never the set of previously visited tabs.
+ * Unmounting a viewport detaches the client; it does not terminate its PTY.
+ */
+export function selectMobileViewportSessionIds(options: {
+  slides: readonly (readonly string[])[];
   visibleSessionIds: ReadonlySet<string>;
-  mountedSessionIds: ReadonlySet<string>;
-  batchSize: number;
-}): string[] {
-  const batchSize = Math.max(0, Math.floor(options.batchSize));
-  if (batchSize === 0) return [];
-  return options.orderedSessionIds
-    .filter((sessionId) => (
-      !options.visibleSessionIds.has(sessionId)
-      && !options.mountedSessionIds.has(sessionId)
-    ))
-    .slice(0, batchSize);
+  foregroundSessionId: string | null;
+}): ReadonlySet<string> {
+  const existing = new Set(options.slides.flat());
+  const retained = new Set([...options.visibleSessionIds].filter((id) => existing.has(id)));
+  if (options.foregroundSessionId && existing.has(options.foregroundSessionId)) {
+    retained.add(options.foregroundSessionId);
+  }
+  const activeIndex = options.slides.findIndex((slide) => slide.some((id) => retained.has(id)));
+  if (activeIndex < 0) return retained;
+  // Only immediate neighbours need a warm viewport for a swipe. Alternate
+  // sides so a neighbouring split workspace cannot consume every spare slot.
+  const previous = options.slides[activeIndex - 1] ?? [];
+  const next = options.slides[activeIndex + 1] ?? [];
+  for (let index = 0; index < Math.max(previous.length, next.length) && retained.size < 3; index += 1) {
+    for (const id of [previous[index], next[index]]) {
+      if (id && retained.size < 3) retained.add(id);
+    }
+  }
+  return retained;
 }
 
 export function resolvePrioritySessionId(
@@ -114,7 +126,9 @@ export function shouldForceForegroundReconnect(options: {
   wasPageHidden: boolean;
   reason: string;
 }): boolean {
-  return options.wasPageHidden || options.reason === 'bfcache' || options.reason === 'online';
+  // Visibility alone does not invalidate a live socket. Probe it first so a
+  // brief app switch preserves the attached tmux client and parser stream.
+  return options.reason === 'bfcache' || options.reason === 'online';
 }
 
 export function getVisibleReconnectWatchdogDelayMs(options: {

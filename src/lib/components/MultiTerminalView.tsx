@@ -1,3 +1,4 @@
+import { useSettledViewportWindow } from '../hooks/useSettledViewportWindow';
 import React, { useEffect, useCallback, useState, useRef, useMemo } from 'react';
 import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
@@ -20,7 +21,7 @@ import {
   BACKGROUND_RESUME_INITIAL_DELAY_MS,
   buildResumeDelayBySessionId,
   resolvePrioritySessionId,
-  selectNextViewportWarmBatch,
+  selectMobileViewportSessionIds,
   selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
   shouldRunResumeRequest,
@@ -99,8 +100,6 @@ interface CloseSessionEventDetail {
 const SWIPE_ANIMATION_SPEED_MS = 320;
 const SWIPER_TRANSLATE_EPSILON_PX = 1;
 const TOUCH_SWIPE_RELEASE_GUARD_MS = SWIPE_ANIMATION_SPEED_MS + 120;
-const MOBILE_VIEWPORT_WARM_BATCH_SIZE = 2;
-const MOBILE_VIEWPORT_WARM_BATCH_DELAY_MS = 160;
 type SyncSwiperOptions = {
   immediate?: boolean;
 };
@@ -701,20 +700,26 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     sessions.length,
   ]);
 
+  // Mobile retains only a small sliding window. Hiding an xterm does not
+  // release its buffer, renderer or websocket; warming every restored session
+  // can exhaust WebKit's per-page memory budget even when only one is visible.
+  const retainedViewportSessionIds = useMemo(() => isMobileLayout
+    ? selectMobileViewportSessionIds({
+      slides: workspaceSlides.map((slide) => slide.sessions.map((session) => session.id)),
+      visibleSessionIds,
+      foregroundSessionId,
+    })
+    : deferredViewportSessionIds,
+  [isMobileLayout, workspaceSlides, visibleSessionIds, foregroundSessionId, deferredViewportSessionIds]);
+
   useEffect(() => {
-    if (visibleSessionIds.size === 0) return;
-    // Keep mounted terminals bounded on both desktop and mobile. Creating an
-    // xterm/canvas for every restored session at once delays the first visible
-    // terminal. Warm only nearby slides, then retain each one the user visits.
+    if (isMobileLayout || visibleSessionIds.size === 0) return;
+    // Desktop retains visited terminals and warms two nearby slides.
     const idsToMount = new Set(visibleSessionIds);
     const activeSlideIndex = workspaceSlides.findIndex((slide) => (
       slide.sessions.some((session) => visibleSessionIds.has(session.id))
     ));
-    // Mobile needs one neighbour for swiping. Desktop gets two slots of runway
-    // so walking the sidebar does not create/connect a brand-new xterm after
-    // every click, while still avoiding the old all-sessions-at-once startup.
-    const warmRadius = isMobileLayout ? 1 : 2;
-    for (let offset = -warmRadius; offset <= warmRadius; offset += 1) {
+    for (let offset = -2; offset <= 2; offset += 1) {
       if (offset === 0) continue;
       workspaceSlides[activeSlideIndex + offset]?.sessions.forEach((session) => idsToMount.add(session.id));
     }
@@ -730,52 +735,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
   }, [isMobileLayout, visibleSessionIds, workspaceSlides]);
 
-  useEffect(() => {
-    if (
-      !isMobileLayout
-      || !connectionPriorityReady
-      || isRestoring
-      || !foregroundViewportReady
-      || !foregroundConnectionReady
-      || !foregroundContentReady
-      || pendingSwitchSessionId !== null
-    ) return;
-
-    const nextBatch = selectNextViewportWarmBatch({
-      orderedSessionIds: workspaceSlides.flatMap((slide) => (
-        slide.sessions.map((session) => session.id)
-      )),
-      visibleSessionIds,
-      mountedSessionIds: deferredViewportSessionIds,
-      batchSize: MOBILE_VIEWPORT_WARM_BATCH_SIZE,
-    });
-    if (nextBatch.length === 0) return;
-
-    // Once the foreground has fully presented, progressively create the
-    // remaining mobile viewports off-screen. A cold sidebar selection otherwise
-    // has to pay xterm construction + health probe + websocket + tmux snapshot
-    // serially while the user waits. Small batches preserve fast first paint
-    // and avoid the old all-sessions-at-once startup stall.
-    const timer = window.setTimeout(() => {
-      setDeferredViewportSessionIds((current) => {
-        const next = new Set(current);
-        nextBatch.forEach((sessionId) => next.add(sessionId));
-        return next;
-      });
-    }, MOBILE_VIEWPORT_WARM_BATCH_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [
-    connectionPriorityReady,
-    deferredViewportSessionIds,
-    foregroundConnectionReady,
-    foregroundContentReady,
-    foregroundViewportReady,
-    isMobileLayout,
-    isRestoring,
-    pendingSwitchSessionId,
-    visibleSessionIds,
-    workspaceSlides,
-  ]);
+  const settledViewportSessionIds = useSettledViewportWindow(retainedViewportSessionIds);
 
   useEffect(() => {
     if (!pendingSwitchSessionId) return;
@@ -2092,7 +2052,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       sessionId: session.id,
       foregroundSessionId,
       visibleSessionIds,
-      deferredViewportSessionIds,
+      deferredViewportSessionIds: isMobileLayout ? settledViewportSessionIds : retainedViewportSessionIds,
     });
     const initialConnectEnabled = shouldStartInitialConnection({
       sessionId: session.id,
@@ -2107,7 +2067,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }) && connectionPriorityReady;
     const initialConnectDelayMs = session.id === foregroundSessionId
       ? 0
-      : deferredViewportSessionIds.has(session.id)
+      : retainedViewportSessionIds.has(session.id)
         ? 0
         : backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS;
     return (

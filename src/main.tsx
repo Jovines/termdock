@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 // test comment
 import App from './App';
 import { LoginScreen } from './lib/components/auth/LoginScreen';
-import { DagPlayground } from './lib/components/sidebar/DagPlayground';
-import { DiffLab } from './lib/components/sidebar/DiffLab';
-import { DiffReviewLab } from './lib/components/sidebar/DiffReviewLab';
+const DagPlayground = lazy(() => import('./lib/components/sidebar/DagPlayground').then((module) => ({ default: module.DagPlayground })));
+const DiffLab = lazy(() => import('./lib/components/sidebar/DiffLab').then((module) => ({ default: module.DiffLab })));
+const DiffReviewLab = lazy(() => import('./lib/components/sidebar/DiffReviewLab').then((module) => ({ default: module.DiffReviewLab })));
 import { ErrorBoundary } from './lib/components/ui/ErrorBoundary';
 import { syncInitialViewportCssVars } from './lib/hooks/useViewportHeight';
 import { I18nProvider, useI18n } from './lib/i18n';
@@ -14,6 +14,7 @@ import {
   getAuthStatus,
   type AuthStatus,
 } from './lib/terminal/api';
+import { PwaUpdateNotice } from './lib/components/PwaUpdateNotice';
 import { setupPwaUpdateReload } from './lib/utils/pwaUpdate';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 
@@ -81,7 +82,9 @@ function AuthGate() {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <I18nProvider>
+      <PwaUpdateNotice />
       <ErrorBoundary>
+        <Suspense fallback={<div className="termdock-boot" role="status">Loading Termdock</div>}>
         {(() => {
           const params = new URLSearchParams(window.location.search);
           if (params.get('dag-playground') === '1') return <DagPlayground />;
@@ -89,6 +92,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           if (params.get('diff-lab') === '1') return <DiffLab />;
           return <AuthGate />;
         })()}
+      </Suspense>
       </ErrorBoundary>
     </I18nProvider>
   </React.StrictMode>

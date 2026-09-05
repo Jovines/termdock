@@ -9,7 +9,7 @@ import {
   resolvePrioritySessionId,
   selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
-  selectNextViewportWarmBatch,
+  selectMobileViewportSessionIds,
   shouldRunResumeRequest,
   shouldForceForegroundReconnect,
   shouldStartInitialConnection,
@@ -149,23 +149,54 @@ describe('shouldDeferSessionSwitch', () => {
   });
 });
 
-describe('selectNextViewportWarmBatch', () => {
-  it('warms only unmounted background sessions in stable order', () => {
-    expect(selectNextViewportWarmBatch({
-      orderedSessionIds: ['active', 'ready-neighbour', 'cold-a', 'cold-b', 'cold-c'],
-      visibleSessionIds: new Set(['active']),
-      mountedSessionIds: new Set(['active', 'ready-neighbour']),
-      batchSize: 2,
-    })).toEqual(['cold-a', 'cold-b']);
+describe('selectMobileViewportSessionIds', () => {
+  const slides = Array.from({ length: 100 }, (_, index) => [`session-${index}`]);
+
+  it('keeps memory bounded while visiting every tab and retains swipe neighbours', () => {
+    for (let index = 0; index < slides.length; index += 1) {
+      const id = slides[index][0];
+      const retained = selectMobileViewportSessionIds({
+        slides, visibleSessionIds: new Set([id]), foregroundSessionId: id,
+      });
+      expect(retained.size).toBeLessThanOrEqual(3);
+      expect(retained.has(id)).toBe(true);
+      if (index > 0) expect(retained.has(slides[index - 1][0])).toBe(true);
+      if (index + 1 < slides.length) expect(retained.has(slides[index + 1][0])).toBe(true);
+      expect(shouldMountSessionViewport({
+        sessionId: slides[(index + 50) % slides.length][0],
+        foregroundSessionId: id,
+        visibleSessionIds: new Set([id]),
+        deferredViewportSessionIds: retained,
+      })).toBe(false);
+    }
   });
 
-  it('does not schedule work for a disabled batch', () => {
-    expect(selectNextViewportWarmBatch({
-      orderedSessionIds: ['active', 'cold'],
-      visibleSessionIds: new Set(['active']),
-      mountedSessionIds: new Set(['active']),
-      batchSize: 0,
-    })).toEqual([]);
+  it('never evicts visible split panes even when there are more than three', () => {
+    const panes = ['a', 'b', 'c', 'd'];
+    expect([...selectMobileViewportSessionIds({
+      slides: [['before'], panes, ['after']],
+      visibleSessionIds: new Set(panes), foregroundSessionId: 'b',
+    })]).toEqual(panes);
+  });
+
+  it('does not eagerly mount an entire adjacent split workspace', () => {
+    expect([...selectMobileViewportSessionIds({
+      slides: [['p1', 'p2', 'p3'], ['active'], ['n1', 'n2']],
+      visibleSessionIds: new Set(['active']), foregroundSessionId: 'active',
+    })]).toEqual(['active', 'p1', 'n1']);
+  });
+
+  it('retains a notification foreground target and ignores removed sessions', () => {
+    const retained = selectMobileViewportSessionIds({
+      slides, visibleSessionIds: new Set(['session-0', 'removed']), foregroundSessionId: 'session-80',
+    });
+    expect(retained.has('session-0')).toBe(true);
+    expect(retained.has('session-80')).toBe(true);
+    expect(retained.has('removed')).toBe(false);
+    expect(retained.size).toBe(3);
+    expect(selectMobileViewportSessionIds({
+      slides: [], visibleSessionIds: new Set(['removed']), foregroundSessionId: 'removed',
+    }).size).toBe(0);
   });
 });
 
@@ -215,8 +246,8 @@ describe('shouldScheduleForegroundResume', () => {
 });
 
 describe('shouldForceForegroundReconnect', () => {
-  it('replaces the foreground socket after a real background or network resume', () => {
-    expect(shouldForceForegroundReconnect({ wasPageHidden: true, reason: 'visibility' })).toBe(true);
+  it('probes after an app switch, but replaces sockets after page or network restoration', () => {
+    expect(shouldForceForegroundReconnect({ wasPageHidden: true, reason: 'visibility' })).toBe(false);
     expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'bfcache' })).toBe(true);
     expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'online' })).toBe(true);
   });

@@ -1,3 +1,5 @@
+import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
+import { clearPreviewResourceCache, fetchPreviewResource } from '../utils/previewResourceCache';
 import type {
   TerminalSession,
   TerminalStreamEvent,
@@ -156,7 +158,10 @@ export async function refreshQuota(): Promise<QuotaStatus> {
 
 
 const FS_REQUEST_TIMEOUT_MS = 8_000;
+export const MODEL_PREVIEW_REQUEST_TIMEOUT_MS = 60_000;
 const HEIC_PREVIEW_REQUEST_TIMEOUT_MS = 32_000;
+// Includes rendering and the complete GLB transfer on mobile connections.
+export const EDA_PREVIEW_REQUEST_TIMEOUT_MS = 125_000;
 const GIT_REQUEST_TIMEOUT_MS = 10_000;
 const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
 export const TERMINAL_CSRF_REQUEST_TIMEOUT_MS = 8_000;
@@ -336,6 +341,11 @@ interface WsConnection {
   // 重连补帧基线：connected.replayLastSeq 到来时记录服务端 replay 后的基线，
   // live data 携带 seq 时再随已处理输出单调推进；下一次重连用它作为 since 参数。
   lastSeq: number;
+  streamEpoch?: string;
+  outputProtocol?: number;
+  flowSeq?: number;
+  acknowledgedFlowSeq?: number;
+  appliedSeq?: number;
   // 输入端缓冲：WS 没开时把用户输入暂存，连上后批量 flush，避免短线期间丢字。
   pendingInputs: string[];
   // 仅在拥塞时启用短窗口批量 flush，快网保持逐条直发。
@@ -350,6 +360,7 @@ interface WsConnection {
 }
 
 const wsConnections = new Map<string, WsConnection>();
+const outputSubscriptions = new Map<string, boolean>();
 
 type LinkQuality = 'good' | 'degraded' | 'congested';
 
@@ -411,16 +422,41 @@ function resolveTmuxRequest(reqId: string, success: boolean, layout?: TmuxLayout
   }
 }
 
-function getWebSocketUrl(sessionId: string, sinceSeq: number): string {
+// Preserve geometry across socket replacement; the server's metadata PTY may
+// still have its original 80x24 size while this browser displays a larger grid.
+const reconnectDimensions = new Map<string, { cols: number; rows: number }>();
+
+function getWebSocketUrl(sessionId: string, sinceSeq: number, epoch?: string): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const base = `${proto}://${window.location.host}/api/terminal/${sessionId}/ws`;
   // sinceSeq > 0 时让服务端只补发增量（短线重连补帧）；首次连接为 0，服务端不会重复发送。
-  return sinceSeq > 0 ? `${base}?since=${sinceSeq}` : base;
+  const params = new URLSearchParams({
+    flow: '2', transport: 'tmux-client',
+    active: outputSubscriptions.get(sessionId) === false ? '0' : '1',
+  });
+  if (sinceSeq > 0) params.set('since', String(sinceSeq));
+  if (epoch) params.set('epoch', epoch);
+  const dimensions = reconnectDimensions.get(sessionId);
+  if (dimensions) {
+    params.set('cols', String(dimensions.cols));
+    params.set('rows', String(dimensions.rows));
+  }
+  return `${base}?${params}`;
 }
 
 // 给定一个已知的初始 seq（来自 attach 接口），让 connectTerminalStream 后续重连
 // 自动带上正确的 since。如果尚未建立连接，则记录在外层 map 等待 connect() 时使用。
 const pendingInitialSeq = new Map<string, number>();
+const pendingSnapshotEpoch = new Map<string, string>();
+export function setTerminalSnapshotCursor(sessionId: string, seq: number, epoch: string): void {
+  pendingInitialSeq.set(sessionId, seq);
+  pendingSnapshotEpoch.set(sessionId, epoch);
+}
+export function getAppliedTerminalCursor(sessionId: string): { seq: number; epoch: string } | null {
+  const conn = wsConnections.get(sessionId);
+  return conn?.streamEpoch && conn.appliedSeq === conn.lastSeq && conn.lastSeq > 0
+    ? { seq: conn.lastSeq, epoch: conn.streamEpoch } : null;
+}
 export function setTerminalInitialSeq(sessionId: string, seq: number): void {
   if (seq > 0) {
     pendingInitialSeq.set(sessionId, seq);
@@ -489,6 +525,8 @@ export function connectTerminalStream(
   let conn: WsConnection | null = null;
   // 初始 seq 来自 /attach（如果有），后续每次重连用 conn.lastSeq。
   let lastSeq = pendingInitialSeq.get(sessionId) ?? 0;
+  let streamEpoch = pendingSnapshotEpoch.get(sessionId);
+  pendingSnapshotEpoch.delete(sessionId);
   pendingInitialSeq.delete(sessionId);
   // WS 没建立时积累的输入缓冲；每次创建新 conn 时挂到上面。
   const pendingInputs: string[] = [];
@@ -551,7 +589,7 @@ export function connectTerminalStream(
       try { conn.ws.close(); } catch { /* ignore */ }
     }
 
-    const url = getWebSocketUrl(sessionId, lastSeq);
+    const url = getWebSocketUrl(sessionId, lastSeq, streamEpoch);
     const ws = new WebSocket(url);
     handlingError = false; // reset for new connection attempt
 
@@ -773,12 +811,17 @@ export function connectTerminalStream(
         const event_ = msg as TerminalStreamEvent;
 
         if (event_.type === 'connected') {
+          newConn.appliedSeq = undefined;
           // 收到服务端基线，下一次重连就用这个 seq 做 since。
-          if (typeof event_.replayLastSeq === 'number' && event_.replayLastSeq > 0) {
+          streamEpoch = event_.streamEpoch;
+          newConn.streamEpoch = streamEpoch;
+          newConn.outputProtocol = event_.outputProtocol;
+          if (typeof event_.replayLastSeq === 'number' && event_.replayLastSeq >= 0) {
             lastSeq = event_.replayLastSeq;
             newConn.lastSeq = lastSeq;
           }
           onEvent(event_);
+          setTerminalOutputSubscription(sessionId, outputSubscriptions.get(sessionId) ?? true);
           return;
         }
 
@@ -788,6 +831,10 @@ export function connectTerminalStream(
           return;
         }
 
+        if (event_.type === 'data') {
+          newConn.appliedSeq = undefined;          if (typeof event_.seq === 'number' && event_.seq <= lastSeq) return;
+          if (typeof event_.flowSeq === 'number') newConn.flowSeq = event_.flowSeq;
+        }
         onEvent(event_);
         if (event_.type === 'data' && typeof event_.seq === 'number' && Number.isFinite(event_.seq) && event_.seq > lastSeq) {
           lastSeq = event_.seq;
@@ -986,6 +1033,23 @@ export function sendTerminalFocusState(
 // 软键盘），用于 tmux focus tracking；viewing 只要求“正在看这个 session”
 // （active + 页面可见 + 窗口聚焦），用于服务端推送抑制。键盘收起但还在看
 // 输出是移动端常态，不能用 focus 充当 viewing。
+export function setTerminalOutputSubscription(sessionId: string, active: boolean): void {
+  outputSubscriptions.set(sessionId, active);
+  const conn = wsConnections.get(sessionId);
+  if (!conn || conn.ws.readyState !== WebSocket.OPEN || conn.outputProtocol !== 2) return;
+  conn.ws.send(JSON.stringify({ type: 'output-subscription', active, since: conn.lastSeq, epoch: conn.streamEpoch }));
+}
+
+/** Called only after the viewport has consumed the latest store chunk. */
+export function acknowledgeTerminalOutput(sessionId: string): void {
+  const conn = wsConnections.get(sessionId);
+  if (!conn || conn.ws.readyState !== WebSocket.OPEN || conn.outputProtocol !== 2) return;
+  conn.appliedSeq = conn.lastSeq;
+  if (!conn.flowSeq || conn.flowSeq === conn.acknowledgedFlowSeq) return;
+  conn.acknowledgedFlowSeq = conn.flowSeq;
+  conn.ws.send(JSON.stringify({ type: 'output-ack', flowSeq: conn.flowSeq, since: conn.appliedSeq, epoch: conn.streamEpoch }));
+}
+
 export function sendTerminalViewingState(
   sessionId: string,
   viewing: boolean,
@@ -1032,6 +1096,13 @@ export async function resizeTerminal(
   rows: number,
   seq?: number,
 ): Promise<void> {
+  if (Number.isFinite(cols) && Number.isFinite(rows) && cols >= 1 && rows >= 1) {
+    reconnectDimensions.delete(sessionId);
+    reconnectDimensions.set(sessionId, { cols: Math.floor(cols), rows: Math.floor(rows) });
+    if (reconnectDimensions.size > 256) {
+      reconnectDimensions.delete(reconnectDimensions.keys().next().value!);
+    }
+  }
   const conn = wsConnections.get(sessionId);
   if (conn && conn.ws.readyState === WebSocket.OPEN) {
     try {
@@ -1688,6 +1759,8 @@ export async function loginWithPassword(password: string): Promise<LoginResult> 
 }
 
 export async function logout(): Promise<void> {
+  clearPreviewResourceCache();
+  void clearTerminalSnapshots();
   const csrfTokenHeader = await getCsrfToken();
   await fetch('/api/auth/logout', {
     method: 'POST',
@@ -2396,11 +2469,9 @@ export async function readFileContent(filePath: string, signal?: AbortSignal, ac
 }> {
   const params = new URLSearchParams({ path: filePath, action });
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
-  const response = await fetchWithTimeout(
+  const response = await fetchPreviewResource(
     `/api/terminal/fs/read?${params}`,
-    { signal },
-    FS_REQUEST_TIMEOUT_MS,
-    'File preview took too long. The file may be on slow storage or blocked by another process.',
+    { signal, timeoutMs: FS_REQUEST_TIMEOUT_MS },
   );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to read file' }));
@@ -2430,11 +2501,9 @@ export async function getGitBlobContent(filePath: string, cwd: string, ref = 'HE
 export async function readImagePreviewBlob(filePath: string, signal?: AbortSignal, action = 'view_file', requestSlotId?: string): Promise<ImagePreviewBlob> {
   const params = new URLSearchParams({ path: filePath, action });
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
-  const response = await fetchWithTimeout(
+  const response = await fetchPreviewResource(
     `/api/terminal/fs/blob?${params}`,
-    { signal },
-    isHeicImagePath(filePath) ? HEIC_PREVIEW_REQUEST_TIMEOUT_MS : FS_REQUEST_TIMEOUT_MS,
-    'Image preview took too long. The file may be on slow storage or blocked by another process.',
+    { signal, timeoutMs: isHeicImagePath(filePath) ? HEIC_PREVIEW_REQUEST_TIMEOUT_MS : FS_REQUEST_TIMEOUT_MS },
   );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to load image preview' }));
@@ -2452,6 +2521,13 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
   };
 }
 
+export function readPreviewSourcePath(response: Response, fallback: string): string {
+  try {
+    const value = decodeURIComponent(response.headers.get('X-Termdock-Source-Path') || '');
+    return value.startsWith('/') && !/[\r\n\0]/.test(value) ? value : fallback;
+  } catch { return fallback; }
+}
+
 export async function readEdaPreviewBlob(
   filePath: string,
   view: EdaPreviewView,
@@ -2461,26 +2537,30 @@ export async function readEdaPreviewBlob(
 ): Promise<EdaPreviewBlob> {
   const params = new URLSearchParams({ path: filePath, view, action });
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
-  const response = await fetchWithTimeout(
-    `/api/terminal/fs/eda-preview?${params}`,
-    { signal },
-    30_000,
-    'KiCad preview rendering timed out.',
-  );
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to render KiCad preview' }));
-    throw new Error(error.error || 'Failed to render KiCad preview');
+  const message = 'KiCad preview rendering or transfer timed out.';
+  const request = withRequestTimeout(signal, EDA_PREVIEW_REQUEST_TIMEOUT_MS, message);
+  try {
+    const response = await fetch(`/api/terminal/fs/eda-preview?${params}`, { signal: request.signal });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to render KiCad preview' }));
+      throw new Error(error.error || 'Failed to render KiCad preview');
+    }
+    const blob = await response.blob();
+    const sizeHeader = response.headers.get('Content-Length');
+    return {
+      blob,
+      path: readPreviewSourcePath(response, filePath),
+      view,
+      size: sizeHeader ? Number(sizeHeader) : null,
+      modified: response.headers.get('Last-Modified'),
+      mimeType: response.headers.get('Content-Type') || blob.type || 'image/svg+xml',
+    };
+  } catch (error) {
+    if (request.signal.aborted && !signal?.aborted) throw new Error(message);
+    throw error;
+  } finally {
+    request.cleanup();
   }
-  const blob = await response.blob();
-  const sizeHeader = response.headers.get('Content-Length');
-  return {
-    blob,
-    path: filePath,
-    view,
-    size: sizeHeader ? Number(sizeHeader) : null,
-    modified: response.headers.get('Last-Modified'),
-    mimeType: response.headers.get('Content-Type') || blob.type || 'image/svg+xml',
-  };
 }
 
 export async function inspectEdaPoint(
@@ -2523,12 +2603,10 @@ export interface Model3dPreviewBlob {
 export async function readModel3dBlob(filePath: string, signal?: AbortSignal, action = 'view_file', requestSlotId?: string): Promise<Model3dPreviewBlob> {
   const params = new URLSearchParams({ path: filePath, action });
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
-  const response = await fetchWithTimeout(
-    `/api/terminal/fs/download?${params}`,
-    { signal },
-    FS_REQUEST_TIMEOUT_MS,
-    '3D model preview took too long. The file may be on slow storage or blocked by another process.',
-  );
+  const message = '3D model transfer timed out. Please retry.';
+  const request = withRequestTimeout(signal, MODEL_PREVIEW_REQUEST_TIMEOUT_MS, message);
+  try {
+  const response = await fetch(`/api/terminal/fs/download?${params}`, { signal: request.signal });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to load 3D model preview' }));
     throw new Error(error.error || 'Failed to load 3D model preview');
@@ -2539,12 +2617,16 @@ export async function readModel3dBlob(filePath: string, signal?: AbortSignal, ac
   const ext = getModel3dExtForPath(filePath) ?? '';
   return {
     blob,
-    path: filePath,
+    path: readPreviewSourcePath(response, filePath),
     size: sizeHeader ? Number(sizeHeader) : null,
     modified: response.headers.get('Last-Modified'),
     ext,
     mimeType: response.headers.get('Content-Type') || blob.type || MODEL_3D_MIME_BY_EXT[ext] || 'application/octet-stream',
   };
+  } finally {
+    // Headers arriving does not mean the model body has finished downloading.
+    request.cleanup();
+  }
 }
 
 function isIOS(): boolean {

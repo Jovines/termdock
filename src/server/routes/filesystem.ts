@@ -6,6 +6,7 @@ import os from 'os';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import busboy from 'busboy';
+import { validatePreview } from '../utils/previewValidation.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { isAuthEnabled, isRequestAuthenticated } from '../utils/authProtection.js';
 import { getImageDimensions, parseImageDimensions } from '../utils/imageDimensions.js';
@@ -3280,6 +3281,8 @@ router.get('/read', async (req: Request, res: Response) => {
         throw new Error('Path is not a regular file');
       }
 
+      if (validatePreview(req, res, resolvedPath, stat, `text-v1-${MAX_FILE_SIZE}`)) return null;
+
       const bytesToRead = Math.min(stat.size, MAX_FILE_SIZE);
       const truncated = stat.size > bytesToRead;
       const buffer = await readBytesPrefix(resolvedPath, bytesToRead);
@@ -3291,6 +3294,10 @@ router.get('/read', async (req: Request, res: Response) => {
       return { resolvedPath, stat, buffer, binary, truncated };
     })(), FS_ROUTE_TIMEOUT_MS, 'File preview took too long. The file may be on slow storage or currently blocked by another process.', 'FS_READ_TIMEOUT');
 
+    if (!result) {
+      logFsIo({ id: requestId, action, op: 'fs.read', startedAt, status: 'ok', path: requestedPath, bytes: 0, extra: { cache: 'revalidated', requestSlotId } });
+      return;
+    }
     logFsIo({ id: requestId, action, op: 'fs.read', startedAt, status: 'ok', path: result.resolvedPath, bytes: Math.min(result.stat.size, MAX_FILE_SIZE), total: result.stat.size, truncated: result.truncated, extra: { requestSlotId } });
     res.json({
       path: result.resolvedPath,
@@ -3442,6 +3449,7 @@ router.get('/eda-preview', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'private, no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Eda-View', requestedView);
+    res.setHeader('X-Termdock-Source-Path', encodeURIComponent(resolvedPath));
     if (requestAcceptsEtag(req.headers['if-none-match'], etag)) {
       res.setHeader('X-Eda-Cache', 'revalidated');
       res.status(304).end();
@@ -3614,6 +3622,11 @@ router.get('/blob', async (req: Request, res: Response) => {
       return { resolvedPath, stat, mimeType };
     })(), FS_ROUTE_TIMEOUT_MS, 'Image preview took too long. The file may be on slow storage or currently blocked by another process.', 'FS_BLOB_TIMEOUT');
 
+    if (validatePreview(req, res, resolvedPath, stat, 'image-v1')) {
+      logOnce('ok', { path: resolvedPath, bytes: 0, extra: { cache: 'revalidated' } });
+      return;
+    }
+
     let responseBody: Buffer | null = null;
     let responseMimeType = mimeType;
     let responseFilename = path.basename(resolvedPath);
@@ -3639,7 +3652,7 @@ router.get('/blob', async (req: Request, res: Response) => {
     res.setHeader('Content-Type', responseMimeType);
     res.setHeader('Content-Length', responseSize.toString());
     res.setHeader('Last-Modified', stat.mtime.toUTCString());
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Cache-Control', 'private, no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Disposition', buildContentDisposition('inline', responseFilename));
 
@@ -4088,6 +4101,7 @@ router.get('/download', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Disposition', buildContentDisposition('attachment', path.basename(resolvedPath)));
+    res.setHeader('X-Termdock-Source-Path', encodeURIComponent(resolvedPath));
 
     const stream = fs.createReadStream(resolvedPath);
     stream.on('error', (error) => {

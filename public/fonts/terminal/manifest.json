@@ -1,0 +1,1349 @@
+{
+  "schemaVersion": 1,
+  "faces": [
+    {
+      "source": "JetBrainsMonoNLNerdFontMono-Regular.woff2",
+      "sourceSha256": "be3091a0a38e0ed8ff2db0519136ad3bfbb2b82b315ca6ea96cca3422bc444bd",
+      "shards": [
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-text-d7b9316fdf4f.woff2",
+          "bytes": 55816,
+          "codepoints": 1361,
+          "group": "text"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-38-a637901140d8.woff2",
+          "bytes": 58884,
+          "codepoints": 449,
+          "group": "icons-38"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-39-838726e8eeca.woff2",
+          "bytes": 105936,
+          "codepoints": 447,
+          "group": "icons-39"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3a-ec149087d0b9.woff2",
+          "bytes": 101292,
+          "codepoints": 648,
+          "group": "icons-3a"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3b-db8e5a24d580.woff2",
+          "bytes": 103308,
+          "codepoints": 750,
+          "group": "icons-3b"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c-2290d2ad4621.woff2",
+          "bytes": 111848,
+          "codepoints": 898,
+          "group": "icons-3c"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3d-2b19b65bb43a.woff2",
+          "bytes": 32180,
+          "codepoints": 308,
+          "group": "icons-3d"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c0-3b9edaf85d65.woff2",
+          "bytes": 57648,
+          "codepoints": 1023,
+          "group": "icons-3c0"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c1-5e7fb0696bbc.woff2",
+          "bytes": 65228,
+          "codepoints": 1024,
+          "group": "icons-3c1"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c2-cfad2884adf5.woff2",
+          "bytes": 64216,
+          "codepoints": 1024,
+          "group": "icons-3c2"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c3-d641de88278b.woff2",
+          "bytes": 68404,
+          "codepoints": 1024,
+          "group": "icons-3c3"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c4-3b0227356b3b.woff2",
+          "bytes": 71248,
+          "codepoints": 1024,
+          "group": "icons-3c4"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c5-9dc67c4d20b4.woff2",
+          "bytes": 70068,
+          "codepoints": 1024,
+          "group": "icons-3c5"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Regular-icons-3c6-c5b444110c62.woff2",
+          "bytes": 57876,
+          "codepoints": 753,
+          "group": "icons-3c6"
+        }
+      ]
+    },
+    {
+      "source": "JetBrainsMonoNLNerdFontMono-Bold.woff2",
+      "sourceSha256": "e239160775bebb9988bddae1fd148985f74bc72ac2e502ee2edc335591dd33bc",
+      "shards": [
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-text-9e8d9df2dd02.woff2",
+          "bytes": 57000,
+          "codepoints": 1361,
+          "group": "text"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-38-022d7c89c800.woff2",
+          "bytes": 58920,
+          "codepoints": 449,
+          "group": "icons-38"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-39-63f8fa5b3eba.woff2",
+          "bytes": 105884,
+          "codepoints": 447,
+          "group": "icons-39"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3a-2d8d46cc4dca.woff2",
+          "bytes": 101308,
+          "codepoints": 648,
+          "group": "icons-3a"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3b-e75aed5d3969.woff2",
+          "bytes": 103268,
+          "codepoints": 750,
+          "group": "icons-3b"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c-ac2534aae681.woff2",
+          "bytes": 111920,
+          "codepoints": 898,
+          "group": "icons-3c"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3d-52c90894de44.woff2",
+          "bytes": 32156,
+          "codepoints": 308,
+          "group": "icons-3d"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c0-8c49a98e75c4.woff2",
+          "bytes": 57492,
+          "codepoints": 1023,
+          "group": "icons-3c0"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c1-971c5e7a86ce.woff2",
+          "bytes": 65180,
+          "codepoints": 1024,
+          "group": "icons-3c1"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c2-e5c4893acfb9.woff2",
+          "bytes": 64272,
+          "codepoints": 1024,
+          "group": "icons-3c2"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c3-156f2560c871.woff2",
+          "bytes": 68392,
+          "codepoints": 1024,
+          "group": "icons-3c3"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c4-49f0d18a7492.woff2",
+          "bytes": 71252,
+          "codepoints": 1024,
+          "group": "icons-3c4"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c5-33d81ad28c5c.woff2",
+          "bytes": 70056,
+          "codepoints": 1024,
+          "group": "icons-3c5"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Bold-icons-3c6-5c301879d053.woff2",
+          "bytes": 57908,
+          "codepoints": 753,
+          "group": "icons-3c6"
+        }
+      ]
+    },
+    {
+      "source": "JetBrainsMonoNLNerdFontMono-Italic.woff2",
+      "sourceSha256": "a4ce42d653dc449d51e720c3c8a344a780f9965b3d4982b14293555ff78fcb6c",
+      "shards": [
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-text-b7a9c776b048.woff2",
+          "bytes": 59248,
+          "codepoints": 1361,
+          "group": "text"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-38-b3e69191d92f.woff2",
+          "bytes": 58852,
+          "codepoints": 449,
+          "group": "icons-38"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-39-c4d8d66882cb.woff2",
+          "bytes": 105908,
+          "codepoints": 447,
+          "group": "icons-39"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3a-27609324e8a3.woff2",
+          "bytes": 101276,
+          "codepoints": 648,
+          "group": "icons-3a"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3b-5e73d85d7506.woff2",
+          "bytes": 103344,
+          "codepoints": 750,
+          "group": "icons-3b"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c-7e535d65bbdb.woff2",
+          "bytes": 111880,
+          "codepoints": 898,
+          "group": "icons-3c"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3d-19831897003a.woff2",
+          "bytes": 32160,
+          "codepoints": 308,
+          "group": "icons-3d"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c0-6465060a06a1.woff2",
+          "bytes": 57520,
+          "codepoints": 1023,
+          "group": "icons-3c0"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c1-9fd72ccd9350.woff2",
+          "bytes": 65216,
+          "codepoints": 1024,
+          "group": "icons-3c1"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c2-ea7dd77de270.woff2",
+          "bytes": 64272,
+          "codepoints": 1024,
+          "group": "icons-3c2"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c3-12808f88907a.woff2",
+          "bytes": 68380,
+          "codepoints": 1024,
+          "group": "icons-3c3"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c4-14b598e5e739.woff2",
+          "bytes": 71220,
+          "codepoints": 1024,
+          "group": "icons-3c4"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c5-3d40530ce6c2.woff2",
+          "bytes": 69996,
+          "codepoints": 1024,
+          "group": "icons-3c5"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-Italic-icons-3c6-7020aec0d9e1.woff2",
+          "bytes": 57896,
+          "codepoints": 753,
+          "group": "icons-3c6"
+        }
+      ]
+    },
+    {
+      "source": "JetBrainsMonoNLNerdFontMono-BoldItalic.woff2",
+      "sourceSha256": "bd6d12ad67b62264e4bd105bef4c30b86de6e28337f682b66685887d84a78a10",
+      "shards": [
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-text-da002b4e56d3.woff2",
+          "bytes": 60804,
+          "codepoints": 1361,
+          "group": "text"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-38-7942d3c93afb.woff2",
+          "bytes": 58840,
+          "codepoints": 449,
+          "group": "icons-38"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-39-19989a2be535.woff2",
+          "bytes": 105992,
+          "codepoints": 447,
+          "group": "icons-39"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3a-7786ff4a4dd9.woff2",
+          "bytes": 101240,
+          "codepoints": 648,
+          "group": "icons-3a"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3b-a759fd623d7e.woff2",
+          "bytes": 103320,
+          "codepoints": 750,
+          "group": "icons-3b"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c-2a1178076740.woff2",
+          "bytes": 111952,
+          "codepoints": 898,
+          "group": "icons-3c"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3d-b004d85f5642.woff2",
+          "bytes": 32160,
+          "codepoints": 308,
+          "group": "icons-3d"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c0-6f2c7518f354.woff2",
+          "bytes": 57620,
+          "codepoints": 1023,
+          "group": "icons-3c0"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c1-4bf64cae9dd2.woff2",
+          "bytes": 65276,
+          "codepoints": 1024,
+          "group": "icons-3c1"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c2-7f26d4c7240b.woff2",
+          "bytes": 64256,
+          "codepoints": 1024,
+          "group": "icons-3c2"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c3-fc8e5a85d620.woff2",
+          "bytes": 68508,
+          "codepoints": 1024,
+          "group": "icons-3c3"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c4-91819b7977d3.woff2",
+          "bytes": 71240,
+          "codepoints": 1024,
+          "group": "icons-3c4"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c5-26933eec54e2.woff2",
+          "bytes": 70068,
+          "codepoints": 1024,
+          "group": "icons-3c5"
+        },
+        {
+          "file": "JetBrainsMonoNLNerdFontMono-BoldItalic-icons-3c6-af186404c8af.woff2",
+          "bytes": 57872,
+          "codepoints": 753,
+          "group": "icons-3c6"
+        }
+      ]
+    },
+    {
+      "source": "NotoSansMonoCJKsc-Subset.woff2",
+      "sourceSha256": "18ecaef8558e0ff8262affb9c2c659bc10c7a9a27416c6a4c16482c1bed05f07",
+      "shards": [
+        {
+          "file": "NotoSansMonoCJKsc-Subset-punctuation-a4288065ed29.woff2",
+          "bytes": 21576,
+          "codepoints": 335,
+          "group": "punctuation"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-4e-bb1ec5541ecc.woff2",
+          "bytes": 19360,
+          "codepoints": 120,
+          "group": "cjk-4e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-4f-d6e8daa67360.woff2",
+          "bytes": 17500,
+          "codepoints": 78,
+          "group": "cjk-4f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-50-63c2ae7f85e8.woff2",
+          "bytes": 13220,
+          "codepoints": 36,
+          "group": "cjk-50"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-51-41b6e0624888.woff2",
+          "bytes": 20252,
+          "codepoints": 81,
+          "group": "cjk-51"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-52-57de15003b8d.woff2",
+          "bytes": 18572,
+          "codepoints": 71,
+          "group": "cjk-52"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-53-94382657e2bc.woff2",
+          "bytes": 20112,
+          "codepoints": 99,
+          "group": "cjk-53"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-54-177141086f32.woff2",
+          "bytes": 18316,
+          "codepoints": 94,
+          "group": "cjk-54"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-55-5ec6fae9813a.woff2",
+          "bytes": 13628,
+          "codepoints": 42,
+          "group": "cjk-55"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-56-720aa493b429.woff2",
+          "bytes": 10368,
+          "codepoints": 34,
+          "group": "cjk-56"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-57-a8884711a286.woff2",
+          "bytes": 11032,
+          "codepoints": 51,
+          "group": "cjk-57"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-58-42a3e7e1fe9a.woff2",
+          "bytes": 11812,
+          "codepoints": 34,
+          "group": "cjk-58"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-59-887ee4253daa.woff2",
+          "bytes": 25608,
+          "codepoints": 69,
+          "group": "cjk-59"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-5a-c45806889e3c.woff2",
+          "bytes": 16060,
+          "codepoints": 28,
+          "group": "cjk-5a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-5b-da142b99dca9.woff2",
+          "bytes": 20988,
+          "codepoints": 73,
+          "group": "cjk-5b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-5c-2bb495e5b511.woff2",
+          "bytes": 15968,
+          "codepoints": 60,
+          "group": "cjk-5c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-5d-9da87d6061f2.woff2",
+          "bytes": 6588,
+          "codepoints": 25,
+          "group": "cjk-5d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-5e-e4010764e593.woff2",
+          "bytes": 16276,
+          "codepoints": 63,
+          "group": "cjk-5e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-5f-a9c9021f6e01.woff2",
+          "bytes": 21488,
+          "codepoints": 68,
+          "group": "cjk-5f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-60-306f229a68e0.woff2",
+          "bytes": 20516,
+          "codepoints": 71,
+          "group": "cjk-60"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-61-6e4546c5f52a.woff2",
+          "bytes": 17056,
+          "codepoints": 28,
+          "group": "cjk-61"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-62-a73e47933059.woff2",
+          "bytes": 27512,
+          "codepoints": 111,
+          "group": "cjk-62"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-63-e8f49f472799.woff2",
+          "bytes": 23256,
+          "codepoints": 79,
+          "group": "cjk-63"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-64-37b54957eadc.woff2",
+          "bytes": 21476,
+          "codepoints": 48,
+          "group": "cjk-64"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-65-2742b20127ad.woff2",
+          "bytes": 21712,
+          "codepoints": 64,
+          "group": "cjk-65"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-66-239656e7fe56.woff2",
+          "bytes": 11572,
+          "codepoints": 50,
+          "group": "cjk-66"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-67-5dfa72b26c3f.woff2",
+          "bytes": 16436,
+          "codepoints": 75,
+          "group": "cjk-67"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-68-fe3d1fc05aae.woff2",
+          "bytes": 16848,
+          "codepoints": 56,
+          "group": "cjk-68"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-69-22535dbbd090.woff2",
+          "bytes": 10644,
+          "codepoints": 23,
+          "group": "cjk-69"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-6a-c4117cd520aa.woff2",
+          "bytes": 6532,
+          "codepoints": 12,
+          "group": "cjk-6a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-6b-895d3349f7de.woff2",
+          "bytes": 17288,
+          "codepoints": 46,
+          "group": "cjk-6b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-6c-56a0c71eb1b4.woff2",
+          "bytes": 20216,
+          "codepoints": 82,
+          "group": "cjk-6c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-6d-9ec807661604.woff2",
+          "bytes": 22060,
+          "codepoints": 72,
+          "group": "cjk-6d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-6e-3b633363cd57.woff2",
+          "bytes": 19264,
+          "codepoints": 49,
+          "group": "cjk-6e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-6f-91a1f1c31b75.woff2",
+          "bytes": 11236,
+          "codepoints": 25,
+          "group": "cjk-6f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-70-3a904a2a2371.woff2",
+          "bytes": 16256,
+          "codepoints": 47,
+          "group": "cjk-70"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-71-e8efb60879b0.woff2",
+          "bytes": 14088,
+          "codepoints": 26,
+          "group": "cjk-71"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-72-591318b99498.woff2",
+          "bytes": 13664,
+          "codepoints": 47,
+          "group": "cjk-72"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-73-d8f444050aa7.woff2",
+          "bytes": 8960,
+          "codepoints": 29,
+          "group": "cjk-73"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-74-55a832a12d7e.woff2",
+          "bytes": 13004,
+          "codepoints": 25,
+          "group": "cjk-74"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-75-660977996a4c.woff2",
+          "bytes": 17236,
+          "codepoints": 64,
+          "group": "cjk-75"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-76-441a04df9fb5.woff2",
+          "bytes": 13016,
+          "codepoints": 48,
+          "group": "cjk-76"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-77-5915143c4398.woff2",
+          "bytes": 14564,
+          "codepoints": 45,
+          "group": "cjk-77"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-78-242fbc33c745.woff2",
+          "bytes": 15620,
+          "codepoints": 47,
+          "group": "cjk-78"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-79-24d13953150a.woff2",
+          "bytes": 13080,
+          "codepoints": 42,
+          "group": "cjk-79"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-7a-41973af74017.woff2",
+          "bytes": 18524,
+          "codepoints": 45,
+          "group": "cjk-7a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-7b-f9661fdaf003.woff2",
+          "bytes": 16132,
+          "codepoints": 39,
+          "group": "cjk-7b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-7c-ef5167770bf7.woff2",
+          "bytes": 15812,
+          "codepoints": 30,
+          "group": "cjk-7c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-7d-d84ad5d95f37.woff2",
+          "bytes": 4436,
+          "codepoints": 7,
+          "group": "cjk-7d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-7e-66841a1c6381.woff2",
+          "bytes": 14876,
+          "codepoints": 60,
+          "group": "cjk-7e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-7f-5090e017351a.woff2",
+          "bytes": 20444,
+          "codepoints": 51,
+          "group": "cjk-7f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-80-9ad74a67c2b9.woff2",
+          "bytes": 23604,
+          "codepoints": 69,
+          "group": "cjk-80"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-81-423a60a6dcf1.woff2",
+          "bytes": 20748,
+          "codepoints": 49,
+          "group": "cjk-81"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-82-aad812217807.woff2",
+          "bytes": 19824,
+          "codepoints": 56,
+          "group": "cjk-82"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-83-3dc74dbac89c.woff2",
+          "bytes": 14892,
+          "codepoints": 45,
+          "group": "cjk-83"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-84-68db7802ffe8.woff2",
+          "bytes": 13192,
+          "codepoints": 31,
+          "group": "cjk-84"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-85-fa235a7160e4.woff2",
+          "bytes": 15332,
+          "codepoints": 25,
+          "group": "cjk-85"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-86-75a6a33d0db2.woff2",
+          "bytes": 11116,
+          "codepoints": 34,
+          "group": "cjk-86"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-87-7d98ea8ce063.woff2",
+          "bytes": 7656,
+          "codepoints": 18,
+          "group": "cjk-87"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-88-363fa8f178aa.woff2",
+          "bytes": 13216,
+          "codepoints": 38,
+          "group": "cjk-88"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-89-f2d185e8721f.woff2",
+          "bytes": 9408,
+          "codepoints": 20,
+          "group": "cjk-89"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-8a-e372253a07f5.woff2",
+          "bytes": 2584,
+          "codepoints": 5,
+          "group": "cjk-8a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-8b-0af53db9bdc1.woff2",
+          "bytes": 10868,
+          "codepoints": 61,
+          "group": "cjk-8b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-8c-6a43d3643480.woff2",
+          "bytes": 12436,
+          "codepoints": 37,
+          "group": "cjk-8c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-8d-09c4b5345b99.woff2",
+          "bytes": 16936,
+          "codepoints": 78,
+          "group": "cjk-8d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-8e-122a752954a6.woff2",
+          "bytes": 9224,
+          "codepoints": 22,
+          "group": "cjk-8e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-8f-c651bbfffeb3.woff2",
+          "bytes": 18396,
+          "codepoints": 64,
+          "group": "cjk-8f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-90-ab0a5fef3083.woff2",
+          "bytes": 26916,
+          "codepoints": 62,
+          "group": "cjk-90"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-91-e07b5cbe4792.woff2",
+          "bytes": 13676,
+          "codepoints": 37,
+          "group": "cjk-91"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-92-cba0a8ee6758.woff2",
+          "bytes": 1084,
+          "codepoints": 1,
+          "group": "cjk-92"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-94-e7a6bd14e248.woff2",
+          "bytes": 7576,
+          "codepoints": 42,
+          "group": "cjk-94"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-95-420f721d52ba.woff2",
+          "bytes": 10136,
+          "codepoints": 51,
+          "group": "cjk-95"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-96-90fd476b83f2.woff2",
+          "bytes": 21256,
+          "codepoints": 68,
+          "group": "cjk-96"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-97-34036fc287f7.woff2",
+          "bytes": 12920,
+          "codepoints": 36,
+          "group": "cjk-97"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-98-5c3cdd76911e.woff2",
+          "bytes": 7128,
+          "codepoints": 32,
+          "group": "cjk-98"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-99-73e6090fd7c8.woff2",
+          "bytes": 6288,
+          "codepoints": 22,
+          "group": "cjk-99"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-9a-673ebaebe683.woff2",
+          "bytes": 8588,
+          "codepoints": 29,
+          "group": "cjk-9a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-9b-90a5a3ee22d6.woff2",
+          "bytes": 6740,
+          "codepoints": 7,
+          "group": "cjk-9b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-9c-116d201c978b.woff2",
+          "bytes": 2912,
+          "codepoints": 9,
+          "group": "cjk-9c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-9e-78db36865caa.woff2",
+          "bytes": 9840,
+          "codepoints": 27,
+          "group": "cjk-9e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Subset-cjk-9f-27e8d16243d5.woff2",
+          "bytes": 3816,
+          "codepoints": 11,
+          "group": "cjk-9f"
+        }
+      ]
+    },
+    {
+      "source": "NotoSansMonoCJKsc-Bold-Subset.woff2",
+      "sourceSha256": "c48005ba8165062f3b31601654d320e54cb20d45978e4d4cafab08f500c1003d",
+      "shards": [
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-punctuation-f1b7708e797a.woff2",
+          "bytes": 21560,
+          "codepoints": 335,
+          "group": "punctuation"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-4e-46bdca5c323f.woff2",
+          "bytes": 19504,
+          "codepoints": 120,
+          "group": "cjk-4e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-4f-17200dc0dd0d.woff2",
+          "bytes": 17832,
+          "codepoints": 78,
+          "group": "cjk-4f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-50-370e36250c30.woff2",
+          "bytes": 13404,
+          "codepoints": 36,
+          "group": "cjk-50"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-51-66352f738581.woff2",
+          "bytes": 20576,
+          "codepoints": 81,
+          "group": "cjk-51"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-52-191f4025d2b5.woff2",
+          "bytes": 18684,
+          "codepoints": 71,
+          "group": "cjk-52"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-53-fb0a637c39bf.woff2",
+          "bytes": 20384,
+          "codepoints": 99,
+          "group": "cjk-53"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-54-66f2e72c9ca0.woff2",
+          "bytes": 18304,
+          "codepoints": 94,
+          "group": "cjk-54"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-55-54b538fd4fd8.woff2",
+          "bytes": 13672,
+          "codepoints": 42,
+          "group": "cjk-55"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-56-88f45aeb2030.woff2",
+          "bytes": 10308,
+          "codepoints": 34,
+          "group": "cjk-56"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-57-154d4324f0ce.woff2",
+          "bytes": 11156,
+          "codepoints": 51,
+          "group": "cjk-57"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-58-1660c86b8a05.woff2",
+          "bytes": 11892,
+          "codepoints": 34,
+          "group": "cjk-58"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-59-31a4c5afa3aa.woff2",
+          "bytes": 25524,
+          "codepoints": 69,
+          "group": "cjk-59"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-5a-fa1d1941710e.woff2",
+          "bytes": 16116,
+          "codepoints": 28,
+          "group": "cjk-5a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-5b-031a2b2ebeb7.woff2",
+          "bytes": 21172,
+          "codepoints": 73,
+          "group": "cjk-5b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-5c-065b634c07b3.woff2",
+          "bytes": 16352,
+          "codepoints": 60,
+          "group": "cjk-5c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-5d-71f6cd3ed180.woff2",
+          "bytes": 6484,
+          "codepoints": 25,
+          "group": "cjk-5d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-5e-f59de7a6e5c5.woff2",
+          "bytes": 16320,
+          "codepoints": 63,
+          "group": "cjk-5e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-5f-8cbe737b6011.woff2",
+          "bytes": 21700,
+          "codepoints": 68,
+          "group": "cjk-5f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-60-22913526da09.woff2",
+          "bytes": 21408,
+          "codepoints": 71,
+          "group": "cjk-60"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-61-c810c1d1a3a3.woff2",
+          "bytes": 17524,
+          "codepoints": 28,
+          "group": "cjk-61"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-62-9464d5d87d65.woff2",
+          "bytes": 27632,
+          "codepoints": 111,
+          "group": "cjk-62"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-63-79564d99f5da.woff2",
+          "bytes": 23348,
+          "codepoints": 79,
+          "group": "cjk-63"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-64-4b7cff1dae6f.woff2",
+          "bytes": 21740,
+          "codepoints": 48,
+          "group": "cjk-64"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-65-8dd48db5e297.woff2",
+          "bytes": 21728,
+          "codepoints": 64,
+          "group": "cjk-65"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-66-a808e22a3d14.woff2",
+          "bytes": 11628,
+          "codepoints": 50,
+          "group": "cjk-66"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-67-ae5f61af3f79.woff2",
+          "bytes": 16696,
+          "codepoints": 75,
+          "group": "cjk-67"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-68-a46bf47bd9ba.woff2",
+          "bytes": 17004,
+          "codepoints": 56,
+          "group": "cjk-68"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-69-28210414eafb.woff2",
+          "bytes": 10768,
+          "codepoints": 23,
+          "group": "cjk-69"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-6a-6bfb1f5e4fb7.woff2",
+          "bytes": 6484,
+          "codepoints": 12,
+          "group": "cjk-6a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-6b-39be890e04e4.woff2",
+          "bytes": 17316,
+          "codepoints": 46,
+          "group": "cjk-6b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-6c-79a4ff740d98.woff2",
+          "bytes": 20368,
+          "codepoints": 82,
+          "group": "cjk-6c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-6d-2de5a763980e.woff2",
+          "bytes": 22268,
+          "codepoints": 72,
+          "group": "cjk-6d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-6e-8e55b339244d.woff2",
+          "bytes": 19848,
+          "codepoints": 49,
+          "group": "cjk-6e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-6f-a56caf9fc7fc.woff2",
+          "bytes": 11376,
+          "codepoints": 25,
+          "group": "cjk-6f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-70-d70c6ee8e03c.woff2",
+          "bytes": 16564,
+          "codepoints": 47,
+          "group": "cjk-70"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-71-ac6f5f86dfef.woff2",
+          "bytes": 14512,
+          "codepoints": 26,
+          "group": "cjk-71"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-72-db3d346ecc61.woff2",
+          "bytes": 13872,
+          "codepoints": 47,
+          "group": "cjk-72"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-73-e7371bd71f0b.woff2",
+          "bytes": 9000,
+          "codepoints": 29,
+          "group": "cjk-73"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-74-43946d9b2f0b.woff2",
+          "bytes": 13024,
+          "codepoints": 25,
+          "group": "cjk-74"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-75-ea7cf53e31fa.woff2",
+          "bytes": 17556,
+          "codepoints": 64,
+          "group": "cjk-75"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-76-04c7fa4e0ebf.woff2",
+          "bytes": 13192,
+          "codepoints": 48,
+          "group": "cjk-76"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-77-24d70898f6b8.woff2",
+          "bytes": 14804,
+          "codepoints": 45,
+          "group": "cjk-77"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-78-c6a5d7135296.woff2",
+          "bytes": 15976,
+          "codepoints": 47,
+          "group": "cjk-78"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-79-7812cb6432aa.woff2",
+          "bytes": 13124,
+          "codepoints": 42,
+          "group": "cjk-79"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-7a-6e123be5cd36.woff2",
+          "bytes": 18656,
+          "codepoints": 45,
+          "group": "cjk-7a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-7b-a183ddc6890f.woff2",
+          "bytes": 16860,
+          "codepoints": 39,
+          "group": "cjk-7b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-7c-0895291ece9c.woff2",
+          "bytes": 16264,
+          "codepoints": 30,
+          "group": "cjk-7c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-7d-1d44252384cf.woff2",
+          "bytes": 4348,
+          "codepoints": 7,
+          "group": "cjk-7d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-7e-7be4dc6f056e.woff2",
+          "bytes": 14988,
+          "codepoints": 60,
+          "group": "cjk-7e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-7f-0d8e987db151.woff2",
+          "bytes": 20600,
+          "codepoints": 51,
+          "group": "cjk-7f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-80-c0c154bb8be0.woff2",
+          "bytes": 24100,
+          "codepoints": 69,
+          "group": "cjk-80"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-81-5343baca5ce7.woff2",
+          "bytes": 20784,
+          "codepoints": 49,
+          "group": "cjk-81"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-82-6d89af9614ce.woff2",
+          "bytes": 20296,
+          "codepoints": 56,
+          "group": "cjk-82"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-83-fa17ef529c5b.woff2",
+          "bytes": 15328,
+          "codepoints": 45,
+          "group": "cjk-83"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-84-287ecb493fad.woff2",
+          "bytes": 13508,
+          "codepoints": 31,
+          "group": "cjk-84"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-85-fea695c48165.woff2",
+          "bytes": 15596,
+          "codepoints": 25,
+          "group": "cjk-85"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-86-8bb35373cb82.woff2",
+          "bytes": 11220,
+          "codepoints": 34,
+          "group": "cjk-86"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-87-f83e9f70a6cc.woff2",
+          "bytes": 7556,
+          "codepoints": 18,
+          "group": "cjk-87"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-88-894cd19292c1.woff2",
+          "bytes": 13132,
+          "codepoints": 38,
+          "group": "cjk-88"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-89-2903a6eaf546.woff2",
+          "bytes": 9464,
+          "codepoints": 20,
+          "group": "cjk-89"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-8a-3ce275bfcf96.woff2",
+          "bytes": 2608,
+          "codepoints": 5,
+          "group": "cjk-8a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-8b-3aaeb26309a6.woff2",
+          "bytes": 10880,
+          "codepoints": 61,
+          "group": "cjk-8b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-8c-719b6608b746.woff2",
+          "bytes": 12420,
+          "codepoints": 37,
+          "group": "cjk-8c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-8d-a7f1ccd0dfb7.woff2",
+          "bytes": 17256,
+          "codepoints": 78,
+          "group": "cjk-8d"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-8e-d503ad5c4958.woff2",
+          "bytes": 9200,
+          "codepoints": 22,
+          "group": "cjk-8e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-8f-18c6d04746c8.woff2",
+          "bytes": 18624,
+          "codepoints": 64,
+          "group": "cjk-8f"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-90-e9d94d915dfe.woff2",
+          "bytes": 27936,
+          "codepoints": 62,
+          "group": "cjk-90"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-91-c258b07ec626.woff2",
+          "bytes": 13984,
+          "codepoints": 37,
+          "group": "cjk-91"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-92-e4833a556b60.woff2",
+          "bytes": 1088,
+          "codepoints": 1,
+          "group": "cjk-92"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-94-0889f5b84499.woff2",
+          "bytes": 7712,
+          "codepoints": 42,
+          "group": "cjk-94"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-95-7ef116efe7ee.woff2",
+          "bytes": 10280,
+          "codepoints": 51,
+          "group": "cjk-95"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-96-afbc0d2cacda.woff2",
+          "bytes": 21912,
+          "codepoints": 68,
+          "group": "cjk-96"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-97-df3903d86f65.woff2",
+          "bytes": 13224,
+          "codepoints": 36,
+          "group": "cjk-97"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-98-0f21094931ee.woff2",
+          "bytes": 7132,
+          "codepoints": 32,
+          "group": "cjk-98"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-99-eb95f4bead58.woff2",
+          "bytes": 6336,
+          "codepoints": 22,
+          "group": "cjk-99"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-9a-764e8b8723ec.woff2",
+          "bytes": 8588,
+          "codepoints": 29,
+          "group": "cjk-9a"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-9b-33a540b9196a.woff2",
+          "bytes": 6672,
+          "codepoints": 7,
+          "group": "cjk-9b"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-9c-60d6040aa049.woff2",
+          "bytes": 2872,
+          "codepoints": 9,
+          "group": "cjk-9c"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-9e-4a64c65bf44d.woff2",
+          "bytes": 9992,
+          "codepoints": 27,
+          "group": "cjk-9e"
+        },
+        {
+          "file": "NotoSansMonoCJKsc-Bold-Subset-cjk-9f-4d84fba11345.woff2",
+          "bytes": 3916,
+          "codepoints": 11,
+          "group": "cjk-9f"
+        }
+      ]
+    }
+  ]
+}

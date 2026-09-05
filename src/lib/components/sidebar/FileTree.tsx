@@ -521,7 +521,7 @@ const FileTreeItem = memo(function FileTreeItem({
   }, []);
 
   return (
-    <div>
+    <div style={!showChildren && !actionsOpen ? { contentVisibility: 'auto', containIntrinsicSize: 'auto 32px' } : undefined}>
       <div ref={actionMenuRef} className="relative">
         {getReferenceLongPressHandlers.popoverNode}
         <div

@@ -2,6 +2,9 @@
 // 独立观感(对齐 cadquery-print skill 的 view.html),不随 Flexoki 主题切换。
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Layers3, RotateCcw } from 'lucide-react';
+import { Matrix3 } from 'three';
+import { createModelExplosion, modelViewDescription, type ExplosionState } from './modelExplosion';
 import { Maximize as RiMaximize, Minimize as RiMinimize, Sun as RiSun, Moon as RiMoon, RefreshCw as RiRefreshCw, Scissors as RiScissors, ArrowLeftRight as RiArrowLeftRight, Crosshair as RiCrosshair, Tag as RiTag } from 'lucide-react';
 import {
   AmbientLight,
@@ -32,6 +35,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { useI18n } from '../../i18n';
+import { captureReferenceCanvas, modelFitDistance, type ReviewReferenceHandler } from './reviewReference';
 
 export type Model3dLoaderKind = 'stl' | 'gltf';
 
@@ -323,13 +327,22 @@ async function parseModel(buffer: ArrayBuffer, kind: Model3dLoaderKind): Promise
   if (kind === 'stl') {
     return { kind: 'stl', geometry: new STLLoader().parse(buffer) };
   }
-  const gltf = await new Promise<{ scene: Group }>((resolve, reject) => {
+  const gltf = await new Promise<import('three/examples/jsm/loaders/GLTFLoader.js').GLTF>((resolve, reject) => {
     new GLTFLoader().parse(buffer, '', resolve, reject);
+  });
+  gltf.scene.traverse((node) => {
+    const mapping = gltf.parser?.associations.get(node);
+    if (mapping?.meshes !== undefined) node.userData.termdockSinglePart = true;
+    const originalName = mapping?.nodes !== undefined ? gltf.parser.json.nodes?.[mapping.nodes]?.name : undefined;
+    if (originalName) node.userData.termdockPartName = originalName;
   });
   return { kind: 'gltf', object: gltf.scene };
 }
 
 interface ViewerResult {
+  capture: (label?: string) => Promise<Blob | null>;
+  partCount: number;
+  setExplosion: (state: ExplosionState | null) => void;
   dims: string;
   /** Pause the animation loop while a cached viewer is hidden. */
   setActive: (active: boolean) => void;
@@ -343,6 +356,7 @@ interface ViewerResult {
     height: number,
   ) => {
     part: string;
+    node?: string;
     point: [number, number, number];
     normal: [number, number, number] | null;
   } | null;
@@ -350,12 +364,13 @@ interface ViewerResult {
   setSelection: (
     selections: Array<{
       part: string;
+      node?: string;
       point: [number, number, number];
       normal: [number, number, number] | null;
     }> | null,
   ) => void;
   /** Project a FILE-space point onto the viewer canvas (px, relative to it). */
-  projectToScreen: (filePoint: Vector3) => { x: number; y: number; visible: boolean } | null;
+  projectToScreen: (filePoint: Vector3, node?: string) => { x: number; y: number; visible: boolean } | null;
   /** 点到模型表面的最近距离(mm); filePoint 用文件坐标系(CAD Z-up)。 */
   surfaceDistance: (filePoint: { x: number; y: number; z: number }) => number;
   /** Register a callback invoked right after each rendered frame, so overlay
@@ -434,6 +449,7 @@ function mountModelViewer(
   // GLB 的 modelCenter 是世界空间包围盒中心; STL 的是 CAD 空间中心,
   // 两者公式不同——共用一套公式会让 STL 坐标整体偏移 (cy−cz), 必须分开。
   const isStl = parsed.kind === 'stl';
+  const explosion = isStl ? null : createModelExplosion(modelObject);
   const fileToWorld = (p: { x: number; y: number; z: number }) =>
     isStl
       ? new Vector3(p.x - modelCenter.x, p.z - modelCenter.z, modelCenter.y - p.y)
@@ -488,6 +504,7 @@ function mountModelViewer(
       if (!posAttr) return;
       const idx = geo.getIndex();
       const triCount = idx ? idx.count / 3 : posAttr.count / 3;
+      const offset = explosion?.offset(node);
       for (let t = 0; t < triCount; t++) {
         const ia = idx ? idx.getX(t * 3) : t * 3;
         const ib = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
@@ -495,6 +512,7 @@ function mountModelViewer(
         vA.fromArray(posAttr.array, ia * 3).applyMatrix4(node.matrixWorld);
         vB.fromArray(posAttr.array, ib * 3).applyMatrix4(node.matrixWorld);
         vC.fromArray(posAttr.array, ic * 3).applyMatrix4(node.matrixWorld);
+        if (offset) { vA.sub(offset); vB.sub(offset); vC.sub(offset); }
         best = Math.min(best, pointTriangleDistance(target, vA, vB, vC));
         if (best < 1e-6) break;
       }
@@ -512,6 +530,7 @@ function mountModelViewer(
       ? { x: new Vector3(1, 0, 0), y: new Vector3(0, 0, -1), z: new Vector3(0, 1, 0) }
       : { x: new Vector3(1, 0, 0), y: new Vector3(0, 1, 0), z: new Vector3(0, 0, 1) };
   const clipPlane = new Plane(new Vector3(0, -1, 0), 0);
+  let clipping = false;
   const clipMaterials: Material[] = [];
   modelObject.traverse((node) => {
     if (node instanceof Mesh) {
@@ -524,7 +543,7 @@ function mountModelViewer(
 
   // Fit the camera to the bounding sphere.
   const radius = Math.max(size.length() / 2, 1e-6);
-  const dist = (radius / Math.tan(((camera.fov * Math.PI) / 180) / 2)) * 1.4;
+  const dist = modelFitDistance(radius, camera.fov, camera.aspect);
   camera.position.set(dist * 0.7, dist * 0.6, dist * 0.7);
   camera.near = dist / 100;
   camera.far = dist * 100;
@@ -659,6 +678,7 @@ function mountModelViewer(
   let active = true;
   let afterRender: (() => void) | null = null;
   let selectionEntries: Array<{ point: Vector3; meshes: Mesh[] }> = [];
+  let explosionFitRatio = 1;
   // 选中光斑保持屏幕恒定大小(~36px), 放大缩小时不跟着模型变大变小
   const updateSelectionScale = () => {
     const halfH = container.clientHeight / 2;
@@ -687,6 +707,26 @@ function mountModelViewer(
   animate();
 
   return {
+    partCount: explosion?.count ?? 1,
+    setExplosion: (state) => {
+      if (!explosion || explosion.count < 2) return;
+      const bounds = explosion.set(state);
+      const center = bounds.getCenter(new Vector3());
+      const nextRatio = Math.max(1, bounds.getSize(new Vector3()).length() / size.length());
+      const offset = camera.position.clone().sub(controls.target).multiplyScalar(nextRatio / explosionFitRatio);
+      controls.target.copy(center);
+      camera.position.copy(center).add(offset);
+      explosionFitRatio = nextRatio;
+      controls.update();
+    },
+    capture: (label) => {
+      // WebGL clears its drawing buffer between frames. Render and copy in the
+      // same task; no expensive preserveDrawingBuffer needed for normal orbit.
+      try {
+        renderer.render(scene, camera);
+        return captureReferenceCanvas(renderer.domElement, undefined, label);
+      } catch { return Promise.resolve(null); }
+    },
     // STL is always mm. glTF is nominally meters, but CAD/printing exports
     // (e.g. CadQuery) are usually mm — there is no reliable unit metadata, so
     // show raw bounding-box numbers without a unit rather than a wrong one.
@@ -712,6 +752,7 @@ function mountModelViewer(
       buildGrid(mode);
     },
     setClip: (clip) => {
+      clipping = Boolean(clip);
       if (!clip) {
         sectionMaterialStabilizer.setEnabled(false);
         for (const m of clipMaterials) m.clippingPlanes = null;
@@ -737,10 +778,11 @@ function mountModelViewer(
       // cut reads as a shell instead of disappearing walls.
       if (stlMaterial) stlMaterial.side = DoubleSide;
     },
-    projectToScreen: (filePoint) => {
+    projectToScreen: (filePoint, node) => {
       // 模型文件坐标是 CAD Z-up, three.js 世界是 Y-up: (x, y, z) → (x, z, -y)。
       // GLB 由 CadQuery 导出(旋转已烘焙), STL 由 mesh 旋转 -90°——两者一致。
       const world = fileToWorld(filePoint);
+      if (node) world.add(explosion?.offset(node) ?? new Vector3());
       const p = world.clone().project(camera);
       if (p.z < -1 || p.z > 1) return null;
       let visible = true;
@@ -748,7 +790,7 @@ function mountModelViewer(
       const distToPoint = dir.length();
       if (distToPoint > 1e-6) {
         raycaster.set(camera.position, dir.normalize());
-        const hits = raycaster.intersectObject(modelObject, true);
+        const hits = raycaster.intersectObject(modelObject, true).filter((hit) => !clipping || clipPlane.distanceToPoint(hit.point) >= 0);
         if (hits.length > 0 && hits[0].distance < distToPoint - 1.5) {
           visible = false;
         }
@@ -761,17 +803,17 @@ function mountModelViewer(
     pick: (screenX, screenY, width, height) => {
       const ndc = new Vector2((screenX / width) * 2 - 1, -((screenY / height) * 2 - 1));
       raycaster.setFromCamera(ndc, camera);
-      const hit = raycaster.intersectObject(modelObject, true)[0];
+      const hit = raycaster.intersectObject(modelObject, true).find((hit) => !clipping || clipPlane.distanceToPoint(hit.point) >= 0);
       if (!hit) return null;
-      const w = hit.point;
+      const w = hit.point.clone().sub(explosion?.offset(hit.object) ?? new Vector3());
       // 世界坐标 → CAD 坐标(与 projectToScreen 互逆)
       const point = worldToFile(w);
-      const normal: [number, number, number] | null = hit.face
-        ? [hit.face.normal.x, hit.face.normal.y, hit.face.normal.z]
-        : null;
+      const worldNormal = hit.face?.normal.clone().applyMatrix3(new Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+      const normal: [number, number, number] | null = worldNormal ? [worldNormal.x, -worldNormal.z, worldNormal.y] : null;
       // 优先最近的零件 Group；底层 Mesh 名可能是导出器生成名或乱码。
-      const part = resolvePickedPartName(hit.object);
-      return { part, point, normal };
+      const partNode = explosion?.part(hit.object);
+      const part = partNode?.userData.termdockPartName || partNode?.name || resolvePickedPartName(hit.object);
+      return { part, node: partNode?.uuid, point, normal };
     },
     setSelection: (selections) => {
       // 清理旧高亮
@@ -804,6 +846,7 @@ function mountModelViewer(
       const up = new Vector3(0, 0, 1);
       for (const sel of selections) {
         const worldPoint = fileToWorld({ x: sel.point[0], y: sel.point[1], z: sel.point[2] });
+        worldPoint.add(explosion?.offset(sel.node ?? sel.part) ?? new Vector3());
         const worldNormal = sel.normal
           ? new Vector3(sel.normal[0], sel.normal[2], -sel.normal[1]).normalize()
           : null;
@@ -815,7 +858,7 @@ function mountModelViewer(
           const mesh = new Mesh(geo, mat);
           if (worldNormal) {
             mesh.quaternion.setFromUnitVectors(up, worldNormal);
-            mesh.position.copy(worldPoint).add(worldNormal.multiplyScalar(1));
+            mesh.position.copy(worldPoint).add(worldNormal.clone().multiplyScalar(0.15));
           } else {
             mesh.position.copy(worldPoint);
           }
@@ -879,7 +922,7 @@ interface ModelPreviewProps {
   features?: ModelFeature[] | null;
   /** Insert a feature reference into the chat input / context draft, the same
       way file references work (draft-aware). */
-  onInsertFeature?: (text: string, key: string) => void;
+  onInsertFeature?: ReviewReferenceHandler;
   /** Re-fetch the model from the server (manual fallback when file-watch
       auto-reload misses, e.g. suspended SSE on mobile). */
   onRefresh?: () => void;
@@ -896,7 +939,7 @@ interface ModelPreviewProps {
 
 type ModelPreviewStatus =
   | { kind: 'loading' }
-  | { kind: 'ready'; dims: string }
+  | { kind: 'ready'; dims: string; partCount: number }
   | { kind: 'error'; message: string };
 
 const BG_STORAGE_KEY = 'termdock.model3d.bg';
@@ -912,7 +955,7 @@ export default function ModelPreview({
   unitScale = 1,
   dimensionUnit,
   coordinateSystemLabel,
-  annotationPrefix = '模型标注',
+  annotationPrefix = '',
   normalizePickedPartName,
   active = true,
 }: ModelPreviewProps) {
@@ -955,6 +998,12 @@ export default function ModelPreview({
   const [clipFlip, setClipFlip] = useState(false);
   const clipRef = useRef<ClipState | null>(null);
   clipRef.current = clipOn ? { axis: clipAxis, value01: clipPos, flip: clipFlip } : null;
+  const [explodeOn, setExplodeOn] = useState(false);
+  const [explodeAmount, setExplodeAmount] = useState(0.65);
+  const [explodeAxis, setExplodeAxis] = useState<ExplosionState['axis']>('y');
+  const explosionRef = useRef<ExplosionState | null>(null);
+  explosionRef.current = explodeOn ? { axis: explodeAxis, amount: explodeAmount } : null;
+  const viewDescription = () => modelViewDescription(explosionRef.current, clipRef.current);
 
   // ---- 语义特征标注: 选特征(可多选2个) → 弹「引用」按钮 → 插入到对话/草稿 ----
   const [featureMode, setFeatureMode] = useState(false);
@@ -973,6 +1022,7 @@ export default function ModelPreview({
   const [pickMode, setPickMode] = useState(false);
   const [picked, setPicked] = useState<{
     part: string;
+    node?: string;
     point: [number, number, number];
     normal: [number, number, number] | null;
   } | null>(null);
@@ -999,42 +1049,32 @@ export default function ModelPreview({
     // 世界坐标(CAD (x,y,z) → (x,z,-y)); STL 无场景变换, 就是文件里的 Z-up 坐标。
     // 只给一个坐标系, Agent 直接读引用文件就能对上, 不用转换。
     const isGlb = resolveModel3dLoaderKind(ext) === 'gltf';
-    const coordLabel = coordinateSystemLabel ?? (isGlb ? 'GLB 世界坐标 Y-up' : 'STL 文件坐标 Z-up');
+    const coordLabel = coordinateSystemLabel ?? (isGlb ? 'GLB Y-up' : 'STL Z-up');
     const toFileCoords = (v: [number, number, number]) => (isGlb ? [v[0], v[2], -v[1]] : v);
     const point = toFileCoords(p.point).map((v) => v.toFixed(1)).join(',');
     const normal = p.normal
-      ? ` / 法线 (${toFileCoords(p.normal).map((v) => v.toFixed(2)).join(',')})`
+      ? ` · 法线 (${toFileCoords(p.normal).map((v) => v.toFixed(2)).join(',')})`
       : '';
     // 部位名人性化: GLB 节点名(base_1) → 特征清单里的零件名(底座)
     const partLabel = pickPartLabel(p);
-    // 最近特征提示: ≤8mm 直接挂特征名, ≤15mm 提示"靠近"
-    let hint = '';
-    if (features && features.length > 0) {
-      let nearest = null;
-      let best = Infinity;
-      for (const ft of features) {
-        const d = Math.hypot(
-          ft.center[0] - p.point[0],
-          ft.center[1] - p.point[1],
-          ft.center[2] - p.point[2],
-        );
-        if (d < best) {
-          best = d;
-          nearest = ft;
-        }
-      }
-      if (nearest && best <= 8) hint = ` ≈ ${nearest.part}·${nearest.name}`;
-      else if (nearest && best <= 15) hint = ` ≈ 靠近 ${nearest.part}·${nearest.name}`;
-    }
-    const text = `"${annotationPrefix}: ${filePath ?? fileName} / 部位: ${partLabel} / 点 (${point})mm [${coordLabel}]${normal}${hint}"`;
-    onInsertFeature?.(text, `pick:${point}`);
+    // Do not guess semantic features from distance alone: a nearby point may
+    // belong to a different part. Explicit feature selections carry their name.
+    const unit = dimensionUnit ?? (isGlb ? '文件单位' : 'mm');
+    const text = `${annotationPrefix ? `${annotationPrefix}: ` : ''}${filePath ?? fileName}\n${partLabel} · 点 (${point}) [${coordLabel}, ${unit}]${normal}`;
+    const view = viewDescription();
+    onInsertFeature?.([text, view].filter(Boolean).join('\n'), `pick:${p.part}:${point}`, { snapshot: viewerRef.current?.capture(view) });
     setPicked(null);
   };
 
   // 选中高亮: 选中的特征(面/棱/角)和点选结果 → 部位发光 + 圆环标记
   useEffect(() => {
+    viewerRef.current?.setExplosion(explosionRef.current);
+  }, [explodeOn, explodeAmount, explodeAxis]);
+
+  useEffect(() => {
     const selections: Array<{
       part: string;
+      node?: string;
       point: [number, number, number];
       normal: [number, number, number] | null;
     }> = [];
@@ -1046,10 +1086,10 @@ export default function ModelPreview({
       }
     }
     if (picked) {
-      selections.push({ part: picked.part, point: picked.point, normal: picked.normal });
+      selections.push({ part: picked.part, node: picked.node, point: picked.point, normal: picked.normal });
     }
     viewerRef.current?.setSelection(selections.length > 0 ? selections : null);
-  }, [features, selectedFeatureIds, picked]);
+  }, [features, selectedFeatureIds, picked, explodeOn, explodeAmount, explodeAxis, status]);
 
   const toggleFeature = (fid: string) => {
     setSelectedFeatureIds((prev) => {
@@ -1082,7 +1122,7 @@ export default function ModelPreview({
             center.y += ft.normal[1] * 2;
             center.z += ft.normal[2] * 2;
           }
-          const pos = viewer.projectToScreen(center);
+          const pos = viewer.projectToScreen(center, ft.node ?? ft.part);
           el.style.display = pos ? '' : 'none';
           if (pos) {
             el.style.transform = `translate(${pos.x}px, ${pos.y}px) translate(-50%, -50%)`;
@@ -1125,6 +1165,7 @@ export default function ModelPreview({
       if (pickedPoint && pickMarker) {
         const pos = viewer.projectToScreen(
           new Vector3(pickedPoint.point[0], pickedPoint.point[1], pickedPoint.point[2]),
+          pickedPoint.node ?? pickedPoint.part,
         );
         if (pos) {
           pickMarker.style.display = '';
@@ -1152,7 +1193,7 @@ export default function ModelPreview({
   const insertFeatureRef = () => {
     if (selectedFeatures.length === 0) return;
     const isGlb = resolveModel3dLoaderKind(ext) === 'gltf';
-    const coordLabel = coordinateSystemLabel ?? (isGlb ? 'GLB 世界坐标 Y-up' : 'STL 文件坐标 Z-up');
+    const coordLabel = coordinateSystemLabel ?? (isGlb ? 'GLB Y-up' : 'STL Z-up');
     const toFileCoords = (v: number[]) => (isGlb ? [v[0], v[2], -v[1]] : v);
     const parts = selectedFeatures.map((ft, i) => {
       const center = toFileCoords(ft.center).map((v) => v.toFixed(1)).join(',');
@@ -1163,8 +1204,9 @@ export default function ModelPreview({
       const label = selectedFeatures.length > 1 ? `面${'AB'[i]}: ` : '';
       return `${label}${ft.part}·${ft.name} (中心 ${center}) [${coordLabel}]${distText}`;
     });
-    const text = `"${annotationPrefix}: ${filePath ?? fileName} / ${parts.join(' ; ')}"`;
-    onInsertFeature?.(text, `features:${selectedFeatures.map((ft) => ft.id).join('+')}`);
+    const text = `${annotationPrefix ? `${annotationPrefix}: ` : ''}${filePath ?? fileName}\n${parts.join(' ; ')}`;
+    const view = viewDescription();
+    onInsertFeature?.([text, view].filter(Boolean).join('\n'), `features:${selectedFeatures.map((ft) => ft.id).join('+')}`, { snapshot: viewerRef.current?.capture(view) });
     setSelectedFeatureIds([]);
   };
 
@@ -1221,7 +1263,8 @@ export default function ModelPreview({
       if (bgOverrideRef.current) viewer.setAppearance(bgOverrideRef.current);
       // Same for the section state: re-apply after a remount/file switch.
       viewer.setClip(clipRef.current);
-      if (!cancelled) setStatus({ kind: 'ready', dims: viewer.dims });
+      viewer.setExplosion(explosionRef.current);
+      if (!cancelled) setStatus({ kind: 'ready', dims: viewer.dims, partCount: viewer.partCount });
     })().catch((err) => {
       if (cancelled) return;
       setStatus({ kind: 'error', message: err instanceof Error ? err.message : tRef.current('rightSidebar.model3dLoadFailed') });
@@ -1235,6 +1278,9 @@ export default function ModelPreview({
     // pseudoFullscreen switches the portal target, which remounts the viewer
     // container — re-run the whole load/mount sequence for the new location.
   }, [blobUrl, ext, pseudoFullscreen, unitScale, dimensionUnit]);
+
+  // File switches/reloads must not inherit an exploded pose from another file.
+  useEffect(() => { setExplodeOn(false); setClipOn(false); }, [blobUrl]);
 
   useEffect(() => {
     viewerRef.current?.setActive(active);
@@ -1263,9 +1309,10 @@ export default function ModelPreview({
       }
     >
       {status.kind === 'ready' && (
-        <div className={`pointer-events-none absolute z-10 select-none text-xs leading-relaxed text-muted-foreground max-sm:rounded-lg max-sm:bg-surface/75 max-sm:px-2.5 max-sm:py-1.5 max-sm:text-[15px] ${expanded ? 'left-[calc(0.75rem+env(safe-area-inset-left,0px))] top-[calc(0.625rem+env(safe-area-inset-top,0px))]' : 'left-3 top-2.5'}`}>
+        <div className={`pointer-events-none absolute right-3 z-10 select-none text-xs leading-relaxed text-muted-foreground max-sm:rounded-lg max-sm:bg-surface/75 max-sm:px-2.5 max-sm:py-1.5 max-sm:text-[15px] ${expanded ? 'left-[calc(0.75rem+env(safe-area-inset-left,0px))] top-[calc(3.75rem+env(safe-area-inset-top,0px))]' : 'left-3 top-14'}`}>
           <div className="text-sm font-semibold text-foreground max-sm:text-base">{fileName}</div>
           <div>{t('rightSidebar.model3dDimensions', { dims: status.dims })}</div>
+          {explodeOn && <div>{t('rightSidebar.model3dExplodedNotice')}</div>}
           {featureMode && featureDiag && (
             <div className="text-foreground/70">
               {t('rightSidebar.model3dFeatureStatus', { total: featureDiag.total, positioned: featureDiag.positioned })}
@@ -1280,7 +1327,14 @@ export default function ModelPreview({
         </div>
       )}
       {status.kind !== 'error' && (
-        <div className={`absolute z-20 flex gap-1.5 ${expanded ? 'right-[calc(0.75rem+env(safe-area-inset-right,0px))] top-[calc(0.625rem+env(safe-area-inset-top,0px))]' : 'right-3 top-2.5'}`}>
+        <div className={`absolute left-3 z-20 flex justify-end gap-0.5 [&>button]:h-9 [&>button]:w-9 [&>button]:shrink-0 ${expanded ? 'right-[calc(0.75rem+env(safe-area-inset-right,0px))] top-[calc(0.625rem+env(safe-area-inset-top,0px))]' : 'right-3 top-2.5'}`}>
+          {status.kind === 'ready' && status.partCount > 1 && (
+            <button type="button" title={t('rightSidebar.model3dExplode')} aria-label={t('rightSidebar.model3dExplode')} aria-pressed={explodeOn}
+              className={`inline-flex items-center justify-center rounded-full ${explodeOn ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground'}`}
+              onClick={() => { setExplodeOn((v) => !v); setClipOn(false); }}>
+              <Layers3 size={16} />
+            </button>
+          )}
           {onRefresh && (
             <button
               type="button"
@@ -1350,7 +1404,7 @@ export default function ModelPreview({
                 ? 'bg-surface-elevated text-foreground'
                 : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
             }`}
-            onClick={() => setClipOn((v) => !v)}
+            onClick={() => { setClipOn((v) => !v); setExplodeOn(false); }}
           >
             <RiScissors size={14} />
           </button>
@@ -1372,13 +1426,30 @@ export default function ModelPreview({
           >
             {expanded ? <RiMinimize size={14} /> : <RiMaximize size={14} />}
           </button>
+      </div>
+      )}
+      {status.kind === 'ready' && explodeOn && status.partCount > 1 && (
+        <div className={`swiper-no-swiping absolute left-3 right-3 z-20 flex flex-wrap items-center justify-center gap-2 rounded-xl bg-surface-2 px-2 py-2 ${expanded ? 'bottom-[calc(3.5rem+env(safe-area-inset-bottom,0px))]' : 'bottom-14'}`}
+          onPointerDown={(event) => event.stopPropagation()} onTouchStart={(event) => event.stopPropagation()}>
+          <select aria-label={t('rightSidebar.model3dExplodeAxis')} value={explodeAxis}
+            onChange={(event) => setExplodeAxis(event.target.value as ExplosionState['axis'])}
+            className="h-9 rounded-md bg-surface-elevated px-2 text-sm text-foreground">
+            {(['x', 'y', 'z'] as const).map((axis) => <option key={axis} value={axis}>{axis.toUpperCase()}</option>)}
+          </select>
+          <input type="range" min={0} max={100} value={Math.round(explodeAmount * 100)}
+            onChange={(event) => setExplodeAmount(Number(event.target.value) / 100)}
+            aria-label={t('rightSidebar.model3dExplodeAmount')} className="h-9 min-w-0 flex-1" />
+          <output className="w-9 text-right text-xs tabular-nums text-muted-foreground">{Math.round(explodeAmount * 100)}%</output>
+          <button type="button" aria-label={t('rightSidebar.model3dAssemble')} title={t('rightSidebar.model3dAssemble')}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-surface-elevated text-foreground"
+            onClick={() => setExplodeOn(false)}><RotateCcw size={16} /></button>
         </div>
       )}
       {/* Section controls: axis pickers + drag slider + flip. Local overlay
           inside the viewer, bare z-20 (local scale, below global overlays). */}
       {status.kind === 'ready' && clipOn && (
         <div
-          className={`swiper-no-swiping absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-xl bg-surface-2 px-3 py-2 ${expanded ? 'bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]' : 'bottom-3'}`}
+          className={`swiper-no-swiping absolute left-3 right-3 z-20 flex items-center justify-center gap-2 rounded-xl bg-surface-2 px-3 py-2 ${expanded ? 'bottom-[calc(3.5rem+env(safe-area-inset-bottom,0px))]' : 'bottom-14'}`}
           onPointerDown={(event) => event.stopPropagation()}
           onTouchStart={(event) => event.stopPropagation()}
         >
@@ -1403,7 +1474,7 @@ export default function ModelPreview({
             max={1000}
             value={Math.round(clipPos * 1000)}
             onChange={(event) => setClipPos(Number(event.target.value) / 1000)}
-            className="w-32 sm:w-48"
+            className="h-9 min-w-0 flex-1"
             aria-label={t('rightSidebar.model3dClipPosition')}
           />
           <button
@@ -1454,7 +1525,7 @@ export default function ModelPreview({
       {/* 语义特征标注: 右侧特征列表(可折叠, 手机默认收起省空间) */}
       {status.kind === 'ready' && features && featureMode && (
         <div
-          className="swiper-no-swiping absolute right-2 top-14 z-20 max-h-[calc(100%-1rem)] w-44 overflow-hidden rounded-xl bg-surface-2/95"
+          className="swiper-no-swiping absolute bottom-28 right-2 top-40 z-20 h-fit max-h-[calc(100%-17rem)] w-44 overflow-auto rounded-xl bg-surface-2/95"
           onPointerDown={(event) => event.stopPropagation()}
           onTouchStart={(event) => event.stopPropagation()}
         >

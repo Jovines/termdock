@@ -98,3 +98,11 @@ export function shallowJsonEqual(a: unknown, b: unknown): boolean {
     return false;
   }
 }
+
+// Flush trailing UI drafts before navigation, background suspension and updates.
+if (typeof window !== 'undefined') {
+  const flushPending = () => { for (const key of pendingValues.keys()) flushCacheThrottled(key); };
+  window.addEventListener('pagehide', flushPending);
+  window.addEventListener('termdock:before-update', flushPending);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushPending(); });
+}

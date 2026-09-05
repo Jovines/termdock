@@ -31,6 +31,8 @@ const DEADLINE_RULES: DeadlineRule[] = [
   // 有限但可能很久：大目录搜索（有 done 事件的进度流）、大文件下载。
   { method: 'GET', pattern: /^\/api\/terminal\/fs\/search$/, deadlineMs: 120_000 },
   { method: 'GET', pattern: /^\/api\/terminal\/fs\/download$/, deadlineMs: 300_000 },
+  // KiCad GLB responses can take longer than rendering to transfer to a phone.
+  { method: 'GET', pattern: /^\/api\/terminal\/fs\/eda-preview$/, deadlineMs: 120_000 },
   // 上传最多 100MB×50 文件，弱网下接收请求体可能要几分钟。注意 Node 内置
   // requestTimeout（默认 300s，本项目未改）管「请求体接收」阶段并在超时后
   // 回 408，所以这里必须低于 300s——让我们的 503+日志先出手，而不是被

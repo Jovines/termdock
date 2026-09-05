@@ -6,6 +6,7 @@ import {
   probeTerminalConnection,
   reconnectTerminalConnectionNow,
   suspendTerminalConnectionReconnects,
+  resizeTerminal,
 } from './api';
 
 class FakeWebSocket {
@@ -50,6 +51,20 @@ class FakeWebSocket {
 }
 
 describe('connectTerminalStream reconnect policy', () => {
+  it('reconnects with the keyboard-closed grid without shrinking to metadata dimensions', async () => {
+    const disconnect = connectTerminalStream('resume-geometry', vi.fn());
+    const first = FakeWebSocket.instances[0];
+    first.readyState = FakeWebSocket.OPEN;
+    await resizeTerminal('resume-geometry', 58, 20);
+    await resizeTerminal('resume-geometry', 58, 40);
+    reconnectTerminalConnectionNow('resume-geometry');
+    vi.advanceTimersByTime(0);
+    const params = new URL(FakeWebSocket.instances[1].url).searchParams;
+    expect(params.get('cols')).toBe('58');
+    expect(params.get('rows')).toBe('40');
+    disconnect();
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     FakeWebSocket.instances = [];

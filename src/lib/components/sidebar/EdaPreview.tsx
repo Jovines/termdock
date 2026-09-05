@@ -4,6 +4,7 @@ import { useI18n } from '../../i18n';
 import { inspectEdaPoint, type EdaPointInspection, type EdaPreviewView } from '../../terminal/api';
 import { SvgInspectionPreview } from './SvgInspectionPreview';
 import { FloatingAnnotationButton } from './FloatingAnnotationButton';
+import { captureReferenceCanvas, type ReviewReferenceHandler } from './reviewReference';
 
 interface EdaPreviewProps {
   blobUrl: string;
@@ -11,7 +12,7 @@ interface EdaPreviewProps {
   view: EdaPreviewView;
   board: boolean;
   onViewChange: (view: EdaPreviewView) => void;
-  onInsertAnnotation?: (text: string, key: string) => void;
+  onInsertAnnotation?: ReviewReferenceHandler;
   onRefresh: () => void;
   /** Interactive viewer used for KiCad's exported PCB GLB. */
   interactive3d?: ReactNode;
@@ -93,11 +94,12 @@ export function EdaPreview({
     const image = imageRef.current;
     if (!stage || !image || !image.naturalWidth || !image.naturalHeight) return;
     const rect = stage.getBoundingClientRect();
-    const scale = Math.min(rect.width / image.naturalWidth, rect.height / image.naturalHeight);
+    const imageRect = image.getBoundingClientRect();
+    const scale = Math.min(imageRect.width / image.naturalWidth, imageRect.height / image.naturalHeight);
     const renderedWidth = image.naturalWidth * scale;
     const renderedHeight = image.naturalHeight * scale;
-    const left = rect.left + (rect.width - renderedWidth) / 2;
-    const top = rect.top + (rect.height - renderedHeight) / 2;
+    const left = imageRect.left + (imageRect.width - renderedWidth) / 2;
+    const top = imageRect.top + (imageRect.height - renderedHeight) / 2;
     const x = event.clientX - left;
     const y = event.clientY - top;
     if (x < 0 || y < 0 || x > renderedWidth || y > renderedHeight) return;
@@ -201,7 +203,9 @@ export function EdaPreview({
                 disabled={pick.inspecting}
                 title={t('rightSidebar.edaInsertAnnotation')}
                 onClick={() => {
-                  onInsertAnnotation?.(annotation, `eda:${view}:${pick.xPercent.toFixed(1)}:${pick.yPercent.toFixed(1)}`);
+                  onInsertAnnotation?.(annotation, `eda:${view}:${pick.xPercent.toFixed(1)}:${pick.yPercent.toFixed(1)}`, {
+                    snapshot: imageRef.current ? captureReferenceCanvas(imageRef.current, pick) : Promise.resolve(null),
+                  });
                   setPick(null);
                 }}
               >

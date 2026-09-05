@@ -31,15 +31,9 @@ import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal
 import { buildBracketedPastePayload, detectTextareaPaste } from '../../terminal/bracketedPaste';
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
 import {
-  nextKeyboardFitStableFrameCount,
-  shouldDeferTerminalFit,
-  shouldForceObservedResizeRedraw,
   shouldPreserveBottomAfterFit,
   shouldProcessObservedResize,
   shouldRefreshTerminalBuffer,
-  shouldReleaseKeyboardResizeWriteHold,
-  shouldSettleKeyboardFit,
-  type TerminalDimensions,
 } from '../../terminal/refreshRedraw';
 import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
 import {
@@ -102,8 +96,6 @@ const MOBILE_COPY_POPOVER_HANDLE_CLEARANCE_PX = 52;
 // DEC private mode 2026 is xterm's native synchronized-output protocol. It
 // keeps buffer parsing live while postponing paints until the matching reset,
 // so a full-screen PTY redraw cannot leak its intermediate ANSI states.
-const XTERM_SYNC_OUTPUT_BEGIN = '\x1b[?2026h';
-const XTERM_SYNC_OUTPUT_END = '\x1b[?2026l';
 /**
  * 清洗用户输入，处理各种特殊字符
  * 1. 换行符统一转换为 CR (\r) - 终端标准
@@ -308,8 +300,6 @@ export type RefreshOptions = {
   skipResizePush?: boolean;
   /** 不滚到底（alternate buffer / tmux copy-mode）。 */
   skipScrollToBottom?: boolean;
-  /** 服务端报上来的尺寸；如果比当前 xterm 小则忽略（防 shrink）。 */
-  candidateSize?: { cols: number; rows: number };
   /** 跳过 throttle / dedupe。 */
   force?: boolean;
   /** WebGL renderer 仍存活时也完整重绘 buffer；只用于低频稳定化刷新。 */
@@ -326,7 +316,7 @@ export type RefreshOptions = {
 
 /**
  * 「后台返回」语义的 reason 白名单。只有这些离散的、由系统切换触发的一次性
- * 事件，才会无条件 dispose+recreate WebGL renderer（见 runRefreshSequence）。
+ * 事件，才会在 Android 上兜底重建 WebGL renderer（见 runRefreshSequence）。
  * 绝不包含 resize / focus / blur / tmux-layout / dpr-change 等高频或常规 reason，
  * 避免重蹈历史上的「idle 花屏」（无输出时持续 repaint）。
  */
@@ -337,9 +327,11 @@ const RESUME_REASONS: ReadonlySet<RefreshReason> = new Set<RefreshReason>([
 ]);
 
 export type TerminalController = {
+  serializeSnapshot: () => string | null;
   focus: () => void;
   blur: () => void;
-  clear: (options?: { preserveKeyboardResizePresentation?: boolean }) => void;
+  clear: () => void;
+  prepareScreenReplacement: () => void;
   copySelectionOrViewport: () => Promise<boolean>;
   pasteClipboardText: () => Promise<boolean>;
   /**
@@ -411,7 +403,6 @@ interface TerminalViewportProps {
   onMobilePasteResult?: (ok: boolean) => void;
   onReadyChange?: (ready: boolean) => void;
   onSizeSynchronizedChange?: (ready: boolean) => void;
-  onKeyboardResizeSettlingChange?: (settling: boolean) => void;
   onWritesSettled?: (position: {
     x: number;
     y: number;
@@ -837,7 +828,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onMobilePasteResult,
       onReadyChange,
       onSizeSynchronizedChange,
-      onKeyboardResizeSettlingChange,
       onWritesSettled,
       onWriteProgress,
       onCursorPositionChange,
@@ -857,6 +847,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const containerRef = React.useRef<HTMLDivElement>(null);
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
+    const serializeAddonRef = React.useRef<SerializeAddon | null>(null);
     const suppressSmoothScrollRef = React.useRef(suppressSmoothScroll);
     suppressSmoothScrollRef.current = suppressSmoothScroll;
     const fitAddonRef = React.useRef<FitAddon | null>(null);
@@ -868,8 +859,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     onReadyChangeRef.current = onReadyChange;
     const onSizeSynchronizedChangeRef = React.useRef(onSizeSynchronizedChange);
     onSizeSynchronizedChangeRef.current = onSizeSynchronizedChange;
-    const onKeyboardResizeSettlingChangeRef = React.useRef(onKeyboardResizeSettlingChange);
-    onKeyboardResizeSettlingChangeRef.current = onKeyboardResizeSettlingChange;
     const onWritesSettledRef = React.useRef(onWritesSettled);
     onWritesSettledRef.current = onWritesSettled;
     const onWriteProgressRef = React.useRef(onWriteProgress);
@@ -888,22 +877,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const pendingWriteLastChunkIdRef = React.useRef<number | null>(null);
     const flushWritesRef = React.useRef<() => void>(() => {});
-    const keyboardResizeWriteHoldRef = React.useRef({
-      active: false,
-      synchronizedOutputActive: false,
-      startedAt: 0,
-      lastWriteAt: 0,
-      rafId: null as number | null,
-    });
-    const keyboardResizeFrameShieldRef = React.useRef({
-      element: null as HTMLDivElement | null,
-      timeoutId: null as number | null,
-    });
-    const keyboardResizePresentationRef = React.useRef({
-      active: false,
-      generation: 0,
-      awaitingFinalRender: false,
-    });
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
     const imeFixedContainingBlockRef = React.useRef<HTMLElement | null | undefined>(undefined);
@@ -3056,122 +3029,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onPointerCancel: enableTouchScroll ? lp_onPointerCancel : undefined,
     });
 
-    const removeKeyboardResizeFrameShield = React.useCallback(() => {
-      const shield = keyboardResizeFrameShieldRef.current;
-      if (shield.timeoutId !== null && typeof window !== 'undefined') {
-        window.clearTimeout(shield.timeoutId);
-      }
-      shield.timeoutId = null;
-      shield.element?.remove();
-      shield.element = null;
-    }, []);
-
-    const setKeyboardResizePresentationSettling = React.useCallback((settling: boolean) => {
-      const presentation = keyboardResizePresentationRef.current;
-      // Every new keyboard transition invalidates a pending onRender/timeout
-      // from the previous direction, even when the old transition has not
-      // finished presenting yet (keyboard open -> immediate close).
-      if (settling) {
-        presentation.generation += 1;
-        presentation.awaitingFinalRender = false;
-      }
-      if (presentation.active === settling) return;
-      presentation.active = settling;
-      if (!settling) presentation.awaitingFinalRender = false;
-      onKeyboardResizeSettlingChangeRef.current?.(settling);
-    }, []);
-
-    const captureKeyboardResizeFrameShield = React.useCallback(() => {
-      removeKeyboardResizeFrameShield();
-      const terminalElement = terminalRef.current?.element;
-      const screen = terminalElement?.querySelector<HTMLElement>('.xterm-screen');
-      const rows = screen?.querySelector<HTMLElement>(':scope > .xterm-rows');
-      // The built-in DOM renderer keeps painted rows below .xterm-screen. WebGL
-      // has a canvas and does not need this path; an empty clone would only
-      // cover a valid live renderer.
-      if (!screen || !rows?.querySelector(':scope > div')) return;
-
-      const shield = document.createElement('div');
-      shield.className = 'terminal-keyboard-resize-frame-shield';
-      shield.setAttribute('aria-hidden', 'true');
-      // At capture time the terminal root may be translated to follow the
-      // shrinking keyboard. Keep the opaque shield fixed over the whole live
-      // screen and retain that translation only on the cloned rows. Moving the
-      // shield itself would uncover part of the newly fitted live rows, making
-      // the old and new grids visible together as duplicated terminal lines.
-      const snapshotRows = rows.cloneNode(true) as HTMLElement;
-      snapshotRows.style.transform = terminalElement?.style.transform || 'none';
-      shield.style.visibility = 'hidden';
-      shield.appendChild(snapshotRows);
-      screen.appendChild(shield);
-      keyboardResizeFrameShieldRef.current.element = shield;
-      const generation = keyboardResizePresentationRef.current.generation;
-      // Safety only. The normal path removes the shield on the first completed
-      // render after synchronized output ends. Since the live terminal is never
-      // hidden, timeout expiry cannot reveal an empty placeholder.
-      keyboardResizeFrameShieldRef.current.timeoutId = window.setTimeout(() => {
-        removeKeyboardResizeFrameShield();
-        if (keyboardResizePresentationRef.current.generation === generation) {
-          setKeyboardResizePresentationSettling(false);
-        }
-      }, 1500);
-    }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
-
-    const releaseKeyboardResizeFrameShieldAfterSynchronizedPaint = React.useCallback(() => {
-      const presentation = keyboardResizePresentationRef.current;
-      if (!presentation.active || !presentation.awaitingFinalRender) return;
-      const generation = presentation.generation;
-      const shieldHadContent = Boolean(
-        keyboardResizeFrameShieldRef.current.element?.textContent?.trim(),
-      );
-      let matchingFrames = 0;
-      let lastRenderedText: string | null = null;
-      const waitForMatchingDomFrame = () => {
-        const current = keyboardResizePresentationRef.current;
-        const writeHold = keyboardResizeWriteHoldRef.current;
-        if (
-          !current.active
-          || !current.awaitingFinalRender
-          || current.generation !== generation
-          || writeHold.active
-          || writeHold.synchronizedOutputActive
-          || isWritingRef.current
-          || Boolean(pendingWriteRef.current)
-          || pendingScreenSyncGenerationRef.current !== null
-        ) {
-          return;
-        }
-        const terminal = terminalRef.current;
-        const rows = terminal?.element?.querySelector<HTMLElement>('.xterm-screen > .xterm-rows');
-        if (!terminal || !rows) return;
-        const renderedText = Array.from(rows.children)
-          .map((row) => (row.textContent ?? '').replace(/\s+$/g, ''))
-          .join('\n')
-          .replace(/\s+$/g, '');
-        // During a DOM-renderer full refresh both surfaces can briefly agree on
-        // an empty frame before the populated rows land. Wait for the expected
-        // row count and two identical presentable DOM frames after the
-        // authoritative write completes; xterm's buffer serialization is not
-        // byte-identical to DOM text because the renderer elides cell spacing.
-        const framePresentable = rows.children.length === terminal.rows
-          && (!shieldHadContent || renderedText.length > 0);
-        matchingFrames = framePresentable && renderedText === lastRenderedText
-          ? matchingFrames + 1
-          : (framePresentable ? 1 : 0);
-        lastRenderedText = renderedText;
-        if (matchingFrames < 2) {
-          window.requestAnimationFrame(waitForMatchingDomFrame);
-          return;
-        }
-        removeKeyboardResizeFrameShield();
-        setKeyboardResizePresentationSettling(false);
-      };
-      window.requestAnimationFrame(waitForMatchingDomFrame);
-    }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
-
     const resetWriteState = React.useCallback((options: {
       notifyFlowResume?: boolean;
-      preserveKeyboardResizePresentation?: boolean;
     } = {}) => {
       writeSettleGenerationRef.current += 1;
       pendingWriteRef.current = '';
@@ -3187,46 +3046,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         window.cancelAnimationFrame(writeScheduledRef.current);
       }
       writeScheduledRef.current = null;
-      const resizeWriteHold = keyboardResizeWriteHoldRef.current;
-      if (options.preserveKeyboardResizePresentation) {
-        // terminal.reset() has already reset synchronized-output mode. Keep the
-        // active write hold/timer so the replacement snapshot remains hidden
-        // behind the captured frame until it is fully consumed.
-        resizeWriteHold.synchronizedOutputActive = false;
-      } else {
-        if (resizeWriteHold.synchronizedOutputActive) {
-          try {
-            terminalRef.current?.write(XTERM_SYNC_OUTPUT_END);
-          } catch { /* terminal may already be disposing */ }
-        }
-        if (resizeWriteHold.rafId !== null && typeof window !== 'undefined') {
-          window.cancelAnimationFrame(resizeWriteHold.rafId);
-        }
-        resizeWriteHold.active = false;
-        resizeWriteHold.synchronizedOutputActive = false;
-        resizeWriteHold.rafId = null;
-      }
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
       osc52RemainderRef.current = '';
-      if (!options.preserveKeyboardResizePresentation) {
-        removeKeyboardResizeFrameShield();
-        setKeyboardResizePresentationSettling(false);
-      }
-    }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
+    }, []);
 
     const fitTerminal = React.useCallback((reason: string = 'unknown') => {
       const fitAddon = fitAddonRef.current;
       const terminal = terminalRef.current;
       const container = containerRef.current;
       if (!fitAddon || !terminal || !container) {
-        return;
-      }
-      if (shouldDeferTerminalFit(
-        enableTouchScrollRef.current,
-        keyboardFitFreezeRef.current.active,
-      )) {
-        debugTerminal('fit deferred: keyboard viewport settling', { reason });
         return;
       }
       // Check if terminal element is attached and has dimensions
@@ -3424,7 +3253,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     //                否则 → terminal.refresh（不主动清 WebGL atlas）
     //   4) fit() → 拿到新 cols/rows
     //   5) resize push：animation-frame coalescing / skip-if-same /
-    //                   candidateSize 防 shrink
+    //                   仅推送当前本地 fit 尺寸
     //   6) 滚底（非 alternate buffer 且未 skipScrollToBottom）→ rAF 等稳定
     // ============================================================
 
@@ -3436,17 +3265,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pendingReasonRafRef = React.useRef<Map<RefreshReason, number>>(new Map());
     // pending rAF 对应的最后一次 options；桌面滚轮可据此同步 flush resize。
     const pendingReasonOptionsRef = React.useRef<Map<RefreshReason, RefreshOptions>>(new Map());
-    const keyboardFitFreezeRef = React.useRef({
-      active: false,
-      startedAt: 0,
-      lastSignalAt: 0,
-      frozenContainerHeight: 0,
-      lastContainerHeight: null as number | null,
-      stableFrames: 0,
-      rafId: null as number | null,
-      originalTransform: '',
-      originalWillChange: '',
-    });
     // 服务端 ACK / pty-size 广播确认过的尺寸，以及当前等待 ACK 的最新请求。
     // WebSocket.send() 只代表进入发送队列，不能据此乐观地认为 PTY 已 resize。
     const resizeSyncStateRef = React.useRef(createResizeSyncState());
@@ -3461,16 +3279,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 才会真正发出去。否则 reload 后 ResizeObserver 在 ensureSession 跑完之前
     // 就会用 OLD session id 推 resize，server 直接 404。
     const sessionReadyRef = React.useRef(false);
-
-    const cancelPendingReasonRaf = React.useCallback((reason: RefreshReason) => {
-      const map = pendingReasonRafRef.current;
-      const id = map.get(reason);
-      if (id !== undefined) {
-        cancelAnimationFrame(id);
-        map.delete(reason);
-      }
-      pendingReasonOptionsRef.current.delete(reason);
-    }, []);
 
     const cancelAllPendingReasonRafs = React.useCallback(() => {
       const map = pendingReasonRafRef.current;
@@ -3631,19 +3439,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return;
         }
 
-        // A refresh may enter through tmux-layout, focus, a renderer callback,
-        // or a server size echo while the keyboard is moving. They all include
-        // fit/resize side effects, so the freeze must guard the orchestrator as
-        // a whole rather than only ResizeObserver's `resize` reason. The final
-        // settled resize refresh supersedes every deferred pass.
-        if (shouldDeferTerminalFit(
-          enableTouchScrollRef.current,
-          keyboardFitFreezeRef.current.active,
-        )) {
-          debugTerminal('refresh deferred: keyboard viewport settling', { reason });
-          return;
-        }
-
         // 0.5) dedupeKey：相同 reason + 相同 key 直接跳过，避免 tmux 服务端
         //      重复 layout 推送造成 fit/refresh 风暴。
         if (options.dedupeKey !== undefined) {
@@ -3658,20 +3453,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         debugTerminal('refresh', { reason, options });
 
         // 1) Renderer 决策
-        // 后台返回（visibility/bfcache/online）时无条件 dispose+recreate WebGL
-        // renderer。原因：安卓 PWA 切后台时浏览器会回收 GPU 显存（glyph texture
-        // atlas / 帧缓冲），但 `gl.isContextLost()` 常返回 false（浏览器认为上下文
-        // 已“秒恢复”）。只做 clearTextureAtlas()+refresh() 会把重画指令送进半死的
-        // 帧缓冲，dirty 标志被清、屏幕却空着——表现为“只剩背景、文字没了”。重建
-        // renderer 会新建 canvas + WebGL 上下文 + 帧缓冲，可靠恢复。
-        //
-        // resume 是低频事件，重建一次 renderer 的 GPU 资源代价可忽略；resize /
-        // focus / blur / dpr-change 等高频 reason 不在此列，避免重蹈“idle 花屏”。
-        // onContextLoss 路径（webglContextLostRef）仍由 needsRecreate 兜底。
+        // Android can silently lose GPU backing resources without a context-loss
+        // event, so retain its resume fallback. Other platforms keep their canvas
+        // across app switches; explicit recovery and real context loss still rebuild.
         const needsRecreate =
           options.forceRendererRecreate === true ||
           webglContextLostRef.current ||
-          (shouldUseWebgl && !!webglAddonRef.current && RESUME_REASONS.has(reason));
+          (shouldUseWebgl && !!webglAddonRef.current && RESUME_REASONS.has(reason)
+            && /Android/i.test(navigator.userAgent));
         let rendererAlreadyRecovered = false;
         if (needsRecreate) {
           webglContextLostRef.current = false;
@@ -3704,26 +3493,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         // 3) Resize push
         if (!options.skipResizePush) {
-          // candidateSize 防 shrink：服务端报上来的尺寸如果比当前 xterm 小，忽略
-          if (options.candidateSize) {
-            const c = options.candidateSize;
-            if (c.cols < after.cols || c.rows < after.rows) {
-              // 已经在请求的尺寸之上，不缩
-            } else {
-              pushResizeToServer(c.cols, c.rows);
-            }
-          } else {
-            // 冷启动时 pty-size 广播可能先把服务端旧尺寸写进 lastServerSizeRef，
-            // 而本地 fit 前后刚好不变。只比较 before/after 会误判“不用推”，直到
-            // 软键盘改变 rows 才修好。这里必须同时比较本地与服务端事实。
-            if (shouldPushFittedSize({
-              before,
-              after,
-              lastServerSize: resizeSyncStateRef.current.confirmed,
-              reconcileServerSize: options.reconcileServerSize,
-            })) {
-              pushResizeToServer(after.cols, after.rows);
-            }
+          // The attached PTY must use this xterm's actual grid. A tmux pane
+          // layout is a server observation, possibly older than a keyboard
+          // resize; feeding it back can leave the PTY at 40 rows and xterm at 16.
+          if (shouldPushFittedSize({
+            before,
+            after,
+            lastServerSize: resizeSyncStateRef.current.confirmed,
+            reconcileServerSize: options.reconcileServerSize,
+          })) {
+            pushResizeToServer(after.cols, after.rows);
           }
         }
 
@@ -3765,20 +3544,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 里调也没问题，编排器会等下一帧再跑。
         }
 
-        // iOS emits a ResizeObserver burst for every intermediate keyboard
-        // height. Fitting each sample reflows scrollback into a different row
-        // count, which exposes unrelated history for several painted frames.
-        // Keep the existing grid during that burst and perform one final fit
-        // after the visual viewport has actually settled.
-        if (
-          reason === 'resize' &&
-          enableTouchScrollRef.current &&
-          keyboardFitFreezeRef.current.active
-        ) {
-          debugTerminal('resize refresh deferred: keyboard viewport settling');
-          return;
-        }
-
         // 0) session-key-change 只做状态复位，不额外触发 resize push 以外的副作用。
         //    用于后端 terminalSessionId 变化（auto-recreate / restart）后，让下一次
         //    first-fit 重新走 immediate 路径，把当前真实尺寸告诉新的 session。
@@ -3801,226 +3566,28 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
         }
 
-        // 2) Dedupe：同 reason 的 pending rAF 取消，只保留最后一次
-        cancelPendingReasonRaf(reason);
+        // Coalesce into the frame already scheduled. Cancelling and requesting
+        // another frame here lets a continuous resize stream postpone fit
+        // indefinitely. Read the newest options when that frame executes.
+        pendingReasonOptionsRef.current.set(reason, options);
+        if (pendingReasonRafRef.current.has(reason)) return;
 
         // 3) 调度：rAF 内跑序列；runRefreshSequence 内部还会再开 rAF 做 scrollToBottom
         const raf = requestAnimationFrame(() => {
+          const latestOptions = pendingReasonOptionsRef.current.get(reason) ?? {};
           pendingReasonRafRef.current.delete(reason);
           pendingReasonOptionsRef.current.delete(reason);
-          runRefreshSequence(reason, options);
+          runRefreshSequence(reason, latestOptions);
         });
         pendingReasonRafRef.current.set(reason, raf);
-        pendingReasonOptionsRef.current.set(reason, options);
       },
       [
         debugTerminal,
-        cancelPendingReasonRaf,
         cancelAllPendingReasonRafs,
         clearResizeAckTimer,
         runRefreshSequence,
       ]
     );
-
-    React.useEffect(() => {
-      if (!enableTouchScroll || typeof window === 'undefined') return;
-
-      const freeze = keyboardFitFreezeRef.current;
-      const writeHold = keyboardResizeWriteHoldRef.current;
-
-      const restoreTerminalTransform = () => {
-        const terminalElement = terminalRef.current?.element;
-        if (terminalElement) {
-          terminalElement.style.transform = freeze.originalTransform;
-          terminalElement.style.willChange = freeze.originalWillChange;
-        }
-      };
-
-      const waitForResizeWrites = () => {
-        writeHold.rafId = null;
-        if (!writeHold.active) return;
-        const now = window.performance.now();
-        if (shouldReleaseKeyboardResizeWriteHold(
-          now - writeHold.startedAt,
-          now - writeHold.lastWriteAt,
-        )) {
-          writeHold.active = false;
-          if (writeHold.synchronizedOutputActive) {
-            pendingWriteRef.current += XTERM_SYNC_OUTPUT_END;
-            pendingBytesRef.current += XTERM_SYNC_OUTPUT_END.length;
-            writeHold.synchronizedOutputActive = false;
-          }
-          keyboardResizePresentationRef.current.awaitingFinalRender = true;
-          flushWritesRef.current();
-          return;
-        }
-        writeHold.rafId = window.requestAnimationFrame(waitForResizeWrites);
-      };
-
-      const beginResizeWriteHold = (now: number) => {
-        writeHold.active = true;
-        writeHold.startedAt = now;
-        writeHold.lastWriteAt = now;
-        if (writeScheduledRef.current !== null) {
-          window.cancelAnimationFrame(writeScheduledRef.current);
-          writeScheduledRef.current = null;
-        }
-      };
-
-      const startResizeWriteHoldTimer = () => {
-        const now = window.performance.now();
-        writeHold.startedAt = now;
-        writeHold.lastWriteAt = Math.max(writeHold.lastWriteAt, now);
-        if (writeHold.rafId === null) {
-          writeHold.rafId = window.requestAnimationFrame(waitForResizeWrites);
-        }
-      };
-
-      const runFinalFit = () => {
-        // xterm's renderer resizes its visible row surface before DEC 2026 can
-        // flush the PTY redraw. Preserve the last coherent DOM frame across
-        // that tiny gap, while leaving the live terminal rendering underneath.
-        captureKeyboardResizeFrameShield();
-        freeze.active = false;
-        freeze.lastContainerHeight = null;
-        freeze.stableFrames = 0;
-        // Transfer presentation ownership before scheduling the fit. The clone
-        // retains the compositor translation that was visible at capture time,
-        // while the live terminal returns to its normal transform underneath.
-        // Showing the clone only after fit would reintroduce an older frame at
-        // the end of the transition—the brief history flash seen on iOS.
-        restoreTerminalTransform();
-        const shield = keyboardResizeFrameShieldRef.current.element;
-        if (shield) shield.style.visibility = 'visible';
-        requestRefresh('resize', {
-          force: true,
-          reconcileServerSize: true,
-          skipScrollToBottom: true,
-        });
-      };
-
-      const settleFrame = () => {
-        freeze.rafId = null;
-        if (!freeze.active) return;
-
-        const container = containerRef.current;
-        const terminalElement = terminalRef.current?.element;
-        if (!container || !terminalElement || !isLayoutVisibleRef.current) {
-          freeze.active = false;
-          restoreTerminalTransform();
-          setKeyboardResizePresentationSettling(false);
-          return;
-        }
-
-        const now = window.performance.now();
-        const containerHeight = container.getBoundingClientRect().height;
-        freeze.stableFrames = nextKeyboardFitStableFrameCount(
-          freeze.lastContainerHeight,
-          containerHeight,
-          freeze.stableFrames,
-        );
-        freeze.lastContainerHeight = containerHeight;
-
-        // The xterm grid stays unchanged, while a compositor-only translation
-        // keeps its bottom edge attached to the shrinking/growing container.
-        // The parent's overflow clipping handles the temporarily hidden rows.
-        // Shrinking clips from the top so the prompt remains attached to the
-        // keyboard. Growing keeps the existing history anchored at the top;
-        // moving a short grid down would create a conspicuous blank upper half.
-        const translateY = Math.min(0, containerHeight - freeze.frozenContainerHeight);
-        terminalElement.style.transform = `translate3d(0, ${translateY}px, 0)`;
-
-        if (shouldSettleKeyboardFit(
-          now - freeze.startedAt,
-          now - freeze.lastSignalAt,
-          freeze.stableFrames,
-        )) {
-          beginResizeWriteHold(now);
-          const terminal = terminalRef.current;
-          if (!terminal) {
-            startResizeWriteHoldTimer();
-            runFinalFit();
-            return;
-          }
-          try {
-            terminal.write(XTERM_SYNC_OUTPUT_BEGIN, () => {
-              if (!writeHold.active) {
-                terminal.write(XTERM_SYNC_OUTPUT_END);
-                return;
-              }
-              writeHold.synchronizedOutputActive = true;
-              startResizeWriteHoldTimer();
-              runFinalFit();
-            });
-          } catch {
-            startResizeWriteHoldTimer();
-            runFinalFit();
-          }
-          return;
-        }
-
-        freeze.rafId = window.requestAnimationFrame(settleFrame);
-      };
-
-      const handleKeyboardViewportChange = () => {
-        if (!isLayoutVisibleRef.current) return;
-        const container = containerRef.current;
-        const terminalElement = terminalRef.current?.element;
-        if (!container || !terminalElement) return;
-
-        const now = window.performance.now();
-        if (!freeze.active) {
-          cancelPendingReasonRaf('resize');
-          setKeyboardResizePresentationSettling(true);
-          freeze.active = true;
-          freeze.startedAt = now;
-          freeze.lastContainerHeight = null;
-          freeze.stableFrames = 0;
-          freeze.frozenContainerHeight = container.getBoundingClientRect().height;
-          freeze.originalTransform = terminalElement.style.transform;
-          freeze.originalWillChange = terminalElement.style.willChange;
-          terminalElement.style.willChange = 'transform';
-        }
-        freeze.lastSignalAt = now;
-        freeze.stableFrames = 0;
-        cancelPendingReasonRaf('resize');
-        if (freeze.rafId === null) {
-          freeze.rafId = window.requestAnimationFrame(settleFrame);
-        }
-      };
-
-      document.addEventListener('termdock:viewport-keyboard-change', handleKeyboardViewportChange);
-      return () => {
-        document.removeEventListener('termdock:viewport-keyboard-change', handleKeyboardViewportChange);
-        freeze.active = false;
-        if (freeze.rafId !== null) {
-          window.cancelAnimationFrame(freeze.rafId);
-          freeze.rafId = null;
-        }
-        const shouldReleaseHeldWrites = writeHold.active || writeHold.synchronizedOutputActive;
-        if (writeHold.rafId !== null) {
-          window.cancelAnimationFrame(writeHold.rafId);
-          writeHold.rafId = null;
-        }
-        writeHold.active = false;
-        if (writeHold.synchronizedOutputActive) {
-          pendingWriteRef.current += XTERM_SYNC_OUTPUT_END;
-          pendingBytesRef.current += XTERM_SYNC_OUTPUT_END.length;
-          writeHold.synchronizedOutputActive = false;
-        }
-        removeKeyboardResizeFrameShield();
-        setKeyboardResizePresentationSettling(false);
-        restoreTerminalTransform();
-        if (shouldReleaseHeldWrites) flushWritesRef.current();
-      };
-    }, [
-      enableTouchScroll,
-      cancelPendingReasonRaf,
-      requestRefresh,
-      captureKeyboardResizeFrameShield,
-      removeKeyboardResizeFrameShield,
-      setKeyboardResizePresentationSettling,
-    ]);
 
     const flushPendingRefresh = React.useCallback(
       (reason: RefreshReason) => {
@@ -4058,9 +3625,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [sessionKey, clearResizeAckTimer]);
 
     const flushWrites = React.useCallback(() => {
-      if (keyboardResizeWriteHoldRef.current.active) {
-        return;
-      }
       if (isWritingRef.current) {
         return;
       }
@@ -4122,7 +3686,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             rows: term.rows,
             lastProcessedChunkId: lastProcessedChunkIdRef.current,
           });
-          releaseKeyboardResizeFrameShieldAfterSynchronizedPaint();
         };
         if (typeof window === 'undefined') {
           reportSettled();
@@ -4132,7 +3695,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           });
         }
       });
-    }, [releaseKeyboardResizeFrameShieldAfterSynchronizedPaint, resetWriteState]);
+    }, [resetWriteState]);
     flushWritesRef.current = flushWrites;
 
     const scheduleFlushWrites = React.useCallback(() => {
@@ -4165,11 +3728,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           flowControlHandlerRef.current?.(true);
         }
 
-        if (keyboardResizeWriteHoldRef.current.active) {
-          keyboardResizeWriteHoldRef.current.lastWriteAt = window.performance.now();
-          return;
-        }
-
         scheduleFlushWrites();
       },
       [scheduleFlushWrites]
@@ -4179,9 +3737,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       let disposed = false;
       let localTerminal: Terminal | null = null;
       let localResizeObserver: ResizeObserver | null = null;
-      let localResizeSettleTimer: number | null = null;
-      let localResizeCycleStartDimensions: TerminalDimensions | null = null;
-      let hasCompletedInitialResizeSettle = false;
       let localDisposables: Array<{ dispose: () => void }> = [];
 
       const container = containerRef.current;
@@ -4271,7 +3826,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           terminal.loadAddon(unicode11Addon);
           terminal.unicode.activeVersion = unicodeVersion;
           terminal.loadAddon(new SearchAddon({ highlightLimit: 1000 }));
-          terminal.loadAddon(new SerializeAddon());
+          const serializeAddon = new SerializeAddon();
+          terminal.loadAddon(serializeAddon);
+          serializeAddonRef.current = serializeAddon;
           terminal.loadAddon(new ProgressAddon());
           try {
             terminal.loadAddon(new ClipboardAddon(undefined, new BrowserClipboardProvider()));
@@ -4547,12 +4104,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             // establishes position:fixed coordinates while keeping the input
             // node connected. Force the next anchor pass to rediscover it.
             imeFixedContainingBlockRef.current = undefined;
-            if (localResizeSettleTimer === null) {
-              const currentTerminal = terminalRef.current;
-              localResizeCycleStartDimensions = currentTerminal
-                ? { cols: currentTerminal.cols, rows: currentTerminal.rows }
-                : null;
-            }
             const firstEntry = entries[0];
             if (firstEntry) {
               debugTerminal('resize observer', {
@@ -4572,44 +4123,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               requestRefresh('resize');
             }
 
-            // 冷启动的 safe-area / Swiper / visualViewport 往往分几轮收敛。
-            // ResizeObserver 的即时 fit 负责尺寸，最后一轮静止后再对屏幕内终端
-            // 完整重绘一次，等价于过去“弹一下软键盘就好了”，但不会惊动后台 tab。
-            if (localResizeSettleTimer !== null) {
-              window.clearTimeout(localResizeSettleTimer);
-            }
-            localResizeSettleTimer = window.setTimeout(() => {
-              localResizeSettleTimer = null;
-              const rect = container.getBoundingClientRect();
-              const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
-              const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-              const isOnScreen = rect.width > 0 && rect.height > 0 &&
-                rect.right > 0 && rect.bottom > 0 &&
-                rect.left < viewportWidth && rect.top < viewportHeight;
-              if (!isOnScreen || document.visibilityState !== 'visible') {
-                localResizeCycleStartDimensions = null;
-                return;
-              }
-              const currentTerminal = terminalRef.current;
-              const settledDimensions = currentTerminal
-                ? { cols: currentTerminal.cols, rows: currentTerminal.rows }
-                : null;
-              requestRefresh('resize', {
-                force: true,
-                // If fit changed rows/cols during this ResizeObserver burst,
-                // terminal.resize() already repainted. Avoid a second full
-                // buffer refresh that looks like a top-to-bottom sweep.
-                forceRedraw: shouldForceObservedResizeRedraw(
-                  hasCompletedInitialResizeSettle,
-                  localResizeCycleStartDimensions,
-                  settledDimensions,
-                ),
-                reconcileServerSize: true,
-                skipScrollToBottom: true,
-              });
-              hasCompletedInitialResizeSettle = true;
-              localResizeCycleStartDimensions = null;
-            }, 180);
           });
           localResizeObserver.observe(container);
 
@@ -4682,10 +4195,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           disposable.dispose();
         }
         localResizeObserver?.disconnect();
-        if (localResizeSettleTimer !== null) {
-          window.clearTimeout(localResizeSettleTimer);
-          localResizeSettleTimer = null;
-        }
 
         if (wheelHandlerRef.current) {
           container.removeEventListener('wheel', wheelHandlerRef.current);
@@ -4932,6 +4441,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     React.useImperativeHandle(
       ref,
       (): TerminalController => ({
+        serializeSnapshot: () => terminalRef.current ? serializeAddonRef.current?.serialize({ scrollback: 100 }) ?? null : null,
         focus: () => {
           const touchEnabled = enableTouchScrollRef.current;
           if (touchEnabled) {
@@ -4953,15 +4463,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           inputFocusHandlerRef.current?.(false);
         },
-        clear: (options) => {
+        clear: () => {
           const terminal = terminalRef.current;
           if (!terminal) {
             return;
           }
           terminal.reset();
-          resetWriteState(options);
+          resetWriteState();
           // clear 走 requestRefresh 统一路径（renderer 不重建、resize 不推）
           requestRefresh('clear', { skipResizePush: true, skipScrollToBottom: true });
+        },
+        prepareScreenReplacement: () => {
+          // The replacement carries a soft reset in the same parser write as
+          // the grid. A full reset here would rebuild and blank the renderer.
+          resetWriteState({ notifyFlowResume: true });
         },
         copySelectionOrViewport: async () => {
           const terminal = terminalRef.current;
@@ -5068,6 +4583,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         requestPtyRedraw: () => {
           const terminal = terminalRef.current;
           if (!terminal || !sessionReadyRef.current) return;
+          // The pending resize already promises an authoritative screen. A
+          // cursor recovery request must not restart that same transaction.
+          if (resizeSyncStateRef.current.pending || pendingScreenSyncGenerationRef.current !== null) return;
           const forced = forceResizeSync(resizeSyncStateRef.current, {
             cols: terminal.cols,
             rows: terminal.rows,

@@ -11,10 +11,10 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
+      injectRegister: false,
       // dev 模式下也启用 SW，方便手机 PWA 调试。
-      // 配合下面 workbox.skipWaiting + clientsClaim，每次刷新检测到新版 SW
-      // 都会立刻接管旧版、控制当前页面，省掉手动清缓存的步骤。
+      // Updates wait for an explicit reload so active terminal work survives.
       devOptions: {
         enabled: true,
         type: 'module',
@@ -64,7 +64,6 @@ export default defineConfig({
         // first use below instead of competing with the initial terminal restore.
         globPatterns: [
           'index.html',
-          'registerSW.js',
           'assets/app-*.js',
           'assets/react-*.js',
           'assets/dnd-*.js',
@@ -76,7 +75,7 @@ export default defineConfig({
         // 关键：新 SW 安装完不要 wait，直接 activate；并立刻 claim 已打开的页面。
         // 这样以后无论 dev 还是 prod，用户刷新一次就能拿到最新代码，不再有
         // "PWA 缓存了旧 bundle 导致看不到新功能" 的窘境。
-        skipWaiting: true,
+        skipWaiting: false,
         clientsClaim: true,
         // dev 模式下经常涉及一些没缓存好的资源（HMR 客户端、新加的模块等），
         // 让 SW 在拿不到 precached 内容时回到 network 而不是报 404。
@@ -98,15 +97,24 @@ export default defineConfig({
             },
           },
           {
+            urlPattern: /\/fonts\/terminal\/[^/]+-[a-f0-9]{12}\.woff2$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'termdock-fonts-v2',
+              cacheableResponse: { statuses: [0, 200] },
+              expiration: {
+                maxEntries: 384,
+                maxAgeSeconds: 30 * 24 * 60 * 60,
+              },
+            },
+          },
+          {
+            // Unversioned compatibility/symbol fonts still require validation.
             urlPattern: /\/fonts\/.*\.(?:woff2|ttf)$/,
             handler: 'StaleWhileRevalidate',
             options: {
               cacheName: 'termdock-fonts-v1',
-              cacheableResponse: { statuses: [0, 200] },
-              expiration: {
-                maxEntries: 24,
-                maxAgeSeconds: 30 * 24 * 60 * 60,
-              },
+              expiration: { maxEntries: 24, maxAgeSeconds: 30 * 24 * 60 * 60 },
             },
           },
         ],

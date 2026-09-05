@@ -237,6 +237,9 @@ export interface TerminalStreamEvent {
   // replayOutOfWindow 表示客户端基线已被服务端淘汰，回放前最好清屏。
   replayChunks?: string[];
   replayLastSeq?: number;
+  streamEpoch?: string;
+  flowSeq?: number;
+  outputProtocol?: number;
   replayOutOfWindow?: boolean;
   // resize 后首次滚动前由服务端从 tmux capture-pane 取得的权威屏幕。
   // 客户端必须原子替换现有 xterm buffer，不能作为普通增量追加。

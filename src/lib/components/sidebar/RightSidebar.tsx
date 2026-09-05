@@ -1,3 +1,4 @@
+import { fetchPreviewResource } from '../../utils/previewResourceCache';
 import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, lazy, Suspense, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useGesture } from '@use-gesture/react';
@@ -46,6 +47,10 @@ import {
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
+import { insertDirectReference } from './insertDirectReference';
+import { MODEL_PREVIEW_REQUEST_TIMEOUT_MS } from '../../terminal/api';
+import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
+import type { ReviewReferenceHandler } from './reviewReference';
 import { UniversalDiffReview } from './DiffReviewPanel';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
 import { DiffReview, type DiffReviewFile, ChangeBadge, nextDiffStreamScrollRequest } from './DiffReview';
@@ -55,7 +60,7 @@ import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
-import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, listDirectory, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
+import { EDA_PREVIEW_REQUEST_TIMEOUT_MS, applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, listDirectory, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { normalizeClientWatchRoots } from '../../terminal/fileWatchRoots';
 import { partitionFileWatchEvents } from '../../terminal/fileWatchEvents';
 import { useI18n } from '../../i18n';
@@ -932,7 +937,7 @@ function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: 
     const hangTimer = window.setTimeout(() => {
       controller.abort(new DOMException('Image fetch timed out', 'TimeoutError'));
     }, 15_000);
-    fetch(versionedSrc, { signal: controller.signal })
+    fetchPreviewResource(versionedSrc, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const width = Number(response.headers.get('X-Image-Width')) || 0;
@@ -4891,6 +4896,7 @@ function ZoomableMermaidDiagram({ svg, title, onZoomChange, onDoubleTap }: {
 }
 
 interface FilePreviewProps {
+  onReviewReference?: ReviewReferenceHandler;
   filePath: string | null;
   onInsertReference: (path: string, key?: string) => void;
   onInsertText: (text: string, key: string) => void;
@@ -4919,11 +4925,11 @@ interface FilePreviewProps {
 type FilePreviewState =
   | { kind: 'idle' }
   | { kind: 'loading'; mode: 'text' | 'image' | 'model3d' | 'video' | 'eda' }
-  | { kind: 'text'; content: string; meta: { size: number; truncated?: boolean } }
+  | { kind: 'text'; content: string; sourcePath: string; meta: { size: number; truncated?: boolean } }
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
-  | { kind: 'model3d'; objectUrl: string; ext: string; meta: { size: number | null; mimeType: string; modified: string | null } }
+  | { kind: 'model3d'; objectUrl: string; sourcePath: string; ext: string; meta: { size: number | null; mimeType: string; modified: string | null } }
   | { kind: 'video'; url: string; meta: { size: number | null; mimeType: string; modified: string | null } }
-  | { kind: 'eda'; objectUrl: string; view: EdaPreviewView; meta: { size: number | null; mimeType: string; modified: string | null } }
+  | { kind: 'eda'; objectUrl: string; sourcePath: string; view: EdaPreviewView; meta: { size: number | null; mimeType: string; modified: string | null } }
   | { kind: 'binary' }
   | { kind: 'error'; message: string };
 
@@ -5010,6 +5016,7 @@ function getNativePointerLogData(event: globalThis.PointerEvent | globalThis.Mou
 }
 
 export function FilePreview({
+  onReviewReference,
   filePath,
   onInsertReference,
   onInsertText,
@@ -5176,6 +5183,9 @@ export function FilePreview({
       setHtmlViewMode(isHtml ? readHtmlViewMode(rootPath, filePath) : 'source');
       if (isEda) setEdaView(getDefaultEdaPreviewView(fullPath));
     }
+    if (!isPathChange) {
+      setPreviewState((state) => state.kind === 'error' ? { kind: 'loading', mode: previewMode } : state);
+    }
     const watchdog = window.setTimeout(() => {
       if (loadingEnded || controller.signal.aborted) return;
       logFilePreviewLoadingEvent('still_active', {
@@ -5190,11 +5200,11 @@ export function FilePreview({
     }, 3_000);
     const stuckTimer = window.setTimeout(() => {
       if (loadingEnded || controller.signal.aborted) return;
-      const message = 'File preview is still waiting on disk I/O. Try the file again or refresh the directory.';
+      const message = isEda ? t('rightSidebar.edaTimeout') : isModel3d ? t('rightSidebar.model3dTimeout') : 'File preview timed out. Try the file again or refresh the directory.';
       controller.abort(new DOMException(message, 'TimeoutError'));
       setPreviewState({ kind: 'error', message });
       endLoading('stuck_timeout', { error: message });
-    }, isHeicImagePath(fullPath) ? 35_000 : FILE_PREVIEW_STUCK_TIMEOUT_MS);
+    }, isEda ? EDA_PREVIEW_REQUEST_TIMEOUT_MS + 5_000 : isModel3d ? MODEL_PREVIEW_REQUEST_TIMEOUT_MS + 5_000 : isHeicImagePath(fullPath) ? 35_000 : FILE_PREVIEW_STUCK_TIMEOUT_MS);
 
     if (isEda) {
       const cached3d = requestedEdaView === 'pcb-3d' ? cachedEda3dPreviewRef.current : null;
@@ -5204,9 +5214,11 @@ export function FilePreview({
       } else {
         readEdaPreviewBlob(fullPath, requestedEdaView, controller.signal, 'view_file', requestSlotId)
           .then((result) => {
+            if (controller.signal.aborted) return;
             objectUrl = URL.createObjectURL(result.blob);
             const nextPreview: Extract<FilePreviewState, { kind: 'eda' }> = {
               kind: 'eda',
+              sourcePath: result.path || fullPath,
               objectUrl,
               view: result.view,
               meta: { size: result.size, mimeType: result.mimeType, modified: result.modified },
@@ -5224,7 +5236,7 @@ export function FilePreview({
           })
           .catch((err) => {
             if (controller.signal.aborted) return;
-            setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.edaLoadFailed') });
+            setPreviewState({ kind: 'error', message: err instanceof Error && /timed out/i.test(err.message) ? t('rightSidebar.edaTimeout') : err instanceof Error ? err.message : t('rightSidebar.edaLoadFailed') });
             endLoading('error', { error: err instanceof Error ? err.message : String(err) });
           });
       }
@@ -5247,9 +5259,11 @@ export function FilePreview({
     } else if (isModel3d) {
       readModel3dBlob(fullPath, controller.signal, 'view_file', requestSlotId)
         .then((result) => {
+          if (controller.signal.aborted) return;
           objectUrl = URL.createObjectURL(result.blob);
           setPreviewState({
             kind: 'model3d',
+            sourcePath: result.path || fullPath,
             objectUrl,
             ext: result.ext,
             meta: { size: result.size, mimeType: result.mimeType, modified: result.modified },
@@ -5258,7 +5272,7 @@ export function FilePreview({
         })
         .catch((err) => {
           if (controller.signal.aborted) return;
-          setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.model3dLoadFailed') });
+          setPreviewState({ kind: 'error', message: err instanceof Error && (err.name === 'TimeoutError' || /timed out/i.test(err.message)) ? t('rightSidebar.model3dTimeout') : err instanceof Error ? err.message : t('rightSidebar.model3dLoadFailed') });
           endLoading('error', { error: err instanceof Error ? err.message : String(err) });
         });
     } else if (isVideo) {
@@ -5277,11 +5291,14 @@ export function FilePreview({
     } else {
       readFileContent(fullPath, controller.signal, 'view_file', requestSlotId)
         .then((result) => {
+          if (controller.signal.aborted) return;
           if (result.binary) {
             setPreviewState({ kind: 'binary' });
             return;
           }
-          setPreviewState({ kind: 'text', content: result.content, meta: { size: result.size, truncated: result.truncated } });
+          // The server returns the validated real path. Resolve Markdown links
+          // and images beside the source, not beside a review shortcut.
+          setPreviewState({ kind: 'text', content: result.content, sourcePath: result.path || fullPath, meta: { size: result.size, truncated: result.truncated } });
           endLoading('text_loaded', { bytes: result.size, truncated: Boolean(result.truncated) });
         })
         .catch((err) => {
@@ -5588,7 +5605,8 @@ export function FilePreview({
   const isModel3dPreview = previewState.kind === 'model3d' || (previewState.kind === 'loading' && previewState.mode === 'model3d');
   const isVideoPreview = previewState.kind === 'video' || (previewState.kind === 'loading' && previewState.mode === 'video');
   const isEdaPreview = previewState.kind === 'eda' || (previewState.kind === 'loading' && previewState.mode === 'eda');
-  const lineReference = buildLineReference(readablePath, rootPath, lineRange);
+  const referencePath = previewState.kind === 'text' ? previewState.sourcePath : readablePath;
+  const lineReference = buildLineReference(referencePath, rootPath, lineRange);
   const lineReferenceText = (() => {
     if (!lineRange || previewState.kind !== 'text' || lines.length === 0) return lineReference;
     const selected: string[] = [];
@@ -5670,7 +5688,7 @@ export function FilePreview({
       onDirectoryLinkOpen?.(target.path);
       return;
     }
-    if (target.path === readablePath) {
+    if (target.path === readablePath || (previewState.kind === 'text' && target.path === previewState.sourcePath)) {
       if (target.fragment) jumpToMarkdownFragment(target.fragment);
       return;
     }
@@ -5700,6 +5718,10 @@ export function FilePreview({
   };
 
   const insertRangeReference = () => {
+    if (onReviewReference) {
+      onReviewReference(lineReferenceText, lineReferenceKey);
+      return;
+    }
     if (!lineRange) return;
     onInsertText(lineReferenceText, lineReferenceKey);
   };
@@ -5740,12 +5762,12 @@ export function FilePreview({
               <button
                 type="button"
                 onClick={navigateBackInPreview}
-                className="inline-flex h-9 shrink-0 items-center gap-1 rounded-full bg-primary/10 px-2.5 text-primary transition hover:bg-primary/15 active:scale-95"
+                className={`inline-flex h-9 shrink-0 items-center justify-center gap-1 rounded-full bg-primary/10 text-primary transition hover:bg-primary/15 active:scale-95 ${isMobile ? 'w-9' : 'px-2.5'}`}
                 aria-label={t('rightSidebar.backToPreviousPreview')}
                 title={t('rightSidebar.backToPreviousPreview')}
               >
                 <RiArrowLeft size={15} />
-                <span className="text-[11px] font-medium">{t('rightSidebar.backToPreviousPreview')}</span>
+                {!isMobile && <span className="text-[11px] font-medium">{t('rightSidebar.backToPreviousPreview')}</span>}
               </button>
             )}
             <div className="min-w-0" title={readablePath}>
@@ -5921,6 +5943,7 @@ export function FilePreview({
       ) : previewState.kind === 'error' ? (
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">{previewState.message}</div>
+          <button type="button" onClick={refreshPreview} className="mx-3 mt-3 rounded-lg bg-surface-2 px-4 py-2 text-sm text-foreground hover:bg-surface-3">{t('common.retry')}</button>
         </div>
       ) : previewState.kind === 'binary' ? (
         <div className="min-h-0 flex-1 overflow-auto">
@@ -5965,11 +5988,11 @@ export function FilePreview({
         <div className="min-h-0 flex-1 overflow-hidden bg-surface">
           <EdaPreview
             blobUrl={previewState.objectUrl}
-            filePath={readablePath}
+            filePath={previewState.sourcePath}
             view={previewState.view}
             board={readablePath.toLowerCase().endsWith('.kicad_pcb')}
             onViewChange={setEdaView}
-            onInsertAnnotation={onInsertFeature}
+            onInsertAnnotation={onReviewReference ?? onInsertFeature}
             onRefresh={refreshPreview}
             interactive3d={cachedEda3dPreview ? (
               <Suspense fallback={<div className="min-h-0 flex-1 px-3 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.model3dLoading')}</div>}>
@@ -5977,9 +6000,9 @@ export function FilePreview({
                   blobUrl={cachedEda3dPreview.objectUrl}
                   ext=".glb"
                   fileName={display.name}
-                  filePath={readablePath}
+                  filePath={cachedEda3dPreview.sourcePath}
                   features={null}
-                  onInsertFeature={onInsertFeature}
+                  onInsertFeature={onReviewReference ?? onInsertFeature}
                   unitScale={1000}
                   dimensionUnit="mm"
                   coordinateSystemLabel="KiCad 3D 导出坐标 Y-up"
@@ -5998,9 +6021,9 @@ export function FilePreview({
               blobUrl={previewState.objectUrl}
               ext={previewState.ext}
               fileName={display.name}
-              filePath={readablePath}
+              filePath={previewState.sourcePath}
               features={modelFeatures}
-              onInsertFeature={onInsertFeature}
+              onInsertFeature={onReviewReference ?? onInsertFeature}
               onRefresh={refreshPreview}
             />
           </Suspense>
@@ -6010,7 +6033,7 @@ export function FilePreview({
           key={readablePath}
           content={previewState.content}
           filePath={readablePath}
-          onInsertAnnotation={onInsertFeature}
+          onInsertAnnotation={onReviewReference ?? onInsertFeature}
         />
       ) : previewState.kind === 'text' && (isKicadProject || isKicadLocalState) ? (
         <KicadProjectPreview
@@ -6018,7 +6041,7 @@ export function FilePreview({
           content={previewState.content}
           filePath={readablePath}
           localState={isKicadLocalState}
-          onInsertAnnotation={onInsertFeature}
+          onInsertAnnotation={onReviewReference ?? onInsertFeature}
         />
       ) : showMarkdownPreview ? (
         <div
@@ -6030,7 +6053,7 @@ export function FilePreview({
         >
           <MarkdownPreview
             content={previewState.content}
-            filePath={readablePath}
+            filePath={previewState.sourcePath}
             rootPath={rootPath}
             lineRange={lineRange}
             onLineRangeClick={handlePreviewLineRangeClick}
@@ -7551,6 +7574,25 @@ export function RightSidebar(
     const suffix = text.includes('\n') ? '\n' : undefined;
     routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key, suffix);
   }, [routeReferenceText]);
+
+  const referenceRouteRef = useRef(insertReferenceText);
+  referenceRouteRef.current = insertReferenceText;
+  const referenceMountedRef = useRef(true);
+  useEffect(() => {
+    referenceMountedRef.current = true;
+    return () => { referenceMountedRef.current = false; };
+  }, []);
+  const pendingReferencesRef = useRef(new Set<string>());
+  const beginReviewReference: ReviewReferenceHandler = useCallback((text, key, evidence) => {
+    if (pendingReferencesRef.current.has(key)) return;
+    const session = useMultiSessionStore.getState().activeSessionId;
+    pendingReferencesRef.current.add(key);
+    void insertDirectReference(text, key, evidence, {
+      insert: insertReferenceText,
+      upload: async (file, signal) => (await uploadFiles('/tmp', [file], signal)).files[0]?.path,
+      isCurrent: () => referenceMountedRef.current && referenceRouteRef.current === insertReferenceText && session === useMultiSessionStore.getState().activeSessionId,
+    }).finally(() => pendingReferencesRef.current.delete(key));
+  }, [insertReferenceText]);
 
   const insertContextText = useCallback((label: string, text: string, key?: string) => {
     if (!text) return;
@@ -10175,10 +10217,10 @@ export function RightSidebar(
 
   const handleMarkdownDirectoryOpen = useCallback((path: string) => {
     setFileQuery('');
-    setExplorerRoot(null);
+    setExplorerRoot(path);
     selectFile(null);
     setLineRange(null);
-    setDirectoryReveal((current) => ({ path, nonce: (current?.nonce ?? 0) + 1 }));
+    setDirectoryReveal(null);
 
     if (isMobile) {
       if (rightSidebarFilePreviewOpen) onCloseRightSidebarFilePreview?.();
@@ -11121,6 +11163,7 @@ export function RightSidebar(
                   onInsertReference={insertPathReference}
                   onInsertText={insertReferenceText}
                   onInsertFeature={insertReferenceText}
+                  onReviewReference={beginReviewReference}
                   onReferenceCopied={markReferenceCopied}
                   onDirectoryLinkOpen={handleMarkdownDirectoryOpen}
                   isMobile={false}
@@ -11222,7 +11265,8 @@ export function RightSidebar(
                     filePath={filesPaneActive && (mobileFilePreviewOpen || mobileFileSlideIndex === 1) ? selectedFilePath : null}
                     onInsertReference={insertPathReference}
                     onInsertText={insertReferenceText}
-                    onInsertFeature={insertReferenceText}
+                      onInsertFeature={insertReferenceText}
+                      onReviewReference={beginReviewReference}
                     onReferenceCopied={markReferenceCopied}
                     onClose={closeFilePreview}
                     onDirectoryLinkOpen={handleMarkdownDirectoryOpen}

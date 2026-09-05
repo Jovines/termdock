@@ -1,75 +1,75 @@
-const SW_UPDATE_CHECK_INTERVAL_MS = 60_000;
+import { useSyncExternalStore } from 'react';
 
-let reloadPending = false;
-
-function reloadOnceForUpdatedServiceWorker(): void {
-  if (reloadPending) return;
-  reloadPending = true;
-  window.setTimeout(() => {
-    window.location.reload();
-  }, 80);
+const SW_UPDATE_CHECK_INTERVAL_MS = 5 * 60_000;
+let waitingRegistration: ServiceWorkerRegistration | undefined;
+let updateAvailable = false;
+let accepted = false;
+let initialized = false;
+const listeners = new Set<() => void>();
+function notifyUpdate(): void {
+  updateAvailable = true;
+  listeners.forEach((listener) => listener());
+}
+export function usePwaUpdateAvailable(): boolean {
+  return useSyncExternalStore((listener) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  }, () => updateAvailable, () => false);
 }
 
-function askWaitingWorkerToActivate(registration: ServiceWorkerRegistration): void {
-  registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
+export function applyPwaUpdate(): void {
+  // Synchronous draft flush hooks run before activation or a manual reload.
+  window.dispatchEvent(new Event('termdock:before-update'));
+  accepted = true;
+  if (waitingRegistration?.waiting) {
+    waitingRegistration.waiting.postMessage({ type: 'SKIP_WAITING' });
+  } else window.location.reload();
 }
 
 export function createControllerChangeHandler(
   controlledAtStartup: boolean,
-  reload: () => void,
+  onUpdate: () => void,
 ): () => void {
   let hasSeenController = controlledAtStartup;
   return () => {
-    // The first controller on a fresh install already owns a page that loaded
-    // the current network build. Reloading here makes the app visibly boot
-    // twice and needlessly destroys a newly-created xterm renderer.
-    if (!hasSeenController) {
-      hasSeenController = true;
-      return;
-    }
-    reload();
+    if (!hasSeenController) { hasSeenController = true; return; }
+    onUpdate();
   };
 }
 
-function watchRegistration(registration: ServiceWorkerRegistration): void {
-  registration.addEventListener('updatefound', () => {
-    const worker = registration.installing;
-    if (!worker) return;
-    worker.addEventListener('statechange', () => {
-      if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-        askWaitingWorkerToActivate(registration);
-      }
-    });
-  });
-}
-
 export function setupPwaUpdateReload(): void {
-  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
-
-  let intervalId: number | null = null;
+  if (initialized || typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+  initialized = true;
   navigator.serviceWorker.addEventListener('controllerchange', createControllerChangeHandler(
     Boolean(navigator.serviceWorker.controller),
-    reloadOnceForUpdatedServiceWorker,
+    () => { if (accepted) window.location.reload(); else notifyUpdate(); },
   ));
 
-  window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/sw.js', { scope: '/' })
+  const register = () => {
+    void navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
       .then((registration) => {
-        watchRegistration(registration);
-        askWaitingWorkerToActivate(registration);
-
+        waitingRegistration = registration;
+        const inspect = () => { if (registration.waiting) notifyUpdate(); };
+        const watch = () => {
+          const worker = registration.installing;
+          worker?.addEventListener('statechange', () => {
+            if (worker.state === 'installed' && navigator.serviceWorker.controller) inspect();
+          });
+        };
+        registration.addEventListener('updatefound', watch);
+        watch();
+        inspect();
+        let lastCheck = 0;
         const check = () => {
-          if (document.visibilityState !== 'visible') return;
-          void registration.update().then(() => askWaitingWorkerToActivate(registration)).catch(() => undefined);
+          if (document.visibilityState !== 'visible' || Date.now() - lastCheck < SW_UPDATE_CHECK_INTERVAL_MS) return;
+          lastCheck = Date.now();
+          void registration.update().then(inspect).catch(() => undefined);
         };
         check();
-        intervalId = window.setInterval(check, SW_UPDATE_CHECK_INTERVAL_MS);
+        window.setInterval(check, SW_UPDATE_CHECK_INTERVAL_MS);
         document.addEventListener('visibilitychange', check);
-      })
-      .catch(() => undefined);
-  });
-
-  window.addEventListener('beforeunload', () => {
-    if (intervalId !== null) window.clearInterval(intervalId);
-  });
+      }).catch(() => undefined);
+  };
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register, { once: true });
 }

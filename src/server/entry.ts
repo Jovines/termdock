@@ -1,3 +1,5 @@
+import { readTerminalHandshakeDimensions } from './utils/terminalHandshakeDimensions.js';
+import { apiCachePolicy } from './utils/apiCachePolicy.js';
 import 'dotenv/config';
 import express from 'express';
 import { createServer as createHttpServer } from 'http';
@@ -6,7 +8,7 @@ import type { Server as HttpServer } from 'http';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import zlib from 'zlib';
+import { createStaticCompressionMiddleware, setStaticCacheHeaders } from './utils/staticAssets.js';
 import { homedir } from 'os';
 import cookieParser from 'cookie-parser';
 import { type SecureContextOptions } from 'tls';
@@ -178,126 +180,6 @@ function getDiffTraceEvent(message: unknown): string | null {
   return message.slice(spaceIndex + 1);
 }
 
-// 静态资源压缩中间件（零依赖，用 Node 内置 zlib）。
-// 动机：跨城/弱网首刷（或 PWA SW 更新后）要下载未压缩的 JS/CSS bundle，
-// express.static 默认不压缩。这里对文本类资源做 br/gzip 压缩，跨城下能把
-// bundle 下载体积砍到 ~1/4，明显缩短首屏等待。
-// 设计要点：
-//  - 只压文本类扩展名；图片/字体/woff2 等已是压缩格式，跳过避免做无用功。
-//  - 编译产物在运行期不变，按 (绝对路径 + mtimeMs + 编码) 缓存压缩结果到内存，
-//    只在第一次请求时压一次，后续直接命中，不占 CPU。
-//  - 路径必须落在 dist 目录内且文件真实存在，否则交回后续中间件（含 SPA
-//    fallback），不影响 index.html 路由与 /api 等。
-const COMPRESSIBLE_EXT = new Set(['.js', '.mjs', '.css', '.html', '.json', '.svg', '.webmanifest', '.map', '.txt']);
-// 扩展名 → Content-Type。自己维护一张小表，不依赖 express.static.mime
-// （express 5 运行期不暴露该字段，访问会抛 TypeError）。
-const CONTENT_TYPE_BY_EXT: Record<string, string> = {
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.webmanifest': 'application/manifest+json; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-  '.txt': 'text/plain; charset=utf-8',
-};
-
-function setStaticCacheHeaders(req: express.Request, res: express.Response): void {
-  let pathname: string;
-  try {
-    pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
-  } catch {
-    pathname = req.path || req.url || '';
-  }
-
-  if (
-    pathname === '/'
-    || pathname.endsWith('/index.html')
-    || pathname === '/sw.js'
-    || pathname === '/registerSW.js'
-    || pathname === '/manifest.webmanifest'
-  ) {
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    return;
-  }
-
-  if (pathname.startsWith('/assets/')) {
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-  }
-}
-
-function createStaticCompressionMiddleware(rootDir: string): express.RequestHandler {
-  const resolvedRoot = path.resolve(rootDir);
-  const cache = new Map<string, { encoding: 'br' | 'gzip'; body: Buffer; mtimeMs: number }>();
-
-  return (req, res, next) => {
-    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-
-    const acceptEncoding = String(req.headers['accept-encoding'] || '');
-    const useBr = /\bbr\b/.test(acceptEncoding);
-    const useGzip = /\bgzip\b/.test(acceptEncoding);
-    if (!useBr && !useGzip) return next();
-
-    // 解析并防目录穿越：只服务 dist 内的文件。
-    let pathname: string;
-    try {
-      pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
-    } catch {
-      return next();
-    }
-    const ext = path.extname(pathname).toLowerCase();
-    if (!COMPRESSIBLE_EXT.has(ext)) return next();
-
-    const filePath = path.resolve(resolvedRoot, '.' + pathname);
-    if (filePath !== resolvedRoot && !filePath.startsWith(resolvedRoot + path.sep)) return next();
-
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(filePath);
-    } catch {
-      return next();
-    }
-    if (!stat.isFile()) return next();
-
-    const encoding: 'br' | 'gzip' = useBr ? 'br' : 'gzip';
-    const cacheKey = `${filePath}|${encoding}`;
-    let entry = cache.get(cacheKey);
-    if (!entry || entry.mtimeMs !== stat.mtimeMs) {
-      let raw: Buffer;
-      try {
-        raw = fs.readFileSync(filePath);
-      } catch {
-        return next();
-      }
-      const body = encoding === 'br'
-        ? zlib.brotliCompressSync(raw, {
-            params: {
-              [zlib.constants.BROTLI_PARAM_QUALITY]: 9,
-              [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length,
-            },
-          })
-        : zlib.gzipSync(raw, { level: 7 });
-      entry = { encoding, body, mtimeMs: stat.mtimeMs };
-      cache.set(cacheKey, entry);
-    }
-
-    res.setHeader('Content-Encoding', encoding);
-    res.setHeader('Vary', 'Accept-Encoding');
-    const type = CONTENT_TYPE_BY_EXT[ext];
-    if (type) res.setHeader('Content-Type', type);
-    setStaticCacheHeaders(req, res);
-    res.setHeader('Content-Length', entry.body.length);
-    if (req.method === 'HEAD') {
-      res.end();
-      return;
-    }
-    res.end(entry.body);
-  };
-}
-
 export function createApp(options: AppOptions = {}): express.Express {
   const app = express();
 
@@ -379,19 +261,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   // 到期销毁 socket 释放浏览器连接槽。必须在所有路由与静态资源之前挂载。
   app.use(requestDeadlineMiddleware());
 
-  app.use('/api', (req, res, next) => {
-    // JSON/API responses must never hit browser conditional caching. A 304 with
-    // an empty body breaks fetch().json() callers and looks like random IO
-    // failures in the sidebar. The KiCad preview endpoint is a binary response,
-    // so it deliberately keeps validators to avoid retransferring multi-MB GLBs.
-    const conditionalBinaryPreview = req.path === '/terminal/fs/eda-preview';
-    if (!conditionalBinaryPreview) {
-      delete req.headers['if-none-match'];
-      delete req.headers['if-modified-since'];
-      res.setHeader('Cache-Control', 'no-store');
-    }
-    next();
-  });
+  app.use('/api', apiCachePolicy);
 
   // 安全中间件：CSRF令牌生成（在所有路由之前）
   app.use(csrfProtection.tokenMiddleware());
@@ -687,7 +557,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     const sinceSeq = sinceParam ? Math.max(0, Number.parseInt(sinceParam, 10) || 0) : 0;
 
     wss.handleUpgrade(request, socket, head, (ws) => {
-      handleTerminalWebSocket(ws, sessionId, clientId, { sinceSeq, pushClientId });
+      handleTerminalWebSocket(ws, sessionId, clientId, { sinceSeq, pushClientId, streamEpoch: url.searchParams.get('epoch') ?? undefined, flowControl: url.searchParams.get('flow') === '2', independentTmux: url.searchParams.get('transport') === 'tmux-client', outputActive: url.searchParams.get('active') !== '0' }, readTerminalHandshakeDimensions(url.searchParams));
     });
   });
 

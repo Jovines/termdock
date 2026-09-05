@@ -1,7 +1,14 @@
+import { scheduleInteractionIdle } from '../../utils/interactionIdle';
+import { readTerminalSnapshot, writeTerminalSnapshot } from '../../utils/terminalSnapshotCache';
+import { getAppliedTerminalCursor, setTerminalSnapshotCursor } from '../../terminal/api';
+import { acknowledgeTerminalOutput } from '../../terminal/api';
+import { useTerminalOutputSubscription } from '../../hooks/useTerminalOutputSubscription';
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
+import { buildAtomicTerminalReplay } from '../../terminal/replayPresentation';
+import { buildTmuxScreenReplacement } from '../../terminal/tmuxScreenPresentation';
 import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
@@ -49,7 +56,6 @@ const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded'
 const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
 const MOBILE_LONG_PRESS_MODE_STORAGE_KEY = 'termdock:mobile-long-press-mode';
 const CURSOR_POSITION_SETTLE_MS = 80;
-const KEYBOARD_CURSOR_REDRAW_FALLBACK_MS = 3000;
 
 type Modifier = 'ctrl' | 'alt';
 
@@ -167,8 +173,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
   const [isInitialSizeReady, setIsInitialSizeReady] = React.useState(false);
   const [isCursorPresentationReady, setIsCursorPresentationReady] = React.useState(true);
-  const [isKeyboardResizeSettling, setIsKeyboardResizeSettling] = React.useState(false);
-  const [isKeyboardCursorReady, setIsKeyboardCursorReady] = React.useState(true);
   const {
     isOpen: isViewportKeyboardOpen,
     keyboardHeight: viewportKeyboardHeight,
@@ -307,14 +311,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastCursorPositionRef = React.useRef<{ x: number; y: number; rows: number } | null>(null);
   const cursorPositionCandidateTimerRef = React.useRef<number | null>(null);
   const cursorPositionFallbackTimerRef = React.useRef<number | null>(null);
-  const lastSettledChunkIdRef = React.useRef<number | null>(null);
-  const keyboardCursorAwaitingPtyRef = React.useRef(false);
-  const keyboardCursorAuthoritativeWriteReadyRef = React.useRef(false);
-  const keyboardCursorBaselineChunkIdRef = React.useRef<number | null>(null);
-  const keyboardCursorGenerationRef = React.useRef(0);
-  const lastKeyboardCursorPositionRef = React.useRef<{ x: number; y: number; rows: number } | null>(null);
-  const keyboardCursorCandidateTimerRef = React.useRef<number | null>(null);
-  const keyboardCursorFallbackTimerRef = React.useRef<number | null>(null);
   const isActiveRef = React.useRef(isActive);
   // Interaction capture in MultiTerminalView can synchronously promote a split
   // pane while the original wheel event is still propagating into xterm. Keep
@@ -350,31 +346,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     rows: number;
     lastProcessedChunkId: number | null;
   }) => {
-    lastSettledChunkIdRef.current = position.lastProcessedChunkId;
-    if (
-      keyboardCursorAwaitingPtyRef.current
-      && keyboardCursorAuthoritativeWriteReadyRef.current
-      && position.lastProcessedChunkId !== keyboardCursorBaselineChunkIdRef.current
-    ) {
-      if (keyboardCursorCandidateTimerRef.current !== null) {
-        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
-        keyboardCursorCandidateTimerRef.current = null;
-      }
-      if (position.x !== 0 || position.y < position.rows - 1) {
-        const generation = keyboardCursorGenerationRef.current;
-        keyboardCursorCandidateTimerRef.current = window.setTimeout(() => {
-          keyboardCursorCandidateTimerRef.current = null;
-          if (generation !== keyboardCursorGenerationRef.current) return;
-          keyboardCursorAwaitingPtyRef.current = false;
-          keyboardCursorAuthoritativeWriteReadyRef.current = false;
-          if (keyboardCursorFallbackTimerRef.current !== null) {
-            window.clearTimeout(keyboardCursorFallbackTimerRef.current);
-            keyboardCursorFallbackTimerRef.current = null;
-          }
-          setIsKeyboardCursorReady(true);
-        }, CURSOR_POSITION_SETTLE_MS);
-      }
-    }
     if (!cursorPositionGateRef.current) return;
     if (cursorPositionCandidateTimerRef.current !== null) {
       window.clearTimeout(cursorPositionCandidateTimerRef.current);
@@ -390,7 +361,31 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }, CURSOR_POSITION_SETTLE_MS);
   }, []);
 
+  const pendingSnapshotRef = React.useRef<(() => void) | null>(null);
+  React.useEffect(() => () => { pendingSnapshotRef.current?.(); }, []);
+  const scheduleSnapshot = React.useCallback(() => {
+    if (pendingSnapshotRef.current) return;
+    pendingSnapshotRef.current = scheduleInteractionIdle(() => {
+      pendingSnapshotRef.current = null;
+      const state = useTerminalStore.getState();
+      const backendId = terminalIdRef.current;
+      const session = state.getTerminalSession(sessionId);
+      if (!backendId || session?.mode !== 'shell' || state.hasPendingBufferWrites(sessionId)) return;
+      const cursor = getAppliedTerminalCursor(backendId);
+      const dimensions = terminalControllerRef.current?.getDimensions();
+      if (!cursor || !dimensions) return;
+      const data = terminalControllerRef.current?.serializeSnapshot();
+      if (data) void writeTerminalSnapshot({ id: backendId, version: 1, ...cursor, ...dimensions, data, savedAt: Date.now() });
+    }, 2000);
+  }, [sessionId]);
+
   const handleViewportWriteProgress = React.useCallback((writtenChunkId: number) => {
+    const state = useTerminalStore.getState();
+    const latest = state.getTerminalSession(sessionId)?.bufferChunks.at(-1)?.id;
+    if (terminalIdRef.current && latest !== undefined && latest <= writtenChunkId && !state.hasPendingBufferWrites(sessionId)) {
+      acknowledgeTerminalOutput(terminalIdRef.current);
+      scheduleSnapshot();
+    }
     if (!awaitingInitialWritesRef.current) return;
     if (!isInitialContentWriteSettled({
       writtenChunkId,
@@ -403,29 +398,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // as synchronized after xterm has actually consumed the target chunk,
       // otherwise the keyboard resize shield can expose an intermediate grid.
       terminalControllerRef.current?.notifyScreenSynchronized(synchronizedGeneration);
-      keyboardCursorAuthoritativeWriteReadyRef.current = true;
     }
     awaitingInitialWritesRef.current = false;
     initialContentTargetChunkIdRef.current = null;
     markInitialContentReadyAfterPaint();
-  }, [markInitialContentReadyAfterPaint]);
+  }, [markInitialContentReadyAfterPaint, scheduleSnapshot, sessionId]);
 
   const handleViewportCursorPositionChange = React.useCallback((position: { x: number; y: number; rows: number }) => {
-    if (keyboardCursorAwaitingPtyRef.current) {
-      const previousKeyboardPosition = lastKeyboardCursorPositionRef.current;
-      if (
-        !previousKeyboardPosition
-        || previousKeyboardPosition.x !== position.x
-        || previousKeyboardPosition.y !== position.y
-        || previousKeyboardPosition.rows !== position.rows
-      ) {
-        lastKeyboardCursorPositionRef.current = position;
-        if (keyboardCursorCandidateTimerRef.current !== null) {
-          window.clearTimeout(keyboardCursorCandidateTimerRef.current);
-          keyboardCursorCandidateTimerRef.current = null;
-        }
-      }
-    }
     if (!cursorPositionGateRef.current) return;
     const previous = lastCursorPositionRef.current;
     if (
@@ -443,57 +422,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       setIsCursorPresentationReady(false);
     }
   }, []);
-
-  const handleKeyboardResizeSettlingChange = React.useCallback((settling: boolean) => {
-    setIsKeyboardResizeSettling(settling);
-    if (desiredSessionMode !== 'tmux') {
-      setIsKeyboardCursorReady(true);
-      return;
-    }
-
-    if (settling) {
-      keyboardCursorGenerationRef.current += 1;
-      keyboardCursorAwaitingPtyRef.current = true;
-      keyboardCursorAuthoritativeWriteReadyRef.current = false;
-      keyboardCursorBaselineChunkIdRef.current = lastSettledChunkIdRef.current;
-      lastKeyboardCursorPositionRef.current = null;
-      if (keyboardCursorCandidateTimerRef.current !== null) {
-        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
-        keyboardCursorCandidateTimerRef.current = null;
-      }
-      if (keyboardCursorFallbackTimerRef.current !== null) {
-        window.clearTimeout(keyboardCursorFallbackTimerRef.current);
-        keyboardCursorFallbackTimerRef.current = null;
-      }
-      setIsKeyboardCursorReady(false);
-      return;
-    }
-
-    if (!keyboardCursorAwaitingPtyRef.current) return;
-    // The resize screen-sync is already an authoritative tmux frame and now
-    // reports completion only after xterm consumes it. Preserve that cursor
-    // candidate instead of forcing a second same-size resize/snapshot cycle.
-    // If it has not arrived, keep the post-fit baseline so a later sync can
-    // still prove that the cursor belongs to the final row count.
-    if (!keyboardCursorAuthoritativeWriteReadyRef.current) {
-      keyboardCursorGenerationRef.current += 1;
-      keyboardCursorBaselineChunkIdRef.current = lastSettledChunkIdRef.current;
-      lastKeyboardCursorPositionRef.current = null;
-      if (keyboardCursorCandidateTimerRef.current !== null) {
-        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
-        keyboardCursorCandidateTimerRef.current = null;
-      }
-    }
-    const generation = keyboardCursorGenerationRef.current;
-    setIsKeyboardCursorReady(false);
-    keyboardCursorFallbackTimerRef.current = window.setTimeout(() => {
-      keyboardCursorFallbackTimerRef.current = null;
-      if (generation !== keyboardCursorGenerationRef.current) return;
-      keyboardCursorAwaitingPtyRef.current = false;
-      keyboardCursorAuthoritativeWriteReadyRef.current = false;
-      setIsKeyboardCursorReady(true);
-    }, KEYBOARD_CURSOR_REDRAW_FALLBACK_MS);
-  }, [desiredSessionMode]);
 
   React.useEffect(() => {
     if (!deferCursorUntilPositioned) {
@@ -730,14 +658,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         window.clearTimeout(cursorPositionCandidateTimerRef.current);
       }
       cursorPositionCandidateTimerRef.current = null;
-      if (keyboardCursorCandidateTimerRef.current !== null && typeof window !== 'undefined') {
-        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
-      }
-      keyboardCursorCandidateTimerRef.current = null;
-      if (keyboardCursorFallbackTimerRef.current !== null && typeof window !== 'undefined') {
-        window.clearTimeout(keyboardCursorFallbackTimerRef.current);
-      }
-      keyboardCursorFallbackTimerRef.current = null;
     };
   }, []);
 
@@ -910,6 +830,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     reportViewing(logicalViewing, 'logical-viewing-change');
   }, [logicalViewing, reportViewing, terminalSessionId]);
 
+  useTerminalOutputSubscription(terminalSessionId, isLayoutVisible, isDocumentVisible, isStreamReady);
+
   // Listen for font size changes from TerminalViewport (pinch-to-zoom)
   React.useEffect(() => {
     const handleFontChange = (event: Event) => {
@@ -966,7 +888,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (!hasStartedInitialConnectRef.current) return;
     const delayMs = resumeRequestDelayRef.current;
     const resume = () => {
-      terminalControllerRef.current?.requestRefresh(resumeRequestReason);
+      terminalControllerRef.current?.requestRefresh(resumeRequestReason, { skipScrollToBottom: true });
       probeOrRestartSession(
         delayMs > 0 ? 'global-resume-background' : 'global-resume-visible',
         delayMs <= 0 && forceResumeReconnect,
@@ -1186,7 +1108,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [cancelPendingShellTitle, flushPendingShellTitle]);
 
   const startStream = React.useCallback(
-    (terminalId: string) => {
+    async (terminalId: string) => {
       if (activeTerminalIdRef.current === terminalId) {
         debugSession(`[startStream] Skipping - already connected to ${terminalId}`);
         return;
@@ -1203,6 +1125,23 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const streamVersion = streamVersionRef.current + 1;
       streamVersionRef.current = streamVersion;
       initialConnectionPendingRef.current = true;
+
+      const current = useTerminalStore.getState().getTerminalSession(sessionId);
+      if (current?.mode === 'shell' && !current.bufferChunks.length) {
+        // Storage may be unavailable or blocked: never hold startup on it.
+        const snapshot = await Promise.race([
+          readTerminalSnapshot(terminalId),
+          new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 75)),
+        ]);
+        if (streamVersionRef.current !== streamVersion || sessionIdRef.current !== sessionId) return;
+        if (snapshot && !useTerminalStore.getState().getTerminalSession(sessionId)?.bufferChunks.length) {
+          useTerminalStore.getState().replaceBuffer(sessionId, [snapshot.data]);
+          const dimensions = terminalControllerRef.current?.getDimensions();
+          if (dimensions?.cols === snapshot.cols && dimensions.rows === snapshot.rows) {
+            setTerminalSnapshotCursor(terminalId, snapshot.seq, snapshot.epoch);
+          }
+        }
+      }
 
       const subscription = terminal.connect(
         terminalId,
@@ -1299,21 +1238,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // 连接建立后只校准 fit / 服务端尺寸。history/replay 紧接着写入时
                 // xterm 会自行重画；这里若再 full refresh，DOM renderer 会短暂拆空
                 // 所有 row，手机切入 Session 时就表现为“内容闪一下再回来”。
-                requestAnimationFrame(() => {
-                  requestAnimationFrame(() => {
-                    terminalControllerRef.current?.requestRefresh('connected', {
-                      force: true,
-                      reconcileServerSize: isActiveRef.current,
-                    });
-                  });
+                // requestRefresh already coalesces work into the next animation
+                // frame. Extra outer frames only delay the first resize/ACK.
+                terminalControllerRef.current?.requestRefresh('connected', {
+                  force: true,
+                  reconcileServerSize: isActiveRef.current,
                 });
                 if (event.mode !== 'tmux') {
                   setTmuxLayout(null);
                   setSessionCopyMode(storeSessionId, false);
                 }
                 // tmux 模式不需要单独复位：编排器内 session-key-change 已经
-                // 处理了 lastServerSize 重置；tmux-layout 第一次到达时由 useEffect
-                // 触发 candidateSize 防 shrink 路径。
+                // 处理了 lastServerSize 重置；connected refresh 按本地尺寸校准。
 
                 debugSession('[Terminal] Connected event received:', {
                   frontendSessionId: storeSessionId,
@@ -1340,7 +1276,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
                 // 短线重连补帧：服务端按 sinceSeq 返回断线期间产生的输出。
                 // - replayOutOfWindow 表示客户端基线已被服务端淘汰（环形 buffer
-                //   覆盖），此时清屏 + 全量重放，避免错位拼接。
+                //   覆盖），此时用同步输出原子执行 reset + 全量重放，既避免
+                //   错位拼接，也不把 reset 后的空终端暴露成中间帧。
                 // - 否则直接 append，与现有 buffer 衔接。
                 const replayChunks = event.replayChunks;
                 const hasInitialWrites = Boolean(sessionState?.history?.length)
@@ -1351,24 +1288,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   markInitialContentReadyAfterPaint();
                 }
                 if (replayChunks && replayChunks.length > 0) {
+                  let replayTargetChunkId: number | null = null;
                   if (event.replayOutOfWindow) {
-                    debugSession(`[Terminal] Replay out-of-window, clearing buffer before replay (${replayChunks.length} chunks)`);
-                    clearBuffer(storeSessionId);
-                    terminalControllerRef.current?.clear();
+                    debugSession(`[Terminal] Replay out-of-window, atomically replacing buffer (${replayChunks.length} chunks)`);
+                    replayTargetChunkId = replaceBuffer(
+                      storeSessionId,
+                      buildAtomicTerminalReplay(replayChunks),
+                    );
                   } else {
                     debugSession(`[Terminal] Replay incremental: ${replayChunks.length} chunks`);
+                    for (const chunk of replayChunks) {
+                      appendToBuffer(storeSessionId, chunk);
+                    }
                   }
                   // 抑制 replay 期间的用户输入，避免 echo 顺序错乱。
                   const replayBytes = replayChunks.reduce((total, chunk) => total + chunk.length, 0);
                   const suppressionMs = Math.max(200, Math.min(1500, Math.ceil(replayBytes / 200)));
                   suppressInputUntilRef.current = Math.max(suppressInputUntilRef.current, Date.now() + suppressionMs);
-                  for (const chunk of replayChunks) {
-                    appendToBuffer(storeSessionId, chunk);
-                  }
+                  initialContentTargetChunkIdRef.current = replayTargetChunkId;
                 }
-                if (hasInitialWrites) {
-                  initialContentTargetChunkIdRef.current = useTerminalStore
-                    .getState()
+                if (hasInitialWrites && initialContentTargetChunkIdRef.current === null) {
+                  initialContentTargetChunkIdRef.current = useTerminalStore.getState()
                     .flushPendingBufferWrites(storeSessionId);
                   if (initialContentTargetChunkIdRef.current === null) {
                     awaitingInitialWritesRef.current = false;
@@ -1410,13 +1350,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 awaitingInitialWritesRef.current = true;
                 setIsInitialContentReady(false);
                 // This is an authoritative tmux grid, not another diff chunk.
-                // Reset xterm and replace the store atomically so stale lines
+                // Replace the grid and store atomically so stale lines
                 // from the pre-resize column layout cannot survive at the top.
                 flowPausedBufferRef.current = [];
-                terminalControllerRef.current?.clear({ preserveKeyboardResizePresentation: true });
+                terminalControllerRef.current?.prepareScreenReplacement();
                 pendingTmuxScreenSyncGenerationRef.current = generation;
-                initialContentTargetChunkIdRef.current = replaceBuffer(storeSessionId, event.chunks ?? []);
-                if (!event.chunks?.length || initialContentTargetChunkIdRef.current === null) {
+                initialContentTargetChunkIdRef.current = replaceBuffer(
+                  storeSessionId,
+                  buildTmuxScreenReplacement(event.chunks ?? []),
+                );
+                if (initialContentTargetChunkIdRef.current === null) {
                   pendingTmuxScreenSyncGenerationRef.current = null;
                   terminalControllerRef.current?.notifyScreenSynchronized(generation);
                   awaitingInitialWritesRef.current = false;
@@ -2109,12 +2052,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [sessionId, setTerminalSession, terminal]);
 
-  // tmux-layout 事件：把"服务端报的尺寸"作为 candidate 交给编排器。
-  // 编排器内部做：
-  //   1) dedupe by sessionId+activePaneId（避免同会话内重复 resize）
-  //   2) candidateSize 防 shrink：比当前 xterm 小就忽略
-  //   3) skipScrollToBottom：tmux 模式下不应强制滚底（vim/less 位置）
-  // 这样原来散在 useEffect 里的三个 ref 全部下沉到编排器内部。
+  // A pane layout can trigger a local fit, but its dimensions must never
+  // become a client resize request: it may predate the current keyboard size.
   React.useEffect(() => {
     // 必须等 terminalSessionId 就绪后再用 dedupeKey：reload 期间 tmux-layout
     // 事件可能比 connected 事件先到，那时 terminalSessionId 还是 null/旧值，
@@ -2126,7 +2065,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (!activePane) return;
 
     terminalControllerRef.current?.requestRefresh('tmux-layout', {
-      candidateSize: { cols: activePane.width, rows: activePane.height },
       skipScrollToBottom: true,
       dedupeKey: `${terminalSessionId}:${_tmuxLayout.sessionId}:${activePane.id}:${activePane.width}x${activePane.height}`,
     });
@@ -2596,7 +2534,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onMobileLongPressCopyResult={handleMobileLongPressCopyResult}
               onReadyChange={handleViewportReadyChange}
               onSizeSynchronizedChange={setIsInitialSizeReady}
-              onKeyboardResizeSettlingChange={handleKeyboardResizeSettlingChange}
               onWritesSettled={handleViewportWritesSettled}
               onWriteProgress={handleViewportWriteProgress}
               onCursorPositionChange={handleViewportCursorPositionChange}
@@ -2609,15 +2546,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               cursorVisible={
                 !focusSuspended
                 && isCursorPresentationReady
-                && !isKeyboardResizeSettling
-                && isKeyboardCursorReady
               }
               suppressSmoothScroll={!isInitialContentReady || !isInitialSizeReady}
               className={
                 focusSuspended
                 || !isCursorPresentationReady
-                || isKeyboardResizeSettling
-                || !isKeyboardCursorReady
                   ? 'terminal-focus-suspended'
                   : undefined
               }

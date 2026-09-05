@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { EDA_EXTENSIONS, getDefaultEdaPreviewView, getEdaExtForPath, inspectEdaPoint, isPreviewableEdaPath } from './api';
+import { describe, expect, it, vi } from 'vitest';
+import { EDA_PREVIEW_REQUEST_TIMEOUT_MS, readEdaPreviewBlob, EDA_EXTENSIONS, getDefaultEdaPreviewView, getEdaExtForPath, inspectEdaPoint, isPreviewableEdaPath } from './api';
 
 describe('KiCad preview file classification', () => {
   it('recognizes schematic and PCB sources case-insensitively', () => {
@@ -37,5 +37,51 @@ describe('KiCad preview file classification', () => {
   it('chooses the matching default view', () => {
     expect(getDefaultEdaPreviewView('main.kicad_sch')).toBe('schematic');
     expect(getDefaultEdaPreviewView('main.kicad_pcb')).toBe('pcb-front');
+  });
+});
+
+
+describe('KiCad preview transfer deadline', () => {
+  it('allows a slow response body past the old 12/30 second deadlines and still bounds a stalled transfer', async () => {
+    vi.useFakeTimers();
+    let transferSignal: AbortSignal | undefined;
+    let completeBody: ((blob: Blob) => void) | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      transferSignal = init.signal;
+      return {
+        ok: true,
+        headers: new Headers(),
+        blob: () => new Promise<Blob>((resolve, reject) => {
+          completeBody = resolve;
+          init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+        }),
+      };
+    }));
+    try {
+      const preview = readEdaPreviewBlob('/board.kicad_pcb', 'pcb-3d');
+      await vi.advanceTimersByTimeAsync(35_000);
+      expect(transferSignal?.aborted).toBe(false);
+      completeBody!(new Blob(['glb']));
+      await expect(preview).resolves.toMatchObject({ view: 'pcb-3d' });
+      expect(vi.getTimerCount()).toBe(0);
+
+      const stalled = readEdaPreviewBlob('/board.kicad_pcb', 'pcb-3d');
+      const rejection = expect(stalled).rejects.toThrow('rendering or transfer timed out');
+      await vi.advanceTimersByTimeAsync(EDA_PREVIEW_REQUEST_TIMEOUT_MS);
+      await rejection;
+      expect(transferSignal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+
+      const controller = new AbortController();
+      const cancelled = readEdaPreviewBlob('/board.kicad_pcb', 'pcb-front', controller.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      const cancellation = expect(cancelled).rejects.toThrow('User cancelled');
+      controller.abort(new Error('User cancelled'));
+      await cancellation;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 });

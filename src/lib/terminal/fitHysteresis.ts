@@ -29,7 +29,7 @@ export const HYSTERESIS_THRESHOLD = 2;
  * - resize：window/visualViewport/ResizeObserver 真实尺寸变化
  * - dpr-change：DPR 改变 → 字号像素改变 → cols 必须重算
  * - session-key-change / session-reset：切会话或重置，要按当前容器重新算
- * - tmux-layout：服务端推下来的 layout，server 是权威，必须采纳
+ * - tmux-layout：布局变化后重新测量本地容器，不采纳服务端行列数
  */
 const REAL_RESIZE_REASONS: ReadonlySet<string> = new Set<string>([
   'mount',

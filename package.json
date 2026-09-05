@@ -28,7 +28,7 @@
     "desktop:dev": "npm run build && npm run build:desktop && electron-forge start",
     "desktop:prepare": "npm run build && npm run build:desktop && node scripts/prepare-desktop-runtime.mjs",
     "desktop:make": "node scripts/ensure-macos-appdmg.mjs && npm run desktop:prepare && electron-forge make",
-    "build:client": "vite build",
+    "build:client": "vite build && node scripts/precompress-client.mjs",
     "build:server": "tsc -p tsconfig.server.json && node -e \"require('fs').chmodSync('dist/server/cli.js', 0o755)\"",
     "build:runtime-manifest": "node scripts/generate-runtime-manifest.mjs",
     "generate:pwa-assets": "pwa-assets-generator --config pwa-assets.config.ts",

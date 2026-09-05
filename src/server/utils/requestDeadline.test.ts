@@ -94,6 +94,18 @@ describe('requestDeadlineMiddleware', () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
+  it('allows KiCad response bodies to finish beyond the default deadline', async () => {
+    ({ server } = await startServer((app) => {
+      app.get('/api/terminal/fs/eda-preview', (_req, res) => {
+        res.write('glb-');
+        setTimeout(() => res.end('complete'), DEADLINE_MS * 2);
+      });
+    }));
+    const port = (server!.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/api/terminal/fs/eda-preview`);
+    expect(await response.text()).toBe('glb-complete');
+  });
+
   it('lets fast requests through untouched', async () => {
     ({ server } = await startServer((app) => {
       app.get('/api/fast', (_req, res) => res.json({ ok: true }));

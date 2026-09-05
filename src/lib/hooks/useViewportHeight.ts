@@ -12,24 +12,12 @@ export const VIEWPORT_LAYOUT_CHANGE_EVENT = 'termdock:viewport-layout-change';
 const MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 240;
 const DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 640;
 const DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX = 360;
-const KEYBOARD_SETTLED_SYNC_DELAYS_MS = [50, 150, 300, 500, 800, 1200] as const;
-const IOS_KEYBOARD_TOOLBAR_MIN_PX = 28;
-const IOS_KEYBOARD_TOOLBAR_MAX_PX = 72;
-const IOS_KEYBOARD_REFERENCE_MIN_AGE_MS = 500;
 
 interface SafeAreaInsets {
   top: number;
   right: number;
   bottom: number;
   left: number;
-}
-
-interface IOSKeyboardHeightCorrectionInput {
-  measuredHeight: number;
-  referenceHeight: number;
-  keyboardOpenAgeMs: number;
-  isIOS: boolean;
-  isTerminalInputFocused: boolean;
 }
 
 interface ViewportKeyboardInsetInput {
@@ -43,7 +31,9 @@ export function shouldApplyViewportKeyboardInset({
   documentVisible,
   editableFocused,
 }: ViewportKeyboardInsetInput): boolean {
-  return documentVisible && editableFocused && measuredHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+  // Layout follows the measured occlusion from its first pixel. The separate
+  // keyboard-open threshold is only for interaction state, never geometry.
+  return documentVisible && editableFocused && measuredHeight > 0;
 }
 
 export function hasFocusedEditableElement(): boolean {
@@ -52,30 +42,6 @@ export function hasFocusedEditableElement(): boolean {
   return activeElement instanceof HTMLElement && activeElement.matches(
     'input:not([type="hidden"]), textarea, select, [contenteditable]:not([contenteditable="false"])'
   );
-}
-
-export function correctIOSKeyboardToolbarUndercount({
-  measuredHeight,
-  referenceHeight,
-  keyboardOpenAgeMs,
-  isIOS,
-  isTerminalInputFocused,
-}: IOSKeyboardHeightCorrectionInput): number {
-  const missingHeight = referenceHeight - measuredHeight;
-  const looksLikeMissingSystemToolbar =
-    missingHeight >= IOS_KEYBOARD_TOOLBAR_MIN_PX &&
-    missingHeight <= IOS_KEYBOARD_TOOLBAR_MAX_PX;
-
-  if (
-    isIOS &&
-    isTerminalInputFocused &&
-    keyboardOpenAgeMs >= IOS_KEYBOARD_REFERENCE_MIN_AGE_MS &&
-    looksLikeMissingSystemToolbar
-  ) {
-    return referenceHeight;
-  }
-
-  return measuredHeight;
 }
 
 declare global {
@@ -255,13 +221,10 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
   }, []);
 
   const [viewportHeight, setViewportHeight] = React.useState(getViewportHeight);
-  const heightBufRef = React.useRef<number[]>([]);
   const baseHeightRef = React.useRef(0);
   const lastWidthRef = React.useRef(0);
   const lastKeyboardHeightRef = React.useRef(0);
   const lastKeyboardOpenRef = React.useRef(false);
-  const keyboardOpenStartedAtRef = React.useRef<number | null>(null);
-  const iosKeyboardReferenceHeightsRef = React.useRef(new Map<string, number>());
 
   React.useEffect(() => {
     if (typeof window === 'undefined') {
@@ -270,11 +233,6 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     let rafId: number | null = null;
     let safeAreaProbe: HTMLDivElement | null = null;
-    const settledSyncTimers = new Set<number>();
-
-    const medianOf3 = (a: number, b: number, c: number) =>
-      [a, b, c].sort((x, y) => x - y)[1];
-
     const ensureSafeAreaProbe = () => {
       if (safeAreaProbe?.isConnected) return safeAreaProbe;
 
@@ -375,17 +333,6 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
       updateBaseHeight(currentWidth, innerHeight, visualBottom, previousKeyboardHeight);
 
-      // Median-of-3 filter only during decreases (keyboard opening).
-      // Single-frame outlier lows are discarded.  Increases (keyboard
-      // closing) are applied immediately so the layout recovers fully.
-      const buf = heightBufRef.current;
-      buf.push(nextHeight);
-      if (buf.length > 3) buf.shift();
-      let filteredHeight = nextHeight;
-      if (buf.length === 3 && nextHeight <= buf[0]) {
-        filteredHeight = medianOf3(buf[0], buf[1], buf[2]);
-      }
-
       setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
 
       const prevApplied = Number.parseInt(
@@ -393,7 +340,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
         10
       );
 
-      document.documentElement.style.setProperty(cssVarName, `${filteredHeight}px`);
+      document.documentElement.style.setProperty(cssVarName, `${nextHeight}px`);
       document.documentElement.style.setProperty('--app-vv-offset-top', `${nextOffsetTop}px`);
 
       // Pre-compute keyboard translateY and marginTop so CSS can reference
@@ -401,10 +348,10 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       // inside transform).
       const baseVh = baseHeightRef.current;
       // Keyboard movement must be based on the actual visual viewport height.
-      // `filteredHeight` may include a small offsetTop compensation for Safari
+      // `nextHeight` may include a small offsetTop compensation for Safari
       // browser-chrome jitter; using that compensated value here makes the
       // terminal under-translate by exactly that intermittent offsetTop.
-      const keyboardViewportHeight = Math.min(filteredHeight, rawViewportHeight);
+      const keyboardViewportHeight = Math.min(nextHeight, rawViewportHeight);
       const visibleHeight = Math.max(0, Math.min(baseVh, visualBottom));
       const measuredKeyboardHeight = Math.max(0, Math.round(baseVh - visibleHeight - safeBottom));
       const editableFocused = hasFocusedEditableElement();
@@ -413,44 +360,9 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
         documentVisible: document.visibilityState === 'visible',
         editableFocused,
       });
-      const isMeasuredKeyboardOpen = applyKeyboardInset;
-      const now = performance.now();
-      if (isMeasuredKeyboardOpen && keyboardOpenStartedAtRef.current === null) {
-        keyboardOpenStartedAtRef.current = now;
-      } else if (!isMeasuredKeyboardOpen) {
-        keyboardOpenStartedAtRef.current = null;
-      }
-
-      const keyboardOpenAgeMs = keyboardOpenStartedAtRef.current === null
-        ? 0
-        : Math.max(0, now - keyboardOpenStartedAtRef.current);
-      const viewportOrientation = currentWidth > baseVh ? 'landscape' : 'portrait';
-      const viewportWidthBucket = Math.round(currentWidth / 20) * 20;
-      const keyboardReferenceKey = `${viewportOrientation}:${viewportWidthBucket}`;
-      const referenceKeyboardHeight = iosKeyboardReferenceHeightsRef.current.get(keyboardReferenceKey) ?? 0;
-      const isTerminalInputFocused = document.activeElement?.matches('[data-terminal-input-anchor="true"]') === true;
-      const keyboardHeight = applyKeyboardInset ? correctIOSKeyboardToolbarUndercount({
-        measuredHeight: measuredKeyboardHeight,
-        referenceHeight: referenceKeyboardHeight,
-        keyboardOpenAgeMs,
-        isIOS: isIOSLike(),
-        isTerminalInputFocused,
-      }) : 0;
+      const keyboardHeight = applyKeyboardInset ? measuredKeyboardHeight : 0;
       const isKeyboardOpen = keyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
 
-      // Keep a high-water reference for this orientation. A later opening that
-      // is shorter by roughly one iOS keyboard/browser toolbar can reuse it
-      // after the animation has settled. The raw measurement remains the
-      // reference source so a corrected value cannot inflate the cache.
-      if (
-        isIOSLike() &&
-        isTerminalInputFocused &&
-        isMeasuredKeyboardOpen &&
-        keyboardOpenAgeMs >= IOS_KEYBOARD_REFERENCE_MIN_AGE_MS &&
-        measuredKeyboardHeight > referenceKeyboardHeight
-      ) {
-        iosKeyboardReferenceHeightsRef.current.set(keyboardReferenceKey, measuredKeyboardHeight);
-      }
       const ty = -keyboardHeight;
       const mt = keyboardHeight;
       document.documentElement.style.setProperty('--kb-translate-y', `${ty}px`);
@@ -477,7 +389,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       }
 
       const previousHeight = prevApplied;
-      if (previousHeight !== filteredHeight || nextOffsetTop > 0 || keyboardHeightChanged || keyboardOpenChanged) {
+      if (previousHeight !== nextHeight || nextOffsetTop > 0 || keyboardHeightChanged || keyboardOpenChanged) {
         debugViewport('sync', {
           cssVarName,
           innerHeight,
@@ -486,18 +398,14 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           offsetTop: nextOffsetTop,
           visibleHeight,
           rawHeight: nextHeight,
-          appliedHeight: filteredHeight,
+          appliedHeight: nextHeight,
           keyboardViewportHeight,
           measuredKeyboardHeight,
           editableFocused,
           applyKeyboardInset,
-          referenceKeyboardHeight,
-          keyboardOpenAgeMs: Math.round(keyboardOpenAgeMs),
-          correctedKeyboardToolbar: keyboardHeight !== measuredKeyboardHeight,
           keyboardHeight,
           isKeyboardOpen,
           safeAreaInsets,
-          filtered: filteredHeight !== nextHeight,
           source,
         });
       }
@@ -508,7 +416,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       // changes after pageshow but emits no resize of its own.
       document.dispatchEvent(new CustomEvent<ViewportLayoutChangeDetail>(VIEWPORT_LAYOUT_CHANGE_EVENT, {
         detail: {
-          height: filteredHeight,
+          height: nextHeight,
           baseHeight: baseVh,
           visibleHeight,
           offsetTop: nextOffsetTop,
@@ -527,28 +435,16 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       rafId = window.requestAnimationFrame(() => syncViewportHeight(source));
     };
 
-    const scheduleSettledSync = (source: string) => {
-      scheduleSync(`${source}:now`);
-      for (const delay of KEYBOARD_SETTLED_SYNC_DELAYS_MS) {
-        const timer = window.setTimeout(() => {
-          settledSyncTimers.delete(timer);
-          scheduleSync(`${source}:${delay}ms`);
-        }, delay);
-        settledSyncTimers.add(timer);
-      }
-    };
-
-    // Mobile browser chrome and standalone-PWA safe areas often settle after
-    // the React tree mounts without emitting resize. Cold start therefore needs
-    // the same bounded convergence passes as pageshow/focus recovery.
-    scheduleSettledSync('mount');
+    // Read at mount and on actual viewport/focus/lifecycle events. There is
+    // no elapsed-time assumption about when the browser has settled.
+    scheduleSync('mount');
 
     const handleResize = () => scheduleSync('resize');
     const handleOrientationChange = () => scheduleSync('orientationchange');
     const handleVisualViewportResize = () => scheduleSync('visualViewport.resize');
     const handleVisualViewportScroll = () => scheduleSync('visualViewport.scroll');
-    const handleFocusIn = () => scheduleSettledSync('focusin');
-    const handleFocusOut = () => scheduleSettledSync('focusout');
+    const handleFocusIn = () => scheduleSync('focusin');
+    const handleFocusOut = () => scheduleSync('focusout');
 
     const resetKeyboardSession = (source: string) => {
       const activeElement = document.activeElement;
@@ -556,10 +452,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
         activeElement.blur();
       }
 
-      keyboardOpenStartedAtRef.current = null;
       lastKeyboardHeightRef.current = 0;
       lastKeyboardOpenRef.current = false;
-      heightBufRef.current = [];
 
       const baseHeight = Math.max(
         baseHeightRef.current,
@@ -589,8 +483,6 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     // 出半行数，屏幕就只显示一半内容。visibilitychange + pageshow 都要监听：
     //   - visibilitychange：标签页从 hidden 变 visible
     //   - pageshow：从 BFCache 恢复（persisted=true 时更明显）
-    // 多次 scheduleSync（立即 + 50ms + 200ms）覆盖 iOS 上 visualViewport
-    // 异步 settle 的窗口。
     const handleResume = (source: string) => {
       debugViewport('resume', {
         source,
@@ -604,7 +496,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           : null,
         hidden: document.hidden,
       });
-      scheduleSettledSync(source);
+      scheduleSync(source);
     };
     const handleVisibilityChange = () => {
       if (document.hidden) {
@@ -633,8 +525,6 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);
       }
-      settledSyncTimers.forEach((timer) => window.clearTimeout(timer));
-      settledSyncTimers.clear();
       safeAreaProbe?.remove();
     };
   }, [cssVarName, debugViewport, getViewportHeight]);

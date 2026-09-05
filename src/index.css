@@ -1,3 +1,5 @@
+@import './lib/terminal/fontFaces.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -365,20 +367,6 @@ body {
  * temporary frame: keyboard ownership is transferred with the destination. */
 .terminal-viewport-container.terminal-focus-suspended .xterm-cursor {
   visibility: hidden;
-}
-
-/* Preserve the last coherent DOM-renderer frame while xterm changes its row
- * surface and the PTY redraw is held by synchronized output. This fixed,
- * opaque cover prevents the translated snapshot and the newly fitted live
- * grid underneath from ever being visible at the same time. */
-.terminal-keyboard-resize-frame-shield {
-  position: absolute !important;
-  inset: 0;
-  z-index: 10;
-  overflow: hidden;
-  background: var(--chrome-bg);
-  pointer-events: none;
-  contain: strict;
 }
 
 .overlay-scrollbar {

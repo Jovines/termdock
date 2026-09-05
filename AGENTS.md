@@ -11,12 +11,12 @@
 - `tsc` / 构建报错时,只修自己 diff 内的错。不在自己 diff 内的错要记录并
   告知用户，但继续做可隔离的检查；只有它确实阻断本任务所需产物时才停下等待，
   不要“顺手”清理。
-- 提交时只 `git add` 自己改过的文件路径;**禁止** `git add -A` / `.` /
+- 普通提交只 `git add` 自己改过的文件路径；上面的统一提交/发版模式按其范围纳入改动;**禁止** `git add -A` / `.` /
   `commit -a`。
 - 允许在别人 WIP 的同一文件上做并行改动，但必须先快照现有 diff，只做不重叠的
-  最小 hunk；不得覆盖、reset、checkout 或 stage 别人的改动。发现 hunk 冲突时停下
+  最小 hunk；不得覆盖、reset 或 checkout 别人的改动；仅在上面的统一提交/发版模式中允许暂存已审查的他人改动。发现 hunk 冲突时停下
   协调，不能擅自改写。
-- commit message 只描述自己的改动。
+- commit message 描述实际纳入的全部改动；普通提交只描述本任务，统一提交/发版模式覆盖其完整范围。
 - git 操作前先 `git status` 快照,操作后对照确认没动别人 WIP。
 
 ## Git 历史与资产
@@ -40,7 +40,7 @@
 ## 工具
 
 - 搜索用 `rg`,列文件用 `rg --files`,不要 `grep -r` / `find`。
-- 改完 `src/` 用 `termdock-deploy` skill 验证;若编译错属他人 WIP,先停。
+- 改完 `src/` 用 `termdock-deploy` skill 验证；遇他人 WIP 编译错时，按上面的可隔离检查与产物阻塞规则处理。
 - **改动完成并验证后自动部署到正式端口 9834**(`termdock-deploy` skill:
   build → `termdock --stop` → setsid 启动 → health 检查),不用再问用户。
 
