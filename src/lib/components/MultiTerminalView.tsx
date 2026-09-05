@@ -20,6 +20,7 @@ import {
   BACKGROUND_RESUME_INITIAL_DELAY_MS,
   buildResumeDelayBySessionId,
   resolvePrioritySessionId,
+  selectNextViewportWarmBatch,
   selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
   shouldRunResumeRequest,
@@ -98,6 +99,8 @@ interface CloseSessionEventDetail {
 const SWIPE_ANIMATION_SPEED_MS = 320;
 const SWIPER_TRANSLATE_EPSILON_PX = 1;
 const TOUCH_SWIPE_RELEASE_GUARD_MS = SWIPE_ANIMATION_SPEED_MS + 120;
+const MOBILE_VIEWPORT_WARM_BATCH_SIZE = 2;
+const MOBILE_VIEWPORT_WARM_BATCH_DELAY_MS = 160;
 type SyncSwiperOptions = {
   immediate?: boolean;
 };
@@ -728,6 +731,53 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [isMobileLayout, visibleSessionIds, workspaceSlides]);
 
   useEffect(() => {
+    if (
+      !isMobileLayout
+      || !connectionPriorityReady
+      || isRestoring
+      || !foregroundViewportReady
+      || !foregroundConnectionReady
+      || !foregroundContentReady
+      || pendingSwitchSessionId !== null
+    ) return;
+
+    const nextBatch = selectNextViewportWarmBatch({
+      orderedSessionIds: workspaceSlides.flatMap((slide) => (
+        slide.sessions.map((session) => session.id)
+      )),
+      visibleSessionIds,
+      mountedSessionIds: deferredViewportSessionIds,
+      batchSize: MOBILE_VIEWPORT_WARM_BATCH_SIZE,
+    });
+    if (nextBatch.length === 0) return;
+
+    // Once the foreground has fully presented, progressively create the
+    // remaining mobile viewports off-screen. A cold sidebar selection otherwise
+    // has to pay xterm construction + health probe + websocket + tmux snapshot
+    // serially while the user waits. Small batches preserve fast first paint
+    // and avoid the old all-sessions-at-once startup stall.
+    const timer = window.setTimeout(() => {
+      setDeferredViewportSessionIds((current) => {
+        const next = new Set(current);
+        nextBatch.forEach((sessionId) => next.add(sessionId));
+        return next;
+      });
+    }, MOBILE_VIEWPORT_WARM_BATCH_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    connectionPriorityReady,
+    deferredViewportSessionIds,
+    foregroundConnectionReady,
+    foregroundContentReady,
+    foregroundViewportReady,
+    isMobileLayout,
+    isRestoring,
+    pendingSwitchSessionId,
+    visibleSessionIds,
+    workspaceSlides,
+  ]);
+
+  useEffect(() => {
     if (!pendingSwitchSessionId) return;
     if (!sessions.some((session) => session.id === pendingSwitchSessionId)) {
       setPendingSwitchSessionId(null);
@@ -739,12 +789,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       || !contentReadySessionIds.has(pendingSwitchSessionId)
     ) return;
 
-    // Keep the currently painted slide in place while an unvisited target is
-    // mounted and connected off-screen. Switching only after its xterm has had
-    // a few paint opportunities avoids the single black frame that otherwise
-    // appears between distant mobile tabs.
+    // The target slide is already active so the selection takes effect as soon
+    // as the sidebar closes. Keep focus/cursor presentation suspended for a
+    // few paint opportunities after its authoritative content arrives.
     const timer = window.setTimeout(() => {
-      setActiveSessionId(pendingSwitchSessionId);
       setPendingSwitchSessionId((current) => (
         current === pendingSwitchSessionId ? null : current
       ));
@@ -1676,6 +1724,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
       if (sessionId === activeSessionIdRef.current) return;
+      // A sidebar selection always changes the visible slide immediately.
+      // Readiness only controls how long the target remains pending/loading.
+      setActiveSessionId(sessionId);
       const shouldDefer = shouldDeferSessionSwitch({
         isMobile: isMobileRef.current,
         viewportReady: viewportReadySessionIds.has(sessionId),
@@ -1684,7 +1735,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       });
       if (!shouldDefer) {
         setPendingSwitchSessionId(null);
-        setActiveSessionId(sessionId);
         if (terminalFocusAvailableRef.current) {
           setFocusTransferRequest({ sessionId, token: Date.now() });
         }
@@ -1697,6 +1747,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         next.add(sessionId);
         return next;
       });
+      // Selection and loading are separate states. Move to the requested slide
+      // immediately, then let that slide present its own loading state while
+      // the terminal connects and restores its authoritative snapshot.
       setPendingSwitchSessionId(sessionId);
       debugSession('[Session] Switched to session:', sessionId);
     }

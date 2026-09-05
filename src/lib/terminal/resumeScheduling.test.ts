@@ -9,6 +9,7 @@ import {
   resolvePrioritySessionId,
   selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
+  selectNextViewportWarmBatch,
   shouldRunResumeRequest,
   shouldForceForegroundReconnect,
   shouldStartInitialConnection,
@@ -145,6 +146,26 @@ describe('shouldDeferSessionSwitch', () => {
       streamReady: true,
       contentReady: false,
     })).toBe(true);
+  });
+});
+
+describe('selectNextViewportWarmBatch', () => {
+  it('warms only unmounted background sessions in stable order', () => {
+    expect(selectNextViewportWarmBatch({
+      orderedSessionIds: ['active', 'ready-neighbour', 'cold-a', 'cold-b', 'cold-c'],
+      visibleSessionIds: new Set(['active']),
+      mountedSessionIds: new Set(['active', 'ready-neighbour']),
+      batchSize: 2,
+    })).toEqual(['cold-a', 'cold-b']);
+  });
+
+  it('does not schedule work for a disabled batch', () => {
+    expect(selectNextViewportWarmBatch({
+      orderedSessionIds: ['active', 'cold'],
+      visibleSessionIds: new Set(['active']),
+      mountedSessionIds: new Set(['active']),
+      batchSize: 0,
+    })).toEqual([]);
   });
 });
 

@@ -3,6 +3,22 @@ export const BACKGROUND_RESUME_STAGGER_MS = 120;
 export const FOREGROUND_RESUME_COALESCE_MS = 250;
 export const VISIBLE_RECONNECT_WATCHDOG_MS = 60_000;
 
+export function selectNextViewportWarmBatch(options: {
+  orderedSessionIds: readonly string[];
+  visibleSessionIds: ReadonlySet<string>;
+  mountedSessionIds: ReadonlySet<string>;
+  batchSize: number;
+}): string[] {
+  const batchSize = Math.max(0, Math.floor(options.batchSize));
+  if (batchSize === 0) return [];
+  return options.orderedSessionIds
+    .filter((sessionId) => (
+      !options.visibleSessionIds.has(sessionId)
+      && !options.mountedSessionIds.has(sessionId)
+    ))
+    .slice(0, batchSize);
+}
+
 export function resolvePrioritySessionId(
   sessions: readonly { id: string; backendSessionId: string | null }[],
   requestedSessionId: string | null,
