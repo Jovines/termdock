@@ -36,6 +36,7 @@ import {
   shouldRefreshTerminalBuffer,
 } from '../../terminal/refreshRedraw';
 import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
+import { createResizePresentation } from '../../terminal/resizePresentation';
 import {
   acknowledgeResize,
   clearPendingResize,
@@ -848,6 +849,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
     const serializeAddonRef = React.useRef<SerializeAddon | null>(null);
+    const resizePresentationRef = React.useRef<ReturnType<typeof createResizePresentation> | null>(null);
     const suppressSmoothScrollRef = React.useRef(suppressSmoothScroll);
     suppressSmoothScrollRef.current = suppressSmoothScroll;
     const fitAddonRef = React.useRef<FitAddon | null>(null);
@@ -872,6 +874,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pendingBytesRef = React.useRef(0);
     const flowPausedRef = React.useRef(false);
     const writeScheduledRef = React.useRef<number | null>(null);
+    const writeScheduleGenerationRef = React.useRef(0);
     const writeSettleGenerationRef = React.useRef(0);
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
@@ -893,7 +896,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const lastDevicePixelRatioRef = React.useRef(
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
-    const lastBufferTypeRef = React.useRef<string | null>(null);
     const isComposingRef = React.useRef(false);
     // compositionend 之后某些 IME（搜狗等）会自动补发一记假 Enter
     // (keydown Enter / beforeinput insertLineBreak)，必须吞掉。
@@ -3042,9 +3044,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           flowControlHandlerRef.current?.(false);
         }
       }
-      if (writeScheduledRef.current !== null && typeof window !== 'undefined') {
-        window.cancelAnimationFrame(writeScheduledRef.current);
-      }
       writeScheduledRef.current = null;
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
@@ -3096,6 +3095,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         });
         let repairedAfterResize = 0;
         if (hysteresis.accept) {
+          if (sessionReadyRef.current && onTmuxScrollRef.current
+            && (before.cols !== proposed.cols || before.rows !== proposed.rows)) {
+            resizePresentationRef.current?.begin();
+          }
           terminal.resize(proposed.cols, proposed.rows);
           repairedAfterResize = repairXtermBufferInvariants(terminal, proposed.rows);
           // terminal.resize() can transiently expose arbitrary scrollback while
@@ -3130,6 +3133,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           changed: before.cols !== next.cols || before.rows !== next.rows,
         });
       } catch {
+        resizePresentationRef.current?.cancel();
         // fit failure is non-fatal; the next refresh attempt will retry.
       }
     }, [debugTerminal]);
@@ -3177,6 +3181,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return false;
       }
 
+      resizePresentationRef.current?.cancel();
       try {
         addon.dispose();
       } catch { /* ignored */ }
@@ -3207,6 +3212,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
         });
 
+        resizePresentationRef.current?.cancel();
         terminal.loadAddon(webglAddon);
         webglAddonRef.current = webglAddon;
         // 拿到一个新 renderer，先乐观地认为它的上下文是活的
@@ -3312,6 +3318,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           });
           sendResizeRequestRef.current(retry.request);
         } else if (retry.exhausted) {
+          resizePresentationRef.current?.cancel();
           debugTerminal('resize ack timeout; leaving size unconfirmed', {
             seq: request.seq,
             cols: request.cols,
@@ -3646,7 +3653,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       pendingWriteLastChunkIdRef.current = null;
 
       isWritingRef.current = true;
+      const presentation = resizePresentationRef.current;
+      const resizeGeneration = presentation?.generation;
       term.write(chunk, () => {
+        if (resizeGeneration !== undefined) presentation?.written(resizeGeneration);
         isWritingRef.current = false;
         pendingBytesRef.current -= chunkBytes;
         if (pendingBytesRef.current < 0) pendingBytesRef.current = 0;
@@ -3661,14 +3671,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
 
         if (pendingWriteRef.current) {
-          if (typeof window !== 'undefined') {
-            writeScheduledRef.current = window.requestAnimationFrame(() => {
-              writeScheduledRef.current = null;
-              flushWrites();
-            });
-          } else {
-            flushWrites();
-          }
+          // xterm's parser already time-slices large writes. Do not leave a
+          // completed parser idle for another display frame while data waits.
+          flushWrites();
           return;
         }
 
@@ -3702,14 +3707,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (writeScheduledRef.current !== null) {
         return;
       }
-      if (typeof window !== 'undefined') {
-        writeScheduledRef.current = window.requestAnimationFrame(() => {
-          writeScheduledRef.current = null;
-          flushWrites();
-        });
-      } else {
+      // The store has already batched this frame's output. Coalesce calls in
+      // this task, then let xterm parse and schedule its own render immediately.
+      const generation = ++writeScheduleGenerationRef.current;
+      writeScheduledRef.current = generation;
+      queueMicrotask(() => {
+        if (writeScheduledRef.current !== generation) return;
+        writeScheduledRef.current = null;
         flushWrites();
-      }
+      });
     }, [flushWrites]);
 
     const enqueueWrite = React.useCallback(
@@ -3784,6 +3790,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             cursorStyle: 'block',
             cursorInactiveStyle: cursorVisibleRef.current ? 'bar' : 'none',
             scrollback: onTmuxScroll ? 2000 : 5000,
+            // FitAddon reads this option without changing the line buffer.
+            // Temporarily setting scrollback=0 during measurement trims
+            // history and triggers buffer resize/scroll events on every fit.
+            scrollbar: { showScrollbar: false },
             allowTransparency: shouldAllowTerminalTransparency(rendererMode, enableImages),
             convertEol: terminalConvertEol,
             drawBoldTextInBrightColors,
@@ -3808,15 +3818,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           });
 
           const fitAddon = new FitAddon();
-          // Patch proposeDimensions to never subtract scrollbar width.
-          const originalPropose = fitAddon.proposeDimensions.bind(fitAddon);
-          fitAddon.proposeDimensions = () => {
-            const saved = terminal.options.scrollback;
-            terminal.options.scrollback = 0;
-            const dims = originalPropose();
-            terminal.options.scrollback = saved;
-            return dims;
-          };
           terminal.loadAddon(fitAddon);
           terminal.loadAddon(new WebLinksAddon());
           terminal.registerLinkProvider(createTerminalPathLinkProvider(terminal, (path) => {
@@ -3839,9 +3840,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
           lastDevicePixelRatioRef.current = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
-          lastBufferTypeRef.current = terminal.buffer.active.type;
 
           terminal.open(container);
+          resizePresentationRef.current = createResizePresentation(terminal);
           if (fontLigatures) {
             terminal.loadAddon(new LigaturesAddon({
               fontFeatureSettings: TERMINAL_LIGATURE_FEATURE_SETTINGS,
@@ -4029,11 +4030,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               y: activeBuffer.cursorY,
               rows: terminal.rows,
             });
-            const nextBufferType = terminal.buffer.active.type;
-            if (lastBufferTypeRef.current !== nextBufferType) {
-              lastBufferTypeRef.current = nextBufferType;
-              refreshTextureAtlasNow(`buffer-type-change:${nextBufferType}`);
-            }
+            // xterm has already repainted a buffer switch before onRender.
+            // Requesting a full refresh here paints the same screen twice.
             if (!enableTouchScroll) {
               updateImeAnchorRef.current();
             }
@@ -4151,12 +4149,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             }
           }
 
-          if (typeof window !== 'undefined') {
-            // post-init 二次 fit：等一帧让 layout 真正稳定再算 cols/rows
-            window.setTimeout(() => {
-              requestRefresh('init-fit', { skipScrollToBottom: true });
-            }, 0);
-          }
+          // Measure with the loaded font and mounted renderer before the
+          // stream can start. A deferred fit lets the first output use an
+          // estimated grid and then reflows that content a frame later.
+          fitTerminal('init-fit');
 
           setLoadingState('ready');
           onReadyChangeRef.current?.(true);
@@ -4201,12 +4197,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           wheelHandlerRef.current = null;
         }
 
+        resizePresentationRef.current?.dispose();
+        resizePresentationRef.current = null;
         disposeWebglRenderer('component-unmount');
         localTerminal?.dispose();
         terminalRef.current = null;
         fitAddonRef.current = null;
         viewportRef.current = null;
-        lastBufferTypeRef.current = null;
         resetWriteState({ notifyFlowResume: true });
         clearResizeAckTimer();
       };
@@ -4301,7 +4298,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (!terminal) {
         return;
       }
-      terminal.reset();
+      // A newly constructed xterm is already empty. Only reset when reusing
+      // an instance that has actually consumed another session's content.
+      if (lastProcessedChunkIdRef.current !== null) terminal.reset();
       resetWriteState();
       sentValueRef.current = '';
       sentCursorRef.current = 0;
@@ -4508,6 +4507,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         setSessionReady: (ready: boolean) => {
           sessionReadyRef.current = ready;
           if (!ready) {
+            resizePresentationRef.current?.cancel();
             clearResizeAckTimer();
             resizeSyncStateRef.current = clearPendingResize(resizeSyncStateRef.current);
             pendingScreenSyncGenerationRef.current = null;
@@ -4523,6 +4523,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             resizeSyncStateRef.current = retry.state;
             if (retry.request && sessionReadyRef.current) {
               sendResizeRequestRef.current(retry.request);
+            } else if (retry.exhausted) {
+              resizePresentationRef.current?.cancel();
             }
             return;
           }

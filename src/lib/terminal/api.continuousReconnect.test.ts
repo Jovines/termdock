@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTermdockAPI } from './factory';
 import {
   connectTerminalStream,
   probeTerminalConnection,
   reconnectTerminalConnectionNow,
   suspendTerminalConnectionReconnects,
   resizeTerminal,
+  VISIBLE_WAKEUP_PROBE_TIMEOUT_MS,
 } from './api';
 
 class FakeWebSocket {
@@ -51,6 +53,77 @@ class FakeWebSocket {
 }
 
 describe('connectTerminalStream reconnect policy', () => {
+  it('reconnects an unresponsive visible pane before the background probe expires', () => {
+    const closeVisible = connectTerminalStream('visible-dead', vi.fn());
+    const closeBackground = connectTerminalStream('background-dead', vi.fn());
+    for (const socket of FakeWebSocket.instances) {
+      socket.readyState = FakeWebSocket.OPEN;
+      socket.onopen?.();
+    }
+    probeTerminalConnection('background-dead');
+    probeTerminalConnection('visible-dead', undefined, { visible: true });
+    vi.advanceTimersByTime(VISIBLE_WAKEUP_PROBE_TIMEOUT_MS + 1);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    expect(FakeWebSocket.instances[2].url).toContain('/visible-dead/');
+    vi.advanceTimersByTime(1_500);
+    expect(FakeWebSocket.instances[3].url).toContain('/background-dead/');
+    closeVisible();
+    closeBackground();
+  });
+
+  it('promotes a pending background probe without a second ping or stale timeout', () => {
+    const close = connectTerminalStream('promoted-probe', vi.fn());
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    const send = vi.spyOn(socket, 'send');
+    const responsive = vi.fn();
+    probeTerminalConnection('promoted-probe', responsive);
+    vi.advanceTimersByTime(100);
+    probeTerminalConnection('promoted-probe', responsive, { visible: true });
+    vi.advanceTimersByTime(20);
+    socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'pong' }) }));
+    expect(responsive).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1_600);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    close();
+  });
+
+  it('coalesces wake probes and replaces an unresponsive OPEN socket once', () => {
+    const disconnect = connectTerminalStream('half-open-probe', vi.fn());
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    const send = vi.spyOn(socket, 'send');
+    const responsive = vi.fn();
+    probeTerminalConnection('half-open-probe', responsive);
+    probeTerminalConnection('half-open-probe', responsive);
+    expect(send).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1_501);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(responsive).not.toHaveBeenCalled();
+    disconnect();
+  });
+
+  it('uses the measured viewport on the first connection and reads it again on reconnect', () => {
+    let dimensions = { cols: 58, rows: 40 };
+    const subscription = createTermdockAPI().connect('initial-geometry', { onEvent: vi.fn() }, {
+      getDimensions: () => dimensions,
+    });
+    const initial = new URL(FakeWebSocket.instances[0].url).searchParams;
+    expect(initial.get('cols')).toBe('58');
+    expect(initial.get('rows')).toBe('40');
+
+    dimensions = { cols: 112, rows: 32 };
+    reconnectTerminalConnectionNow('initial-geometry');
+    vi.advanceTimersByTime(0);
+    const reconnected = new URL(FakeWebSocket.instances[1].url).searchParams;
+    expect(reconnected.get('cols')).toBe('112');
+    expect(reconnected.get('rows')).toBe('32');
+    subscription.close();
+  });
+
   it('reconnects with the keyboard-closed grid without shrinking to metadata dimensions', async () => {
     const disconnect = connectTerminalStream('resume-geometry', vi.fn());
     const first = FakeWebSocket.instances[0];
@@ -161,9 +234,11 @@ describe('connectTerminalStream reconnect policy', () => {
     expect(probeTerminalConnection('responsive-probe', onResponsive)).toBe(true);
     vi.advanceTimersByTime(1);
     socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'pong' }) }));
+    expect(onResponsive).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(1_499);
 
     expect(onResponsive).toHaveBeenCalledTimes(1);
+    expect(FakeWebSocket.instances).toHaveLength(1);
 
     // The explicit foreground probe also unfreezes normal retry behavior.
     socket.fail();

@@ -320,6 +320,7 @@ const PONG_TIMEOUT_MS = 8_000;
 // visibilitychange / online 唤醒后做一次健康探测：发 ping 等若干毫秒，超时直接重连。
 // 1500ms 是给蜂窝网络/弱 Wi-Fi 唤醒首包留的余量（实测 500ms 经常误判半开导致无谓 close）。
 const WAKEUP_PROBE_TIMEOUT_MS = 1500;
+export const VISIBLE_WAKEUP_PROBE_TIMEOUT_MS = 250;
 
 interface WsConnection {
   ws: WebSocket;
@@ -357,6 +358,11 @@ interface WsConnection {
   // Monotonic probe marker. A pong can arrive in the same millisecond as the
   // ping, so timestamps alone cannot reliably prove that a new frame arrived.
   inboundSequence: number;
+  wakeProbe?: {
+    timer: ReturnType<typeof setTimeout>;
+    listeners: Set<() => void>;
+    deadline: number;
+  };
 }
 
 const wsConnections = new Map<string, WsConnection>();
@@ -426,7 +432,7 @@ function resolveTmuxRequest(reqId: string, success: boolean, layout?: TmuxLayout
 // still have its original 80x24 size while this browser displays a larger grid.
 const reconnectDimensions = new Map<string, { cols: number; rows: number }>();
 
-function getWebSocketUrl(sessionId: string, sinceSeq: number, epoch?: string): string {
+function getWebSocketUrl(sessionId: string, sinceSeq: number, epoch?: string, viewportDimensions?: { cols: number; rows: number } | null): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const base = `${proto}://${window.location.host}/api/terminal/${sessionId}/ws`;
   // sinceSeq > 0 时让服务端只补发增量（短线重连补帧）；首次连接为 0，服务端不会重复发送。
@@ -436,7 +442,7 @@ function getWebSocketUrl(sessionId: string, sinceSeq: number, epoch?: string): s
   });
   if (sinceSeq > 0) params.set('since', String(sinceSeq));
   if (epoch) params.set('epoch', epoch);
-  const dimensions = reconnectDimensions.get(sessionId);
+  const dimensions = viewportDimensions ?? reconnectDimensions.get(sessionId);
   if (dimensions) {
     params.set('cols', String(dimensions.cols));
     params.set('rows', String(dimensions.rows));
@@ -546,6 +552,7 @@ export function connectTerminalStream(
   };
 
   const stopHeartbeat = (c: WsConnection) => {
+    if (c.wakeProbe) { clearTimeout(c.wakeProbe.timer); c.wakeProbe = undefined; }
     if (c.heartbeatTimer) { clearInterval(c.heartbeatTimer); c.heartbeatTimer = null; }
     if (c.pongTimer) { clearTimeout(c.pongTimer); c.pongTimer = null; }
     if (c.inputFlushTimer) { clearTimeout(c.inputFlushTimer); c.inputFlushTimer = null; }
@@ -589,7 +596,7 @@ export function connectTerminalStream(
       try { conn.ws.close(); } catch { /* ignore */ }
     }
 
-    const url = getWebSocketUrl(sessionId, lastSeq, streamEpoch);
+    const url = getWebSocketUrl(sessionId, lastSeq, streamEpoch, options.getDimensions?.());
     const ws = new WebSocket(url);
     handlingError = false; // reset for new connection attempt
 
@@ -665,6 +672,12 @@ export function connectTerminalStream(
       newConn.inboundSequence += 1;
       try {
         const msg = JSON.parse(event.data as string);
+        if (newConn.wakeProbe && wsConnections.get(sessionId) === newConn) {
+          const probe = newConn.wakeProbe;
+          newConn.wakeProbe = undefined;
+          clearTimeout(probe.timer);
+          for (const listener of probe.listeners) listener();
+        }
 
         // 服务端 pong 不需要透传给上层。
         if (msg.type === 'pong') {
@@ -974,7 +987,11 @@ export async function sendTerminalInput(
 //   要立即替换为新连接。
 // - WS OPEN：发 ping，等 WAKEUP_PROBE_TIMEOUT_MS 内有任何消息就算活着；
 //   超时则主动替换连接，走重连补帧路径。
-export function probeTerminalConnection(sessionId: string, onResponsive?: () => void): boolean {
+export function probeTerminalConnection(
+  sessionId: string,
+  onResponsive?: () => void,
+  options: { visible?: boolean } = {},
+): boolean {
   const conn = wsConnections.get(sessionId);
   if (!conn) return false;
   conn.retryState.isSuspended = false;
@@ -984,17 +1001,26 @@ export function probeTerminalConnection(sessionId: string, onResponsive?: () => 
     conn.reconnectNow();
     return true;
   }
-  const baselineSequence = conn.inboundSequence;
-  try { conn.ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
-  setTimeout(() => {
+  const timeoutMs = options.visible ? VISIBLE_WAKEUP_PROBE_TIMEOUT_MS : WAKEUP_PROBE_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  const existingProbe = conn.wakeProbe;
+  const listeners = existingProbe?.listeners ?? new Set<() => void>();
+  if (onResponsive) listeners.add(onResponsive);
+  if (existingProbe && existingProbe.deadline <= deadline) return true;
+  if (existingProbe) clearTimeout(existingProbe.timer);
+  const timer = setTimeout(() => {
     if (wsConnections.get(sessionId) !== conn || conn.retryState.isClosed) return;
-    // 如果在窗口期内没有收到新帧，就视为半开连接。
-    if (conn.inboundSequence <= baselineSequence) {
-      conn.reconnectNow();
-    } else {
-      onResponsive?.();
-    }
-  }, WAKEUP_PROBE_TIMEOUT_MS);
+    conn.wakeProbe = undefined;
+    conn.reconnectNow();
+  }, timeoutMs);
+  conn.wakeProbe = { timer, listeners, deadline };
+  // Promotion from background to visible shortens the same probe deadline.
+  if (existingProbe) return true;
+  try { conn.ws.send(JSON.stringify({ type: 'ping' })); } catch {
+    clearTimeout(timer);
+    conn.wakeProbe = undefined;
+    conn.reconnectNow();
+  }
   return true;
 }
 

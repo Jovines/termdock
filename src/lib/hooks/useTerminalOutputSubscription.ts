@@ -1,29 +1,19 @@
 import { useEffect } from 'react';
 import { setTerminalOutputSubscription } from '../terminal/api';
 
-export const BACKGROUND_OUTPUT_GRACE_MS = 15_000;
-
-/** A brief app switch must not detach tmux and force a full-screen replay.
- * Unseen slides still detach immediately. Long background stays retain the
- * existing output budget and reconnect/replay recovery mechanisms.
+/** Mounted terminals keep their live stream across session switches. Detaching
+ * an offscreen tmux client forces a reset/full-screen replay on its next swipe.
+ * Mobile viewport retention already bounds the number of mounted terminals;
+ * unmount closes their streams. Hidden pages retain the same bounded delivery
+ * stream; server flow control disconnects an observer only if it falls behind.
  */
 export function useTerminalOutputSubscription(
   sessionId: string | null,
-  layoutVisible: boolean,
-  documentVisible: boolean,
+  _documentVisible: boolean,
   streamReady: boolean,
 ): void {
   useEffect(() => {
     if (!sessionId) return;
-    if (!layoutVisible || documentVisible) {
-      setTerminalOutputSubscription(sessionId, layoutVisible);
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      // iOS can defer this timer until foreground, before React has committed
-      // visibility state. Never detach a page that has already returned.
-      if (document.hidden) setTerminalOutputSubscription(sessionId, false);
-    }, BACKGROUND_OUTPUT_GRACE_MS);
-    return () => window.clearTimeout(timer);
-  }, [sessionId, layoutVisible, documentVisible, streamReady]);
+    setTerminalOutputSubscription(sessionId, true);
+  }, [sessionId, streamReady]);
 }

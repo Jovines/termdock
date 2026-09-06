@@ -5,6 +5,7 @@ import {
   FOREGROUND_RESUME_COALESCE_MS,
   VISIBLE_RECONNECT_WATCHDOG_MS,
   buildResumeDelayBySessionId,
+  areVisibleResumeSessionsReady,
   getVisibleReconnectWatchdogDelayMs,
   resolvePrioritySessionId,
   selectConnectionForegroundSessionId,
@@ -221,6 +222,22 @@ describe('shouldRestartMissingTerminalConnection', () => {
 });
 
 describe('shouldRunResumeRequest', () => {
+  it('starts every visible split pane before the background wave', () => {
+    for (const sessionId of ['focused', 'visible-sibling']) {
+      expect(shouldRunResumeRequest({
+        sessionId, foregroundSessionId: 'focused', isVisible: true,
+        requestToken: 4, foregroundCompletedToken: 3,
+      })).toBe(true);
+    }
+    expect(shouldRunResumeRequest({
+      sessionId: 'old-priority', foregroundSessionId: 'old-priority', isVisible: false,
+      requestToken: 4, foregroundCompletedToken: 3,
+    })).toBe(false);
+    const visible = new Set(['focused', 'visible-sibling']);
+    expect(areVisibleResumeSessionsReady(visible, new Set(['focused']))).toBe(false);
+    expect(areVisibleResumeSessionsReady(visible, new Set(['focused', 'visible-sibling']))).toBe(true);
+  });
+
   it('runs the selected session first and holds the background wave', () => {
     expect(shouldRunResumeRequest({
       sessionId: 'selected', foregroundSessionId: 'selected', requestToken: 4, foregroundCompletedToken: 3,
@@ -246,10 +263,10 @@ describe('shouldScheduleForegroundResume', () => {
 });
 
 describe('shouldForceForegroundReconnect', () => {
-  it('probes after an app switch, but replaces sockets after page or network restoration', () => {
+  it('probes after app, page and network restoration before replacing a socket', () => {
     expect(shouldForceForegroundReconnect({ wasPageHidden: true, reason: 'visibility' })).toBe(false);
-    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'bfcache' })).toBe(true);
-    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'online' })).toBe(true);
+    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'bfcache' })).toBe(false);
+    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'online' })).toBe(false);
   });
 
   it('keeps an ordinary window focus on the lightweight probe path', () => {

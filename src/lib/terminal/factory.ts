@@ -27,7 +27,7 @@ export const createTermdockAPI = (): TerminalAPI => ({
       sessionId,
       handlers.onEvent,
       handlers.onError,
-      getRetryPolicy(options)
+      { ...getRetryPolicy(options), getDimensions: options?.getDimensions }
     );
 
     return {

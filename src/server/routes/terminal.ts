@@ -1,5 +1,6 @@
 import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
 import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
+import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
 import { TerminalOutputDelivery, resolveTerminalReplayCursor, type OutputFrame } from '../utils/terminalOutputDelivery.js';
 import express from 'express';
 import fs from 'fs';
@@ -8012,6 +8013,8 @@ export function handleTerminalWebSocket(
   let replayRequest: Promise<void> | null = null;
   let clientCols = session.cols;
   let clientRows = session.rows;
+  let initialAttachmentResize = true;
+  let initialScreen: TmuxInitialScreen | null = null;
   if (initialDimensions && options.independentTmux) {
     clientCols = initialDimensions.cols;
     clientRows = initialDimensions.rows;
@@ -8041,7 +8044,8 @@ export function handleTerminalWebSocket(
         ws.close(1013, 'Output transport is congested');
         return;
       }
-      delivery.enqueue({ type: 'data', data });
+      const liveData = initialScreen ? initialScreen.push(data) : data;
+      if (liveData) delivery.enqueue({ type: 'data', data: liveData });
     },
     () => { if (ws.readyState === ws.OPEN) ws.close(1012, 'Tmux display client detached'); },
   ) : null;
@@ -8066,6 +8070,9 @@ export function handleTerminalWebSocket(
     delivery.replaying = true;
     if (attachment) {
       attachment.close();
+      initialScreen?.cancel();
+      initialScreen = null;
+      initialAttachmentResize = true;
       delivery.setActive(false); // Discard only this observer's obsolete stream.
     }
     replayRequest = (async () => {
@@ -8099,10 +8106,24 @@ export function handleTerminalWebSocket(
     if (attachment) {
       if (ws.readyState !== ws.OPEN) return;
       delivery.setActive(outputWanted && !clientPaused);
-      if (delivery.active && !await attachment.open(clientCols, clientRows)) return;
-      // A fresh attached client emits initialization and full redraw through
-      // its own PTY. No independent pane snapshot is mixed into that stream.
-      replayChunks = ['\x1bc'];
+      if (delivery.active) {
+        const screen = new TmuxInitialScreen();
+        initialScreen = screen;
+        if (!await attachment.open(clientCols, clientRows)) {
+          screen.cancel();
+          return;
+        }
+        const first = await screen.ready;
+        if (initialScreen === screen) initialScreen = null;
+        if (first.status === 'cancelled' || ws.readyState !== ws.OPEN) return;
+        if (first.status === 'overflow') throw new Error('Initial tmux screen exceeded output budget');
+        // Bootstrap with the actual first PTY redraw, not a standalone empty
+        // reset followed by the screen in a second client write. Subsequent
+        // bytes already wait in delivery and retain their original ordering.
+        replayChunks = first.data ? [first.data] : ['\x1bc'];
+      } else {
+        replayChunks = ['\x1bc'];
+      }
       replayOutOfWindow = true;
     } else if (sinceSeq > 0 && session.mode === 'shell') {
       const since = getHistorySince(sessionId, sinceSeq);
@@ -8161,6 +8182,8 @@ export function handleTerminalWebSocket(
       ws.send(JSON.stringify({ type: 'git-status', gitStatus: session.gitStatus }));
     }
     })().catch((error) => {
+      initialScreen?.cancel();
+      initialScreen = null;
       console.warn(`[ws] replay failed session=${sessionId}: ${getErrorMessage(error)}`);
       if (ws.readyState === ws.OPEN) ws.close(1011, 'Replay unavailable');
     }).finally(() => { replayRequest = null; });
@@ -8168,6 +8191,7 @@ export function handleTerminalWebSocket(
   };
   if (attachment) independentTmuxReplays.set(ws, async () => {
     attachment.close();
+    initialScreen?.cancel();
     await replayRequest;
     if (ws.readyState === ws.OPEN) await sendReplay(0);
   });
@@ -8341,12 +8365,18 @@ export function handleTerminalWebSocket(
             if (attachment) {
               const cleanCols = Math.floor(cols), cleanRows = Math.floor(rows);
               const sameSize = clientCols === cleanCols && clientRows === cleanRows;
-              const ok = attachment.resize(cleanCols, cleanRows);
+              const ok = sameSize ? attachment.attached : attachment.resize(cleanCols, cleanRows);
               if (ok) {
+                // The first resize confirms the grid supplied at attachment.
+                // Its PTY is already drawing that grid; forcing refresh-client
+                // here repeats the initial clear/full redraw. Later same-size
+                // requests remain explicit display recovery requests.
+                const needsRedraw = sameSize && !initialAttachmentResize;
+                initialAttachmentResize = false;
                 clientCols = cleanCols;
                 clientRows = cleanRows;
                 session.lastActivity = Date.now();
-                if (sameSize) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
+                if (needsRedraw) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
               }
               if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({
                 type: 'resize-ack', seq: typeof msg.seq === 'number' ? msg.seq : undefined,
@@ -8490,6 +8520,8 @@ export function handleTerminalWebSocket(
 
   // Cleanup on close
   ws.on('close', () => {
+    initialScreen?.cancel();
+    initialScreen = null;
     attachment?.close();
     if (tmuxInterval) clearInterval(tmuxInterval);
     if (activeProgramInterval) clearInterval(activeProgramInterval);

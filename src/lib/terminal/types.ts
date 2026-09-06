@@ -280,6 +280,7 @@ export interface TmuxActionPayload {
 
 // Stream Connection Options
 export interface TerminalStreamOptions {
+  getDimensions?: ConnectStreamOptions['getDimensions'];
   retry?: RetryPolicy;
   connectionTimeoutMs?: number;
 }
@@ -349,6 +350,8 @@ export interface TerminalChunk {
 
 // Connect Stream Options
 export interface ConnectStreamOptions {
+  /** Read the fitted grid before each socket opens, including the first one. */
+  getDimensions?: () => { cols: number; rows: number } | null;
   maxRetries?: number;
   initialRetryDelay?: number;
   maxRetryDelay?: number;

@@ -1,5 +1,6 @@
 export const BACKGROUND_RESUME_INITIAL_DELAY_MS = 300;
 export const BACKGROUND_RESUME_STAGGER_MS = 120;
+export const BACKGROUND_RESUME_MAX_HOLD_MS = 2000;
 export const FOREGROUND_RESUME_COALESCE_MS = 250;
 export const VISIBLE_RECONNECT_WATCHDOG_MS = 60_000;
 
@@ -57,8 +58,10 @@ export function shouldStartInitialConnection(options: {
   sessionId: string;
   foregroundSessionId: string | null;
   foregroundReady: boolean;
+  isVisible?: boolean;
 }): boolean {
   return options.foregroundSessionId === null
+    || options.isVisible === true
     || options.sessionId === options.foregroundSessionId
     || options.foregroundReady;
 }
@@ -108,11 +111,20 @@ export function shouldRunResumeRequest(options: {
   foregroundSessionId: string | null;
   requestToken: number;
   foregroundCompletedToken: number;
+  isVisible?: boolean;
 }): boolean {
   return options.requestToken === 0
+    || options.isVisible === true
     || options.foregroundSessionId === null
-    || options.sessionId === options.foregroundSessionId
+    || (options.isVisible === undefined && options.sessionId === options.foregroundSessionId)
     || options.foregroundCompletedToken === options.requestToken;
+}
+
+export function areVisibleResumeSessionsReady(
+  visibleIds: ReadonlySet<string>,
+  completedIds: ReadonlySet<string>,
+): boolean {
+  return [...visibleIds].every(id => completedIds.has(id));
 }
 
 export function shouldScheduleForegroundResume(
@@ -126,9 +138,10 @@ export function shouldForceForegroundReconnect(options: {
   wasPageHidden: boolean;
   reason: string;
 }): boolean {
-  // Visibility alone does not invalidate a live socket. Probe it first so a
-  // brief app switch preserves the attached tmux client and parser stream.
-  return options.reason === 'bfcache' || options.reason === 'online';
+  // Page/network restoration is not proof that an OPEN socket is dead.
+  // The probe replaces closed sockets immediately and half-open ones on timeout.
+  void options;
+  return false;
 }
 
 export function getVisibleReconnectWatchdogDelayMs(options: {

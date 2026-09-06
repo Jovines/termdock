@@ -19,6 +19,8 @@ import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/s
 import type { TermdockColorTheme } from '../terminal/theme';
 import {
   BACKGROUND_RESUME_INITIAL_DELAY_MS,
+  BACKGROUND_RESUME_MAX_HOLD_MS,
+  areVisibleResumeSessionsReady,
   buildResumeDelayBySessionId,
   resolvePrioritySessionId,
   selectMobileViewportSessionIds,
@@ -437,7 +439,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     forceForegroundReconnect: false,
   });
   const [readySessionIds, setReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [foregroundResumeCompletedToken, setForegroundResumeCompletedToken] = useState(0);
+  const [resumeProgress, setResumeProgress] = useState<{ token: number; completed: ReadonlySet<string> }>(
+    () => ({ token: 0, completed: new Set() }),
+  );
+  const [releasedResumeToken, setReleasedResumeToken] = useState(0);
   const [viewportReadySessionIds, setViewportReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [contentReadySessionIds, setContentReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [deferredViewportSessionIds, setDeferredViewportSessionIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -457,6 +462,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [mobileKeyboardOpenSessionId, setMobileKeyboardOpenSessionId] = useState<string | null>(null);
   const terminalFocusAvailableRef = useRef(terminalFocusAvailable);
   const isTouchSwipeRef = useRef(false);
+  const isSwipePointerDownRef = useRef(false);
   const touchSwipeReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const swiperDrivenActiveSessionIdRef = useRef<string | null>(null);
   const isMobileRef = useRef(isMobileLayout);
@@ -629,6 +635,23 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     );
   }, [visibleSessionIds, workspaceSlides]);
   const foregroundConnectionReady = foregroundSessionId !== null && readySessionIds.has(foregroundSessionId);
+  const resumePrioritySessionIds = useMemo(() => {
+    const ids = new Set(visibleSessionIds);
+    if (pendingSwitchSessionId) ids.add(pendingSwitchSessionId);
+    if (!ids.size && foregroundSessionId) ids.add(foregroundSessionId);
+    return ids;
+  }, [visibleSessionIds, pendingSwitchSessionId, foregroundSessionId]);
+  const visibleResumeReady = resumeProgress.token === resumeRequest.token
+    && areVisibleResumeSessionsReady(resumePrioritySessionIds, resumeProgress.completed);
+  const foregroundResumeCompletedToken = visibleResumeReady || releasedResumeToken === resumeRequest.token
+    ? resumeRequest.token : -1;
+  useEffect(() => {
+    if (!resumeRequest.token || visibleResumeReady) return;
+    // Give visible panes an exclusive head start without starving every other
+    // session forever if one pane is unavailable or requires authentication.
+    const timer = window.setTimeout(() => setReleasedResumeToken(resumeRequest.token), BACKGROUND_RESUME_MAX_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [resumeRequest.token, visibleResumeReady]);
   const handleStreamReadyChange = useCallback((sessionId: string, ready: boolean) => {
     setReadySessionIds((current) => {
       const alreadyReady = current.has(sessionId);
@@ -640,12 +663,18 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
   }, []);
   const handleStreamConnected = useCallback((sessionId: string) => {
+    const token = resumeRequestTokenRef.current;
+    setResumeProgress(current => {
+      if (current.token === token && current.completed.has(sessionId)) return current;
+      const completed = new Set(current.token === token ? current.completed : []);
+      completed.add(sessionId);
+      return { token, completed };
+    });
     const expectedForeground = priorityForegroundSessionId
       ?? pendingSwitchSessionId
       ?? activeSessionIdRef.current;
     if (sessionId !== expectedForeground) return;
     markStartupMilestone('foreground-stream-connected');
-    setForegroundResumeCompletedToken(resumeRequestTokenRef.current);
   }, [pendingSwitchSessionId, priorityForegroundSessionId]);
   const handleViewportReadyChange = useCallback((sessionId: string, ready: boolean) => {
     setViewportReadySessionIds((current) => {
@@ -1172,6 +1201,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       const refreshReason = reason === 'bfcache' || reason === 'online' ? reason : 'visibility';
       const forceForegroundReconnect = shouldForceForegroundReconnect({ wasPageHidden, reason });
       wasPageHidden = false;
+      // Freeze existing background backoff timers before React dispatches the
+      // visible-first wave, including when online fires without a prior hide.
+      suspendTerminalConnectionReconnects();
       clientLog('info', 'PWA_RESUME scheduled', {
         source: reason,
         forceForegroundReconnect,
@@ -2058,14 +2090,16 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       sessionId: session.id,
       foregroundSessionId,
       foregroundReady: foregroundConnectionReady,
+      isVisible: isLayoutVisible,
     }) && connectionPriorityReady;
     const resumeRequestEnabled = shouldRunResumeRequest({
       sessionId: session.id,
       foregroundSessionId,
       requestToken: resumeRequest.token,
       foregroundCompletedToken: foregroundResumeCompletedToken,
+      isVisible: resumePrioritySessionIds.has(session.id),
     }) && connectionPriorityReady;
-    const initialConnectDelayMs = session.id === foregroundSessionId
+    const initialConnectDelayMs = isLayoutVisible || session.id === foregroundSessionId
       ? 0
       : retainedViewportSessionIds.has(session.id)
         ? 0
@@ -2079,7 +2113,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         style={options.containerStyle}
         aria-hidden={options.hidden || undefined}
         onPointerDown={() => {
-          if (!isActive) activateSplitPane(session.id);
+          // A neighbouring slide can still be under the finger while a swipe
+          // reverses. Only stationary panes in the selected workspace may
+          // take focus here; Swiper owns activation across slides.
+          if (!isActive && isLayoutVisible) activateSplitPane(session.id);
         }}
         onWheelCapture={() => {
           // A trackpad/mouse wheel does not emit pointerdown. Activate during
@@ -2103,7 +2140,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               || (session.mode === 'tmux' && !contentReadySessionIds.has(session.id))
             }
             isLayoutVisible={isLayoutVisible}
-            initialConnectEnabled={initialConnectEnabled}
+            initialConnectEnabled={initialConnectEnabled && resumeRequestEnabled}
             resumeRequestEnabled={resumeRequestEnabled}
             suppressKeyboard={options.suppressKeyboard}
             keyboardPortalTarget={options.keyboardPortalTarget}
@@ -2112,8 +2149,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
             resumeRequestToken={resumeRequest.token}
             resumeRequestReason={resumeRequest.reason}
-            forceResumeReconnect={resumeRequest.forceForegroundReconnect && session.id === foregroundSessionId}
-            resumeRequestDelayMs={session.id === foregroundSessionId
+            forceResumeReconnect={resumeRequest.forceForegroundReconnect && resumePrioritySessionIds.has(session.id)}
+            resumeRequestDelayMs={resumePrioritySessionIds.has(session.id)
               ? 0
               : options.hidden
                 ? BACKGROUND_RESUME_INITIAL_DELAY_MS
@@ -2200,6 +2237,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               return;
             }
             clearTouchSwipeReleaseTimer();
+            isSwipePointerDownRef.current = true;
             isTouchSwipeRef.current = true;
           }}
           onTouchEnd={(_, event) => {
@@ -2217,10 +2255,20 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             // immediate snap path, so the page jumps with no release animation.
             // Keep the guard through the expected release window; transitionEnd
             // clears it earlier when Swiper does emit one.
+            isSwipePointerDownRef.current = false;
             endTouchSwipeAfterNativeSettle('touch-end');
           }}
           onTransitionEnd={() => {
             const swiper = swiperRef.current;
+            // Interrupting a release animation with another drag makes Swiper
+            // emit transitionEnd for the OLD animation from onTouchMove.
+            // Even an aligned wrapper is not settled while the finger is down.
+            // Clearing the guard here would reject the new slideChange and
+            // snap the wrapper back to the previous session.
+            if (isSwipePointerDownRef.current) {
+              logSwiperState('[swiper:transition-end-during-touch]');
+              return;
+            }
             if (
               isTouchSwipeRef.current &&
               swiper &&

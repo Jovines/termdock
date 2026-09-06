@@ -39,7 +39,6 @@ import {
 } from '../../terminal/resumeScheduling';
 import {
   getActivationRefreshMode,
-  shouldForceSettledRedraw,
 } from '../../terminal/refreshRedraw';
 import {
   CONFIRMED_SESSION_MISSING_MESSAGE,
@@ -145,8 +144,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminal = React.useMemo(() => createTermdockAPI(), []);
   const debugSession = React.useMemo(() => createDebugLogger('session'), []);
   const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
-  const resumeRequestDelayRef = React.useRef(resumeRequestDelayMs);
-  resumeRequestDelayRef.current = resumeRequestDelayMs;
+  const lastResumeRequestRef = React.useRef<{ token: number; visible: boolean } | null>(null);
   const resumeAttemptRef = React.useRef<{ startedAt: number; strategy: 'reconnect' | 'probe'; reason: string } | null>(null);
 
   // Sync with external fontSize changes while allowing local pinch-to-zoom overrides
@@ -172,6 +170,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isStreamReady, setIsStreamReady] = React.useState(false);
   const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
   const [isInitialSizeReady, setIsInitialSizeReady] = React.useState(false);
+  const [isViewportInitialized, setIsViewportInitialized] = React.useState(false);
   const [isCursorPresentationReady, setIsCursorPresentationReady] = React.useState(true);
   const {
     isOpen: isViewportKeyboardOpen,
@@ -496,7 +495,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // 注意只在 isActive 由 false→true 时才跑。terminalSessionId 变化、初次 mount
   // 不应该触发——那些场景由 'connected' / 'session-key-change' / 'mount' 自己
   // 的 refresh 负责，page-flip 多来一次会让用户看到 connected 之后再"闪一下"。
-  const wasActiveRef = React.useRef(false);
+  const wasActiveRef = React.useRef(isActive);
   React.useEffect(() => {
     if (!isActive) {
       terminalControllerRef.current?.blur();
@@ -525,7 +524,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (activationRefreshMode === 'none') {
       return;
     }
-    const pageFlipStartDimensions = terminalControllerRef.current?.getDimensions() ?? null;
     // 双 rAF 先等 swiper transform 收尾并校准尺寸。这里不完整重画、也不滚底；
     // 真正的稳定化刷新统一留给 transition 结束后的那一轮，避免可见的双重扫屏。
     let raf1 = 0;
@@ -540,11 +538,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
     const postTransitionTimer = window.setTimeout(() => {
       const controller = terminalControllerRef.current;
-      const settledDimensions = controller?.getDimensions() ?? null;
       controller?.requestRefresh('page-flip', {
-        // terminal.resize() already repaints when the swiper settle changed
-        // rows/cols. Only force a full-buffer redraw when fit stayed unchanged.
-        forceRedraw: shouldForceSettledRedraw(pageFlipStartDimensions, settledDimensions),
+        // Recheck settled geometry without repainting unchanged content.
+        // Actual resize and renderer context recovery already repaint.
+        skipScrollToBottom: true,
         reconcileServerSize: true,
       });
     }, 360);
@@ -711,7 +708,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     setRestartTrigger((token) => token + 1);
   }, []);
 
-  const probeOrRestartSession = React.useCallback((reason: string, forceReconnect: boolean) => {
+  const probeOrRestartSession = React.useCallback((reason: string, forceReconnect: boolean, visible: boolean) => {
     const tid = terminalIdRef.current;
     const startedAt = Date.now();
     if (tid && forceReconnect && reconnectTerminalConnectionNow(tid)) {
@@ -739,7 +736,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       });
       resumeAttemptRef.current = null;
       onStreamConnected?.(sessionId);
-    })) {
+    }, { visible })) {
       resumeAttemptRef.current = { startedAt, strategy: 'probe', reason };
       clientLog('info', 'PWA_RESUME terminal-start', {
         frontendSessionId: sessionId,
@@ -830,7 +827,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     reportViewing(logicalViewing, 'logical-viewing-change');
   }, [logicalViewing, reportViewing, terminalSessionId]);
 
-  useTerminalOutputSubscription(terminalSessionId, isLayoutVisible, isDocumentVisible, isStreamReady);
+  useTerminalOutputSubscription(terminalSessionId, isDocumentVisible, isStreamReady);
 
   // Listen for font size changes from TerminalViewport (pinch-to-zoom)
   React.useEffect(() => {
@@ -886,12 +883,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // A cold background session is already queued by the initial-connection
     // scheduler. Do not start a second resume/restart path for the same tab.
     if (!hasStartedInitialConnectRef.current) return;
-    const delayMs = resumeRequestDelayRef.current;
+    const delayMs = resumeRequestDelayMs;
+    const visible = delayMs <= 0;
+    const previous = lastResumeRequestRef.current;
+    if (previous?.token === resumeRequestToken && (previous.visible || !visible)) return;
     const resume = () => {
+      lastResumeRequestRef.current = { token: resumeRequestToken, visible };
       terminalControllerRef.current?.requestRefresh(resumeRequestReason, { skipScrollToBottom: true });
       probeOrRestartSession(
         delayMs > 0 ? 'global-resume-background' : 'global-resume-visible',
         delayMs <= 0 && forceResumeReconnect,
+        visible,
       );
     };
     if (delayMs <= 0) {
@@ -900,7 +902,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
     const timer = window.setTimeout(resume, delayMs);
     return () => window.clearTimeout(timer);
-  }, [resumeRequestToken, resumeRequestReason, resumeRequestEnabled, forceResumeReconnect, probeOrRestartSession]);
+  }, [resumeRequestToken, resumeRequestReason, resumeRequestEnabled, resumeRequestDelayMs, forceResumeReconnect, probeOrRestartSession]);
 
   // ensureSession 自愈：HTTP 建连失败等发生在 WebSocket 之前的错误也必须持续恢复。
   // 普通网络错误始终显示 Reconnecting，并按封顶退避重跑；只有明确的鉴权失败
@@ -1535,7 +1537,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
           },
         },
-        STREAM_OPTIONS
+        {
+          ...STREAM_OPTIONS,
+          getDimensions: () => terminalControllerRef.current?.getDimensions() ?? null,
+        }
       );
 
       streamCleanupRef.current = () => {
@@ -1612,6 +1617,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       debugSession(`[useEffect] Already initialized for sessionId=${sessionId}, skipping`);
       return;
     }
+
+    // Attach at xterm's measured grid. Opening before fonts/fit are ready
+    // makes tmux draw its old grid, then redraw everything after the resize.
+    if (!isViewportInitialized) return;
 
     const ensureSession = async (runId: number) => {
       debugSession(`[ensureSession] Starting for sessionId=${sessionId}, runId=${runId}`);
@@ -1818,7 +1827,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       debugSession(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${scheduledRunId ?? 'pending'}`);
     };
-  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession, desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName, initialConnectDelayMs, initialConnectEnabled]);
+  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession, desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName, initialConnectDelayMs, initialConnectEnabled, isViewportInitialized]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!sessionId) return;
@@ -2207,6 +2216,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalControllerRef.current = controller;
   }, []);
   const handleViewportReadyChange = React.useCallback((ready: boolean) => {
+    setIsViewportInitialized(ready);
     onViewportReadyChange?.(sessionId, ready);
   }, [onViewportReadyChange, sessionId]);
 
