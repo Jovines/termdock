@@ -80,6 +80,8 @@ import {
 import { isOwnedDesktopRuntimeTarget } from './runtimeTarget.js';
 import { serviceDocumentNeedsReload } from './serviceWindowRecovery.js';
 import {
+  CertificateTrustRequests,
+  resolveServiceCertificateTrust,
   canOfferCertificateTrust,
   downloadCertificateAuthority,
   isCertificateTrustError,
@@ -103,6 +105,8 @@ const START_TIMEOUT_MS = 90_000;
 const RESTORE_LOAD_TIMEOUT_MS = 15_000;
 const localServiceCertificatePath = path.join(termdockDir, 'certs', 'termdock-local.pem');
 const sessionTrustedCertificateTargets = new Set<string>();
+const certificateTrustRequests = new CertificateTrustRequests();
+const sessionTrustedLeafByOrigin = new Map<string, string>();
 const sessionTrustedCertificateAuthorities = new Map<string, string>();
 let managedLocalCertificateFingerprint: string | null = null;
 const serviceWindowRecoveryTimers = new WeakMap<BrowserWindow, ReturnType<typeof setTimeout>>();
@@ -538,7 +542,10 @@ function readManagedLocalCertificateFingerprint(): string | null {
   }
 }
 
-function installCertificateVerifyProcedure(targetSession: Session = session.defaultSession): void {
+function installCertificateVerifyProcedure(
+  targetSession: Session = session.defaultSession,
+  serviceOrigin?: string,
+): void {
   targetSession.setCertificateVerifyProc((request, callback) => {
     let isLocalTarget = false;
     try {
@@ -553,7 +560,11 @@ function installCertificateVerifyProcedure(targetSession: Session = session.defa
       // Keep Chromium's default verification if the certificate cannot be parsed.
     }
     const explicitlyTrustedTarget = presentedFingerprint
-      ? sessionTrustedCertificateTargets.has(certificateTrustKey(request.hostname, presentedFingerprint))
+      ? serviceOrigin
+        ? new URL(serviceOrigin).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+            === request.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+          && sessionTrustedLeafByOrigin.get(serviceOrigin) === presentedFingerprint
+        : sessionTrustedCertificateTargets.has(certificateTrustKey(request.hostname, presentedFingerprint))
       : false;
     const managedMatch = isLocalTarget
       ? matchManagedLocalCertificate(
@@ -564,7 +575,24 @@ function installCertificateVerifyProcedure(targetSession: Session = session.defa
       : { matches: false, currentFingerprint: managedLocalCertificateFingerprint };
     managedLocalCertificateFingerprint = managedMatch.currentFingerprint;
     const managedLocalCertificate = managedMatch.matches;
-    callback(explicitlyTrustedTarget || managedLocalCertificate ? 0 : -3);
+    if (explicitlyTrustedTarget || managedLocalCertificate) {
+      callback(0);
+      return;
+    }
+    if (serviceOrigin && canOfferCertificateTrust(serviceOrigin)
+      && isCertificateTrustError(request.verificationResult)) {
+      // Resolve trust before Chromium caches a rejection. This covers fetch,
+      // WebSocket and navigation requests, not only the initial Node probe.
+      void resolveServiceCertificateTrust(
+        serviceOrigin, request.hostname, request.certificate.data,
+        () => requestCertificateTrust(serviceOrigin),
+      ).then((trusted) => callback(trusted ? 0 : -3), (error: unknown) => {
+        console.warn(`[desktop-certificate] ${serviceOrigin}: ${networkErrorDetails(error)}`);
+        callback(-3);
+      });
+      return;
+    }
+    callback(-3);
   });
 }
 
@@ -652,9 +680,20 @@ function trustedCertificateAuthorityFor(target: string): TrustedCertificateAutho
   return readDesktopConfig().trustedCertificateAuthorities.find((entry) => entry.origin === origin);
 }
 
-async function requestCertificateTrust(
-  target: string,
-): Promise<DownloadedCertificateAuthority | null> {
+function requestCertificateTrust(target: string): Promise<DownloadedCertificateAuthority | null> {
+  return certificateTrustRequests.request(new URL(target).origin, () => confirmCertificateTrust(target));
+}
+
+function rememberSessionCertificate(target: string, certificate: DownloadedCertificateAuthority): void {
+  const url = new URL(target);
+  const previous = sessionTrustedLeafByOrigin.get(url.origin);
+  if (previous) sessionTrustedCertificateTargets.delete(certificateTrustKey(url.hostname, previous));
+  sessionTrustedLeafByOrigin.set(url.origin, certificate.leafFingerprint256);
+  sessionTrustedCertificateAuthorities.set(url.origin, certificate.certificatePem);
+  sessionTrustedCertificateTargets.add(certificateTrustKey(url.hostname, certificate.leafFingerprint256));
+}
+
+async function confirmCertificateTrust(target: string): Promise<DownloadedCertificateAuthority | null> {
   let certificate: DownloadedCertificateAuthority;
   try {
     certificate = await downloadCertificateAuthority(target);
@@ -670,10 +709,7 @@ async function requestCertificateTrust(
 
   const existingTrust = trustedCertificateAuthorityFor(target);
   if (existingTrust?.fingerprint256 === certificate.fingerprint256) {
-    sessionTrustedCertificateAuthorities.set(new URL(target).origin, certificate.certificatePem);
-    sessionTrustedCertificateTargets.add(
-      certificateTrustKey(new URL(target).hostname, certificate.leafFingerprint256),
-    );
+    rememberSessionCertificate(target, certificate);
     return certificate;
   }
 
@@ -704,10 +740,7 @@ async function requestCertificateTrust(
     trustedAt: Date.now(),
   });
   writeDesktopConfig(config);
-  sessionTrustedCertificateAuthorities.set(origin, certificate.certificatePem);
-  sessionTrustedCertificateTargets.add(
-    certificateTrustKey(new URL(target).hostname, certificate.leafFingerprint256),
-  );
+  rememberSessionCertificate(target, certificate);
   return certificate;
 }
 
@@ -977,6 +1010,11 @@ async function probeServiceWithLocalNetworkPermission(
   // Do the first macOS HTTPS probe with Node TLS. Sending an untrusted
   // certificate through Chromium first permanently caches that rejection for
   // the process and prevents an immediate retry after the user approves it.
+  if (options.interactive !== false && canOfferCertificateTrust(normalizedUrl)
+    && trustedCertificateAuthorityFor(normalizedUrl)) {
+    const certificate = await requestCertificateTrust(normalizedUrl);
+    if (!certificate) return { ok: false, url: normalizedUrl, error: 'HTTPS 证书尚未受信任' };
+  }
   const approvedAuthority = sessionTrustedCertificateAuthorities.get(new URL(normalizedUrl).origin);
   let probe = approvedAuthority
     ? await probeServiceWithCertificateAuthority(normalizedUrl, approvedAuthority)
@@ -1477,6 +1515,13 @@ async function connectWindow(
   rawUrl: string,
   options: { focus?: boolean; updateLastConnection?: boolean; persist?: boolean } = {},
 ): Promise<ServiceProbe> {
+  if (options.focus !== false) {
+    try {
+      certificateTrustRequests.retry(new URL(normalizeServiceUrl(rawUrl)).origin);
+    } catch {
+      return await probeService(rawUrl);
+    }
+  }
   let probe = await probeServiceWithLocalNetworkPermission(rawUrl, {
     interactive: options.focus !== false,
   });
@@ -1497,6 +1542,9 @@ async function connectWindow(
       const existing = config.connections.find((entry) => entry.url === probe.url);
       if (existing) existing.lastConnectedAt = Date.now();
       writeDesktopConfig(config);
+    }
+    if (await serviceDocumentNeedsReload(existingWindow.webContents, key)) {
+      await existingWindow.loadURL(probe.url);
     }
     if (options.focus !== false) {
       mainWindow?.hide();
@@ -1625,7 +1673,7 @@ async function recoverServiceWindow(window: BrowserWindow, reason: string): Prom
   try {
     let probeTimer: ReturnType<typeof setTimeout> | null = null;
     const probe = await Promise.race([
-      probeService(serviceOrigin),
+      probeServiceWithLocalNetworkPermission(serviceOrigin, { interactive: false }),
       new Promise<ServiceProbe>((resolve) => {
         probeTimer = setTimeout(() => resolve({
           ok: false,
@@ -1655,7 +1703,7 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
       .digest('hex')
       .slice(0, 24)}`)
     : null;
-  if (serviceSession) installCertificateVerifyProcedure(serviceSession);
+  if (serviceSession) installCertificateVerifyProcedure(serviceSession, options?.serviceOrigin);
   const window = new BrowserWindow({
     title: options ? `Termdock — ${options.label}` : 'Termdock — 连接中心',
     show: false,
@@ -1682,6 +1730,17 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
     },
   });
   if (options) windowServiceOrigins.set(window, options.serviceOrigin);
+  if (options) {
+    window.webContents.on('certificate-error', (event, url, error, certificate, callback) => {
+      if (new URL(url).origin !== options.serviceOrigin
+        || !canOfferCertificateTrust(url) || !isCertificateTrustError(error)) return;
+      event.preventDefault();
+      void resolveServiceCertificateTrust(
+        options.serviceOrigin, new URL(url).hostname, certificate.data,
+        () => requestCertificateTrust(options.serviceOrigin),
+      ).then(callback, () => callback(false));
+    });
+  }
   if (options) {
     window.webContents.on('page-title-updated', (event) => {
       event.preventDefault();
@@ -1840,7 +1899,10 @@ function installIpcHandlers(): void {
     return png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength);
   });
   ipcMain.handle('desktop:snapshot', () => snapshot());
-  ipcMain.handle('desktop:probe', (_event, url: string) => probeServiceWithLocalNetworkPermission(url));
+  ipcMain.handle('desktop:probe', (_event, url: string) => {
+    try { certificateTrustRequests.retry(new URL(normalizeServiceUrl(url)).origin); } catch { /* probe reports invalid URLs */ }
+    return probeServiceWithLocalNetworkPermission(url);
+  });
   ipcMain.handle('desktop:save-connection', async (_event, input: { url: string; label: string }) => {
     const url = normalizeServiceUrl(input.url);
     const config = readDesktopConfig();

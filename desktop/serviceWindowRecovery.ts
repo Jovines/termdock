@@ -7,6 +7,7 @@ interface ServiceDocumentState {
   origin?: unknown;
   readyState?: unknown;
   rootChildren?: unknown;
+  bootError?: unknown;
 }
 
 const SERVICE_DOCUMENT_STATE_SCRIPT = String.raw`
@@ -14,6 +15,7 @@ const SERVICE_DOCUMENT_STATE_SCRIPT = String.raw`
   origin: window.location.origin,
   readyState: document.readyState,
   rootChildren: document.getElementById('root')?.childElementCount ?? 0,
+  bootError: Boolean(document.querySelector('.termdock-boot-error')),
 }))()
 `;
 
@@ -41,7 +43,8 @@ export async function serviceDocumentNeedsReload(
       || state.origin !== expectedOrigin
       || state.readyState !== 'complete'
       || typeof state.rootChildren !== 'number'
-      || state.rootChildren < 1;
+      || state.rootChildren < 1
+      || state.bootError === true;
   } catch {
     return true;
   } finally {

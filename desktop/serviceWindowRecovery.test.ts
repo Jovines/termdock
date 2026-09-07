@@ -29,6 +29,15 @@ describe('serviceDocumentNeedsReload', () => {
     }, 'https://localhost:9834')).resolves.toBe(true);
   });
 
+  it('reloads a rendered authentication bootstrap error', async () => {
+    await expect(serviceDocumentNeedsReload({
+      getURL: () => 'https://localhost:9834/',
+      executeJavaScript: vi.fn().mockResolvedValue({
+        origin: 'https://localhost:9834', readyState: 'complete', rootChildren: 1, bootError: true,
+      }),
+    }, 'https://localhost:9834')).resolves.toBe(true);
+  });
+
   it('treats an unresponsive renderer as recoverable', async () => {
     await expect(serviceDocumentNeedsReload({
       getURL: () => 'https://localhost:9834/',

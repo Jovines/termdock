@@ -19,7 +19,7 @@ export interface DownloadedCertificateAuthority {
 
 export function isCertificateTrustError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /ERR_CERT_AUTHORITY_INVALID|ERR_CERT_INVALID|SELF[_ ]SIGNED[_ ]CERT(?:[_ ]IN[_ ]CHAIN)?|UNABLE[_ ]TO[_ ]VERIFY[_ ](?:THE[_ ]FIRST[_ ]CERTIFICATE|LEAF[_ ]SIGNATURE)|UNABLE[_ ]TO[_ ]GET[_ ]ISSUER[_ ]CERT/i.test(message);
+  return /(?:ERR_)?CERT_AUTHORITY_INVALID|(?:ERR_)?CERT_INVALID|SELF[_ ]SIGNED[_ ]CERT(?:[_ ]IN[_ ]CHAIN)?|UNABLE[_ ]TO[_ ]VERIFY[_ ](?:THE[_ ]FIRST[_ ]CERTIFICATE|LEAF[_ ]SIGNATURE)|UNABLE[_ ]TO[_ ]GET[_ ]ISSUER[_ ]CERT/i.test(message);
 }
 
 export function matchManagedLocalCertificate(
@@ -177,4 +177,47 @@ export async function downloadCertificateAuthority(rawUrl: string): Promise<Down
     });
     request.on('error', reject);
   });
+}
+
+/** Share one prompt per origin; a cancellation stays quiet until an explicit retry. */
+export class CertificateTrustRequests {
+  private pending = new Map<string, Promise<DownloadedCertificateAuthority | null>>();
+  private declined = new Set<string>();
+
+  retry(origin: string): void {
+    this.declined.delete(origin);
+  }
+
+  request(
+    origin: string,
+    prompt: () => Promise<DownloadedCertificateAuthority | null>,
+  ): Promise<DownloadedCertificateAuthority | null> {
+    const pending = this.pending.get(origin);
+    if (pending) return pending;
+    if (this.declined.has(origin)) return Promise.resolve(null);
+    const result = Promise.resolve().then(prompt).then((certificate) => {
+      if (!certificate) this.declined.add(origin);
+      return certificate;
+    }, (error: unknown) => {
+      this.declined.add(origin);
+      throw error;
+    }).finally(() => this.pending.delete(origin));
+    this.pending.set(origin, result);
+    return result;
+  }
+}
+
+export async function resolveServiceCertificateTrust(
+  origin: string,
+  hostname: string,
+  presentedPem: string,
+  requestTrust: () => Promise<DownloadedCertificateAuthority | null>,
+): Promise<boolean> {
+  if (new URL(origin).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+    !== hostname.replace(/^\[|\]$/g, '').toLowerCase()) return false;
+  const presented = new crypto.X509Certificate(presentedPem);
+  const trusted = await requestTrust();
+  // The server can rotate again while the dialog is open. Approval of the
+  // downloaded certificate must never approve a different pending request.
+  return trusted !== null && presented.fingerprint256 === trusted.leafFingerprint256;
 }
