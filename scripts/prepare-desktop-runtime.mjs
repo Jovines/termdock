@@ -164,6 +164,7 @@ const runtimePackage = {
   private: true,
   type: 'module',
   dependencies: rootPackage.dependencies,
+  overrides: rootPackage.overrides,
 };
 fs.writeFileSync(path.join(serverDir, 'package.json'), `${JSON.stringify(runtimePackage, null, 2)}\n`);
 fs.copyFileSync(path.join(root, 'package-lock.json'), path.join(serverDir, 'package-lock.json'));
