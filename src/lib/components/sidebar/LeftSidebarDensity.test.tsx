@@ -103,7 +103,7 @@ describe('LeftSidebar session density', () => {
     expect(within(splitGroup!).getByText('Session 1').closest('button')?.className).toContain('sidebar-session-primary');
     expect(screen.getByText('Session 3').closest('button')?.className).toContain('sidebar-session-primary');
     expect(screen.getByRole('button', { name: 'Remove from split Session 1' }).className).toContain('sidebar-session-action');
-    expect(splitGroup?.className).toContain('before:bg-border');
+    expect(splitGroup?.className).toContain('before:border-border');
     expect(splitGroup?.querySelector('[data-split-members]')?.className).not.toContain('border-t');
     expect(splitGroup?.querySelector('header')).toBeNull();
     expect(within(splitGroup!).queryByLabelText('More actions')).toBeNull();

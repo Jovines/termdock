@@ -18,6 +18,11 @@ vi.mock('../../terminal/api', async (original) => ({
   saveCollaborationGroup: mocks.save,
   removeCollaborationGroup: mocks.remove,
 }));
+// Simulate the drawer's stale post-drag click suppression. Independent DnD
+// surfaces must bypass it so their controls remain clickable after a gesture.
+vi.mock('@use-gesture/react', () => ({
+  useDrag: () => () => ({ onClickCapture: (event: { stopPropagation(): void }) => event.stopPropagation() }),
+}));
 vi.mock('@hello-pangea/dnd', () => ({
   DragDropContext: ({ children, onBeforeCapture, onDragStart, onDragEnd }: any) => {
     mocks.capture = onBeforeCapture; mocks.start = onDragStart; mocks.end = onDragEnd; return children;
@@ -33,11 +38,11 @@ const callbacks = () => ({
   onReorderSplitWorkspace: vi.fn(), onRenameSplitWorkspace: vi.fn(), onCombineSplitSessions: vi.fn(),
   onReorderSessions: vi.fn(), onOpenSettings: vi.fn(),
 });
-async function setup(groupByFolder = false, groupIds = baseGroup.sessionIds, sessionOrder = ['a', 'b', 'c', 'd']) {
+async function setup(groupByFolder = false, groupIds = baseGroup.sessionIds, sessionOrder = ['a', 'b', 'c', 'd'], pinned = true) {
   useSidebarStore.setState({ groupByFolder, collapsedGroups: new Set() });
   mocks.list.mockResolvedValue({ groups: [{ ...baseGroup, sessionIds: groupIds }] });
   const handlers = callbacks();
-  render(<I18nProvider><LeftSidebar {...handlers} isOpen pinned drawerWidthPx={300}
+  render(<I18nProvider><LeftSidebar {...handlers} isOpen pinned={pinned} drawerWidthPx={300}
     sessions={sessionOrder.map((id) => ({ id, name: id.toUpperCase(), mode: 'shell' as const }))}
     activeSessionId="a" sessionStates={new Map()} splitWorkspaces={[workspace]} /></I18nProvider>);
   await screen.findByRole('region', { name: 'Agent 工作组：Release team' });
@@ -58,6 +63,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.save.mockResolvedValue({ group: baseGroup });
   mocks.remove.mockResolvedValue(undefined);
+  Object.defineProperty(HTMLElement.prototype, 'getAnimations', { configurable: true, value: vi.fn(() => []) });
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ locale: 'en', agents: [] }))));
 });
@@ -163,6 +169,23 @@ describe('Agent workgroup split navigation', () => {
     end();
     expect(handlers.onReorderSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd']);
     await waitFor(() => expect(mocks.save).toHaveBeenCalled());
+  });
+  it('keeps an entry drop target when the destination group is displaced during sorting', async () => {
+    const handlers = await setup(false, baseGroup.sessionIds, ['d', 'a', 'b', 'c']);
+    const landingArea = document.querySelector<HTMLElement>('[data-collaboration-background]')!;
+    vi.spyOn(landingArea, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 47, 200, 6));
+    act(() => mocks.capture!());
+    const end = drag('d', 'session');
+    point(null);
+    end({ destination: { droppableId: 'group-sessions:', index: 1 } });
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ id: 'team', name: 'Release team', sessionIds: ['a', 'c', 'b', 'd'] }));
+    expect(handlers.onReorderSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd']);
+  });
+  it('keeps layout buttons usable when the overlay drawer has stale drag suppression', async () => {
+    const handlers = await setup(false, baseGroup.sessionIds, ['a', 'b', 'c', 'd'], false);
+    fireEvent.click(screen.getByRole('button', { name: 'Split layout: Side by side' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Stacked' }));
+    expect(handlers.onSetSplitLayout).toHaveBeenCalledWith('a', 'vertical');
   });
   it('cancel and unsupported drops preserve memberships', async () => {
     const handlers = await setup();

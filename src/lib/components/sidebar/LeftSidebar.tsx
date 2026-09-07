@@ -306,7 +306,7 @@ export function LeftSidebar(
   const draggedSessionIdRef = useRef<string | null>(null);
   const [isSidebarGroupDragging, setIsSidebarGroupDragging] = useState(false);
   const sidebarDropGeometryRef = useRef<Array<{
-    element: HTMLElement; sessionId: string; groupId: string; rect: DOMRect;
+    element: HTMLElement; sessionId: string; groupId: string; rect: DOMRect; background: boolean;
     scrollParents: Array<{ element: HTMLElement; top: number; left: number }>;
   }>>([]);
   const splitExitAllowedListIdRef = useRef<string | null>(null);
@@ -362,15 +362,16 @@ export function LeftSidebar(
   }, [agentOperationsOpen, isOpen, refreshCollaborationGroups]);
 
   const captureSidebarDropGeometry = useCallback(() => {
-    sidebarDropGeometryRef.current = Array.from(document.querySelectorAll<HTMLElement>('[data-collaboration-member]')).flatMap((element) => {
-      const sessionId = element.dataset.collaborationMember;
+    sidebarDropGeometryRef.current = Array.from(document.querySelectorAll<HTMLElement>('[data-collaboration-member], [data-collaboration-background]')).flatMap((element) => {
+      const sessionId = element.dataset.collaborationMember ?? '';
+      const background = element.hasAttribute('data-collaboration-background');
       const groupId = element.closest<HTMLElement>('[data-collaboration-group]')?.dataset.collaborationGroup;
-      if (!sessionId || !groupId) return [];
+      if ((!sessionId && !background) || !groupId) return [];
       const scrollParents = [];
       for (let parent = element.parentElement; parent; parent = parent.parentElement) {
         scrollParents.push({ element: parent, top: parent.scrollTop, left: parent.scrollLeft });
       }
-      return [{ element, sessionId, groupId, rect: element.getBoundingClientRect(), scrollParents }];
+      return [{ element, sessionId, groupId, background, rect: element.getBoundingClientRect(), scrollParents }];
     });
   }, []);
 
@@ -401,6 +402,11 @@ export function LeftSidebar(
         && clientY >= target.rect.top - dy + target.rect.height * 0.25
         && clientY <= target.rect.bottom - dy - target.rect.height * 0.25;
     });
+    if (centeredMember?.background) {
+      centeredMember.element.closest<HTMLElement>('[data-collaboration-group]')?.setAttribute('data-drop-active', 'true');
+      splitExitTargetRef.current = { kind: 'collaboration', groupId: centeredMember.groupId, background: true };
+      return;
+    }
     if (centeredMember) {
       const workspace = splitWorkspaces.find((candidate) => candidate.sessionIds.includes(centeredMember.sessionId));
       if (!workspace?.sessionIds.includes(draggedSessionIdRef.current ?? '')) {
@@ -1357,7 +1363,7 @@ export function LeftSidebar(
       <section
         data-split-workspace={workspace.id}
         aria-label={accessibleName}
-        className={`group/split relative rounded-sm p-0.5 before:pointer-events-none before:absolute before:inset-y-1 before:left-0 before:w-px before:bg-border transition-colors ${
+        className={`group/split relative rounded-md p-0.5 before:pointer-events-none before:absolute before:inset-0 before:rounded-md before:border before:border-border transition-colors ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
@@ -1428,7 +1434,7 @@ export function LeftSidebar(
         data-collaboration-group={collaboration.id}
         data-collaboration-group-name={collaboration.name}
         aria-label={`Agent 工作组：${collaboration.name}`}
-        className={`group/collaboration relative rounded-sm p-0.5 before:pointer-events-none before:absolute before:inset-y-1 before:left-0 before:w-px before:bg-border transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
+        className={`group/collaboration relative rounded-md p-0.5 before:pointer-events-none before:absolute before:inset-0 before:rounded-md before:border before:border-border transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
@@ -1471,7 +1477,7 @@ export function LeftSidebar(
                   data-split-anchor={section.workspace?.sessionIds[0]}
                   role={section.workspace ? 'region' : undefined}
                   aria-label={section.workspace ? `${t('tab.splitWorkspace')} · ${section.sessionIds.length}` : undefined}
-                  className={section.workspace && !unifiedSplit ? `relative my-0.5 before:pointer-events-none before:absolute before:inset-y-0.5 before:left-0 before:w-px before:bg-border data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${section.sessionIds.includes(activeSessionId ?? '') ? 'bg-primary/[0.07]' : 'bg-surface/35'}` : undefined}>
+                  className={section.workspace && !unifiedSplit ? `relative my-0.5 rounded-sm before:pointer-events-none before:absolute before:inset-0 before:rounded-sm before:border before:border-border data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${section.sessionIds.includes(activeSessionId ?? '') ? 'bg-primary/[0.07]' : 'bg-surface/35'}` : undefined}>
                   {section.sessionIds.map((id) => {
                     const session = sessionsById.get(id);
                     if (!session) return null;
@@ -1556,6 +1562,7 @@ export function LeftSidebar(
                   <div
                     ref={dragProvided.innerRef}
                     {...dragProvided.draggableProps}
+                    data-sidebar-gesture-ignore
                     data-sidebar-entity-index={index}
                     className="relative"
                   >
@@ -1892,6 +1899,7 @@ export function LeftSidebar(
                                               <div
                                                 ref={dragProvided.innerRef}
                                                 {...dragProvided.draggableProps}
+                                                data-sidebar-gesture-ignore
                                                 data-sidebar-entity-index={index}
                                                 className="relative"
                                               >
