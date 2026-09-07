@@ -1,3 +1,4 @@
+import { getPublicOrigin } from './publicSecurity.js';
 let secureCookies = false;
 
 export function setSecureCookieMode(enabled: boolean): void {
@@ -5,12 +6,12 @@ export function setSecureCookieMode(enabled: boolean): void {
 }
 
 export function shouldUseSecureCookies(): boolean {
-  return secureCookies;
+  return secureCookies || Boolean(getPublicOrigin());
 }
 
 export function getCookieSecurityOptions() {
   return {
-    secure: secureCookies,
+    secure: shouldUseSecureCookies(),
     sameSite: 'lax' as const,
   };
 }

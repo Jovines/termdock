@@ -50,7 +50,20 @@ function AuthGate() {
   }, []);
 
   useEffect(() => {
-    refresh();
+    void refresh();
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', refreshVisible);
+    window.addEventListener('focus', refreshVisible);
+    // Active terminal-only connections also need an HTTP response to renew
+    // the HttpOnly cookie; WebSocket traffic cannot set it.
+    const timer = window.setInterval(refreshVisible, 60 * 60 * 1000);
+    return () => {
+      document.removeEventListener('visibilitychange', refreshVisible);
+      window.removeEventListener('focus', refreshVisible);
+      window.clearInterval(timer);
+    };
   }, [refresh]);
 
   useEffect(() => {

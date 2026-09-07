@@ -148,6 +148,8 @@ export const PORT = {
 | 配置项 | 环境变量 | 默认值 | 定义位置 |
 |--------|---------|--------|---------|
 | 监听地址 | `HOST` | 0.0.0.0 | `config.ts` DEFAULT_HOST |
+| 公网严格模式 | `TERMDOCK_PUBLIC_ORIGIN` | 未启用 | `utils/publicSecurity.ts` |
+| 登录密码（覆盖文件） | `TERMDOCK_PASSWORD` | 未设置 | `utils/authProtection.ts` |
 | 域名白名单 | `TERMDOCK_ALLOWED_HOSTS` | — | 多个文件读 env |
 | mDNS 域名后缀 | `TERMDOCK_LOCAL_ACCESS_DOMAIN_SUFFIX` | termdock.local | `config.ts` LOCAL_ACCESS |
 | mDNS 名称长度 | `TERMDOCK_LOCAL_ACCESS_NAME_LENGTH` | 4 | `config.ts` LOCAL_ACCESS |
@@ -178,3 +180,45 @@ export const PORT = {
 | Shell | `SHELL` | 继承当前 | 多个文件读 env |
 | 额外路径 | `ALLOWED_PATHS` | — | pathValidator 读 env |
 | 开发模式 | `NODE_ENV` | — | 影响多个默认值 |
+
+
+## 公网安全模式
+
+Termdock 的登录用户拥有运行服务的系统账户权限，终端可以执行任意命令。
+Host 白名单、CSRF 和文件路径检查不能代替认证，也不是操作系统沙箱。
+
+先运行 `td --set-password` 设置至少 16 位、唯一的高强度密码，再配置：
+
+```dotenv
+TERMDOCK_PUBLIC_ORIGIN=https://term.example.com:9834
+```
+
+该值是浏览器访问的完整 HTTPS origin，端口映射时填写外部端口。
+程序自动加入对应 Host 白名单，并只接受这个精确的浏览器 Origin（协议、主机、端口都匹配）；
+WebSocket 在此模式下不能省略 Origin。HTTP CLI 可不带 Origin，但私有接口仍要求认证。
+
+端口映射应指向 Termdock 的 HTTPS 监听器。程序在公网模式下拒绝无 TLS 的非回环监听。
+已有 TLS 反向代理可以连接仅监听 `127.0.0.1` / `::1` 的 HTTP 后端；程序不会自动信任
+`X-Forwarded-For` 或 `X-Forwarded-Proto`。此配置不会申请证书、配置路由器或开放防火墙。
+公网访问需要客户端可验证、与访问域名匹配的证书。
+
+公网模式同时强制 Secure Cookie 和 HSTS。所有认证会话采用 30 天滑动有效期：已认证访问同时续期服务端会话与浏览器 Cookie，
+连续 30 天未访问才需要重新登录，不另设 12 小时或 30 分钟上限。页面切回前台及可见时每小时
+会检查登录状态并续期，续期结果会持久化；改密码和主动退出仍立即撤销会话。
+旧版本存储的密码如果没有长度元数据，需要重新运行 `td --set-password`。
+建议使用文件保存密码哈希；环境变量密码会被子进程继承，并且对应会话在重启后失效。
+本次会话存储升级会使旧格式会话失效，需要重新登录。
+
+所有模式下均有以下应用防护：
+
+- `/api` 默认要求认证（已设置密码时），认证发生在解析请求体之前；公开端点和带作用域的预览另行验证。
+- scrypt 密码验证使用异步工作线程，最多并发 2 次、全局每分钟 30 次，并保留逐来源 IP 的指数退避。
+- 会话令牌只保存 SHA-256 摘要，绑定当前密码版本；退出登录同步落盘并立即断开关联 WebSocket。
+- WebSocket 每次输入前及每秒检查会话，消息上限 1 MiB、全局连接上限 256；HTTP 有连接、头部和读取超时上限。
+- HTML / SVG 文件预览的响应携带 CSP sandbox，顶层直接打开同样不能取得应用来源权限。
+- 预览令牌绑定登录会话与目录，30 分钟绝对过期，不会因不断加载资源无限续期；访问日志隐藏令牌。
+- 应用页面限制内联脚本和事件处理器，禁止对象插件及跨来源嵌入；客户端日志接口需要认证并校验 Origin。
+- 本机 CLI 特权调用同时要求回环地址、专用令牌，且拒绝浏览器来源头。
+
+这些措施不提供抗大流量 DDoS 或多租户隔离。需要更强身份保证时，应在入口增加 MFA / VPN，
+并以独立、最小权限的系统账户运行服务。程序本身的回归测试不替代公网链路的实际验收。

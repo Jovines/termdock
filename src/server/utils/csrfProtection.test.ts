@@ -44,3 +44,16 @@ describe('CSRF protection local bypass', () => {
     expect(json).toHaveBeenCalledWith(expect.objectContaining({ code: 'CSRF_ERROR' }));
   });
 });
+
+
+describe('CSRF token validation', () => {
+  it('rejects empty and attacker-chosen malformed token pairs', () => {
+    const csrf = new CsrfProtection();
+    expect(csrf.verifyToken('', '')).toBe(false);
+    expect(csrf.verifyToken('a', 'a')).toBe(false);
+    expect(csrf.verifyToken('g'.repeat(64), 'g'.repeat(64))).toBe(false);
+    const token = csrf.generateToken();
+    expect(csrf.verifyToken(token, token)).toBe(true);
+    expect(csrf.verifyToken(token, csrf.generateToken())).toBe(false);
+  });
+});

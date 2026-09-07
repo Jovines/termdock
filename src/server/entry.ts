@@ -1,3 +1,6 @@
+import { apiAccessGate, isTrustedLocalRequest } from './utils/apiAccess.js';
+import { assertPublicSecurity, securityHeaders } from './utils/publicSecurity.js';
+import { guardWebSocketSession } from './utils/webSocketSecurity.js';
 import { readTerminalHandshakeDimensions } from './utils/terminalHandshakeDimensions.js';
 import { apiCachePolicy } from './utils/apiCachePolicy.js';
 import 'dotenv/config';
@@ -22,12 +25,13 @@ import { createOnboardingRouter } from './routes/onboarding.js';
 import { createLocalRouter } from './routes/local.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
-import { isUpgradeRequestAuthenticated, requireAuth } from './utils/authProtection.js';
+import { isUpgradeRequestAuthenticated, requireAuth, renewSessionMiddleware } from './utils/authProtection.js';
 import { localAccessManager, type LocalAccessState } from './utils/localAccess.js';
 import {
   isAllowedHost,
   isUpgradeOriginAllowed,
   validateHostMiddleware,
+  validateOriginMiddleware,
 } from './utils/requestSecurity.js';
 import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
 import { requestDeadlineMiddleware } from './utils/requestDeadline.js';
@@ -181,13 +185,20 @@ function getDiffTraceEvent(message: unknown): string | null {
 }
 
 export function createApp(options: AppOptions = {}): express.Express {
+  assertPublicSecurity();
   const app = express();
+  app.disable('x-powered-by');
+  app.use(securityHeaders);
 
   app.use(validateHostMiddleware);
 
-  // 基础中间件
-  app.use(express.json({ limit: '5mb' }));
+  // Authenticate before allocating request bodies, including future API routes.
   app.use(cookieParser());
+  app.use('/api', renewSessionMiddleware);
+  app.use('/api', apiAccessGate(options.localApiToken));
+  // 基础中间件
+  app.use('/api/auth', express.json({ limit: '2kb' }));
+  app.use(express.json({ limit: '5mb' }));
 
   // Note: clientId cookie is no longer used for session persistence (sessions are global).
   // Kept for potential future use and backward compatibility.
@@ -218,6 +229,7 @@ export function createApp(options: AppOptions = {}): express.Express {
         return req.path || req.url || '';
       }
     })();
+    const logPathname = pathname.replace(/(\/fs\/preview\/)[0-9a-f]{32}(?=\/)/gi, '$1[redacted]');
     const routeFamily = getRouteFamily(pathname);
     let logged = false;
     const log = (event: 'finish' | 'close') => {
@@ -228,7 +240,7 @@ export function createApp(options: AppOptions = {}): express.Express {
       writeJsonLog('access.log', {
         event,
         method: req.method,
-        path: pathname,
+        path: logPathname,
         routeFamily,
         statusCode: res.statusCode,
         durationMs: Math.round(durationMs * 100) / 100,
@@ -241,7 +253,7 @@ export function createApp(options: AppOptions = {}): express.Express {
           source: 'access',
           event,
           method: req.method,
-          path: pathname,
+          path: logPathname,
           routeFamily,
           statusCode: res.statusCode,
           durationMs: Math.round(durationMs * 100) / 100,
@@ -294,7 +306,7 @@ export function createApp(options: AppOptions = {}): express.Express {
 
   // Client-side log relay — enables collecting browser/device logs
   // on the server, critical for debugging mobile Safari / PWA issues.
-  app.post('/api/client-log', (req, res) => {
+  app.post('/api/client-log', requireAuth(), validateOriginMiddleware, (req, res) => {
     const { level, message, data } = req.body ?? {};
     if (!shouldWriteClientLog(level, message)) {
       res.json({ ok: true, suppressed: true });
@@ -357,11 +369,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   // A locally installed Agent/plugin CLI uses the mode-0600 local API token.
   // Keep this bypass loopback-only: possession of the token must not turn the
   // LAN-facing terminal API into a bearer-token endpoint.
-  const isTrustedLocalCliRequest = (req: express.Request): boolean => {
-    if (!options.localApiToken || req.header('X-Termdock-Local-Token') !== options.localApiToken) return false;
-    const address = req.socket.remoteAddress ?? '';
-    return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
-  };
+  const isTrustedLocalCliRequest = (req: express.Request): boolean => isTrustedLocalRequest(req, options.localApiToken);
 
   app.get('/api/diagnostics/runtime', requireAuth({ bypass: isTrustedLocalCliRequest }), async (_req, res) => {
     if (!options.runtimeMonitor) {
@@ -376,7 +384,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   // session cookie, then get redirected to a short-lived URL token so the
   // sandboxed iframe's subresource requests (which browsers refuse to send
   // cookies for) can still load images/css/js.
-  app.use('/api/terminal', requireAuth({ bypass: (req) => req.path.startsWith('/fs/preview') || isTrustedLocalCliRequest(req) }));
+  app.use('/api/terminal', requireAuth({ bypass: (req) => /^\/fs\/preview\//i.test(req.path) || isTrustedLocalCliRequest(req) }));
   app.use('/api/terminal', csrfProtection.verifyMiddleware({ bypass: isTrustedLocalCliRequest }));
 
   // 终端路由
@@ -410,6 +418,13 @@ export function createApp(options: AppOptions = {}): express.Express {
     });
   }
 
+  // Never expose parser errors, submitted passwords, or stack traces to callers.
+  app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(error);
+    const candidate = (error as { status?: unknown })?.status;
+    const status = typeof candidate === 'number' && candidate >= 400 && candidate <= 599 ? candidate : 500;
+    res.status(status).json({ error: status === 413 ? 'Request body too large' : status < 500 ? 'Invalid request' : 'Internal server error', code: 'REQUEST_ERROR' });
+  });
   return app;
 }
 
@@ -433,9 +448,13 @@ function reloadHttpsCertificate(server: HttpServer, options: ServerOptions): boo
 }
 
 export function startServer(options: ServerOptions = {}): StartServerResult {
+  assertPublicSecurity();
   const stopLogMaintenance = startTermdockLogMaintenance();
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
+  if (process.env.TERMDOCK_PUBLIC_ORIGIN && !(options.httpsCertPath && options.httpsKeyPath) && !['127.0.0.1', '::1', 'localhost'].includes(host)) {
+    throw new Error('Public access requires HTTPS certificates, or a loopback-only listener behind a TLS proxy.');
+  }
   const runtimeMonitor = new RuntimeMonitor({
     stateDirectory: path.join(homedir(), '.termdock'),
     historyPath: path.join(homedir(), '.termdock', 'runtime-metrics.log'),
@@ -448,6 +467,12 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     runtimeMonitor,
   });
   const { server, scheme } = createServerForApp(app, options);
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 120_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxHeadersCount = 64;
+  server.maxRequestsPerSocket = 1000;
+  server.maxConnections = 1024;
   server.on('connection', (socket) => runtimeMonitor.trackSocket(socket));
   server.once('close', () => runtimeMonitor.stop());
   setSecureCookieMode(scheme === 'https');
@@ -500,6 +525,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   //  - serverNoContextTakeover：每条消息独立压缩上下文，降低长连接常驻内存。
   const wss = new WebSocketServer({
     noServer: true,
+    maxPayload: 1024 * 1024,
     perMessageDeflate: {
       threshold: 1024,
       concurrencyLimit: 10,
@@ -513,13 +539,23 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const CONTROL_WS_PATH = '/api/control/ws';
 
   server.on('upgrade', (request, socket, head) => {
+    if (wss.clients.size >= 256) {
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+      return;
+    }
     if (!isAllowedHost(request.headers.host) || !isUpgradeOriginAllowed(request.headers.origin, request.headers.host)) {
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    const url = new URL(request.url ?? '/', `${scheme}://${request.headers.host ?? 'localhost'}`);
+    let url: URL;
+    try {
+      url = new URL(request.url ?? '/', `${scheme}://${request.headers.host ?? 'localhost'}`);
+    } catch {
+      socket.destroy();
+      return;
+    }
     const pathname = url.pathname;
 
     // Reject the upgrade before the WebSocket handshake completes if auth
@@ -538,6 +574,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       const clientId = crypto.randomUUID();
       wss.handleUpgrade(request, socket, head, (ws) => {
         handleControlWebSocket(ws, clientId);
+        guardWebSocketSession(ws, cookieHeader);
       });
       return;
     }
@@ -558,6 +595,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
 
     wss.handleUpgrade(request, socket, head, (ws) => {
       handleTerminalWebSocket(ws, sessionId, clientId, { sinceSeq, pushClientId, streamEpoch: url.searchParams.get('epoch') ?? undefined, flowControl: url.searchParams.get('flow') === '2', independentTmux: url.searchParams.get('transport') === 'tmux-client', outputActive: url.searchParams.get('active') !== '0' }, readTerminalHandshakeDimensions(url.searchParams));
+      guardWebSocketSession(ws, cookieHeader);
     });
   });
 

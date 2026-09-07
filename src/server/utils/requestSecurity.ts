@@ -1,3 +1,5 @@
+import { shouldUseSecureCookies } from './cookieSecurity.js';
+import { getPublicOrigin } from './publicSecurity.js';
 import type { NextFunction, Request, Response } from 'express';
 import { getLanIPv4Addresses, localAccessManager } from './localAccess.js';
 
@@ -43,6 +45,8 @@ export function getAllowedHosts(): Set<string> {
   for (const host of getEnvExtraHosts()) {
     hosts.add(host);
   }
+  const publicOrigin = getPublicOrigin();
+  if (publicOrigin) hosts.add(new URL(publicOrigin).hostname);
   return hosts;
 }
 
@@ -61,18 +65,20 @@ export function validateHostMiddleware(req: Request, res: Response, next: NextFu
 }
 
 export function isAllowedOrigin(originHeader: string | undefined, _hostHeader: string | undefined): boolean {
-  // 与下方 isUpgradeOriginAllowed 同理：dev 模式下 Vite proxy (9833 → 9835) 用
-  // changeOrigin: true 把 Host 改写成 `localhost:9835`，而浏览器 Origin 仍是
-  // `http://192.168.x.x:9833`，强制 Origin === Host 会让 LAN 访问的所有 POST
-  // （包括登录）全部 403。Origin 头由浏览器控制、无法被网页攻击者伪造，所以只
-  // 要求 origin host 落在 allowedHosts 白名单内即可，防 CSRF 的强度不变。
-  // 注意：反向代理场景下 Host 头可能是内部地址，不用它来 gate Origin 检查，
-  // 否则 TERMDOCK_ALLOWED_HOSTS 只包含公网域名时会误杀正常登录请求。
+  // Non-browser API clients may omit Origin; cookie-authenticated mutations
+  // additionally require CSRF tokens. Browsers cannot forge this header.
   if (!originHeader) return true;
   try {
-    const originHost = stripPort(new URL(originHeader).host);
-    if (!originHost) return false;
-    return getAllowedHosts().has(originHost);
+    const origin = new URL(originHeader);
+    if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== originHeader) return false;
+    const publicOrigin = getPublicOrigin();
+    if (publicOrigin) return origin.origin === publicOrigin;
+    if (!getAllowedHosts().has(stripPort(origin.host))) return false;
+    // Only the development proxy intentionally changes Host/port. On normal
+    // listeners, another service on the same LAN host is a different origin.
+    if (process.env.NODE_ENV === 'development') return true;
+    return origin.host.toLowerCase() === (_hostHeader ?? '').toLowerCase() &&
+      origin.protocol === (shouldUseSecureCookies() ? 'https:' : 'http:');
   } catch {
     return false;
   }
@@ -86,20 +92,7 @@ export function validateOriginMiddleware(req: Request, res: Response, next: Next
   next();
 }
 
-export function isUpgradeOriginAllowed(originHeader: string | undefined, _hostHeader: string | undefined): boolean {
-  // WS 升级请求：Origin 头是浏览器实际发出的（不可伪造），而 Host 头可能被前置代理改写。
-  // 在 dev 模式下 Vite proxy (9833 → 9835) 用 changeOrigin: true 会把 Host 改写成
-  // `localhost:9835`，但 Origin 仍是 `http://192.168.x.x:9833`。这种 mismatch
-  // 会让正常 LAN 访问全部 403、WS 退化为持续 reconnecting。
-  // 这里只要求 origin host 落在 allowedHosts 里（loopback + LAN IPv4 + mDNS 域名），
-  // 不强制等于 request.headers.host。Origin 校验保持原强度（必须能解析出 host、
-  // 且 host 在白名单内），所以攻击者把 Origin 改成任意地址仍然过不了。
-  if (!originHeader) return true;
-  try {
-    const originHost = stripPort(new URL(originHeader).host);
-    if (!originHost) return false;
-    return getAllowedHosts().has(originHost);
-  } catch {
-    return false;
-  }
+export function isUpgradeOriginAllowed(originHeader: string | undefined, hostHeader: string | undefined): boolean {
+  if (getPublicOrigin() && !originHeader) return false;
+  return isAllowedOrigin(originHeader, hostHeader);
 }

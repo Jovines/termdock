@@ -1,14 +1,18 @@
 // flexoki-allow-file — 3D viewer 是刻意与主题无关的组件,色值固定为一套
 // 独立观感(对齐 cadquery-print skill 的 view.html),不随 Flexoki 主题切换。
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Layers3, RotateCcw } from 'lucide-react';
+import { Eye, EyeOff, Focus, ListTree, Layers3, RotateCcw, Undo2, X, Quote, House } from 'lucide-react';
 import { Matrix3 } from 'three';
 import { createModelExplosion, modelViewDescription, type ExplosionState } from './modelExplosion';
-import { Maximize as RiMaximize, Minimize as RiMinimize, Sun as RiSun, Moon as RiMoon, RefreshCw as RiRefreshCw, Scissors as RiScissors, ArrowLeftRight as RiArrowLeftRight, Crosshair as RiCrosshair, Tag as RiTag } from 'lucide-react';
+import { createModelVisibility, isObjectVisible, partVisibilityReducer, type ModelPartInfo, type PartVisibilityAction } from './modelVisibility';
+import ModelPartsPanel from './ModelPartsPanel';
+import ModelViewerMenu from './ModelViewerMenu';
+import { Maximize as RiMaximize, Minimize as RiMinimize, Scissors as RiScissors, ArrowLeftRight as RiArrowLeftRight, Tag as RiTag } from 'lucide-react';
 import {
   AmbientLight,
   Box3,
+  BoxHelper,
   BufferGeometry,
   Color,
   DirectionalLight,
@@ -339,10 +343,20 @@ async function parseModel(buffer: ArrayBuffer, kind: Model3dLoaderKind): Promise
   return { kind: 'gltf', object: gltf.scene };
 }
 
+type ModelView = 'home' | 'fit' | 'front' | 'top' | 'right';
+interface ModelCameraPose { position: Vector3; target: Vector3 }
 interface ViewerResult {
   capture: (label?: string) => Promise<Blob | null>;
   partCount: number;
+  parts: ModelPartInfo[];
+  setSelectedPart: (id: string | null) => void;
+  cameraPose: () => ModelCameraPose;
+  restoreCameraPose: (pose: ModelCameraPose) => void;
+  focusPart: (id?: string) => void;
+  setView: (view: ModelView) => void;
+  zoomAt: (x: number, y: number, width: number, height: number) => void;
   setExplosion: (state: ExplosionState | null) => void;
+  setHiddenParts: (ids: readonly string[]) => void;
   dims: string;
   /** Pause the animation loop while a cached viewer is hidden. */
   setActive: (active: boolean) => void;
@@ -357,6 +371,7 @@ interface ViewerResult {
   ) => {
     part: string;
     node?: string;
+    visibilityId?: string;
     point: [number, number, number];
     normal: [number, number, number] | null;
   } | null;
@@ -450,6 +465,16 @@ function mountModelViewer(
   // 两者公式不同——共用一套公式会让 STL 坐标整体偏移 (cy−cz), 必须分开。
   const isStl = parsed.kind === 'stl';
   const explosion = isStl ? null : createModelExplosion(modelObject);
+  const visibility = createModelVisibility(modelObject);
+  let selectedPartBox: BoxHelper | null = null;
+  let selectedPartNode: Object3D | undefined;
+  const clearPartBox = () => {
+    if (!selectedPartBox) return;
+    scene.remove(selectedPartBox);
+    selectedPartBox.geometry.dispose();
+    (selectedPartBox.material as Material).dispose();
+    selectedPartBox = null;
+  };
   const fileToWorld = (p: { x: number; y: number; z: number }) =>
     isStl
       ? new Vector3(p.x - modelCenter.x, p.z - modelCenter.z, modelCenter.y - p.y)
@@ -577,6 +602,45 @@ function mountModelViewer(
   controls.zoomToCursor = true;
   controls.zoomSpeed = PINCH_ZOOM_SENSITIVITY;
 
+  // Bound zoom so repeated pinches never cross the target or lose the model.
+  controls.minDistance = Math.max(radius * 0.025, camera.near * 2);
+  controls.maxDistance = dist * 30;
+  let cameraMotion: { start: number; from: ModelCameraPose; to: ModelCameraPose } | null = null;
+  const stopCameraMotion = () => { cameraMotion = null; };
+  const moveCamera = (target: Vector3, position: Vector3) => {
+    // Flush residual orbit damping before interpolating to a deliberate pose.
+    const damping = controls.enableDamping;
+    controls.enableDamping = false; controls.update(); controls.enableDamping = damping;
+    const to = { target, position };
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      controls.target.copy(target); camera.position.copy(position); controls.update();
+      cameraMotion = null;
+    } else cameraMotion = { start: performance.now(), from: { target: controls.target.clone(), position: camera.position.clone() }, to };
+  };
+  const visibleBounds = () => {
+    modelObject.updateWorldMatrix(true, true);
+    const bounds = new Box3();
+    modelObject.traverse((node) => {
+      if (!(node instanceof Mesh) || !isObjectVisible(node)) return;
+      if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
+      if (node.geometry.boundingBox) bounds.union(node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld));
+    });
+    return bounds;
+  };
+  const setView = (view: ModelView) => {
+    const bounds = visibleBounds();
+    if (bounds.isEmpty()) return;
+    const target = bounds.getCenter(new Vector3());
+    const distance = modelFitDistance(Math.max(bounds.getSize(new Vector3()).length() / 2, radius * 0.025), camera.fov, camera.aspect);
+    const direction = view === 'fit' ? camera.position.clone().sub(controls.target).normalize()
+      : view === 'front' ? new Vector3(0, 0, 1)
+      : view === 'right' ? new Vector3(1, 0, 0)
+      : view === 'top' ? new Vector3(0, 1, 0.0001).normalize()
+      : new Vector3(0.7, 0.6, 0.7).normalize();
+    moveCamera(target, target.clone().addScaledVector(direction, distance));
+  };
+  renderer.domElement.addEventListener('wheel', stopCameraMotion, { capture: true });
+
   // OrbitControls shares one set of gains between mouse/trackpad and touch.
   // Temporarily switch to calmer mobile gains while touch pointers are down,
   // then restore the desktop values without changing trackpad behavior.
@@ -588,6 +652,7 @@ function mountModelViewer(
     controls.zoomSpeed = sensitivity.zoom;
   };
   const handleControlPointerDown = (event: PointerEvent) => {
+    stopCameraMotion();
     if (event.pointerType !== 'touch') return;
     activeTouchPointers.add(event.pointerId);
     applyTouchSensitivity(true);
@@ -668,7 +733,12 @@ function mountModelViewer(
     const width = container.clientWidth;
     const height = Math.max(1, container.clientHeight);
     if (width === 0) return;
+    const previousFit = modelFitDistance(radius, camera.fov, camera.aspect);
     camera.aspect = width / height;
+    // Opening the parts inspector changes the canvas budget. Retain orbit,
+    // pan and relative user zoom while fitting the new viewport dimensions.
+    const nextFit = modelFitDistance(radius, camera.fov, camera.aspect);
+    camera.position.sub(controls.target).multiplyScalar(nextFit / previousFit).add(controls.target);
     camera.updateProjectionMatrix();
     renderer.setSize(width, height);
   });
@@ -698,7 +768,18 @@ function mountModelViewer(
       frameId = null;
       return;
     }
+    if (cameraMotion) {
+      const progress = Math.min(1, (performance.now() - cameraMotion.start) / 240);
+      const eased = progress * progress * (3 - 2 * progress);
+      camera.position.lerpVectors(cameraMotion.from.position, cameraMotion.to.position, eased);
+      controls.target.lerpVectors(cameraMotion.from.target, cameraMotion.to.target, eased);
+      if (progress === 1) cameraMotion = null;
+    }
     controls.update();
+    if (selectedPartBox && selectedPartNode) {
+      selectedPartBox.visible = isObjectVisible(selectedPartNode);
+      if (selectedPartBox.visible) selectedPartBox.update();
+    }
     renderer.render(scene, camera);
     updateSelectionScale();
     afterRender?.();
@@ -708,7 +789,46 @@ function mountModelViewer(
 
   return {
     partCount: explosion?.count ?? 1,
+    parts: visibility.parts,
+    setView,
+    zoomAt: (x, y, width, height) => {
+      raycaster.setFromCamera(new Vector2((x / width) * 2 - 1, 1 - (y / height) * 2), camera);
+      const hit = raycaster.intersectObject(modelObject, true).find((entry) => isObjectVisible(entry.object)
+        && (!clipping || clipPlane.distanceToPoint(entry.point) >= 0));
+      if (!hit) { setView('fit'); return; }
+      const direction = camera.position.clone().sub(hit.point).normalize();
+      const distance = Math.max(controls.minDistance, camera.position.distanceTo(hit.point) * 0.45);
+      moveCamera(hit.point.clone(), hit.point.clone().addScaledVector(direction, distance));
+    },
+    cameraPose: () => ({ position: camera.position.clone(), target: controls.target.clone() }),
+    restoreCameraPose: ({ position, target }) => {
+      stopCameraMotion();
+      camera.position.copy(position); controls.target.copy(target); controls.update();
+    },
+    focusPart: (id) => {
+      stopCameraMotion();
+      const node = id ? visibility.node(id) : modelObject;
+      if (!node) return;
+      const bounds = new Box3().setFromObject(node);
+      if (bounds.isEmpty()) return;
+      const center = bounds.getCenter(new Vector3());
+      const distance = modelFitDistance(Math.max(bounds.getSize(new Vector3()).length() / 2, 1e-6), camera.fov, camera.aspect);
+      const direction = camera.position.clone().sub(controls.target).normalize();
+      controls.target.copy(center); camera.position.copy(center).addScaledVector(direction, distance);
+      controls.update();
+    },
+    setSelectedPart: (id) => {
+      clearPartBox();
+      selectedPartNode = id ? visibility.node(id) : undefined;
+      if (!selectedPartNode) return;
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || 'white';
+      selectedPartBox = new BoxHelper(selectedPartNode, new Color(accent));
+      selectedPartBox.visible = isObjectVisible(selectedPartNode);
+      scene.add(selectedPartBox);
+    },
+    setHiddenParts: visibility.setHidden,
     setExplosion: (state) => {
+      stopCameraMotion();
       if (!explosion || explosion.count < 2) return;
       const bounds = explosion.set(state);
       const center = bounds.getCenter(new Vector3());
@@ -779,6 +899,7 @@ function mountModelViewer(
       if (stlMaterial) stlMaterial.side = DoubleSide;
     },
     projectToScreen: (filePoint, node) => {
+      if (!visibility.isPartVisible(node)) return null;
       // 模型文件坐标是 CAD Z-up, three.js 世界是 Y-up: (x, y, z) → (x, z, -y)。
       // GLB 由 CadQuery 导出(旋转已烘焙), STL 由 mesh 旋转 -90°——两者一致。
       const world = fileToWorld(filePoint);
@@ -790,7 +911,8 @@ function mountModelViewer(
       const distToPoint = dir.length();
       if (distToPoint > 1e-6) {
         raycaster.set(camera.position, dir.normalize());
-        const hits = raycaster.intersectObject(modelObject, true).filter((hit) => !clipping || clipPlane.distanceToPoint(hit.point) >= 0);
+        const hits = raycaster.intersectObject(modelObject, true).filter((hit) => isObjectVisible(hit.object)
+          && (!clipping || clipPlane.distanceToPoint(hit.point) >= 0));
         if (hits.length > 0 && hits[0].distance < distToPoint - 1.5) {
           visible = false;
         }
@@ -803,7 +925,8 @@ function mountModelViewer(
     pick: (screenX, screenY, width, height) => {
       const ndc = new Vector2((screenX / width) * 2 - 1, -((screenY / height) * 2 - 1));
       raycaster.setFromCamera(ndc, camera);
-      const hit = raycaster.intersectObject(modelObject, true).find((hit) => !clipping || clipPlane.distanceToPoint(hit.point) >= 0);
+      const hit = raycaster.intersectObject(modelObject, true).find((hit) => isObjectVisible(hit.object)
+        && (!clipping || clipPlane.distanceToPoint(hit.point) >= 0));
       if (!hit) return null;
       const w = hit.point.clone().sub(explosion?.offset(hit.object) ?? new Vector3());
       // 世界坐标 → CAD 坐标(与 projectToScreen 互逆)
@@ -813,7 +936,7 @@ function mountModelViewer(
       // 优先最近的零件 Group；底层 Mesh 名可能是导出器生成名或乱码。
       const partNode = explosion?.part(hit.object);
       const part = partNode?.userData.termdockPartName || partNode?.name || resolvePickedPartName(hit.object);
-      return { part, node: partNode?.uuid, point, normal };
+      return { part, node: partNode?.uuid, visibilityId: visibility.id(hit.object), point, normal };
     },
     setSelection: (selections) => {
       // 清理旧高亮
@@ -825,7 +948,8 @@ function mountModelViewer(
         }
       }
       selectionEntries = [];
-      if (!selections || selections.length === 0) return;
+      const visibleSelections = selections?.filter((sel) => visibility.isPartVisible(sel.node ?? sel.part));
+      if (!visibleSelections?.length) return;
 
       const fillGeo = new CircleGeometry(radius * 0.10, 32);
       const fillMat = new MeshStandardMaterial({
@@ -844,7 +968,7 @@ function mountModelViewer(
         depthWrite: false,
       });
       const up = new Vector3(0, 0, 1);
-      for (const sel of selections) {
+      for (const sel of visibleSelections) {
         const worldPoint = fileToWorld({ x: sel.point[0], y: sel.point[1], z: sel.point[2] });
         worldPoint.add(explosion?.offset(sel.node ?? sel.part) ?? new Vector3());
         const worldNormal = sel.normal
@@ -873,6 +997,7 @@ function mountModelViewer(
       afterRender = cb;
     },
     dispose: () => {
+      clearPartBox();
       active = false;
       if (frameId !== null) cancelAnimationFrame(frameId);
       frameId = null;
@@ -888,6 +1013,7 @@ function mountModelViewer(
       renderer.domElement.removeEventListener('pointerdown', handleControlPointerDown, { capture: true });
       renderer.domElement.removeEventListener('pointerup', handleControlPointerEnd, { capture: true });
       renderer.domElement.removeEventListener('pointercancel', handleControlPointerEnd, { capture: true });
+      renderer.domElement.removeEventListener('wheel', stopCameraMotion, { capture: true });
       renderer.domElement.removeEventListener('wheel', handleWheelCapture, { capture: true });
       renderer.domElement.removeEventListener('gesturestart', handleGestureStart);
       renderer.domElement.removeEventListener('gesturechange', handleGestureChange);
@@ -939,7 +1065,7 @@ interface ModelPreviewProps {
 
 type ModelPreviewStatus =
   | { kind: 'loading' }
-  | { kind: 'ready'; dims: string; partCount: number }
+  | { kind: 'ready'; dims: string; partCount: number; parts: ModelPartInfo[] }
   | { kind: 'error'; message: string };
 
 const BG_STORAGE_KEY = 'termdock.model3d.bg';
@@ -1003,7 +1129,38 @@ export default function ModelPreview({
   const [explodeAxis, setExplodeAxis] = useState<ExplosionState['axis']>('y');
   const explosionRef = useRef<ExplosionState | null>(null);
   explosionRef.current = explodeOn ? { axis: explodeAxis, amount: explodeAmount } : null;
-  const viewDescription = () => modelViewDescription(explosionRef.current, clipRef.current);
+  const [partVisibility, dispatchVisibility] = useReducer(partVisibilityReducer, { hidden: [], history: [] });
+  const visibilityStateRef = useRef(partVisibility);
+  visibilityStateRef.current = partVisibility;
+  const visibilityCameraHistory = useRef<Array<ModelCameraPose | undefined>>([]);
+  const dispatchPartVisibility = (action: PartVisibilityAction) => {
+    const previous = visibilityStateRef.current;
+    const next = partVisibilityReducer(previous, action);
+    visibilityStateRef.current = next;
+    if (action.type === 'reset') visibilityCameraHistory.current = [];
+    else if (action.type === 'undo') {
+      const pose = visibilityCameraHistory.current.pop();
+      if (pose) viewerRef.current?.restoreCameraPose(pose);
+    } else if (next !== previous) {
+      visibilityCameraHistory.current = [...visibilityCameraHistory.current.slice(-19), viewerRef.current?.cameraPose()];
+    }
+    dispatchVisibility(action);
+  };
+  const hiddenPartIds = partVisibility.hidden;
+  const [partsOpen, setPartsOpen] = useState(false);
+  const [wideViewer, setWideViewer] = useState(false);
+  const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  const partsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const parts = status.kind === 'ready' ? status.parts.filter((part) => part.initiallyVisible).map((part, index) => ({
+    ...part, name: normalizePickedPartName?.(part.name) || part.name || t('rightSidebar.model3dUnnamedPart', { index: index + 1 }),
+  })) : [];
+  const selectedPart = parts.find((part) => part.id === selectedPartId);
+  const closeParts = () => { setPartsOpen(false); partsButtonRef.current?.focus(); };
+  const hiddenPartIdsRef = useRef(hiddenPartIds);
+  hiddenPartIdsRef.current = hiddenPartIds;
+  const viewDescription = () => [modelViewDescription(explosionRef.current, clipRef.current),
+    hiddenPartIdsRef.current.length > 0 ? `Hidden parts: ${hiddenPartIdsRef.current.length}` : '',
+  ].filter(Boolean).join(' / ');
 
   // ---- 语义特征标注: 选特征(可多选2个) → 弹「引用」按钮 → 插入到对话/草稿 ----
   const [featureMode, setFeatureMode] = useState(false);
@@ -1019,10 +1176,10 @@ export default function ModelPreview({
   const selectedFeatures = features?.filter((ft) => selectedFeatureIds.includes(ft.id)) ?? [];
 
   // ---- 通用点选引用(方案 A): 点模型任意位置 → 拾取部位/坐标 → 弹「引用」 ----
-  const [pickMode, setPickMode] = useState(false);
   const [picked, setPicked] = useState<{
     part: string;
     node?: string;
+    visibilityId?: string;
     point: [number, number, number];
     normal: [number, number, number] | null;
   } | null>(null);
@@ -1030,6 +1187,39 @@ export default function ModelPreview({
   pickedRef.current = picked;
   const pickMarkerRef = useRef<HTMLDivElement | null>(null);
   const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
+  const activePickPointers = useRef(new Set<number>());
+  const multiTouchPick = useRef(false);
+  const lastTap = useRef<{ x: number; y: number; time: number; pointerType: string } | null>(null);
+
+  const selectPart = (id: string) => {
+    setSelectedPartId(id); setPicked(null); setFeatureMode(false); setSelectedFeatureIds([]);
+  };
+  const togglePart = (id: string) => {
+    dispatchPartVisibility({ type: 'toggle', id });
+    if (hiddenPartIds.includes(id) && hiddenPartIds.length === parts.length - 1) viewerRef.current?.focusPart();
+    if (picked?.visibilityId === id) setPicked(null);
+  };
+  const isolatePart = (id: string) => {
+    dispatchPartVisibility({ type: 'set', hidden: parts.filter((part) => part.id !== id).map((part) => part.id) });
+    setSelectedPartId(id);
+    if (picked?.visibilityId !== id) setPicked(null);
+    viewerRef.current?.focusPart(id);
+  };
+  const showAllParts = () => {
+    dispatchPartVisibility({ type: 'set', hidden: [] });
+    if (hiddenPartIds.length === parts.length - 1) viewerRef.current?.focusPart();
+  };
+  const hasSelection = Boolean(selectedPart || picked || selectedFeatures.length);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const update = () => setWideViewer(root.clientWidth >= 720);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [pseudoFullscreen]);
 
   const pickPartLabel = (p: { part: string }) => {
     const nodeBase = p.part.replace(/_\d+$/, '');
@@ -1072,6 +1262,14 @@ export default function ModelPreview({
   }, [explodeOn, explodeAmount, explodeAxis]);
 
   useEffect(() => {
+    viewerRef.current?.setHiddenParts(hiddenPartIds);
+  }, [hiddenPartIds]);
+
+  useEffect(() => {
+    viewerRef.current?.setSelectedPart(selectedPartId);
+  }, [selectedPartId, status]);
+
+  useEffect(() => {
     const selections: Array<{
       part: string;
       node?: string;
@@ -1089,7 +1287,7 @@ export default function ModelPreview({
       selections.push({ part: picked.part, node: picked.node, point: picked.point, normal: picked.normal });
     }
     viewerRef.current?.setSelection(selections.length > 0 ? selections : null);
-  }, [features, selectedFeatureIds, picked, explodeOn, explodeAmount, explodeAxis, status]);
+  }, [features, selectedFeatureIds, picked, explodeOn, explodeAmount, explodeAxis, status, hiddenPartIds]);
 
   const toggleFeature = (fid: string) => {
     setSelectedFeatureIds((prev) => {
@@ -1187,7 +1385,6 @@ export default function ModelPreview({
     setSelectedFeatureIds([]);
     setGlossaryOpen(false);
     setPicked(null);
-    setPickMode(false);
   }, [blobUrl, featureMode]);
 
   const insertFeatureRef = () => {
@@ -1264,7 +1461,8 @@ export default function ModelPreview({
       // Same for the section state: re-apply after a remount/file switch.
       viewer.setClip(clipRef.current);
       viewer.setExplosion(explosionRef.current);
-      if (!cancelled) setStatus({ kind: 'ready', dims: viewer.dims, partCount: viewer.partCount });
+      viewer.setHiddenParts(hiddenPartIdsRef.current);
+      if (!cancelled) setStatus({ kind: 'ready', dims: viewer.dims, partCount: viewer.partCount, parts: viewer.parts });
     })().catch((err) => {
       if (cancelled) return;
       setStatus({ kind: 'error', message: err instanceof Error ? err.message : tRef.current('rightSidebar.model3dLoadFailed') });
@@ -1280,7 +1478,10 @@ export default function ModelPreview({
   }, [blobUrl, ext, pseudoFullscreen, unitScale, dimensionUnit]);
 
   // File switches/reloads must not inherit an exploded pose from another file.
-  useEffect(() => { setExplodeOn(false); setClipOn(false); }, [blobUrl]);
+  useEffect(() => {
+    lastTap.current = null;
+    setExplodeOn(false); setClipOn(false); dispatchPartVisibility({ type: 'reset' }); setPicked(null); setSelectedPartId(null);
+  }, [blobUrl, ext]);
 
   useEffect(() => {
     viewerRef.current?.setActive(active);
@@ -1299,51 +1500,70 @@ export default function ModelPreview({
   // Pseudo-fullscreen renders through a portal to <body> so the overlay is in
   // the root stacking context — staying inside the sidebar tree loses to
   // sibling overlays (sessions bar) and to ancestors with transforms.
+  const controlsBottom = !partsOpen && hasSelection
+    ? (expanded ? 'bottom-[calc(4rem+env(safe-area-inset-bottom,0px))]' : 'bottom-16')
+    : !partsOpen && (hiddenPartIds.length > 0 || partVisibility.history.length > 0)
+      ? (expanded ? 'bottom-[calc(3.5rem+env(safe-area-inset-bottom,0px))]' : 'bottom-14')
+      : (expanded ? 'bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]' : 'bottom-3');
   const viewerUi = (
     <div
       ref={rootRef}
+      data-sidebar-gesture-ignore
+      onPointerDown={(event) => event.stopPropagation()}
+      onTouchStart={(event) => event.stopPropagation()}
+      onKeyDownCapture={(event) => {
+        if (event.key !== 'Escape') return;
+        if (event.target instanceof Element && event.target.closest('[data-model-viewer-menu="open"]')) return;
+        if (partsOpen) closeParts();
+        else if (hasSelection) { setSelectedPartId(null); setPicked(null); setSelectedFeatureIds([]); }
+        else return;
+        event.preventDefault(); event.stopPropagation();
+      }}
       className={
         pseudoFullscreen
-          ? 'fixed inset-0 z-modal-panel overflow-hidden bg-surface'
-          : 'relative h-full min-h-0 flex-1 overflow-hidden bg-surface'
+          ? `fixed inset-0 z-modal-panel flex overflow-hidden bg-surface ${wideViewer ? 'flex-row' : 'flex-col'}`
+          : `relative flex h-full min-h-0 flex-1 overflow-hidden bg-surface ${wideViewer ? 'flex-row' : 'flex-col'}`
       }
     >
-      {status.kind === 'ready' && (
+      <div className="relative min-h-0 min-w-0 flex-1">
+      {status.kind === 'ready' && !partsOpen && !selectedPart && (
         <div className={`pointer-events-none absolute right-3 z-10 select-none text-xs leading-relaxed text-muted-foreground max-sm:rounded-lg max-sm:bg-surface/75 max-sm:px-2.5 max-sm:py-1.5 max-sm:text-[15px] ${expanded ? 'left-[calc(0.75rem+env(safe-area-inset-left,0px))] top-[calc(3.75rem+env(safe-area-inset-top,0px))]' : 'left-3 top-14'}`}>
           <div className="text-sm font-semibold text-foreground max-sm:text-base">{fileName}</div>
           <div>{t('rightSidebar.model3dDimensions', { dims: status.dims })}</div>
-          {explodeOn && <div>{t('rightSidebar.model3dExplodedNotice')}</div>}
+          {explodeOn && !partsOpen && <div>{t('rightSidebar.model3dExplodedNotice')}</div>}
           {featureMode && featureDiag && (
             <div className="text-foreground/70">
               {t('rightSidebar.model3dFeatureStatus', { total: featureDiag.total, positioned: featureDiag.positioned })}
             </div>
           )}
-          <div className="max-sm:hidden">
-            {pickMode ? t('rightSidebar.model3dPickHint') : t('rightSidebar.model3dHintMouse')}
-          </div>
-          <div className="sm:hidden">
-            {pickMode ? t('rightSidebar.model3dPickHint') : t('rightSidebar.model3dHintTouch')}
-          </div>
+          {!partsOpen && !hasSelection && <div>{t('rightSidebar.model3dInspectHint')}</div>}
         </div>
       )}
       {status.kind !== 'error' && (
         <div className={`absolute left-3 z-20 flex justify-end gap-0.5 [&>button]:h-9 [&>button]:w-9 [&>button]:shrink-0 ${expanded ? 'right-[calc(0.75rem+env(safe-area-inset-right,0px))] top-[calc(0.625rem+env(safe-area-inset-top,0px))]' : 'right-3 top-2.5'}`}>
+          {status.kind === 'ready' && status.partCount > 1 && <button
+            ref={partsButtonRef}
+            type="button"
+            title={t('rightSidebar.model3dParts')}
+            aria-label={t('rightSidebar.model3dParts')}
+            aria-expanded={partsOpen}
+            style={{ width: 'auto' }}
+            className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition active:scale-95 ${
+              partsOpen
+                ? 'bg-surface-elevated text-foreground'
+                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+            }`}
+            onClick={() => {
+              setPartsOpen((value) => !value); setFeatureMode(false); setSelectedFeatureIds([]);
+            }}
+          >
+            <span className="inline-flex items-center gap-1 px-2"><ListTree size={16} />{t('rightSidebar.model3dParts')}{hiddenPartIds.length > 0 && <span className="text-xs tabular-nums text-accent">{hiddenPartIds.length}</span>}</span>
+          </button>}
           {status.kind === 'ready' && status.partCount > 1 && (
             <button type="button" title={t('rightSidebar.model3dExplode')} aria-label={t('rightSidebar.model3dExplode')} aria-pressed={explodeOn}
               className={`inline-flex items-center justify-center rounded-full ${explodeOn ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground'}`}
               onClick={() => { setExplodeOn((v) => !v); setClipOn(false); }}>
               <Layers3 size={16} />
-            </button>
-          )}
-          {onRefresh && (
-            <button
-              type="button"
-              title={t('rightSidebar.model3dRefresh')}
-              aria-label={t('rightSidebar.model3dRefresh')}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-              onClick={onRefresh}
-            >
-              <RiRefreshCw size={14} />
             </button>
           )}
           {features && features.length > 0 && (
@@ -1361,7 +1581,7 @@ export default function ModelPreview({
                 setFeatureMode((v) => {
                   const next = !v;
                   if (next) {
-                    setPickMode(false);
+                    setSelectedPartId(null);
                     setPicked(null);
                   }
                   return next;
@@ -1371,29 +1591,6 @@ export default function ModelPreview({
               <RiTag size={14} />
             </button>
           )}
-          <button
-            type="button"
-            title={t('rightSidebar.model3dPickToggle')}
-            aria-label={t('rightSidebar.model3dPickToggle')}
-            aria-pressed={pickMode}
-            className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition active:scale-95 ${
-              pickMode
-                ? 'bg-surface-elevated text-foreground'
-                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            }`}
-            onClick={() => {
-              setPickMode((v) => {
-                const next = !v;
-                if (next) {
-                  setFeatureMode(false);
-                  setSelectedFeatureIds([]);
-                }
-                return next;
-              });
-            }}
-          >
-            <RiCrosshair size={14} />
-          </button>
           <button
             type="button"
             title={t('rightSidebar.model3dClipToggle')}
@@ -1410,15 +1607,6 @@ export default function ModelPreview({
           </button>
           <button
             type="button"
-            title={t(effectiveBg === 'dark' ? 'rightSidebar.model3dBgToLight' : 'rightSidebar.model3dBgToDark')}
-            aria-label={t(effectiveBg === 'dark' ? 'rightSidebar.model3dBgToLight' : 'rightSidebar.model3dBgToDark')}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-            onClick={toggleBg}
-          >
-            {effectiveBg === 'dark' ? <RiSun size={14} /> : <RiMoon size={14} />}
-          </button>
-          <button
-            type="button"
             title={t(expanded ? 'rightSidebar.model3dFullscreenExit' : 'rightSidebar.model3dFullscreenEnter')}
             aria-label={t(expanded ? 'rightSidebar.model3dFullscreenExit' : 'rightSidebar.model3dFullscreenEnter')}
             className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
@@ -1426,10 +1614,14 @@ export default function ModelPreview({
           >
             {expanded ? <RiMinimize size={14} /> : <RiMaximize size={14} />}
           </button>
+          <button type="button" title={t('rightSidebar.model3dHome')} aria-label={t('rightSidebar.model3dHome')}
+            className="inline-flex items-center justify-center rounded-full bg-surface-2 text-muted-foreground hover:bg-surface-elevated"
+            onClick={() => viewerRef.current?.setView('home')}><House size={16} /></button>
+          <ModelViewerMenu onView={(view) => viewerRef.current?.setView(view)} dark={effectiveBg === 'dark'} onToggleBackground={toggleBg} onRefresh={onRefresh} />
       </div>
       )}
       {status.kind === 'ready' && explodeOn && status.partCount > 1 && (
-        <div className={`swiper-no-swiping absolute left-3 right-3 z-20 flex flex-wrap items-center justify-center gap-2 rounded-xl bg-surface-2 px-2 py-2 ${expanded ? 'bottom-[calc(3.5rem+env(safe-area-inset-bottom,0px))]' : 'bottom-14'}`}
+        <div className={`swiper-no-swiping absolute left-3 right-3 z-20 flex flex-wrap items-center justify-center gap-2 rounded-lg bg-surface-2 px-2 py-1 ${controlsBottom}`}
           onPointerDown={(event) => event.stopPropagation()} onTouchStart={(event) => event.stopPropagation()}>
           <select aria-label={t('rightSidebar.model3dExplodeAxis')} value={explodeAxis}
             onChange={(event) => setExplodeAxis(event.target.value as ExplosionState['axis'])}
@@ -1449,7 +1641,7 @@ export default function ModelPreview({
           inside the viewer, bare z-20 (local scale, below global overlays). */}
       {status.kind === 'ready' && clipOn && (
         <div
-          className={`swiper-no-swiping absolute left-3 right-3 z-20 flex items-center justify-center gap-2 rounded-xl bg-surface-2 px-3 py-2 ${expanded ? 'bottom-[calc(3.5rem+env(safe-area-inset-bottom,0px))]' : 'bottom-14'}`}
+          className={`swiper-no-swiping absolute left-3 right-3 z-20 flex items-center justify-center gap-2 rounded-xl bg-surface-2 px-3 py-2 ${controlsBottom}`}
           onPointerDown={(event) => event.stopPropagation()}
           onTouchStart={(event) => event.stopPropagation()}
         >
@@ -1590,30 +1782,37 @@ export default function ModelPreview({
           )}
         </div>
       )}
-      {/* 通用点选引用: 拾取标记(穿透, 不挡拖动) */}
-      {status.kind === 'ready' && pickMode && picked && (
-        <div
-          ref={pickMarkerRef}
-          className="swiper-no-swiping pointer-events-none absolute left-0 top-0 z-10 model3d-feature-label flex items-center gap-1 rounded-full border border-foreground/50 bg-surface-elevated px-2 py-0.5"
-        >
-          <span className="block h-2 w-2 flex-none rounded-full bg-[#4385BE]" />
-          <span className="max-w-[160px] truncate text-[11px] leading-4 text-foreground">
-            {pickPartLabel(picked)} ({picked.point.map((v) => v.toFixed(0)).join(',')})
-          </span>
+      {status.kind === 'ready' && !featureMode && picked && (
+        <div ref={pickMarkerRef} className="pointer-events-none absolute left-0 top-0 z-10 h-3 w-3 rounded-full border-2 border-accent bg-surface" />
+      )}
+      {status.kind === 'ready' && !partsOpen && hasSelection && (
+        <div className={`swiper-no-swiping absolute left-3 right-3 z-20 flex items-center rounded-lg border border-border/30 bg-surface pl-3 pr-1 shadow ${expanded ? 'bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]' : 'bottom-3'}`}
+          onPointerDown={(event) => event.stopPropagation()} onTouchStart={(event) => event.stopPropagation()}>
+          <div className="min-w-0 flex-1 truncate text-xs font-medium text-foreground" title={selectedPart?.name}>
+            {selectedPart?.name ?? (picked ? pickPartLabel(picked) : selectedFeatures.map((feature) => feature.name).join(' · '))}
+          </div>
+          {selectedPart && parts.length > 1 && <>
+            <button type="button" className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-foreground hover:bg-surface-2"
+              title={t(hiddenPartIds.includes(selectedPart.id) ? 'rightSidebar.model3dShowPart' : 'rightSidebar.model3dHidePart')}
+              aria-label={t(hiddenPartIds.includes(selectedPart.id) ? 'rightSidebar.model3dShowPart' : 'rightSidebar.model3dHidePart')}
+              onClick={() => { togglePart(selectedPart.id); setSelectedPartId(null); setPicked(null); setSelectedFeatureIds([]); }}>
+              {hiddenPartIds.includes(selectedPart.id) ? <Eye size={18} /> : <EyeOff size={18} />}
+            </button>
+            <button type="button" onClick={() => isolatePart(selectedPart.id)} disabled={!hiddenPartIds.includes(selectedPart.id) && hiddenPartIds.length === parts.length - 1}
+              title={t('rightSidebar.model3dIsolatePart')} aria-label={t('rightSidebar.model3dIsolatePart')}
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-foreground hover:bg-surface-2 disabled:opacity-40"><Focus size={18} /></button>
+          </>}
+          {onInsertFeature && (picked || selectedFeatures.length > 0) && <button type="button" className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-2" title={t('rightSidebar.model3dFeatureInsert')} aria-label={t('rightSidebar.model3dFeatureInsert')} onClick={selectedFeatures.length > 0 ? insertFeatureRef : insertPickRef}><Quote size={18} /></button>}
+          {partVisibility.history.length > 0 && <button type="button" onClick={() => dispatchPartVisibility({ type: 'undo' })} aria-label={t('rightSidebar.model3dUndoVisibility')} title={t('rightSidebar.model3dUndoVisibility')} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-2"><Undo2 size={16} /></button>}
+          <button type="button" aria-label={t('rightSidebar.model3dClearSelection')} onClick={() => { setSelectedPartId(null); setPicked(null); setSelectedFeatureIds([]); }} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-2"><X size={16} /></button>
         </div>
       )}
-      {/* 引用按钮固定在底部居中, 不覆盖模型、不挡拖动 */}
-      {status.kind === 'ready' && (selectedFeatures.length > 0 || (pickMode && picked)) && (
-        <button
-          type="button"
-          title={t('rightSidebar.model3dFeatureInsert')}
-          className="swiper-no-swiping absolute bottom-3 left-1/2 z-30 inline-flex h-7 -translate-x-1/2 items-center gap-1 rounded-full border border-foreground/40 bg-surface-elevated px-3 text-xs font-medium text-foreground shadow"
-          onPointerDown={(event) => event.stopPropagation()}
-          onTouchStart={(event) => event.stopPropagation()}
-          onClick={selectedFeatures.length > 0 ? insertFeatureRef : insertPickRef}
-        >
-          {t('rightSidebar.model3dFeatureInsert')}
-        </button>
+      {status.kind === 'ready' && !partsOpen && !hasSelection && (hiddenPartIds.length > 0 || partVisibility.history.length > 0) && (
+        <div className={`swiper-no-swiping absolute left-3 right-3 z-20 flex items-center justify-between gap-2 rounded-xl bg-surface px-2 ${expanded ? 'bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]' : 'bottom-3'}`}
+          onPointerDown={(event) => event.stopPropagation()} onTouchStart={(event) => event.stopPropagation()}>
+          <button type="button" className="inline-flex h-9 items-center gap-1 px-1 text-xs text-foreground" onClick={() => setPartsOpen(true)}><ListTree size={15} />{hiddenPartIds.length ? t('rightSidebar.model3dHiddenParts', { count: hiddenPartIds.length }) : t('rightSidebar.model3dAllPartsVisible')}</button>
+          <button type="button" disabled={!partVisibility.history.length} className="inline-flex h-9 items-center gap-1 px-1 text-xs text-foreground disabled:opacity-40" onClick={() => dispatchPartVisibility({ type: 'undo' })}><Undo2 size={14} />{t('rightSidebar.model3dUndoVisibility')}</button>
+        </div>
       )}
       {/* The viewer canvas swallows pointer/touch gestures: swiper-no-swiping
           opts out of the sidebar file-list swiper (see gestureArbiter.ts) and
@@ -1622,19 +1821,40 @@ export default function ModelPreview({
         ref={containerRef}
         className="swiper-no-swiping absolute inset-0"
         style={{ touchAction: 'none' }}
+        tabIndex={0}
+        aria-label={t('rightSidebar.model3dCanvas')}
+        onPointerMove={(event) => {
+          const start = pointerDownPosRef.current;
+          if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) pointerDownPosRef.current = null;
+        }}
         onPointerDown={(event) => {
           event.stopPropagation();
-          // 只记录起点: 拖动旋转不触发选中/取消
-          pointerDownPosRef.current = { x: event.clientX, y: event.clientY };
+          event.currentTarget.focus({ preventScroll: true });
+          if (activePickPointers.current.size === 0) multiTouchPick.current = false;
+          activePickPointers.current.add(event.pointerId);
+          if (activePickPointers.current.size > 1) { multiTouchPick.current = true; lastTap.current = null; }
+          pointerDownPosRef.current = multiTouchPick.current ? null : { x: event.clientX, y: event.clientY };
         }}
         onPointerUp={(event) => {
           const start = pointerDownPosRef.current;
           pointerDownPosRef.current = null;
-          if (!start) return;
+          activePickPointers.current.delete(event.pointerId);
+          if (!start || multiTouchPick.current) { lastTap.current = null; return; }
           // 位移超过阈值 = 拖动, 不选中
           if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) return;
+          if (event.button !== 0) return;
           const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-          if (pickMode) {
+          const previous = lastTap.current;
+          const now = performance.now();
+          if (previous && now - previous.time < 320 && previous.pointerType === event.pointerType
+            && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 24) {
+            lastTap.current = null;
+            viewerRef.current?.zoomAt(event.clientX - rect.left, event.clientY - rect.top, rect.width || 1, rect.height || 1);
+            setPicked(null); setSelectedFeatureIds([]); setSelectedPartId(null);
+            return;
+          }
+          lastTap.current = { x: event.clientX, y: event.clientY, time: now, pointerType: event.pointerType };
+          if (!featureMode) {
             // 通用点选: 点击模型任意位置 → 拾取部位 + 坐标
             const hit = viewerRef.current?.pick(
               event.clientX - rect.left,
@@ -1642,6 +1862,7 @@ export default function ModelPreview({
               rect.width || 1,
               rect.height || 1,
             );
+            setSelectedPartId(hit?.visibilityId ?? null);
             setPicked(hit
               ? { ...hit, part: normalizePickedPartName?.(hit.part) ?? hit.part }
               : null);
@@ -1649,9 +1870,13 @@ export default function ModelPreview({
             // 点击空白处: 取消特征选中 / 清除点选
             setSelectedFeatureIds([]);
             setPicked(null);
+            setSelectedPartId(null);
           }
         }}
-        onPointerCancel={() => {
+        onPointerCancel={(event) => {
+          activePickPointers.current.delete(event.pointerId);
+          multiTouchPick.current = true;
+          lastTap.current = null;
           pointerDownPosRef.current = null;
         }}
         onTouchStart={(event) => event.stopPropagation()}
@@ -1669,6 +1894,10 @@ export default function ModelPreview({
           </div>
         </div>
       )}
+      </div>
+      {status.kind === 'ready' && partsOpen && <ModelPartsPanel key={blobUrl} parts={parts} hidden={hiddenPartIds} selected={selectedPartId} wide={wideViewer}
+        canUndo={partVisibility.history.length > 0} onSelect={selectPart} onToggle={togglePart} onIsolate={isolatePart}
+        onShowAll={showAllParts} onUndo={() => dispatchPartVisibility({ type: 'undo' })} onClose={closeParts} />}
     </div>
   );
 

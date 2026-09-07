@@ -1,3 +1,4 @@
+import { isTrustedLocalRequest } from '../utils/apiAccess.js';
 import { Router } from 'express';
 import { injectBranchAudit, injectChangeAudit, type BranchAuditPayload, type ChangeAuditPayload } from '../utils/changeAuditStore.js';
 
@@ -5,7 +6,7 @@ export function createLocalRouter(options: { token?: string | null } = {}) {
   const router = Router();
 
   router.post('/change-audit', (req, res) => {
-    if (!options.token || req.header('X-Termdock-Local-Token') !== options.token) {
+    if (!isTrustedLocalRequest(req, options.token)) {
       res.status(401).json({ error: 'Unauthorized local request' });
       return;
     }
@@ -21,7 +22,7 @@ export function createLocalRouter(options: { token?: string | null } = {}) {
   });
 
   router.post('/branch-audit', (req, res) => {
-    if (!options.token || req.header('X-Termdock-Local-Token') !== options.token) {
+    if (!isTrustedLocalRequest(req, options.token)) {
       res.status(401).json({ error: 'Unauthorized local request' });
       return;
     }

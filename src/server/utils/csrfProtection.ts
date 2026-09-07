@@ -49,7 +49,8 @@ export class CsrfProtection {
    * 验证CSRF令牌
    */
   verifyToken(cookieToken: unknown, headerToken: unknown): boolean {
-    if (typeof cookieToken !== 'string' || typeof headerToken !== 'string') {
+    if (typeof cookieToken !== 'string' || typeof headerToken !== 'string' ||
+        !new RegExp(`^[0-9a-f]{${this.config.tokenLength * 2}}$`).test(cookieToken) || cookieToken.length !== headerToken.length) {
       return false;
     }
 
@@ -99,12 +100,6 @@ export class CsrfProtection {
        // 跳过安全检查和GET/HEAD/OPTIONS请求
        const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
        if (safeMethods.includes(req.method)) {
-         return next();
-       }
-       
-       // 跳过某些端点（如果需要）
-       const skipPaths = ['/api/csrf-token'];
-       if (skipPaths.some(path => req.path.startsWith(path))) {
          return next();
        }
        

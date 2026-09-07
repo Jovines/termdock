@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.168",
+  "version": "1.4.169",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -67,13 +67,13 @@
     "browser-haptic": "^1.0.13",
     "busboy": "^1.6.0",
     "cookie-parser": "^1.4.7",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.14",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "heic-convert": "^2.1.0",
     "katex": "^0.17.0",
     "lucide-react": "^1.17.0",
-    "mermaid": "^11.16.0",
+    "mermaid": "^11.17.2",
     "motion": "^12.40.0",
     "multicast-dns": "^7.2.5",
     "node-pty": "^1.1.0",
@@ -142,5 +142,8 @@
   "homepage": "https://github.com/Jovines/termdock#readme",
   "bugs": {
     "url": "https://github.com/Jovines/termdock/issues"
+  },
+  "overrides": {
+    "prismjs": "^1.30.0"
   }
 }

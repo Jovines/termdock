@@ -671,6 +671,8 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     );
   }
 
+  const panelBindings = bindPanel();
+
   // ── Overlay mode (used on both desktop & mobile) — fixed, draggable ──
   return (
     <>
@@ -706,7 +708,13 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       />
 
       <aside
-        {...bindPanel()}
+        {...panelBindings}
+        onClickCapture={(event) => {
+          // Independent gesture surfaces never update the drawer's tap state.
+          // Its stale drag suppression must not swallow their buttons, including
+          // clicks from React portals such as the model fullscreen view.
+          if (!shouldIgnorePanelDrag(event)) panelBindings.onClickCapture?.(event);
+        }}
         ref={setPanelRef}
         data-sidebar={side}
         className={`fixed inset-y-0 z-sidebar-panel flex flex-col chrome-glow-panel will-change-transform ${

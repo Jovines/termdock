@@ -11,7 +11,7 @@ import {
   recordLoginFailure,
   recordLoginSuccess,
   setSessionCookie,
-  verifyPassword,
+  verifyPasswordAsync,
 } from '../utils/authProtection.js';
 import { validateOriginMiddleware } from '../utils/requestSecurity.js';
 
@@ -28,7 +28,7 @@ router.get('/status', (req, res) => {
 
 // POST /api/auth/login — public; verifies password, issues session cookie.
 // Rate-limited per source IP via exponential backoff.
-router.post('/login', validateOriginMiddleware, (req, res) => {
+router.post('/login', validateOriginMiddleware, async (req, res) => {
   if (!isAuthEnabled()) {
     return res.status(400).json({ error: 'Authentication is not enabled', code: 'AUTH_DISABLED' });
   }
@@ -45,13 +45,19 @@ router.post('/login', validateOriginMiddleware, (req, res) => {
   }
 
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  if (!verifyPassword(password)) {
+  const verified = await verifyPasswordAsync(password);
+  if (verified === null) {
+    res.setHeader('Retry-After', '60');
+    return res.status(429).json({ error: 'Login capacity exceeded. Please retry later.', code: 'RATE_LIMITED', retryAfterMs: 60_000 });
+  }
+  if (!verified) {
     recordLoginFailure(ip);
     // Same generic message regardless of cause to avoid user-enumeration.
     return res.status(401).json({ error: 'Invalid password', code: 'INVALID_PASSWORD' });
   }
 
   recordLoginSuccess(ip);
+  destroySession(req.cookies?.[AUTH_COOKIE]);
   const session = createSession();
   setSessionCookie(res, session.token);
   res.json({ ok: true });

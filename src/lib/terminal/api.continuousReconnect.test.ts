@@ -53,6 +53,67 @@ class FakeWebSocket {
 }
 
 describe('connectTerminalStream reconnect policy', () => {
+  it('preserves the retry across error followed by close after waking', () => {
+    const onEvent = vi.fn();
+    const disconnect = connectTerminalStream('wake-error-close', onEvent, vi.fn(), {
+      initialRetryDelay: 10,
+    });
+    const first = FakeWebSocket.instances[0];
+    first.readyState = FakeWebSocket.OPEN;
+    first.onopen?.();
+    suspendTerminalConnectionReconnects();
+    probeTerminalConnection('wake-error-close', undefined, { visible: true });
+    first.fail();
+    vi.advanceTimersByTime(5);
+    first.closeFromServer(1006, '');
+    first.fail();
+    vi.advanceTimersByTime(5);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const recovered = FakeWebSocket.instances[1];
+    recovered.readyState = FakeWebSocket.OPEN;
+    recovered.onopen?.();
+    recovered.onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({ type: 'connected' }),
+    }));
+    expect(onEvent).toHaveBeenLastCalledWith({ type: 'connected' });
+    disconnect();
+  });
+
+  it('ignores delayed open and exit events from the socket replaced on resume', () => {
+    const onEvent = vi.fn();
+    const disconnect = connectTerminalStream('stale-wake-events', onEvent, vi.fn(), {
+      connectionTimeout: 100,
+      initialRetryDelay: 10,
+    });
+    const stale = FakeWebSocket.instances[0];
+    reconnectTerminalConnectionNow('stale-wake-events');
+    vi.advanceTimersByTime(0);
+    stale.onopen?.();
+    stale.onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({ type: 'exit' }),
+    }));
+    expect(onEvent).not.toHaveBeenCalledWith({ type: 'exit' });
+    // The old open event must not cancel the new handshake deadline.
+    vi.advanceTimersByTime(120);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    disconnect();
+  });
+
+  it('recovers a dead heartbeat even when close never emits an event', () => {
+    const disconnect = connectTerminalStream('silent-close', vi.fn(), vi.fn(), {
+      initialRetryDelay: 10,
+    });
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    vi.spyOn(socket, 'close').mockImplementation(() => {
+      socket.readyState = FakeWebSocket.CLOSING;
+    });
+    vi.advanceTimersByTime(28_010);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    disconnect();
+  });
+
   it('reconnects an unresponsive visible pane before the background probe expires', () => {
     const closeVisible = connectTerminalStream('visible-dead', vi.fn());
     const closeBackground = connectTerminalStream('background-dead', vi.fn());

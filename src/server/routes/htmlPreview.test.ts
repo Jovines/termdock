@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -11,6 +11,13 @@ import {
   validatePreviewToken,
 } from './filesystem.js';
 
+const previewAuth = vi.hoisted(() => ({ enabled: false, valid: false }));
+vi.mock('../utils/authProtection.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../utils/authProtection.js')>(),
+  isAuthEnabled: () => previewAuth.enabled,
+  isSessionValid: () => previewAuth.valid,
+}));
+
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
@@ -20,6 +27,9 @@ function makeTempDir(): string {
 }
 
 afterEach(() => {
+  previewAuth.enabled = false;
+  previewAuth.valid = false;
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -108,5 +118,32 @@ describe('HTML preview auth tokens', () => {
 
     const token = mintPreviewToken(root);
     expect(validatePreviewToken(token, path.join(root, '..', 'outside.png'))).toBe(false);
+  });
+});
+
+
+describe('preview capability revocation', () => {
+  it('expires absolutely even while subresources keep loading', () => {
+    const now = Date.now();
+    const token = mintPreviewToken('/tmp');
+    vi.spyOn(Date, 'now').mockReturnValue(now + 29 * 60_000);
+    expect(validatePreviewToken(token, '/tmp/site.html')).toBe(true);
+    vi.spyOn(Date, 'now').mockReturnValue(now + 31 * 60_000);
+    expect(validatePreviewToken(token, '/tmp/site.html')).toBe(false);
+  });
+
+  it('revokes a preview capability when its owner logs out', () => {
+    previewAuth.enabled = true;
+    previewAuth.valid = true;
+    const token = mintPreviewToken('/tmp', 'owner-session');
+    expect(validatePreviewToken(token, '/tmp/site.html')).toBe(true);
+    previewAuth.valid = false;
+    expect(validatePreviewToken(token, '/tmp/site.html')).toBe(false);
+  });
+
+  it('does not carry anonymous preview tokens across enabling authentication', () => {
+    const token = mintPreviewToken('/tmp');
+    previewAuth.enabled = true;
+    expect(validatePreviewToken(token, '/tmp/site.html')).toBe(false);
   });
 });

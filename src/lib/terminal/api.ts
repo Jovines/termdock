@@ -568,8 +568,12 @@ export function connectTerminalStream(
       c.pongTimer = setTimeout(() => {
         const sinceLast = Date.now() - c.lastInboundAt;
         if (sinceLast >= PONG_TIMEOUT_MS) {
-          // 主动关掉，让 onclose 走重连路径。
+          // A suspended iOS socket may never deliver close. Drive recovery
+          // ourselves, while preserving the hidden-page retry suspension.
+          handlingError = true;
+          stopHeartbeat(c);
           try { c.ws.close(); } catch { /* ignore */ }
+          handleError(new Error('WebSocket heartbeat timeout'), false);
         }
       }, PONG_TIMEOUT_MS);
     }, HEARTBEAT_INTERVAL_MS);
@@ -658,6 +662,7 @@ export function connectTerminalStream(
     };
 
     ws.onopen = () => {
+      if (retryState.isClosed || ignoredSockets.has(ws) || handlingError) return;
       clearTimeouts();
       retryState.retryCount = 0;
       newConn.lastInboundAt = Date.now();
@@ -668,6 +673,7 @@ export function connectTerminalStream(
     };
 
     ws.onmessage = (event) => {
+      if (retryState.isClosed || ignoredSockets.has(ws) || handlingError) return;
       newConn.lastInboundAt = Date.now();
       newConn.inboundSequence += 1;
       try {
@@ -859,7 +865,7 @@ export function connectTerminalStream(
     };
 
     ws.onerror = () => {
-      if (ignoredSockets.has(ws)) return;
+      if (retryState.isClosed || ignoredSockets.has(ws) || handlingError) return;
       clearTimeouts();
       stopHeartbeat(newConn);
       if (!handlingError) {
@@ -869,11 +875,11 @@ export function connectTerminalStream(
     };
 
     ws.onclose = (ev: CloseEvent) => {
-      if (ignoredSockets.has(ws)) return;
+      // A preceding error already scheduled the retry. Do not clear its timer
+      // when the browser subsequently delivers close for the same failure.
+      if (retryState.isClosed || ignoredSockets.has(ws) || handlingError) return;
       clearTimeouts();
       stopHeartbeat(newConn);
-      if (retryState.isClosed) return;
-      if (handlingError) return; // already handled by onerror
       handlingError = true;
 
       // Server closed with 4001 = session not found — fatal, no point retrying

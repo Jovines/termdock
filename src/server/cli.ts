@@ -1238,7 +1238,7 @@ async function runSetPassword(): Promise<void> {
 
   if (isTty) {
     console.log(`${ICON.lock} ${c.bold('Termdock — set access password')}`);
-    console.log(c.dim('  Password must be at least 6 characters. Input is hidden.'));
+    console.log(c.dim('  Password must be at least 16 characters. Input is hidden.'));
     console.log('');
   }
 
@@ -1248,8 +1248,8 @@ async function runSetPassword(): Promise<void> {
     process.exit(1);
   }
 
-  if (password.length < 6) {
-    console.error(`\n${ICON.err} ${c.red('Password must be at least 6 characters.')}`);
+  if (password.length < 16) {
+    console.error(`\n${ICON.err} ${c.red('Password must be at least 16 characters.')}`);
     process.exit(1);
   }
 
@@ -1262,7 +1262,7 @@ async function runSetPassword(): Promise<void> {
   }
 
   const hash = hashPassword(password);
-  writeAuthFile(hash);
+  writeAuthFile(hash, password.length);
   // Changing the password invalidates all existing sessions so old clients
   // are forced to re-authenticate.
   destroyAllSessions();
