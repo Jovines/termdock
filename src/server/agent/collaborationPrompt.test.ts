@@ -82,3 +82,14 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('Termdock 会话 ID：coder-id');
   });
 });
+
+it('tells the Agent that an unreachable service cannot receive messages and pending is not delivery', () => {
+  const prompt = formatCollaborationDelivery({
+    targetSessionId: 'local', messages: [],
+    groups: [{ id: 'cross-pair', name: 'Pair', sessionIds: ['local', 'remote:peer'], createdAt: 1, updatedAt: 1 }],
+    sessions: [{ sessionId: 'remote:peer', name: 'Reviewer · Mac', status: 'service-unreachable' }],
+  });
+  expect(prompt).toContain('服务不可达，消息无法送达');
+  expect(prompt).toContain('不要把 pending 当作成功');
+  expect(prompt).toContain('Mac 客户端须保持运行');
+});

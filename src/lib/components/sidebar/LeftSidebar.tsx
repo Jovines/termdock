@@ -128,7 +128,7 @@ export function normalizeSidebarCollaborationGroups(
     const sessionIds = Array.from(new Set(group.sessionIds)).filter(
       (id) => availableSessionIds.has(id) && !claimedSessionIds.has(id),
     );
-    if (sessionIds.length < 2) continue;
+    if (sessionIds.length < (group.federated ? 1 : 2)) continue;
     sessionIds.forEach((id) => claimedSessionIds.add(id));
     normalized.push({ ...group, sessionIds });
   }
@@ -165,7 +165,7 @@ function buildSidebarEntities(
   const allowedIds = new Set(orderedSessions.map((session) => session.id));
   for (const group of collaborationGroups) {
     const visibleIds = group.sessionIds.filter((id) => allowedIds.has(id));
-    if (visibleIds.length < 2) continue;
+    if (visibleIds.length < (group.federated ? 1 : 2)) continue;
     const visibleGroup = visibleIds.length === group.sessionIds.length
       ? group
       : { ...group, sessionIds: visibleIds };
@@ -1002,7 +1002,8 @@ export function LeftSidebar(
   ) => {
     const group = rawCollaborationGroups.find((candidate) => candidate.id === groupId);
     if (!group || sourceIndex === destinationIndex) return;
-    const sessionIds = buildCollaborationSections(group.sessionIds, splitWorkspaces).flatMap((section) => section.sessionIds);
+    const localIds = group.sessionIds.filter((id) => !id.startsWith('remote:'));
+    const sessionIds = buildCollaborationSections(localIds, splitWorkspaces).flatMap((section) => section.sessionIds);
     const [movedId] = sessionIds.splice(sourceIndex, 1);
     if (!movedId) return;
     sessionIds.splice(destinationIndex, 0, movedId);
@@ -1011,6 +1012,7 @@ export function LeftSidebar(
       const orderedSplitIds = sessionIds.filter((id) => workspace.sessionIds.includes(id));
       onReorderSplitWorkspace(workspace.id, orderedSplitIds);
     }
+    sessionIds.push(...group.sessionIds.filter((id) => id.startsWith('remote:')));
     setRawCollaborationGroups((current) => current.map((candidate) => (
       candidate.id === groupId ? { ...candidate, sessionIds } : candidate
     )));
@@ -1424,7 +1426,7 @@ export function LeftSidebar(
     isDragging = false,
     isCombineTarget = false,
   ): React.ReactNode => {
-    if (members.length < 2) return null;
+    if (members.length < (collaboration.federated ? 1 : 2)) return null;
     const hasActive = members.some((session) => session.id === activeSessionId);
     const sections = buildCollaborationSections(collaboration.sessionIds, splitWorkspaces);
     const orderedIds = sections.flatMap((section) => section.sessionIds);
@@ -1526,6 +1528,19 @@ export function LeftSidebar(
             </div>
           )}
         </Droppable>
+        {collaboration.remoteSessions?.map((remote) => <button
+          key={remote.sessionId} type="button" title={`${remote.serviceLabel ?? remote.serviceOrigin} · ${remote.serviceConnected === false ? '服务不可达，消息尚未送达' : remote.status}`}
+          className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
+          onClick={() => {
+            void window.termdockDesktop?.collaborationFocus?.(remote.sessionId).then((focused) => {
+              if (!focused) { setAgentOperationsGroupId(collaboration.id); setAgentOperationsOpen(true); }
+            });
+          }}>
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${remote.serviceConnected === false ? 'bg-muted-foreground' : 'bg-primary'}`} />
+          <span className="min-w-0 flex-1 truncate">{remote.name}</span>
+          <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{remote.serviceLabel ?? remote.serviceOrigin}</span>
+          {remote.serviceConnected === false && <span className="shrink-0 text-[9px]">不可达</span>}
+        </button>)}
         <div data-collaboration-background className="relative h-1.5" title={`工作组：${collaboration.name}`}>
           <span className="absolute inset-x-0 bottom-0 z-20 hidden rounded-sm bg-surface-elevated px-2 py-1 text-[10px] text-muted-foreground group-data-[sidebar-dragging=true]/collaboration:block">
             拖入工作组 · 在此移出分屏

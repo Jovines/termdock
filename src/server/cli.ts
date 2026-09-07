@@ -1512,6 +1512,11 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
     }
     return;
   }
+  const delivery = body.delivery as { pending?: number; reason?: string; serviceUnavailable?: boolean } | undefined;
+  if (delivery?.reason) {
+    console.log(`${delivery.serviceUnavailable ? '服务不可达' : '等待投递'}: ${delivery.reason}`);
+    return;
+  }
   const success = command.action === 'reply' ? 'Reply sent.'
     : command.action === 'handoff' ? 'Handoff sent.'
       : command.action === 'add' ? 'Session added to collaboration group.'

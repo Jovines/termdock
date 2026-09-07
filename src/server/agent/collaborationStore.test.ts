@@ -85,3 +85,26 @@ describe('CollaborationStore', () => {
     expect(store.listMessages(group.id)).toEqual([]);
   });
 });
+
+describe('federation persistence', () => {
+  it('deduplicates retried deliveries, advances receipts without changing content, and retains deletion across restarts', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-federation-'));
+    try {
+      const file = path.join(directory, 'groups.json');
+      const store = new CollaborationStore(file);
+      const group = { id: 'cross-pair', name: 'Pair', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1, federated: true, remoteSessions: [] };
+      store.mergeFederatedGroup(group);
+      const [message] = store.send({ groupId: group.id, fromSessionId: 'one', toSessionIds: ['two'], kind: 'ask', content: 'Ready?' });
+      store.mergeFederatedMessages([message, message]);
+      expect(store.inbox('two')).toHaveLength(1);
+      store.mergeFederatedMessages([{ ...message, content: 'rewrite attempt', status: 'read', deliveredAt: 2, readAt: 3 }]);
+      store.mergeFederatedMessages([message]);
+      expect(store.inbox('two')[0]).toMatchObject({ content: 'Ready?', status: 'read' });
+      store.remove(group.id);
+      const restored = new CollaborationStore(file);
+      restored.mergeFederatedGroup(group);
+      expect(restored.list()).toHaveLength(0);
+      expect(restored.federationSnapshot().groups[0].deleted).toBe(true);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+});

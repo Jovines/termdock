@@ -48,7 +48,7 @@ export function formatCollaborationDelivery(input: {
   const peers = peerIds.map((sessionId) => {
     const session = sessionsById.get(sessionId);
     return [
-      `- ${session?.name ?? '离线会话'} · ${session?.status ?? 'offline'}`,
+      `- ${session?.name ?? '离线会话'} · ${session?.status === 'service-unreachable' ? '服务不可达，消息无法送达；仅可排队等待服务重连' : session?.status ?? 'offline'}`,
       ...(session?.agentNativeSessionId ? [`  Agent 原生 Session ID：${session.agentNativeSessionId}`] : []),
       `  Termdock 会话 ID：${sessionId}`,
     ].join('\n');
@@ -64,6 +64,7 @@ export function formatCollaborationDelivery(input: {
     '- 如果没有这种内建能力，则使用下方 Termdock 收件箱命令；命令中的 <会话ID> 指 Termdock 会话 ID。',
     ...(hasUserMessage ? ['- 用户消息：直接在当前会话回答或执行（无来源 Agent，不能运行 `td collab reply`）。'] : []),
     ...(hasAgentMessage ? ['- 回复：`td collab reply <消息ID> "回复内容"`'] : []),
+    ...(peerIds.some((id) => id.startsWith('remote:')) ? ['- 跨服务成员必须使用 td collab 通信；服务不可达时消息尚未送达，不要把 pending 当作成功，也不要假定对方已收到任务。Mac 客户端须保持运行以转发消息。'] : []),
     '- 发消息：`td collab send <会话ID> "消息内容"`',
     '- 交接：`td collab handoff <会话ID> "交接摘要"`',
     '- 加成员：`td collab add <协作组ID> <会话ID>`',

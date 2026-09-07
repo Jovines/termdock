@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   listCollaborationGroups: vi.fn().mockResolvedValue({ groups: [], sessions: [] }),
   searchTerminalSessions: vi.fn().mockResolvedValue({ results: [] }),
   saveCollaborationGroup: vi.fn(),
+  sendCollaborationMessage: vi.fn(),
   spawnCollaborationAgent: vi.fn(),
   setAgentAutomationEnabled: vi.fn().mockResolvedValue({ automation: {} }),
 }));
@@ -30,7 +31,7 @@ vi.mock('../../terminal/api', () => ({
   runAgentAutomation: vi.fn(),
   saveAgentAutomation: vi.fn(),
   saveCollaborationGroup: apiMocks.saveCollaborationGroup,
-  sendCollaborationMessage: vi.fn(),
+  sendCollaborationMessage: apiMocks.sendCollaborationMessage,
   spawnCollaborationAgent: apiMocks.spawnCollaborationAgent,
   setAgentAutomationEnabled: apiMocks.setAgentAutomationEnabled,
   searchTerminalSessions: apiMocks.searchTerminalSessions,
@@ -42,6 +43,7 @@ afterEach(() => {
   apiMocks.listCollaborationGroups.mockReset().mockResolvedValue({ groups: [], sessions: [] });
   apiMocks.searchTerminalSessions.mockReset().mockResolvedValue({ results: [] });
   apiMocks.saveCollaborationGroup.mockReset();
+  apiMocks.sendCollaborationMessage.mockReset();
   apiMocks.spawnCollaborationAgent.mockReset();
   apiMocks.setAgentAutomationEnabled.mockReset().mockResolvedValue({ automation: {} });
 });
@@ -231,4 +233,23 @@ describe('AgentOperationsPanel', () => {
     expect(screen.getByRole('button', { name: /构建排查/ }).textContent).not.toContain('<span>');
     expect(screen.getByRole('button', { name: /构建排查/ }).textContent).toContain('打开会话');
   });
+});
+
+it('labels remote members and reports unreachable delivery without claiming success', async () => {
+  const remoteId = 'remote:https%3A%2F%2Fremote.test:one';
+  apiMocks.listCollaborationGroups.mockResolvedValue({
+    groups: [{ id: 'cross-pair', name: '跨服务组', federated: true, sessionIds: ['one', remoteId], createdAt: 1, updatedAt: 1 }],
+    sessions: [
+      { sessionId: 'one', name: '开发', status: 'idle', cwd: '/repo', currentTask: '' },
+      { sessionId: remoteId, name: '测试', status: 'offline', cwd: '/remote', currentTask: '', serviceOrigin: 'https://remote.test', serviceLabel: 'Mac mini', serviceConnected: false },
+    ],
+  });
+  apiMocks.sendCollaborationMessage.mockResolvedValue({ messages: [{ id: 'message' }], deliveries: [{ sessionId: remoteId, delivered: [], pending: 1, serviceUnavailable: true }] });
+  const user = userEvent.setup();
+  render(<AgentOperationsPanel activeSessionId="one" initialCollaborationGroupId="cross-pair" onClose={() => undefined} onNewSession={() => undefined} />);
+  expect(await screen.findByText('Mac mini')).toBeTruthy();
+  expect(screen.getByText('服务不可达')).toBeTruthy();
+  await user.type(screen.getByPlaceholderText(/说明背景、期望产出/), '请检查');
+  await user.click(screen.getByRole('button', { name: '发送' }));
+  expect(await screen.findByText(/1 个接收成员的服务不可达，尚未送达/)).toBeTruthy();
 });

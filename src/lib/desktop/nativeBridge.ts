@@ -56,6 +56,10 @@ export interface DesktopRuntimeUpdateState {
 
 export interface TermdockDesktopBridge {
   platform: string;
+  collaborationList?(): Promise<{ groups: import('../terminal/api').CollaborationGroup[]; sessions: import('../terminal/api').OrchestrationSession[] }>;
+  collaborationSave?(input: { id?: string; name: string; sessionIds: string[] }): Promise<{ group: import('../terminal/api').CollaborationGroup }>;
+  collaborationRemove?(id: string): Promise<void>;
+  collaborationFocus?(id: string): Promise<boolean>;
   /** Present when the desktop shell only acknowledges confirmed native delivery. */
   notificationDeliveryConfirmation?: boolean;
   snapshot(): Promise<DesktopNativeSnapshot>;

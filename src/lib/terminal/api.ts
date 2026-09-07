@@ -3670,6 +3670,8 @@ export interface AutomationRun {
 }
 
 export interface CollaborationGroup {
+  federated?: boolean;
+  remoteSessions?: OrchestrationSession[];
   id: string;
   name: string;
   sessionIds: string[];
@@ -3695,6 +3697,9 @@ export interface CollaborationMessage {
 }
 
 export interface OrchestrationSession {
+  serviceOrigin?: string;
+  serviceLabel?: string;
+  serviceConnected?: boolean;
   sessionId: string;
   agentNativeSessionId?: string | null;
   backendSessionId: string | null;
@@ -3760,7 +3765,8 @@ let collaborationGroupsRequest: Promise<CollaborationGroupsResponse> | null = nu
 
 export function listCollaborationGroups(): Promise<CollaborationGroupsResponse> {
   if (collaborationGroupsRequest) return collaborationGroupsRequest;
-  collaborationGroupsRequest = operationsRequest<CollaborationGroupsResponse>('/collaboration-groups')
+  collaborationGroupsRequest = (window.termdockDesktop?.collaborationList?.()
+    ?? operationsRequest<CollaborationGroupsResponse>('/collaboration-groups'))
     .finally(() => {
       collaborationGroupsRequest = null;
     });
@@ -3768,7 +3774,8 @@ export function listCollaborationGroups(): Promise<CollaborationGroupsResponse> 
 }
 
 export function saveCollaborationGroup(input: { id?: string; name: string; sessionIds: string[] }): Promise<{ group: CollaborationGroup }> {
-  return operationsRequest('/collaboration-groups', { method: 'POST', body: JSON.stringify(input) });
+  return window.termdockDesktop?.collaborationSave?.(input)
+    ?? operationsRequest('/collaboration-groups', { method: 'POST', body: JSON.stringify(input) });
 }
 
 export function spawnCollaborationAgent(groupId: string, input: {
@@ -3785,6 +3792,7 @@ export function spawnCollaborationAgent(groupId: string, input: {
 }
 
 export function removeCollaborationGroup(groupId: string): Promise<void> {
+  if (groupId.startsWith('cross-') && window.termdockDesktop?.collaborationRemove) return window.termdockDesktop.collaborationRemove(groupId);
   return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' });
 }
 
@@ -3799,7 +3807,7 @@ export function sendCollaborationMessage(groupId: string, input: {
   content: string;
   threadId?: string;
   replyTo?: string;
-}): Promise<{ messages: CollaborationMessage[]; deliveries: Array<{ sessionId: string; delivered: string[]; pending: number }> }> {
+}): Promise<{ messages: CollaborationMessage[]; deliveries: Array<{ sessionId: string; delivered: string[]; pending: number; serviceUnavailable?: boolean; reason?: string }> }> {
   return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/messages`, { method: 'POST', body: JSON.stringify(input) });
 }
 

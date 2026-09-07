@@ -1,3 +1,4 @@
+import { CollaborationFederation, sessionAddress } from './collaborationFederation.js';
 import {
   app,
   BrowserWindow,
@@ -154,6 +155,30 @@ let connectedServiceRuntimePollInFlight = false;
 let isQuitting = false;
 const FLOATING_WIDGET_WIDTHS = [64, 108, 152] as const;
 const FLOATING_WIDGET_HEIGHT = 40;
+
+const collaborationFederation = new CollaborationFederation(() => [...serviceWindows.entries()]
+  .filter(([, window]) => !window.isDestroyed())
+  .map(([origin, window]) => ({ origin, label: serviceLabel(origin),
+    request: async (route: string, method = 'GET', body?: unknown) => {
+      if (new URL(window.webContents.getURL()).origin !== origin) throw new Error('服务窗口尚未就绪');
+      const args = JSON.stringify({ route, method, body });
+      return window.webContents.executeJavaScript(`(async () => {
+        const { route, method, body } = ${args};
+        const headers = { 'Content-Type': 'application/json' };
+        if (method !== 'GET') {
+          const token = await fetch('/api/csrf-token', { signal: AbortSignal.timeout(5000) }).then(r => r.json());
+          headers['X-XSRF-TOKEN'] = token.csrfToken;
+        }
+        const response = await fetch('/api/terminal/operations' + route, {
+          method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000)
+        });
+        const payload = response.status === 204 ? null : await response.json();
+        if (!response.ok) throw new Error(payload?.error || '服务不可达或需要升级 Termdock');
+        return payload;
+      })()`, true);
+    },
+  })));
+let collaborationPollTimer: ReturnType<typeof setInterval> | null = null;
 
 function focusedWorkspaceWindow(): BrowserWindow | null {
   const focused = BrowserWindow.getFocusedWindow();
@@ -1898,6 +1923,27 @@ function installIpcHandlers(): void {
     const png = image.toPNG();
     return png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength);
   });
+  const collaborationOrigin = (event: Electron.IpcMainInvokeEvent) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const origin = window ? windowServiceOrigins.get(window) : undefined;
+    if (!origin || event.senderFrame !== event.sender.mainFrame
+      || new URL(event.sender.getURL()).origin !== origin) throw new Error('未授权的服务窗口');
+    return origin;
+  };
+  ipcMain.handle('desktop:collaboration-list', (event) => collaborationFederation.list(collaborationOrigin(event)));
+  ipcMain.handle('desktop:collaboration-save', (event, input) => collaborationFederation.save(collaborationOrigin(event), input));
+  ipcMain.handle('desktop:collaboration-remove', (event, id: string) => collaborationFederation.remove(collaborationOrigin(event), id));
+  ipcMain.handle('desktop:collaboration-focus', (event, id: string) => {
+    collaborationOrigin(event);
+    const address = sessionAddress(id);
+    const target = address ? serviceWindows.get(address.origin) : null;
+    if (!target || target.isDestroyed()) return false;
+    showAndFocusWindow(target);
+    target.webContents.send('desktop:focus-session', address!.id);
+    return true;
+  });
+  collaborationPollTimer = setInterval(() => void collaborationFederation.refresh().catch(() => {}), 2000);
+  collaborationPollTimer.unref();
   ipcMain.handle('desktop:snapshot', () => snapshot());
   ipcMain.handle('desktop:probe', (_event, url: string) => {
     try { certificateTrustRequests.retry(new URL(normalizeServiceUrl(url)).origin); } catch { /* probe reports invalid URLs */ }
@@ -2383,6 +2429,7 @@ app.on('before-quit', () => {
   isQuitting = true;
   desktopRuntimeOwnerServer?.close();
   desktopRuntimeOwnerServer = null;
+  if (collaborationPollTimer) clearInterval(collaborationPollTimer);
   if (connectedServiceRuntimePollTimer) clearInterval(connectedServiceRuntimePollTimer);
   connectedServiceRuntimePollTimer = null;
   connectedServiceRuntimePollInFlight = false;

@@ -1895,7 +1895,20 @@ function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId
   return globalSessionState.sessions.find((record) => record.tmuxSessionName === tmuxSessionName)?.sessionId ?? null;
 }
 
-function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number } {
+function collaborationRemoteSessions() {
+  return Array.from(new Map(collaborationStore.list().flatMap((group) => group.remoteSessions ?? [])
+    .map((session) => [session.sessionId, { ...session, status: session.serviceConnected !== true || Date.now() - (session.serviceCheckedAt ?? 0) > 15_000 ? 'service-unreachable' : session.status, name: `${session.name} · ${session.serviceLabel}` }])).values());
+}
+
+function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number; serviceUnavailable?: boolean; reason?: string } {
+  const remote = collaborationRemoteSessions().find((session) => session.sessionId === frontendSessionId);
+  if (remote) {
+    const unavailable = remote.serviceConnected !== true || Date.now() - (remote.serviceCheckedAt ?? 0) > 15_000;
+    return { delivered: [], pending: collaborationStore.inbox(frontendSessionId, { pendingOnly: true }).length,
+      serviceUnavailable: unavailable, reason: unavailable
+        ? `服务 ${remote.serviceLabel} 不可达：消息尚未送达，仅保存在待发送队列；请勿等待对方已收到的回复，服务重连且 Mac 客户端运行后重试投递。`
+        : '跨服务消息尚未确认送达，正在等待 Mac 客户端转发。' };
+  }
   const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
   const session = record?.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
   const pending = collaborationStore.inbox(frontendSessionId, { pendingOnly: true, limit: 10 });
@@ -1908,7 +1921,7 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
     targetSessionId: frontendSessionId,
     messages: pending,
     groups: collaborationStore.groupsForSession(frontendSessionId),
-    sessions: globalSessionState.sessions.map((candidate) => {
+    sessions: [...collaborationRemoteSessions(), ...globalSessionState.sessions.map((candidate) => {
       const snapshot = orchestrationSessionSnapshot(candidate);
       return {
         sessionId: snapshot.sessionId,
@@ -1916,7 +1929,7 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
         name: snapshot.name,
         status: snapshot.status,
       };
-    }),
+    })],
   });
   session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
   collaborationStore.markDelivered(pending.map((message) => message.id));
@@ -6077,8 +6090,32 @@ router.delete('/operations/automations/:automationId', (req, res) => {
   res.status(204).send();
 });
 
+// Authenticated desktop connections exchange only collaboration data; no peer credentials
+// or arbitrary remote URLs are accepted by the server.
+router.get('/operations/collaboration-federation', (_req, res) => {
+  res.json({ ...collaborationStore.federationSnapshot(),
+    sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot) });
+});
+
+router.post('/operations/collaboration-federation', (req, res) => {
+  try {
+    const group = req.body?.group;
+    if (!group || !Array.isArray(group.remoteSessions)) throw new Error('跨服务工作组无效');
+    const remoteIds = new Set(group.remoteSessions.map((session: { sessionId: string }) => session.sessionId));
+    const localIds = new Set(globalSessionState.sessions.map((session) => session.sessionId));
+    if (!group.deleted && group.sessionIds.some((id: string) => !localIds.has(id) && !remoteIds.has(id))) {
+      throw new Error('工作组包含不存在的本服务会话，请刷新成员列表');
+    }
+    collaborationStore.mergeFederatedGroup(group);
+    collaborationStore.mergeFederatedMessages(Array.isArray(req.body.messages) ? req.body.messages : []);
+    for (const id of group.sessionIds) if (localIds.has(id)) tryDeliverCollaborationInbox(id);
+    res.json(collaborationStore.federationSnapshot());
+  } catch (error) { res.status(400).json({ error: getErrorMessage(error) }); }
+});
+
 router.get('/operations/collaboration-groups', (_req, res) => {
   res.json({
+    federationVersion: 1,
     groups: collaborationStore.list(),
     sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot),
   });
@@ -6089,7 +6126,9 @@ router.post('/operations/collaboration-groups', (req, res) => {
   const sessionIds: string[] = Array.isArray(req.body?.sessionIds)
     ? (req.body.sessionIds as unknown[]).filter((id): id is string => typeof id === 'string')
     : [];
-  const knownIds = new Set(globalSessionState.sessions.map((session) => session.sessionId));
+  const existingGroup = typeof req.body?.id === 'string' ? collaborationStore.getGroup(req.body.id) : null;
+  const knownIds = new Set([...globalSessionState.sessions.map((session) => session.sessionId),
+    ...(existingGroup?.remoteSessions?.map((session) => session.sessionId) ?? [])]);
   const normalizedIds = Array.from(new Set(sessionIds.filter((id) => knownIds.has(id))));
   if (!name || normalizedIds.length < 2) return res.status(400).json({ error: '协作组至少需要两个有效会话' });
   const group = collaborationStore.save({
@@ -6163,7 +6202,7 @@ router.get('/operations/orchestration/peers', async (req, res) => {
   res.json({
     source: orchestrationSessionSnapshot(source),
     groups,
-    peers: globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot),
+    peers: [...globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot), ...collaborationRemoteSessions().filter((record) => peerIds.has(record.sessionId))],
     sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot),
     agents: await listDetectedAgentLaunchers(),
   });
@@ -6232,7 +6271,7 @@ router.get('/operations/orchestration/inbox', (req, res) => {
   res.json({
     session: orchestrationSessionSnapshot(globalSessionState.sessions.find((record) => record.sessionId === sessionId)!),
     groups,
-    peers: globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot),
+    peers: [...globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot), ...collaborationRemoteSessions().filter((record) => peerIds.has(record.sessionId))],
     messages,
   });
 });
