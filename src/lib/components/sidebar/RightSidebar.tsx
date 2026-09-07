@@ -738,8 +738,18 @@ export function resolveMarkdownLocalLinkTarget(
   rootPath: string | null,
 ): MarkdownLocalLinkTarget | null {
   const trimmed = href.trim();
-  if (!trimmed || /^(?:https?:|mailto:|javascript:|data:|#)/i.test(trimmed)) return null;
+  if (!trimmed || /^(?:https?:|mailto:|javascript:|data:)/i.test(trimmed)) return null;
   if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
+
+  // Fragment-only links belong to the current preview, not a new browser window.
+  if (trimmed.startsWith('#')) {
+    if (!markdownFilePath) return null;
+    try {
+      return { path: markdownFilePath, fragment: decodeURIComponent(trimmed.slice(1)) || null, directory: false };
+    } catch {
+      return null;
+    }
+  }
 
   const hashIndex = trimmed.indexOf('#');
   const rawPathWithQuery = hashIndex >= 0 ? trimmed.slice(0, hashIndex) : trimmed;

@@ -267,6 +267,31 @@ describe('right sidebar Markdown preview rendering', () => {
     });
   });
 
+  it.each(['#hello-world', '#%E7%AB%A0%E8%8A%82', '#missing-heading', '#'])('keeps fragment link %s in the current preview without opening a window', (href) => {
+    const onLocalLinkOpen = vi.fn();
+    render(
+      <MarkdownPreview
+        content={`[Jump](${href})\n\n# Hello World\n\n# 章节`}
+        filePath="/repo/docs/guide.md"
+        rootPath="/repo"
+        lineRange={null}
+        onLineRangeClick={() => undefined}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+        onLocalLinkOpen={onLocalLinkOpen}
+      />,
+    );
+
+    // Cancelling the native click prevents Electron's new-window handler.
+    expect(fireEvent.click(screen.getByRole('link', { name: 'Jump' }))).toBe(false);
+    expect(onLocalLinkOpen).toHaveBeenCalledWith({
+      path: '/repo/docs/guide.md',
+      fragment: decodeURIComponent(href.slice(1)) || null,
+      directory: false,
+    });
+  });
+
   it('tracks the active heading hierarchy for sticky Markdown preview context', () => {
     const blocks = buildMarkdownPreviewBlocks([
       '# Product',
