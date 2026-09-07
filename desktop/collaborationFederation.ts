@@ -117,6 +117,8 @@ export class CollaborationFederation {
     }
     await Promise.all(services.filter((service) => this.reachable.has(service.origin)).map(async (service) => {
       for (const group of this.groups.values()) {
+        const hadReplica = this.snapshots.get(service.origin)?.groups.some((item) => item.id === group.id);
+        if (!hadReplica && !group.sessionIds.some((id) => sessionAddress(id)?.origin === service.origin)) continue;
         try { await this.push(service, group); } catch { this.reachable.delete(service.origin); }
       }
     }));
@@ -163,7 +165,9 @@ export class CollaborationFederation {
     if (!service) throw new Error('当前服务未连接');
     const local = await service.request('/collaboration-groups') as { groups: FederationGroup[]; sessions: FederationSession[] };
     const groups = [...local.groups.filter((group) => !group.federated), ...[...this.groups.values()]
-      .filter((group) => !group.deleted).map((group) => this.groupForService(group, origin))];
+      .filter((group) => !group.deleted && (group.sessionIds.some((id) => sessionAddress(id)?.origin === origin)
+        || this.snapshots.get(origin)?.groups.some((item) => item.id === group.id)))
+      .map((group) => this.groupForService(group, origin))];
     const sessions = [...this.sessions.values()].map((session) => ({ ...session, sessionId: localId(origin, session.sessionId) }));
     // Older services still work locally, but cannot be selected as federation targets.
     if (!this.reachable.has(origin)) sessions.push(...local.sessions);

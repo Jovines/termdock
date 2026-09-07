@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { CollaborationFederation, qualifySession, sessionAddress, type FederationGroup, type FederationService, type FederationSession } from './collaborationFederation.js';
 
-function fixture() {
-  const origins = ['https://one.test', 'https://two.test'];
+function fixture(origins = ['https://one.test', 'https://two.test']) {
   const records = origins.map((origin) => ({ origin, connected: true, groups: [] as FederationGroup[], messages: [] as any[],
     sessions: [{ sessionId: 'same-id', name: origin, cwd: '/work', status: 'idle', capability: '', currentTask: '', updatedAt: 1,
       backendSessionId: null, agent: null }] as FederationSession[] }));
@@ -56,6 +55,17 @@ describe('cross-service collaboration transport', () => {
     records[1].messages[0].status = 'read';
     await bridge.refresh();
     expect(records[0].messages[0].status).toBe('read');
+  });
+
+  it('does not copy group messages to an unrelated connected service', async () => {
+    const { bridge, records } = fixture(['https://one.test', 'https://two.test', 'https://unrelated.test']);
+    await bridge.save(records[0].origin, { name: 'Pair', sessionIds: ['same-id', qualifySession(records[1].origin, 'same-id')] });
+    records[0].messages.push({ id: 'private-message', groupId: records[0].groups[0].id,
+      fromSessionId: 'same-id', toSessionId: qualifySession(records[1].origin, 'same-id'), status: 'pending' });
+    await bridge.refresh();
+    expect(records[2].groups).toEqual([]);
+    expect(records[2].messages).toEqual([]);
+    expect((await bridge.list(records[2].origin)).groups).toEqual([]);
   });
 
   it('propagates deletion after an offline service returns without resurrecting the group', async () => {
