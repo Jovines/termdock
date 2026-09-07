@@ -8,6 +8,7 @@ import { LeftSidebar, buildCollaborationSections } from './LeftSidebar';
 
 const mocks = vi.hoisted(() => ({
   start: null as null | ((start: DragStart) => void),
+  capture: null as null | (() => void),
   end: null as null | ((result: DropResult) => void),
   save: vi.fn(), remove: vi.fn(), list: vi.fn(),
 }));
@@ -18,8 +19,8 @@ vi.mock('../../terminal/api', async (original) => ({
   removeCollaborationGroup: mocks.remove,
 }));
 vi.mock('@hello-pangea/dnd', () => ({
-  DragDropContext: ({ children, onDragStart, onDragEnd }: any) => {
-    mocks.start = onDragStart; mocks.end = onDragEnd; return children;
+  DragDropContext: ({ children, onBeforeCapture, onDragStart, onDragEnd }: any) => {
+    mocks.capture = onBeforeCapture; mocks.start = onDragStart; mocks.end = onDragEnd; return children;
   },
   Droppable: ({ children }: any) => children({ innerRef: vi.fn(), droppableProps: {}, placeholder: null }, {}),
   Draggable: ({ children, draggableId }: any) => children({ innerRef: vi.fn(), draggableProps: {}, dragHandleProps: { 'data-drag-id': draggableId } }, {}),
@@ -32,12 +33,12 @@ const callbacks = () => ({
   onReorderSplitWorkspace: vi.fn(), onRenameSplitWorkspace: vi.fn(), onCombineSplitSessions: vi.fn(),
   onReorderSessions: vi.fn(), onOpenSettings: vi.fn(),
 });
-async function setup(groupByFolder = false, groupIds = baseGroup.sessionIds) {
+async function setup(groupByFolder = false, groupIds = baseGroup.sessionIds, sessionOrder = ['a', 'b', 'c', 'd']) {
   useSidebarStore.setState({ groupByFolder, collapsedGroups: new Set() });
   mocks.list.mockResolvedValue({ groups: [{ ...baseGroup, sessionIds: groupIds }] });
   const handlers = callbacks();
   render(<I18nProvider><LeftSidebar {...handlers} isOpen pinned drawerWidthPx={300}
-    sessions={['a', 'b', 'c', 'd'].map((id) => ({ id, name: id.toUpperCase(), mode: 'shell' as const }))}
+    sessions={sessionOrder.map((id) => ({ id, name: id.toUpperCase(), mode: 'shell' as const }))}
     activeSessionId="a" sessionStates={new Map()} splitWorkspaces={[workspace]} /></I18nProvider>);
   await screen.findByRole('region', { name: 'Agent 工作组：Release team' });
   return handlers;
@@ -78,13 +79,14 @@ describe('Agent workgroup split navigation', () => {
     fireEvent.click(within(inner as HTMLElement).getByRole('button', { name: 'Split layout: Side by side' }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Stacked' }));
     expect(handlers.onSetSplitLayout).toHaveBeenCalledWith('a', 'vertical');
-    fireEvent.click(screen.getByRole('button', { name: 'Exit split Release team' }));
-    expect(handlers.onCloseSplit).toHaveBeenCalledWith('a');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from split A' }));
+    expect(handlers.onRemoveFromSplit).toHaveBeenCalledWith('a');
   });
-  it('uses the workgroup header for a split containing every member', async () => {
+  it('keeps full-group splits compact with the layout control on the first member', async () => {
     await setup(false, ['a', 'b']);
     const inner = document.querySelector('[data-collaboration-split]')!;
-    expect(inner.querySelector('[aria-haspopup="menu"]')).toBeNull();
+    expect(inner.querySelector('[aria-haspopup="menu"]')).toBeTruthy();
+    expect(screen.queryByText('Release team')).toBeNull();
     expect(screen.getAllByRole('button', { name: 'Split layout: Side by side' })).toHaveLength(1);
   });
   it('combines members by drag without changing workgroup membership', async () => {
@@ -117,6 +119,50 @@ describe('Agent workgroup split navigation', () => {
     expect(handlers.onRemoveFromSplit).toHaveBeenCalledWith('a');
     expect(mocks.save).not.toHaveBeenCalled();
     expect(mocks.remove).not.toHaveBeenCalled();
+  });
+  it.each([false, true])('moves a workgroup as one item without splitting it (folders=%s)', async (folders) => {
+    const handlers = await setup(folders);
+    const handle = screen.getByRole('button', { name: '移动工作组 Release team' });
+    expect(handle.getAttribute('data-drag-id')).toBe('collaboration:team');
+    expect(screen.getByRole('button', { name: '打开 Agent 工作组消息：Release team' }).hasAttribute('data-drag-id')).toBe(false);
+    const start: DragStart = {
+      draggableId: 'collaboration:team', type: 'session', mode: 'FLUID',
+      source: { droppableId: folders ? 'group-sessions:' : 'sidebar-entities', index: 0 },
+    };
+    act(() => mocks.start!(start));
+    act(() => mocks.end!({ ...start, reason: 'DROP', combine: null, destination: { ...start.source, index: 1 } }));
+    expect(handlers.onReorderSessions).toHaveBeenCalledWith(['d', 'a', 'c', 'b']);
+    expect(handlers.onCombineSplitSessions).not.toHaveBeenCalled();
+    expect(mocks.save).not.toHaveBeenCalled();
+  });
+  it('keeps the original center drop target when sorting displaces its row', async () => {
+    const handlers = await setup();
+    const member = document.querySelector<HTMLElement>('[data-collaboration-member="a"]')!;
+    vi.spyOn(member, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 38, 200, 24));
+    act(() => mocks.capture!());
+    const end = drag('c');
+    point(document.querySelector('[data-collaboration-group]'));
+    end();
+    expect(handlers.onCombineSplitSessions).toHaveBeenCalledWith('a', 'c');
+  });
+  it('prefers the visible group landing area over a covered split row', async () => {
+    const handlers = await setup();
+    const member = document.querySelector<HTMLElement>('[data-collaboration-member="b"]')!;
+    vi.spyOn(member, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 38, 200, 24));
+    act(() => mocks.capture!());
+    const end = drag('a');
+    point(document.querySelector('[data-collaboration-background]'));
+    end();
+    expect(handlers.onRemoveFromSplit).toHaveBeenCalledWith('a');
+    expect(handlers.onCombineSplitSessions).not.toHaveBeenCalled();
+  });
+  it('keeps the target group anchored when an earlier session joins it', async () => {
+    const handlers = await setup(false, baseGroup.sessionIds, ['d', 'a', 'b', 'c']);
+    const end = drag('d', 'session');
+    point(document.querySelector('[data-collaboration-background]'));
+    end();
+    expect(handlers.onReorderSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd']);
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled());
   });
   it('cancel and unsupported drops preserve memberships', async () => {
     const handlers = await setup();

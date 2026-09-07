@@ -121,6 +121,7 @@ import {
   ensureTmuxColorCapabilities,
   resolveTmuxInnerTerm,
 } from '../utils/terminalColorEnvironment.js';
+import { buildTmuxAttachArgs, supportsTmuxClientFeatures } from '../utils/tmuxClientCapabilities.js';
 import {
   buildTmuxScreenSnapshot,
   parseTmuxPaneSnapshot,
@@ -5288,9 +5289,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     ? getTmuxBinary()
     : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCandidates()[0]);
   const args = mode === 'tmux' && tmuxSessionName
-    // xterm supports DEC 2026. Declare it on this attached client so tmux
-    // emits real synchronized-output boundaries around its redraw batches.
-    ? ['-T', 'RGB,sync', 'attach-session', '-t', tmuxSessionName]
+    ? buildTmuxAttachArgs(tmuxSessionName, await supportsTmuxClientFeatures(command))
     : (process.platform === 'win32' ? buildPowerShellCwdHookArgs() : []);
 
   const envPath = buildAugmentedPath();
@@ -8024,16 +8023,18 @@ export function handleTerminalWebSocket(
   const attachment = ownTmux ? new TerminalClientAttachment(
     async (cols, rows) => {
       const provider = await getPtyProvider();
+      const tmuxBinary = getTmuxBinary();
+      const supportsFeatures = await supportsTmuxClientFeatures(tmuxBinary);
       // The metadata observer must not choose the pane size while a browser
       // owns an attached client. Resolve by exact PID, never another client.
       const raw = await runTmux(['list-clients', '-t', session.tmuxSessionName!, '-F', '#{client_pid} #{client_tty}']);
       const metadata = raw.split('\n').map(line => line.trim().split(/\s+/))
         .find(([pid]) => pid === String(session.ptyProcess.pid));
-      if (metadata?.[1]) await runTmux(['refresh-client', '-t', metadata[1], '-f', 'ignore-size']);
+      if (metadata?.[1] && supportsFeatures) await runTmux(['refresh-client', '-t', metadata[1], '-f', 'ignore-size']);
       const env = buildInteractiveColorEnvironment({ ...process.env, PATH: buildAugmentedPath() });
       delete env.TMUX;
       delete env.TMUX_PANE;
-      return provider.spawn(getTmuxBinary(), ['-T', 'RGB,sync', 'attach-session', '-t', session.tmuxSessionName!], {
+      return provider.spawn(tmuxBinary, buildTmuxAttachArgs(session.tmuxSessionName!, supportsFeatures), {
         name: 'xterm-256color', cols, rows, cwd: session.cwd || os.homedir(),
         env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       });

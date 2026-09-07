@@ -18,6 +18,7 @@ import {
   ChevronDown as RiChevronDownLine,
   Workflow as RiWorkflowLine,
   History as RiHistoryLine,
+  GripVertical as RiDragHandle,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -303,6 +304,11 @@ export function LeftSidebar(
   const sidebarMemberDragActiveRef = useRef(false);
   const sourceCollaborationGroupIdRef = useRef<string | null>(null);
   const draggedSessionIdRef = useRef<string | null>(null);
+  const [isSidebarGroupDragging, setIsSidebarGroupDragging] = useState(false);
+  const sidebarDropGeometryRef = useRef<Array<{
+    element: HTMLElement; sessionId: string; groupId: string; rect: DOMRect;
+    scrollParents: Array<{ element: HTMLElement; top: number; left: number }>;
+  }>>([]);
   const splitExitAllowedListIdRef = useRef<string | null>(null);
   const splitExitTargetRef = useRef<SidebarPointerDropTarget | null>(null);
   // 由「翻页→自动展开」机制维护的分组 key 集合，用于区分：
@@ -355,12 +361,54 @@ export function LeftSidebar(
     if (isOpen || !agentOperationsOpen) void refreshCollaborationGroups();
   }, [agentOperationsOpen, isOpen, refreshCollaborationGroups]);
 
+  const captureSidebarDropGeometry = useCallback(() => {
+    sidebarDropGeometryRef.current = Array.from(document.querySelectorAll<HTMLElement>('[data-collaboration-member]')).flatMap((element) => {
+      const sessionId = element.dataset.collaborationMember;
+      const groupId = element.closest<HTMLElement>('[data-collaboration-group]')?.dataset.collaborationGroup;
+      if (!sessionId || !groupId) return [];
+      const scrollParents = [];
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        scrollParents.push({ element: parent, top: parent.scrollTop, left: parent.scrollLeft });
+      }
+      return [{ element, sessionId, groupId, rect: element.getBoundingClientRect(), scrollParents }];
+    });
+  }, []);
+
   const updateSplitExitTarget = useCallback((clientX: number, clientY: number) => {
     if (!sidebarMemberDragActiveRef.current) return;
     document.querySelectorAll<HTMLElement>('[data-split-exit-drop-index]')
       .forEach((marker) => marker.removeAttribute('data-active'));
     document.querySelectorAll<HTMLElement>('[data-drop-active]')
       .forEach((element) => element.removeAttribute('data-drop-active'));
+    // The temporary group landing area can overlap a row visually; its explicit
+    // action takes priority over the row's pre-lift combine geometry.
+    const groupBackground = document.elementsFromPoint(clientX, clientY)
+      .map((element) => element.closest<HTMLElement>('[data-collaboration-background]')).find(Boolean);
+    const backgroundGroup = groupBackground?.closest<HTMLElement>('[data-collaboration-group]');
+    if (backgroundGroup?.dataset.collaborationGroup) {
+      backgroundGroup.dataset.dropActive = 'true';
+      splitExitTargetRef.current = { kind: 'collaboration', groupId: backgroundGroup.dataset.collaborationGroup, background: true };
+      return;
+    }
+    // Pangea displaces neighboring rows while sorting. Use their pre-lift
+    // positions for the center drop target so a deliberate combine does not
+    // turn into a reorder as the target moves away from the pointer.
+    const centeredMember = sidebarDropGeometryRef.current.find((target) => {
+      if (target.sessionId === draggedSessionIdRef.current || !target.element.isConnected) return false;
+      const dx = target.scrollParents.reduce((sum, parent) => sum + parent.element.scrollLeft - parent.left, 0);
+      const dy = target.scrollParents.reduce((sum, parent) => sum + parent.element.scrollTop - parent.top, 0);
+      return clientX >= target.rect.left - dx && clientX <= target.rect.right - dx
+        && clientY >= target.rect.top - dy + target.rect.height * 0.25
+        && clientY <= target.rect.bottom - dy - target.rect.height * 0.25;
+    });
+    if (centeredMember) {
+      const workspace = splitWorkspaces.find((candidate) => candidate.sessionIds.includes(centeredMember.sessionId));
+      if (!workspace?.sessionIds.includes(draggedSessionIdRef.current ?? '')) {
+        centeredMember.element.dataset.dropActive = 'true';
+        splitExitTargetRef.current = { kind: 'split', sessionId: centeredMember.sessionId, groupId: centeredMember.groupId };
+        return;
+      }
+    }
     // Ignore the lifted row itself; hit-test the stationary content underneath.
     const hits = document.elementsFromPoint(clientX, clientY).filter((element) => {
       const draggable = element.closest<HTMLElement>('[data-rfd-draggable-id]');
@@ -418,7 +466,7 @@ export function LeftSidebar(
       ':scope > [data-sidebar-entity-index] > [data-split-exit-drop-index]',
     )).find((candidate) => candidate.dataset.splitExitDropIndex === String(insertionIndex));
     if (marker instanceof HTMLElement) marker.dataset.active = 'true';
-  }, []);
+  }, [splitWorkspaces]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => updateSplitExitTarget(event.clientX, event.clientY);
@@ -438,7 +486,10 @@ export function LeftSidebar(
     try {
       handler(result);
     } finally {
+      document.querySelectorAll<HTMLElement>('[data-sidebar-dragging]').forEach((group) => { delete group.dataset.sidebarDragging; });
       sidebarMemberDragActiveRef.current = false;
+      sidebarDropGeometryRef.current = [];
+      setIsSidebarGroupDragging(false);
       sourceCollaborationGroupIdRef.current = null;
       draggedSessionIdRef.current = null;
       splitExitAllowedListIdRef.current = null;
@@ -728,7 +779,7 @@ export function LeftSidebar(
             <span className={`absolute inset-y-2 left-0 w-0.5 rounded-full ${accentClass}`} />
           )}
           <span className={`relative inline-flex shrink-0 items-center justify-center rounded-md ${
-            compact ? 'h-5 w-5' : 'h-[22px] w-[22px]'
+            compact ? 'h-5 w-[22px]' : 'h-[22px] w-[22px]'
           } ${
             isActive
               ? session.mode === 'tmux'
@@ -854,6 +905,7 @@ export function LeftSidebar(
   );
 
   const handleSidebarDragStart = useCallback((start: DragStart) => {
+    setIsSidebarGroupDragging(start.draggableId.startsWith('collaboration:') || start.draggableId.startsWith('workspace:'));
     const splitSessionId = start.draggableId.replace(/^split-member:/, '');
     draggedSessionIdRef.current = start.draggableId.replace(/^(?:session|split-member|collaboration-member):/, '');
     const sourceWorkspace = start.type === 'split-member'
@@ -870,6 +922,9 @@ export function LeftSidebar(
       || sourceCollaboration
       || (start.type === 'session' && start.draggableId.startsWith('session:')),
     );
+    if (sidebarMemberDragActiveRef.current) {
+      document.querySelectorAll<HTMLElement>('[data-collaboration-group]').forEach((group) => { group.dataset.sidebarDragging = 'true'; });
+    }
     sourceCollaborationGroupIdRef.current = sourceCollaboration?.id ?? null;
     const sourceIds = sourceWorkspace?.sessionIds ?? sourceCollaboration?.sessionIds ?? [];
     const sourceGroup = sourceIds.length > 0
@@ -896,6 +951,18 @@ export function LeftSidebar(
       ? rawCollaborationGroups.find((group) => group.id === targetGroupId)
       : null;
     if (targetGroupId && !target) return;
+    if (target) {
+      // A group is emitted at its earliest session in the sidebar order. Move
+      // the incoming member to the group, rather than letting it pull the whole
+      // group back to its old position higher in the list.
+      const sessionIds = sessions.map((session) => session.id).filter((id) => id !== sessionId);
+      let insertionIndex = -1;
+      sessionIds.forEach((id, index) => { if (target.sessionIds.includes(id)) insertionIndex = index; });
+      if (insertionIndex >= 0) {
+        sessionIds.splice(insertionIndex + 1, 0, sessionId);
+        onReorderSessions(sessionIds);
+      }
+    }
     const nextSourceIds = source?.sessionIds.filter((id) => id !== sessionId) ?? [];
     const nextTargetIds = target
       ? [...target.sessionIds.filter((id) => id !== sessionId), sessionId]
@@ -920,7 +987,7 @@ export function LeftSidebar(
       () => refreshCollaborationGroups(),
       () => refreshCollaborationGroups(),
     );
-  }, [rawCollaborationGroups, refreshCollaborationGroups]);
+  }, [rawCollaborationGroups, refreshCollaborationGroups, sessions, onReorderSessions]);
 
   const reorderCollaborationMembers = useCallback((
     groupId: string,
@@ -977,7 +1044,13 @@ export function LeftSidebar(
       const targetGroupId = result.combine.droppableId.replace(/^collaboration-members:/, '');
       if (targetGroupId !== sourceGroupId) moveSessionBetweenCollaborationGroups(sessionId, sourceGroupId, targetGroupId);
       const targetId = result.combine.draggableId.replace(/^collaboration-member:/, '');
-      if (sessionsById.has(targetId)) onCombineSplitSessions(targetId, sessionId);
+      const workspace = splitWorkspaces.find((candidate) => candidate.sessionIds.includes(sessionId));
+      if (workspace?.sessionIds.includes(targetId)) {
+        const group = collaborationGroups.find((candidate) => candidate.id === sourceGroupId);
+        const targetIndex = group ? buildCollaborationSections(group.sessionIds, splitWorkspaces)
+          .flatMap((section) => section.sessionIds).indexOf(targetId) : -1;
+        if (targetIndex >= 0) reorderCollaborationMembers(sourceGroupId, result.source.index, targetIndex);
+      } else if (sessionsById.has(targetId)) onCombineSplitSessions(targetId, sessionId);
       return true;
     }
     if (result.destination?.droppableId === result.source.droppableId) {
@@ -1110,6 +1183,11 @@ export function LeftSidebar(
       moveSessionBetweenCollaborationGroups(source.session.id, null, pointerTarget.groupId);
       return;
     }
+    if (result.combine && source.kind !== 'session') {
+      const targetIndex = entities.findIndex((entity) => entity.id === result.combine?.draggableId);
+      if (targetIndex < 0) return;
+      result = { ...result, combine: null, destination: { ...result.source, index: targetIndex } };
+    }
     if (result.combine) {
       const target = entities.find((entity) => entity.id === result.combine?.draggableId);
       if (!target) return;
@@ -1207,7 +1285,7 @@ export function LeftSidebar(
           <div
             role="menu"
             aria-label={t('tab.splitLayout')}
-            className="absolute right-0 top-full z-30 mt-1 flex gap-0.5 rounded-md border border-border/20 bg-surface-elevated p-1 shadow-lg"
+            className="absolute right-0 top-full z-30 mt-1 flex gap-0.5 rounded-md border border-border bg-surface-elevated p-1 shadow-lg"
           >
             {layoutOptions.map((option) => {
               const LayoutIcon = option.icon;
@@ -1241,6 +1319,15 @@ export function LeftSidebar(
     );
   };
 
+  const renderGroupDragHandle = (label: string, props?: DraggableProvidedDragHandleProps | null) => props && (
+    <button type="button" {...props}
+      aria-label={label} title={label}
+      onClick={(event) => event.stopPropagation()}
+      className="absolute -left-2 inset-y-0 z-10 flex w-3 cursor-grab items-start justify-center pt-1.5 text-muted-foreground/60 transition hover:text-foreground focus-visible:text-foreground active:cursor-grabbing">
+      <RiDragHandle size={10} />
+    </button>
+  );
+
   const renderSplitWorkspaceItem = (
     workspace: SplitWorkspaceSummary,
     members: LeftSidebarProps['sessions'],
@@ -1268,10 +1355,9 @@ export function LeftSidebar(
     const layoutMenuOpen = layoutMenuWorkspaceId === workspace.id;
     return (
       <section
-        {...(dragHandleProps ?? {})}
         data-split-workspace={workspace.id}
         aria-label={accessibleName}
-        className={`group/split relative rounded-md border border-border/10 bg-surface/35 p-0.5 transition-colors ${
+        className={`group/split relative rounded-sm p-0.5 before:pointer-events-none before:absolute before:inset-y-1 before:left-0 before:w-px before:bg-border transition-colors ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
@@ -1287,6 +1373,7 @@ export function LeftSidebar(
                       : 'hover:bg-surface-2'
         }`}
       >
+        {renderGroupDragHandle(`移动分屏组 ${accessibleName}`, dragHandleProps)}
         <Droppable droppableId={`split-members:${workspace.id}`} type="split-member" direction="vertical">
           {(membersProvided, membersSnapshot) => (
             <div
@@ -1341,7 +1428,7 @@ export function LeftSidebar(
         data-collaboration-group={collaboration.id}
         data-collaboration-group-name={collaboration.name}
         aria-label={`Agent 工作组：${collaboration.name}`}
-        className={`group/collaboration relative ml-1 rounded-md border border-border/10 bg-surface/35 p-0.5 transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
+        className={`group/collaboration relative rounded-sm p-0.5 before:pointer-events-none before:absolute before:inset-y-1 before:left-0 before:w-px before:bg-border transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
@@ -1351,12 +1438,10 @@ export function LeftSidebar(
                 : 'hover:bg-surface-2'
         }`}
       >
+        {renderGroupDragHandle(`移动工作组 ${collaboration.name}`, dragHandleProps)}
         <button
           type="button"
-          {...(dragHandleProps ?? {})}
-          className={`absolute -right-1 top-1.5 z-10 inline-flex h-4 w-4 items-center justify-center rounded-full border border-border/20 bg-[var(--chrome-bg)] text-primary transition hover:bg-surface-elevated hover:text-foreground ${
-            dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''
-          }`}
+          className="absolute -right-1 top-1.5 z-10 inline-flex h-4 w-4 items-center justify-center rounded-sm bg-[var(--chrome-bg)] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
           title={`打开 ${collaboration.name} 的协作消息`}
           aria-label={`打开 Agent 工作组消息：${collaboration.name}`}
           onClick={(event) => {
@@ -1367,16 +1452,6 @@ export function LeftSidebar(
         >
           <RiWorkflowLine size={9} />
         </button>
-        <div data-collaboration-background className={`relative flex min-h-7 items-center gap-1 px-1.5 pr-5 text-[11px] text-muted-foreground ${unifiedSplit && layoutMenuWorkspaceId === unifiedSplit.id ? 'z-20' : ''}`}>
-          <span className="min-w-0 flex-1 truncate" title={collaboration.name}>{collaboration.name}</span>
-          {unifiedSplit && <>
-            <span className="shrink-0">{t('tab.splitWorkspace')} · {members.length}</span>
-            {renderSplitLayoutControl(unifiedSplit)}
-            <button type="button" className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-surface-2"
-              aria-label={`${t('tab.splitClose')} ${collaboration.name}`} title={t('tab.splitClose')}
-              onClick={() => onCloseSplit(unifiedSplit.sessionIds[0]!)}><RiUnlinkLine size={12} /></button>
-          </>}
-        </div>
         <Droppable
           droppableId={`collaboration-members:${collaboration.id}`}
           type="collaboration-member"
@@ -1388,7 +1463,7 @@ export function LeftSidebar(
               ref={membersProvided.innerRef}
               {...membersProvided.droppableProps}
               data-collaboration-members
-              className={`pl-0.5 ${membersSnapshot.isDraggingOver ? 'rounded-sm bg-primary/10' : ''}`}
+              className={`${membersSnapshot.isDraggingOver ? 'rounded-sm bg-primary/10' : ''}`}
             >
               {sections.map((section) => (
                 <div key={section.workspace?.id ?? section.sessionIds[0]}
@@ -1396,16 +1471,7 @@ export function LeftSidebar(
                   data-split-anchor={section.workspace?.sessionIds[0]}
                   role={section.workspace ? 'region' : undefined}
                   aria-label={section.workspace ? `${t('tab.splitWorkspace')} · ${section.sessionIds.length}` : undefined}
-                  className={section.workspace && !unifiedSplit ? `relative my-0.5 rounded border border-border/20 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${section.sessionIds.includes(activeSessionId ?? '') ? 'bg-primary/[0.07]' : 'bg-surface/35'}` : undefined}>
-                  {section.workspace && !unifiedSplit && (
-                    <div className={`relative flex min-h-7 items-center gap-1 px-1.5 text-[11px] text-muted-foreground ${layoutMenuWorkspaceId === section.workspace.id ? 'z-20' : ''}`}>
-                      <span className="min-w-0 flex-1 truncate">{t('tab.splitWorkspace')} · {section.sessionIds.length}</span>
-                      {renderSplitLayoutControl(section.workspace)}
-                      <button type="button" className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-surface-2"
-                        aria-label={`${t('tab.splitClose')} ${collaboration.name}`}
-                        title={t('tab.splitClose')} onClick={() => onCloseSplit(section.sessionIds[0]!)}><RiUnlinkLine size={12} /></button>
-                    </div>
-                  )}
+                  className={section.workspace && !unifiedSplit ? `relative my-0.5 before:pointer-events-none before:absolute before:inset-y-0.5 before:left-0 before:w-px before:bg-border data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${section.sessionIds.includes(activeSessionId ?? '') ? 'bg-primary/[0.07]' : 'bg-surface/35'}` : undefined}>
                   {section.sessionIds.map((id) => {
                     const session = sessionsById.get(id);
                     if (!session) return null;
@@ -1423,7 +1489,7 @@ export function LeftSidebar(
                       data-collaboration-member={session.id}
                       data-split-member={splitSessionIds.has(session.id) ? 'true' : undefined}
                       {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
-                      className={`relative flex items-center rounded-sm pr-0.5 transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
+                      className={`${section.workspace && id === section.sessionIds[0] && layoutMenuWorkspaceId === section.workspace.id ? 'z-20 ' : ''}relative flex items-center rounded-sm pr-0.5 transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
                         memberSnapshot.combineTargetFor ? 'bg-primary/15 ring-1 ring-primary/40 ' : memberSnapshot.isDragging ? 'bg-surface-elevated opacity-90 shadow-lg ' : ''
                       }${
                         getSessionStatusBackground(session.id)
@@ -1434,13 +1500,13 @@ export function LeftSidebar(
                               : 'text-muted-foreground hover:bg-surface-2')
                       }`}
                     >
-                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true)}
+                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true, section.workspace && id === section.sessionIds[0] ? renderSplitLayoutControl(section.workspace) : undefined)}
                       {!section.workspace && splitSessionIds.has(session.id) && (
                         <button type="button" className="shrink-0 px-1 text-[10px] text-primary"
                           title={`与 ${splitWorkspaces.find((workspace) => workspace.sessionIds.includes(session.id))?.sessionIds.filter((id) => id !== session.id).map((id) => sessionsById.get(id)?.name ?? id).join('、')} 分屏`}
                           aria-label={`查看 ${session.name} 的跨组分屏`}
                           onClick={() => { window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id })); closeIfOverlay(); }}>
-                          跨组
+                          <RiSplitLine size={10} />
                         </button>
                       )}
                     </div>
@@ -1454,8 +1520,10 @@ export function LeftSidebar(
             </div>
           )}
         </Droppable>
-        <div data-collaboration-background className="min-h-6 px-2 py-1 text-[10px] text-muted-foreground/70" title="拖到成员上组合分屏；拖到这里加入工作组或仅移出分屏">
-          拖到此处入组 · 组内拖出分屏
+        <div data-collaboration-background className="relative h-1.5" title={`工作组：${collaboration.name}`}>
+          <span className="absolute inset-x-0 bottom-0 z-20 hidden rounded-sm bg-surface-elevated px-2 py-1 text-[10px] text-muted-foreground group-data-[sidebar-dragging=true]/collaboration:block">
+            拖入工作组 · 在此移出分屏
+          </span>
         </div>
       </section>
     );
@@ -1467,13 +1535,14 @@ export function LeftSidebar(
     folderKey?: string,
   ): React.ReactNode => (
     <DragDropContext
+      onBeforeCapture={captureSidebarDropGeometry}
       onDragStart={handleSidebarDragStart}
       onDragEnd={(result) => finishSidebarDrag(
         (completed) => handleEntityDragEnd(completed, entities, folderKey),
         result,
       )}
     >
-      <Droppable droppableId={droppableId} direction="vertical" isCombineEnabled>
+      <Droppable droppableId={droppableId} direction="vertical" isCombineEnabled={!isSidebarGroupDragging}>
         {(provided) => (
           <div
             ref={provided.innerRef}
@@ -1742,6 +1811,7 @@ export function LeftSidebar(
         ) : groupByFolder ? (
           <div className="space-y-1.5">
             <DragDropContext
+              onBeforeCapture={captureSidebarDropGeometry}
               onDragStart={handleSidebarDragStart}
               onDragEnd={(result) => finishSidebarDrag(handleGroupedDragEnd, result)}
             >
@@ -1808,7 +1878,7 @@ export function LeftSidebar(
                               </button>
                               {!collapsed && (
                                 <div className="mt-0.5 pl-2">
-                                  <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="vertical" isCombineEnabled>
+                                  <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="vertical" isCombineEnabled={!isSidebarGroupDragging}>
                                     {(sessionsProvided) => (
                                       <div
                                         ref={sessionsProvided.innerRef}
@@ -1834,7 +1904,7 @@ export function LeftSidebar(
                                                       entity.members,
                                                       snapshot.isDragging,
                                                       Boolean(snapshot.combineTargetFor),
-                          dragProvided.dragHandleProps,
+                                                      dragProvided.dragHandleProps,
                                                     )
                                                     : entity.kind === 'collaboration'
                                                       ? renderCollaborationGroupItem(
