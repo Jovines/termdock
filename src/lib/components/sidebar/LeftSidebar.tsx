@@ -1544,7 +1544,8 @@ export function LeftSidebar(
           <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{remote.serviceLabel ?? remote.serviceOrigin}</span>
           {remote.serviceConnected === false && <span className="shrink-0 text-[9px]">不可达</span>}
         </button>)}
-        <div data-collaboration-background className="relative h-1.5" title={`工作组：${collaboration.name}`}>
+        {/* Keep the drop target without adding extra space below the last row. */}
+        <div data-collaboration-background className="absolute inset-x-0 bottom-0 h-1.5" title={`工作组：${collaboration.name}`}>
           <span className="absolute inset-x-0 bottom-0 z-20 hidden rounded-sm bg-surface-elevated px-2 py-1 text-[10px] text-muted-foreground group-data-[sidebar-dragging=true]/collaboration:block">
             拖入工作组 · 在此移出分屏
           </span>
