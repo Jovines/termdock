@@ -1,3 +1,4 @@
+import { remoteSessionAddress, type CollaborationPeerState } from '../../collaboration/directory';
 import { openRemoteSession } from '../../federation/remoteSession';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -6,6 +7,9 @@ import {
   getAgentLaunchers,
   listAgentAutomations,
   listCollaborationGroups,
+  subscribeCollaborationGroups,
+  retryCollaborationPeers,
+  type CollaborationGroupsResponse,
   listCollaborationMessages,
   prepareAgentResumeHistory,
   removeAgentAutomation,
@@ -52,27 +56,55 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [sessionsState, setSessionsState] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [collaborationError, setCollaborationError] = useState<string | null>(null);
+  const [peerState, setPeerState] = useState<CollaborationPeerState | undefined>();
+  const [launcherError, setLauncherError] = useState<string | null>(null);
+  const collaborationRefresh = useRef<Promise<void> | null>(null);
+  const automationRefresh = useRef<Promise<void> | null>(null);
+  const launcherRefresh = useRef<Promise<void> | null>(null);
   const directCollaborationGroup = initialCollaborationGroupId
     ? groups.find((group) => group.id === initialCollaborationGroupId) ?? null
     : null;
 
+  const acceptCollaboration = useCallback((data: CollaborationGroupsResponse) => {
+    setGroups(data.groups);
+    setSessions(data.sessions);
+    setPeerState(data.peers);
+    setCollaborationError(null);
+    setSessionsState('loaded');
+  }, []);
+  useEffect(() => subscribeCollaborationGroups(acceptCollaboration), [acceptCollaboration]);
+
   const refresh = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!options.silent) setError(null);
-    try {
-      const [automationData, collaborationData, detectedAgents] = await Promise.all([
-        listAgentAutomations(),
-        listCollaborationGroups(),
-        getAgentLaunchers(),
-      ]);
-      setAutomations(automationData.automations);
-      setAutomationRuns(automationData.runs);
-      setGroups(collaborationData.groups);
-      setSessions(collaborationData.sessions);
-      setAgents(detectedAgents);
-    } catch (nextError) {
-      if (!options.silent) setError(nextError instanceof Error ? nextError.message : '加载失败');
+    // Launcher discovery can be slow (custom commands, network PATH entries).
+    // It must not gate the already-running sessions or an unrelated tab.
+    if (!automationRefresh.current) {
+      automationRefresh.current = listAgentAutomations().then((data) => {
+        setAutomations(data.automations);
+        setAutomationRuns(data.runs);
+      }).catch((nextError) => {
+        if (!options.silent) setError(nextError instanceof Error ? nextError.message : '自动任务加载失败');
+      }).finally(() => { automationRefresh.current = null; });
     }
-  }, []);
+    if (!launcherRefresh.current) {
+      launcherRefresh.current = getAgentLaunchers().then((data) => {
+        setAgents(data);
+        setLauncherError(null);
+      }).catch(() => {
+        setLauncherError('Agent 命令检测失败；已有会话可继续协作。');
+      }).finally(() => { launcherRefresh.current = null; });
+    }
+    if (!collaborationRefresh.current) {
+      setSessionsState((state) => state === 'error' ? 'loading' : state);
+      collaborationRefresh.current = listCollaborationGroups().then(acceptCollaboration).catch((nextError) => {
+        setSessionsState('error');
+        setCollaborationError(`协作会话加载失败：${nextError instanceof Error ? nextError.message : '请重试'}`);
+      }).finally(() => { collaborationRefresh.current = null; });
+    }
+    await collaborationRefresh.current;
+  }, [acceptCollaboration]);
 
   useEffect(() => {
     void refresh();
@@ -113,11 +145,20 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
             </button>
           ))}
         </nav>
+        {collaborationError && <div role="alert" className="mx-4 mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{collaborationError}<button className={`${buttonClass} ml-2`} onClick={() => void refresh()}>重新加载会话</button></div>}
+        {tab === 'collaboration' && peerState && ['loading', 'partial', 'error', 'unsupported'].includes(peerState.state) && <div role="status" className="mx-4 mt-3 text-[11px] text-muted-foreground">
+          {peerState.state === 'loading' ? '正在加载其他服务的会话；当前服务内可先组队。'
+            : peerState.state === 'unsupported' ? '当前客户端不支持跨服务会话，请更新客户端；当前服务内可继续组队。'
+            : peerState.state === 'partial' ? '部分服务暂不可达；已有成员会保留，重连后继续同步。'
+              : '其他服务的会话暂时加载失败；当前服务内仍可组队。'}
+          {['partial', 'error'].includes(peerState.state) && <button className={`${buttonClass} ml-2`} onClick={retryCollaborationPeers}>重试跨服务连接</button>}
+        </div>}
+        {launcherError && <div className="mx-4 mt-3 text-[11px] text-muted-foreground">{launcherError}</div>}
         {error && <div className="mx-4 mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{error}</div>}
         {notice && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {tab === 'automation' && <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />}
-          {tab === 'collaboration' && <CollaborationTab groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && <CollaborationTab sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
       </section>
@@ -280,7 +321,8 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+  sessionsState: 'loading' | 'loaded' | 'error';
   groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; defaultSessionMode: 'shell' | 'tmux'; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
 }) {
@@ -299,6 +341,7 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
   const [content, setContent] = useState('');
   const [editingMembers, setEditingMembers] = useState(false);
   const [memberSelection, setMemberSelection] = useState<Set<string>>(new Set());
+  const [memberRevision, setMemberRevision] = useState<number | undefined>();
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [spawnAgentSlug, setSpawnAgentSlug] = useState('');
   const [spawnName, setSpawnName] = useState('');
@@ -309,8 +352,10 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
   const selectedGroup = selectedGroupId === 'new'
     ? null
     : groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null;
-  const availableSessionIds = new Set(sessions.map((session) => session.sessionId));
-  const selectedCount = [...selected].filter((id) => availableSessionIds.has(id)).length;
+  const availableSessionIds = new Set(sessions.filter(canAddCollaborationSession).map((session) => session.sessionId));
+  const selectedCount = selected.size;
+  const unavailableSelectedIds = [...selected].filter((id) => !availableSessionIds.has(id));
+  const memberOptions = collaborationMemberOptions(selectedGroup, sessions);
   const normalizedSessionQuery = sessionQuery.trim().toLocaleLowerCase();
   const filteredSessions = sessions.filter((session) => !normalizedSessionQuery || [session.name, session.serviceLabel ?? '', session.cwd, friendlyCurrentTask(session.currentTask)]
     .some((value) => value.toLocaleLowerCase().includes(normalizedSessionQuery)));
@@ -358,8 +403,8 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
   const createGroup = async () => {
     setBusy('create-group'); setError(null); setNotice(null);
     try {
-      const validSessionIds = [...selected].filter((id) => availableSessionIds.has(id));
-      const result = await saveCollaborationGroup({ name, sessionIds: validSessionIds });
+      if (unavailableSelectedIds.length) throw new Error('所选会话已变化，请先清除不可用选择');
+      const result = await saveCollaborationGroup({ name, sessionIds: [...selected] });
       setName(''); setSessionQuery(''); setSelectedGroupId(result.group.id); await refresh();
       setNotice(`“${result.group.name}”已创建，${result.group.sessionIds.length} 个会话可以开始协作`);
     } catch (error) { setError(error instanceof Error ? error.message : '创建失败'); }
@@ -394,10 +439,11 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
   };
   const saveMembers = async () => {
     if (!selectedGroup) return;
-    const sessionIds = sessions.filter((session) => memberSelection.has(session.sessionId)).map((session) => session.sessionId);
+    const sessionIds = [...memberSelection];
     setBusy('save-members'); setError(null); setNotice(null);
     try {
-      await saveCollaborationGroup({ id: selectedGroup.id, name: selectedGroup.name, sessionIds });
+      const result = await saveCollaborationGroup({ id: selectedGroup.id, name: selectedGroup.name, sessionIds, expectedUpdatedAt: memberRevision });
+      setSelectedGroupId(result.group.id);
       setEditingMembers(false); await refresh();
       setNotice(`“${selectedGroup.name}”成员已更新，共 ${sessionIds.length} 个会话`);
     } catch (error) { setError(error instanceof Error ? error.message : '成员更新失败'); }
@@ -445,25 +491,26 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
     </div>}
 
     {!selectedGroup && <section className="border-y border-border/15 py-4">
-      <div className="flex items-start justify-between gap-3"><div><h4 className="text-[12px] font-medium text-foreground">创建协作组</h4><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">至少选择两个会话。离线成员会在重新上线后收到消息；已从列表移除的会话不会提交。</p></div><span className={`shrink-0 text-[10px] ${selectedCount >= 2 ? 'text-primary' : 'text-muted-foreground'}`}>已选 {selectedCount} 个</span></div>
+      <div className="flex items-start justify-between gap-3"><div><h4 className="text-[12px] font-medium text-foreground">创建协作组</h4><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">至少选择两个会话。离线成员会在重新上线后收到消息；成员发生变化时会提示你重新选择。</p></div><span className={`shrink-0 text-[10px] ${selectedCount >= 2 ? 'text-primary' : 'text-muted-foreground'}`}>已选 {selectedCount} 个</span></div>
       <label className="mt-4 block space-y-1 text-[10px] text-muted-foreground">协作组名称<input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：发布准备" /></label>
       {sessions.length > 5 && <label className="relative mt-3 block"><span className="sr-only">筛选会话</span><Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><input className={`${inputClass} pl-8`} value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="按名称、目录或当前任务筛选" /></label>}
       <div className="mt-3 max-h-64 divide-y divide-border/10 overflow-y-auto border-y border-border/10">
-        {filteredSessions.map((session) => <label key={session.sessionId} className="flex cursor-pointer items-start gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input className="mt-0.5" type="checkbox" checked={selected.has(session.sessionId)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-[12px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="shrink-0 text-[9px] text-muted-foreground">{collaborationSessionStatus(session)}</span></span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{friendlyCurrentTask(session.currentTask)} · {session.cwd}</span></span></label>)}
-        {sessions.length === 0 && <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">暂无可选会话，请先打开两个会话</p>}
+        {filteredSessions.map((session) => <label key={session.sessionId} className="flex cursor-pointer items-start gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input className="mt-0.5" type="checkbox" disabled={!canAddCollaborationSession(session)} checked={selected.has(session.sessionId)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-[12px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="shrink-0 text-[9px] text-muted-foreground">{collaborationSessionStatus(session)}</span></span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{friendlyCurrentTask(session.currentTask)} · {session.cwd}</span></span></label>)}
+        {sessions.length === 0 && <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">{sessionsState === 'loading' ? '正在加载会话…' : sessionsState === 'error' ? '会话加载失败，请重试' : '当前服务暂无可选会话'}</p>}
         {sessions.length > 0 && filteredSessions.length === 0 && <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">没有符合筛选条件的会话</p>}
       </div>
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><p className={`min-w-0 flex-1 text-[10px] ${selectedCount < 2 ? 'text-muted-foreground' : 'text-primary'}`}>{selectedCount < 2 ? `还需选择 ${2 - selectedCount} 个会话` : '成员已满足要求，可以创建'}</p><div className="flex justify-end gap-2">{groups.length > 0 && <button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSelectedGroupId(groups[0]?.id ?? null)}>取消</button>}<button disabled={busy !== null || !name.trim() || selectedCount < 2} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void createGroup()}>{busy === 'create-group' ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}创建协作组</button></div></div>
+      {unavailableSelectedIds.length > 0 && <div role="alert" className="mt-2 text-[11px] text-destructive">有 {unavailableSelectedIds.length} 个所选会话暂不可用。<button className={buttonClass} onClick={() => setSelected((current) => new Set([...current].filter((id) => availableSessionIds.has(id))))}>清除不可用选择</button></div>}
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><p className={`min-w-0 flex-1 text-[10px] ${selectedCount < 2 ? 'text-muted-foreground' : 'text-primary'}`}>{selectedCount < 2 ? `还需选择 ${2 - selectedCount} 个会话` : '成员已满足要求，可以创建'}</p><div className="flex justify-end gap-2">{groups.length > 0 && <button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSelectedGroupId(groups[0]?.id ?? null)}>取消</button>}<button disabled={busy !== null || sessionsState !== 'loaded' || !name.trim() || selectedCount < 2 || unavailableSelectedIds.length > 0} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void createGroup()}>{busy === 'create-group' ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}创建协作组</button></div></div>
     </section>}
 
     {selectedGroup && <>
       <section className="border-y border-border/15 py-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0"><h4 className="text-[13px] font-medium text-foreground">{selectedGroup.name}</h4><p className="mt-1 text-[10px] text-muted-foreground">{selectedGroup.sessionIds.length} 个成员 · 组 ID：<span className="break-all font-mono">{selectedGroup.id}</span></p></div>
-          {confirmDelete ? <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} bg-surface-2 px-2 text-foreground`} onClick={() => setConfirmDelete(false)}>取消</button><button disabled={busy !== null} className={`${buttonClass} bg-destructive px-2 text-destructive-foreground`} onClick={() => void remove()}>{busy === `delete:${selectedGroup.id}` ? <RefreshCw size={13} className="animate-spin" /> : null}确认删除</button></div> : <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} px-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground`} onClick={() => { setMemberSelection(new Set(selectedGroup.sessionIds)); setEditingMembers((value) => !value); setSpawnOpen(false); }}><Pencil size={13} />管理成员</button><button className={`${buttonClass} px-2 text-primary hover:bg-primary/10`} onClick={openSpawn}><Plus size={13} />新建 Agent</button><button aria-label={`删除协作组 ${selectedGroup.name}`} title="删除协作组" disabled={busy !== null} className="rounded-lg p-2 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive" onClick={() => setConfirmDelete(true)}><Trash2 size={14} /></button></div>}
+          {confirmDelete ? <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} bg-surface-2 px-2 text-foreground`} onClick={() => setConfirmDelete(false)}>取消</button><button disabled={busy !== null} className={`${buttonClass} bg-destructive px-2 text-destructive-foreground`} onClick={() => void remove()}>{busy === `delete:${selectedGroup.id}` ? <RefreshCw size={13} className="animate-spin" /> : null}确认删除</button></div> : <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} px-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground`} onClick={() => { setMemberSelection(new Set(selectedGroup.sessionIds)); setMemberRevision(selectedGroup.updatedAt); setEditingMembers((value) => !value); setSpawnOpen(false); }}><Pencil size={13} />管理成员</button><button className={`${buttonClass} px-2 text-primary hover:bg-primary/10`} onClick={openSpawn}><Plus size={13} />新建 Agent</button><button aria-label={`删除协作组 ${selectedGroup.name}`} title="删除协作组" disabled={busy !== null} className="rounded-lg p-2 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive" onClick={() => setConfirmDelete(true)}><Trash2 size={14} /></button></div>}
         </div>
         <div className="mt-3 grid divide-y divide-border/10 border-y border-border/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0">{selectedGroup.sessionIds.map((id) => { const session = sessions.find((candidate) => candidate.sessionId === id); return <button key={id} disabled={!session} onClick={() => session && void openCollaborationSession(session).catch((error) => setError(error instanceof Error ? error.message : '无法打开会话'))} className="min-w-0 px-3 py-2.5 text-left transition hover:bg-surface-2 disabled:cursor-default"><span className="flex items-center gap-2"><span className={`h-2 w-2 shrink-0 rounded-full ${session?.status === 'working' ? 'bg-primary' : session ? 'bg-[var(--success)]' : 'bg-muted-foreground'}`} /><span className="truncate text-[11px] text-foreground">{session?.name ?? id}</span>{session && <ServiceBadge session={session} />}<span className="ml-auto shrink-0 text-[9px] text-muted-foreground">{session ? collaborationSessionStatus(session) : '已离线'}</span></span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{session ? friendlyCurrentTask(session.currentTask) : '重新上线后可继续接收消息'}</span></button>; })}</div>
-        {editingMembers && <div className="mt-4 border-t border-border/15 pt-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-[11px] font-medium text-foreground">管理成员</h5><p className="mt-1 text-[9px] text-muted-foreground">勾选已有 Session，保存后立即参与之后的协作消息。</p></div><span className="text-[9px] text-muted-foreground">已选 {memberSelection.size}</span></div><div className="mt-3 max-h-52 divide-y divide-border/10 overflow-y-auto border-y border-border/10">{sessions.map((session) => <label key={session.sessionId} className="flex cursor-pointer items-center gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input type="checkbox" checked={memberSelection.has(session.sessionId)} onChange={() => setMemberSelection((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="block truncate text-[11px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="block truncate text-[9px] text-muted-foreground">{collaborationSessionStatus(session)} · {session.cwd}</span></span></label>)}</div><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setEditingMembers(false)}>取消</button><button disabled={busy !== null || memberSelection.size < 2} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void saveMembers()}>{busy === 'save-members' ? <RefreshCw size={13} className="animate-spin" /> : <Check size={13} />}保存成员</button></div></div>}
+        {editingMembers && <div className="mt-4 border-t border-border/15 pt-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-[11px] font-medium text-foreground">管理成员</h5><p className="mt-1 text-[9px] text-muted-foreground">暂不可用的原成员会保留，只有取消勾选才会移出。</p></div><span className="text-[9px] text-muted-foreground">已选 {memberSelection.size}</span></div><div className="mt-3 max-h-52 divide-y divide-border/10 overflow-y-auto border-y border-border/10">{memberOptions.map((session) => <label key={session.sessionId} className="flex cursor-pointer items-center gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input type="checkbox" disabled={!selectedGroup.sessionIds.includes(session.sessionId) && !canAddCollaborationSession(session)} checked={memberSelection.has(session.sessionId)} onChange={() => setMemberSelection((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="block truncate text-[11px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="block truncate text-[9px] text-muted-foreground">{collaborationSessionStatus(session)} · {session.cwd}</span></span></label>)}</div><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setEditingMembers(false)}>取消</button><button disabled={busy !== null || sessionsState !== 'loaded' || memberSelection.size < 2} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void saveMembers()}>{busy === 'save-members' ? <RefreshCw size={13} className="animate-spin" /> : <Check size={13} />}保存成员</button></div></div>}
         {spawnOpen && <div className="mt-4 border-t border-primary/20 pt-4"><div><h5 className="text-[11px] font-medium text-foreground">创建 Agent Session</h5><p className="mt-1 text-[9px] text-muted-foreground">新会话启动后自动加入本组，并收到初始任务和成员信息。</p></div><div className="mt-3 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">Agent / Plugin<select aria-label="新 Agent 类型" className={inputClass} value={spawnAgentSlug} onChange={(event) => setSpawnAgentSlug(event.target.value)}>{agents.map((agent) => <option key={agent.slug} value={agent.slug}>{agent.displayName}{agent.isPlugin ? ' · Plugin' : ''}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">会话名称<input aria-label="新 Agent 会话名称" className={inputClass} value={spawnName} onChange={(event) => setSpawnName(event.target.value)} placeholder="留空则自动命名" /></label></div><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">工作目录<input aria-label="新 Agent 工作目录" className={inputClass} value={spawnCwd} onChange={(event) => setSpawnCwd(event.target.value)} placeholder="默认继承当前会话" /></label><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">初始任务<textarea aria-label="新 Agent 初始任务" className={`${inputClass} min-h-16 resize-y`} value={spawnTask} onChange={(event) => setSpawnTask(event.target.value)} placeholder="说明它加入后要先完成什么" /></label><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSpawnOpen(false)}>取消</button><button disabled={busy !== null || !spawnAgentSlug} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void spawnAgent()}>{busy === 'spawn-agent' ? <RefreshCw size={13} className="animate-spin" /> : <Bot size={13} />}创建并加入</button></div></div>}
       </section>
 
@@ -485,6 +532,24 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
       </section>
     </>}
   </div>;
+}
+
+function canAddCollaborationSession(session: OrchestrationSession): boolean {
+  return !remoteSessionAddress(session.sessionId) || session.serviceConnected !== false;
+}
+
+export function collaborationMemberOptions(group: CollaborationGroup | null, sessions: OrchestrationSession[]): OrchestrationSession[] {
+  const options = new Map(sessions.map((session) => [session.sessionId, session]));
+  for (const id of group?.sessionIds ?? []) {
+    if (options.has(id)) continue;
+    const saved = group?.remoteSessions?.find((session) => session.sessionId === id);
+    options.set(id, saved ? { ...saved, status: 'offline', serviceConnected: false } : {
+      sessionId: id, name: id, backendSessionId: null, cwd: '', agent: null,
+      status: 'offline', capability: '', currentTask: '暂不可用，保留成员身份', updatedAt: 0,
+      ...(remoteSessionAddress(id) ? { serviceConnected: false } : {}),
+    });
+  }
+  return [...options.values()];
 }
 
 function ServiceBadge({ session }: { session: OrchestrationSession }) {

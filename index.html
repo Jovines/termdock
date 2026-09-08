@@ -107,8 +107,18 @@
       }
 
       .termdock-boot-error {
-        max-width: 28rem;
+        flex-direction: column;
         text-align: center;
+      }
+
+      .termdock-boot-error button {
+        color: inherit;
+        background: transparent;
+        border: 1px solid currentColor;
+        border-radius: 6px;
+        padding: 8px 16px;
+        font: inherit;
+        cursor: pointer;
       }
 
       @keyframes termdock-boot-spin {
@@ -188,20 +198,57 @@
       </div>
     </div>
     <script>
+      // Keep recovery independent of the module graph: it must work even when
+      // an update interrupts loading the entry module or one of its imports.
+      var termdockBootRetryKey = 'termdock-boot-retry';
+      var termdockBootRetryTimer;
       function showTermdockBootError(event) {
         var root = document.getElementById('root');
         if (!root || root.children.length !== 1 || !root.querySelector('.termdock-boot')) return;
+        var resource = event && event.target;
+        var resourceError = resource && resource !== window;
+        if (resourceError && resource.tagName !== 'SCRIPT' &&
+            !(resource.tagName === 'LINK' && resource.rel === 'stylesheet')) return;
+        if (root.querySelector('.termdock-boot-error')) return;
+        var chinese = (navigator.language || '').toLowerCase().startsWith('zh');
         var message = event && event.message ? event.message : 'Termdock failed to start.';
-        if (!event.message && event.reason) {
+        if (event && !event.message && event.reason) {
           message = event.reason && event.reason.message ? event.reason.message : String(event.reason);
         }
+        if (resourceError) message = chinese ? '启动资源加载失败。' : 'Startup resources failed to load.';
+        var retryCount = 3;
+        try {
+          var previous = JSON.parse(sessionStorage.getItem(termdockBootRetryKey) || 'null');
+          retryCount = previous && Date.now() - previous.at < 120000 &&
+            Number.isInteger(previous.count) && previous.count >= 0 ? previous.count : 0;
+          // Write before scheduling so a broken bundle cannot loop forever.
+          sessionStorage.setItem(termdockBootRetryKey, JSON.stringify({ count: retryCount + 1, at: Date.now() }));
+        } catch { retryCount = 3; }
         root.textContent = '';
         var errorBox = document.createElement('div');
         errorBox.className = 'termdock-boot termdock-boot-error';
         var text = document.createElement('span');
         text.textContent = message;
         errorBox.appendChild(text);
+        var status = document.createElement('span');
+        status.textContent = retryCount < 3
+          ? (chinese ? '正在等待服务恢复，将自动重试…' : 'Waiting for the service; retrying shortly…')
+          : (chinese ? '请稍后重新加载。' : 'Please reload to try again.');
+        errorBox.appendChild(status);
+        var reload = document.createElement('button');
+        reload.type = 'button';
+        reload.textContent = chinese ? '重新加载' : 'Reload';
+        reload.onclick = function () {
+          clearTimeout(termdockBootRetryTimer);
+          try { sessionStorage.removeItem(termdockBootRetryKey); } catch {}
+          window.location.reload();
+        };
+        errorBox.appendChild(reload);
         root.appendChild(errorBox);
+        if (retryCount < 3) termdockBootRetryTimer = setTimeout(function () {
+          // React may have recovered while a nonfatal boot error was displayed.
+          if (document.querySelector('.termdock-boot-error')) window.location.reload();
+        }, 2000 * Math.pow(2, retryCount));
       }
       window.addEventListener('error', showTermdockBootError, true);
       window.addEventListener('unhandledrejection', showTermdockBootError);

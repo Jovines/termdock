@@ -1,3 +1,4 @@
+import { collaborationGroupRoutes } from '../agent/collaborationGroupRoutes.js';
 import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
 import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
 import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
@@ -6262,7 +6263,12 @@ router.post('/operations/collaboration-federation', (req, res) => {
     if (!group || !Array.isArray(group.remoteSessions)) throw new Error('跨服务工作组无效');
     const remoteIds = new Set(group.remoteSessions.map((session: { sessionId: string }) => session.sessionId));
     const localIds = new Set(globalSessionState.sessions.map((session) => session.sessionId));
-    if (!group.deleted && group.sessionIds.some((id: string) => !localIds.has(id) && !remoteIds.has(id))) {
+    const existing = collaborationStore.getGroup(group.id);
+    if (req.body.expectedUpdatedAt !== undefined && req.body.expectedUpdatedAt !== existing?.updatedAt) {
+      return res.status(409).json({ code: 'GROUP_CHANGED', error: '协作组已被修改，请重新打开成员管理后再保存' });
+    }
+    const retainedIds = new Set(existing?.sessionIds ?? []);
+    if (!group.deleted && group.sessionIds.some((id: string) => !localIds.has(id) && !remoteIds.has(id) && !retainedIds.has(id))) {
       throw new Error('工作组包含不存在的本服务会话，请刷新成员列表');
     }
     collaborationStore.mergeFederatedGroup(group);
@@ -6280,31 +6286,8 @@ router.post('/operations/collaboration-federation', (req, res) => {
   } catch (error) { res.status(400).json({ error: getErrorMessage(error) }); }
 });
 
-router.get('/operations/collaboration-groups', (_req, res) => {
-  res.json({
-    federationVersion: 1,
-    groups: collaborationStore.list(),
-    sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot),
-  });
-});
-
-router.post('/operations/collaboration-groups', (req, res) => {
-  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-  const sessionIds: string[] = Array.isArray(req.body?.sessionIds)
-    ? (req.body.sessionIds as unknown[]).filter((id): id is string => typeof id === 'string')
-    : [];
-  const existingGroup = typeof req.body?.id === 'string' ? collaborationStore.getGroup(req.body.id) : null;
-  const knownIds = new Set([...globalSessionState.sessions.map((session) => session.sessionId),
-    ...(existingGroup?.remoteSessions?.map((session) => session.sessionId) ?? [])]);
-  const normalizedIds = Array.from(new Set(sessionIds.filter((id) => knownIds.has(id))));
-  if (!name || normalizedIds.length < 2) return res.status(400).json({ error: '协作组至少需要两个有效会话' });
-  const group = collaborationStore.save({
-    id: typeof req.body?.id === 'string' ? req.body.id : undefined,
-    name,
-    sessionIds: normalizedIds,
-  });
-  res.json({ group });
-});
+router.use('/operations', collaborationGroupRoutes({ store: collaborationStore,
+  sessions: () => globalSessionState.sessions.map(orchestrationSessionSnapshot) }));
 
 router.post('/operations/collaboration-groups/:groupId/spawn', async (req, res) => {
   const group = collaborationStore.getGroup(req.params.groupId);
@@ -6315,11 +6298,6 @@ router.post('/operations/collaboration-groups/:groupId/spawn', async (req, res) 
     if (error instanceof HttpStatusError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     res.status(400).json({ error: getErrorMessage(error) });
   }
-});
-
-router.delete('/operations/collaboration-groups/:groupId', (req, res) => {
-  if (!collaborationStore.remove(req.params.groupId)) return res.status(404).json({ error: '协作组不存在' });
-  res.status(204).send();
 });
 
 router.get('/operations/collaboration-groups/:groupId/messages', (req, res) => {

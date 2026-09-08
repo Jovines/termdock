@@ -37,6 +37,8 @@ import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWor
 import {
   listAgentResumeHistory,
   listCollaborationGroups,
+  subscribeCollaborationGroups,
+  moveCollaborationMember,
   prepareAgentResumeHistory,
   removeCollaborationGroup,
   removeAgentResumeHistory,
@@ -280,6 +282,7 @@ export function LeftSidebar(
   const [agentResumeHistoryPendingId, setAgentResumeHistoryPendingId] = useState<string | null>(null);
   const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
   const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
+  const [collaborationActionError, setCollaborationActionError] = useState<string | null>(null);
   const [rawCollaborationGroups, setRawCollaborationGroups] = useState<CollaborationGroup[]>([]);
   const [newSessionOptions, setNewSessionOptions] = useState<{
     mode: 'shell' | 'tmux';
@@ -347,6 +350,8 @@ export function LeftSidebar(
       // snapshot when the operations endpoint is temporarily unavailable.
     }
   }, []);
+
+  useEffect(() => subscribeCollaborationGroups((data) => setRawCollaborationGroups(data.groups)), []);
 
   useEffect(() => {
     void refreshCollaborationGroups();
@@ -983,18 +988,18 @@ export function LeftSidebar(
       if (group.id === targetGroupId) return [{ ...group, sessionIds: nextTargetIds }];
       return [group];
     }));
-    const requests: Promise<unknown>[] = [];
-    if (source) {
-      requests.push(nextSourceIds.length >= 2
-        ? saveCollaborationGroup({ id: source.id, name: source.name, sessionIds: nextSourceIds })
-        : removeCollaborationGroup(source.id));
-    }
-    if (target) {
-      requests.push(saveCollaborationGroup({ id: target.id, name: target.name, sessionIds: nextTargetIds }));
-    }
-    void Promise.all(requests).then(
+    setCollaborationActionError(null);
+    const request = source && target
+      ? moveCollaborationMember({ sourceGroupId: source.id, targetGroupId: target.id, sessionId,
+        expectedSourceUpdatedAt: source.updatedAt, expectedTargetUpdatedAt: target.updatedAt })
+      : source ? (nextSourceIds.length >= 2
+        ? saveCollaborationGroup({ id: source.id, name: source.name, sessionIds: nextSourceIds, expectedUpdatedAt: source.updatedAt })
+        : removeCollaborationGroup(source.id, source.updatedAt))
+      : target ? saveCollaborationGroup({ id: target.id, name: target.name, sessionIds: nextTargetIds, expectedUpdatedAt: target.updatedAt })
+        : Promise.resolve();
+    void request.then(
       () => refreshCollaborationGroups(),
-      () => refreshCollaborationGroups(),
+      (error) => { setCollaborationActionError(error instanceof Error ? error.message : '协作成员移动失败'); return refreshCollaborationGroups(); },
     );
   }, [rawCollaborationGroups, refreshCollaborationGroups, sessions, onReorderSessions]);
 
@@ -1019,9 +1024,10 @@ export function LeftSidebar(
     setRawCollaborationGroups((current) => current.map((candidate) => (
       candidate.id === groupId ? { ...candidate, sessionIds } : candidate
     )));
-    void saveCollaborationGroup({ id: group.id, name: group.name, sessionIds }).then(
+    setCollaborationActionError(null);
+    void saveCollaborationGroup({ id: group.id, name: group.name, sessionIds, expectedUpdatedAt: group.updatedAt }).then(
       () => refreshCollaborationGroups(),
-      () => refreshCollaborationGroups(),
+      (error) => { setCollaborationActionError(error instanceof Error ? error.message : '成员排序失败'); return refreshCollaborationGroups(); },
     );
   }, [rawCollaborationGroups, refreshCollaborationGroups, splitWorkspaces, onReorderSplitWorkspace]);
 
@@ -1775,6 +1781,10 @@ export function LeftSidebar(
         </div>
       </div>
 
+      {collaborationActionError && <div role="alert" className="mx-2 mt-2 flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
+        <span className="min-w-0 flex-1">{collaborationActionError}</span>
+        <button type="button" aria-label="关闭协作错误提示" className="shrink-0" onClick={() => setCollaborationActionError(null)}><RiCloseLine size={14} /></button>
+      </div>}
       {/* Session list */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
         {recoverableTmuxSessions.length > 0 && (

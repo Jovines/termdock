@@ -10,13 +10,14 @@ const mocks = vi.hoisted(() => ({
   start: null as null | ((start: DragStart) => void),
   capture: null as null | (() => void),
   end: null as null | ((result: DropResult) => void),
-  save: vi.fn(), remove: vi.fn(), list: vi.fn(),
+  save: vi.fn(), remove: vi.fn(), list: vi.fn(), move: vi.fn(),
 }));
 vi.mock('../../terminal/api', async (original) => ({
   ...await original<typeof import('../../terminal/api')>(),
   listCollaborationGroups: mocks.list,
   saveCollaborationGroup: mocks.save,
   removeCollaborationGroup: mocks.remove,
+  moveCollaborationMember: mocks.move,
 }));
 // Simulate the drawer's stale post-drag click suppression. Independent DnD
 // surfaces must bypass it so their controls remain clickable after a gesture.
@@ -63,6 +64,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.save.mockResolvedValue({ group: baseGroup });
   mocks.remove.mockResolvedValue(undefined);
+  mocks.move.mockResolvedValue(undefined);
   Object.defineProperty(HTMLElement.prototype, 'getAnimations', { configurable: true, value: vi.fn(() => []) });
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ locale: 'en', agents: [] }))));
@@ -106,7 +108,7 @@ describe('Agent workgroup split navigation', () => {
     const end = drag('d', 'session');
     point(document.querySelector('[data-collaboration-background]'));
     end();
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ id: 'team', name: 'Release team', sessionIds: ['a', 'c', 'b', 'd'] }));
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ id: 'team', name: 'Release team', sessionIds: ['a', 'c', 'b', 'd'], expectedUpdatedAt: 1 }));
     expect(handlers.onCombineSplitSessions).not.toHaveBeenCalled();
   });
   it('supports dragging an outside session onto a member to join and split', async () => {
@@ -178,7 +180,7 @@ describe('Agent workgroup split navigation', () => {
     const end = drag('d', 'session');
     point(null);
     end({ destination: { droppableId: 'group-sessions:', index: 1 } });
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ id: 'team', name: 'Release team', sessionIds: ['a', 'c', 'b', 'd'] }));
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ id: 'team', name: 'Release team', sessionIds: ['a', 'c', 'b', 'd'], expectedUpdatedAt: 1 }));
     expect(handlers.onReorderSessions).toHaveBeenCalledWith(['a', 'b', 'c', 'd']);
   });
   it('keeps layout buttons usable when the overlay drawer has stale drag suppression', async () => {
@@ -187,6 +189,24 @@ describe('Agent workgroup split navigation', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Stacked' }));
     expect(handlers.onSetSplitLayout).toHaveBeenCalledWith('a', 'vertical');
   });
+  it('uses one atomic move for two groups and surfaces a failed write', async () => {
+    const groups = [{ ...baseGroup, sessionIds: ['a', 'b'] },
+      { ...baseGroup, id: 'target', name: 'Target', sessionIds: ['c', 'd'], updatedAt: 9 }];
+    mocks.list.mockResolvedValue({ groups });
+    mocks.move.mockRejectedValue(new Error('协作组已变化，请刷新后重新移动成员'));
+    render(<I18nProvider><LeftSidebar {...callbacks()} isOpen pinned drawerWidthPx={300}
+      sessions={['a', 'b', 'c', 'd'].map(id => ({ id, name: id.toUpperCase(), mode: 'shell' as const }))}
+      activeSessionId="a" sessionStates={new Map()} splitWorkspaces={[]} /></I18nProvider>);
+    await screen.findByRole('region', { name: 'Agent 工作组：Target' });
+    const end = drag('a');
+    point(document.querySelector('[data-collaboration-group="target"] [data-collaboration-background]'));
+    end();
+    await waitFor(() => expect(mocks.move).toHaveBeenCalledWith({ sourceGroupId: 'team', targetGroupId: 'target', sessionId: 'a',
+      expectedSourceUpdatedAt: 1, expectedTargetUpdatedAt: 9 }));
+    expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.remove).not.toHaveBeenCalled();
+    expect((await screen.findByRole('alert')).textContent).toContain('协作组已变化');
+  });
+
   it('cancel and unsupported drops preserve memberships', async () => {
     const handlers = await setup();
     const cancel = drag('a');

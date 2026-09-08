@@ -106,3 +106,24 @@ td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 一个会话可能同时处理多个任务，因此不从某条消息推断整个会话任务已完成；会话级 `task_state` 保持 `unknown`，每个任务的显式状态在 `tasks` 中携带报告时间与消息 ID。`last_heartbeat`、`last_tool_activity_at` 无通用可靠来源时返回 `null`，不拿终端输出时间冒充；`last_message_at` 来自消息记录。
 
 `--task-envelope` 接受 `task_id`、`status=ack|working|blocked|complete|failed`、可选 `progress`（0–100）、`evidence` 和 `blocker`；自动映射 response_kind。显式指定的 response_kind 与任务状态冲突时拒绝。`--metadata` 接受任意 JSON 对象，正文仍然自由。字段中的路径和链接只是证据引用，不会触发 Termdock 读取另一台机器的文件或凭据。
+
+## 会话目录与桌面兼容边界
+
+当前服务是自身会话和协作组记录的权威来源。浏览器与 macOS 页面都通过页面的加密 `fetch` 读取 `/operations/collaboration-groups`；桌面端只补充其他已连接服务的会话，不用桌面缓存覆盖本服务的组、成员或删除结果。侧栏和工作台共用 `CollaborationDirectory` 的读取与订阅，切换服务或清除认证状态时丢弃旧目录，过期请求不能覆盖写入后的新状态。
+
+本服务读取有 10 秒期限，独立于其他服务的发现。其他服务的发现有 5 秒期限，后台完成后发布增量目录，失败时保留本服务数据，并把缓存的远端成员标为不可达。已持久化的远端成员即使客户端未连接也保留其身份，不把旧在线快照当成当前在线证据。加载中、真正为空、本服务失败、跨服务部分不可达分别表达。
+
+桌面 preload 显式声明 `collaboration: { protocolVersion: 2, peers: true, save: true }`。v2 `collaborationPeers()` 返回 `{ protocolVersion: 2, origin, sessions, services }`，必须与当前服务匹配；它只发现会话，不执行消息转发。定时 relay 独立负责副本和消息同步。缺少能力声明的旧客户端通过适配层读取旧 `collaborationList()`，仅接受其中的远端会话；未知的新协议不会被猜测为兼容。旧桥接失败、超时或返回空不会阻止本服务组队。
+
+| 操作 | 权威写入路径 |
+| --- | --- |
+| 创建本服务组、修改已有成员、删除已有组（含联邦副本） | 页面向当前服务写入；不优先走原生桥接。 |
+| 添加新的跨服务成员 | 桌面确认各服务的新会话目录，将结果首先持久化在发起服务；后台再同步副本。 |
+| 普通组转换为跨服务组 | v2 客户端调用当前服务的 `/:groupId/promote`，在一次文件替换内迁移组、消息和幂等记录；不分步复制和删除。 |
+| 从一个组移动成员到另一个组 | 当前服务的 `/move-member` 原子更新两个组；失败时两边都保持原状态。 |
+
+服务目录声明 `capabilities.groupRevision / groupPromotion / groupMove`。已有成员编辑携带开始编辑时的 `expectedUpdatedAt`；遇到并发修改返回 `409 GROUP_CHANGED`，遇到已删除组返回 `404 GROUP_NOT_FOUND`，不能隐式重建。新成员中任一项失效，整个保存返回 `409 MEMBERS_CHANGED`，不能过滤后部分保存。暂不可用的原成员由用户明确取消勾选才移出。跨组移动携带两组各自的版本。旧服务不支持原子转换或跨组移动时，拒绝该操作并保留原记录；单服务基本操作仍可使用。
+
+成员创建、修改和删除失败后不会自动换传输重试，因为第一次写入可能已经成功。客户端窗口与目标服务不一致时拒绝跨服务写入，避免把入口页面的身份当成目标服务。桌面发行包仍需在真实 macOS 客户端验证；浏览器夹具、协议测试和本机服务部署不能替代该验收。
+
+回归覆盖位于 `src/lib/collaboration/directory.test.ts`、`src/lib/terminal/api.collaboration.test.ts`、`src/server/agent/collaborationGroupRoutes.test.ts`、`desktop/collaborationFederation.test.ts` 和 `src/server/agent/collaborationFederation.integration.test.ts`；加密入口同时由 `browserIntegration.routing.test.ts` 与 `transportBoundary.test.ts` 守卫。

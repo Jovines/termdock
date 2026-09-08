@@ -81,6 +81,7 @@ export class CollaborationFederation {
   private sessions = new Map<string, FederationSession>();
   private diagnostics = new Map<string, Diagnostic>();
   private inFlight: Promise<void> | null = null;
+  private catalogInFlight: Promise<void> | null = null;
 
   constructor(private readonly services: () => FederationService[]) {}
 
@@ -90,7 +91,13 @@ export class CollaborationFederation {
     return this.inFlight;
   }
 
-  private async synchronize(): Promise<void> {
+  private async refreshCatalog(): Promise<void> {
+    if (this.catalogInFlight) return this.catalogInFlight;
+    this.catalogInFlight = this.discover().finally(() => { this.catalogInFlight = null; });
+    return this.catalogInFlight;
+  }
+
+  private async discover(): Promise<void> {
     const services = this.services();
     const snapshots = await Promise.all(services.map(async (service) => {
       try {
@@ -129,6 +136,11 @@ export class CollaborationFederation {
           serviceConnected: connected, serviceCheckedAt: Date.now(), status: connected ? session.status : 'offline' });
       }
     }
+  }
+
+  private async synchronize(): Promise<void> {
+    await this.refreshCatalog();
+    const services = this.services();
     for (const message of this.messages.values()) {
       const target = sessionAddress(message.toSessionId)?.origin;
       if (message.status === 'pending' && target && !this.reachable.has(target)) {
@@ -249,54 +261,81 @@ export class CollaborationFederation {
     }
   }
 
-  async list(origin: string) {
-    await this.refresh();
-    const service = this.services().find((item) => item.origin === origin);
-    if (!service) throw new Error('当前服务未连接');
-    const local = await service.request('/collaboration-groups') as { groups: FederationGroup[]; sessions: FederationSession[] };
-    const groups = [...local.groups.filter((group) => !group.federated), ...[...this.groups.values()]
-      .filter((group) => !group.deleted && (group.sessionIds.some((id) => sessionAddress(id)?.origin === origin)
-        || this.snapshots.get(origin)?.groups.some((item) => item.id === group.id)))
-      .map((group) => this.groupForService(group, origin))];
-    const sessions = [...this.sessions.values()].map((session) => ({ ...session, sessionId: localId(origin, session.sessionId) }));
-    // Older services still work locally, but cannot be selected as federation targets.
-    if (!this.reachable.has(origin)) sessions.push(...local.sessions);
-    return { groups, sessions };
+  /** Discovery is read-only; listing candidates never drains the message relay. */
+  async peers(origin: string) {
+    if (!this.services().some((service) => service.origin === origin)) throw new Error('当前服务未连接');
+    await this.refreshCatalog();
+    return {
+      protocolVersion: 2 as const,
+      origin,
+      sessions: [...this.sessions.values()].filter((session) => sessionAddress(session.sessionId)?.origin !== origin),
+      services: [...this.snapshots.keys(), ...this.services().map((service) => service.origin)]
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .map((value) => ({ origin: value, label: this.services().find((service) => service.origin === value)?.label ?? value,
+          connected: this.reachable.has(value) })),
+    };
   }
 
-  async save(origin: string, input: { id?: string; name: string; sessionIds: string[] }) {
-    await this.refresh();
+  async list(origin: string) {
     const service = this.services().find((item) => item.origin === origin);
     if (!service) throw new Error('当前服务未连接');
+    const [peers, local] = await Promise.all([this.peers(origin),
+      service.request('/collaboration-groups') as Promise<{ groups: FederationGroup[]; sessions: FederationSession[] }>]);
+    return { groups: local.groups, sessions: [...peers.sessions, ...local.sessions] };
+  }
+
+  async save(origin: string, input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number }) {
+    await this.refreshCatalog();
+    const service = this.services().find((item) => item.origin === origin);
+    if (!service) throw new Error('当前服务未连接');
+    const local = await service.request('/collaboration-groups') as { groups: FederationGroup[]; sessions: FederationSession[]; capabilities?: { groupPromotion?: number } };
+    const original = input.id ? local.groups.find((group) => group.id === input.id) : undefined;
+    if (input.id && !original) throw new Error('协作组已删除，请刷新列表');
+    if (original && input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== original.updatedAt) {
+      throw new Error('协作组已被修改，请重新打开成员管理后再保存');
+    }
+    // Hydrate from the same authoritative response that supplied selectable local sessions.
+    for (const id of this.sessions.keys()) if (sessionAddress(id)?.origin === origin) this.sessions.delete(id);
+    for (const session of local.sessions) {
+      const sessionId = qualifySession(origin, session.sessionId);
+      this.sessions.set(sessionId, { ...session, sessionId, serviceOrigin: origin, serviceLabel: service.label, serviceConnected: true });
+    }
     if (!input.id?.startsWith('cross-') && !input.sessionIds.some((id) => sessionAddress(id))) {
       return service.request('/collaboration-groups', 'POST', input);
     }
     if (!this.reachable.has(origin)) throw new Error('当前服务需要升级 Termdock 后才能跨服务组队');
     const ids = [...new Set(input.sessionIds.map((id) => qualifySession(origin, id)))];
-    if (!input.name?.trim() || ids.length < 2 || ids.some((id) => !this.sessions.has(id))) throw new Error('请选择至少两个有效会话');
-    const existing = input.id ? this.groups.get(input.id) : undefined;
+    const retained = new Set(original?.sessionIds.map((id) => qualifySession(origin, id)) ?? []);
+    if (!input.name?.trim() || ids.length < 2 || ids.some((id) => !retained.has(id)
+      && (!this.sessions.has(id) || !this.reachable.has(sessionAddress(id)!.origin)))) {
+      throw new Error('所选成员已变化或服务不可达，请刷新后重新选择；尚未保存任何修改');
+    }
+    const existing = original?.federated ? { ...original, sessionIds: original.sessionIds.map((id) => qualifySession(origin, id)) } : undefined;
     const group: FederationGroup = { id: existing?.id ?? `cross-${randomUUID()}`, name: input.name.trim(),
       sessionIds: ids, createdAt: existing?.createdAt ?? Date.now(), updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1), federated: true };
-    if (input.id && !input.id.startsWith('cross-')) {
-      const history = await service.request(`/collaboration-groups/${encodeURIComponent(input.id)}/messages`) as { messages: Message[] };
-      for (const message of history.messages) this.mergeMessage({ ...mapMessage(message, (id) => qualifySession(origin, id)), groupId: group.id });
+    if (original && !original.federated) {
+      if (local.capabilities?.groupPromotion !== 1) throw new Error('当前服务需要升级后才能将已有组转换为跨服务组；原组和记录均未修改');
+      const result = await service.request(`/collaboration-groups/${encodeURIComponent(original.id)}/promote`, 'POST', {
+        group: this.groupForService(group, origin), expectedUpdatedAt: input.expectedUpdatedAt ?? original.updatedAt,
+      }) as { group: FederationGroup };
+      group.updatedAt = result.group.updatedAt;
+      group.createdAt = result.group.createdAt;
+    } else {
+      await service.request('/collaboration-federation', 'POST', {
+        group: this.groupForService(group, origin), messages: [],
+        ...(existing ? { expectedUpdatedAt: input.expectedUpdatedAt ?? existing.updatedAt } : {}),
+      });
     }
-    // First persist in the initiating server. A failed second service is retried by polling.
-    await this.push(service, group);
     this.groups.set(group.id, group);
-    if (input.id && !input.id.startsWith('cross-')) await service.request(`/collaboration-groups/${encodeURIComponent(input.id)}`, 'DELETE');
-    await this.refresh();
+    // The initiating replica is durable now. The background relay handles peers;
+    // saving a group must not wait for unrelated deliveries or offline services.
     return { group: this.groupForService(group, origin) };
   }
 
   async remove(origin: string, id: string) {
-    await this.refresh();
     const service = this.services().find((item) => item.origin === origin);
-    const group = this.groups.get(id);
-    if (!service || !group) throw new Error('工作组不存在');
-    const deleted = { ...group, deleted: true, updatedAt: Math.max(Date.now(), group.updatedAt + 1) };
-    await this.push(service, deleted);
-    this.groups.set(id, deleted);
-    await this.refresh();
+    if (!service) throw new Error('当前服务未连接');
+    // The server persists a tombstone for federated groups. The relay propagates it.
+    await service.request(`/collaboration-groups/${encodeURIComponent(id)}`, 'DELETE');
   }
 }

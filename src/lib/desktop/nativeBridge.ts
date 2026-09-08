@@ -60,8 +60,11 @@ export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   platform: string;
   /** Available only to the managed local loopback application's top-level page. */
   getLocalInvite?(): Promise<{ url: string; targetPeerId: string; pairingCode: string; serviceName?: string } | null>;
+  /** Versioned discovery/mutation contract; legacy clients omit this object. */
+  collaboration?: { protocolVersion: number; peers: boolean; save: boolean };
+  collaborationPeers?(): Promise<import('../collaboration/directory').CollaborationPeers>;
   collaborationList?(): Promise<{ groups: import('../terminal/api').CollaborationGroup[]; sessions: import('../terminal/api').OrchestrationSession[] }>;
-  collaborationSave?(input: { id?: string; name: string; sessionIds: string[] }): Promise<{ group: import('../terminal/api').CollaborationGroup }>;
+  collaborationSave?(input: import('../terminal/api').CollaborationGroupInput & { expectedOrigin?: string }): Promise<{ group: import('../terminal/api').CollaborationGroup }>;
   collaborationRemove?(id: string): Promise<void>;
   collaborationFocus?(id: string): Promise<boolean>;
   /** Present when the desktop shell only acknowledges confirmed native delivery. */

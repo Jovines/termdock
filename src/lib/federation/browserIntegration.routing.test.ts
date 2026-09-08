@@ -35,6 +35,39 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it.each(['direct', 'relay'] as const)('keeps collaboration reads and local writes on the encrypted %s target with an old preload', async (mode) => {
+    const base = mocks.connect.getMockImplementation()!;
+    if (mode === 'relay') mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('direct target unavailable');
+      return base(args);
+    });
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://b.example', targetPeerId: 'B', serviceOrigin: 'https://b.example',
+      ...(mode === 'relay' ? { routes: [{ url: 'https://a.example', targetPeerId: 'A' }] } : {}) };
+    mocks.saved.mockReturnValue(target);
+    const client = await integration.connectDevice(target);
+    const local = { groups: [], sessions: ['one', 'two'].map(sessionId => ({ sessionId, name: sessionId, cwd: '/repo', agent: null,
+      backendSessionId: null, status: 'shell', capability: '', currentTask: '', updatedAt: 1 })) };
+    const business = vi.fn(async (_path: string, init?: RequestInit) => Response.json(init?.method === 'POST'
+      ? { group: { ...JSON.parse(String(init.body)), id: 'created', createdAt: 1, updatedAt: 1 } } : local));
+    Object.assign(client, { fetch: business });
+    const nativeSave = vi.fn().mockRejectedValue(new Error('legacy upload must not run'));
+    Object.assign(window, { location, addEventListener: vi.fn(), removeEventListener: vi.fn(), termdockDesktop: { collaborationList: () => Promise.reject(new Error('old preload unavailable')), collaborationSave: nativeSave } });
+    integration.installEncryptedFetch();
+    const api = await import('../terminal/api');
+    vi.stubGlobal('fetch', window.fetch);
+    try {
+      expect(await api.listCollaborationGroups()).toMatchObject(local);
+      await api.saveCollaborationGroup({ name: 'Local', sessionIds: ['one', 'two'] });
+      expect(business).toHaveBeenCalledWith('/api/terminal/operations/collaboration-groups', expect.objectContaining({ method: 'POST' }));
+      business.mockRejectedValueOnce(new Error('encrypted connection lost'));
+      await expect(api.listCollaborationGroups()).rejects.toThrow('encrypted connection lost');
+      expect(integration.currentConnectionPath()).toBe(mode);
+      expect(nativeFetch).not.toHaveBeenCalled();
+      expect(nativeSave).not.toHaveBeenCalled();
+    } finally { api.resetCollaborationDirectory(); }
+  });
+
   it('discovers a pinned entry through its alternate address without switching the active service', async () => {
     const base = mocks.connect.getMockImplementation()!;
     mocks.connect.mockRejectedValueOnce(new Error('old network'));

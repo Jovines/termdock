@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentOperationsPanel, cleanSessionSnippet } from './AgentOperationsPanel';
 
 const apiMocks = vi.hoisted(() => ({
+  getAgentLaunchers: vi.fn(),
   listAgentAutomations: vi.fn().mockResolvedValue({ automations: [], runs: [] }),
   listCollaborationGroups: vi.fn().mockResolvedValue({ groups: [], sessions: [] }),
   listCollaborationMessages: vi.fn().mockResolvedValue({ messages: [] }),
@@ -17,7 +18,7 @@ const apiMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../terminal/api', () => ({
-  getAgentLaunchers: vi.fn().mockResolvedValue([
+  getAgentLaunchers: apiMocks.getAgentLaunchers.mockResolvedValue([
     { slug: 'codex', command: 'codex', displayName: 'Codex', accentColor: 'var(--primary)', icon: null, isPlugin: false },
     { slug: 'custom', command: 'custom-agent', displayName: 'Custom Agent', accentColor: 'var(--primary)', icon: null, isPlugin: true },
   ]),
@@ -25,6 +26,8 @@ vi.mock('../../terminal/api', () => ({
   listDirectory: vi.fn().mockResolvedValue({ path: '/repo', entries: [] }),
   listAgentAutomations: apiMocks.listAgentAutomations,
   listCollaborationGroups: apiMocks.listCollaborationGroups,
+  subscribeCollaborationGroups: vi.fn(() => () => {}),
+  retryCollaborationPeers: vi.fn(),
   listCollaborationMessages: apiMocks.listCollaborationMessages,
   prepareAgentResumeHistory: vi.fn(),
   removeAgentAutomation: vi.fn(),
@@ -49,9 +52,52 @@ afterEach(() => {
   apiMocks.sendCollaborationMessage.mockReset();
   apiMocks.spawnCollaborationAgent.mockReset();
   apiMocks.setAgentAutomationEnabled.mockReset().mockResolvedValue({ automation: {} });
+  apiMocks.getAgentLaunchers.mockReset().mockResolvedValue([
+    { slug: 'codex', command: 'codex', displayName: 'Codex', accentColor: 'var(--primary)', icon: null, isPlugin: false },
+    { slug: 'custom', command: 'custom-agent', displayName: 'Custom Agent', accentColor: 'var(--primary)', icon: null, isPlugin: true },
+  ]);
 });
 
 describe('AgentOperationsPanel', () => {
+  const customSession = { sessionId: 'custom-peer', name: '自定义 TraeX 会话', cwd: '/repo', status: 'ready', currentTask: '开发', capability: 'Custom plugin', agent: { slug: 'custom-traex', displayName: 'TraeX' } };
+
+  it('shows custom-plugin and plain terminal sessions while launcher discovery and automations are still pending', async () => {
+    apiMocks.getAgentLaunchers.mockReturnValue(new Promise(() => {}));
+    apiMocks.listAgentAutomations.mockReturnValue(new Promise(() => {}));
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions: [customSession, { ...customSession, sessionId: 'shell', name: '普通终端', agent: null }] });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    expect(await screen.findByText('自定义 TraeX 会话')).toBeTruthy();
+    expect(screen.getByText('普通终端')).toBeTruthy();
+    expect(screen.queryByText('当前服务暂无可选会话')).toBeNull();
+  });
+
+  it('keeps collaboration groups and sessions available when launcher detection fails', async () => {
+    apiMocks.getAgentLaunchers.mockRejectedValue(new Error('custom plugin PATH unavailable'));
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions: [customSession] });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    expect(await screen.findByText('自定义 TraeX 会话')).toBeTruthy();
+    expect(await screen.findByText('Agent 命令检测失败；已有会话可继续协作。')).toBeTruthy();
+  });
+
+  it('distinguishes pending and failed collaboration requests from an empty list and supports retry', async () => {
+    let reject!: (error: Error) => void;
+    apiMocks.listCollaborationGroups.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    expect(screen.getByText('正在加载会话…')).toBeTruthy();
+    reject(new Error('连接中断'));
+    expect(await screen.findByText('会话加载失败，请重试')).toBeTruthy();
+    expect(screen.queryByText('当前服务暂无可选会话')).toBeNull();
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions: [customSession] });
+    await user.click(screen.getByRole('button', { name: '重新加载会话' }));
+    expect(await screen.findByText('自定义 TraeX 会话')).toBeTruthy();
+    expect(screen.queryByText('会话加载失败，请重试')).toBeNull();
+  });
   it('cleans terminal control noise from user-facing snippets', () => {
     expect(cleanSessionSnippet('\u001b[31m(B<span>构建失败</span> ━━━━━ MMMMMMMMMMMMMMMMMM')).toBe('构建失败');
   });
@@ -174,6 +220,34 @@ describe('AgentOperationsPanel', () => {
     expect(screen.getByPlaceholderText(/说明背景、期望产出/)).toBeTruthy();
   });
 
+  it('retains unavailable original members when adding another session', async () => {
+    const group = { id: 'offline-group', name: '原成员保留', sessionIds: ['one', 'offline-member'], createdAt: 1, updatedAt: 7 };
+    const sessions = ['one', 'three'].map((sessionId) => ({ sessionId, name: sessionId, cwd: '/repo', agent: null,
+      backendSessionId: null, status: 'idle', capability: '', currentTask: '', updatedAt: 1 }));
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions });
+    apiMocks.saveCollaborationGroup.mockResolvedValue({ group });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    await user.click(await screen.findByRole('button', { name: /管理成员/ }));
+    expect((screen.getByRole('checkbox', { name: /offline-member/ }) as HTMLInputElement).checked).toBe(true);
+    await user.click(screen.getByRole('checkbox', { name: /three/ }));
+    await user.click(screen.getByRole('button', { name: /保存成员/ }));
+    expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({ id: group.id, name: group.name,
+      sessionIds: ['one', 'offline-member', 'three'], expectedUpdatedAt: 7 });
+  });
+
+  it('shows independent peer loading and errors without blocking local candidates', async () => {
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions: [{ sessionId: 'one', name: '本服务会话', cwd: '/repo', currentTask: '', status: 'idle' }],
+      peers: { state: 'error', checkedAt: 1 } });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    expect(await screen.findByRole('checkbox', { name: /本服务会话/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '重试跨服务连接' })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('当前服务内仍可组队');
+  });
+
   it('lets the user add existing Sessions to a collaboration group', async () => {
     const group = { id: 'group-one', name: '发布组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 };
     const sessions = [
@@ -191,7 +265,7 @@ describe('AgentOperationsPanel', () => {
     await user.click(screen.getByRole('checkbox', { name: /文档/ }));
     await user.click(screen.getByRole('button', { name: /保存成员/ }));
 
-    expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({ id: 'group-one', name: '发布组', sessionIds: ['one', 'two', 'three'] });
+    expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({ id: 'group-one', name: '发布组', sessionIds: ['one', 'two', 'three'], expectedUpdatedAt: 1 });
     expect(await screen.findByText('“发布组”成员已更新，共 3 个会话')).toBeTruthy();
   });
 

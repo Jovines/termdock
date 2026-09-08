@@ -139,6 +139,34 @@ export class CollaborationStore {
     return true;
   }
 
+  /** A drag between two groups commits both memberships (or neither). */
+  moveMember(input: { sourceGroupId: string; targetGroupId: string; sessionId: string;
+    expectedSourceUpdatedAt: number; expectedTargetUpdatedAt: number }): void {
+    const source = this.getGroup(input.sourceGroupId);
+    const target = this.getGroup(input.targetGroupId);
+    if (!source || source.deleted || !target || target.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
+    if (source.id === target.id || !source.sessionIds.includes(input.sessionId)
+      || source.updatedAt !== input.expectedSourceUpdatedAt || target.updatedAt !== input.expectedTargetUpdatedAt) {
+      throw new CollaborationError('GROUP_CHANGED', '协作组已变化，请刷新后重新移动成员', 409);
+    }
+    const sourceIds = source.sessionIds.filter((id) => id !== input.sessionId);
+    const dissolved = sourceIds.length < 2;
+    const now = Date.now();
+    this.document = { ...this.document,
+      groups: this.document.groups.flatMap((group) => {
+        if (group.id === source.id) {
+          if (dissolved) return group.federated ? [{ ...group, deleted: true, updatedAt: Math.max(now, group.updatedAt + 1) }] : [];
+          return [{ ...group, sessionIds: sourceIds,
+            ...(group.remoteSessions ? { remoteSessions: group.remoteSessions.filter((session) => sourceIds.includes(session.sessionId)) } : {}),
+            updatedAt: Math.max(now, group.updatedAt + 1) }];
+        }
+        return group.id === target.id ? [{ ...group, sessionIds: [...new Set([...group.sessionIds, input.sessionId])], updatedAt: Math.max(now, group.updatedAt + 1) }] : [group];
+      }),
+      messages: dissolved ? this.document.messages.filter((message) => message.groupId !== source.id) : this.document.messages,
+    };
+    this.persist();
+  }
+
   removeSession(sessionId: string): { updatedGroups: number; dissolvedGroups: number } {
     const affected = this.document.groups.filter((group) => group.sessionIds.includes(sessionId));
     if (affected.length === 0) return { updatedGroups: 0, dissolvedGroups: 0 };
@@ -275,19 +303,38 @@ export class CollaborationStore {
   }
 
   mergeFederatedGroup(group: CollaborationGroup): void {
-    if (!group.federated || typeof group.id !== 'string' || !group.id.startsWith('cross-') || typeof group.name !== 'string' || !group.name.trim()
-      || !Number.isFinite(group.updatedAt) || !Number.isFinite(group.createdAt)
-      || !Array.isArray(group.sessionIds) || group.sessionIds.some((id) => typeof id !== 'string')
-      || !Array.isArray(group.remoteSessions) || group.remoteSessions.some((session) => !session
-        || typeof session.sessionId !== 'string' || !session.sessionId.startsWith('remote:')
-        || typeof session.serviceOrigin !== 'string' || typeof session.serviceLabel !== 'string'
-        || typeof session.name !== 'string' || !group.sessionIds.includes(session.sessionId))
-      || (!group.deleted && new Set(group.sessionIds).size < 2)) throw new Error('跨服务工作组无效');
+    validateFederatedGroup(group);
     const existing = this.getGroup(group.id);
     if (existing && (!existing.federated || existing.updatedAt > group.updatedAt)) return;
     this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), group];
     if (group.deleted) this.document.messages = this.document.messages.filter((item) => item.groupId !== group.id);
     this.persist();
+  }
+
+  /** Promote the source group and its complete history in one atomic file replacement. */
+  promoteGroup(id: string, group: CollaborationGroup, expectedUpdatedAt: number): CollaborationGroup {
+    validateFederatedGroup(group);
+    const existing = this.getGroup(id);
+    if (!existing || existing.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
+    if (existing.federated || existing.updatedAt !== expectedUpdatedAt || this.getGroup(group.id)) {
+      throw new CollaborationError('GROUP_CHANGED', '协作组已被修改，请重新打开成员管理后再保存', 409);
+    }
+    const promoted = { ...group, createdAt: existing.createdAt, updatedAt: Math.max(Date.now(), existing.updatedAt + 1, group.updatedAt) };
+    const idempotency = { ...this.document.idempotency };
+    for (const [key, value] of Object.entries(idempotency)) {
+      let parts: unknown;
+      try { parts = JSON.parse(key); } catch { continue; }
+      if (Array.isArray(parts) && parts[0] === id) {
+        delete idempotency[key];
+        idempotency[JSON.stringify([promoted.id, ...parts.slice(1)])] = value;
+      }
+    }
+    this.document = { ...this.document, idempotency,
+      groups: this.document.groups.map((item) => item.id === id ? promoted : item),
+      messages: this.document.messages.map((message) => message.groupId === id ? { ...message, groupId: promoted.id } : message),
+    };
+    this.persist();
+    return promoted;
   }
 
   mergeFederatedMessages(messages: CollaborationMessage[]): void {
@@ -471,4 +518,15 @@ export class CollaborationStore {
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
     ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry);
+}
+
+function validateFederatedGroup(group: CollaborationGroup): void {
+    if (!group.federated || typeof group.id !== 'string' || !group.id.startsWith('cross-') || typeof group.name !== 'string' || !group.name.trim()
+      || !Number.isFinite(group.updatedAt) || !Number.isFinite(group.createdAt)
+      || !Array.isArray(group.sessionIds) || group.sessionIds.some((id) => typeof id !== 'string')
+      || !Array.isArray(group.remoteSessions) || group.remoteSessions.some((session) => !session
+        || typeof session.sessionId !== 'string' || !session.sessionId.startsWith('remote:')
+        || typeof session.serviceOrigin !== 'string' || typeof session.serviceLabel !== 'string'
+        || typeof session.name !== 'string' || !group.sessionIds.includes(session.sessionId))
+      || (!group.deleted && new Set(group.sessionIds).size < 2)) throw new Error('跨服务工作组无效');
 }

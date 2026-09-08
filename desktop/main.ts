@@ -1967,8 +1967,15 @@ function installIpcHandlers(): void {
       || new URL(event.sender.getURL()).origin !== origin) throw new Error('未授权的服务窗口');
     return origin;
   };
+  ipcMain.handle('desktop:collaboration-peers', (event) => collaborationFederation.peers(collaborationOrigin(event)));
   ipcMain.handle('desktop:collaboration-list', (event) => collaborationFederation.list(collaborationOrigin(event)));
-  ipcMain.handle('desktop:collaboration-save', (event, input) => collaborationFederation.save(collaborationOrigin(event), input));
+  ipcMain.handle('desktop:collaboration-save', (event, input) => {
+    const origin = collaborationOrigin(event);
+    if (input?.expectedOrigin !== undefined && input.expectedOrigin !== origin) {
+      throw new Error('当前服务与客户端窗口不一致，请在目标服务窗口中添加跨服务成员');
+    }
+    return collaborationFederation.save(origin, input);
+  });
   ipcMain.handle('desktop:collaboration-remove', (event, id: string) => collaborationFederation.remove(collaborationOrigin(event), id));
   ipcMain.handle('desktop:collaboration-focus', (event, id: string) => {
     collaborationOrigin(event);

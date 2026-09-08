@@ -1,3 +1,5 @@
+import { CollaborationDirectory, remoteSessionAddress, type CollaborationDirectoryData } from '../collaboration/directory';
+import { selectedTarget } from '../federation/clientScope';
 import { prepareEncryptedDownload } from './secureDownload';
 import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
 import { secureSocket } from '../federation/browserIntegration';
@@ -278,6 +280,7 @@ if (typeof window !== 'undefined' && !(window as any).__termdockFetchPatched) {
     if (response.status === 401) {
       // Drop CSRF cache so the next login re-fetches a fresh token.
       csrfToken = null;
+      resetCollaborationDirectory();
       try {
         window.dispatchEvent(new CustomEvent(AUTH_UNAUTHORIZED_EVENT));
       } catch {
@@ -309,6 +312,7 @@ async function getCsrfToken(): Promise<string> {
 
 // Exported so the auth flow can force a fresh token after login.
 export function resetCsrfTokenCache(): void {
+  resetCollaborationDirectory();
   csrfToken = null;
 }
 
@@ -3716,22 +3720,108 @@ export function removeAgentAutomation(automationId: string): Promise<void> {
   return operationsRequest(`/automations/${encodeURIComponent(automationId)}`, { method: 'DELETE' });
 }
 
-type CollaborationGroupsResponse = { groups: CollaborationGroup[]; sessions: OrchestrationSession[] };
-let collaborationGroupsRequest: Promise<CollaborationGroupsResponse> | null = null;
+export type CollaborationGroupsResponse = CollaborationDirectoryData;
+export interface CollaborationGroupInput {
+  id?: string;
+  name: string;
+  sessionIds: string[];
+  expectedUpdatedAt?: number;
+}
+let collaborationDirectory: CollaborationDirectory | null = null;
+let collaborationScope = '';
+let collaborationBridge: typeof window.termdockDesktop;
+const collaborationListeners = new Set<(data: CollaborationGroupsResponse) => void>();
 
-export function listCollaborationGroups(): Promise<CollaborationGroupsResponse> {
-  if (collaborationGroupsRequest) return collaborationGroupsRequest;
-  collaborationGroupsRequest = (window.termdockDesktop?.collaborationList?.()
-    ?? operationsRequest<CollaborationGroupsResponse>('/collaboration-groups'))
-    .finally(() => {
-      collaborationGroupsRequest = null;
-    });
-  return collaborationGroupsRequest;
+function readCurrentCollaborationGroups(): Promise<CollaborationGroupsResponse> {
+  return operationsRequest('/collaboration-groups', { signal: AbortSignal.timeout(10_000) });
 }
 
-export function saveCollaborationGroup(input: { id?: string; name: string; sessionIds: string[] }): Promise<{ group: CollaborationGroup }> {
-  return window.termdockDesktop?.collaborationSave?.(input)
-    ?? operationsRequest('/collaboration-groups', { method: 'POST', body: JSON.stringify(input) });
+function currentCollaborationDirectory(): CollaborationDirectory {
+  const target = selectedTarget();
+  const origin = target?.serviceOrigin ?? window.location?.origin ?? '';
+  const scope = `${target?.targetPeerId ?? ''}:${origin}`;
+  const bridge = window.termdockDesktop;
+  if (!collaborationDirectory || scope !== collaborationScope || bridge !== collaborationBridge) {
+    collaborationDirectory?.dispose();
+    collaborationScope = scope;
+    collaborationBridge = bridge;
+    const compatible = !bridge?.collaboration || bridge.collaboration.protocolVersion === 2;
+    const readPeers = bridge?.collaboration
+      ? compatible && bridge.collaboration.peers && bridge.collaborationPeers ? () => bridge.collaborationPeers!() : undefined
+      : bridge?.collaborationList ? () => bridge.collaborationList!() : undefined;
+    collaborationDirectory = new CollaborationDirectory({ origin, readLocal: readCurrentCollaborationGroups, readPeers,
+      peerProtocol: !compatible || (bridge?.collaboration?.peers && !bridge.collaborationPeers) ? 'unsupported' : bridge?.collaboration?.peers ? 'v2' : 'legacy' });
+    collaborationDirectory.subscribe((data) => { for (const listener of collaborationListeners) listener(data); });
+  }
+  return collaborationDirectory;
+}
+
+export function resetCollaborationDirectory(): void {
+  collaborationDirectory?.dispose();
+  collaborationDirectory = null;
+}
+
+export function subscribeCollaborationGroups(listener: (data: CollaborationGroupsResponse) => void): () => void {
+  collaborationListeners.add(listener);
+  return () => { collaborationListeners.delete(listener); };
+}
+
+export function retryCollaborationPeers(): void {
+  currentCollaborationDirectory().refreshPeers(true);
+}
+
+export function listCollaborationGroups(): Promise<CollaborationGroupsResponse> {
+  return currentCollaborationDirectory().load();
+}
+
+export async function saveCollaborationGroup(input: CollaborationGroupInput): Promise<{ group: CollaborationGroup }> {
+  // Validate against the current service, never against a stale desktop catalog.
+  const current = await readCurrentCollaborationGroups();
+  const existing = input.id ? current.groups.find((group) => group.id === input.id) : undefined;
+  if (input.id && !existing) throw new TerminalApiError('协作组已删除，请刷新列表', 404);
+  if (existing && input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== existing.updatedAt) {
+    throw new TerminalApiError('协作组已被修改，请重新打开成员管理后再保存', 409);
+  }
+  const sessionIds = [...new Set(input.sessionIds)];
+  if (!input.name.trim() || sessionIds.length < 2) throw new TerminalApiError('协作组至少需要两个有效会话', 400);
+  const knownIds = new Set([...current.sessions.map((session) => session.sessionId), ...(existing?.sessionIds ?? [])]);
+  const additions = sessionIds.filter((id) => !knownIds.has(id));
+  if (additions.some((id) => !remoteSessionAddress(id))) {
+    throw new TerminalApiError('所选会话已变化，请刷新后重新选择；尚未保存任何修改', 409);
+  }
+  const payload = { ...input, sessionIds, ...(existing ? { expectedUpdatedAt: input.expectedUpdatedAt ?? existing.updatedAt } : {}) };
+  let result: { group: CollaborationGroup };
+  if (additions.length) {
+    const bridge = window.termdockDesktop;
+    if (!bridge?.collaborationSave || (bridge.collaboration && (bridge.collaboration.protocolVersion !== 2 || !bridge.collaboration.save))) {
+      throw new TerminalApiError('添加跨服务成员需要连接支持协作的 Mac 客户端；当前服务内仍可组队', 409);
+    }
+    if (existing && !existing.federated && bridge.collaboration?.protocolVersion !== 2) {
+      throw new TerminalApiError('将已有组转换为跨服务组需要更新 Mac 客户端；原组和记录均未修改', 409);
+    }
+    // Mutation failures must never fall back or retry: the first write may have succeeded.
+    const expectedOrigin = selectedTarget()?.serviceOrigin ?? window.location.origin;
+    if (!bridge.collaboration && expectedOrigin !== window.location.origin) {
+      throw new TerminalApiError('旧版客户端无法在入口页面中添加跨服务成员，请更新客户端后重试', 409);
+    }
+    result = await bridge.collaborationSave({ ...payload, expectedOrigin });
+  } else {
+    result = await operationsRequest('/collaboration-groups', { method: 'POST', body: JSON.stringify(payload) });
+  }
+  currentCollaborationDirectory().invalidate();
+  return result;
+}
+
+export async function moveCollaborationMember(input: {
+  sourceGroupId: string; targetGroupId: string; sessionId: string;
+  expectedSourceUpdatedAt: number; expectedTargetUpdatedAt: number;
+}): Promise<void> {
+  const current = await readCurrentCollaborationGroups();
+  if (current.capabilities?.groupMove !== 1) {
+    throw new TerminalApiError('当前服务需要升级后才能在协作组之间移动成员；原成员关系未修改', 409);
+  }
+  await operationsRequest('/collaboration-groups/move-member', { method: 'POST', body: JSON.stringify(input) });
+  currentCollaborationDirectory().invalidate();
 }
 
 export function spawnCollaborationAgent(groupId: string, input: {
@@ -3741,15 +3831,16 @@ export function spawnCollaborationAgent(groupId: string, input: {
   task?: string;
   mode?: 'shell' | 'tmux';
 }): Promise<{ group: CollaborationGroup; session: OrchestrationSession }> {
-  return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/spawn`, {
+  return operationsRequest<{ group: CollaborationGroup; session: OrchestrationSession }>(`/collaboration-groups/${encodeURIComponent(groupId)}/spawn`, {
     method: 'POST',
     body: JSON.stringify(input),
-  });
+  }).then((result) => { currentCollaborationDirectory().invalidate(); return result; });
 }
 
-export function removeCollaborationGroup(groupId: string): Promise<void> {
-  if (groupId.startsWith('cross-') && window.termdockDesktop?.collaborationRemove) return window.termdockDesktop.collaborationRemove(groupId);
-  return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' });
+export function removeCollaborationGroup(groupId: string, expectedUpdatedAt?: number): Promise<void> {
+  const revision = expectedUpdatedAt === undefined ? '' : `?expectedUpdatedAt=${encodeURIComponent(expectedUpdatedAt)}`;
+  return operationsRequest<void>(`/collaboration-groups/${encodeURIComponent(groupId)}${revision}`, { method: 'DELETE' })
+    .then(() => { currentCollaborationDirectory().invalidate(); });
 }
 
 export function listCollaborationMessages(groupId: string): Promise<{ messages: CollaborationMessage[] }> {
