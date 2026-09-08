@@ -35,6 +35,91 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it('tries another address of the same pinned computer before a relay and preserves both routes', async () => {
+    mocks.boot = 'C';
+    const routes = [{ url: 'https://company.internal:9834', targetPeerId: 'C' }, { url: 'https://b.example', targetPeerId: 'B' }];
+    mocks.connect.mockRejectedValueOnce(new TypeError('home network unavailable'));
+    const integration = await import('./browserIntegration');
+    await integration.connectDevice({ url: 'https://home.internal:9834', targetPeerId: 'C', routes });
+    expect(mocks.connect.mock.calls.map(([args]) => [args.targetPeerId, args.url])).toEqual([
+      ['C', 'wss://home.internal:9834/api/federation/secure'], ['C', 'wss://company.internal:9834/api/federation/secure'],
+    ]);
+    expect(mocks.relay).not.toHaveBeenCalled();
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ routes }));
+    expect(integration.currentConnectionPath()).toBe('direct');
+  });
+  it('verifies a manually entered address against the existing identity and restores the offline PWA', async () => {
+    mocks.boot = 'C';
+    const service = { id: 'C', url: 'https://home.internal:9834', targetPeerId: 'C', label: 'My computer' };
+    mocks.saved.mockReturnValue(service);
+    const integration = await import('./browserIntegration');
+    const routes = await integration.addServiceAddress(service, ' company.internal:9834 ');
+    expect(mocks.connect).toHaveBeenCalledWith(expect.objectContaining({ targetPeerId: 'C', url: 'wss://company.internal:9834/api/federation/secure' }));
+    expect(routes).toEqual([{ url: 'https://company.internal:9834', targetPeerId: 'C' }]);
+    expect(integration.currentSecureClient()).toBe(clients.get('C'));
+    expect(clients.get('C')!.close).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    expect(window.dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: integration.SECURE_STATE_EVENT }));
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+  it('does not save an address whose handshake fails the pinned service check', async () => {
+    mocks.connect.mockRejectedValueOnce(new Error('Unexpected remote peer'));
+    const integration = await import('./browserIntegration');
+    await expect(integration.addServiceAddress({ id: 'C', url: 'https://home.internal', targetPeerId: 'C', label: 'Computer' }, 'https://wrong.internal')).rejects.toThrow('同一台 Termdock');
+    expect(local.getItem('termdock.federation.connections.v1')).toBeNull();
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(integration.currentSecureClient()).toBeUndefined();
+  });
+  it('rejects duplicates and non-HTTPS LAN addresses before connecting', async () => {
+    const integration = await import('./browserIntegration');
+    const service = { id: 'C', url: 'https://home.internal:9834', targetPeerId: 'C', label: 'Computer' };
+    await expect(integration.addServiceAddress(service, 'home.internal:9834/')).rejects.toThrow('已经');
+    await expect(integration.addServiceAddress(service, 'http://192.168.1.20:9834')).rejects.toThrow('HTTPS');
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+  it('does not interrupt a working connection just to save another address', async () => {
+    const integration = await import('./browserIntegration');
+    const service = { id: 'B', url: 'https://b.example', targetPeerId: 'B', label: 'Computer' };
+    mocks.saved.mockReturnValue(service);
+    const old = await integration.connectDevice(service);
+    await integration.addServiceAddress(service, 'https://company.internal');
+    expect(integration.currentSecureClient()).toBe(old);
+    expect(old.close).not.toHaveBeenCalled();
+    expect(clients.get('B')!.close).toHaveBeenCalledOnce();
+  });
+  it('uses the newly verified connection when an older reconnect subsequently fails', async () => {
+    mocks.boot = 'C';
+    const service = { id: 'C', url: 'https://home.internal', targetPeerId: 'C', label: 'Computer' };
+    mocks.saved.mockReturnValue(service);
+    let rejectOld!: (error: Error) => void;
+    mocks.connect.mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject; }));
+    const integration = await import('./browserIntegration');
+    const pending = integration.getActiveClient();
+    await vi.waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+    await integration.addServiceAddress(service, 'https://company.internal');
+    const current = integration.currentSecureClient();
+    rejectOld(new Error('Home network still unavailable'));
+    await expect(pending).resolves.toBe(current);
+  });
+  it('does not let a late successful reconnect overwrite the manually restored address', async () => {
+    mocks.boot = 'C';
+    const service = { id: 'C', url: 'https://home.internal', targetPeerId: 'C', label: 'Computer' };
+    mocks.saved.mockReturnValue(service);
+    const dial = mocks.connect.getMockImplementation()!;
+    const old = await dial({ targetPeerId: 'C' });
+    let resolveOld!: (client: typeof old) => void;
+    mocks.connect.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    const integration = await import('./browserIntegration');
+    const pending = integration.getActiveClient();
+    await vi.waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+    await integration.addServiceAddress(service, 'https://company.internal');
+    const current = integration.currentSecureClient();
+    resolveOld(old);
+    await expect(pending).resolves.toBe(current);
+    expect(integration.currentSecureClient()).toBe(current);
+    expect(old.close).toHaveBeenCalledOnce();
+    expect(mocks.save).toHaveBeenCalledOnce();
+  });
   it('prefers direct C and never treats the currently connected B as an authorized backup', async () => {
     const integration = await import('./browserIntegration');
     await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B' });

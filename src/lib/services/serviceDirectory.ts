@@ -1,4 +1,7 @@
-/** Saved addresses are display/connection metadata, never credentials. */
+/** Saved addresses are display/connection metadata, never credentials.
+ * A route with the service's own peer ID is another direct address; a different
+ * peer ID identifies an explicitly authorized relay service.
+ */
 export interface ServiceRoute { url: string; targetPeerId: string }
 export interface ServiceConnection {
   id: string;

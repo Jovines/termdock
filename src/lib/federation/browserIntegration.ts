@@ -154,6 +154,21 @@ export function connectionRoutes(intent: ConnectionIntent): ServiceRoute[] {
     catch { return []; }
   }).slice(0, 4);
 }
+/** Every direct address must authenticate as the same pinned service. Keep
+ * alternate addresses in the existing route format so desktop bridges preserve
+ * them too, without requiring a native-shell update.
+ */
+export function connectionAddresses(intent: ConnectionIntent): string[] {
+  const relays = connectionRoutes(intent);
+  const candidates = [intent.serviceOrigin || intent.url, ...(intent.routes || []).slice(0, 4)
+    .filter(route => route.targetPeerId === intent.targetPeerId).map(route => route.url)];
+  const addresses = new Set<string>();
+  for (const candidate of candidates) try {
+    const address = normalizeServiceAddress(candidate);
+    if (!relays.some(route => route.url === address)) addresses.add(address);
+  } catch { /* Ignore invalid persisted addresses, never replace the identity. */ }
+  return [...addresses];
+}
 function secureUrl(address: string): string {
   const url = new URL('/api/federation/secure', normalizeServiceAddress(address));
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; return url.href;
@@ -162,8 +177,8 @@ async function connectEntry(route: ServiceRoute): Promise<SecureClient> {
   return connect({ url: secureUrl(route.url), targetPeerId: route.targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(5000) });
 }
 async function openTargetForAuthentication(intent: ConnectionIntent): Promise<SecureClient> {
-  const routes = connectionRoutes(intent), origin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
-  if (!routes.some(route => route.url === origin)) try {
+  const routes = connectionRoutes(intent);
+  for (const origin of connectionAddresses(intent)) try {
     return await connect({ url: secureUrl(origin), targetPeerId: intent.targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(3000) });
   } catch { /* Try only the explicitly saved entry permissions below. */ }
   for (const route of routes) {
@@ -184,8 +199,9 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
   const identity = await getIdentity();
   const serviceOrigin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
   const known = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId);
-  const routes = connectionRoutes({ ...intent, routes: intent.routes ?? known?.routes });
-  const knownDirectAddress = !routes.some(route => normalizeServiceAddress(route.url) === serviceOrigin);
+  const savedIntent = { ...intent, routes: intent.routes ?? known?.routes };
+  const routes = connectionRoutes(savedIntent);
+  const addresses = connectionAddresses(savedIntent);
   let next: SecureClient | undefined, nextEntry: SecureClient | undefined;
   let pairingCode = intent.pairingCode;
   let path: 'direct' | 'relay' = 'direct';
@@ -206,10 +222,11 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
       if (intent.routeOnly) await saveServiceConnection({ id: intent.targetPeerId, url: serviceOrigin, label: intent.serviceName || new URL(serviceOrigin).host, targetPeerId: intent.targetPeerId, serviceOrigin, routes });
     }
     let directFailure: unknown;
-    if (knownDirectAddress) try {
-      next = await connect({ url: secureUrl(serviceOrigin), targetPeerId: intent.targetPeerId, pairingCode, identity, signal: AbortSignal.timeout(routes.length ? 3000 : 10_000) });
+    for (const address of addresses) try {
+      next = await connect({ url: secureUrl(address), targetPeerId: intent.targetPeerId, pairingCode, identity, signal: AbortSignal.timeout(routes.length || addresses.length > 1 ? 3000 : 10_000) });
       pairingCode = undefined;
       await readDeviceAuthorization(next);
+      break;
     } catch (error) {
       next?.close(); next = undefined;
       if (error instanceof DeviceAuthorizationRequired) throw error;
@@ -236,10 +253,17 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
       }
     }
     if (!next) throw directFailure || new Error('当前网络无法连接这台服务，也没有可用的已授权入口。');
+    // A manually verified address can restore this service while an earlier
+    // reconnect is still pending. Do not replace it with that stale attempt.
+    if (active !== previous && active && !active.closed && active.targetPeerId === intent.targetPeerId) {
+      next.close();
+      for (const entry of openedEntries) if (entry !== entryClient) entry.close();
+      return active;
+    }
     if (path === 'direct' && new URL(serviceOrigin).host === location.host) migrateLegacyServiceState(intent.targetPeerId);
     const existing = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId || (!item.targetPeerId && (item.serviceOrigin || item.url) === serviceOrigin));
     const serviceName = existing?.label || intent.serviceName || new URL(serviceOrigin).host;
-    const saved = { url: serviceOrigin, targetPeerId: intent.targetPeerId, serviceName, serviceOrigin, routes };
+    const saved = { url: serviceOrigin, targetPeerId: intent.targetPeerId, serviceName, serviceOrigin, routes: savedIntent.routes ?? routes };
     await saveServiceConnection({ id: existing?.id || intent.targetPeerId, ...saved, label: serviceName });
     saveSelectedTarget(saved);
     active = next; activePath = path; entryClient = nextEntry;
@@ -258,12 +282,17 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
 export async function preferDirectConnection(): Promise<void> {
   const previous = active, selected = savedConnection();
   if (probingDirect || activePath !== 'relay' || !previous || previous.closed || !previous.canSwitchTransport || !selected?.serviceOrigin) return;
-  const routes = connectionRoutes(selected);
-  if (routes.some(route => normalizeServiceAddress(route.url) === normalizeServiceAddress(selected.serviceOrigin!))) return;
   probingDirect = true; let candidate: SecureClient | undefined;
   try {
-    candidate = await connect({ url: secureUrl(selected.serviceOrigin), targetPeerId: selected.targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(3000) });
-    await readDeviceAuthorization(candidate);
+    for (const address of connectionAddresses(selected)) try {
+      candidate = await connect({ url: secureUrl(address), targetPeerId: selected.targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(3000) });
+      await readDeviceAuthorization(candidate);
+      break;
+    } catch (error) {
+      candidate?.close(); candidate = undefined;
+      if (error instanceof DeviceAuthorizationRequired) throw error;
+    }
+    if (!candidate) return;
     if (active !== previous || !previous.canSwitchTransport) return;
     const oldEntry = entryClient;
     active = candidate; candidate = undefined; entryClient = undefined; activePath = 'direct';
@@ -281,7 +310,10 @@ export async function getActiveClient(): Promise<SecureClient> {
   if (connecting) return connecting;
   const saved = savedConnection();
   if (!saved) throw new Error('DEVICE_PAIRING_REQUIRED');
-  connecting = connectDevice(saved).finally(() => { connecting = undefined; });
+  connecting = connectDevice(saved).catch(error => {
+    if (active && !active.closed && active.targetPeerId === saved.targetPeerId) return active;
+    throw error;
+  }).finally(() => { connecting = undefined; });
   return connecting;
 }
 export function secureSocket(url: string): WebSocket {
@@ -374,9 +406,53 @@ export async function createEntryInvitation(target: ConnectionIntent, route: Ser
   } finally { entry.close(); }
 }
 export async function saveServiceRoutes(service: import('../services/serviceDirectory').ServiceConnection, routes: ServiceRoute[]): Promise<void> {
-  await saveServiceConnection({ ...service, url: service.serviceOrigin || service.url, entryServiceId: undefined, routes });
+  const latest = (await listServiceConnections()).find(item => item.id === service.id || (service.targetPeerId && item.targetPeerId === service.targetPeerId)) || service;
+  await saveServiceConnection({ ...latest, url: latest.serviceOrigin || latest.url, entryServiceId: undefined, routes });
   const selected = savedConnection();
   if (selected && selected.targetPeerId === service.targetPeerId) saveSelectedTarget({ ...selected, url: selected.serviceOrigin || selected.url, entryServiceId: undefined, routes });
+}
+
+/** Verify before saving: an address on another LAN may belong to a completely
+ * different computer. No password or discovery result can replace this pin.
+ */
+export async function addServiceAddress(service: import('../services/serviceDirectory').ServiceConnection, input: string): Promise<ServiceRoute[]> {
+  const targetPeerId = service.targetPeerId;
+  if (!targetPeerId) throw new Error('请先连接这台服务，再添加备用地址。');
+  let address: string;
+  try { address = normalizeServiceAddress(input); }
+  catch { throw new Error('请输入有效的 HTTPS 地址，例如 https://电脑地址:9834。'); }
+  const latestService = async () => (await listServiceConnections()).find(item => item.targetPeerId === targetPeerId) || service;
+  const nextRoutes = (current: typeof service) => {
+    const existing = current.routes ?? connectionRoutes({ ...current, targetPeerId });
+    if (normalizeServiceAddress(current.serviceOrigin || current.url) === address || existing.some(route => normalizeServiceAddress(route.url) === address)) {
+      throw new Error('这个地址已经在连接列表中。');
+    }
+    if (existing.length >= 4) throw new Error('最多保存 4 个备用地址或入口，请先移除不再使用的连接。');
+    return [...existing, { url: address, targetPeerId }];
+  };
+  nextRoutes(await latestService());
+  let candidate: SecureClient | undefined;
+  try {
+    try {
+      candidate = await connect({ url: secureUrl(address), targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(5000) });
+      await readDeviceAuthorization(candidate);
+    } catch (error) {
+      if (error instanceof DeviceAuthorizationRequired) throw new Error('这台服务尚未授权当前设备，请先恢复设备授权。');
+      throw new Error('无法验证这个地址。请确认能访问该地址、HTTPS 证书受信任，且运行的是同一台 Termdock 服务。');
+    }
+    const current = await latestService();
+    const routes = nextRoutes(current);
+    await saveServiceRoutes(current, routes);
+    // Restore an offline PWA using the connection just verified, without
+    // another attempt at the unreachable home address or a page navigation.
+    if (savedConnection()?.targetPeerId === targetPeerId && BOOT_SERVICE_ID === targetPeerId && (!active || active.closed)) {
+      const previous = active, previousEntry = entryClient;
+      active = candidate; candidate = undefined; entryClient = undefined; activePath = 'direct';
+      previous?.close(); previousEntry?.close();
+      window.dispatchEvent(new Event(SECURE_STATE_EVENT));
+    }
+    return routes;
+  } finally { candidate?.close(); }
 }
 
 export async function authenticateKnownConnection(intent: ConnectionIntent, password: string): Promise<void> {

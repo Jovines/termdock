@@ -44,3 +44,6 @@
 .service-route-line { display: flex; align-items: center; gap: 12px; }
 .service-route-line .service-name { flex: 1; min-width: 0; }
 .service-full-width { width: 100%; }
+.service-route-address { flex: 1; min-width: 0; }
+.service-relay-options > summary { cursor: pointer; padding: 12px 0; color: var(--muted-foreground); }
+.service-relay-options[open] > summary { margin-bottom: 8px; }

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ request: vi.fn(), invalidate: vi.fn(), saved: vi.fn() }));
 vi.mock('./browserIntegration', () => ({
+  SECURE_STATE_EVENT: 'termdock:secure-state',
   preferDirectConnection: vi.fn(), connectionRoutes: () => [],
   connectDevice: vi.fn(), connectOpenService: vi.fn(), getIdentity: async () => ({ peerId: 'phone' }),
   currentSecureClient: () => ({ request: mocks.request, targetPeerId: 'service' }), currentEntryClient: () => undefined,
@@ -22,6 +23,14 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('device authorization lifecycle', () => {
+  it('rechecks access when a manually verified address restores the encrypted transport', async () => {
+    mocks.request.mockRejectedValueOnce(new Error('Home network unavailable'));
+    render(<SecureAccessGate><div>Active terminal</div></SecureAccessGate>);
+    await screen.findByText('正在重新连接，登录信息已保留…');
+    fireEvent(window, new Event('termdock:secure-state'));
+    await screen.findByText('Active terminal');
+    expect(mocks.invalidate).not.toHaveBeenCalled();
+  });
   it('retains the mounted terminal on a transient foreground validation failure', async () => {
     const unmounted = vi.fn();
     function Terminal() { useEffect(() => () => unmounted(), []); return <div>Active terminal</div>; }

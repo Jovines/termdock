@@ -2,7 +2,7 @@ import { listServiceConnections, normalizeServiceAddress, type ServiceConnection
 import { defaultDeviceName } from './deviceName';
 import { useEffect, useState, type ReactNode } from 'react';
 import FederationAccess, { type FederationGrant, type FederationInviteInput } from '../../components/FederationAccess';
-import { connectDevice, connectionRoutes, createEntryInvitation, authenticateKnownConnection, preferDirectConnection, connectServiceAddress, connectOpenService, currentSecureClient, getActiveClient, getIdentity, invalidateSecureTransport, savedConnection, type ConnectionIntent } from './browserIntegration';
+import { connectDevice, connectionRoutes, createEntryInvitation, authenticateKnownConnection, preferDirectConnection, connectServiceAddress, connectOpenService, currentSecureClient, getActiveClient, getIdentity, invalidateSecureTransport, savedConnection, SECURE_STATE_EVENT, type ConnectionIntent } from './browserIntegration';
 import { createInviteLink, parseInviteLink } from './inviteLink';
 import { SessionAccessView } from './SessionAccessView';
 import { LoginScreen } from '../components/auth/LoginScreen';
@@ -111,6 +111,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     const network = (navigator as Navigator & { connection?: EventTarget }).connection;
     network?.addEventListener('change', online);
     window.addEventListener('auth:unauthorized', visible);
+    window.addEventListener(SECURE_STATE_EVENT, visible);
     const timer = setInterval(visible, 30_000);
     return () => {
       stopped = true; clearTimeout(retry); clearInterval(timer);
@@ -119,6 +120,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       window.removeEventListener('online', online);
       network?.removeEventListener('change', online);
       window.removeEventListener('auth:unauthorized', visible);
+      window.removeEventListener(SECURE_STATE_EVENT, visible);
     };
   }, []);
   const refresh = async () => {
