@@ -103,7 +103,7 @@ import { CollaborationStore, type CollaborationGroup, type CollaborationMessageK
 import { formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
-import { resolveCollaborationBackend } from '../agent/sessionBindingRecovery.js';
+import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, type CollaborationBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
 import { writeCollaborationTmuxPane } from '../agent/collaborationTmuxDelivery.js';
@@ -1940,20 +1940,7 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
 }
 
 function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId?: unknown; tmuxSessionName?: unknown }): string | null {
-  const sessionId = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
-  if (sessionId && globalSessionState.sessions.some((record) => record.sessionId === sessionId)) return sessionId;
-  const backendSessionId = typeof input.backendSessionId === 'string' ? input.backendSessionId.trim() : '';
-  if (backendSessionId) {
-    const owner = collaborationRouting.ownerOfBackend(backendSessionId);
-    if (owner && globalSessionState.sessions.some((record) => record.sessionId === owner)) return owner;
-    const resolved = globalSessionState.sessions.find((record) => record.backendSessionId === backendSessionId)?.sessionId;
-    if (resolved) return resolved;
-  }
-  const tmuxSessionName = typeof input.tmuxSessionName === 'string' ? input.tmuxSessionName.trim() : '';
-  if (!tmuxSessionName) return null;
-  const bound = globalSessionState.sessions.find((record) => collaborationRouting.get(record.sessionId)?.tmuxSessionName === tmuxSessionName);
-  if (bound) return bound.sessionId;
-  return globalSessionState.sessions.find((record) => record.tmuxSessionName === tmuxSessionName)?.sessionId ?? null;
+  return resolveCollaborationSessionId(input, globalSessionState.sessions, collaborationRouting);
 }
 
 function collaborationRemoteSessions() {

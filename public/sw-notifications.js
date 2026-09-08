@@ -17,6 +17,7 @@ self.addEventListener('push', (event) => {
     data: {
       url: payload.url || '/',
       sessionId: payload.sessionId,
+      targetPeerId: payload.targetPeerId,
     },
   };
   event.waitUntil((async () => {
@@ -59,8 +60,15 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil((async () => {
-    // A worker has no paired device channel. Foreground reconciliation owns
-    // subscription updates; never retry them through cookie-authenticated HTTP.
+    try {
+      let subscription = event.newSubscription || await self.registration.pushManager.getSubscription();
+      if (!subscription && event.oldSubscription?.options) {
+        subscription = await self.registration.pushManager.subscribe(event.oldSubscription.options);
+      }
+      if (subscription) await self.termdockBackground?.renewSubscriptions(subscription.toJSON());
+    } catch (error) {
+      console.warn('Background encrypted subscription sync failed', error);
+    }
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of windows) {
       client.postMessage({ type: 'termdock:push-subscription-changed' });
@@ -69,9 +77,8 @@ self.addEventListener('pushsubscriptionchange', (event) => {
 });
 
 async function reportNotificationClick(stage, traceId, data = {}) {
-  // Worker diagnostics stay local; background fetch cannot use the document's
-  // encrypted transport and must not send notification metadata in plaintext.
-  console.debug(`PWA_NOTIFICATION_CLICK ${stage}`, { traceId, ...data });
+  try { await self.termdockBackground?.reportClick(stage, traceId, data); }
+  catch { console.debug(`PWA_NOTIFICATION_CLICK ${stage}`, { traceId, ...data }); }
 }
 
 const NOTIFICATION_TARGET_CACHE = 'termdock-notification-target-v1';
@@ -136,6 +143,7 @@ self.addEventListener('notificationclick', (event) => {
 
   event.waitUntil((async () => {
     await reportNotificationClick('sw-click-start', traceId, {
+      targetPeerId: data.targetPeerId,
       sessionId: data.sessionId || null,
       url: data.url || null,
       tag: event.notification.tag || null,
@@ -214,5 +222,5 @@ self.addEventListener('notificationclick', (event) => {
         resultUrl: openedClient?.url || null,
       });
     }
-  })());
+  })().finally(() => self.termdockBackground?.flushLogs().catch(() => {})));
 });

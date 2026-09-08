@@ -1616,7 +1616,7 @@ async function connectWindow(
   }
 
   const workspaceWindow = createDesktopWindow({ serviceOrigin: key, label: serviceLabel(probe.url) });
-  await prepareBundledFrontend(workspaceWindow.webContents.session, key, path.join(runtimePaths().serverRoot, 'dist', 'client'));
+  await prepareBundledFrontend(workspaceWindow.webContents.session, key, () => path.join(runtimePaths().serverRoot, 'dist', 'client'));
   if (options.invitation) pendingServiceInvitations.set(workspaceWindow, options.invitation);
   serviceWindows.set(key, workspaceWindow);
   broadcastServiceActivity();

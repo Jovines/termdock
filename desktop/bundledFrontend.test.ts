@@ -18,3 +18,25 @@ describe('bundled service frontend', () => {
     expect(clearStorageData.mock.invocationCallOrder[0]).toBeLessThan(handle.mock.invocationCallOrder[0]);
   });
 });
+
+it('switches the document on reload while retaining old lazy assets', async () => {
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'termdock-frontend-update-'));
+  try {
+    const old = path.join(directory, 'old'), next = path.join(directory, 'new');
+    for (const root of [old, next]) await fs.mkdir(path.join(root, 'assets'), { recursive: true });
+    await fs.writeFile(path.join(old, 'index.html'), 'old frontend');
+    await fs.writeFile(path.join(old, 'assets', 'old.js'), 'old lazy module');
+    await fs.writeFile(path.join(next, 'index.html'), 'new frontend');
+    let selected = old;
+    let handler!: (request: Request) => Promise<Response>;
+    const session = { clearStorageData: async () => {}, protocol: { handle: async (_scheme: string, fn: typeof handler) => { handler = fn; } } } as unknown as Session;
+    await prepareBundledFrontend(session, 'https://service.test', () => selected);
+    selected = next;
+    expect(await (await handler(new Request('https://service.test/assets/old.js'))).text()).toBe('old lazy module');
+    expect(await (await handler(new Request('https://service.test/'))).text()).toBe('new frontend');
+    expect(await (await handler(new Request('https://service.test/assets/old.js'))).text()).toBe('old lazy module');
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});

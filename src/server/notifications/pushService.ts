@@ -1,3 +1,5 @@
+let pushTargetPeerId: string | undefined;
+export function setPushTargetPeerId(value: string): void { pushTargetPeerId = value; }
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -192,6 +194,7 @@ async function sendPayload(options: {
       };
       await webpush.sendNotification(subscription, JSON.stringify({
         ...options.build(entry.locale),
+        targetPeerId: pushTargetPeerId,
         alertStyle: entry.alertStyle,
         locale: entry.locale,
       }), {

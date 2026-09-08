@@ -1684,10 +1684,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
       try {
-        if (typeof navigator.clipboard?.read === 'function') {
-          const image = await readTerminalClipboardImage(navigator.clipboard);
-          if (image) return pasteImageIntoTerminal(image, textarea);
-        }
+        const image = await readTerminalClipboardImage(navigator.clipboard);
+        if (image) return pasteImageIntoTerminal(image, textarea);
         if (!navigator.clipboard?.readText) {
           return false;
         }
@@ -5053,6 +5051,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
                 const text = event.clipboardData.getData('text/plain');
                 if (!text) {
+                  // Native macOS image formats do not always appear as DOM Files.
+                  if (window.termdockDesktop) {
+                    event.preventDefault();
+                    void readClipboardIntoTerminal(event.currentTarget);
+                  }
                   return;
                 }
                 event.preventDefault();
@@ -5081,6 +5084,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
                   // ---- Cmd/Ctrl + V：粘贴 ----
                   if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) {
+                    if (window.termdockDesktop?.readClipboardImage) {
+                      event.preventDefault();
+                      void readClipboardIntoTerminal(event.currentTarget);
+                      return;
+                    }
                     // Let the system paste event supply image bytes as well as
                     // text, without an isolated preload upload or read prompt.
                     return;

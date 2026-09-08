@@ -15,6 +15,27 @@ interface LiveBackend {
   agentSession: { sessionId: string | null } | null;
 }
 
+export function resolveCollaborationSessionId(
+  input: { sessionId?: unknown; backendSessionId?: unknown; tmuxSessionName?: unknown },
+  records: readonly Pick<SessionRecord, 'sessionId' | 'backendSessionId' | 'tmuxSessionName'>[],
+  routing: CollaborationRoutingStore,
+): string | null {
+  const sessionId = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
+  if (sessionId && records.some((record) => record.sessionId === sessionId)) return sessionId;
+  const backendSessionId = typeof input.backendSessionId === 'string' ? input.backendSessionId.trim() : '';
+  if (backendSessionId) {
+    const owner = routing.ownerOfBackend(backendSessionId);
+    if (owner && records.some((record) => record.sessionId === owner)) return owner;
+    const resolved = records.find((record) => record.backendSessionId === backendSessionId)?.sessionId;
+    if (resolved) return resolved;
+  }
+  const tmuxSessionName = typeof input.tmuxSessionName === 'string' ? input.tmuxSessionName.trim() : '';
+  if (!tmuxSessionName) return null;
+  const bound = records.find((record) => routing.get(record.sessionId)?.tmuxSessionName === tmuxSessionName);
+  if (bound) return bound.sessionId;
+  return records.find((record) => record.tmuxSessionName === tmuxSessionName)?.sessionId ?? null;
+}
+
 export function resolveCollaborationBackend<T extends LiveBackend>(
   record: SessionRecord,
   records: readonly SessionRecord[],

@@ -4,44 +4,18 @@ import { createRelaySocketFactory } from './relaySocket';
 import { installWorkerBridge } from './workerBridge';
 import { DeviceAuthorizationRequired, readDeviceAuthorization } from './deviceAuthorization';
 import { BOOT_SERVICE_ID, TARGET_KEY, ENTRY_KEY, selectedTarget, saveSelectedTarget, migrateLegacyServiceState } from './clientScope';
-import { createIdentity, importIdentity, exportIdentity, type Identity } from '../../server/federation/secureProtocol';
+import { getIdentity } from './deviceIdentity';
+export { getIdentity } from './deviceIdentity';
 
 export const SECURE_STATE_EVENT = 'termdock:secure-state';
 let active: SecureClient | undefined;
 let connecting: Promise<SecureClient> | undefined;
-let identityPromise: Promise<Identity> | undefined;
 let entryClient: SecureClient | undefined;
 let activePath: 'direct' | 'relay' = 'direct';
 let probingDirect = false;
 const nativeFetch = globalThis.fetch.bind(globalThis);
 export interface ConnectionIntent { url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean; routes?: ServiceRoute[] }
 
-export async function getIdentity(): Promise<Identity> {
-  if (!identityPromise) identityPromise = (async () => {
-    const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('termdock-device-identity', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('keys');
-      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-    });
-    try {
-      const stored = await new Promise<string | undefined>((resolve, reject) => {
-        const request = database.transaction('keys').objectStore('keys').get('identity');
-        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-      });
-      if (stored) return importIdentity(stored);
-      const identity = await createIdentity();
-      let winner = identity;
-      await new Promise<void>((resolve, reject) => {
-        const tx = database.transaction('keys', 'readwrite');
-        const store = tx.objectStore('keys'); const existing = store.get('identity');
-        existing.onsuccess = () => { if (typeof existing.result === 'string') winner = importIdentity(existing.result); else store.put(exportIdentity(identity), 'identity'); };
-        tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
-      });
-      return winner;
-    } finally { database.close(); }
-  })();
-  return identityPromise;
-}
 export function savedConnection(): ConnectionIntent | null {
   return selectedTarget();
 }

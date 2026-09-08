@@ -36,3 +36,13 @@ describe('shared service manager', () => {
     expect(localStorage.length).toBe(0);
   });
 });
+
+it('saves an offline address without probing, opening, or retaining a password', async () => {
+  localStorage.clear();
+  const onAdd = vi.fn(), onOpen = vi.fn();
+  render(<ServiceManager initiallyAdding onAdd={onAdd} onOpen={onOpen} />);
+  fireEvent.change(screen.getByLabelText('服务地址或邀请链接'), { target: { value: 'offline.example:9834' } });
+  fireEvent.click(screen.getByRole('button', { name: '仅保存，不连接' }));
+  await waitFor(() => expect(readBrowserServices()).toEqual([{ id: 'https://offline.example:9834', url: 'https://offline.example:9834', label: 'offline.example:9834' }]));
+  expect(onAdd).not.toHaveBeenCalled(); expect(onOpen).not.toHaveBeenCalled();
+});

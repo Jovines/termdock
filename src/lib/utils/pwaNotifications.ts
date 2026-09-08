@@ -1,3 +1,5 @@
+import { connectionAddresses, connectionRoutes, savedConnection } from '../federation/browserIntegration';
+import { saveBackgroundTarget, removeBackgroundTarget } from '../federation/backgroundState';
 const PWA_NOTIFICATIONS_ENABLED_KEY = 'termdock-pwa-notifications-enabled';
 const PWA_AI_NOTIFICATIONS_ENABLED_KEY = 'termdock-pwa-ai-notifications-enabled';
 const PWA_EXIT_NOTIFICATIONS_ENABLED_KEY = 'termdock-pwa-exit-notifications-enabled';
@@ -341,6 +343,11 @@ export async function syncPwaPushSubscription(force = false, allowCreate = false
       if (!response.ok) return false;
       window.localStorage.setItem(PUSH_SYNC_STORAGE_KEY, String(Date.now()));
     }
+    const target = savedConnection();
+    if (target) await saveBackgroundTarget({ targetPeerId: target.targetPeerId,
+      addresses: connectionAddresses(target), routes: connectionRoutes(target), publicKey: status.publicKey,
+      preferences: { aiEnabled: getStoredPwaAiNotificationsEnabled(), exitEnabled: getStoredPwaExitNotificationsEnabled(),
+        alertStyle: getStoredPwaNotificationAlertStyle(), locale: navigator.language } });
     return true;
   } catch (error) {
     console.warn('[PWA notifications] Push subscription sync failed:', error);
@@ -355,6 +362,8 @@ export async function unsubscribePwaPush(): Promise<void> {
   try {
     await notificationMutation('unsubscribe', { endpoint: subscription?.endpoint });
   } finally {
+    const target = savedConnection();
+    if (target) await removeBackgroundTarget(target.targetPeerId);
     await subscription?.unsubscribe();
     try {
       window.localStorage.removeItem(PUSH_SYNC_STORAGE_KEY);

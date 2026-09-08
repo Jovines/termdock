@@ -1,4 +1,5 @@
 import { Router, type Request } from 'express';
+import { encryptedRequestSubject } from '../federation/requestContext.js';
 import {
   getPushSubscription,
   getVapidPublicKey,
@@ -11,6 +12,8 @@ import {
 const router = Router();
 
 function clientIdFromRequest(req: Request): string {
+  const subject = encryptedRequestSubject(req);
+  if (subject) return `device:${subject}`;
   return typeof req.cookies?.['termdock-client'] === 'string' ? req.cookies['termdock-client'] : '';
 }
 

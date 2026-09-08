@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { build as bundleWorker } from 'esbuild';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -10,6 +11,13 @@ loadDotenv();
 export default defineConfig({
   plugins: [
     react(),
+    {
+      name: 'encrypted-background-worker',
+      async generateBundle() {
+        const result = await bundleWorker({ entryPoints: ['src/lib/federation/backgroundWorker.ts'], bundle: true, write: false, format: 'iife', platform: 'browser', target: 'es2022', minify: true });
+        this.emitFile({ type: 'asset', fileName: 'sw-encrypted-background.js', source: result.outputFiles[0].text });
+      },
+    },
     VitePWA({
       registerType: 'prompt',
       injectRegister: false,
@@ -28,6 +36,7 @@ export default defineConfig({
         'maskable-icon-512x512.png',
         'sw-notifications.js',
         'sw-secure-api.js',
+        'sw-downloads.js',
         'robots.txt',
       ],
       manifest: {
@@ -72,7 +81,7 @@ export default defineConfig({
           'assets/index-*.css',
           'icons/agents/*.svg',
         ],
-        importScripts: ['sw-notifications.js', 'sw-secure-api.js'],
+        importScripts: ['sw-encrypted-background.js', 'sw-notifications.js', 'sw-secure-api.js', 'sw-downloads.js'],
         // 关键：新 SW 安装完不要 wait，直接 activate；并立刻 claim 已打开的页面。
         // 这样以后无论 dev 还是 prod，用户刷新一次就能拿到最新代码，不再有
         // "PWA 缓存了旧 bundle 导致看不到新功能" 的窘境。
@@ -80,7 +89,7 @@ export default defineConfig({
         clientsClaim: true,
         // dev 模式下经常涉及一些没缓存好的资源（HMR 客户端、新加的模块等），
         // 让 SW 在拿不到 precached 内容时回到 network 而不是报 404。
-        navigateFallbackDenylist: [/^\/api\//, /^\/health$/],
+        navigateFallbackDenylist: [/^\/api\//, /^\/__termdock-download\//, /^\/health$/],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         runtimeCaching: [
           {

@@ -1,3 +1,5 @@
+import shimSource from 'es-module-shims/wasm?raw';
+import previewRuntime from './previewRuntime.js?raw';
 import { canonicalApiPath } from '../../server/federation/accessPolicy.js';
 
 const PREFIX = '/api/terminal/fs/preview/';
@@ -137,21 +139,26 @@ export async function prepareSecureHtmlPreview(src: string, options: { fetch: Pr
   }
   try {
     const main = await read(documentResponse);
+    const shim = blob(shimSource, 'text/javascript');
     const document = new DOMParser().parseFromString(new TextDecoder().decode(main.bytes), 'text/html');
     document.querySelectorAll('base,meta[http-equiv],iframe,frame,object,embed').forEach(node => node.remove());
     for (const node of document.querySelectorAll<HTMLElement>('*')) {
       node.removeAttribute('ping'); node.removeAttribute('srcdoc');
       if (node.hasAttribute('style')) node.setAttribute('style', await css(node.getAttribute('style')!, documentUrl, new Set()));
       if (node.tagName === 'STYLE') node.textContent = await css(node.textContent ?? '', documentUrl, new Set());
-      if (node.tagName === 'FORM') { node.removeAttribute('action'); node.removeAttribute('method'); }
+
       if (node.tagName === 'A' || node.tagName === 'AREA') {
         const href = node.getAttribute('href');
-        if (href && !href.startsWith('#')) { node.removeAttribute('href'); node.setAttribute('title', '预览中的页面跳转已禁用'); }
+        try { if (href && !href.startsWith('#')) { const url = localUrl(href, documentUrl); if (!url) { const external = new URL(href, documentUrl); if (external.protocol !== 'https:') { node.removeAttribute('href'); continue; } externalOrigins.add(external.origin); node.setAttribute('href', external.href); } else node.setAttribute('href', new URL(url.pathname.slice(rootUrl.pathname.length) + url.search + url.hash, virtualBase).href); } } catch (error) { node.removeAttribute('href'); report(error instanceof Error ? error.message : '预览链接无法加载'); }
       }
-      for (const name of ['action', 'formaction', 'data', 'manifest']) node.removeAttribute(name);
+      for (const name of ['data', 'manifest']) node.removeAttribute(name);
       if (node.tagName === 'SCRIPT' && node.getAttribute('type') === 'module') {
-        node.remove(); report('模块脚本的动态依赖暂不支持安全预览'); continue;
+        node.setAttribute('type', 'module-shim');
+        const source = node.getAttribute('src');
+        if (source) { const url = localUrl(source, documentUrl); if (url) node.setAttribute('src', new URL(url.pathname.slice(rootUrl.pathname.length) + url.search, virtualBase).href); else { const external = new URL(source, documentUrl); if (external.protocol !== 'https:') { node.remove(); continue; } externalOrigins.add(external.origin); node.setAttribute('src', external.href); } }
+        continue;
       }
+      if (node.tagName === 'SCRIPT' && node.getAttribute('type') === 'importmap') { node.setAttribute('type', 'importmap-shim'); continue; }
       if (node.tagName === 'LINK') {
         const rel = (node.getAttribute('rel') ?? '').toLowerCase();
         if (!['stylesheet', 'icon'].includes(rel)) { node.remove(); continue; }
@@ -172,11 +179,12 @@ export async function prepareSecureHtmlPreview(src: string, options: { fetch: Pr
     }
     const sources = [...externalOrigins].join(' ');
     const csp = document.createElement('meta'); csp.httpEquiv = 'Content-Security-Policy';
-    csp.content = `default-src 'none'; script-src 'unsafe-inline' blob: ${sources}; style-src 'unsafe-inline' blob: ${sources}; img-src blob: data: ${sources}; font-src blob: data: ${sources}; media-src blob: data: ${sources}; connect-src ${sources || "'none'"}; frame-src 'none'; object-src 'none'; base-uri https://termdock-preview.invalid; form-action 'none'`;
+    csp.content = `default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ${sources}; style-src 'unsafe-inline' blob: ${sources}; img-src blob: data: ${sources}; font-src blob: data: ${sources}; media-src blob: data: ${sources}; connect-src blob: ${sources} ${[...externalOrigins].map(value => value.replace(/^https:/, 'wss:')).join(' ')}; worker-src blob:; frame-src 'none'; object-src 'none'; base-uri https://termdock-preview.invalid; form-action 'none'`;
     const base = document.createElement('base'); base.href = virtualBase;
     const referrer = document.createElement('meta'); referrer.name = 'referrer'; referrer.content = 'no-referrer';
-    const bootstrap = document.createElement('script'); bootstrap.textContent = previewBootstrap(capability, virtualBase, [...externalOrigins]);
-    document.head.prepend(csp, referrer, base, bootstrap);
+    const bootstrap = document.createElement('script'); bootstrap.textContent = previewRuntime + '\ninstallPreviewRuntime(' + [capability, virtualBase, [...externalOrigins], shim].map(scriptText).join(',') + ');';
+    const loader = document.createElement('script'); loader.src = shim;
+    document.head.prepend(csp, referrer, base, bootstrap, loader);
     const html = '<!doctype html>\n' + document.documentElement.outerHTML;
     return {
       html, shellUrl: `/preview-shell.html#${capability}`, errors,
@@ -186,6 +194,21 @@ export async function prepareSecureHtmlPreview(src: string, options: { fetch: Pr
           if (event.source !== frame.contentWindow || event.data?.capability !== capability) return;
           if (event.data.type === 'preview-ready') { frame.contentWindow?.postMessage({ type: 'preview-init', capability, html, resources: packed }, '*'); return; }
           if (event.data.type === 'preview-error') { onError('部分动态内容被安全预览限制'); return; }
+          if (event.data.type === 'preview-navigate') {
+            void (async () => {
+              const url = virtualUrl(String(event.data.url));
+              const next = await prepareSecureHtmlPreview(url.pathname + url.search, options);
+              if (disposed) { next.dispose(); return; }
+              const detach = next.attach(frame, onError);
+              liveBridges.add(() => { detach(); next.dispose(); });
+              frame.src = next.shellUrl.replace('#', '?navigation=' + crypto.randomUUID() + '#');
+            })().catch(error => onError(error instanceof Error ? error.message : '无法打开预览页面'));
+            return;
+          }
+          if (event.data.type === 'preview-external') {
+            try { const url = new URL(String(event.data.url)); if (url.protocol === 'https:' && externalOrigins.has(url.origin)) window.open(url.href, '_blank', 'noopener,noreferrer'); } catch { /* Invalid external navigation. */ }
+            return;
+          }
           if (event.data.type !== 'preview-fetch' || event.ports.length !== 1) return;
           const port = event.ports[0];
           if (pending.size >= 8 || !['GET', 'HEAD'].includes(event.data.method)) { port.postMessage({ error: '预览仅允许读取已授权目录资源' }); port.close(); return; }
@@ -206,31 +229,4 @@ export async function prepareSecureHtmlPreview(src: string, options: { fetch: Pr
       dispose: release,
     };
   } catch (error) { release(); throw error; }
-}
-
-function previewBootstrap(capability: string, virtualBase: string, externalOrigins: string[]): string {
-  return `(() => {
-    const capability=${scriptText(capability)}, base=${scriptText(virtualBase)}, external=new Set(${scriptText(externalOrigins)});
-    const report=()=>parent.postMessage({type:'preview-error',capability},'*');
-    const nativeFetch=window.fetch.bind(window);
-    Object.defineProperty(window,'fetch',{configurable:false,writable:false,value:async(input,init={})=>{
-      const url=new URL(typeof input==='string'?input:input.url||String(input),base);
-      const method=String(init.method||(input&&input.method)||'GET').toUpperCase();
-      if(!['GET','HEAD'].includes(method)){report();throw new Error('Preview is read-only');}
-      if(external.has(url.origin))return nativeFetch(url.href,{...init,method,credentials:'omit',referrerPolicy:'no-referrer'});
-      if(url.origin!==new URL(base).origin||!url.pathname.startsWith(new URL(base).pathname)){report();throw new Error('Outside preview scope');}
-      return new Promise((resolve,reject)=>{
-        const channel=new MessageChannel();const timer=setTimeout(()=>{channel.port1.close();report();reject(new Error('Preview resource timeout'));},15000);
-        channel.port1.onmessage=e=>{clearTimeout(timer);channel.port1.close();if(e.data.error){report();reject(new Error(e.data.error));}else resolve(new Response(method==='HEAD'?null:e.data.data,{status:e.data.status,headers:e.data.headers}));};
-        parent.postMessage({type:'preview-fetch',capability,url:url.href,method},'*',[channel.port2]);
-      });
-    }});
-    for(const name of ['XMLHttpRequest','WebSocket','EventSource','Worker','SharedWorker'])Object.defineProperty(window,name,{configurable:false,writable:false,value:function(){report();throw new Error(name+' is unavailable in secure preview');}});
-    Object.defineProperty(window,'open',{configurable:false,writable:false,value:()=>{report();return null;}});
-    document.addEventListener('submit',e=>{e.preventDefault();report();},true);
-    document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('a,area');if(a&&a.getAttribute('href')&&!a.getAttribute('href').startsWith('#')){e.preventDefault();report();}},true);
-    window.addEventListener('securitypolicyviolation',report);
-    window.addEventListener('error',report,true);
-    window.addEventListener('unhandledrejection',report);
-  })();`;
 }

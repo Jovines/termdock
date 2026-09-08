@@ -8,6 +8,37 @@ beforeEach(() => resetCsrfTokenCache());
 afterEach(() => vi.unstubAllGlobals());
 
 describe('terminal clipboard image', () => {
+  it('reads native PNG bytes even when the browser cannot expose the clipboard image', async () => {
+    const png = new Uint8Array([137, 80, 78, 71]).buffer;
+    const nativeRead = vi.fn().mockResolvedValue(png);
+    const legacy = vi.fn();
+    const browserRead = vi.fn().mockRejectedValue(new Error('Clipboard permission denied'));
+    vi.stubGlobal('termdockDesktop', { readClipboardImage: nativeRead, pasteClipboardImage: legacy });
+    const image = await readTerminalClipboardImage({ read: browserRead });
+    expect(image?.size).toBe(4);
+    expect(image?.type).toBe('image/png');
+    expect(nativeRead).toHaveBeenCalledOnce();
+    expect(browserRead).not.toHaveBeenCalled();
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it('leaves native text clipboards alone without requesting browser image access', async () => {
+    vi.stubGlobal('termdockDesktop', { readClipboardImage: vi.fn().mockResolvedValue(null) });
+    const read = vi.fn();
+    await expect(readTerminalClipboardImage({ read })).resolves.toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('surfaces native clipboard failures without invoking the legacy uploader', async () => {
+    const legacy = vi.fn();
+    vi.stubGlobal('termdockDesktop', {
+      readClipboardImage: vi.fn().mockRejectedValue(new Error('Native clipboard unavailable')),
+      pasteClipboardImage: legacy,
+    });
+    await expect(readTerminalClipboardImage()).rejects.toThrow('Native clipboard unavailable');
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
   it('reads image bytes and uploads through renderer encrypted fetch, never the native desktop uploader', async () => {
     const legacy = vi.fn(() => { throw new Error('Unencrypted preload request'); });
     vi.stubGlobal('termdockDesktop', { pasteClipboardImage: legacy });

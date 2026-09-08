@@ -36,7 +36,7 @@ export const securityHeaders: RequestHandler = (req, res, next) => {
   const shellSource = /^[a-z0-9.\-:\[\]]+$/i.test(host) ? `http://${host}/preview-shell.html https://${host}/preview-shell.html` : "'none'";
   const shell = req.path === '/preview-shell.html';
   res.setHeader('Content-Security-Policy', shell
-    ? "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' blob: https: http:; style-src 'unsafe-inline' blob: https:; img-src blob: data: https:; font-src blob: data: https:; media-src blob: data: https:; connect-src https:; frame-src 'none'; frame-ancestors 'self'; object-src 'none'; base-uri https://termdock-preview.invalid; form-action 'none'"
+    ? "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: https: http:; style-src 'unsafe-inline' blob: https:; img-src blob: data: https:; font-src blob: data: https:; media-src blob: data: https:; connect-src blob: https: wss:; worker-src blob:; frame-src 'none'; frame-ancestors 'self'; object-src 'none'; base-uri https://termdock-preview.invalid; form-action 'none'"
     : preview
     ? "sandbox allow-scripts; frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
     : `script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; worker-src 'self' blob:; frame-src ${shellSource}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`);

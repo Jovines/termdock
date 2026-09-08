@@ -1,4 +1,5 @@
 import { uploadFiles } from './api';
+import { getTermdockDesktopBridge } from '../desktop/nativeBridge';
 
 /** Keep uploads in the renderer, where fetch is bound to the active encrypted
  * service. The desktop preload's isolated-world fetch cannot use that channel. */
@@ -13,7 +14,15 @@ export async function uploadTerminalClipboardImage(image: File): Promise<string>
   return files[0].path;
 }
 
-export async function readTerminalClipboardImage(clipboard: Pick<Clipboard, 'read'>): Promise<File | null> {
+export async function readTerminalClipboardImage(clipboard?: Pick<Clipboard, 'read'>): Promise<File | null> {
+  const bridge = getTermdockDesktopBridge();
+  if (bridge?.readClipboardImage) {
+    const png = await bridge.readClipboardImage();
+    return png?.byteLength
+      ? new File([png], 'clipboard.png', { type: 'image/png' })
+      : null;
+  }
+  if (typeof clipboard?.read !== 'function') return null;
   for (const item of await clipboard.read()) {
     const type = item.types.find(type => type.startsWith('image/'));
     if (!type) continue;

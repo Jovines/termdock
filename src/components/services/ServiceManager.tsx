@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, ChevronRight, Loader2, MoreHorizontal, Plus, Server, Smartphone } from 'lucide-react';
-import { listServiceConnections, observeServiceConnections, removeServiceConnection, sameService, saveServiceConnection, type ServiceConnection } from '../../lib/services/serviceDirectory';
+import { listServiceConnections, normalizeServiceAddress, observeServiceConnections, removeServiceConnection, sameService, saveServiceConnection, type ServiceConnection } from '../../lib/services/serviceDirectory';
 import './ServiceManager.css';
 
 export interface ServiceNavigation { title?: string; back?: () => void }
@@ -70,7 +70,7 @@ export function ServiceManager({ current, renderRoutes, renderRelayServices, onO
   </>;
   return <div className="service-manager">
     {!hideHeader && <div className="service-heading">{title && <button type="button" className="service-icon-button" aria-label="返回服务" disabled={busy} onClick={back}><ArrowLeft size={20} /></button>}<h2>{title || '服务'}</h2></div>}
-    {page.kind === 'relay-services' ? renderRelayServices?.(pageService!, setBusy) : page.kind === 'routes' ? renderRoutes?.(pageService!, setBusy) : page.kind === 'list' ? list : page.kind === 'add' ? <AddServiceForm initialInput={page.input} passwordRequired={page.passwordRequired} busy={busy} onSubmit={async (input, password) => {
+    {page.kind === 'relay-services' ? renderRelayServices?.(pageService!, setBusy) : page.kind === 'routes' ? renderRoutes?.(pageService!, setBusy) : page.kind === 'list' ? list : page.kind === 'add' ? <AddServiceForm onSave={input => perform(async () => { const url = normalizeServiceAddress(input); setServices(await saveServiceConnection({ id: url, url, label: new URL(url).host })); back(); })} initialInput={page.input} passwordRequired={page.passwordRequired} busy={busy} onSubmit={async (input, password) => {
       let result: { passwordRequired?: boolean } | void;
       await perform(async () => { result = await onAdd(input, password); if (!result?.passwordRequired) back(); });
       return result!;
@@ -78,11 +78,12 @@ export function ServiceManager({ current, renderRoutes, renderRelayServices, onO
     {error && <p className="service-error" role="alert">{error}</p>}
   </div>;
 }
-function AddServiceForm({ busy, onSubmit, initialInput = '', passwordRequired = false }: { initialInput?: string; passwordRequired?: boolean; busy: boolean; onSubmit: (input: string, password?: string) => Promise<{ passwordRequired?: boolean } | void> }) {
+function AddServiceForm({ busy, onSubmit, onSave, initialInput = '', passwordRequired = false }: { onSave: (input: string) => Promise<void>; initialInput?: string; passwordRequired?: boolean; busy: boolean; onSubmit: (input: string, password?: string) => Promise<{ passwordRequired?: boolean } | void> }) {
   const [input, setInput] = useState(initialInput); const [password, setPassword] = useState(''); const [needsPassword, setNeedsPassword] = useState(passwordRequired);
   return <form className="service-form" onSubmit={async event => { event.preventDefault(); const result = await onSubmit(input.trim(), needsPassword ? password : undefined); if (result?.passwordRequired) setNeedsPassword(true); setPassword(''); }}>
     <label className="service-field"><span>服务地址或邀请链接</span><input value={input} onChange={event => { setInput(event.target.value); setNeedsPassword(false); setPassword(''); }} disabled={busy} required autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="例如：电脑地址:9834 或 https://…" /></label>
     {needsPassword ? <label className="service-field"><span>服务密码</span><input type="password" value={password} onChange={event => setPassword(event.target.value)} disabled={busy} required autoFocus autoComplete="current-password" placeholder="输入这台服务的密码" /></label> : <p className="service-help">连接自己的服务，输入地址即可；收到邀请时，粘贴完整链接。</p>}
+    <button type="button" className="service-button service-secondary" disabled={busy || !input.trim() || input.includes("#termdock-invite=")} onClick={() => void onSave(input.trim())}>仅保存，不连接</button>
     <button type="submit" className="service-button service-primary" disabled={busy || !input.trim() || (needsPassword && !password)}>{busy ? <><Loader2 size={16} className="service-spinning" />正在连接…</> : needsPassword ? '登录并连接' : '继续'}</button>
   </form>;
 }

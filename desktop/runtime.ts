@@ -229,7 +229,7 @@ function downloadedRuntime(context: RuntimeContext): DesktopRuntimePaths | null 
     const packageRoot = path.join(resolved, 'package');
     const manifest = parseRuntimeManifest(readJson(path.join(packageRoot, 'runtime-manifest.json')));
     const bundled = bundledManifest(context.resourcesPath);
-    if (runtimeCompatibilityError(manifest, bundled, context.appVersion)) return null;
+    if (runtimeCompatibilityError(manifest, bundled, context.appVersion) || compareVersions(manifest.version, bundled.version) < 0) return null;
     const packageJson = readJson(path.join(packageRoot, 'package.json')) as { version?: unknown };
     if (packageJson.version !== manifest.version) return null;
     const cli = path.join(packageRoot, manifest.entrypoint);

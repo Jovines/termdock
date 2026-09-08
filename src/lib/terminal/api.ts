@@ -1,3 +1,4 @@
+import { prepareEncryptedDownload } from './secureDownload';
 import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
 import { secureSocket } from '../federation/browserIntegration';
 import { clearPreviewResourceCache, fetchPreviewResource } from '../utils/previewResourceCache';
@@ -234,7 +235,7 @@ function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number, 
   };
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit | undefined, timeoutMs: number, timeoutMessage: string): Promise<Response> {
+async function fetchWithTimeout(input: RequestInfo | URL, init: (RequestInit & { onUploadProgress?: (bytes: number) => void }) | undefined, timeoutMs: number, timeoutMessage: string): Promise<Response> {
   const { signal, cleanup } = withRequestTimeout(init?.signal ?? undefined, timeoutMs, timeoutMessage);
   try {
     return await fetch(input, { ...init, signal });
@@ -2730,6 +2731,11 @@ export async function downloadFile(filePath: string): Promise<void> {
     }
   }
 
+  if (isIOS()) {
+    const attachment = await prepareEncryptedDownload(blob, filename);
+    if (attachment) { window.location.assign(attachment); return; }
+  }
+
   // Fallback: anchor + blob URL.
   const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -2775,9 +2781,15 @@ export async function uploadFiles(
   // Use the encrypted fetch transport even before a Service Worker controls this
   // page. Native XHR would transmit file bytes outside the end-to-end channel.
   onProgress?.(0);
+  const body = onProgress ? await new Response(formData).blob() : formData;
+  const headers: Record<string, string> = { 'X-XSRF-TOKEN': csrfTokenHeader };
+  if (body instanceof Blob) headers['Content-Type'] = body.type;
   const response = await fetchWithTimeout(
     url,
-    { method: 'POST', headers: { 'X-XSRF-TOKEN': csrfTokenHeader }, body: formData, signal },
+    { method: 'POST', headers, body, signal,
+      onUploadProgress: body instanceof Blob && onProgress
+        ? bytes => onProgress(Math.min(99, Math.floor(bytes / Math.max(1, body.size) * 100)))
+        : undefined },
     120_000,
     'Upload timed out',
   );

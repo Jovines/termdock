@@ -20,7 +20,7 @@ import { isAuthEnabled, getPasswordCredentialFingerprint, getPasswordVerifier, g
 import { MAX_OPEN_SECURE_SOCKETS, MAX_SERVER_HTTP_REQUESTS } from './streamLimits.js';
 
 interface SocketHandlers {
-  terminal(socket: WebSocket, sessionId: string, clientId: string, options: {sinceSeq?: number; streamEpoch?: string; flowControl?: boolean; independentTmux?: boolean; outputActive?: boolean}, dimensions?: {cols: number; rows: number}): void;
+  terminal(socket: WebSocket, sessionId: string, clientId: string, options: {pushClientId?: string; sinceSeq?: number; streamEpoch?: string; flowControl?: boolean; independentTmux?: boolean; outputActive?: boolean}, dimensions?: {cols: number; rows: number}): void;
   control(socket: WebSocket, clientId: string): void;
 }
 class LogicalSocket extends EventEmitter {
@@ -82,7 +82,9 @@ export async function createFederationRuntime(app: express.Express, directory: s
   const internal = createServer((request, response) => {
     if (request.headers['x-termdock-inner'] !== internalToken) { response.writeHead(403).end(); return; }
     delete request.headers['x-termdock-inner'];
-    markEncryptedRequest(request); app(request, response);
+    const subject = request.headers['x-termdock-device'];
+    delete request.headers['x-termdock-device'];
+    markEncryptedRequest(request, typeof subject === 'string' ? subject : undefined); app(request, response);
   });
   await new Promise<void>((resolve, reject) => { internal.once('error', reject); internal.listen(0, '127.0.0.1', resolve); });
   const address = internal.address();
@@ -126,7 +128,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
         };
         try {
           httpAllowed(operation.head);
-          const headers = new Headers({ 'x-termdock-inner': internalToken });
+          const headers = new Headers({ 'x-termdock-inner': internalToken, 'x-termdock-device': subjectId });
           const supplied = operation.head.headers;
           if (supplied && typeof supplied === 'object') for (const [name, value] of Object.entries(supplied)) {
             if (['content-type', 'accept', 'range', 'if-none-match', 'if-modified-since'].includes(name.toLowerCase()) && typeof value === 'string') headers.set(name, value);
@@ -333,7 +335,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             logical.once('close', () => sockets.delete(packet.id));
             send({ type: 'ws-ready', id: packet.id });
             if (match) handlers.terminal(logical as unknown as WebSocket, match[1], randomUUID(), {
-              sinceSeq: Math.max(0, Number(url.searchParams.get('since')) || 0), streamEpoch: url.searchParams.get('epoch') ?? undefined,
+              pushClientId: `device:${subjectId}`, sinceSeq: Math.max(0, Number(url.searchParams.get('since')) || 0), streamEpoch: url.searchParams.get('epoch') ?? undefined,
               flowControl: url.searchParams.get('flow') === '2', outputActive: url.searchParams.get('active') !== '0',
               independentTmux: full(subjectId) && url.searchParams.get('transport') === 'tmux-client',
             }, allowed(subjectId, 'session.resize', match[1]) ? readTerminalHandshakeDimensions(url.searchParams) : undefined);

@@ -1355,24 +1355,28 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
   }
   const backendSessionId = process.env.TERMDOCK_BACKEND_SESSION_ID?.trim() || null;
   let tmuxSessionName: string | null = null;
-  if (!backendSessionId && process.env.TMUX) {
+  if (process.env.TMUX) {
     try {
-      const { stdout } = await execFileAsync(process.env.TMUX_BIN || 'tmux', ['display-message', '-p', '#S'], {
+      const paneId = process.env.TMUX_PANE?.trim();
+      const { stdout } = await execFileAsync(process.env.TMUX_BIN || 'tmux', [
+        'display-message', '-p', ...(/^%\d+$/.test(paneId ?? '') ? ['-t', paneId!] : []), '#S',
+      ], {
         timeout: 2_000,
         maxBuffer: 16 * 1024,
       });
       const detected = stdout.trim();
       if (detected && !detected.includes('\n') && detected.length <= 128) tmuxSessionName = detected;
     } catch {
-      // The explicit backend id remains the primary path; tmux is a fallback
-      // for managed panes whose inner shell predates the attach wrapper env.
+      // Keep a working backend context if tmux inspection fails. A surviving
+      // pane may retain an obsolete backend id after TD reattaches it, so
+      // send both identities whenever tmux inspection succeeds.
     }
   }
   if (!backendSessionId && !tmuxSessionName) {
     console.error(JSON.stringify({ ok: false, code: 'SESSION_NOT_FOUND', error: 'td collab must run inside a Termdock-managed Session.' }));
     process.exit(1);
   }
-  const context = backendSessionId ? { backendSessionId } : { tmuxSessionName };
+  const context = { backendSessionId, tmuxSessionName };
   const baseUrl = runningState.localUrl
     ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
   process.exitCode = await executeCollaborationCommand(command,

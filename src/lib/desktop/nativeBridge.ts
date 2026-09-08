@@ -85,6 +85,8 @@ export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   openNotificationSettings?(): Promise<void>;
   prepareNotificationTest?(): Promise<void>;
   showNotification(payload: DesktopNotificationPayload): Promise<boolean>;
+  /** Native PNG bytes only; the renderer owns encrypted upload and target routing. */
+  readClipboardImage?(): Promise<ArrayBuffer | null>;
   /** Legacy isolated preload uploader. New UI must upload in the encrypted renderer. */
   pasteClipboardImage?(): Promise<string | null>;
   onNativeFileDrop(

@@ -118,6 +118,7 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
     silent?: boolean;
     persistent?: boolean;
   }): Promise<boolean> => ipcRenderer.invoke('desktop:show-notification', payload),
+  readClipboardImage: (): Promise<ArrayBuffer | null> => ipcRenderer.invoke('desktop:read-clipboard-image'),
   pasteClipboardImage: async (): Promise<string | null> => {
     const png = await ipcRenderer.invoke('desktop:read-clipboard-image') as ArrayBuffer | null;
     if (!(png instanceof ArrayBuffer) || png.byteLength === 0) return null;

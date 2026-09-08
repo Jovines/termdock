@@ -142,6 +142,10 @@ describe('downloaded runtime selection', () => {
     expect(fs.realpathSync(path.join(packageRoot, 'node_modules')))
       .toBe(fs.realpathSync(path.join(resourcesPath, 'server', 'node_modules')));
 
+    writeJson(path.join(resourcesPath, 'server', 'runtime-manifest.json'), manifest({ version: '1.4.48' }));
+    expect(resolvePackagedRuntime({ appVersion: '1.4.48', resourcesPath, homeDir })).toMatchObject({ source: 'bundled', version: '1.4.48' });
+    writeJson(path.join(resourcesPath, 'server', 'runtime-manifest.json'), bundled);
+
     expect(rollbackDownloadedRuntime({ appVersion: '1.4.46', resourcesPath, homeDir }, '1.4.47'))
       .toBe(true);
     expect(resolvePackagedRuntime({ appVersion: '1.4.46', resourcesPath, homeDir }).source)

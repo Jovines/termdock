@@ -1,3 +1,4 @@
+import { setPushTargetPeerId } from './notifications/pushService.js';
 import { desktopDirectTargets } from './federation/desktopTargets.js';
 import { createOpenAccessRouter } from './federation/openAccess.js';
 import { createPasswordLoginRouter } from './federation/passwordLoginRoutes.js';
@@ -532,7 +533,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     },
   });
   void federation.then(runtime => {
-    federationServiceId = runtime.serviceId; refreshDirectTargets();
+    federationServiceId = runtime.serviceId; setPushTargetPeerId(runtime.serviceId); refreshDirectTargets();
     app.locals.passwordRuntime = runtime;
     entrySubjectAllowed = subjectId => runtime.store.authorize({ subjectId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed;
     routeInvitations = new RouteInvitationStore({
