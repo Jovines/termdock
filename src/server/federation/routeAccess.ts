@@ -9,7 +9,7 @@ const digest = (s: string) => createHash('sha256').update(s).digest();
 /** Target directory is re-read on every permission check; invalid config denies all. */
 export class RouteAccess {
   private tickets = new Map<string, { subjectId: string; serviceId: string; expiresAt: number }>();
-  constructor(private filePath: string, private now: () => number = Date.now, private canRouteSubject: (subjectId: string, serviceId: string) => boolean = () => false) {}
+  constructor(private filePath: string, private now: () => number = Date.now, private canRouteSubject: (subjectId: string, serviceId: string) => boolean = () => false, private additionalTargets: () => DirectTargetConfig[] = () => []) {}
   private registry(): { relays: RelayRecord[]; directTargets: DirectTargetConfig[] } {
     const empty = { relays: [], directTargets: [] };
     try {
@@ -25,8 +25,8 @@ export class RouteAccess {
       }
       const targetIds = new Set<string>();
       for (const target of directTargets) {
-        if (!target || typeof target !== 'object' || Array.isArray(target) || Object.keys(target).some(key => !['serviceId', 'url', 'caPath'].includes(key))
-          || !validId(target.serviceId) || targetIds.has(target.serviceId) || typeof target.url !== 'string' || (target.caPath !== undefined && typeof target.caPath !== 'string')) return empty;
+        if (!target || typeof target !== 'object' || Array.isArray(target) || Object.keys(target).some(key => !['serviceId', 'url', 'caPath', 'label'].includes(key))
+          || (target.label !== undefined && (typeof target.label !== 'string' || target.label.length > 120)) || !validId(target.serviceId) || targetIds.has(target.serviceId) || typeof target.url !== 'string' || (target.caPath !== undefined && typeof target.caPath !== 'string')) return empty;
         const url = new URL(target.url);
         if (!['https:', 'wss:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || !['/', '/api/federation/secure'].includes(url.pathname)) return empty;
         targetIds.add(target.serviceId);
@@ -66,7 +66,7 @@ export class RouteAccess {
   hasConfiguredTarget(serviceId: string): boolean {
     if (!validId(serviceId)) return false;
     const registry = this.registry();
-    return registry.relays.some(relay => relay.targets.includes(serviceId)) || registry.directTargets.some(target => target.serviceId === serviceId);
+    return registry.relays.some(relay => relay.targets.includes(serviceId)) || registry.directTargets.some(target => target.serviceId === serviceId) || this.additionalTargets().some(target => target.serviceId === serviceId);
   }
   addDirectTarget(target: DirectTargetConfig): void {
     const url = new URL(target.url);
@@ -85,14 +85,18 @@ export class RouteAccess {
     const temporary = `${this.filePath}.tmp`;
     writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600 }); renameSync(temporary, this.filePath);
   }
-  configuredDirectTargets(): DirectTargetConfig[] { return this.registry().directTargets; }
-  configuredTargets(): Array<{ serviceId: string; url?: string }> {
+  configuredDirectTargets(): DirectTargetConfig[] {
+    const targets = new Map(this.additionalTargets().map(target => [target.serviceId, target]));
+    for (const target of this.registry().directTargets) targets.set(target.serviceId, target);
+    return [...targets.values()];
+  }
+  configuredTargets(): Array<{ serviceId: string; url?: string; label?: string }> {
     const registry = this.registry();
-    const targets = new Map<string, { serviceId: string; url?: string }>();
+    const targets = new Map<string, { serviceId: string; url?: string; label?: string }>();
     for (const relay of registry.relays) for (const serviceId of relay.targets) targets.set(serviceId, { serviceId });
-    for (const target of registry.directTargets) {
+    for (const target of this.configuredDirectTargets()) {
       const url = new URL(target.url); url.protocol = 'https:';
-      targets.set(target.serviceId, { serviceId: target.serviceId, url: url.origin });
+      targets.set(target.serviceId, { serviceId: target.serviceId, url: url.origin, ...(target.label ? { label: target.label } : {}) });
     }
     return [...targets.values()];
   }

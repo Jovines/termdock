@@ -1,6 +1,7 @@
 import React from 'react';
-import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
+import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
+import { readTerminalClipboardImage, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
 import { useI18n } from '../../i18n';
 import { flushSync } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
@@ -938,6 +939,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+    const [pasteError, setPasteError] = React.useState<string | null>(null);
+    React.useEffect(() => {
+      const receive = (event: Event) => {
+        const zone = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-termdock-terminal-dropzone]') : null;
+        if (zone?.dataset.termdockTerminalDropzone === sessionKey) setPasteError(String((event as CustomEvent).detail));
+      };
+      window.addEventListener('termdock:file-drop-error', receive);
+      return () => window.removeEventListener('termdock:file-drop-error', receive);
+    }, [sessionKey]);
     const debugTerminal = React.useMemo(() => createDebugLogger('terminal'), []);
 
     // Early initialization loading indicator
@@ -1651,7 +1661,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const escapedPaths = payload.paths
         .map(escapeShellPath)
         .join(' ');
-      sendTerminalSeq(escapedPaths);
+      sendTerminalSeq(`${escapedPaths} `);
       try {
         hiddenInputRef.current?.focus({ preventScroll: true });
       } catch {
@@ -1659,26 +1669,35 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }), [sendTerminalSeq, sessionKey]);
 
+    const pasteImageIntoTerminal = React.useCallback(async (image: File, textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
+      setPasteError(null);
+      try {
+        const imagePath = await uploadTerminalClipboardImage(image);
+        sendTerminalSeq(`${escapeShellPath(imagePath)} `, textarea);
+        dismissMobileCopyPopover();
+        return true;
+      } catch (error) {
+        setPasteError(error instanceof Error ? error.message : 'Image upload failed');
+        return false;
+      }
+    }, [dismissMobileCopyPopover, sendTerminalSeq]);
+
     const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
       try {
-        const desktop = getTermdockDesktopBridge();
-        if (desktop?.pasteClipboardImage) {
-          const imagePath = await desktop.pasteClipboardImage();
-          if (imagePath) {
-            sendTerminalSeq(escapeShellPath(imagePath), textarea);
-            dismissMobileCopyPopover();
-            return true;
-          }
+        if (typeof navigator.clipboard?.read === 'function') {
+          const image = await readTerminalClipboardImage(navigator.clipboard);
+          if (image) return pasteImageIntoTerminal(image, textarea);
         }
         if (!navigator.clipboard?.readText) {
           return false;
         }
         const text = await navigator.clipboard.readText();
         return pasteTextIntoTerminal(text, textarea);
-      } catch {
+      } catch (error) {
+        setPasteError(error instanceof Error ? error.message : 'Clipboard read failed');
         return false;
       }
-    }, [dismissMobileCopyPopover, pasteTextIntoTerminal, sendTerminalSeq]);
+    }, [pasteImageIntoTerminal, pasteTextIntoTerminal]);
 
     /**
      * 根据 xterm 当前光标位置计算 IME 组合文本锚点。桌面 textarea 会缩成
@@ -4669,6 +4688,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }, 0);
         }}
       >
+        {pasteError && (
+          <button type="button" role="alert" onClick={() => setPasteError(null)}
+            className="absolute bottom-2 left-2 right-2 z-20 rounded-md border border-border bg-surface-2 px-3 py-2 text-left text-sm text-foreground">
+            {pasteError}
+          </button>
+        )}
         {mobileCopyPopover && (
           <button
             type="button"
@@ -5020,12 +5045,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 syncTextareaToPty(event.currentTarget);
               }}
               onPaste={(event) => {
+                const image = Array.from(event.clipboardData.files).find(file => file.type.startsWith('image/'));
+                if (image) {
+                  event.preventDefault();
+                  void pasteImageIntoTerminal(image, event.currentTarget);
+                  return;
+                }
                 const text = event.clipboardData.getData('text/plain');
                 if (!text) {
-                  if (getTermdockDesktopBridge()?.pasteClipboardImage) {
-                    event.preventDefault();
-                    void readClipboardIntoTerminal(event.currentTarget);
-                  }
                   return;
                 }
                 event.preventDefault();
@@ -5054,8 +5081,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
                   // ---- Cmd/Ctrl + V：粘贴 ----
                   if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) {
-                    event.preventDefault();
-                    void readClipboardIntoTerminal(event.currentTarget);
+                    // Let the system paste event supply image bytes as well as
+                    // text, without an isolated preload upload or read prompt.
                     return;
                   }
 

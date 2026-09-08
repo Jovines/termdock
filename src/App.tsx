@@ -274,14 +274,7 @@ function reportHistoryGuardDebug(message: string, data: Record<string, unknown> 
       ts: Date.now(),
     },
   });
-  try {
-    const blob = new Blob([payload], { type: 'application/json' });
-    if (window.navigator.sendBeacon?.('/api/client-log', blob)) {
-      return;
-    }
-  } catch {
-    // ignore and fall back to fetch
-  }
+  // sendBeacon bypasses the paired fetch transport, even when it reports success.
   void fetch('/api/client-log', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -59,37 +59,8 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil((async () => {
-    try {
-      const statusResponse = await fetch('/api/notifications/status', { credentials: 'same-origin' });
-      if (statusResponse.ok) {
-        const status = await statusResponse.json();
-        const subscription = event.newSubscription || await self.registration.pushManager.getSubscription();
-        if (subscription) {
-          const tokenResponse = await fetch('/api/csrf-token', { credentials: 'same-origin' });
-          if (tokenResponse.ok) {
-            const { csrfToken } = await tokenResponse.json();
-            await fetch('/api/notifications/subscribe', {
-              method: 'POST',
-              credentials: 'same-origin',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-XSRF-TOKEN': csrfToken,
-              },
-              body: JSON.stringify({
-                subscription: subscription.toJSON(),
-                aiEnabled: status.subscription?.aiEnabled !== false,
-                exitEnabled: status.subscription?.exitEnabled === true,
-                alertStyle: status.subscription?.alertStyle || 'normal',
-                locale: status.subscription?.locale || 'zh-CN',
-              }),
-            });
-          }
-        }
-      }
-    } catch {
-      // App foreground reconciliation is the fallback for browsers that do not
-      // permit re-subscription inside pushsubscriptionchange.
-    }
+    // A worker has no paired device channel. Foreground reconciliation owns
+    // subscription updates; never retry them through cookie-authenticated HTTP.
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of windows) {
       client.postMessage({ type: 'termdock:push-subscription-changed' });
@@ -98,20 +69,9 @@ self.addEventListener('pushsubscriptionchange', (event) => {
 });
 
 async function reportNotificationClick(stage, traceId, data = {}) {
-  try {
-    await fetch('/api/client-log', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        level: 'info',
-        message: `PWA_NOTIFICATION_CLICK ${stage}`,
-        data: { traceId, ts: Date.now(), ...data },
-      }),
-    });
-  } catch {
-    // Diagnostics must never interfere with notification navigation.
-  }
+  // Worker diagnostics stay local; background fetch cannot use the document's
+  // encrypted transport and must not send notification metadata in plaintext.
+  console.debug(`PWA_NOTIFICATION_CLICK ${stage}`, { traceId, ...data });
 }
 
 const NOTIFICATION_TARGET_CACHE = 'termdock-notification-target-v1';

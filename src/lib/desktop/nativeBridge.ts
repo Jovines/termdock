@@ -1,4 +1,5 @@
 import type { ServiceDirectoryBridge } from '../services/serviceDirectory';
+import { installEncryptedFileDrops } from './encryptedFileDrops';
 export interface DesktopCliInstallation {
   path: string;
   version: string | null;
@@ -84,7 +85,7 @@ export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   openNotificationSettings?(): Promise<void>;
   prepareNotificationTest?(): Promise<void>;
   showNotification(payload: DesktopNotificationPayload): Promise<boolean>;
-  /** Uploads the native clipboard image to the active service and returns its path. */
+  /** Legacy isolated preload uploader. New UI must upload in the encrypted renderer. */
   pasteClipboardImage?(): Promise<string | null>;
   onNativeFileDrop(
     callback: (payload: NativeFileDropPayload) => void,
@@ -141,9 +142,11 @@ export function subscribeNativeFileDrops(
   if (!bridge) return () => undefined;
   nativeFileDropListeners.add(listener);
   if (!nativeFileDropBridgeInstalled) {
-    bridge.onNativeFileDrop((payload) => {
+    const deliver = (payload: NativeFileDropPayload) => {
       for (const current of nativeFileDropListeners) current(payload);
-    });
+    };
+    installEncryptedFileDrops(deliver);
+    bridge.onNativeFileDrop(deliver);
     nativeFileDropBridgeInstalled = true;
   }
   return () => {

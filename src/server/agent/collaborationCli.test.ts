@@ -14,6 +14,14 @@ describe('collaboration CLI contract', () => {
     expect(() => parseCollaborationCommand(['send', 'peer', 'body', '--unknown'])).toThrow(/Unknown/);
     expect(() => parseCollaborationCommand(['send', 'peer', 'body', '--file', 'body.txt'])).toThrow(/Choose/);
   });
+  it('supports explicit rebind without allowing pane options on send', async () => {
+    const fixture_ = fixture([{ ok: true, route: { state: 'recovering' } }]);
+    const command = parseCollaborationCommand(['rebind', '--pane', '%3']);
+    expect(await executeCollaborationCommand(command, { backendSessionId: 'b' }, fixture_.io)).toBe(0);
+    expect(fixture_.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/route/rebind'), expect.objectContaining({ pane: '%3', backendSessionId: 'b' })]));
+    expect(() => parseCollaborationCommand(['rebind', '--pane', '3'])).toThrow(/pane/);
+    expect(() => parseCollaborationCommand(['send', 'peer', 'body', '--pane', '%3'])).toThrow(/not supported/);
+  });
   it('waits for delivery and emits an identifier without repeating the full sent body', async () => {
     const fixture_ = fixture([{ message_id: 'm', thread_id: 't', status: 'pending', messages: [{ content: 'large evidence' }] }, { message_id: 'm', thread_id: 't', status: 'delivered' }]);
     const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'delivered']), { backendSessionId: 'b' }, fixture_.io);

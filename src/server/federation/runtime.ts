@@ -44,7 +44,7 @@ class LogicalSocket extends EventEmitter {
 }
 interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: number; abort: AbortController; state: 'uploading' | 'running'; updatedAt: number; uploadSlot: boolean; ack?: () => void }
 export interface FederationRuntimeOptions {
-  listRouteTargets?: () => Array<{ serviceId: string; url?: string; available: boolean }>;
+  listRouteTargets?: () => Array<{ serviceId: string; label?: string; url?: string; available: boolean }>;
   listRouteAccess?: () => Array<{ id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }>;
   grantRouteAccess?: (issuerId: string, targetServiceId: string, subjectId: string, url?: string) => unknown;
   revokeRouteAccess?: (id: string) => boolean;

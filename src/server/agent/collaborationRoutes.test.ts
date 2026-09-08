@@ -15,7 +15,8 @@ describe('collaboration API with arbitrary pull consumers', () => {
     store.save({ name: 'Generic clients', sessionIds: ['a', 'b'] });
     const app = express(); app.use(express.json({ limit: '5mb' }));
     app.use(collaborationRoutes({ store, resolveSession: (body) => ['a', 'b', 'outsider'].includes(String(body.session)) ? String(body.session) : null,
-      deliver: () => ({ delivered: [] }) }));
+      deliver: () => ({ delivered: [] }),
+      rebind: async (sessionId, pane) => ({ sessionId, pane, state: 'recovering' }) }));
     server = await new Promise<Server>((resolve) => { const running = app.listen(0, '127.0.0.1', () => resolve(running)); });
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   });
@@ -24,6 +25,13 @@ describe('collaboration API with arbitrary pull consumers', () => {
     const response = await fetch(url + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return { status: response.status, body: await response.json() };
   };
+  it('rebinds the calling session and validates explicit tmux pane ids', async () => {
+    expect(await post('/route/rebind', { session: 'b', pane: '%3', targetSessionId: 'a' })).toMatchObject({
+      status: 200, body: { ok: true, route: { sessionId: 'b', pane: '%3' } },
+    });
+    expect(await post('/route/rebind', { session: 'b', pane: 'peer:0' })).toMatchObject({ status: 400, body: { code: 'INVALID_PANE' } });
+    expect(await post('/route/rebind', { pane: '%3' })).toMatchObject({ status: 404 });
+  });
   it('roundtrips ACK/progress/result without any agent status adapter and enforces message ownership', async () => {
     const { body: sent } = await post('/send', { session: 'a', targetSessionId: 'b', message: 'Verify', idempotency_key: 'request' });
     expect(sent).toMatchObject({ ok: true, status: 'pending', message_id: expect.any(String) });

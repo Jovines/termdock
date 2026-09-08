@@ -80,6 +80,7 @@ import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
 import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
 import { VideoPreviewPlayer } from './VideoPreviewPlayer';
+import { useEncryptedMediaSource } from '../../federation/mediaSource';
 import { EdaPreview } from './EdaPreview';
 import { SvgInspectionPreview } from './SvgInspectionPreview';
 import { CsvPreview } from './CsvPreview';
@@ -897,6 +898,7 @@ type MarkdownImageState =
 function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: string }) {
   const isVector = isSvgImageSrc(src);
   const versionedSrc = useVersionedFsBlobSrc(src);
+  const fallbackSrc = useEncryptedMediaSource(versionedSrc);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [nearViewport, setNearViewport] = useState(false);
@@ -1006,7 +1008,7 @@ function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: 
         />
       ) : state.status === 'fallback' ? (
         <img
-          src={versionedSrc}
+          src={fallbackSrc}
           alt={alt}
           title={title}
           loading="lazy"
@@ -4758,6 +4760,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
 // cleanly) fit in both directions; raster images only shrink (upscaling
 // would blur).
 function ZoomableImage({ src, alt, vector, onLoad, onError, onZoomChange, onDoubleTap }: ZoomableImageProps) {
+  const mediaSrc = useEncryptedMediaSource(src, onError);
   const [fitSize, setFitSize] = useState<{ width: number; height: number } | null>(null);
   // blob: object URLs carry no extension, so callers with a known MIME type
   // pass `vector` explicitly; otherwise fall back to the URL's .svg suffix.
@@ -4772,7 +4775,7 @@ function ZoomableImage({ src, alt, vector, onLoad, onError, onZoomChange, onDoub
       {({ transformStyle, vectorTransformStyle, scale, animateTransform }) => {
         const image = (
           <img
-            src={src}
+            src={mediaSrc}
             alt={alt}
             draggable={false}
             className="max-h-full max-w-full touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"

@@ -2676,8 +2676,7 @@ function isIOS(): boolean {
 //   2. Web Share API (iOS) — opens the native iOS share sheet which includes
 //      "Save to Files". Safari ignores <a download> with blob URLs (they
 //      open inline instead), and window.open is unreliable in standalone
-//      PWAs. If share is unavailable the page navigates to the server URL
-//      so Content-Disposition: attachment triggers the download prompt.
+//      PWAs. If share is unavailable, use the already decrypted blob.
 //   3. <a download> blob URL fallback — used everywhere else (Firefox, desktop
 //      Safari). Triggers the browser's native download in a normal tab.
 export async function downloadFile(filePath: string): Promise<void> {
@@ -2726,13 +2725,9 @@ export async function downloadFile(filePath: string): Promise<void> {
         return;
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
-        // share failed — fall through to direct URL navigation
+        // Share failed: keep using the already decrypted bytes below.
       }
     }
-    // Last resort: navigate to the server URL so Safari sees the
-    // Content-Disposition: attachment header and shows a download prompt.
-    window.location.href = url;
-    return;
   }
 
   // Fallback: anchor + blob URL.

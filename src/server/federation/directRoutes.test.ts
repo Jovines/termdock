@@ -1,3 +1,4 @@
+import { X509Certificate } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import { once } from 'node:events';
@@ -46,6 +47,28 @@ describe('registered direct targets', () => {
     const unknown = once(client, 'close'); client.send(JSON.stringify({ type: 'open', streamId: 's2', serviceId: 'https://evil.example' }));
     // URL-shaped destinations are rejected as invalid protocol IDs and close the consumer.
     expect((await unknown)[0]).toBe(1008);
+  });
+  it('uses only the CA fingerprint approved by Desktop for a direct WSS connection', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'td-desktop-ca-')); cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'ca.pem'), '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost'], { stdio: 'ignore' });
+    const ca = readFileSync(join(dir, 'ca.pem')); let caRequests = 0;
+    const target = createServer({ key: readFileSync(join(dir, 'key.pem')), cert: ca }, (req, res) => {
+      if (req.url !== '/onboarding/ca.crt') { res.writeHead(404).end(); return; }
+      caRequests++; res.end(ca);
+    });
+    const wss = new WebSocketServer({ server: target, path: '/api/federation/secure' });
+    target.listen(0, '127.0.0.1'); await once(target, 'listening');
+    cleanups.push(() => { for (const ws of wss.clients) ws.terminate(); wss.close(); target.close(); });
+    const address = target.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const url = `https://127.0.0.1:${address.port}`;
+    const wrong = router(); cleanups.push(attachRegisteredDirectTargets(wrong, [{ serviceId: 'C', url, caFingerprint256: Array(32).fill('00').join(':') }]));
+    const rejectedPhone = await phone(wrong); const rejected = next(rejectedPhone);
+    rejectedPhone.send(JSON.stringify({ type: 'open', streamId: 'rejected-ca', serviceId: 'C' }));
+    expect((await rejected).type).toBe('close'); expect(wss.clients.size).toBe(0);
+    const b = router(); cleanups.push(attachRegisteredDirectTargets(b, [{ serviceId: 'C', url, caFingerprint256: new X509Certificate(ca).fingerprint256 }]));
+    const client = await phone(b); const connected = once(wss, 'connection'); const opened = next(client);
+    client.send(JSON.stringify({ type: 'open', streamId: 'approved-ca', serviceId: 'C' }));
+    expect((await opened).type).toBe('opened'); await connected; expect(caRequests).toBe(2);
   });
   it('withdraws direct registrations and closes active destination sockets', async () => {
     const b = router(); const target = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(target, 'listening');

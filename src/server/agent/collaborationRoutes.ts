@@ -6,19 +6,28 @@ type Dependencies = {
   store: CollaborationStore;
   resolveSession: (input: Record<string, unknown>) => string | null;
   deliver: (id: string) => unknown;
+  rebind?: (id: string, pane: string | null) => Promise<unknown>;
 };
-export function collaborationRoutes({ store, resolveSession, deliver }: Dependencies): Router {
+export function collaborationRoutes({ store, resolveSession, deliver, rebind }: Dependencies): Router {
   const router = Router();
-  const run = (handler: (req: Request, res: Response, sessionId: string) => void) => (req: Request, res: Response) => {
+  const run = (handler: (req: Request, res: Response, sessionId: string) => void | Promise<void>) => async (req: Request, res: Response) => {
     try {
       const sessionId = resolveSession((req.method === 'GET' ? req.query : req.body) ?? {});
       if (!sessionId) throw new CollaborationError('SESSION_NOT_FOUND', 'Run inside a Termdock managed session', 404);
-      handler(req, res, sessionId);
+      await handler(req, res, sessionId);
     } catch (error) {
       res.status(error instanceof CollaborationError ? error.httpStatus : 400).json({ ok: false,
         code: error instanceof CollaborationError ? error.code : 'COLLABORATION_ERROR', error: error instanceof Error ? error.message : String(error) });
     }
   };
+  router.post('/route/rebind', run(async (req, res, sessionId) => {
+    if (!rebind) throw new CollaborationError('ROUTE_REBIND_UNAVAILABLE', 'Route rebinding is not available');
+    const pane = req.body.pane;
+    if (pane !== undefined && pane !== null && (typeof pane !== 'string' || !/^%\d+$/.test(pane))) {
+      throw new CollaborationError('INVALID_PANE', 'pane must be a tmux pane id such as %3');
+    }
+    res.json({ ok: true, route: await rebind(sessionId, pane ?? null) });
+  }));
   const ownMessage = (id: string, sessionId: string, recipientOnly = false) => {
     const message = store.getMessage(id);
     if (!message || (message.toSessionId !== sessionId && (recipientOnly || message.fromSessionId !== sessionId))) throw new CollaborationError('MESSAGE_NOT_FOUND', 'Message does not belong to this session', 404);
@@ -30,11 +39,13 @@ export function collaborationRoutes({ store, resolveSession, deliver }: Dependen
     res.json({ ok: true, ...receipts[0], messages, receipts });
   };
   router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, limits: COLLAB_LIMITS,
+    routing: { background_recovery: true, explicit_rebind: Boolean(rebind), fixed_tmux_pane: true },
     statuses: ['pending', 'delivered', 'read', 'failed', 'expired'], queued_status: 'pending',
     semantics: { delivered: 'written to terminal; no application acknowledgement implied', read: 'explicit consumer acknowledgement',
       ack: 'explicit response_kind=ack', result: 'explicit response_kind=result; inspect task.status and evidence',
       done: 'adapter reports turn ended, never proof of task completion', heartbeat: 'null unless explicitly observed',
-      timeout: 'stops waiting, does not cancel delivery' } }); }));
+      timeout: 'stops waiting, does not cancel delivery',
+      retry: 'same message id may be submitted again after a crash or uncertain transport result; consumers deduplicate by message id' } }); }));
   router.post('/send', run((req, res, sessionId) => {
     const target = typeof req.body.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
     const groups = store.groupsForSession(sessionId).filter((group) => group.sessionIds.includes(target) && (!req.body.group_id || group.id === req.body.group_id));

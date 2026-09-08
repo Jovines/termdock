@@ -44,6 +44,25 @@ td collab reply <message-id> '检查完成' \
 
 超时只停止本次等待，不撤销消息，不代表远端任务失败。已取得回执时仍返回原 ID 和最后已知状态。网络中断导致发送结果不确定时，使用返回的幂等键和同一正文重试；不要自行换 key 重新触发任务。
 
+## 本地路由恢复与后台投递
+
+本地协作使用独立的持久化路由登记（`~/.termdock/collaboration-routing.json`）；global session state 是界面绑定的投影，搜索索引只负责搜索。创建、接管会话时登记后端绑定，后台发现投影为空或陈旧时从路由登记和存活会话重建。历史绑定本身不证明在线。
+
+服务启动后自动检查协作成员和持久化待投递队列，不需要浏览器打开、调用 status 或产生新的 Agent hook。每个 peer 的恢复、投递和显式重绑串行执行，多个 peer 可独立推进。消息按接收方队列顺序提交；路由或写入失败保留消息，按 2 秒至 30 秒退避重试。回执中的 `last_error`、`next_retry_at` 解释阻塞原因；`attempt_count` 只统计真正进入终端写入的尝试，路由尚未就绪时为 0 是正常的。
+
+tmux 存活而 TD 后端缺失时，只挂接现存会话，不新建 tmux 会话、不启动或恢复 Agent。目标首次定位后固定到 tmux server/session/pane 和 pane 进程身份，投递不跟随活动 pane，也不改变焦点。多个候选无法唯一定位、tmux 重建或 Agent 身份不符时保留队列；在目标会话内显式运行：
+
+```sh
+td collab rebind            # 当前会话只有一个可识别 Agent 时
+td collab rebind --pane %3  # 明确指定当前 tmux 会话内的 Agent pane
+```
+
+重绑只作用于调用方 peer，成功后继续投递积压消息。它不会把 `delivered` 改回待投递，也不会启动新的 Agent。
+
+`td collab status` 中的 `route_state` / `route_error` / `route_checked_at` 描述路由观测：`recovering`（等待或正在检查）、`detached`（tmux 后端尚未挂接成功）、`ready`（可投递）、`agent-exited`（未检测到目标 Agent）、`offline`（会话或后端已不存在）、`ambiguous`（多个候选）、`identity-mismatch`（目标身份变化）、`unavailable`（检查或恢复出错）。路由 ready 不表示 Agent 空闲；不能将其他活动 pane 的 turn 状态归给当前 peer。
+
+**投递保证的边界：**提交结果仍是“已写入终端”，不等于应用 ACK。成功回执已保存的消息不会被后台重放；同一进程内，即使写入后的回执保存失败，也避免再次写入。但终端输入和本地文件不能组成原子事务：进程恰在写入之后、保存回执之前崩溃时，重启可能重复提交同一消息 ID。因此这是允许重复的重试传输，接收方应按消息 ID 去重；需要应用确认时使用 `read`、显式 ACK 和消费游标。TTL 在提交前检查；已开始但结果尚不确定的提交不会被中途标为 expired。
+
 ## 增量收件箱与消费游标
 
 ```sh

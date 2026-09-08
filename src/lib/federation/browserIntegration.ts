@@ -374,7 +374,7 @@ export function installEncryptedFetch(): void {
 }
 
 export interface EntryRouteGrant { id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }
-export interface RelayTarget { serviceId: string; url?: string; available: boolean; authorized: boolean }
+export interface RelayTarget { serviceId: string; label?: string; url?: string; available: boolean; authorized: boolean }
 export interface RelayTargetDirectory { route: ServiceRoute; canManage: boolean; items: RelayTarget[] }
 /** Browse only a pinned entry's explicit directory, without changing the active service. */
 export async function listRelayTargets(service: import('../services/serviceDirectory').ServiceConnection): Promise<RelayTargetDirectory> {
@@ -410,7 +410,7 @@ export async function prepareRelayConnection(route: ServiceRoute, targetServiceI
       await entry.request({ type: 'route-grant', serviceId: target.serviceId, subjectId: (await getIdentity()).peerId });
     }
     const origin = known?.serviceOrigin || known?.url || target.url || route.url;
-    return { url: origin, serviceOrigin: origin, targetPeerId: target.serviceId, serviceName: known?.label || (target.url ? new URL(target.url).host : `中转服务 ${target.serviceId.slice(0, 8)}`), routes };
+    return { url: origin, serviceOrigin: origin, targetPeerId: target.serviceId, serviceName: known?.label || target.label || (target.url ? new URL(target.url).host : `中转服务 ${target.serviceId.slice(0, 8)}`), routes };
   } finally { entry.close(); }
 }
 export async function inspectEntryRoute(route: ServiceRoute, targetServiceId: string): Promise<{ canManage: boolean; grants: EntryRouteGrant[] }> {

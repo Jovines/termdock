@@ -236,6 +236,11 @@ export class CollaborationStore {
     return this.document.messages.filter((message) => message.toSessionId === sessionId && message.status === 'pending').length;
   }
 
+  pendingRecipients(): string[] {
+    this.expire();
+    return [...new Set(this.document.messages.filter((message) => message.status === 'pending').map((message) => message.toSessionId))];
+  }
+
   markDelivered(messageIds: string[]): CollaborationMessage[] {
     return this.updateStatus(messageIds, 'delivered');
   }
@@ -315,7 +320,8 @@ export class CollaborationStore {
 
   private expire(): void {
     let changed = false;
-    for (const message of this.document.messages) if (message.status === 'pending' && message.expiresAt && message.expiresAt <= Date.now()) {
+    for (const message of this.document.messages) if (message.status === 'pending' && message.expiresAt && message.expiresAt <= Date.now()
+      && this.document.transport?.[message.id]?.last_error !== 'DELIVERY_IN_PROGRESS') {
       message.status = 'expired'; message.failureReason = 'MESSAGE_EXPIRED'; changed = true;
     }
     if (changed) this.persist();

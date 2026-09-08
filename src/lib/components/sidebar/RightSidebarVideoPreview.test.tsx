@@ -45,8 +45,10 @@ function renderFilePreview(filePath: string) {
 describe('RightSidebar video preview', () => {
   const originalFetch = globalThis.fetch;
   const originalResizeObserver = globalThis.ResizeObserver;
+  const originalWorker = navigator.serviceWorker;
 
   beforeEach(() => {
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { controller: {} } });
     useSidebarStore.setState({ rootPath: '/repo' });
     globalThis.ResizeObserver = class {
       observe() {}
@@ -59,6 +61,7 @@ describe('RightSidebar video preview', () => {
 
   afterEach(() => {
     cleanup();
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: originalWorker });
     globalThis.fetch = originalFetch;
     globalThis.ResizeObserver = originalResizeObserver;
     readFileContentMock.mockClear();

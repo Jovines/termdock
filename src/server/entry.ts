@@ -1,3 +1,4 @@
+import { desktopDirectTargets } from './federation/desktopTargets.js';
 import { createOpenAccessRouter } from './federation/openAccess.js';
 import { createPasswordLoginRouter } from './federation/passwordLoginRoutes.js';
 import { apiAccessGate, isTrustedLocalRequest } from './utils/apiAccess.js';
@@ -472,24 +473,38 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const { server, scheme } = createServerForApp(app, options);
   let entrySubjectAllowed = (_subjectId: string) => false;
   let routeInvitations: RouteInvitationStore | undefined;
+  let federationServiceId = '';
+  const desktopTargets = () => desktopDirectTargets(path.join(homedir(), '.termdock', 'desktop.json'), federationServiceId);
   const routeAccess = new RouteAccess(path.join(homedir(), '.termdock', 'federation', 'routes.json'), Date.now,
-    (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true);
+    (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true, desktopTargets);
   const relayRouter = new RelayRouter<RoutePrincipal>({
     authenticate: context => context as RoutePrincipal,
     allowRegister: (principal, serviceId) => routeAccess.allowRegister(principal, serviceId),
     allowRoute: (principal, serviceId) => routeAccess.allowRoute(principal, serviceId),
   });
-  const dynamicDirectTargets = new Map<string, () => void>();
-  server.once('close', () => { for (const close of dynamicDirectTargets.values()) close(); });
-  try {
-    const detachDirectTargets = attachRegisteredDirectTargets(relayRouter, routeAccess.configuredDirectTargets(), path.join(homedir(), '.termdock', 'federation'));
-    server.once('close', detachDirectTargets);
-  } catch { console.error('Configured direct routes unavailable; target access remains closed.'); }
+  const dynamicDirectTargets = new Map<string, { signature: string; close: () => void }>();
+  const refreshDirectTargets = () => {
+    const desired = new Map(routeAccess.configuredDirectTargets().filter(target => target.serviceId !== federationServiceId).map(target => [target.serviceId, target]));
+    for (const [id, registered] of dynamicDirectTargets) {
+      const target = desired.get(id);
+      if (!target || registered.signature !== JSON.stringify([target.url, target.caPath, target.caFingerprint256])) {
+        registered.close(); dynamicDirectTargets.delete(id);
+      }
+    }
+    for (const [id, target] of desired) if (!dynamicDirectTargets.has(id)) {
+      try {
+        dynamicDirectTargets.set(id, { signature: JSON.stringify([target.url, target.caPath, target.caFingerprint256]), close: attachRegisteredDirectTargets(relayRouter, [target], path.join(homedir(), '.termdock', 'federation')) });
+      } catch { /* A malformed or unavailable local route remains unusable. */ }
+    }
+  };
+  refreshDirectTargets();
+  const desktopRoutesTimer = setInterval(refreshDirectTargets, 2000); desktopRoutesTimer.unref();
+  server.once('close', () => { clearInterval(desktopRoutesTimer); for (const target of dynamicDirectTargets.values()) target.close(); });
   server.once('close', () => relayRouter.close());
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket,
   }, {
-    listRouteTargets: () => routeAccess.configuredTargets().map(target => ({ ...target, available: relayRouter.hasRoute(target.serviceId) })),
+    listRouteTargets: () => { refreshDirectTargets(); return routeAccess.configuredTargets().map(target => ({ ...target, available: relayRouter.hasRoute(target.serviceId) })); },
     listRouteAccess: () => routeInvitations?.list() || [],
     grantRouteAccess: async (issuerId, targetServiceId, subjectId, url) => {
       if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
@@ -500,7 +515,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
         const runtime = await federation;
         if (!runtime.store.authorize({ subjectId: issuerId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed) throw new Error('AUTHORIZATION_DENIED');
         routeAccess.addDirectTarget(target);
-        if (!dynamicDirectTargets.has(targetServiceId)) dynamicDirectTargets.set(targetServiceId, attachRegisteredDirectTargets(relayRouter, [target]));
+        refreshDirectTargets();
       }
       return routeInvitations.grant(issuerId, targetServiceId, subjectId);
     },
@@ -517,6 +532,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     },
   });
   void federation.then(runtime => {
+    federationServiceId = runtime.serviceId; refreshDirectTargets();
     app.locals.passwordRuntime = runtime;
     entrySubjectAllowed = subjectId => runtime.store.authorize({ subjectId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed;
     routeInvitations = new RouteInvitationStore({

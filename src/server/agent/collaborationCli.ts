@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'capabilities' | 'help';
+  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'capabilities' | 'help';
   target?: string; message?: string; groupId?: string; sessionId?: string; agentSlug?: string; name?: string; cwd?: string; task?: string;
   json: boolean;
   options: Record<string, string | boolean>;
@@ -11,6 +11,7 @@ export interface CollaborationCommand {
 }
 export const COLLAB_HELP = `td collab — durable messages; no agent-specific hooks required
   status | capabilities
+  rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
   send <session-id> <message> | reply <message-id> <message> | handoff <session-id> <message>
     --group <id> --thread <id> --idempotency-key <key>
     --file <path> | --stdin (instead of inline body; -- ends option parsing)
@@ -38,7 +39,7 @@ Inbox defaults to unread first, newest 50; cursor/consumer mode reads oldest uns
 Reading never advances a consumer or marks messages read automatically.`;
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'unread', 'follow', 'stdin', 'receipt-only', 'help']);
-const VALUE_OPTIONS = new Set(['group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task']);
+const VALUE_OPTIONS = new Set(['group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -57,7 +58,8 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     } else positional.push(value);
   }
   const action = (options.help ? 'help' : positional.shift() ?? 'status') as CollaborationCommand['action'];
-  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
   if (options['wait-until'] && !['queued', 'delivered', 'read'].includes(String(options['wait-until']))) throw new Error('wait-until must be queued, delivered or read');
   if (options['expect-reply'] && !['ack', 'result', 'any'].includes(String(options['expect-reply']))) throw new Error('expect-reply must be ack, result or any');
@@ -81,7 +83,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help']);
   const byAction: Record<string, string[]> = {
-    status: [], capabilities: [], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
+    status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
@@ -142,6 +144,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
   try {
     if (command.action === 'help') { io.write(COLLAB_HELP); return 0; }
     if (command.action === 'capabilities' || command.action === 'status') { output(await request('GET', command.action === 'status' ? '/peers' : '/capabilities')); return 0; }
+    if (command.action === 'rebind') { output(await request('POST', '/route/rebind', { pane: o.pane ?? null })); return 0; }
     if (command.action === 'inbox') {
       let cursor = o.cursor as string | undefined;
       do {

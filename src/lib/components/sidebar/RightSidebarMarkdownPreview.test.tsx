@@ -2,10 +2,13 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, computeMarkdownImageDisplayBox, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, isSvgImageSrc, resolveMarkdownLocalLinkTarget, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
 
 const mermaidRender = vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100%" style="max-width: 100%;" viewBox="0 0 96 48"><text>Graph</text></svg>' }));
+const originalWorker = navigator.serviceWorker;
+beforeEach(() => Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { controller: {} } }));
+afterEach(() => Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: originalWorker }));
 const mermaidInitialize = vi.fn();
 const katexRenderToString = vi.fn((tex: string) => `<span class="katex">${tex}</span>`);
 const domPurifySanitize = vi.fn((html: string) => (

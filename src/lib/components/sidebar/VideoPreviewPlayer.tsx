@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { Maximize as RiMaximize, Minimize as RiMinimize, Pause as RiPause, Play as RiPlay, RotateCw as RiRotateCw } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useEncryptedMediaSource } from '../../federation/mediaSource';
 import { SIDEBAR_GESTURE_IGNORE_ATTR, SWIPER_NO_SWIPING_CLASS } from './gestureArbiter';
 
 export function formatVideoTime(totalSeconds: number): string {
@@ -41,6 +42,7 @@ const SCRUB_EXACT_SETTLE_MS = 90;
  * 让画面在拖动过程中实时跳帧。
  */
 export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps) {
+  const mediaUrl = useEncryptedMediaSource(url, onLoadError);
   const { t } = useI18n();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -296,7 +298,7 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
           data-testid="file-preview-video"
           className="absolute left-1/2 top-1/2 max-w-none object-contain transition-transform duration-200"
           style={{ ...measuredRotatedStyle, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
-          src={url}
+          src={mediaUrl}
           preload="auto"
           playsInline
           onClick={togglePlay}
