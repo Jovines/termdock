@@ -45,6 +45,7 @@ export async function buildGitHubUpdateFeed(
   fetchImpl: typeof fetch = fetch,
 ): Promise<UpdateFeedResponse> {
   const response = await fetchImpl(GITHUB_RELEASE_API, {
+    signal: AbortSignal.timeout(20_000),
     headers: {
       Accept: 'application/vnd.github+json',
       'User-Agent': `Termdock/${currentVersion}`,
@@ -88,13 +89,18 @@ export async function startGitHubUpdateFeedServer(
   currentVersion: string,
   platform: string,
   arch: string,
+  getFeed: () => Promise<UpdateFeedResponse> = () => buildGitHubUpdateFeed(currentVersion, platform, arch),
 ): Promise<{ url: string; close: () => void }> {
   const server = http.createServer((request, response) => {
+    if (request.url !== '/feed') {
+      response.writeHead(404).end();
+      return;
+    }
     if (request.method !== 'GET') {
       response.writeHead(405).end();
       return;
     }
-    void buildGitHubUpdateFeed(currentVersion, platform, arch).then((feed) => {
+    void getFeed().then((feed) => {
       if (feed.status === 204) {
         response.writeHead(204).end();
         return;

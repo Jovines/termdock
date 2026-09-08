@@ -9,7 +9,11 @@ import {
   updateRuntimeFromRegistry,
   type RuntimeUpdateResult,
 } from './runtime.js';
-import { buildGitHubUpdateFeed, startGitHubUpdateFeedServer } from './githubUpdateFeed.js';
+import {
+  buildGitHubUpdateFeed,
+  startGitHubUpdateFeedServer,
+  type UpdateFeedResponse,
+} from './githubUpdateFeed.js';
 import type { DesktopAppUpdateState, DesktopRuntimeUpdateState } from './types.js';
 
 const AUTOMATIC_CHECK_DELAY_MS = 15_000;
@@ -28,6 +32,10 @@ let checkPromise: Promise<DesktopAppUpdateState> | null = null;
 let settleCheck: ((state: DesktopAppUpdateState) => void) | null = null;
 let checkTimeout: ReturnType<typeof setTimeout> | null = null;
 let updateFeedPromise: Promise<string> | null = null;
+let selectedFeed: UpdateFeedResponse | null = null;
+let nativeCheckInFlight = false;
+let runtimeDownloadPromise: Promise<RuntimeUpdateResult> | null = null;
+let runningRuntimeVersion: string | null = null;
 const stateListeners = new Set<UpdateStateListener>();
 const runtimeStateListeners = new Set<RuntimeUpdateStateListener>();
 let updateState: DesktopAppUpdateState = {
@@ -53,9 +61,21 @@ async function ensureUpdateFeedConfigured(): Promise<string> {
     app.getVersion(),
     process.platform,
     process.arch,
+    async () => {
+      if (!selectedFeed) throw new Error('No desktop update has been selected');
+      return selectedFeed;
+    },
   ).then((feed) => {
-    autoUpdater.setFeedURL({ url: feed.url });
+    try {
+      autoUpdater.setFeedURL({ url: feed.url });
+    } catch (error) {
+      feed.close();
+      throw error;
+    }
     return feed.url;
+  }).catch((error) => {
+    updateFeedPromise = null;
+    throw error;
   });
   return updateFeedPromise;
 }
@@ -119,7 +139,7 @@ export function getDesktopRuntimeUpdateState(): DesktopRuntimeUpdateState {
         resourcesPath: process.resourcesPath,
       });
       if (runtimeUpdateState.status === 'idle' || runtimeUpdateState.status === 'current') {
-        runtimeUpdateState = { ...runtimeUpdateState, currentVersion: selected.version };
+        runtimeUpdateState = { ...runtimeUpdateState, currentVersion: runningRuntimeVersion ?? selected.version };
       }
     } catch {
       // The bundled version remains a safe display fallback.
@@ -136,6 +156,7 @@ export function subscribeDesktopRuntimeUpdateState(
 }
 
 export function markDesktopRuntimeRunning(version: string): DesktopRuntimeUpdateState {
+  runningRuntimeVersion = version;
   return publishRuntimeUpdateState({
     status: 'current',
     currentVersion: version,
@@ -158,15 +179,20 @@ export function markDesktopRuntimeRestartFailed(error: unknown): DesktopRuntimeU
 
 export function checkForRuntimeUpdates(): Promise<DesktopRuntimeUpdateState> {
   if (runtimeCheckPromise) return runtimeCheckPromise;
+  if (runtimeUpdateState.status === 'ready' || runtimeUpdateState.status === 'restarting') {
+    return Promise.resolve(getDesktopRuntimeUpdateState());
+  }
   const before = getDesktopRuntimeUpdateState().currentVersion;
   publishRuntimeUpdateState({ status: 'checking', error: null });
   runtimeCheckPromise = ensureLatestRuntime()
     .then((result) => {
       if (!result || result.status === 'disabled' || result.status === 'current') {
+        const stagedVersion = result?.currentVersion ?? before;
+        const needsRestart = stagedVersion !== before;
         return publishRuntimeUpdateState({
-          status: 'current',
-          currentVersion: result?.currentVersion ?? before,
-          latestVersion: result?.latestVersion ?? null,
+          status: needsRestart ? 'ready' : 'current',
+          currentVersion: before,
+          latestVersion: needsRestart ? stagedVersion : result?.latestVersion ?? null,
           checkedAt: Date.now(),
           error: null,
         });
@@ -203,7 +229,11 @@ export function checkForRuntimeUpdates(): Promise<DesktopRuntimeUpdateState> {
 async function reportUpdateError(error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
   console.error('[desktop-updater]', message);
-  const state = publishUpdateState({ status: 'error', checkedAt: Date.now(), error: message });
+  const state = publishUpdateState({
+    status: updateState.status === 'installing' ? 'ready' : 'error',
+    checkedAt: Date.now(),
+    error: message,
+  });
   finishPendingCheck(state);
   if (!nativeCheckDialogPending || !showMessageBox) return;
   nativeCheckDialogPending = false;
@@ -217,6 +247,7 @@ async function reportUpdateError(error: unknown): Promise<void> {
 
 function configureUpdaterEvents(): void {
   autoUpdater.on('error', (error) => {
+    nativeCheckInFlight = false;
     void reportUpdateError(error);
   });
   autoUpdater.on('checking-for-update', () => {
@@ -235,18 +266,22 @@ function configureUpdaterEvents(): void {
     });
   });
   autoUpdater.on('update-not-available', () => {
+    nativeCheckInFlight = false;
     reportCurrentVersion();
   });
   autoUpdater.on(
     'update-downloaded',
     (_event, releaseNotes, releaseName) => {
-      publishUpdateState({
+      nativeCheckInFlight = false;
+      nativeCheckDialogPending = false;
+      const state = publishUpdateState({
         status: 'ready',
         latestVersion: normalizeReleaseVersion(releaseName),
         releaseName: releaseName || null,
         checkedAt: Date.now(),
         error: null,
       });
+      finishPendingCheck(state);
       if (updateDialogShown || !showMessageBox) return;
       updateDialogShown = true;
       const notes = typeof releaseNotes === 'string' ? releaseNotes.trim() : '';
@@ -259,8 +294,11 @@ function configureUpdaterEvents(): void {
         defaultId: 0,
         cancelId: 1,
       }).then((result) => {
-        if (result.response === 0) installDownloadedDesktopUpdate();
-        else updateDialogShown = false;
+        if (result.response === 0 && updateState.status === 'ready') installDownloadedDesktopUpdate();
+      }).catch((error) => {
+        console.error('[desktop-updater] update dialog failed', error);
+      }).finally(() => {
+        updateDialogShown = false;
       });
     },
   );
@@ -286,13 +324,16 @@ function reportCurrentVersion(): DesktopAppUpdateState {
 }
 
 async function runAutomaticChecks(): Promise<void> {
-  const runtime = await checkForRuntimeUpdates();
-  if (runtime.status === 'ready' && runtime.latestVersion) {
-    console.log(`[desktop-updater] runtime updated to ${runtime.latestVersion}`);
-  } else if (runtime.status === 'error') {
-    console.error('[desktop-runtime] automatic update check failed', runtime.error);
-  }
-  await checkForDesktopUpdates().catch(() => undefined);
+  await Promise.all([
+    checkForDesktopUpdates(),
+    checkForRuntimeUpdates().then((runtime) => {
+      if (runtime.status === 'ready' && runtime.latestVersion) {
+        console.log(`[desktop-updater] runtime staged at ${runtime.latestVersion}`);
+      } else if (runtime.status === 'error') {
+        console.error('[desktop-runtime] automatic update check failed', runtime.error);
+      }
+    }),
+  ]).catch((error) => console.error('[desktop-updater] automatic check failed', error));
 }
 
 export function configureDesktopUpdater(displayMessageBox: ShowMessageBox): void {
@@ -314,7 +355,13 @@ export function configureDesktopUpdater(displayMessageBox: ShowMessageBox): void
 
 export async function ensureLatestRuntime(): Promise<RuntimeUpdateResult | null> {
   if (!supportsAutomaticUpdates()) return null;
-  return updateRuntimeFromRegistry({ appVersion: app.getVersion(), resourcesPath: process.resourcesPath });
+  runtimeDownloadPromise ??= updateRuntimeFromRegistry({
+    appVersion: app.getVersion(),
+    resourcesPath: process.resourcesPath,
+  }).finally(() => {
+    runtimeDownloadPromise = null;
+  });
+  return runtimeDownloadPromise;
 }
 
 export async function checkForDesktopUpdates(options: {
@@ -332,16 +379,32 @@ export async function checkForDesktopUpdates(options: {
     return state;
   }
 
-  nativeCheckDialogPending ||= options.presentNativeDialogs === true;
-  if (updateState.status === 'ready' || updateState.status === 'downloading') {
+  if (updateState.status === 'ready' || updateState.status === 'downloading' || updateState.status === 'installing') {
+    if (options.presentNativeDialogs && showMessageBox && updateState.status !== 'installing') {
+      const ready = updateState.status === 'ready';
+      const result = await showMessageBox({
+        type: 'info',
+        message: ready ? '桌面版更新已准备好安装' : '桌面版更新正在后台下载',
+        buttons: ready ? ['重启并安装', '稍后'] : ['好'],
+        defaultId: 0,
+        cancelId: ready ? 1 : 0,
+      });
+      if (ready && result.response === 0 && updateState.status === 'ready') installDownloadedDesktopUpdate();
+    }
     return snapshotUpdateState();
   }
+  nativeCheckDialogPending ||= options.presentNativeDialogs === true;
   if (checkPromise) return checkPromise;
+  // Electron cannot cancel or identify native checks. Wait for its terminal
+  // event before retrying, even if our UI deadline has already elapsed.
+  if (nativeCheckInFlight) return snapshotUpdateState();
 
   publishUpdateState({ status: 'checking', error: null });
   checkPromise = new Promise<DesktopAppUpdateState>((resolve) => {
+    let active = true;
     settleCheck = resolve;
     checkTimeout = setTimeout(() => {
+      active = false;
       void reportUpdateError(new Error('Desktop update check timed out'));
     }, UPDATE_CHECK_TIMEOUT_MS);
     checkTimeout.unref?.();
@@ -349,19 +412,25 @@ export async function checkForDesktopUpdates(options: {
     // invalid response on some Electron releases. Resolve the current-version
     // case from GitHub metadata before handing an actual update to it.
     void buildGitHubUpdateFeed(app.getVersion(), process.platform, process.arch).then((feed) => {
+      if (!active) return undefined;
       if (feed.status === 204) {
         reportCurrentVersion();
         return undefined;
       }
+      selectedFeed = feed;
       return ensureUpdateFeedConfigured();
     }).then((feedUrl) => {
-      if (!feedUrl) return;
+      if (!active || !feedUrl) return;
       try {
+        nativeCheckInFlight = true;
         autoUpdater.checkForUpdates();
       } catch (error) {
+        nativeCheckInFlight = false;
         void reportUpdateError(error);
       }
-    }).catch((error) => void reportUpdateError(error));
+    }).catch((error) => {
+      if (active) void reportUpdateError(error);
+    });
   });
   return checkPromise;
 }
@@ -371,6 +440,11 @@ export function installDownloadedDesktopUpdate(): DesktopAppUpdateState {
     throw new Error('Desktop update has not finished downloading');
   }
   const state = publishUpdateState({ status: 'installing', error: null });
-  autoUpdater.quitAndInstall();
+  try {
+    autoUpdater.quitAndInstall();
+  } catch (error) {
+    publishUpdateState({ status: 'ready', error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
   return state;
 }
