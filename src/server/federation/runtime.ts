@@ -44,6 +44,7 @@ class LogicalSocket extends EventEmitter {
 }
 interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: number; abort: AbortController; state: 'uploading' | 'running'; updatedAt: number; uploadSlot: boolean; ack?: () => void }
 export interface FederationRuntimeOptions {
+  listRouteTargets?: () => Array<{ serviceId: string; url?: string; available: boolean }>;
   listRouteAccess?: () => Array<{ id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }>;
   grantRouteAccess?: (issuerId: string, targetServiceId: string, subjectId: string, url?: string) => unknown;
   revokeRouteAccess?: (id: string) => boolean;
@@ -245,6 +246,11 @@ export async function createFederationRuntime(app: express.Express, directory: s
           } else if (packet.type === 'route-pair') {
             if (!options.consumeRouteInvitation || typeof packet.code !== 'string') throw new Error('PAIRING_DENIED');
             send({ type: 'result', id: packet.id, ...options.consumeRouteInvitation(packet.code, subjectId) });
+          } else if (packet.type === 'route-targets') {
+            const canManage = allowed(subjectId, 'authorization.manage');
+            const items = (options.listRouteTargets?.() || []).filter(target => target.serviceId !== serviceId && (canManage || options.hasRouteGrant?.(subjectId, target.serviceId)))
+              .map(target => ({ ...target, authorized: options.hasRouteGrant?.(subjectId, target.serviceId) === true }));
+            send({ type: 'result', id: packet.id, canManage, items });
           } else if (packet.type === 'route-access') {
             const all = options.listRouteAccess?.() || [];
             const canManage = allowed(subjectId, 'authorization.manage');

@@ -93,21 +93,25 @@ async function authenticateServicePassword(url: string, password: string): Promi
     const known = (await listServiceConnections()).find(item => item.targetPeerId && (item.serviceOrigin || item.url) === url);
     if (!known?.targetPeerId) throw new Error('暂时连不上这台服务，请检查地址和网络。');
     const intent = { ...known, targetPeerId: known.targetPeerId, serviceName: known.label };
-    const client = await openTargetForAuthentication(intent);
-    const { startPasswordBootstrap, finishPasswordBootstrap } = await import('../../server/federation/passwordBootstrap');
-    let state: Awaited<ReturnType<typeof startPasswordBootstrap>> | undefined;
-    try {
-      const params = await client.request({ type: 'password-parameters' }, { timeoutMs: 5000 });
-      state = await startPasswordBootstrap(password, String(params.saltHex));
-      const response = await client.request({ type: 'password-start', startLoginRequest: state.startLoginRequest, origin: location.origin });
-      const verified = await finishPasswordBootstrap(state, response as unknown as Parameters<typeof finishPasswordBootstrap>[1], { clientIdentity: (await getIdentity()).peerId, origin: location.origin });
-      if (verified.serverIdentity !== known.targetPeerId) throw new Error('服务身份发生变化。');
-      await client.request({ type: 'password-finish', attemptId: verified.attemptId, finishLoginRequest: verified.finishLoginRequest });
-      return intent;
-    } catch { throw new Error('暂时无法登录，请检查密码与入口授权后重试。'); }
-    finally { if (state) state.passwordKey = ''; client.close(); }
+    await authenticatePinnedPassword(intent, password);
+    return intent;
   }
 }
+async function authenticatePinnedPassword(intent: ConnectionIntent, password: string): Promise<void> {
+  const client = await openTargetForAuthentication(intent);
+  const { startPasswordBootstrap, finishPasswordBootstrap } = await import('../../server/federation/passwordBootstrap');
+  let state: Awaited<ReturnType<typeof startPasswordBootstrap>> | undefined;
+  try {
+    const params = await client.request({ type: 'password-parameters' }, { timeoutMs: 5000 });
+    state = await startPasswordBootstrap(password, String(params.saltHex));
+    const response = await client.request({ type: 'password-start', startLoginRequest: state.startLoginRequest, origin: location.origin });
+    const verified = await finishPasswordBootstrap(state, response as unknown as Parameters<typeof finishPasswordBootstrap>[1], { clientIdentity: (await getIdentity()).peerId, origin: location.origin });
+    if (verified.serverIdentity !== intent.targetPeerId) throw new Error('服务身份发生变化。');
+    await client.request({ type: 'password-finish', attemptId: verified.attemptId, finishLoginRequest: verified.finishLoginRequest });
+  } catch { throw new Error('暂时无法登录，请检查目标服务密码与入口授权后重试。'); }
+  finally { if (state) state.passwordKey = ''; client.close(); }
+}
+
 async function passwordLogin(password: string): Promise<Response> {
   try {
     // On an expired remote target, sign back into that target, not the page host.
@@ -370,6 +374,45 @@ export function installEncryptedFetch(): void {
 }
 
 export interface EntryRouteGrant { id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }
+export interface RelayTarget { serviceId: string; url?: string; available: boolean; authorized: boolean }
+export interface RelayTargetDirectory { route: ServiceRoute; canManage: boolean; items: RelayTarget[] }
+/** Browse only a pinned entry's explicit directory, without changing the active service. */
+export async function listRelayTargets(service: import('../services/serviceDirectory').ServiceConnection): Promise<RelayTargetDirectory> {
+  if (!service.targetPeerId) throw new Error('请先连接这台服务，再查看可中转的服务。');
+  for (const url of connectionAddresses({ ...service, targetPeerId: service.targetPeerId })) {
+    let client: SecureClient;
+    const route = { url, targetPeerId: service.targetPeerId };
+    try { client = await connectEntry(route); } catch { continue; }
+    try {
+      const result = await client.request({ type: 'route-targets' }, { timeoutMs: 5000 });
+      if (!Array.isArray(result.items)) throw new Error('入口服务需要更新后才能查看中转列表。');
+      return { route, canManage: result.canManage === true, items: result.items as RelayTarget[] };
+    } catch (error) {
+      if (error instanceof Error && /UNKNOWN|UNSUPPORTED/i.test(error.message)) throw new Error('入口服务需要更新后才能查看中转列表。');
+      throw error;
+    } finally { client.close(); }
+  }
+  throw new Error('暂时连不上中转入口，请检查地址和网络后重试。');
+}
+export async function prepareRelayConnection(route: ServiceRoute, targetServiceId: string): Promise<ConnectionIntent> {
+  const entry = await connectEntry(route);
+  try {
+    // Re-read visibility and grants at the click, so stale lists cannot authorize a target.
+    const result = await entry.request({ type: 'route-targets' }, { timeoutMs: 5000 });
+    const target = (Array.isArray(result.items) ? result.items as RelayTarget[] : []).find(item => item.serviceId === targetServiceId);
+    if (!target) throw new Error('该服务已不可见，请刷新列表或请入口管理员授权。');
+    if (!target.available) throw new Error('入口暂时无法中转到这台服务，请稍后重试。');
+    const known = (await listServiceConnections()).find(item => item.targetPeerId === target.serviceId);
+    const routes = [route, ...(known?.routes || []).filter(item => item.targetPeerId !== route.targetPeerId)];
+    if (routes.length > 4) throw new Error('这台服务已保存 4 个备用连接，请先移除一个后重试。');
+    if (!target.authorized) {
+      if (!result.canManage) throw new Error('请先让入口管理员授权此设备。');
+      await entry.request({ type: 'route-grant', serviceId: target.serviceId, subjectId: (await getIdentity()).peerId });
+    }
+    const origin = known?.serviceOrigin || known?.url || target.url || route.url;
+    return { url: origin, serviceOrigin: origin, targetPeerId: target.serviceId, serviceName: known?.label || (target.url ? new URL(target.url).host : `中转服务 ${target.serviceId.slice(0, 8)}`), routes };
+  } finally { entry.close(); }
+}
 export async function inspectEntryRoute(route: ServiceRoute, targetServiceId: string): Promise<{ canManage: boolean; grants: EntryRouteGrant[] }> {
   const client = await connectEntry(route);
   try {
@@ -456,8 +499,6 @@ export async function addServiceAddress(service: import('../services/serviceDire
 }
 
 export async function authenticateKnownConnection(intent: ConnectionIntent, password: string): Promise<void> {
-  const origin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
-  const verified = await authenticateServicePassword(origin, password);
-  if (verified.targetPeerId !== intent.targetPeerId) throw new Error('服务身份已改变，请重新确认连接。');
+  await authenticatePinnedPassword(intent, password);
   await connectDevice({ ...intent, pairingCode: undefined, routeCode: undefined });
 }

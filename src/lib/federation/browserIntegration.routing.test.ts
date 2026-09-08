@@ -35,6 +35,50 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it('discovers a pinned entry through its alternate address without switching the active service', async () => {
+    const base = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockRejectedValueOnce(new Error('old network'));
+    mocks.connect.mockImplementation(async args => {
+      const client = await base(args);
+      client.request.mockResolvedValue({ items: [{ serviceId: 'C', url: 'https://c.internal', available: true, authorized: true }], canManage: false });
+      return client;
+    });
+    const integration = await import('./browserIntegration');
+    const result = await integration.listRelayTargets({ id: 'B', targetPeerId: 'B', url: 'https://home.internal', label: 'B', routes: [{ url: 'https://office.internal', targetPeerId: 'B' }] });
+    expect(result.route).toEqual({ url: 'https://office.internal', targetPeerId: 'B' });
+    expect(result.items).toHaveLength(1);
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(integration.currentSecureClient()).toBeUndefined();
+    expect(clients.get('B')!.close).toHaveBeenCalled();
+  });
+  it('revalidates target visibility before granting only the current device, without prematurely saving C', async () => {
+    const base = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      const client = await base(args);
+      client.request.mockImplementation(async (packet: { type: string }) => packet.type === 'route-targets' ? { canManage: true, items: [{ serviceId: 'C', url: 'https://c.internal', available: true, authorized: false }] } : {});
+      return client;
+    });
+    const integration = await import('./browserIntegration');
+    const intent = await integration.prepareRelayConnection({ url: 'https://b.example', targetPeerId: 'B' }, 'C');
+    expect(intent).toMatchObject({ targetPeerId: 'C', serviceOrigin: 'https://c.internal', routes: [{ url: 'https://b.example', targetPeerId: 'B' }] });
+    expect(clients.get('B')!.request).toHaveBeenCalledWith({ type: 'route-grant', subjectId: 'phone', serviceId: 'C' });
+    expect(local.getItem('termdock.federation.connections.v1')).toBeNull();
+    await expect(integration.prepareRelayConnection({ url: 'https://b.example', targetPeerId: 'B' }, 'hidden')).rejects.toThrow('不可见');
+    expect(clients.get('B')!.request.mock.calls.some(([packet]) => packet.type === 'route-grant')).toBe(false);
+  });
+  it('logs in to a first-time target entirely through its entry when direct access is impossible', async () => {
+    const base = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('target is unreachable from this browser');
+      return base(args);
+    });
+    const integration = await import('./browserIntegration');
+    await integration.authenticateKnownConnection({ url: 'https://b.example', targetPeerId: 'B', routes: [{ url: 'https://a.example', targetPeerId: 'A' }] }, 'target-password');
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ targetPeerId: 'B', routes: [{ url: 'https://a.example', targetPeerId: 'A' }] }));
+    expect(integration.currentConnectionPath()).toBe('relay');
+    expect(mocks.connect.mock.calls.filter(([args]) => args.targetPeerId === 'B' && args.socketFactory).length).toBe(2);
+  });
   it('tries another address of the same pinned computer before a relay and preserves both routes', async () => {
     mocks.boot = 'C';
     const routes = [{ url: 'https://company.internal:9834', targetPeerId: 'C' }, { url: 'https://b.example', targetPeerId: 'B' }];

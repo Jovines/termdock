@@ -12,6 +12,13 @@ function setup() {
   return { access: new RouteAccess(file, () => now, () => authorized), file, config, token, revokeSubject: () => { authorized = false; }, time: (value: number) => { now = value; } };
 }
 describe('route authentication', () => {
+  it('exposes only target identities and normalized origins, never relay tokens or CA paths', () => {
+    const { access, config, file } = setup();
+    writeFileSync(file, JSON.stringify({ ...config, directTargets: [{ serviceId: 'D', url: 'wss://d.internal/api/federation/secure', caPath: '/private/root.pem' }] }));
+    expect(access.configuredTargets()).toEqual([{ serviceId: 'C' }, { serviceId: 'D', url: 'https://d.internal' }]);
+    writeFileSync(file, 'broken');
+    expect(access.configuredTargets()).toEqual([]);
+  });
   it('separates relay advertisement from target access', () => {
     const { access, token } = setup(); const relay = access.authenticate(`Bearer ${token}`)!;
     expect(access.allowRegister(relay, 'C')).toBe(true); expect(access.allowRegister(relay, 'D')).toBe(false);

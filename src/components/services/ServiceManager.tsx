@@ -6,6 +6,7 @@ import './ServiceManager.css';
 export interface ServiceNavigation { title?: string; back?: () => void }
 export interface ServiceManagerProps {
   current?: ServiceConnection;
+  renderRelayServices?: (service: ServiceConnection, onBusy: (busy: boolean) => void) => ReactNode;
   renderRoutes?: (service: ServiceConnection, onBusy: (busy: boolean) => void) => ReactNode;
   onOpen: (service: ServiceConnection) => Promise<{ passwordRequired?: boolean } | void>;
   onAdd: (input: string, password?: string) => Promise<{ passwordRequired?: boolean } | void>;
@@ -15,16 +16,16 @@ export interface ServiceManagerProps {
   onBusyChange?: (busy: boolean) => void;
   initiallyAdding?: boolean;
 }
-type Page = { kind: 'list' } | { kind: 'add'; input?: string; passwordRequired?: boolean } | { kind: 'edit'; service: ServiceConnection } | { kind: 'routes'; service: ServiceConnection };
-export function ServiceManager({ current, renderRoutes, onOpen, onAdd, onInvite, hideHeader, onNavigation, onBusyChange, initiallyAdding = false }: ServiceManagerProps) {
+type Page = { kind: 'list' } | { kind: 'add'; input?: string; passwordRequired?: boolean } | { kind: 'edit'; service: ServiceConnection } | { kind: 'routes' | 'relay-services'; service: ServiceConnection };
+export function ServiceManager({ current, renderRoutes, renderRelayServices, onOpen, onAdd, onInvite, hideHeader, onNavigation, onBusyChange, initiallyAdding = false }: ServiceManagerProps) {
   const [services, setServices] = useState<ServiceConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState<Page>(initiallyAdding ? { kind: 'add' } : { kind: 'list' });
   const [busy, setBusyState] = useState(false);
   const setBusy = useCallback((value: boolean) => { setBusyState(value); onBusyChange?.(value); }, [onBusyChange]);
   const [error, setError] = useState('');
-  const back = useCallback(() => { setPage(previous => previous.kind === 'routes' ? { kind: 'edit', service: previous.service } : { kind: 'list' }); setError(''); }, []);
-  const title = page.kind === 'add' ? '添加服务' : page.kind === 'edit' ? '服务设置' : page.kind === 'routes' ? '备用连接' : undefined;
+  const back = useCallback(() => { setPage(previous => previous.kind === 'routes' || previous.kind === 'relay-services' ? { kind: 'edit', service: previous.service } : { kind: 'list' }); setError(''); }, []);
+  const title = page.kind === 'add' ? '添加服务' : page.kind === 'edit' ? '服务设置' : page.kind === 'routes' ? '备用连接' : page.kind === 'relay-services' ? '可中转的服务' : undefined;
   useEffect(() => { onNavigation?.({ title, ...(title ? { back } : {}) }); }, [title, back, onNavigation]);
   useEffect(() => {
     let disposed = false, request = 0;
@@ -43,7 +44,7 @@ export function ServiceManager({ current, renderRoutes, onOpen, onAdd, onInvite,
     try { await task(); } catch (failure) { setError(failure instanceof Error ? failure.message : '暂时无法完成，请重试。'); }
     finally { setBusy(false); }
   };
-  const pageService = page.kind === 'edit' || page.kind === 'routes' ? services.find(item => sameService(item, page.service)) || page.service : undefined;
+  const pageService = page.kind === 'edit' || page.kind === 'routes' || page.kind === 'relay-services' ? services.find(item => sameService(item, page.service)) || page.service : undefined;
   const currentRecord = current ? services.find(item => sameService(item, current)) || current : undefined;
   const others = services.filter(item => !current || !sameService(item, current));
   const rows = currentRecord ? [currentRecord, ...others] : others;
@@ -69,11 +70,11 @@ export function ServiceManager({ current, renderRoutes, onOpen, onAdd, onInvite,
   </>;
   return <div className="service-manager">
     {!hideHeader && <div className="service-heading">{title && <button type="button" className="service-icon-button" aria-label="返回服务" disabled={busy} onClick={back}><ArrowLeft size={20} /></button>}<h2>{title || '服务'}</h2></div>}
-    {page.kind === 'routes' ? renderRoutes?.(pageService!, setBusy) : page.kind === 'list' ? list : page.kind === 'add' ? <AddServiceForm initialInput={page.input} passwordRequired={page.passwordRequired} busy={busy} onSubmit={async (input, password) => {
+    {page.kind === 'relay-services' ? renderRelayServices?.(pageService!, setBusy) : page.kind === 'routes' ? renderRoutes?.(pageService!, setBusy) : page.kind === 'list' ? list : page.kind === 'add' ? <AddServiceForm initialInput={page.input} passwordRequired={page.passwordRequired} busy={busy} onSubmit={async (input, password) => {
       let result: { passwordRequired?: boolean } | void;
       await perform(async () => { result = await onAdd(input, password); if (!result?.passwordRequired) back(); });
       return result!;
-    }} /> : <EditServiceForm onRoutes={renderRoutes && page.service.targetPeerId ? () => setPage({ kind: 'routes', service: page.service }) : undefined} service={pageService!} busy={busy} canRemove={!current || !sameService(page.service, current)} onSave={name => void perform(async () => { setServices(await saveServiceConnection({ ...pageService!, label: name })); back(); })} onRemove={() => void perform(async () => { setServices(await removeServiceConnection(page.service.id)); back(); })} />}
+    }} /> : <EditServiceForm onRelayServices={renderRelayServices && page.service.targetPeerId ? () => setPage({ kind: 'relay-services', service: page.service }) : undefined} onRoutes={renderRoutes && page.service.targetPeerId ? () => setPage({ kind: 'routes', service: page.service }) : undefined} service={pageService!} busy={busy} canRemove={!current || !sameService(page.service, current)} onSave={name => void perform(async () => { setServices(await saveServiceConnection({ ...pageService!, label: name })); back(); })} onRemove={() => void perform(async () => { setServices(await removeServiceConnection(page.service.id)); back(); })} />}
     {error && <p className="service-error" role="alert">{error}</p>}
   </div>;
 }
@@ -85,12 +86,13 @@ function AddServiceForm({ busy, onSubmit, initialInput = '', passwordRequired = 
     <button type="submit" className="service-button service-primary" disabled={busy || !input.trim() || (needsPassword && !password)}>{busy ? <><Loader2 size={16} className="service-spinning" />正在连接…</> : needsPassword ? '登录并连接' : '继续'}</button>
   </form>;
 }
-function EditServiceForm({ service, busy, canRemove, onSave, onRemove, onRoutes }: { onRoutes?: () => void; service: ServiceConnection; busy: boolean; canRemove: boolean; onSave: (name: string) => void; onRemove: () => void }) {
+function EditServiceForm({ service, busy, canRemove, onSave, onRemove, onRoutes, onRelayServices }: { onRelayServices?: () => void; onRoutes?: () => void; service: ServiceConnection; busy: boolean; canRemove: boolean; onSave: (name: string) => void; onRemove: () => void }) {
   const [name, setName] = useState(service.label); const [confirmRemove, setConfirmRemove] = useState(false);
   return <form className="service-form" onSubmit={event => { event.preventDefault(); onSave(name.trim()); }}>
     <label className="service-field"><span>服务名称</span><input value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={120} placeholder="例如：办公室电脑" /></label>
     <p className="service-address">{service.serviceOrigin || service.url}</p>
     <button type="submit" className="service-button service-primary" disabled={busy || !name.trim()}>保存名称</button>
+    {onRelayServices && <button type="button" className="service-row-open" disabled={busy} onClick={onRelayServices}><span className="service-row-copy"><span className="service-name">可中转的服务</span><span className="service-description">通过这台服务连接其他电脑</span></span><ChevronRight size={16} /></button>}
     {onRoutes && <button type="button" className="service-row-open" disabled={busy} onClick={onRoutes}><span className="service-row-copy"><span className="service-name">备用连接</span><span className="service-description">添加其他网络地址或授权入口</span></span><ChevronRight size={16} /></button>}
     {canRemove && <div className="service-remove">{confirmRemove ? <><p className="service-help">从列表移除“{service.label}”？不会停止服务或删除终端。</p><div className="service-actions service-actions-pair"><button type="button" className="service-button service-secondary" disabled={busy} onClick={() => setConfirmRemove(false)}>取消</button><button type="button" className="service-button service-danger" disabled={busy} onClick={onRemove}>确认移除</button></div></> : <button type="button" className="service-button service-danger" disabled={busy} onClick={() => setConfirmRemove(true)}>移除服务</button>}</div>}
   </form>;

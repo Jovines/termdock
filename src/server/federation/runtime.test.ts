@@ -223,6 +223,24 @@ describe('federation runtime over real encrypted WebSocket', () => {
     expect(await client.take('replay')).toMatchObject({ type: 'error', error: 'INVALID_LOGIN' });
     expect(Buffer.concat(client.wire.map(chunk => Buffer.from(chunk))).toString()).not.toContain('relay-password');
   });
+  it('lists only explicitly authorized targets for a device and all configured targets for an administrator', async () => {
+    const grants = new Set<string>();
+    const targets = [{ serviceId: 'C', url: 'https://c.internal', available: true }, { serviceId: 'D', available: false }];
+    const f = await fixture({ listRouteTargets: () => targets, hasRouteGrant: (subject, target) => grants.has(subject + ':' + target) });
+    const phone = await f.connect();
+    phone.channel.send({ type: 'route-targets', id: 'empty', subjectId: 'forged' });
+    expect(await phone.take('empty')).toMatchObject({ canManage: false, items: [] });
+    grants.add(phone.identity.peerId + ':C');
+    phone.channel.send({ type: 'route-targets', id: 'scoped' });
+    expect(await phone.take('scoped')).toMatchObject({ canManage: false, items: [{ ...targets[0], authorized: true }] });
+    grants.clear();
+    phone.channel.send({ type: 'route-targets', id: 'revoked' });
+    expect(await phone.take('revoked')).toMatchObject({ items: [] });
+    await phone.pair();
+    phone.channel.send({ type: 'route-targets', id: 'owner' });
+    expect(await phone.take('owner')).toMatchObject({ canManage: true, items: targets.map(target => ({ ...target, authorized: false })) });
+    expect(f.issueRouteTicket).not.toHaveBeenCalled();
+  });
   it('requires an explicit target route grant, even for an owner, and binds tickets to the real subject', async () => {
     const grants = new Set<string>();
     const f = await fixture({ hasRouteGrant: (subject, target) => grants.has(subject + ':' + target) }), client = await f.connect();

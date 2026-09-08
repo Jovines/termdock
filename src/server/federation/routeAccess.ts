@@ -86,4 +86,14 @@ export class RouteAccess {
     writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600 }); renameSync(temporary, this.filePath);
   }
   configuredDirectTargets(): DirectTargetConfig[] { return this.registry().directTargets; }
+  configuredTargets(): Array<{ serviceId: string; url?: string }> {
+    const registry = this.registry();
+    const targets = new Map<string, { serviceId: string; url?: string }>();
+    for (const relay of registry.relays) for (const serviceId of relay.targets) targets.set(serviceId, { serviceId });
+    for (const target of registry.directTargets) {
+      const url = new URL(target.url); url.protocol = 'https:';
+      targets.set(target.serviceId, { serviceId: target.serviceId, url: url.origin });
+    }
+    return [...targets.values()];
+  }
 }

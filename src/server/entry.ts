@@ -489,6 +489,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket,
   }, {
+    listRouteTargets: () => routeAccess.configuredTargets().map(target => ({ ...target, available: relayRouter.hasRoute(target.serviceId) })),
     listRouteAccess: () => routeInvitations?.list() || [],
     grantRouteAccess: async (issuerId, targetServiceId, subjectId, url) => {
       if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
@@ -615,8 +616,9 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     }
     const pathname = url.pathname;
     if (pathname === '/api/federation/relay') {
-      // Native relay peers have no Origin. Authenticate explicitly before upgrade.
-      if (scheme !== 'https' || (request.headers.origin && !isUpgradeOriginAllowed(request.headers.origin, request.headers.host))) {
+      // A paired device can use B from another HTTPS PWA origin. This channel
+      // ignores cookies: the single-use target-scoped ticket below is mandatory.
+      if (scheme !== 'https' || !secureChannelOriginAllowed(request.headers.origin, () => isUpgradeOriginAllowed(request.headers.origin, request.headers.host))) {
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
       }
       const principal = routeAccess.authenticate(request.headers.authorization, url.searchParams.get('routeToken'));
