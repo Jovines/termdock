@@ -1,3 +1,4 @@
+import { BOOT_SERVICE_ID } from '../federation/clientScope';
 export interface TerminalSnapshot {
   id: string;
   version: 1;
@@ -16,7 +17,7 @@ let connection: Promise<IDBDatabase | null> | undefined;
 function database(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
   return connection ??= new Promise((resolve) => {
-    const request = indexedDB.open('termdock-terminal-snapshots', 1);
+    const request = indexedDB.open(`termdock-terminal-snapshots:${BOOT_SERVICE_ID}`, 1);
     request.onupgradeneeded = () => request.result.createObjectStore('snapshots', { keyPath: 'id' });
     request.onerror = () => resolve(null);
     request.onblocked = () => resolve(null);

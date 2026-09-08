@@ -1,3 +1,4 @@
+import type { ServiceDirectoryBridge } from '../services/serviceDirectory';
 export interface DesktopCliInstallation {
   path: string;
   version: string | null;
@@ -54,8 +55,10 @@ export interface DesktopRuntimeUpdateState {
   error: string | null;
 }
 
-export interface TermdockDesktopBridge {
+export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   platform: string;
+  /** Available only to the managed local loopback application's top-level page. */
+  getLocalInvite?(): Promise<{ url: string; targetPeerId: string; pairingCode: string; serviceName?: string } | null>;
   collaborationList?(): Promise<{ groups: import('../terminal/api').CollaborationGroup[]; sessions: import('../terminal/api').OrchestrationSession[] }>;
   collaborationSave?(input: { id?: string; name: string; sessionIds: string[] }): Promise<{ group: import('../terminal/api').CollaborationGroup }>;
   collaborationRemove?(id: string): Promise<void>;

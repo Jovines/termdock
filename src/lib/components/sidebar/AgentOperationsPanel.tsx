@@ -1,3 +1,4 @@
+import { openRemoteSession } from '../../federation/remoteSession';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Bot, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
@@ -289,6 +290,10 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
   const [sessionQuery, setSessionQuery] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [messages, setMessages] = useState<CollaborationMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [responseFilter, setResponseFilter] = useState('all');
+  const [onlyNew, setOnlyNew] = useState(true);
+  const [seenMessages, setSeenMessages] = useState<Set<string>>(new Set());
   const [targetSessionId, setTargetSessionId] = useState('*');
   const [kind, setKind] = useState<CollaborationMessageKind>('message');
   const [content, setContent] = useState('');
@@ -317,6 +322,8 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
   useEffect(() => {
     setEditingMembers(false);
     setSpawnOpen(false);
+    try { setSeenMessages(new Set(JSON.parse(localStorage.getItem(`collab-seen:${selectedGroup?.id}`) ?? '[]'))); }
+    catch { setSeenMessages(new Set()); }
     setMemberSelection(new Set(selectedGroup?.sessionIds ?? []));
   }, [selectedGroup?.id]);
 
@@ -325,11 +332,18 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
   }, [agents, spawnAgentSlug]);
 
   useEffect(() => {
-    if (!selectedGroup) { setMessages([]); return; }
+    setMessages([]);
+    if (!selectedGroup) { setMessagesLoading(false); return; }
+    setMessagesLoading(true);
     let cancelled = false;
-    const load = () => void listCollaborationMessages(selectedGroup.id)
-      .then((data) => { if (!cancelled) setMessages(data.messages); })
-      .catch((error) => { if (!cancelled) setError(error instanceof Error ? error.message : '消息加载失败'); });
+    let version = 0;
+    const load = () => {
+      const current = ++version;
+      void listCollaborationMessages(selectedGroup.id)
+        .then((data) => { if (!cancelled && current === version) setMessages(data.messages); })
+        .catch((error) => { if (!cancelled && current === version) setError(error instanceof Error ? error.message : '消息加载失败'); })
+        .finally(() => { if (!cancelled && current === version) setMessagesLoading(false); });
+    };
     load();
     const timer = window.setInterval(load, 3_000);
     return () => { cancelled = true; window.clearInterval(timer); };
@@ -411,7 +425,15 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
     } catch (error) { setError(error instanceof Error ? error.message : 'Agent Session 创建失败'); }
     finally { setBusy(null); }
   };
-  const activities = collapseCollaborationMessages(messages, sessions);
+  const visibleMessages = messages.filter((message) => (!onlyNew || !seenMessages.has(message.id))
+    && (responseFilter === 'all' || message.responseKind === responseFilter));
+  const activities = collapseCollaborationMessages(visibleMessages, sessions);
+  const markVisibleSeen = () => {
+    const next = new Set([...seenMessages, ...visibleMessages.map((message) => message.id)].slice(-10_000));
+    try { localStorage.setItem(`collab-seen:${selectedGroup?.id}`, JSON.stringify([...next])); }
+    catch { setError('无法保存已看记录，请检查浏览器存储空间'); return; }
+    setSeenMessages(next);
+  };
 
   return <div className="space-y-5">
     <div className="flex items-start justify-between gap-4">
@@ -445,9 +467,16 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
         {spawnOpen && <div className="mt-4 border-t border-primary/20 pt-4"><div><h5 className="text-[11px] font-medium text-foreground">创建 Agent Session</h5><p className="mt-1 text-[9px] text-muted-foreground">新会话启动后自动加入本组，并收到初始任务和成员信息。</p></div><div className="mt-3 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">Agent / Plugin<select aria-label="新 Agent 类型" className={inputClass} value={spawnAgentSlug} onChange={(event) => setSpawnAgentSlug(event.target.value)}>{agents.map((agent) => <option key={agent.slug} value={agent.slug}>{agent.displayName}{agent.isPlugin ? ' · Plugin' : ''}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">会话名称<input aria-label="新 Agent 会话名称" className={inputClass} value={spawnName} onChange={(event) => setSpawnName(event.target.value)} placeholder="留空则自动命名" /></label></div><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">工作目录<input aria-label="新 Agent 工作目录" className={inputClass} value={spawnCwd} onChange={(event) => setSpawnCwd(event.target.value)} placeholder="默认继承当前会话" /></label><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">初始任务<textarea aria-label="新 Agent 初始任务" className={`${inputClass} min-h-16 resize-y`} value={spawnTask} onChange={(event) => setSpawnTask(event.target.value)} placeholder="说明它加入后要先完成什么" /></label><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSpawnOpen(false)}>取消</button><button disabled={busy !== null || !spawnAgentSlug} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void spawnAgent()}>{busy === 'spawn-agent' ? <RefreshCw size={13} className="animate-spin" /> : <Bot size={13} />}创建并加入</button></div></div>}
       </section>
 
-      <section><div className="mb-2 flex items-center justify-between"><h4 className="text-[11px] font-medium text-foreground">协作记录</h4><span className="text-[9px] text-muted-foreground">{activities.length} 条</span></div><div className="max-h-72 divide-y divide-border/10 overflow-y-auto border-y border-border/10">
-        {activities.map((activity) => <div key={activity.key} className="px-2 py-3"><div className="flex items-center gap-2 text-[9px] text-muted-foreground"><span className="font-medium text-primary">{messageKindLabel(activity.kind)}</span><span>{activity.fromName}</span><span>→</span><span className="truncate">{activity.toNames.join('、')}</span><span className="ml-auto shrink-0">{new Date(activity.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div><p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">{activity.content}</p><p className="mt-1 text-[9px] text-muted-foreground">{activity.status === 'pending' ? '尚未送达 · 等待服务连接或 Agent 上线' : activity.status === 'read' ? '已读取' : '已进入 Agent 队列'}</p></div>)}
-        {activities.length === 0 && <Empty text="还没有消息。可以先发一个任务或问题。" />}
+      <section><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h4 className="text-[11px] font-medium text-foreground">协作记录</h4><span className="text-[9px] text-muted-foreground">{activities.length} 条</span></div>
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <select aria-label="筛选回复类型" className={`${inputClass} w-auto`} value={responseFilter} onChange={(event) => setResponseFilter(event.target.value)}><option value="all">全部类型</option><option value="ack">收到确认</option><option value="progress">进展</option><option value="result">结果与证据</option></select>
+          <label className="flex min-h-9 items-center gap-2 text-[11px] text-muted-foreground"><input type="checkbox" checked={onlyNew} onChange={(event) => setOnlyNew(event.target.checked)} />只看新记录</label>
+          <button className={`${buttonClass} min-h-9 text-muted-foreground`} disabled={!visibleMessages.length} onClick={markVisibleSeen}>标记当前记录已看</button>
+        </div><div className="max-h-72 divide-y divide-border/10 overflow-y-auto border-y border-border/10">
+        {activities.map((activity) => <div key={activity.key} className="px-2 py-3"><div className="flex items-center gap-2 text-[9px] text-muted-foreground"><span className="font-medium text-primary">{activity.responseKind === 'ack' ? '收到确认' : activity.responseKind === 'progress' ? '进展' : activity.responseKind === 'result' ? '结果' : messageKindLabel(activity.kind)}</span><span>{activity.fromName}</span><span>→</span><span className="truncate">{activity.toNames.join('、')}</span><span className="ml-auto shrink-0">{new Date(activity.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div><p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">{activity.content}</p><p className="mt-1 text-[9px] text-muted-foreground">{activity.status === 'pending' ? '尚未送达 · 等待连接或接收方读取' : activity.status === 'read' ? '接收方已确认读取 · 不代表任务完成' : activity.status === 'failed' ? '投递失败' : activity.status === 'expired' ? '消息已过期，未继续投递' : '已写入接收方终端 · 等待接手确认'}</p>
+          {(activity.task || activity.failureReason) && <details className="mt-2 text-[10px] text-muted-foreground"><summary className="cursor-pointer">任务详情与证据</summary><pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(activity.task ?? { failure_reason: activity.failureReason }, null, 2)}</pre></details>}
+        </div>)}
+        {activities.length === 0 && <Empty text={messagesLoading ? "正在加载协作记录…" : messages.length ? "没有符合筛选条件的新记录。可切换类型或取消“只看新记录”。" : "还没有消息。可以先发一个任务或问题。"} />}
       </div></section>
 
       <section ref={messageComposerRef} className="border-t border-primary/20 bg-primary/5 px-3 py-3"><h4 className="text-[11px] font-medium text-foreground">发送给成员</h4><div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">接收人<select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}><option value="*">全组成员</option>{selectedGroup.sessionIds.map((id) => <option key={id} value={id}>{collaborationSessionName(sessions.find((session) => session.sessionId === id)) ?? `${id.slice(0, 8)}（离线）`}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">消息类型<select className={inputClass} value={kind} onChange={(event) => setKind(event.target.value as CollaborationMessageKind)}><option value="message">普通消息</option><option value="ask">需要回答的问题</option><option value="task">需要执行的任务</option><option value="handoff">工作交接</option><option value="done">完成通知</option></select></label></div>
@@ -475,7 +504,7 @@ function collaborationSessionName(session?: OrchestrationSession): string | unde
 
 async function openCollaborationSession(session: OrchestrationSession): Promise<void> {
   if (session.sessionId.startsWith('remote:')) {
-    if (!await window.termdockDesktop?.collaborationFocus?.(session.sessionId)) throw new Error('服务未连接，请先在连接中心重新连接');
+    await openRemoteSession(session.sessionId);
   } else window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.sessionId }));
 }
 
@@ -503,25 +532,25 @@ function collapseCollaborationMessages(messages: CollaborationMessage[], session
   const sessionsById = new Map(sessions.map((session) => [session.sessionId, collaborationSessionName(session)!]));
   const grouped = new Map<string, {
     key: string; kind: CollaborationMessageKind; content: string; createdAt: number;
-    fromName: string; toNames: string[]; status: CollaborationMessage['status'];
+    fromName: string; toNames: string[]; status: CollaborationMessage['status']; responseKind?: CollaborationMessage['responseKind']; task?: CollaborationMessage['task']; failureReason?: string | null;
   }>();
   for (const message of messages) {
-    const key = `${message.threadId}:${message.createdAt}:${message.fromSessionId ?? 'user'}:${message.kind}:${message.content}`;
+    const key = `${message.threadId}:${message.createdAt}:${message.fromSessionId ?? 'user'}:${message.kind}:${message.responseKind ?? ''}:${JSON.stringify(message.task ?? null)}:${message.content}`;
     const existing = grouped.get(key);
     const recipient = sessionsById.get(message.toSessionId) ?? message.toSessionId.slice(0, 8);
     if (existing) {
       existing.toNames.push(recipient);
-      const rank = { pending: 0, delivered: 1, read: 2 } as const;
+      const rank = { failed: -2, expired: -1, pending: 0, delivered: 1, read: 2 } as const;
       if (rank[message.status] < rank[existing.status]) existing.status = message.status;
       continue;
     }
     grouped.set(key, {
       key, kind: message.kind, content: message.content, createdAt: message.createdAt,
       fromName: message.fromSessionId ? sessionsById.get(message.fromSessionId) ?? message.fromSessionId.slice(0, 8) : '你',
-      toNames: [recipient], status: message.status,
+      toNames: [recipient], status: message.status, responseKind: message.responseKind, task: message.task, failureReason: message.failureReason,
     });
   }
-  return [...grouped.values()].sort((a, b) => a.createdAt - b.createdAt);
+  return [...grouped.values()].sort((a, b) => b.createdAt - a.createdAt);
 }
 
 function SearchTab({ onClose, onNewSession, setError }: { onClose: () => void; onNewSession: AgentOperationsPanelProps['onNewSession']; setError: (value: string | null) => void }) {

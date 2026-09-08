@@ -1,4 +1,5 @@
 import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
+import { secureSocket } from '../federation/browserIntegration';
 import { clearPreviewResourceCache, fetchPreviewResource } from '../utils/previewResourceCache';
 import type {
   TerminalSession,
@@ -601,7 +602,7 @@ export function connectTerminalStream(
     }
 
     const url = getWebSocketUrl(sessionId, lastSeq, streamEpoch, options.getDimensions?.());
-    const ws = new WebSocket(url);
+    const ws = secureSocket(url);
     handlingError = false; // reset for new connection attempt
 
     retryState.connectionTimeoutId = setTimeout(() => {
@@ -2776,68 +2777,9 @@ export async function uploadFiles(
   }
   const url = `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}`;
   const csrfTokenHeader = await getCsrfToken();
-  if (onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      const handleSignalAbort = () => xhr.abort();
-      const cleanup = () => signal?.removeEventListener('abort', handleSignalAbort);
-      const rejectWithResponseError = () => {
-        let message = 'Upload failed';
-        try {
-          const payload = JSON.parse(xhr.responseText) as { error?: string };
-          message = payload.error || message;
-        } catch {
-          // Keep the generic error when the response is not JSON.
-        }
-        reject(new Error(message));
-      };
-
-      xhr.open('POST', url);
-      xhr.setRequestHeader('X-XSRF-TOKEN', csrfTokenHeader);
-      xhr.timeout = 120_000;
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable && event.total > 0) {
-          onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
-        }
-      };
-      xhr.onload = () => {
-        cleanup();
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            onProgress(100);
-            resolve(JSON.parse(xhr.responseText) as { files: { name: string; path: string; size: number }[] });
-          } catch {
-            reject(new Error('Upload returned an invalid response'));
-          }
-          return;
-        }
-        if (xhr.status === 401) {
-          csrfToken = null;
-          window.dispatchEvent(new CustomEvent(AUTH_UNAUTHORIZED_EVENT));
-        }
-        rejectWithResponseError();
-      };
-      xhr.onerror = () => {
-        cleanup();
-        reject(new Error('Upload failed'));
-      };
-      xhr.ontimeout = () => {
-        cleanup();
-        reject(new Error('Upload timed out'));
-      };
-      xhr.onabort = () => {
-        cleanup();
-        reject(new DOMException('Upload aborted', 'AbortError'));
-      };
-      signal?.addEventListener('abort', handleSignalAbort, { once: true });
-      if (signal?.aborted) {
-        xhr.abort();
-        return;
-      }
-      onProgress(0);
-      xhr.send(formData);
-    });
-  }
+  // Use the encrypted fetch transport even before a Service Worker controls this
+  // page. Native XHR would transmit file bytes outside the end-to-end channel.
+  onProgress?.(0);
   const response = await fetchWithTimeout(
     url,
     { method: 'POST', headers: { 'X-XSRF-TOKEN': csrfTokenHeader }, body: formData, signal },
@@ -2848,7 +2790,9 @@ export async function uploadFiles(
     const error = await response.json().catch(() => ({ error: 'Upload failed' }));
     throw new Error(error.error || 'Upload failed');
   }
-  return response.json();
+  const result = await response.json();
+  onProgress?.(100);
+  return result;
 }
 
 export async function getLocalFileBrowserAvailability(signal?: AbortSignal): Promise<{ available: boolean; platform?: string }> {
@@ -3690,7 +3634,12 @@ export interface CollaborationMessage {
   content: string;
   threadId: string;
   replyTo: string | null;
-  status: 'pending' | 'delivered' | 'read';
+  status: 'pending' | 'delivered' | 'read' | 'failed' | 'expired';
+  responseKind?: 'ack' | 'progress' | 'result';
+  failureReason?: string | null;
+  metadata?: Record<string, unknown>;
+  task?: { task_id: string; status: 'ack' | 'working' | 'blocked' | 'complete' | 'failed'; progress?: number; evidence?: unknown; blocker?: string };
+  sequence?: number;
   createdAt: number;
   deliveredAt: number | null;
   readAt: number | null;

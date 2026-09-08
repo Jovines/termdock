@@ -1,0 +1,17 @@
+sequenceDiagram
+    participant P as 手机 PWA
+    participant B as B 入口
+    participant A as A 中继
+    participant C as C 目标
+    Note over A,C: A 已主动连接 B、C，并登记获授权的路由
+    P->>B: 请求到 C 的通道
+    B->>A: 通过已有连接请求转发
+    A->>C: 请求建立通道
+    Note over P,C: P 与 C 经中继完成身份验证、加密握手和权限检查
+    P->>B: 加密的 Session 打开请求
+    B->>A: 转发密文
+    A->>C: 转发密文
+    C-->>A: 加密画面及输出
+    A-->>B: 转发密文
+    B-->>P: 转发密文
+    Note over P,C: 获准的终端输入沿同一路径发送；断线输入不自动重放

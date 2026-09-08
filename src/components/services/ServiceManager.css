@@ -1,0 +1,46 @@
+.service-manager { font-family: var(--font-sans); color: var(--foreground); font-size: 14px; min-width: 0; }
+.service-manager button, .service-manager input { font: inherit; box-sizing: border-box; -webkit-appearance: none; appearance: none; }
+.service-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+.service-heading h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.service-list { display: flex; flex-direction: column; }
+.service-row { display: flex; align-items: center; min-width: 0; padding: 6px 0; }
+.service-row + .service-row { border-top: 1px solid var(--border); }
+.service-row-open { display: flex; gap: 12px; align-items: center; flex: 1; min-width: 0; border: 0; border-radius: 10px; background: transparent; color: inherit; padding: 8px 4px 8px 0; text-align: left; cursor: pointer; }
+.service-row-open:not(:disabled):hover { background: var(--surface-2); }
+.service-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 40px; height: 40px; border-radius: 12px; background: var(--surface-2); color: var(--muted-foreground); }
+.service-row-copy { min-width: 0; flex: 1; }
+.service-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.service-description { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted-foreground); }
+.service-muted, .service-help { color: var(--muted-foreground); }
+.service-selected { color: var(--primary); }
+.service-icon-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-height: 44px; width: 44px; border: 0; border-radius: 10px; color: var(--muted-foreground); background: transparent; cursor: pointer; }
+.service-icon-button:hover { background: var(--surface-2); color: var(--foreground); }
+.service-actions { display: grid; gap: 8px; margin-top: 20px; }
+.service-actions-pair { grid-template-columns: 1fr 1fr; }
+.service-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; width: 100%; border: 1px solid transparent; border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+.service-button:disabled, .service-icon-button:disabled { opacity: .5; cursor: default; }
+.service-secondary { background: transparent; color: var(--foreground); border-color: var(--border); }
+.service-secondary:hover { background: var(--surface-2); }
+.service-primary { background: var(--primary); color: var(--primary-foreground); }
+.service-primary:hover { opacity: .9; }
+.service-danger { color: var(--destructive); background: transparent; }
+.service-danger:hover { background: var(--surface-2); }
+.service-form { display: flex; flex-direction: column; gap: 16px; }
+.service-field { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.service-field input { min-width: 0; width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground); font-size: 16px; }
+.service-field input:focus { border-color: var(--primary); }
+.service-help, .service-address, .service-feedback, .service-empty { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
+.service-address { overflow-wrap: anywhere; }
+.service-empty { padding: 20px 0; }
+.service-feedback { display: flex; align-items: center; gap: 8px; padding: 20px 0; }
+.service-error { margin: 16px 0 0; font-size: 13px; line-height: 1.6; color: var(--destructive); }
+.service-remove { border-top: 1px solid var(--border); padding-top: 12px; }
+.service-spinning { animation: service-spin 1s linear infinite; }
+@keyframes service-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .service-spinning { animation: none; } }
+@media (min-width: 640px) { .service-field input { font-size: 14px; } }
+.service-route-item { padding: 12px 0; }
+.service-route-item + .service-route-item { border-top: 1px solid var(--border); }
+.service-route-line { display: flex; align-items: center; gap: 12px; }
+.service-route-line .service-name { flex: 1; min-width: 0; }
+.service-full-width { width: 100%; }

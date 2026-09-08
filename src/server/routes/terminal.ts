@@ -97,6 +97,8 @@ import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
+import { collaborationRoutes } from '../agent/collaborationRoutes.js';
+import { COLLAB_LIMITS, extrasFromBody, type MessageFragment, type TransportDiagnostic } from '../agent/collaborationProtocol.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from '../agent/collaborationStore.js';
 import { formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
@@ -1785,7 +1787,7 @@ async function openInventorySession(
   };
 }
 
-interface OrchestrationSessionSnapshot {
+interface OrchestrationSessionSnapshot extends ReturnType<CollaborationStore['sessionFacts']> {
   sessionId: string;
   agentNativeSessionId: string | null;
   backendSessionId: string | null;
@@ -1803,6 +1805,7 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
   const agent = backend?.agent ?? (record.agentResume?.slug ? agentBySlug(record.agentResume.slug) : null);
   const latestPrompt = backend?.autoTitlePromptPayloads.at(-1)?.trim() ?? '';
   return {
+    ...collaborationStore.sessionFacts(record.sessionId, Boolean(backend), backend?.agentSession?.status),
     sessionId: record.sessionId,
     agentNativeSessionId: backend?.agentSession?.sessionId ?? record.agentResume?.sessionId ?? null,
     backendSessionId: record.backendSessionId ?? null,
@@ -1897,14 +1900,14 @@ function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId
 
 function collaborationRemoteSessions() {
   return Array.from(new Map(collaborationStore.list().flatMap((group) => group.remoteSessions ?? [])
-    .map((session) => [session.sessionId, { ...session, status: session.serviceConnected !== true || Date.now() - (session.serviceCheckedAt ?? 0) > 15_000 ? 'service-unreachable' : session.status, name: `${session.name} · ${session.serviceLabel}` }])).values());
+    .map((session) => [session.sessionId, { ...session, ...collaborationStore.sessionFacts(session.sessionId, session.serviceConnected === true && Date.now() - (session.serviceCheckedAt ?? 0) <= 15_000, session.status), status: session.serviceConnected !== true || Date.now() - (session.serviceCheckedAt ?? 0) > 15_000 ? 'service-unreachable' : session.status, name: `${session.name} · ${session.serviceLabel}` }])).values());
 }
 
 function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number; serviceUnavailable?: boolean; reason?: string } {
   const remote = collaborationRemoteSessions().find((session) => session.sessionId === frontendSessionId);
   if (remote) {
     const unavailable = remote.serviceConnected !== true || Date.now() - (remote.serviceCheckedAt ?? 0) > 15_000;
-    return { delivered: [], pending: collaborationStore.inbox(frontendSessionId, { pendingOnly: true }).length,
+    return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId),
       serviceUnavailable: unavailable, reason: unavailable
         ? `服务 ${remote.serviceLabel} 不可达：消息尚未送达，仅保存在待发送队列；请勿等待对方已收到的回复，服务重连且 Mac 客户端运行后重试投递。`
         : '跨服务消息尚未确认送达，正在等待 Mac 客户端转发。' };
@@ -1931,9 +1934,20 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
       };
     })],
   });
-  session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
+  try {
+    session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
+  } catch (error) {
+    for (const message of pending) collaborationStore.recordTransport(message.id, {
+      relay_online: null, peer_reachable: true, attempt_count: (collaborationStore.diagnostic(message.id)?.attempt_count ?? 0) + 1,
+      next_retry_at: Date.now() + 2_000, last_error: `PTY_WRITE_FAILED: ${getErrorMessage(error)}`, checked_at: Date.now(),
+    });
+    setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 2_000).unref?.();
+    return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId), reason: '终端写入失败，消息已保留并等待重试' };
+  }
   collaborationStore.markDelivered(pending.map((message) => message.id));
-  return { delivered: pending.map((message) => message.id), pending: 0 };
+  const remaining = collaborationStore.pendingCount(frontendSessionId);
+  if (remaining) setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 300).unref?.();
+  return { delivered: pending.map((message) => message.id), pending: remaining };
 }
 
 async function refreshCollaborationAgentIdentity(
@@ -6093,7 +6107,7 @@ router.delete('/operations/automations/:automationId', (req, res) => {
 // Authenticated desktop connections exchange only collaboration data; no peer credentials
 // or arbitrary remote URLs are accepted by the server.
 router.get('/operations/collaboration-federation', (_req, res) => {
-  res.json({ ...collaborationStore.federationSnapshot(),
+  res.json({ protocolVersion: 2, limits: COLLAB_LIMITS, ...collaborationStore.federationSnapshot(),
     sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot) });
 });
 
@@ -6108,8 +6122,16 @@ router.post('/operations/collaboration-federation', (req, res) => {
     }
     collaborationStore.mergeFederatedGroup(group);
     collaborationStore.mergeFederatedMessages(Array.isArray(req.body.messages) ? req.body.messages : []);
+    const fragments = Array.isArray(req.body.fragments) ? req.body.fragments as MessageFragment[] : [];
+    if (fragments.length > 25 || fragments.some((fragment) => fragment.group_id !== group.id)) throw new Error('无效消息分片');
+    const fragmentReceipts = fragments.map((fragment) => collaborationStore.acceptFragment(fragment));
+    for (const entry of Array.isArray(req.body.transport) ? req.body.transport as Array<{ message_id: string; diagnostic: TransportDiagnostic; failure_reason?: string }> : []) {
+      if (collaborationStore.getMessage(entry.message_id)?.groupId !== group.id || !entry.diagnostic || !Number.isFinite(entry.diagnostic.checked_at) || !Number.isInteger(entry.diagnostic.attempt_count) || entry.diagnostic.attempt_count < 0) continue;
+      collaborationStore.recordTransport(entry.message_id, entry.diagnostic);
+      if (entry.failure_reason) collaborationStore.fail(entry.message_id, entry.failure_reason);
+    }
     for (const id of group.sessionIds) if (localIds.has(id)) tryDeliverCollaborationInbox(id);
-    res.json(collaborationStore.federationSnapshot());
+    res.json({ protocolVersion: 2, ...collaborationStore.federationSnapshot(), fragmentReceipts });
   } catch (error) { res.status(400).json({ error: getErrorMessage(error) }); }
 });
 
@@ -6167,7 +6189,7 @@ router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => 
     if (!group) return res.status(404).json({ error: '协作组不存在' });
     const fromSessionId = resolveFrontendSessionId(req.body ?? {});
     const kind = typeof req.body?.kind === 'string' ? req.body.kind as CollaborationMessageKind : 'message';
-    const content = typeof req.body?.content === 'string' ? req.body.content.slice(0, 20_000) : '';
+    const content = typeof req.body?.content === 'string' ? req.body.content : '';
     const requestedTargets: string[] = Array.isArray(req.body?.toSessionIds)
       ? (req.body.toSessionIds as unknown[]).filter((id): id is string => typeof id === 'string')
       : [];
@@ -6175,6 +6197,7 @@ router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => 
       ? requestedTargets
       : group.sessionIds.filter((id) => id !== fromSessionId);
     const messages = collaborationStore.send({
+      ...extrasFromBody(req.body),
       groupId: group.id,
       fromSessionId,
       toSessionIds,
@@ -6187,7 +6210,7 @@ router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => 
       sessionId,
       ...tryDeliverCollaborationInbox(sessionId),
     }));
-    res.json({ messages, deliveries });
+    res.json({ messages: messages.map((message) => collaborationStore.getMessage(message.id)), deliveries });
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error) });
   }
@@ -6242,65 +6265,7 @@ router.post('/operations/orchestration/spawn', async (req, res) => {
   }
 });
 
-router.post('/operations/orchestration/send', (req, res) => {
-  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
-  const targetSessionId = typeof req.body?.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
-  const content = typeof req.body?.message === 'string' ? req.body.message.trim().slice(0, 20_000) : '';
-  if (!sourceSessionId) return res.status(400).json({ error: '无法识别发送会话；请从 Termdock 会话内运行 td collab' });
-  const group = collaborationStore.groupsForSession(sourceSessionId).find((candidate) => candidate.sessionIds.includes(targetSessionId));
-  if (!group) return res.status(400).json({ error: '发送方和接收方不在同一协作组' });
-  try {
-    const messages = collaborationStore.send({
-      groupId: group.id, fromSessionId: sourceSessionId, toSessionIds: [targetSessionId],
-      kind: typeof req.body?.kind === 'string' ? req.body.kind as CollaborationMessageKind : 'message',
-      content,
-    });
-    res.json({ ok: true, messages, delivery: tryDeliverCollaborationInbox(targetSessionId) });
-  } catch (error) {
-    res.status(400).json({ error: getErrorMessage(error) });
-  }
-});
-
-router.get('/operations/orchestration/inbox', (req, res) => {
-  const sessionId = resolveFrontendSessionId(req.query);
-  if (!sessionId) return res.status(404).json({ error: '会话不存在' });
-  const messages = collaborationStore.inbox(sessionId, { limit: Number(req.query.limit) || 50 });
-  if (req.query.markRead === 'true') collaborationStore.markRead(messages.map((message) => message.id));
-  const groups = collaborationStore.groupsForSession(sessionId);
-  const peerIds = new Set(groups.flatMap((group) => group.sessionIds).filter((id) => id !== sessionId));
-  res.json({
-    session: orchestrationSessionSnapshot(globalSessionState.sessions.find((record) => record.sessionId === sessionId)!),
-    groups,
-    peers: [...globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot), ...collaborationRemoteSessions().filter((record) => peerIds.has(record.sessionId))],
-    messages,
-  });
-});
-
-router.post('/operations/orchestration/reply', (req, res) => {
-  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
-  const messageId = typeof req.body?.messageId === 'string' ? req.body.messageId.trim() : '';
-  const content = typeof req.body?.content === 'string' ? req.body.content.trim().slice(0, 20_000) : '';
-  const original = collaborationStore.getMessage(messageId);
-  if (!sourceSessionId || !original || original.toSessionId !== sourceSessionId) {
-    return res.status(404).json({ error: '协作消息不存在或不属于当前会话' });
-  }
-  if (!original.fromSessionId) return res.status(400).json({ error: '这条用户消息无需回复到其他会话' });
-  try {
-    collaborationStore.markRead([original.id]);
-    const messages = collaborationStore.send({
-      groupId: original.groupId,
-      fromSessionId: sourceSessionId,
-      toSessionIds: [original.fromSessionId],
-      kind: 'reply',
-      content,
-      threadId: original.threadId,
-      replyTo: original.id,
-    });
-    res.json({ ok: true, messages, delivery: tryDeliverCollaborationInbox(original.fromSessionId) });
-  } catch (error) {
-    res.status(400).json({ error: getErrorMessage(error) });
-  }
-});
+router.use('/operations/orchestration', collaborationRoutes({ store: collaborationStore, resolveSession: resolveFrontendSessionId, deliver: tryDeliverCollaborationInbox }));
 
 router.get('/operations/session-search', (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q : '';
@@ -8194,6 +8159,8 @@ export function handleTerminalWebSocket(
       type: 'connected',
       streamEpoch: TERMINAL_STREAM_EPOCH,
       outputProtocol: options.flowControl ? 2 : undefined,
+      cols: session.cols,
+      rows: session.rows,
       runtime,
       ptyBackend: session.ptyBackend || 'unknown',
       mode: session.mode,

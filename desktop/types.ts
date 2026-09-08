@@ -3,6 +3,10 @@ export interface SavedConnection {
   label: string;
   url: string;
   lastConnectedAt?: number;
+  targetPeerId?: string;
+  serviceOrigin?: string;
+  entryServiceId?: string;
+  routes?: { url: string; targetPeerId: string }[];
 }
 
 export interface ServiceProbe {
@@ -115,6 +119,7 @@ export interface DesktopRuntimeUpdateState {
 }
 
 export interface DesktopConfig {
+  removedServiceKeys?: string[];
   version: 1;
   connections: SavedConnection[];
   lastConnectionUrl: string | null;

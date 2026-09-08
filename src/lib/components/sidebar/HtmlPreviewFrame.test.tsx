@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createRef } from 'react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFrame';
 
+vi.mock('../../federation/browserIntegration', () => ({ getActiveClient: async () => ({ fetch: vi.fn() }) }));
+vi.mock('../../federation/secureHtmlPreview', () => ({ prepareSecureHtmlPreview: async () => ({ html: '<!doctype html><p>Safe preview</p>', shellUrl: '/preview-shell.html#test', errors: [], attach: () => () => {}, dispose: () => {} }) }));
 afterEach(() => cleanup());
 
 function renderPreview() {
@@ -23,11 +25,14 @@ function renderPreview() {
 }
 
 describe('HtmlPreviewFrame', () => {
-  it('keeps the HTML document sandboxed and exposes the fullscreen action', () => {
+  it('keeps the HTML document sandboxed and exposes the fullscreen action', async () => {
     const { container } = renderPreview();
     const iframe = container.querySelector('iframe');
 
-    expect(iframe?.getAttribute('src')).toBe('/preview/index.html');
+    expect(iframe?.getAttribute('src')).toBeNull();
+    await waitFor(() => expect(iframe?.getAttribute('src')).toBe('/preview-shell.html#test'));
+    expect(iframe?.getAttribute('srcdoc')).toBeNull();
+    expect(iframe?.getAttribute('referrerpolicy')).toBe('no-referrer');
     expect(iframe?.getAttribute('sandbox')).toBe('allow-scripts');
     expect(iframe?.parentElement?.querySelector('button')).toBeNull();
   });

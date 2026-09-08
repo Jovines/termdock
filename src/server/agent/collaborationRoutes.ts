@@ -1,0 +1,84 @@
+import { Router, type Request, type Response } from 'express';
+import { CollaborationStore, type CollaborationMessageKind } from './collaborationStore.js';
+import { COLLAB_LIMITS, CollaborationError, extrasFromBody } from './collaborationProtocol.js';
+
+type Dependencies = {
+  store: CollaborationStore;
+  resolveSession: (input: Record<string, unknown>) => string | null;
+  deliver: (id: string) => unknown;
+};
+export function collaborationRoutes({ store, resolveSession, deliver }: Dependencies): Router {
+  const router = Router();
+  const run = (handler: (req: Request, res: Response, sessionId: string) => void) => (req: Request, res: Response) => {
+    try {
+      const sessionId = resolveSession((req.method === 'GET' ? req.query : req.body) ?? {});
+      if (!sessionId) throw new CollaborationError('SESSION_NOT_FOUND', 'Run inside a Termdock managed session', 404);
+      handler(req, res, sessionId);
+    } catch (error) {
+      res.status(error instanceof CollaborationError ? error.httpStatus : 400).json({ ok: false,
+        code: error instanceof CollaborationError ? error.code : 'COLLABORATION_ERROR', error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  const ownMessage = (id: string, sessionId: string, recipientOnly = false) => {
+    const message = store.getMessage(id);
+    if (!message || (message.toSessionId !== sessionId && (recipientOnly || message.fromSessionId !== sessionId))) throw new CollaborationError('MESSAGE_NOT_FOUND', 'Message does not belong to this session', 404);
+    return message;
+  };
+  const sent = (res: Response, ids: string[]) => {
+    const messages = ids.map((id) => store.getMessage(id)!);
+    const receipts = ids.map((id) => store.receipt(id));
+    res.json({ ok: true, ...receipts[0], messages, receipts });
+  };
+  router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, limits: COLLAB_LIMITS,
+    statuses: ['pending', 'delivered', 'read', 'failed', 'expired'], queued_status: 'pending',
+    semantics: { delivered: 'written to terminal; no application acknowledgement implied', read: 'explicit consumer acknowledgement',
+      ack: 'explicit response_kind=ack', result: 'explicit response_kind=result; inspect task.status and evidence',
+      done: 'adapter reports turn ended, never proof of task completion', heartbeat: 'null unless explicitly observed',
+      timeout: 'stops waiting, does not cancel delivery' } }); }));
+  router.post('/send', run((req, res, sessionId) => {
+    const target = typeof req.body.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
+    const groups = store.groupsForSession(sessionId).filter((group) => group.sessionIds.includes(target) && (!req.body.group_id || group.id === req.body.group_id));
+    if (!groups.length) throw new CollaborationError('GROUP_NOT_FOUND', 'Sender and recipient must share the specified group');
+    if (groups.length > 1 && !req.body.group_id) throw new CollaborationError('AMBIGUOUS_GROUP', 'Multiple shared groups; specify --group');
+    const messages = store.send({ ...extrasFromBody(req.body), groupId: groups[0].id, fromSessionId: sessionId, toSessionIds: [target],
+      kind: (req.body.kind ?? 'message') as CollaborationMessageKind, content: typeof req.body.message === 'string' ? req.body.message : '',
+      threadId: typeof req.body.thread_id === 'string' ? req.body.thread_id : undefined });
+    deliver(target);
+    sent(res, messages.map((message) => message.id));
+  }));
+  router.post('/reply', run((req, res, sessionId) => {
+    const original = ownMessage(String(req.body.messageId ?? ''), sessionId, true);
+    if (!original.fromSessionId) throw new CollaborationError('NO_REPLY_TARGET', 'User messages have no agent reply target');
+    const messages = store.send({ ...extrasFromBody(req.body), groupId: original.groupId, fromSessionId: sessionId,
+      toSessionIds: [original.fromSessionId], kind: 'reply', content: typeof req.body.content === 'string' ? req.body.content : '',
+      replyTo: original.id, threadId: original.threadId });
+    // Reply is explicit consumption; only mark after successful validation/persistence.
+    store.markRead([original.id]);
+    deliver(original.fromSessionId);
+    sent(res, messages.map((message) => message.id));
+  }));
+  router.get('/message/:id', run((req, res, sessionId) => {
+    const message = ownMessage(String(req.params.id), sessionId);
+    res.json({ ok: true, ...store.receipt(message.id), ...(req.query.receipt_only === 'true' ? {} : { message }) });
+  }));
+  router.post('/message/:id/read', run((req, res, sessionId) => {
+    const message = ownMessage(String(req.params.id), sessionId, true);
+    store.markRead([message.id]);
+    res.json({ ok: true, ...store.receipt(message.id) });
+  }));
+  router.get('/inbox', run((req, res, sessionId) => {
+    const string = (key: string) => typeof req.query[key] === 'string' ? req.query[key] as string : undefined;
+    const sinceText = string('since');
+    const since = sinceText === undefined ? undefined : /^\d+$/.test(sinceText) ? Number(sinceText) : Date.parse(sinceText);
+    if (since !== undefined && !Number.isFinite(since)) throw new CollaborationError('INVALID_SINCE', 'since must be an ISO timestamp or epoch milliseconds');
+    const page = store.page(sessionId, { unread: string('unread') === 'true', since, afterId: string('after_id'), cursor: string('cursor'),
+      consumer: string('consumer'), limit: string('limit') ? Number(string('limit')) : undefined,
+      from: string('from'), group: string('group'), thread: string('thread'), kind: string('kind'), responseKind: string('response_kind'), order: string('order') });
+    res.json({ ok: true, ...page });
+  }));
+  router.post('/cursor/commit', run((req, res, sessionId) => {
+    store.commitCursor(sessionId, String(req.body.cursor ?? ''), String(req.body.consumer ?? ''));
+    res.json({ ok: true, consumer: req.body.consumer, cursor: req.body.cursor });
+  }));
+  return router;
+}

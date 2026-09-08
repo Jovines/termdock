@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { isEncryptedRequest } from '../federation/requestContext.js';
 import type { Request, Response, NextFunction } from 'express';
 import { getCookieSecurityOptions } from './cookieSecurity.js';
 
@@ -93,6 +94,7 @@ export class CsrfProtection {
     */
   verifyMiddleware(options?: { bypass?: (req: Request) => boolean }) {
      return (req: Request, res: Response, next: NextFunction) => {
+       if (isEncryptedRequest(req)) return next();
        if (options?.bypass?.(req)) {
          return next();
        }

@@ -32,9 +32,14 @@ export const securityHeaders: RequestHandler = (req, res, next) => {
   // Enforce sandbox even for top-level navigation to user-controlled HTML/SVG.
   // allow-same-origin must NEVER be added: that would expose the terminal API.
   const preview = /^\/api\/terminal\/fs(?:\/|$)/i.test(req.path);
-  res.setHeader('Content-Security-Policy', preview
+  const host = req.get('host') ?? '';
+  const shellSource = /^[a-z0-9.\-:\[\]]+$/i.test(host) ? `http://${host}/preview-shell.html https://${host}/preview-shell.html` : "'none'";
+  const shell = req.path === '/preview-shell.html';
+  res.setHeader('Content-Security-Policy', shell
+    ? "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' blob: https: http:; style-src 'unsafe-inline' blob: https:; img-src blob: data: https:; font-src blob: data: https:; media-src blob: data: https:; connect-src https:; frame-src 'none'; frame-ancestors 'self'; object-src 'none'; base-uri https://termdock-preview.invalid; form-action 'none'"
+    : preview
     ? "sandbox allow-scripts; frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
-    : "script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; worker-src 'self' blob:; frame-ancestors 'self'; object-src 'none'; base-uri 'self'");
+    : `script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; worker-src 'self' blob:; frame-src ${shellSource}; frame-ancestors 'self'; object-src 'none'; base-uri 'self'`);
   if (getPublicOrigin()) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     if (!isAuthEnabled()) {

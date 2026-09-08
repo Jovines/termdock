@@ -1,7 +1,14 @@
+import { createOpenAccessRouter } from './federation/openAccess.js';
+import { createPasswordLoginRouter } from './federation/passwordLoginRoutes.js';
 import { apiAccessGate, isTrustedLocalRequest } from './utils/apiAccess.js';
+import { isEncryptedRequest } from './federation/requestContext.js';
+import { createFederationRuntime } from './federation/runtime.js';
+import { RouteAccess, type RoutePrincipal } from './federation/routeAccess.js';
+import { RouteInvitationStore } from './federation/routeInvitations.js';
+import { attachRegisteredDirectTargets, verifyDirectTarget } from './federation/directRoutes.js';
+import { secureChannelOriginAllowed } from './federation/originPolicy.js';
+import { RelayRouter } from './federation/relay.js';
 import { assertPublicSecurity, securityHeaders } from './utils/publicSecurity.js';
-import { guardWebSocketSession } from './utils/webSocketSecurity.js';
-import { readTerminalHandshakeDimensions } from './utils/terminalHandshakeDimensions.js';
 import { apiCachePolicy } from './utils/apiCachePolicy.js';
 import 'dotenv/config';
 import express from 'express';
@@ -25,7 +32,7 @@ import { createOnboardingRouter } from './routes/onboarding.js';
 import { createLocalRouter } from './routes/local.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
-import { isUpgradeRequestAuthenticated, requireAuth, renewSessionMiddleware } from './utils/authProtection.js';
+import { requireAuth, renewSessionMiddleware } from './utils/authProtection.js';
 import { localAccessManager, type LocalAccessState } from './utils/localAccess.js';
 import {
   isAllowedHost,
@@ -56,20 +63,6 @@ import { PORT, DEFAULT_HOST } from './config.js';
 
 const CLIENT_STATE_COOKIE = 'termdock-client';
 export const DEFAULT_PORT = PORT.backend;
-
-/** Read one cookie from a raw Cookie header (upgrade requests bypass the
- *  cookie-parser middleware). Values are percent-encoded. */
-function getCookieValue(cookieHeader: string | undefined, name: string): string | undefined {
-  if (!cookieHeader) return undefined;
-  const pattern = new RegExp(`(?:^|;\\s*)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=([^;]*)`);
-  const match = cookieHeader.match(pattern);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return match[1];
-  }
-}
 
 const CLIENT_LOG_DEDUP_WINDOW_MS = 5_000;
 const CLIENT_LOG_RATE_WINDOW_MS = 10_000;
@@ -120,6 +113,7 @@ export interface StartServerResult {
 }
 
 export interface AppOptions {
+  secureRequired?: boolean;
   port?: number;
   httpsCaPath?: string;
   localApiToken?: string;
@@ -191,6 +185,14 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use(securityHeaders);
 
   app.use(validateHostMiddleware);
+  if (options.secureRequired) app.use('/api/auth/open', createOpenAccessRouter(() => app.locals.passwordRuntime?.serviceId));
+  if (options.secureRequired) app.use('/api/auth/password', createPasswordLoginRouter(() => app.locals.passwordRuntime));
+
+  app.use('/api', (req, res, next) => {
+    if (!options.secureRequired || isEncryptedRequest(req) || isTrustedLocalRequest(req, options.localApiToken)) return next();
+    if (req.method === 'GET' && ['/meta', '/auth/status'].includes(req.path)) return next();
+    res.status(426).json({ error: 'Pair this device to use an encrypted connection', code: 'E2EE_REQUIRED' });
+  });
 
   // Authenticate before allocating request bodies, including future API routes.
   app.use(cookieParser());
@@ -461,12 +463,69 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   });
   runtimeMonitor.start();
   const app = createApp({
+    secureRequired: true,
     port: options.onboardingPort ?? port,
     httpsCaPath: options.httpsCaPath,
     localApiToken: options.localApiToken,
     runtimeMonitor,
   });
   const { server, scheme } = createServerForApp(app, options);
+  let entrySubjectAllowed = (_subjectId: string) => false;
+  let routeInvitations: RouteInvitationStore | undefined;
+  const routeAccess = new RouteAccess(path.join(homedir(), '.termdock', 'federation', 'routes.json'), Date.now,
+    (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true);
+  const relayRouter = new RelayRouter<RoutePrincipal>({
+    authenticate: context => context as RoutePrincipal,
+    allowRegister: (principal, serviceId) => routeAccess.allowRegister(principal, serviceId),
+    allowRoute: (principal, serviceId) => routeAccess.allowRoute(principal, serviceId),
+  });
+  const dynamicDirectTargets = new Map<string, () => void>();
+  server.once('close', () => { for (const close of dynamicDirectTargets.values()) close(); });
+  try {
+    const detachDirectTargets = attachRegisteredDirectTargets(relayRouter, routeAccess.configuredDirectTargets(), path.join(homedir(), '.termdock', 'federation'));
+    server.once('close', detachDirectTargets);
+  } catch { console.error('Configured direct routes unavailable; target access remains closed.'); }
+  server.once('close', () => relayRouter.close());
+  const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
+    terminal: handleTerminalWebSocket, control: handleControlWebSocket,
+  }, {
+    listRouteAccess: () => routeInvitations?.list() || [],
+    grantRouteAccess: async (issuerId, targetServiceId, subjectId, url) => {
+      if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
+      if (!routeAccess.hasConfiguredTarget(targetServiceId)) {
+        if (!url) throw new Error('ROUTE_TARGET_NOT_CONFIGURED');
+        const target = { serviceId: targetServiceId, url };
+        await verifyDirectTarget(target);
+        const runtime = await federation;
+        if (!runtime.store.authorize({ subjectId: issuerId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed) throw new Error('AUTHORIZATION_DENIED');
+        routeAccess.addDirectTarget(target);
+        if (!dynamicDirectTargets.has(targetServiceId)) dynamicDirectTargets.set(targetServiceId, attachRegisteredDirectTargets(relayRouter, [target]));
+      }
+      return routeInvitations.grant(issuerId, targetServiceId, subjectId);
+    },
+    revokeRouteAccess: id => routeInvitations?.revoke(id) || false,
+    issueRouteTicket: (subjectId: string, serviceId: string) => routeAccess.issueRouteTicket(subjectId, serviceId),
+    hasRouteGrant: (subjectId: string, serviceId: string) => routeInvitations?.allows(subjectId, serviceId) === true,
+    createRouteInvitation: (issuerId: string, serviceId: string) => {
+      if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
+      return routeInvitations.create(issuerId, serviceId);
+    },
+    consumeRouteInvitation: (code: string, subjectId: string) => {
+      if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
+      return routeInvitations.consume(code, subjectId);
+    },
+  });
+  void federation.then(runtime => {
+    app.locals.passwordRuntime = runtime;
+    entrySubjectAllowed = subjectId => runtime.store.authorize({ subjectId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed;
+    routeInvitations = new RouteInvitationStore({
+      filePath: path.join(homedir(), '.termdock', 'federation', 'route-invitations.json'), serviceId: runtime.serviceId,
+      issuerAllowed: subjectId => entrySubjectAllowed(subjectId),
+      targetAvailable: serviceId => routeAccess.hasConfiguredTarget(serviceId) && relayRouter.hasRoute(serviceId),
+    });
+  }).catch(() => console.error('Route invitations unavailable; uninitialized route grants remain denied.'));
+  void federation.catch(() => console.error('Encrypted access initialization failed; business access remains closed.'));
+  server.once('close', () => { void federation.then(runtime => runtime.close()).catch(() => {}); });
   server.headersTimeout = 10_000;
   server.requestTimeout = 120_000;
   server.keepAliveTimeout = 5_000;
@@ -535,15 +594,13 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     },
   });
 
-  const WS_PATH_RE = /^\/api\/terminal\/([^/]+)\/ws$/;
-  const CONTROL_WS_PATH = '/api/control/ws';
 
   server.on('upgrade', (request, socket, head) => {
     if (wss.clients.size >= 256) {
       socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       return;
     }
-    if (!isAllowedHost(request.headers.host) || !isUpgradeOriginAllowed(request.headers.origin, request.headers.host)) {
+    if (!isAllowedHost(request.headers.host)) {
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
@@ -557,46 +614,35 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       return;
     }
     const pathname = url.pathname;
-
-    // Reject the upgrade before the WebSocket handshake completes if auth
-    // is enabled and the client cookie is missing/expired. We respond with
-    // a real HTTP 401 so the browser surfaces a useful error. Applied to
-    // both per-terminal and control paths.
-    const cookieHeader = request.headers.cookie;
-    if (!isUpgradeRequestAuthenticated(typeof cookieHeader === 'string' ? cookieHeader : undefined)) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
-      socket.destroy();
+    if (pathname === '/api/federation/relay') {
+      // Native relay peers have no Origin. Authenticate explicitly before upgrade.
+      if (scheme !== 'https' || (request.headers.origin && !isUpgradeOriginAllowed(request.headers.origin, request.headers.host))) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
+      }
+      const principal = routeAccess.authenticate(request.headers.authorization, url.searchParams.get('routeToken'));
+      if (!principal) { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return; }
+      wss.handleUpgrade(request, socket, head, ws => {
+        void relayRouter.attach(ws, principal).then(attached => { if (attached) ws.send(JSON.stringify({ type: 'ready' })); });
+      });
       return;
     }
-
-    // Control WS: server-pushed global client-state events. One per browser.
-    if (pathname === CONTROL_WS_PATH) {
-      const clientId = crypto.randomUUID();
+    if (pathname === '/api/federation/secure') {
+      // This exception applies only to the cookie-independent Noise handshake.
+      // Target pinning and device authorization remain mandatory inside it.
+      if (!secureChannelOriginAllowed(request.headers.origin, () => isUpgradeOriginAllowed(request.headers.origin, request.headers.host))) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
+      }
       wss.handleUpgrade(request, socket, head, (ws) => {
-        handleControlWebSocket(ws, clientId);
-        guardWebSocketSession(ws, cookieHeader);
+        void federation.then(runtime => runtime.accept(ws, { allowOpenAccess: !!request.headers.origin && isUpgradeOriginAllowed(request.headers.origin, request.headers.host) })).catch(() => ws.close(1011, 'Encrypted access unavailable'));
       });
       return;
     }
 
-    // Per-terminal WS: bidirectional I/O for a single terminal session.
-    const match = pathname.match(WS_PATH_RE);
-    if (!match) {
-      socket.destroy();
-      return;
-    }
+    // Business WebSockets have no plaintext fallback after pairing migration.
+    socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n');
+    return;
 
-    const sessionId = match[1];
-    const clientId = crypto.randomUUID();
-    const pushClientId = getCookieValue(cookieHeader, CLIENT_STATE_COOKIE);
-    // 短线重连时客户端会带上 ?since=<lastSeq>，让服务端只补发增量。
-    const sinceParam = url.searchParams.get('since');
-    const sinceSeq = sinceParam ? Math.max(0, Number.parseInt(sinceParam, 10) || 0) : 0;
 
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      handleTerminalWebSocket(ws, sessionId, clientId, { sinceSeq, pushClientId, streamEpoch: url.searchParams.get('epoch') ?? undefined, flowControl: url.searchParams.get('flow') === '2', independentTmux: url.searchParams.get('transport') === 'tmux-client', outputActive: url.searchParams.get('active') !== '0' }, readTerminalHandshakeDimensions(url.searchParams));
-      guardWebSocketSession(ws, cookieHeader);
-    });
   });
 
   server.listen(port, host, () => {

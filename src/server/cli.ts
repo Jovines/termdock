@@ -14,6 +14,13 @@ import { resolve } from 'path';
 loadDotenv({ path: resolve(os.homedir(), '.termdock', '.env'), quiet: true });
 loadDotenv({ path: resolve(process.cwd(), '.env'), quiet: true });
 
+// Federation commands run before normal server/terminal CLI initialization.
+if (process.argv.slice(2).some(arg => arg === '--federation-pairing' || arg === '--federation-relay')) {
+  const { runFederationCli } = await import('./federation/cli.js');
+  process.exit(await runFederationCli(process.argv.slice(2)));
+}
+
+import { parseCollaborationCommand, executeCollaborationCommand, COLLAB_HELP, type CollaborationCommand } from './agent/collaborationCli.js';
 import fs from 'fs';
 import http from 'http';
 import https from 'https';
@@ -162,18 +169,7 @@ interface CliOptions {
   pluginHooks?: { slug: string; action: 'install' | 'uninstall' };
   pluginRemove?: string;
   agentEvent?: { slug: string; event: string; status?: string };
-  collab?: {
-    action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn';
-    target?: string;
-    message?: string;
-    groupId?: string;
-    sessionId?: string;
-    agentSlug?: string;
-    name?: string;
-    cwd?: string;
-    task?: string;
-    json: boolean;
-  };
+  collab?: CollaborationCommand;
 }
 
 interface ServerState {
@@ -285,7 +281,7 @@ Short commands:
                      Emit one lifecycle/status event from an Agent hook.
   pi                 Same as agent-plugin
   collab status      Show this Session's collaboration groups and peers
-  collab inbox       Read and acknowledge collaboration messages
+  collab inbox       Read messages without acknowledging (see collab --help)
   collab send <session-id> <message>
                      Send a durable message to a related Session
   collab handoff <session-id> <summary>
@@ -769,51 +765,8 @@ function parseArgs(argv: string[]): CliOptions {
         process.exit(1);
       }
     } else if (command === 'collab') {
-      const action = (next || 'status') as NonNullable<CliOptions['collab']>['action'];
-      const json = argv.includes('--json');
-      if (action === 'status' || action === 'inbox') {
-        collab = { action, json };
-      } else if (action === 'send' || action === 'handoff' || action === 'reply') {
-        const target = argv[2];
-        const message = argv.slice(3).filter((part) => part !== '--json').join(' ').trim();
-        if (!target || !message) {
-          console.error(`${ICON.err} ${c.red(`Usage: td collab ${action} <${action === 'reply' ? 'message-id' : 'session-id'}> <message>`)}`);
-          process.exit(1);
-        }
-        collab = { action, target, message, json };
-      } else if (action === 'add' || action === 'remove') {
-        const groupId = argv[2];
-        const sessionId = argv[3];
-        if (!groupId || !sessionId || groupId.startsWith('-') || sessionId.startsWith('-')) {
-          console.error(`${ICON.err} ${c.red(`Usage: td collab ${action} <group-id> <session-id>`)}`);
-          process.exit(1);
-        }
-        collab = { action, groupId, sessionId, json };
-      } else if (action === 'spawn') {
-        const groupId = argv[2];
-        const agentSlug = argv[3];
-        const optionValue = (flag: string): string | undefined => {
-          const index = argv.indexOf(flag);
-          const value = index >= 0 ? argv[index + 1] : undefined;
-          return value && !value.startsWith('--') ? value : undefined;
-        };
-        if (!groupId || !agentSlug || groupId.startsWith('-') || agentSlug.startsWith('-')) {
-          console.error(`${ICON.err} ${c.red('Usage: td collab spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]')}`);
-          process.exit(1);
-        }
-        collab = {
-          action,
-          groupId,
-          agentSlug,
-          name: optionValue('--name'),
-          cwd: optionValue('--cwd'),
-          task: optionValue('--task'),
-          json,
-        };
-      } else {
-        console.error(`${ICON.err} ${c.red('Usage: td collab <status|inbox|send|handoff|reply|add|remove|spawn>')}`);
-        process.exit(1);
-      }
+      try { collab = parseCollaborationCommand(argv.slice(1)); }
+      catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: error instanceof Error ? error.message : String(error) })); process.exit(1); }
       argv = [];
     } else if (command === 'pcreate' || command === 'plugin-create') {
       if (next && !next.startsWith('-')) {
@@ -1329,7 +1282,7 @@ async function readStdinText(): Promise<string> {
   });
 }
 
-async function postLocalJson(baseUrl: string, token: string, endpoint: string, payload: unknown): Promise<{ statusCode: number; body: string }> {
+async function postLocalJson(baseUrl: string, token: string, endpoint: string, payload: unknown, timeoutMs = 30_000): Promise<{ statusCode: number; body: string }> {
   const url = new URL(endpoint, baseUrl);
   const body = JSON.stringify(payload);
   const isHttps = url.protocol === 'https:';
@@ -1355,13 +1308,15 @@ async function postLocalJson(baseUrl: string, token: string, endpoint: string, p
       res.on('data', (chunk) => { responseBody += chunk; });
       res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: responseBody }));
     });
+    const timer = setTimeout(() => req.destroy(new Error('Local collaboration request timed out')), timeoutMs);
+    req.on('close', () => clearTimeout(timer));
     req.on('error', reject);
     req.write(body);
     req.end();
   });
 }
 
-async function getLocalJson(baseUrl: string, token: string, endpoint: string): Promise<{ statusCode: number; body: string }> {
+async function getLocalJson(baseUrl: string, token: string, endpoint: string, timeoutMs = 30_000): Promise<{ statusCode: number; body: string }> {
   const url = new URL(endpoint, baseUrl);
   const isHttps = url.protocol === 'https:';
   const requestImpl = isHttps ? https.request : http.request;
@@ -1384,15 +1339,18 @@ async function getLocalJson(baseUrl: string, token: string, endpoint: string): P
       res.on('data', (chunk) => { responseBody += chunk; });
       res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: responseBody }));
     });
+    const timer = setTimeout(() => req.destroy(new Error('Local collaboration request timed out')), timeoutMs);
+    req.on('close', () => clearTimeout(timer));
     req.on('error', reject);
     req.end();
   });
 }
 
 async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<void> {
+  if (command.action === 'help') { console.log(COLLAB_HELP); return; }
   const runningState = getRunningState();
   if (!runningState?.localApiToken) {
-    console.error(`${ICON.err} ${c.red('Termdock is not running or its local API token is unavailable.')}`);
+    console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running or its local API token is unavailable.' }));
     process.exit(1);
   }
   const backendSessionId = process.env.TERMDOCK_BACKEND_SESSION_ID?.trim() || null;
@@ -1411,119 +1369,18 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
     }
   }
   if (!backendSessionId && !tmuxSessionName) {
-    console.error(`${ICON.err} ${c.red('td collab must run inside a Termdock-managed Session.')}`);
+    console.error(JSON.stringify({ ok: false, code: 'SESSION_NOT_FOUND', error: 'td collab must run inside a Termdock-managed Session.' }));
     process.exit(1);
   }
   const context = backendSessionId ? { backendSessionId } : { tmuxSessionName };
-  const contextQuery = new URLSearchParams(
-    Object.entries(context).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
-  ).toString();
   const baseUrl = runningState.localUrl
     ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
-  let response: { statusCode: number; body: string };
-  if (command.action === 'status') {
-    response = await getLocalJson(baseUrl, runningState.localApiToken,
-      `/api/terminal/operations/orchestration/peers?${contextQuery}`);
-  } else if (command.action === 'inbox') {
-    response = await getLocalJson(baseUrl, runningState.localApiToken,
-      `/api/terminal/operations/orchestration/inbox?${contextQuery}&markRead=true`);
-  } else if (command.action === 'reply') {
-    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/reply', {
-      ...context,
-      messageId: command.target,
-      content: command.message,
-    });
-  } else if (command.action === 'add' || command.action === 'remove') {
-    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/members', {
-      ...context,
-      groupId: command.groupId,
-      targetSessionId: command.sessionId,
-      action: command.action,
-    });
-  } else if (command.action === 'spawn') {
-    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/spawn', {
-      ...context,
-      groupId: command.groupId,
-      agentSlug: command.agentSlug,
-      name: command.name,
-      cwd: command.cwd,
-      task: command.task,
-    });
-  } else {
-    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/send', {
-      ...context,
-      targetSessionId: command.target,
-      message: command.message,
-      kind: command.action === 'handoff' ? 'handoff' : 'message',
-    });
-  }
-  let body: Record<string, unknown> = {};
-  try { body = JSON.parse(response.body || '{}') as Record<string, unknown>; } catch { /* handled below */ }
-  if (response.statusCode < 200 || response.statusCode >= 300) {
-    console.error(`${ICON.err} ${c.red(typeof body.error === 'string' ? body.error : 'Collaboration request failed')}`);
-    process.exit(1);
-  }
-  if (command.json) {
-    console.log(JSON.stringify(body, null, 2));
-    return;
-  }
-  if (command.action === 'status') {
-    const groups = Array.isArray(body.groups) ? body.groups as Array<{ id?: string; name?: string; sessionIds?: string[] }> : [];
-    const peers = Array.isArray(body.peers) ? body.peers as Array<{ sessionId?: string; name?: string; status?: string; currentTask?: string; capability?: string }> : [];
-    const sessions = Array.isArray(body.sessions) ? body.sessions as Array<{ sessionId?: string; name?: string; status?: string; cwd?: string }> : [];
-    const agents = Array.isArray(body.agents) ? body.agents as Array<{ slug?: string; displayName?: string }> : [];
-    console.log(`${ICON.ok} ${c.green(`Collaboration: ${groups.length} group(s), ${peers.length} peer(s)`)}`);
-    for (const group of groups) {
-      console.log(`  ${c.green(group.name ?? 'Group')} ${c.dim(`[${group.id ?? ''}]`)}`);
-      if (group.sessionIds?.length) console.log(`    ${c.dim(`${group.sessionIds.length} member(s)`)}`);
-    }
-    if (peers.length > 0) console.log(`\n${c.dim('Current group peers:')}`);
-    for (const peer of peers) {
-      console.log(`  ${c.cyan(peer.name ?? peer.sessionId ?? 'Session')} ${c.dim(`[${peer.sessionId ?? ''}]`)}`);
-      console.log(`    ${peer.status ?? 'offline'} · ${peer.capability ?? ''}`);
-      if (peer.currentTask) console.log(`    ${c.dim(peer.currentTask)}`);
-    }
-    for (const group of groups) {
-      const memberIds = new Set(group.sessionIds ?? []);
-      const candidates = sessions.filter((session) => session.sessionId && !memberIds.has(session.sessionId));
-      if (candidates.length > 0) {
-        console.log(`\n${c.dim(`Sessions available to add to ${group.name ?? 'group'} [${group.id ?? ''}]:`)}`);
-        for (const session of candidates) {
-          console.log(`  ${session.name ?? 'Session'} ${c.dim(`[${session.sessionId ?? ''}]`)} · ${session.status ?? 'offline'}`);
-          if (session.cwd) console.log(`    ${c.dim(session.cwd)}`);
-        }
-      }
-    }
-    if (agents.length > 0) {
-      console.log(`\n${c.dim('Agent types available to spawn:')}`);
-      for (const agent of agents) console.log(`  ${agent.displayName ?? agent.slug ?? 'Agent'} ${c.dim(`[${agent.slug ?? ''}]`)}`);
-    }
-    return;
-  }
-  if (command.action === 'inbox') {
-    const messages = Array.isArray(body.messages) ? body.messages as Array<{ id?: string; kind?: string; content?: string; fromSessionId?: string; createdAt?: number }> : [];
-    if (messages.length === 0) {
-      console.log(`${ICON.ok} ${c.dim('Collaboration inbox is empty.')}`);
-      return;
-    }
-    for (const message of messages) {
-      console.log(`${c.cyan(message.kind ?? 'message')} ${c.dim(`#${message.id ?? ''}`)} from ${message.fromSessionId ?? 'user'}`);
-      console.log(`  ${message.content ?? ''}`);
-    }
-    return;
-  }
-  const delivery = body.delivery as { pending?: number; reason?: string; serviceUnavailable?: boolean } | undefined;
-  if (delivery?.reason) {
-    console.log(`${delivery.serviceUnavailable ? '服务不可达' : '等待投递'}: ${delivery.reason}`);
-    return;
-  }
-  const success = command.action === 'reply' ? 'Reply sent.'
-    : command.action === 'handoff' ? 'Handoff sent.'
-      : command.action === 'add' ? 'Session added to collaboration group.'
-        : command.action === 'remove' ? 'Session removed from collaboration group.'
-          : command.action === 'spawn' ? 'Agent Session created and added to collaboration group.'
-            : 'Message sent.';
-  console.log(`${ICON.ok} ${c.green(success)}`);
+  process.exitCode = await executeCollaborationCommand(command,
+    Object.fromEntries(Object.entries(context).filter((entry): entry is [string, string] => typeof entry[1] === 'string')),
+    { request: (method, endpoint, body, timeout) => method === 'GET'
+        ? getLocalJson(baseUrl, runningState.localApiToken!, endpoint, timeout)
+        : postLocalJson(baseUrl, runningState.localApiToken!, endpoint, body, timeout),
+      write: (line) => console.log(line), stdin: readStdinText });
 }
 
 async function runInjectChangeAudit(source: string | true): Promise<void> {
@@ -3732,7 +3589,7 @@ async function main(): Promise<void> {
 
   if (options.collab) {
     await runCollab(options.collab);
-    process.exit(0);
+    return; // Preserve the receipt exit code and allow piped JSON output to drain.
   }
 
   if (options.pluginInit) {

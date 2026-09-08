@@ -27,6 +27,7 @@ export default defineConfig({
         'pwa-512x512.png',
         'maskable-icon-512x512.png',
         'sw-notifications.js',
+        'sw-secure-api.js',
         'robots.txt',
       ],
       manifest: {
@@ -71,7 +72,7 @@ export default defineConfig({
           'assets/index-*.css',
           'icons/agents/*.svg',
         ],
-        importScripts: ['sw-notifications.js'],
+        importScripts: ['sw-notifications.js', 'sw-secure-api.js'],
         // 关键：新 SW 安装完不要 wait，直接 activate；并立刻 claim 已打开的页面。
         // 这样以后无论 dev 还是 prod，用户刷新一次就能拿到最新代码，不再有
         // "PWA 缓存了旧 bundle 导致看不到新功能" 的窘境。

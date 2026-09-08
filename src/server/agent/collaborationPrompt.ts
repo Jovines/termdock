@@ -39,8 +39,12 @@ export function formatCollaborationDelivery(input: {
       `来自：${source}`,
       `协作组：${group}`,
       '--- 消息内容 ---',
-      message.content,
+      Buffer.byteLength(message.content) > 8_192
+        ? `大消息已完整保存（${Buffer.byteLength(message.content)} 字节）。使用 td collab message get ${message.id} --json 获取正文；不要把这条提示当作任务正文。`
+        : message.content,
       '--- 消息结束 ---',
+      ...(message.responseKind ? [`回复类型：${message.responseKind}（ack=收到，progress=进展，result=结果；结果不保证成功）`] : []),
+      ...(message.task ? [`任务上报：${JSON.stringify(message.task)}`] : []),
     ].join('\n');
   });
   const peerIds = Array.from(new Set(input.groups.flatMap((group) => group.sessionIds)))
@@ -70,7 +74,11 @@ export function formatCollaborationDelivery(input: {
     '- 加成员：`td collab add <协作组ID> <会话ID>`',
     '- 移成员：`td collab remove <协作组ID> <会话ID>`',
     '- 新建 Agent：`td collab spawn <协作组ID> <agent-slug> --name "名称" --task "初始任务"`',
-    '- 查看：`td collab status` / `td collab inbox`',
+    '- 查看：`td collab status` / `td collab inbox`；完整选项：`td collab --help`。默认 JSON，pending 只表示已入队。',
+    '- 确认投递：`td collab message get <消息ID> --receipt-only`；send/reply 可加 `--wait-until delivered --timeout 30s`。超时不会取消消息，重试使用同一 `--idempotency-key`。',
+    '- 只取新回复：`td collab inbox --consumer <名称> --limit 20`；处理完成后用返回的 next_cursor 执行 `td collab cursor commit <游标> --consumer <名称>`。需要明确标记读取时用 `td collab message read <消息ID>`。',
+    '- 回复应明确类型：reply 加 `--response-kind ack|progress|result`；可附 `--task-envelope` JSON（task_id、status、progress、evidence、blocker）。不要把 ACK 或 turn done 汇报为任务完成。',
+    '- Agent 状态与工具活动只作可选提示；任意接入方都可通过收件箱主动读取、确认和回复，无需专用 hooks。',
   ];
 
   return [

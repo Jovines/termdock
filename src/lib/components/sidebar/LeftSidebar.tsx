@@ -1,7 +1,10 @@
+import { openRemoteSession } from '../../federation/remoteSession';
+import { openServiceAccess } from '../../federation/accessEvents';
 import {
   X as RiCloseLine,
   Plus as RiAddLine,
   Settings as RiSettings4Line,
+  Server as RiServerLine,
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
   LoaderCircle as RiLoaderCircle,
@@ -1532,8 +1535,8 @@ export function LeftSidebar(
           key={remote.sessionId} type="button" title={`${remote.serviceLabel ?? remote.serviceOrigin} · ${remote.serviceConnected === false ? '服务不可达，消息尚未送达' : remote.status}`}
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
           onClick={() => {
-            void window.termdockDesktop?.collaborationFocus?.(remote.sessionId).then((focused) => {
-              if (!focused) { setAgentOperationsGroupId(collaboration.id); setAgentOperationsOpen(true); }
+            void openRemoteSession(remote.sessionId).catch(() => {
+              setAgentOperationsGroupId(collaboration.id); setAgentOperationsOpen(true);
             });
           }}>
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${remote.serviceConnected === false ? 'bg-muted-foreground' : 'bg-primary'}`} />
@@ -1739,6 +1742,10 @@ export function LeftSidebar(
                   <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); setAgentOperationsGroupId(null); setAgentOperationsOpen(true); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
                     <RiWorkflowLine size={14} className="text-muted-foreground" />
                     <span>Agent 工作台</span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); openServiceAccess(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
+                    <RiServerLine size={14} className="text-muted-foreground" />
+                    <span>服务与设备</span>
                   </button>
                   <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenSettings(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
                     <RiSettings4Line size={14} className="text-muted-foreground" />

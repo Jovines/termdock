@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
     ipcRenderer.invoke('desktop:set-floating-metric-count', count),
   disableFloatingWidget: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:disable-floating-widget'),
   startLocal: (): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:start-local'),
+  getLocalInvite: (): Promise<{ url: string; targetPeerId: string; pairingCode: string; serviceName: string } | null> => ipcRenderer.invoke('desktop:local-invite'),
   installCli: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:install-cli'),
   desktopUpdateState: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:update-state'),
   checkDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:check-update'),
@@ -94,6 +95,16 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
     const listener = (_event: Electron.IpcRendererEvent, services: DesktopServiceActivity[]) => callback(services);
     ipcRenderer.on('desktop:service-activity-changed', listener);
     return () => ipcRenderer.removeListener('desktop:service-activity-changed', listener);
+  },
+  serviceConnections: () => ipcRenderer.invoke('desktop:service-connections'),
+  saveServiceConnection: (connection: unknown) => ipcRenderer.invoke('desktop:save-service-connection', connection),
+  importServiceConnection: (connection: unknown) => ipcRenderer.invoke('desktop:import-service-connection', connection),
+  removeServiceConnection: (id: string) => ipcRenderer.invoke('desktop:remove-service-connection', id),
+  openServiceConnection: (connection: unknown, invitation?: string) => ipcRenderer.invoke('desktop:open-service-connection', connection, invitation),
+  getServiceConnection: () => ipcRenderer.invoke('desktop:current-service-connection'),
+  onServiceConnections: (callback: () => void): (() => void) => {
+    ipcRenderer.on('desktop:service-connections-changed', callback);
+    return () => ipcRenderer.removeListener('desktop:service-connections-changed', callback);
   },
   showConnectionCenter: (): Promise<void> => ipcRenderer.invoke('desktop:show-connection-center'),
   revealDataDirectory: (): Promise<void> => ipcRenderer.invoke('desktop:reveal-data-directory'),

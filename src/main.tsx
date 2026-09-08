@@ -1,24 +1,22 @@
-import React, { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import './lib/federation/scopeBootstrap';
+import React, { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
+import { installEncryptedFetch } from './lib/federation/browserIntegration';
+import { SecureAccessGate } from './lib/federation/SecureAccessGate';
 // test comment
-import App from './App';
-import { LoginScreen } from './lib/components/auth/LoginScreen';
+const App = lazy(() => import('./App'));
 const DagPlayground = lazy(() => import('./lib/components/sidebar/DagPlayground').then((module) => ({ default: module.DagPlayground })));
 const DiffLab = lazy(() => import('./lib/components/sidebar/DiffLab').then((module) => ({ default: module.DiffLab })));
 const DiffReviewLab = lazy(() => import('./lib/components/sidebar/DiffReviewLab').then((module) => ({ default: module.DiffReviewLab })));
 import { ErrorBoundary } from './lib/components/ui/ErrorBoundary';
 import { syncInitialViewportCssVars } from './lib/hooks/useViewportHeight';
-import { I18nProvider, useI18n } from './lib/i18n';
-import {
-  AUTH_UNAUTHORIZED_EVENT,
-  getAuthStatus,
-  type AuthStatus,
-} from './lib/terminal/api';
+import { I18nProvider } from './lib/i18n';
 import { PwaUpdateNotice } from './lib/components/PwaUpdateNotice';
 import { setupPwaUpdateReload } from './lib/utils/pwaUpdate';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 
 syncInitialViewportCssVars();
+installEncryptedFetch();
 setupPwaUpdateReload();
 
 try {
@@ -29,67 +27,6 @@ try {
   }
 } catch {
   // Ignore corrupt storage; App will fall back to the default theme.
-}
-
-// Top-level gate that decides whether to show the LoginScreen or the real
-// App. Listens to `auth:unauthorized` from the global fetch interceptor so
-// that any 401 (e.g. session expired mid-use) drops back to login.
-function AuthGate() {
-  const { t } = useI18n();
-  const [status, setStatus] = useState<AuthStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      const next = await getAuthStatus();
-      setStatus(next);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to query auth status');
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    const refreshVisible = () => {
-      if (document.visibilityState === 'visible') void refresh();
-    };
-    document.addEventListener('visibilitychange', refreshVisible);
-    window.addEventListener('focus', refreshVisible);
-    // Active terminal-only connections also need an HTTP response to renew
-    // the HttpOnly cookie; WebSocket traffic cannot set it.
-    const timer = window.setInterval(refreshVisible, 60 * 60 * 1000);
-    return () => {
-      document.removeEventListener('visibilitychange', refreshVisible);
-      window.removeEventListener('focus', refreshVisible);
-      window.clearInterval(timer);
-    };
-  }, [refresh]);
-
-  useEffect(() => {
-    const handler = () => {
-      // Force-flip to "not authenticated" without waiting for the next
-      // status fetch, so navigation feels immediate.
-      setStatus((prev) => (prev ? { ...prev, authenticated: false } : prev));
-    };
-    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, handler);
-    return () => window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, handler);
-  }, []);
-
-  if (status === null) {
-    return (
-      <div className={`termdock-boot${error ? ' termdock-boot-error' : ''}`} role="status" aria-live="polite">
-        {!error && <div className="termdock-boot-spinner" aria-hidden="true" />}
-        <span>{error ? `${t('common.error')}: ${error}` : 'Loading Termdock'}</span>
-      </div>
-    );
-  }
-
-  if (status.enabled && !status.authenticated) {
-    return <LoginScreen onLoginSuccess={refresh} />;
-  }
-
-  return <App />;
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -103,7 +40,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           if (params.get('dag-playground') === '1') return <DagPlayground />;
           if (params.get('diff-review-lab') === '1') return <DiffReviewLab />;
           if (params.get('diff-lab') === '1') return <DiffLab />;
-          return <AuthGate />;
+          return <SecureAccessGate><App /></SecureAccessGate>;
         })()}
       </Suspense>
       </ErrorBoundary>

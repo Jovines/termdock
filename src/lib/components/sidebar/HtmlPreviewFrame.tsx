@@ -1,3 +1,5 @@
+import { getActiveClient } from '../../federation/browserIntegration';
+import { prepareSecureHtmlPreview, type SecureHtmlPreview } from '../../federation/secureHtmlPreview';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Minimize2 as RiFullscreenExit } from 'lucide-react';
@@ -20,6 +22,24 @@ export const HtmlPreviewFrame = forwardRef<HtmlPreviewFrameHandle, HtmlPreviewFr
   onFullscreenChange,
 }, ref) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [prepared, setPrepared] = useState<SecureHtmlPreview>();
+  const [previewError, setPreviewError] = useState('');
+  useEffect(() => {
+    const abort = new AbortController(); let preview: SecureHtmlPreview | undefined;
+    setPrepared(undefined); setPreviewError('');
+    void (async () => {
+      const client = await getActiveClient();
+      preview = await prepareSecureHtmlPreview(src, { fetch: (path, init) => client.fetch(path, init), signal: abort.signal });
+      if (abort.signal.aborted) { preview.dispose(); return; }
+      setPrepared(preview); if (preview.errors.length) setPreviewError(preview.errors.join('；'));
+    })().catch(error => { if (!abort.signal.aborted) setPreviewError(error instanceof Error ? error.message : '安全预览加载失败'); });
+    return () => { abort.abort(); preview?.dispose(); };
+  }, [src]);
+  useEffect(() => {
+    if (!prepared || !iframeRef.current) return;
+    return prepared.attach(iframeRef.current, setPreviewError);
+  }, [prepared]);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [pseudoFullscreen, setPseudoFullscreen] = useState(false);
   const expanded = nativeFullscreen || pseudoFullscreen;
@@ -92,8 +112,12 @@ export const HtmlPreviewFrame = forwardRef<HtmlPreviewFrameHandle, HtmlPreviewFr
           </button>
         </div>
       )}
+      {previewError && <div role="status" className="shrink-0 border-b border-border px-3 py-2 text-xs text-muted-foreground">{previewError}</div>}
+      {!prepared && !previewError && <div role="status" className="p-3 text-xs text-muted-foreground">正在安全加载预览资源…</div>}
       <iframe
-        src={src}
+        ref={iframeRef}
+        src={prepared?.shellUrl}
+        referrerPolicy="no-referrer"
         title={title}
         sandbox="allow-scripts"
         className="block min-h-0 w-full flex-1 border-0 bg-white"

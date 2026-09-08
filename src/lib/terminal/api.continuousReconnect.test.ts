@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// Reconnection policy sits above the encrypted transport; simulate its socket facade.
+vi.mock('../federation/browserIntegration', () => ({ secureSocket: (url: string) => new WebSocket(url) }));
 import { createTermdockAPI } from './factory';
 import {
   connectTerminalStream,

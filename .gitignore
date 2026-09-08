@@ -37,3 +37,6 @@ runtime-manifest.json
 .claude/settings.local.json
 .claude/scheduled_tasks.json
 .claude/worktrees/
+
+desktop/renderer/services.js
+desktop/renderer/services.css

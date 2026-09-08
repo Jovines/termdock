@@ -10,6 +10,7 @@ import busboy from 'busboy';
 import { validatePreview } from '../utils/previewValidation.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { isAuthEnabled, isRequestAuthenticated } from '../utils/authProtection.js';
+import { isEncryptedRequest } from '../federation/requestContext.js';
 import { getImageDimensions, parseImageDimensions } from '../utils/imageDimensions.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
 import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
@@ -3994,7 +3995,7 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
     // previewed file's directory, so the sandboxed iframe's subresources can
     // load without cookies. The token segment in the URL is inherited by every
     // relative reference the document makes.
-    if (authEnabled && !maybeToken) {
+    if ((authEnabled || isEncryptedRequest(req)) && !maybeToken) {
       const root = stat.isDirectory() ? validatedPath : path.dirname(validatedPath);
       const tokenized = tokenizePreviewUrl(previewBaseUrl, mintPreviewToken(root, req.cookies?.[AUTH_COOKIE]));
       redirectUrl = stat.isDirectory() && !previewBaseUrl.endsWith('/') ? `${tokenized}/` : tokenized;

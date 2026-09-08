@@ -8,6 +8,7 @@ import { AgentOperationsPanel, cleanSessionSnippet } from './AgentOperationsPane
 const apiMocks = vi.hoisted(() => ({
   listAgentAutomations: vi.fn().mockResolvedValue({ automations: [], runs: [] }),
   listCollaborationGroups: vi.fn().mockResolvedValue({ groups: [], sessions: [] }),
+  listCollaborationMessages: vi.fn().mockResolvedValue({ messages: [] }),
   searchTerminalSessions: vi.fn().mockResolvedValue({ results: [] }),
   saveCollaborationGroup: vi.fn(),
   sendCollaborationMessage: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock('../../terminal/api', () => ({
   listDirectory: vi.fn().mockResolvedValue({ path: '/repo', entries: [] }),
   listAgentAutomations: apiMocks.listAgentAutomations,
   listCollaborationGroups: apiMocks.listCollaborationGroups,
-  listCollaborationMessages: vi.fn().mockResolvedValue({ messages: [] }),
+  listCollaborationMessages: apiMocks.listCollaborationMessages,
   prepareAgentResumeHistory: vi.fn(),
   removeAgentAutomation: vi.fn(),
   removeCollaborationGroup: vi.fn(),
@@ -39,6 +40,8 @@ vi.mock('../../terminal/api', () => ({
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
+  apiMocks.listCollaborationMessages.mockReset().mockResolvedValue({ messages: [] });
   apiMocks.listAgentAutomations.mockReset().mockResolvedValue({ automations: [], runs: [] });
   apiMocks.listCollaborationGroups.mockReset().mockResolvedValue({ groups: [], sessions: [] });
   apiMocks.searchTerminalSessions.mockReset().mockResolvedValue({ results: [] });
@@ -252,4 +255,25 @@ it('labels remote members and reports unreachable delivery without claiming succ
   await user.type(screen.getByPlaceholderText(/说明背景、期望产出/), '请检查');
   await user.click(screen.getByRole('button', { name: '发送' }));
   expect(await screen.findByText(/1 个接收成员的服务不可达，尚未送达/)).toBeTruthy();
+});
+
+it('filters new results independently of ACKs and never marks filtered-out records seen', async () => {
+  const user = userEvent.setup();
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [{ id: 'evidence-group', name: '证据组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 }], sessions: [] });
+  apiMocks.listCollaborationMessages.mockResolvedValue({ messages: [
+    { id: 'ack', kind: 'reply', responseKind: 'ack', content: '仅表示收到', threadId: 'thread', createdAt: 1, fromSessionId: 'two', toSessionId: 'one', status: 'read' },
+    { id: 'result', kind: 'reply', responseKind: 'result', content: '证据：检查通过', threadId: 'thread', createdAt: 2, fromSessionId: 'two', toSessionId: 'one', status: 'read' },
+  ] });
+  render(<AgentOperationsPanel activeSessionId="one" initialCollaborationGroupId="evidence-group" onClose={() => undefined} onNewSession={() => undefined} />);
+  await screen.findByText('证据：检查通过');
+  await user.selectOptions(screen.getByLabelText('筛选回复类型'), 'result');
+  expect(screen.queryByText('仅表示收到')).toBeNull();
+  await user.click(screen.getByRole('button', { name: '标记当前记录已看' }));
+  expect(screen.queryByText('证据：检查通过')).toBeNull();
+  expect(JSON.parse(localStorage.getItem('collab-seen:evidence-group')!)).toEqual(['result']);
+  await user.selectOptions(screen.getByLabelText('筛选回复类型'), 'ack');
+  expect(screen.getByText('仅表示收到')).toBeTruthy();
+  await user.click(screen.getByLabelText('只看新记录'));
+  await user.selectOptions(screen.getByLabelText('筛选回复类型'), 'result');
+  expect(screen.getByText('证据：检查通过')).toBeTruthy();
 });

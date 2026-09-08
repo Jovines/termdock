@@ -1,4 +1,7 @@
 import { CollaborationFederation, sessionAddress } from './collaborationFederation.js';
+import { prepareBundledFrontend } from './bundledFrontend.js';
+import { serviceConnection, serviceConnectionKeys, importServiceConnection, upsertServiceConnection, invitationForService } from './serviceConnections.js';
+const pendingServiceInvitations = new WeakMap<BrowserWindow, string>();
 import {
   app,
   BrowserWindow,
@@ -18,7 +21,7 @@ import {
   type MessageBoxOptions,
   type Session,
 } from 'electron';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
@@ -79,6 +82,7 @@ import {
   restartConnectedServiceRuntime,
 } from './connectedServiceRuntime.js';
 import { isOwnedDesktopRuntimeTarget } from './runtimeTarget.js';
+import { canReadLocalInvite } from './localInviteGuard.js';
 import { serviceDocumentNeedsReload } from './serviceWindowRecovery.js';
 import {
   CertificateTrustRequests,
@@ -98,6 +102,7 @@ const termdockDir = path.join(os.homedir(), '.termdock');
 const desktopConfigPath = path.join(termdockDir, 'desktop.json');
 const serverStatePath = path.join(termdockDir, 'server.json');
 const desktopRuntimeOwnerSocketPath = path.join(termdockDir, 'desktop-runtime-owner.sock');
+let federationRelayProcess: ChildProcess | null = null;
 const DEFAULT_LOCAL_URL = 'http://localhost:9834';
 const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
@@ -572,6 +577,8 @@ function installCertificateVerifyProcedure(
   serviceOrigin?: string,
 ): void {
   targetSession.setCertificateVerifyProc((request, callback) => {
+    const routeOrigins = serviceOrigin ? readDesktopConfig().connections.flatMap(item => item.routes || []).map(route => route.url) : [];
+    const requestedOrigin = [serviceOrigin, ...routeOrigins].find(origin => origin && new URL(origin).hostname.replace(/^\[|\]$/g, '').toLowerCase() === request.hostname.replace(/^\[|\]$/g, '').toLowerCase());
     let isLocalTarget = false;
     try {
       isLocalTarget = isLocalNetworkTarget(new URL(`https://${request.hostname}`));
@@ -586,9 +593,7 @@ function installCertificateVerifyProcedure(
     }
     const explicitlyTrustedTarget = presentedFingerprint
       ? serviceOrigin
-        ? new URL(serviceOrigin).hostname.replace(/^\[|\]$/g, '').toLowerCase()
-            === request.hostname.replace(/^\[|\]$/g, '').toLowerCase()
-          && sessionTrustedLeafByOrigin.get(serviceOrigin) === presentedFingerprint
+        ? !!requestedOrigin && sessionTrustedLeafByOrigin.get(requestedOrigin) === presentedFingerprint
         : sessionTrustedCertificateTargets.has(certificateTrustKey(request.hostname, presentedFingerprint))
       : false;
     const managedMatch = isLocalTarget
@@ -604,13 +609,13 @@ function installCertificateVerifyProcedure(
       callback(0);
       return;
     }
-    if (serviceOrigin && canOfferCertificateTrust(serviceOrigin)
+    if (requestedOrigin && canOfferCertificateTrust(requestedOrigin)
       && isCertificateTrustError(request.verificationResult)) {
       // Resolve trust before Chromium caches a rejection. This covers fetch,
       // WebSocket and navigation requests, not only the initial Node probe.
       void resolveServiceCertificateTrust(
-        serviceOrigin, request.hostname, request.certificate.data,
-        () => requestCertificateTrust(serviceOrigin),
+        requestedOrigin, request.hostname, request.certificate.data,
+        () => requestCertificateTrust(requestedOrigin),
       ).then((trusted) => callback(trusted ? 0 : -3), (error: unknown) => {
         console.warn(`[desktop-certificate] ${serviceOrigin}: ${networkErrorDetails(error)}`);
         callback(-3);
@@ -794,6 +799,7 @@ function readDesktopConfig(): DesktopConfig {
     const lastConnectionUrl = typeof parsed.lastConnectionUrl === 'string' ? parsed.lastConnectionUrl : null;
     return {
       version: 1,
+      removedServiceKeys: Array.isArray(parsed.removedServiceKeys) ? parsed.removedServiceKeys.filter((key): key is string => typeof key === 'string').slice(-768) : [],
       connections: parsed.connections.filter((entry): entry is SavedConnection =>
         Boolean(entry)
         && typeof entry.id === 'string'
@@ -1111,6 +1117,33 @@ function runtimePaths(): ResolvedDesktopRuntime {
     version: app.getVersion(),
     source: 'development',
   };
+}
+
+/** Explicit opt-in only; all routing and reconnect behavior lives in the shared CLI. */
+function startConfiguredFederationRelay(): void {
+  const configPath = path.join(termdockDir, 'federation', 'relay.json');
+  if (federationRelayProcess || !fs.existsSync(configPath)) return;
+  let logFd: number | undefined;
+  try {
+    const runtime = runtimePaths();
+    if (!fs.existsSync(runtime.cli)) throw new Error('Runtime unavailable');
+    const logPath = path.join(termdockDir, 'federation', 'relay.log');
+    logFd = fs.openSync(logPath, 'a', 0o600);
+    fs.fchmodSync(logFd, 0o600);
+    const child = spawn(runtime.node, [runtime.cli, '--federation-relay', configPath], {
+      detached: false,
+      stdio: ['ignore', logFd, logFd],
+      env: desktopRuntimeEnv(runtime),
+    });
+    federationRelayProcess = child;
+    child.once('error', () => {
+      if (federationRelayProcess === child) federationRelayProcess = null;
+      console.error('[federation] Configured relay failed to start; inspect the private relay log.');
+    });
+    child.once('exit', () => { if (federationRelayProcess === child) federationRelayProcess = null; });
+  } catch {
+    console.error('[federation] Unable to start configured relay; verify the runtime and private configuration.');
+  } finally { if (logFd !== undefined) fs.closeSync(logFd); }
 }
 
 async function executableVersion(executable: string): Promise<string | null> {
@@ -1538,7 +1571,7 @@ async function installCli(): Promise<DesktopSnapshot> {
 
 async function connectWindow(
   rawUrl: string,
-  options: { focus?: boolean; updateLastConnection?: boolean; persist?: boolean } = {},
+  options: { focus?: boolean; updateLastConnection?: boolean; persist?: boolean; invitation?: string } = {},
 ): Promise<ServiceProbe> {
   if (options.focus !== false) {
     try {
@@ -1547,7 +1580,8 @@ async function connectWindow(
       return await probeService(rawUrl);
     }
   }
-  let probe = await probeServiceWithLocalNetworkPermission(rawUrl, {
+  const known = readDesktopConfig().connections.find(item => (item.serviceOrigin || item.url) === normalizeServiceUrl(rawUrl));
+  let probe: ServiceProbe = known?.targetPeerId ? { ok: true, url: normalizeServiceUrl(rawUrl) } : await probeServiceWithLocalNetworkPermission(rawUrl, {
     interactive: options.focus !== false,
   });
   if (!probe.ok) return probe;
@@ -1568,7 +1602,8 @@ async function connectWindow(
       if (existing) existing.lastConnectedAt = Date.now();
       writeDesktopConfig(config);
     }
-    if (await serviceDocumentNeedsReload(existingWindow.webContents, key)) {
+    if (options.invitation || await serviceDocumentNeedsReload(existingWindow.webContents, key)) {
+      if (options.invitation) pendingServiceInvitations.set(existingWindow, options.invitation);
       await existingWindow.loadURL(probe.url);
     }
     if (options.focus !== false) {
@@ -1581,6 +1616,8 @@ async function connectWindow(
   }
 
   const workspaceWindow = createDesktopWindow({ serviceOrigin: key, label: serviceLabel(probe.url) });
+  await prepareBundledFrontend(workspaceWindow.webContents.session, key, path.join(runtimePaths().serverRoot, 'dist', 'client'));
+  if (options.invitation) pendingServiceInvitations.set(workspaceWindow, options.invitation);
   serviceWindows.set(key, workspaceWindow);
   broadcastServiceActivity();
   while (!workspaceWindow.isDestroyed()) {
@@ -1945,6 +1982,52 @@ function installIpcHandlers(): void {
   collaborationPollTimer = setInterval(() => void collaborationFederation.refresh().catch(() => {}), 2000);
   collaborationPollTimer.unref();
   ipcMain.handle('desktop:snapshot', () => snapshot());
+  const directorySender = (event: Electron.IpcMainInvokeEvent) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || event.senderFrame !== event.sender.mainFrame) throw new Error('无法访问服务列表。');
+    const origin = windowServiceOrigins.get(window);
+    const url = new URL(event.senderFrame.url);
+    if (origin ? url.origin !== origin || url.pathname !== '/' : window !== mainWindow || url.protocol !== 'file:') throw new Error('无法访问服务列表。');
+    return window;
+  };
+  const directoryChanged = () => {
+    installMenu();
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('desktop:service-connections-changed');
+    broadcastServiceActivity();
+  };
+  ipcMain.handle('desktop:service-connections', event => { directorySender(event); return readDesktopConfig().connections; });
+  ipcMain.handle('desktop:save-service-connection', (event, input: unknown) => {
+    directorySender(event);
+    const config = readDesktopConfig(); config.connections = upsertServiceConnection(config.connections, input);
+    writeDesktopConfig(config); directoryChanged(); return config.connections;
+  });
+  ipcMain.handle('desktop:import-service-connection', (event, input: unknown) => {
+    directorySender(event);
+    const config = readDesktopConfig(); config.connections = importServiceConnection(config.connections, config.removedServiceKeys || [], input);
+    writeDesktopConfig(config); directoryChanged(); return config.connections;
+  });
+  ipcMain.handle('desktop:remove-service-connection', (event, id: string) => {
+    directorySender(event);
+    const config = readDesktopConfig();
+    const removed = config.connections.find(item => item.id === id);
+    if (removed) config.removedServiceKeys = [...new Set([...(config.removedServiceKeys || []), ...serviceConnectionKeys(removed)])].slice(-768);
+    config.connections = config.connections.filter(item => item.id !== id);
+    writeDesktopConfig(config); directoryChanged(); return config.connections;
+  });
+  ipcMain.handle('desktop:current-service-connection', event => {
+    const window = directorySender(event), origin = windowServiceOrigins.get(window);
+    const connection = readDesktopConfig().connections.find(item => (item.serviceOrigin || item.url) === origin);
+    const invitation = pendingServiceInvitations.get(window); pendingServiceInvitations.delete(window);
+    return connection ? { ...connection, ...(invitation ? { invitation } : {}) } : null;
+  });
+  ipcMain.handle('desktop:open-service-connection', async (event, input: unknown, rawInvitation?: string) => {
+    directorySender(event);
+    const connection = serviceConnection(input), invitation = invitationForService(rawInvitation, connection);
+    // A bookmark pin is connection metadata, never authorization to the service.
+    const config = readDesktopConfig(); config.connections = upsertServiceConnection(config.connections, connection);
+    writeDesktopConfig(config); directoryChanged();
+    return connectWindow(connection.serviceOrigin || connection.url, { invitation });
+  });
   ipcMain.handle('desktop:probe', (_event, url: string) => {
     try { certificateTrustRequests.retry(new URL(normalizeServiceUrl(url)).origin); } catch { /* probe reports invalid URLs */ }
     return probeServiceWithLocalNetworkPermission(url);
@@ -2014,6 +2097,29 @@ function installIpcHandlers(): void {
     showAndFocusWindow(targetWindow);
     broadcastServiceActivity();
     return true;
+  });
+  ipcMain.handle('desktop:local-invite', async (event) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!sourceWindow || sourceWindow.isDestroyed() || event.senderFrame !== event.sender.mainFrame) return null;
+    const registeredOrigin = windowServiceOrigins.get(sourceWindow);
+    const initialUrl = event.sender.getURL();
+    // First reject remote/preview callers before any asynchronous local probing.
+    let callerPort: number;
+    try { const url = new URL(initialUrl); callerPort = Number(url.port || (url.protocol === 'https:' ? 443 : 80)); } catch { return null; }
+    if (!canReadLocalInvite({ registeredOrigin, currentUrl: initialUrl, mainFrame: true, running: true, desktopManaged: true, servicePort: callerPort })) return null;
+    const status = await getLocalServiceStatus().catch(() => null);
+    if (!status || !status.state || sourceWindow.isDestroyed() || event.sender.isDestroyed()
+      || event.senderFrame !== event.sender.mainFrame || event.sender.getURL() !== initialUrl
+      || windowServiceOrigins.get(sourceWindow) !== registeredOrigin
+      || !canReadLocalInvite({ registeredOrigin, currentUrl: event.sender.getURL(), mainFrame: true,
+        running: status.running, desktopManaged: status.probe?.desktopManaged === true, servicePort: status.state.port })
+      || !isOwnedDesktopRuntimeWindow(sourceWindow, status)) return null;
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(termdockDir, 'federation', 'pairing.json'), 'utf8'));
+      if (typeof data.serviceId !== 'string' || !/^12D3KooW[1-9A-HJ-NP-Za-km-z]{44}$/.test(data.serviceId)
+        || typeof data.pairingCode !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(data.pairingCode)) return null;
+      return { url: registeredOrigin, targetPeerId: data.serviceId, pairingCode: data.pairingCode, serviceName: '本机 Termdock' };
+    } catch { return null; }
   });
   ipcMain.handle('desktop:start-local', () => startLocalService());
   ipcMain.handle('desktop:update-preferences', async (_event, preferences: {
@@ -2369,6 +2475,7 @@ app.whenReady().then(async () => {
     });
   });
   startConnectedServiceRuntimePolling();
+  startConfiguredFederationRelay();
   const startupConfig = readDesktopConfig();
   const restoreUrls = startupConfig.openConnectionUrls;
   startupRestoreActive = true;
@@ -2427,6 +2534,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  federationRelayProcess?.kill('SIGTERM');
+  federationRelayProcess = null;
   desktopRuntimeOwnerServer?.close();
   desktopRuntimeOwnerServer = null;
   if (collaborationPollTimer) clearInterval(collaborationPollTimer);

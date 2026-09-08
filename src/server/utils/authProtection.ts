@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { isEncryptedRequest } from '../federation/requestContext.js';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
@@ -156,6 +157,15 @@ function credentialFingerprint(): string {
 
 export function isEnvPasswordSet(): boolean {
   return getEnvPassword() !== null;
+}
+
+/** Server-only input for password-authenticated encrypted bootstrap. Never serialize this value. */
+export function getPasswordVerifier(): string | null {
+  return getEnvPasswordHash() ?? readAuthFile()?.passwordHash ?? null;
+}
+export function getPasswordCredentialFingerprint(): string | null {
+  const verifier = getPasswordVerifier();
+  return verifier ? crypto.createHash('sha256').update(verifier).digest('hex') : null;
 }
 
 export function isAuthEnabled(): boolean {
@@ -354,6 +364,7 @@ export function recordLoginSuccess(ip: string): void {
 
 // Returns true when the incoming request bears a valid session cookie.
 export function isRequestAuthenticated(req: Request): boolean {
+  if (isEncryptedRequest(req)) return true;
   pruneExpiredSessions();
   const token = req.cookies?.[AUTH_COOKIE];
   return isSessionValid(typeof token === 'string' ? token : undefined);
@@ -377,6 +388,7 @@ export function renewSessionMiddleware(req: Request, res: Response, next: NextFu
 // Bypass paths are public (login/status/health/static).
 export function requireAuth(options?: { bypass?: (req: Request) => boolean }) {
   return (req: Request, res: Response, next: NextFunction) => {
+    if (isEncryptedRequest(req)) return next();
     if (!isAuthEnabled()) return next();
     if (options?.bypass?.(req)) return next();
     if (isRequestAuthenticated(req)) return next();

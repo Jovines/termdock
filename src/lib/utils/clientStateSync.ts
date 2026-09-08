@@ -1,3 +1,4 @@
+import { secureSocket } from '../federation/browserIntegration';
 // Single source of truth for the persisted client-state list on the client.
 //
 // The server owns `globalSessionState` (the canonical tab list). This module
@@ -155,7 +156,7 @@ function connect(): void {
 
   let ws: WebSocket;
   try {
-    ws = new WebSocket(url);
+    ws = secureSocket(url);
   } catch {
     scheduleReconnect();
     return;
