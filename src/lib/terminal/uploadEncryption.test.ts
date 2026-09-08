@@ -7,6 +7,33 @@ beforeEach(() => resetCsrfTokenCache());
 afterEach(() => vi.unstubAllGlobals());
 
 describe('file upload encryption boundary', () => {
+  it('preserves case-sensitive browser multipart boundaries when reporting progress', async () => {
+    const NativeResponse = Response;
+    const boundary = '----WebKitFormBoundaryAbCdEf123';
+    // Node generates lowercase boundaries; WebKit uses mixed case. Keep the
+    // native Blob conversion (which lowercases its MIME type) in this fixture.
+    vi.stubGlobal('Response', class extends NativeResponse {
+      constructor(body?: BodyInit | null, init?: ResponseInit) {
+        if (body instanceof FormData) {
+          super(`--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="phone.txt"\r\nContent-Type: text/plain\r\n\r\nprivate\r\n--${boundary}--\r\n`, {
+            headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+          });
+        } else super(body, init);
+      }
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+      if (input === '/api/csrf-token') return NativeResponse.json({ csrfToken: 'secure-channel' });
+      const request = new Request(new URL(String(input), 'https://termdock.invalid'), init);
+      const parsed = await request.formData();
+      const file = parsed.get('files') as File;
+      expect(file.name).toBe('phone.txt');
+      expect(await file.text()).toBe('private');
+      return NativeResponse.json({ files: [{ name: file.name, path: '/tmp/phone.txt', size: file.size }] });
+    }));
+    await expect(uploadFiles('/tmp', [new File(['private'], 'phone.txt')], undefined, vi.fn()))
+      .resolves.toMatchObject({ files: [{ path: '/tmp/phone.txt' }] });
+  });
+
   it('uses the encrypted fetch hook with progress even without a Service Worker', async () => {
     const xhr = vi.fn(() => { throw new Error('Native upload must not transmit plaintext'); });
     vi.stubGlobal('XMLHttpRequest', xhr);

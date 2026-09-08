@@ -2785,9 +2785,15 @@ export async function uploadFiles(
   // Use the encrypted fetch transport even before a Service Worker controls this
   // page. Native XHR would transmit file bytes outside the end-to-end channel.
   onProgress?.(0);
-  const body = onProgress ? await new Response(formData).blob() : formData;
   const headers: Record<string, string> = { 'X-XSRF-TOKEN': csrfTokenHeader };
-  if (body instanceof Blob) headers['Content-Type'] = body.type;
+  let body: FormData | Blob = formData;
+  if (onProgress) {
+    const encoded = new Response(formData);
+    // Blob.type lowercases MIME parameters, including WebKit's case-sensitive
+    // multipart boundary. Preserve the header from the same serialization.
+    headers['Content-Type'] = encoded.headers.get('Content-Type')!;
+    body = await encoded.blob();
+  }
   const response = await fetchWithTimeout(
     url,
     { method: 'POST', headers, body, signal,

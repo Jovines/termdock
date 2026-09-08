@@ -1,6 +1,6 @@
 import { CollaborationFederation, sessionAddress } from './collaborationFederation.js';
 import { prepareBundledFrontend } from './bundledFrontend.js';
-import { serviceConnection, serviceConnectionKeys, importServiceConnection, upsertServiceConnection, invitationForService } from './serviceConnections.js';
+import { serviceConnection, serviceConnectionKeys, importServiceConnection, saveServiceConnection, invitationForService } from './serviceConnections.js';
 const pendingServiceInvitations = new WeakMap<BrowserWindow, string>();
 import {
   app,
@@ -2005,7 +2005,7 @@ function installIpcHandlers(): void {
   ipcMain.handle('desktop:service-connections', event => { directorySender(event); return readDesktopConfig().connections; });
   ipcMain.handle('desktop:save-service-connection', (event, input: unknown) => {
     directorySender(event);
-    const config = readDesktopConfig(); config.connections = upsertServiceConnection(config.connections, input);
+    const config = readDesktopConfig(); Object.assign(config, saveServiceConnection(config.connections, config.removedServiceKeys || [], input));
     writeDesktopConfig(config); directoryChanged(); return config.connections;
   });
   ipcMain.handle('desktop:import-service-connection', (event, input: unknown) => {
@@ -2031,7 +2031,7 @@ function installIpcHandlers(): void {
     directorySender(event);
     const connection = serviceConnection(input), invitation = invitationForService(rawInvitation, connection);
     // A bookmark pin is connection metadata, never authorization to the service.
-    const config = readDesktopConfig(); config.connections = upsertServiceConnection(config.connections, connection);
+    const config = readDesktopConfig(); Object.assign(config, saveServiceConnection(config.connections, config.removedServiceKeys || [], connection));
     writeDesktopConfig(config); directoryChanged();
     return connectWindow(connection.serviceOrigin || connection.url, { invitation });
   });
@@ -2043,15 +2043,11 @@ function installIpcHandlers(): void {
     const url = normalizeServiceUrl(input.url);
     const config = readDesktopConfig();
     const existing = config.connections.find((entry) => entry.url === url);
-    if (existing) {
-      existing.label = input.label.trim() || new URL(url).host;
-    } else {
-      config.connections.push({
-        id: crypto.randomUUID(),
-        label: input.label.trim() || new URL(url).host,
-        url,
-      });
-    }
+    Object.assign(config, saveServiceConnection(config.connections, config.removedServiceKeys || [], {
+      id: existing?.id || crypto.randomUUID(),
+      label: input.label.trim() || new URL(url).host,
+      url,
+    }));
     writeDesktopConfig(config);
     installMenu();
     return snapshot();

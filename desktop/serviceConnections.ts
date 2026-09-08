@@ -46,6 +46,15 @@ export function upsertServiceConnection(current: SavedConnection[], input: unkno
   const merged = { ...old, ...next, id: old?.id || next.id };
   return [...current.filter(item => item !== old), merged];
 }
+/** Explicit saves restore a service; legacy imports must still honor tombstones. */
+export function saveServiceConnection(current: SavedConnection[], removedKeys: string[], input: unknown): { connections: SavedConnection[]; removedServiceKeys: string[] } {
+  const candidate = serviceConnection(input);
+  const previous = current.find(item => item.id === candidate.id || sameServiceConnection(item, candidate));
+  const connections = upsertServiceConnection(current, candidate);
+  const restored = connections[connections.length - 1];
+  const keys = new Set([...serviceConnectionKeys(candidate), ...serviceConnectionKeys(restored), ...(previous ? serviceConnectionKeys(previous) : [])]);
+  return { connections, removedServiceKeys: removedKeys.filter(key => !keys.has(key)) };
+}
 export function invitationForService(value: unknown, service: SavedConnection): string | undefined {
   if (value === undefined) return;
   if (typeof value !== 'string' || value.length > 12000) throw new Error('邀请链接无效。');
