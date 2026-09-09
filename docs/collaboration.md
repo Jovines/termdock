@@ -97,7 +97,7 @@ td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 
 `relay_online`、`peer_reachable` 是最近一次转发观测，超过 15 秒变成 `null`（未知），不从 Agent turn 状态猜测。另有 `attempt_count`、`next_retry_at`、`last_error`、`transport_checked_at`、`fragments_sent`、`fragments_total`。断线保持 pending，失败退避重试最多间隔 30 秒；接收服务本身不可达时跟随每 2 秒的连接轮询。瞬时链路错误与明确不可投递分开表示。
 
-现有跨服务桥由 Mac 客户端运行。新分片和扩展消息需要桥接客户端及两端服务均支持 v2；普通短消息可以继续与旧服务通信。不支持扩展消息的旧服务会得到明确的 `PEER_UPGRADE_REQUIRED`，不能声称已投递。服务端单独升级不能替换正在运行的旧桌面桥。
+跨服务转发可由 Mac 客户端或浏览器/PWA 运行，二者复用相同的同步、去重与分片协议。浏览器按已保存的服务身份分别建立加密连接，共用同源顶层页面的转发器；无需打开每个服务的工作区。所有写入都由页面的加密客户端完成，不回退到普通 HTTP。手机后台或网页关闭时转发会暂停，消息保存在服务端，恢复前台后继续同步。新分片和扩展消息需要桥接客户端及两端服务均支持 v2；普通短消息可以继续与旧服务通信。不支持扩展消息的旧服务会得到明确的 `PEER_UPGRADE_REQUIRED`，不能声称已投递。服务端单独升级不能替换正在运行的旧桌面桥。
 
 ## 会话状态与结构化任务
 
@@ -113,17 +113,19 @@ td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 
 本服务读取有 10 秒期限，独立于其他服务的发现。其他服务的发现有 5 秒期限，后台完成后发布增量目录，失败时保留本服务数据，并把缓存的远端成员标为不可达。已持久化的远端成员即使客户端未连接也保留其身份，不把旧在线快照当成当前在线证据。加载中、真正为空、本服务失败、跨服务部分不可达分别表达。
 
-桌面 preload 显式声明 `collaboration: { protocolVersion: 2, peers: true, save: true }`。v2 `collaborationPeers()` 返回 `{ protocolVersion: 2, origin, sessions, services }`，必须与当前服务匹配；它只发现会话，不执行消息转发。定时 relay 独立负责副本和消息同步。缺少能力声明的旧客户端通过适配层读取旧 `collaborationList()`，仅接受其中的远端会话；未知的新协议不会被猜测为兼容。旧桥接失败、超时或返回空不会阻止本服务组队。
+桌面 preload 显式声明 `collaboration: { protocolVersion: 2, peers: true, save: true }`。v2 `collaborationPeers()` 返回 `{ protocolVersion: 2, origin, sessions, services }`，必须与当前目标服务或接收 IPC 的实际窗口地址匹配（兼容 localhost、入口地址等别名）；它只发现会话，不执行消息转发。定时 relay 独立负责副本和消息同步。缺少能力声明的旧客户端通过适配层读取旧 `collaborationList()`，仅接受其中的远端会话；未知的新协议不会被猜测为兼容。旧桥接失败、超时或返回空不会阻止本服务组队。
 
 | 操作 | 权威写入路径 |
 | --- | --- |
 | 创建本服务组、修改已有成员、删除已有组（含联邦副本） | 页面向当前服务写入；不优先走原生桥接。 |
-| 添加新的跨服务成员 | 桌面确认各服务的新会话目录，将结果首先持久化在发起服务；后台再同步副本。 |
+| 添加新的跨服务成员 | 客户端确认各服务的新会话目录，将结果首先持久化在发起服务；后台再同步副本。 |
 | 普通组转换为跨服务组 | v2 客户端调用当前服务的 `/:groupId/promote`，在一次文件替换内迁移组、消息和幂等记录；不分步复制和删除。 |
 | 从一个组移动成员到另一个组 | 当前服务的 `/move-member` 原子更新两个组；失败时两边都保持原状态。 |
 
 服务目录声明 `capabilities.groupRevision / groupPromotion / groupMove`。已有成员编辑携带开始编辑时的 `expectedUpdatedAt`；遇到并发修改返回 `409 GROUP_CHANGED`，遇到已删除组返回 `404 GROUP_NOT_FOUND`，不能隐式重建。新成员中任一项失效，整个保存返回 `409 MEMBERS_CHANGED`，不能过滤后部分保存。暂不可用的原成员由用户明确取消勾选才移出。跨组移动携带两组各自的版本。旧服务不支持原子转换或跨组移动时，拒绝该操作并保留原记录；单服务基本操作仍可使用。
 
-成员创建、修改和删除失败后不会自动换传输重试，因为第一次写入可能已经成功。客户端窗口与目标服务不一致时拒绝跨服务写入，避免把入口页面的身份当成目标服务。桌面发行包仍需在真实 macOS 客户端验证；浏览器夹具、协议测试和本机服务部署不能替代该验收。
+成员创建、修改和删除失败后不会自动换传输重试，因为第一次写入可能已经成功。原生写入必须由拥有该 IPC 的服务窗口发起，允许 localhost 等窗口地址与目标显示地址不同；业务请求始终由该窗口的加密客户端发往固定服务身份。网页转发为每个已授权目标使用独立加密客户端，不更改当前页面目标。桌面发行包仍需在真实 macOS 客户端验证；浏览器夹具、协议测试和本机服务部署不能替代该验收。
 
 回归覆盖位于 `src/lib/collaboration/directory.test.ts`、`src/lib/terminal/api.collaboration.test.ts`、`src/server/agent/collaborationGroupRoutes.test.ts`、`desktop/collaborationFederation.test.ts` 和 `src/server/agent/collaborationFederation.integration.test.ts`；加密入口同时由 `browserIntegration.routing.test.ts` 与 `transportBoundary.test.ts` 守卫。
+
+本轮兼容修复和浏览器转发按用户要求未运行自动测试。Web、服务端和桌面构建分别检查，Mac 1.4.182 与真实 iOS PWA 的连接、跨服务建组、消息送达及后台恢复仍需实机验收。

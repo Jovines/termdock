@@ -1,5 +1,3 @@
-import { createHash, randomUUID } from 'node:crypto';
-
 export interface FederationSession {
   sessionId: string;
   name: string;
@@ -72,7 +70,7 @@ function mapMessage(message: Message, map: (id: string) => string): Message {
   return { ...message, fromSessionId: message.fromSessionId ? map(message.fromSessionId) : null, toSessionId: map(message.toSessionId) };
 }
 
-/** Server replicas are durable. The desktop supplies authenticated transport only. */
+/** Shared desktop/web protocol. Server replicas are durable; callers supply encrypted transport. */
 export class CollaborationFederation {
   private snapshots = new Map<string, Snapshot>();
   private reachable = new Set<string>();
@@ -80,6 +78,7 @@ export class CollaborationFederation {
   private messages = new Map<string, Message>();
   private sessions = new Map<string, FederationSession>();
   private diagnostics = new Map<string, Diagnostic>();
+  private serviceErrors = new Map<string, string>();
   private inFlight: Promise<void> | null = null;
   private catalogInFlight: Promise<void> | null = null;
 
@@ -99,12 +98,16 @@ export class CollaborationFederation {
 
   private async discover(): Promise<void> {
     const services = this.services();
+    this.serviceErrors.clear();
     const snapshots = await Promise.all(services.map(async (service) => {
       try {
         const data = await service.request('/collaboration-federation') as Snapshot;
-        if (!Array.isArray(data.groups) || !Array.isArray(data.sessions) || !Array.isArray(data.messages)) return null;
+        if (!Array.isArray(data.groups) || !Array.isArray(data.sessions) || !Array.isArray(data.messages)) throw new Error('协作目录响应无效，请更新服务');
         return { service, data };
-      } catch { return null; }
+      } catch (error) {
+        this.serviceErrors.set(service.origin, error instanceof Error ? error.message.slice(0, 300) : '协作目录请求失败');
+        return null;
+      }
     }));
     this.reachable.clear();
     for (const snapshot of snapshots) {
@@ -220,15 +223,15 @@ export class CollaborationFederation {
         continue;
       }
       try {
-        const bytes = Buffer.from(JSON.stringify(message));
+        const bytes = new TextEncoder().encode(JSON.stringify(message));
         if (version >= 2 && bytes.length > FRAGMENT_BYTES && !known.has(message.id)) {
           const total = Math.ceil(bytes.length / FRAGMENT_BYTES);
-          const sha256 = createHash('sha256').update(bytes).digest('hex');
+          const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
           diagnostic.fragments_total = total;
           for (let index = 0; index < total; index++) {
             const result = await service.request('/collaboration-federation', 'POST', {
               group: this.groupForService(group, service.origin), messages: [], fragments: [{ message_id: message.id, group_id: group.id,
-                index, total, sha256, data: bytes.subarray(index * FRAGMENT_BYTES, (index + 1) * FRAGMENT_BYTES).toString('base64') }],
+                index, total, sha256, data: btoa(String.fromCharCode(...bytes.subarray(index * FRAGMENT_BYTES, (index + 1) * FRAGMENT_BYTES))) }],
             }) as Snapshot;
             const ack = result.fragmentReceipts?.find((item) => item.message_id === message.id);
             if (!ack || (index === total - 1 && !ack.complete)) throw new Error('FRAGMENT_ACK_MISSING');
@@ -272,7 +275,7 @@ export class CollaborationFederation {
       services: [...this.snapshots.keys(), ...this.services().map((service) => service.origin)]
         .filter((value, index, values) => values.indexOf(value) === index)
         .map((value) => ({ origin: value, label: this.services().find((service) => service.origin === value)?.label ?? value,
-          connected: this.reachable.has(value) })),
+          connected: this.reachable.has(value), error: this.serviceErrors.get(value) })),
     };
   }
 
@@ -311,7 +314,7 @@ export class CollaborationFederation {
       throw new Error('所选成员已变化或服务不可达，请刷新后重新选择；尚未保存任何修改');
     }
     const existing = original?.federated ? { ...original, sessionIds: original.sessionIds.map((id) => qualifySession(origin, id)) } : undefined;
-    const group: FederationGroup = { id: existing?.id ?? `cross-${randomUUID()}`, name: input.name.trim(),
+    const group: FederationGroup = { id: existing?.id ?? `cross-${crypto.randomUUID()}`, name: input.name.trim(),
       sessionIds: ids, createdAt: existing?.createdAt ?? Date.now(), updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1), federated: true };
     if (original && !original.federated) {
       if (local.capabilities?.groupPromotion !== 1) throw new Error('当前服务需要升级后才能将已有组转换为跨服务组；原组和记录均未修改');

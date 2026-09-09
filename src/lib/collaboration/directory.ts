@@ -4,6 +4,7 @@ export interface CollaborationPeerService {
   origin: string;
   label: string;
   connected: boolean;
+  error?: string;
 }
 export interface CollaborationPeers {
   protocolVersion?: number;
@@ -25,6 +26,8 @@ export interface CollaborationDirectoryData {
 }
 export interface CollaborationDirectorySource {
   origin: string;
+  /** Native IPC is bound to the physical service window, which may use an alias. */
+  peerOrigin?: string;
   readLocal(): Promise<CollaborationDirectoryData>;
   readPeers?: () => Promise<CollaborationPeers>;
   peerProtocol?: 'legacy' | 'v2' | 'unsupported';
@@ -71,7 +74,7 @@ export class CollaborationDirectory {
     // Persisted members remain visible when the desktop or a peer is unavailable.
     for (const group of this.local.groups) for (const session of group.remoteSessions ?? []) {
       const address = remoteSessionAddress(session.sessionId);
-      if (address && address.origin !== this.source.origin) {
+      if (address && address.origin !== this.source.origin && address.origin !== this.source.peerOrigin) {
         sessions.set(session.sessionId, { ...session, status: 'offline', serviceConnected: false });
       }
     }
@@ -124,20 +127,21 @@ export class CollaborationDirectory {
     this.peerInFlight = Promise.race([
       Promise.resolve().then(() => read()),
       new Promise<never>((_resolve, reject) => {
-        this.peerTimer = setTimeout(() => reject(new Error('跨服务会话加载超时')), 5000);
+        this.peerTimer = setTimeout(() => reject(new Error('跨服务会话加载超时，请检查客户端协作连接')), 20_000);
       }),
     ]).then((data) => {
       if (this.disposed) return;
-      if (!Array.isArray(data.sessions) || (this.source.peerProtocol === 'v2' && (data.protocolVersion !== 2 || data.origin !== this.source.origin))
-        || (data.origin && data.origin !== this.source.origin)
+      const matchesOrigin = data.origin === this.source.origin || (!!this.source.peerOrigin && data.origin === this.source.peerOrigin);
+      if (!Array.isArray(data.sessions) || (this.source.peerProtocol === 'v2' && (data.protocolVersion !== 2 || !matchesOrigin))
+        || (data.origin && !matchesOrigin)
         || (data.protocolVersion !== undefined && data.protocolVersion !== 2)) {
-        throw new Error('客户端协作能力不兼容，请更新客户端');
+        throw new Error('客户端协作响应与当前服务不匹配，请更新客户端后重试');
       }
       this.remote = data.sessions.filter((session) => {
         const address = remoteSessionAddress(session.sessionId);
-        return address && address.origin !== this.source.origin;
+        return address && address.origin !== this.source.origin && address.origin !== this.source.peerOrigin;
       });
-      const services = data.services?.filter((service) => service.origin !== this.source.origin);
+      const services = data.services?.filter((service) => service.origin !== this.source.origin && service.origin !== this.source.peerOrigin);
       this.peers = { state: services?.some((service) => !service.connected) ? 'partial' : 'ready', checkedAt: Date.now(), services };
     }).catch((error) => {
       if (this.disposed) return;

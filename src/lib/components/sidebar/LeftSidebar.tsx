@@ -1642,7 +1642,8 @@ export function LeftSidebar(
     <>
       <ServiceSwitcher />
       {/* Header — single compact row */}
-      <div className="relative z-10 shrink-0 border-b border-border/15 px-2 py-2">
+      <div className="relative z-20 shrink-0 px-2 py-2">
+        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-10 border-b border-border/15" />
         <div className="flex items-center gap-1.5">
           <div className="min-w-0 flex-1 px-1">
             <div className="flex items-baseline gap-1.5">
@@ -1788,7 +1789,7 @@ export function LeftSidebar(
         <button type="button" aria-label="关闭协作错误提示" className="shrink-0" onClick={() => setCollaborationActionError(null)}><RiCloseLine size={14} /></button>
       </div>}
       {/* Session list */}
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
+      <div className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
         {recoverableTmuxSessions.length > 0 && (
           <section className="mb-2 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
             <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">

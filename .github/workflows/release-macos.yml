@@ -80,6 +80,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify native PTY cleanup and reconnect backoff
+        run: npx vitest run src/server/utils/nodePtyCleanup.test.ts src/server/utils/ptySpawnBackoff.test.ts src/server/utils/terminalClientAttachment.test.ts
+
       - name: Check tag matches package version
         if: startsWith(github.ref, 'refs/tags/')
         run: |

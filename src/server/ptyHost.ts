@@ -12,6 +12,7 @@
  * Standalone entry: keep imports dependency-light (node-pty + protocol only).
  */
 
+import { ensureNodePty } from './utils/ensureNodePty.js';
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -102,6 +103,7 @@ function appendToRing(ch: Channel, data: string): void {
 }
 
 async function loadNodePty(): Promise<typeof import('node-pty')> {
+  ensureNodePty();
   return await import('node-pty');
 }
 

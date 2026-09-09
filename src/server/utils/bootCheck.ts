@@ -1,3 +1,4 @@
+import { ensureNodePty } from './ensureNodePty.js';
 /**
  * Termdock 启动自检 — 确保原生模块和系统依赖在启动时可用
  *
@@ -283,6 +284,7 @@ function checkTmux(): TmuxCheckResult {
 let _cachedResult: BootChecks | null = null;
 
 export function runBootChecks(): BootChecks {
+  ensureNodePty(); // Must precede the global marker and any native module load.
   if (_cachedResult) return _cachedResult;
 
   // 如果 marker 存在且有效，读取缓存的检查结果

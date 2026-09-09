@@ -17,8 +17,13 @@ export function useServiceWorkspaceActivity(runningCount: number, reviewCount: n
   }, [runningCount, reviewCount]);
 }
 
-/** The same selector activates a native window or a retained PWA workspace. */
+/** Native desktop already has independent service windows. */
 export function ServiceSwitcher() {
+  if (window.termdockDesktop) return null;
+  return <BrowserServiceSwitcher />;
+}
+
+function BrowserServiceSwitcher() {
   const [services, setServices] = useState<ServiceConnection[]>([]);
   const [nativeActivity, setNativeActivity] = useState<DesktopServiceActivity[]>([]);
   const [currentId, setCurrentId] = useState(savedConnection()?.targetPeerId);

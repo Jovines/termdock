@@ -48,7 +48,10 @@ function which(bin) {
 // —— native modules: 实际 spawn 测试，不只是 require ——
 console.log('\n=== Rebuilding native modules ===');
 
+const { ensureNodePty } = require_('./ensure-node-pty.cjs');
 const PTY_PATH = require_.resolve('node-pty/package.json', { paths: [pkgRoot] }).replace('/package.json', '');
+
+ensureNodePty(PTY_PATH);
 
 // Ensure node-pty prebuild spawn-helper binaries have execute permissions.
 // npm may strip +x during install, which causes terminal creation to fail.

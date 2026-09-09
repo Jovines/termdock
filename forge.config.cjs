@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 const signingIdentity = process.env.APPLE_SIGNING_IDENTITY || '-';
 const macosDeploymentTarget = '12.0';
@@ -46,6 +47,12 @@ function signBundledRuntime(buildPath, _electronVersion, platform, _arch, callba
   try {
     if (platform === 'darwin') {
       const resources = findResourcesDir(buildPath);
+      const ptyRoot = path.join(resources, 'server', 'node_modules', 'node-pty');
+      const ptyBinary = path.join(ptyRoot, 'build', 'Release', 'pty.node');
+      const ptyMarkerPath = path.join(ptyRoot, '.termdock-fd-fix.json');
+      const ptyMarker = JSON.parse(fs.readFileSync(ptyMarkerPath, 'utf8'));
+      const binaryHash = () => createHash('sha256').update(fs.readFileSync(ptyBinary)).digest('hex');
+      if (ptyMarker.binary !== binaryHash()) throw new Error('Patched node-pty binary changed before signing');
       const candidates = [
         path.join(resources, 'runtime', 'bin', 'node'),
         ...walkFiles(path.join(resources, 'toolchain', 'bin')),
@@ -63,6 +70,10 @@ function signBundledRuntime(buildPath, _electronVersion, platform, _arch, callba
         args.push(binary);
         execFileSync('/usr/bin/codesign', args, { stdio: 'inherit' });
       }
+      // Signing changes Mach-O bytes. Seal the signed hash before the enclosing
+      // app is signed so startup never rebuilds code inside the installed app.
+      ptyMarker.binary = binaryHash();
+      fs.writeFileSync(ptyMarkerPath, JSON.stringify(ptyMarker));
     }
     callback();
   } catch (error) {

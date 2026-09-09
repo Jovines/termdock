@@ -3,7 +3,7 @@ import { listServiceConnections, saveServiceConnection, normalizeServiceAddress,
 import { defaultDeviceName } from './deviceName';
 import { useEffect, useState, type ReactNode } from 'react';
 import FederationAccess, { type FederationGrant, type FederationInviteInput } from '../../components/FederationAccess';
-import { connectDevice, connectionRoutes, createEntryInvitation, authenticateKnownConnection, preferDirectConnection, connectServiceAddress, connectOpenService, currentSecureClient, getActiveClient, getIdentity, invalidateSecureTransport, savedConnection, SECURE_STATE_EVENT, type ConnectionIntent } from './browserIntegration';
+import { connectDevice, connectionRoutes, connectionAddresses, createEntryInvitation, authenticateKnownConnection, preferDirectConnection, connectServiceAddress, connectOpenService, currentSecureClient, getActiveClient, getIdentity, invalidateSecureTransport, savedConnection, SECURE_STATE_EVENT, type ConnectionIntent } from './browserIntegration';
 import { createInviteLink, parseInviteLink } from './inviteLink';
 import { SessionAccessView } from './SessionAccessView';
 import { LoginScreen } from '../components/auth/LoginScreen';
@@ -51,8 +51,9 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       const { origin, sessionId } = (event as CustomEvent<{ origin: string; sessionId: string }>).detail;
       try {
         const connections = JSON.parse(localStorage.getItem('termdock.federation.connections.v1') ?? '[]') as ConnectionIntent[];
-        const connection = connections.find(item => new URL(item.serviceOrigin ?? item.url).host === new URL(origin).host);
+        const connection = connections.find(item => connectionAddresses(item).some(address => new URL(address).origin === new URL(origin).origin));
         if (!connection) { setOpen(true); return; }
+        if (getWorkspaceHost()?.focusSession(connection.targetPeerId, sessionId)) return;
         sessionStorage.setItem(OPEN_SESSION_KEY, JSON.stringify({ serviceId: connection.targetPeerId, sessionId }));
         void connectDevice(connection).then(() => { setRemoteSession(sessionId); setReady(true); }).catch(() => { setError(true); setOpen(true); });
       } catch { setOpen(true); }

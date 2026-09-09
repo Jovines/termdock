@@ -1,3 +1,5 @@
+import { ensureNodePty } from '../utils/ensureNodePty.js';
+import { PtySpawnBackoff, PtySpawnDeferredError } from '../utils/ptySpawnBackoff.js';
 import { collaborationGroupRoutes } from '../agent/collaborationGroupRoutes.js';
 import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
 import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
@@ -1955,8 +1957,8 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
     const unavailable = remote.serviceConnected !== true || Date.now() - (remote.serviceCheckedAt ?? 0) > 15_000;
     return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId),
       serviceUnavailable: unavailable, reason: unavailable
-        ? `服务 ${remote.serviceLabel} 不可达：消息尚未送达，仅保存在待发送队列；请勿等待对方已收到的回复，服务重连且 Mac 客户端运行后重试投递。`
-        : '跨服务消息尚未确认送达，正在等待 Mac 客户端转发。' };
+        ? `服务 ${remote.serviceLabel} 不可达：消息尚未送达，仅保存在待发送队列；请勿等待对方已收到的回复，服务重连且转发客户端恢复运行后重试投递。`
+        : '跨服务消息尚未确认送达，正在等待在线客户端转发。' };
   }
   collaborationDeliveryWorker.wake(frontendSessionId);
   const route = collaborationDeliveryWorker.state(frontendSessionId);
@@ -5898,6 +5900,7 @@ async function getPtyProvider(): Promise<PtyProvider> {
     }
 
     try {
+      ensureNodePty();
       const nodePty = await import('node-pty');
       console.log('Using node-pty for terminal sessions');
       return { spawn: nodePty.spawn, backend: 'node-pty' } as PtyProvider;
@@ -8114,6 +8117,8 @@ async function executeTmuxAction(
   return { shouldBroadcastLayout };
 }
 
+const attachmentSpawnBackoff = new PtySpawnBackoff();
+
 export function handleTerminalWebSocket(
   ws: WebSocket,
   sessionId: string,
@@ -8138,6 +8143,7 @@ export function handleTerminalWebSocket(
   let outputWanted = options.outputActive !== false;
   let clientPaused = false;
   let replayRequest: Promise<void> | null = null;
+  let replayRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let clientCols = session.cols;
   let clientRows = session.rows;
   let initialAttachmentResize = true;
@@ -8150,6 +8156,7 @@ export function handleTerminalWebSocket(
   if (ownTmux) independentTmuxClients.add(ws);
   const attachment = ownTmux ? new TerminalClientAttachment(
     async (cols, rows) => {
+      attachmentSpawnBackoff.check();
       const provider = await getPtyProvider();
       const tmuxBinary = getTmuxBinary();
       const supportsFeatures = await supportsTmuxClientFeatures(tmuxBinary);
@@ -8162,10 +8169,10 @@ export function handleTerminalWebSocket(
       const env = buildInteractiveColorEnvironment({ ...process.env, PATH: buildAugmentedPath() });
       delete env.TMUX;
       delete env.TMUX_PANE;
-      return provider.spawn(tmuxBinary, buildTmuxAttachArgs(session.tmuxSessionName!, supportsFeatures), {
+      return attachmentSpawnBackoff.spawn(() => provider.spawn(tmuxBinary, buildTmuxAttachArgs(session.tmuxSessionName!, supportsFeatures), {
         name: 'xterm-256color', cols, rows, cwd: session.cwd || os.homedir(),
         env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
-      });
+      }));
     },
     (data) => {
       if (ws.readyState !== ws.OPEN) return;
@@ -8194,6 +8201,7 @@ export function handleTerminalWebSocket(
   }
 
   const sendReplay = (requestedSince = initialSince, clientEpoch = options.streamEpoch): Promise<void> => {
+    if (replayRetryTimer) return Promise.resolve();
     if (replayRequest) return replayRequest;
     const sinceSeq = resolveTerminalReplayCursor(requestedSince, clientEpoch, TERMINAL_STREAM_EPOCH);
     delivery.replaying = true;
@@ -8315,8 +8323,23 @@ export function handleTerminalWebSocket(
     })().catch((error) => {
       initialScreen?.cancel();
       initialScreen = null;
-      console.warn(`[ws] replay failed session=${sessionId}: ${getErrorMessage(error)}`);
-      if (ws.readyState === ws.OPEN) ws.close(1011, 'Replay unavailable');
+      if (!(error instanceof PtySpawnDeferredError)) {
+        console.warn(`[ws] replay failed session=${sessionId}: ${getErrorMessage(error)}`);
+      }
+      const retryAfterMs = attachment ? attachmentSpawnBackoff.retryAfterMs : 0;
+      if (retryAfterMs > 0 && ws.readyState === ws.OPEN) {
+        // Hold failed connections through the cooldown, so automatic reconnect
+        // does not itself become a high-frequency handshake loop.
+        const timer = setTimeout(() => {
+          replayRetryTimer = null;
+          ws.off('close', cancelRetry);
+          if (ws.readyState === ws.OPEN) ws.close(1013, 'PTY temporarily unavailable');
+        }, retryAfterMs);
+        replayRetryTimer = timer;
+        const cancelRetry = () => { clearTimeout(timer); replayRetryTimer = null; };
+        timer.unref();
+        ws.once('close', cancelRetry);
+      } else if (ws.readyState === ws.OPEN) ws.close(1011, 'Replay unavailable');
     }).finally(() => { replayRequest = null; });
     return replayRequest;
   };

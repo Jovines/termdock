@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.184",
+  "version": "1.4.185",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -83,7 +83,7 @@
     "mermaid": "^11.17.2",
     "motion": "^12.40.0",
     "multicast-dns": "^7.2.5",
-    "node-pty": "^1.1.0",
+    "node-pty": "1.1.0",
     "qrcode": "^1.5.4",
     "react": "^18.2.0",
     "react-diff-view": "^3.3.3",

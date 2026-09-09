@@ -149,8 +149,10 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         {tab === 'collaboration' && peerState && ['loading', 'partial', 'error', 'unsupported'].includes(peerState.state) && <div role="status" className="mx-4 mt-3 text-[11px] text-muted-foreground">
           {peerState.state === 'loading' ? '正在加载其他服务的会话；当前服务内可先组队。'
             : peerState.state === 'unsupported' ? '当前客户端不支持跨服务会话，请更新客户端；当前服务内可继续组队。'
-            : peerState.state === 'partial' ? '部分服务暂不可达；已有成员会保留，重连后继续同步。'
+            : peerState.state === 'partial' ? '部分服务的协作会话暂不可用；已有成员会保留，恢复后继续同步。'
               : '其他服务的会话暂时加载失败；当前服务内仍可组队。'}
+          {peerState.error && <span className="mt-1 block break-words text-[10px]">{peerState.error}</span>}
+          {peerState.services?.filter(service => !service.connected && service.error).map(service => <span key={service.origin} className="mt-1 block break-words text-[10px]">{service.label}：{service.error}</span>)}
           {['partial', 'error'].includes(peerState.state) && <button className={`${buttonClass} ml-2`} onClick={retryCollaborationPeers}>重试跨服务连接</button>}
         </div>}
         {launcherError && <div className="mx-4 mt-3 text-[11px] text-muted-foreground">{launcherError}</div>}
@@ -528,7 +530,7 @@ function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessi
 
       <section ref={messageComposerRef} className="border-t border-primary/20 bg-primary/5 px-3 py-3"><h4 className="text-[11px] font-medium text-foreground">发送给成员</h4><div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">接收人<select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}><option value="*">全组成员</option>{selectedGroup.sessionIds.map((id) => <option key={id} value={id}>{collaborationSessionName(sessions.find((session) => session.sessionId === id)) ?? `${id.slice(0, 8)}（离线）`}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">消息类型<select className={inputClass} value={kind} onChange={(event) => setKind(event.target.value as CollaborationMessageKind)}><option value="message">普通消息</option><option value="ask">需要回答的问题</option><option value="task">需要执行的任务</option><option value="handoff">工作交接</option><option value="done">完成通知</option></select></label></div>
         <label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">内容<textarea className={`${inputClass} min-h-20 resize-y`} value={content} onChange={(event) => setContent(event.target.value)} placeholder="说明背景、期望产出，以及对方需要回复或完成什么…" /></label>
-        <div className="mt-2 flex items-center justify-between gap-3"><p className="text-[9px] leading-relaxed text-muted-foreground">{selectedGroup.federated ? '跨服务消息由 Mac 客户端转发，请保持客户端运行；服务不可达时等待重连。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || !content.trim()} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
+        <div className="mt-2 flex items-center justify-between gap-3"><p className="text-[9px] leading-relaxed text-muted-foreground">{selectedGroup.federated ? '跨服务消息由当前客户端转发，请保持窗口或网页运行；手机后台可能暂停，返回后继续同步。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || !content.trim()} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
       </section>
     </>}
   </div>;

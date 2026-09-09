@@ -162,14 +162,15 @@ function secureUrl(address: string): string {
 async function connectEntry(route: ServiceRoute, signal?: AbortSignal): Promise<SecureClient> {
   return connect({ url: secureUrl(route.url), targetPeerId: route.targetPeerId, identity: await getIdentity(), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) });
 }
-async function openTargetForAuthentication(intent: ConnectionIntent): Promise<SecureClient> {
+async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal?: AbortSignal): Promise<SecureClient> {
   const identity = await getIdentity();
   const attempts: ConnectionAttempt<SecureClient>[] = connectionAddresses(intent).map(origin => ({
     key: `direct:${origin}`,
     run: signal => connect({ url: secureUrl(origin), targetPeerId: intent.targetPeerId, identity,
-      signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) }),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(8000), ...(outerSignal ? [outerSignal] : [])]) }),
   }));
   for (const route of connectionRoutes(intent)) attempts.push({ key: `relay:${route.targetPeerId}:${route.url}`, run: async signal => {
+    if (outerSignal) signal = AbortSignal.any([signal, outerSignal]);
     const reused = [active, entryClient].find(client => client && !client.closed && client.targetPeerId === route.targetPeerId);
     const entry = reused || await connectEntry(route, signal);
     try {
@@ -187,6 +188,19 @@ async function openTargetForAuthentication(intent: ConnectionIntent): Promise<Se
   const result = await raceConnectionAttempts(attempts, client => client.close());
   rememberConnectionPath(intent.targetPeerId, result.key);
   return result.value;
+}
+/** Open another saved service without replacing this page's active target or stores. */
+export async function openAuthorizedServiceClient(intent: ConnectionIntent, signal: AbortSignal): Promise<SecureClient> {
+  const client = await openTargetForAuthentication(intent, signal);
+  const abort = () => client.close();
+  signal.addEventListener('abort', abort, { once: true });
+  try {
+    if (signal.aborted) throw signal.reason;
+    await readDeviceAuthorization(client, { timeoutMs: 3000 });
+    if (signal.aborted) throw signal.reason;
+    return client;
+  } catch (error) { client.close(); throw error; }
+  finally { signal.removeEventListener('abort', abort); }
 }
 export async function connectDevice(intent: ConnectionIntent, options: { rememberOnly?: boolean } = {}): Promise<SecureClient> {
   const previous = active, previousEntry = entryClient;

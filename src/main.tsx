@@ -1,4 +1,5 @@
 import './lib/federation/scopeBootstrap';
+import { installBrowserCollaboration } from './lib/collaboration/browserFederation';
 import React, { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
 import { installEncryptedFetch } from './lib/federation/browserIntegration';
@@ -26,6 +27,7 @@ const initialService = savedConnection();
 if (initialService) void import('./App').catch(() => {});
 if (!new URLSearchParams(location.search).has('dag-playground') && !new URLSearchParams(location.search).has('diff-lab') && !new URLSearchParams(location.search).has('diff-review-lab')) {
   installWorkspaceHost(initialService ? { ...initialService, id: initialService.targetPeerId, label: initialService.serviceName || location.host } : undefined);
+  installBrowserCollaboration();
 }
 
 try {

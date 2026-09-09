@@ -187,6 +187,9 @@ run(process.platform === 'win32' ? 'npm.cmd' : 'npm', [
   },
 });
 
+// Ship the same repair gate for bundled and subsequently downloaded runtimes.
+fs.cpSync(path.join(root, 'scripts'), path.join(serverDir, 'scripts'), { recursive: true });
+run(runtimeNode, [path.join(serverDir, 'scripts/ensure-node-pty.cjs'), path.join(serverDir, 'node_modules/node-pty')], { cwd: serverDir });
 makeSpawnHelpersExecutable(path.join(serverDir, 'node_modules', 'node-pty'));
 run(runtimeNode, [
   '-e',
