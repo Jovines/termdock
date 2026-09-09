@@ -11,7 +11,7 @@ export interface TerminalPathMatch {
 // A token may contain shell-escaped spaces, but stops at punctuation that is
 // normally used to wrap a path in prose/Markdown. URL-looking tokens are
 // deliberately rejected so the existing WebLinksAddon remains authoritative.
-const PATH_TOKEN_PATTERN = /(?:\\[ \t]|[^\s`"'<>|()[\]{}=,:;!?])+/gu;
+const PATH_TOKEN_PATTERN = /(?:\\[ \t]|[^\s`"'<>|()[\]{}=,:;!?：，；！？。、“”‘’])+/gu;
 const TRAILING_PROSE_PUNCTUATION = /[,;:!?]+$/u;
 const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//iu;
 
@@ -70,6 +70,31 @@ export function resolveTerminalPath(text: string, cwd: string | null | undefined
   return normalizeAbsolutePath(`${cwd}/${unescaped}`);
 }
 
+// TUI renderers can wrap with CRLF and indentation instead of xterm's
+// isWrapped flag. Only join a colored directory prefix to a same-colored
+// relative path continuation near the right edge; ordinary output stays separate.
+function hardWrapIndent(terminal: Terminal, index: number): number | null {
+  const previous = terminal.buffer.active.getLine(index - 1);
+  const next = terminal.buffer.active.getLine(index);
+  if (!previous || !next || next.isWrapped) return null;
+  const before = previous.translateToString(true);
+  const after = next.translateToString(true);
+  const tail = findTerminalPathMatches(before).at(-1);
+  const continuation = after.match(/^( +)([^\s]+\/[^\s]+)/u);
+  if (!tail || tail.endIndex !== before.length || !tail.text.endsWith('/') || !continuation
+    || /^[~./]/u.test(continuation[2])) return null;
+  let lastColumn = previous.length - 1;
+  while (lastColumn >= 0 && !previous.getCell(lastColumn)?.getChars()) lastColumn -= 1;
+  const indent = continuation[1].length;
+  if (lastColumn < previous.length - Math.max(8, indent + 2)) return null;
+  const left = previous.getCell(lastColumn);
+  const right = next.getCell(indent);
+  if (!left || !right || left.isFgDefault() || right.isFgDefault()
+    || left.getFgColorMode() !== right.getFgColorMode()
+    || left.getFgColor() !== right.getFgColor()) return null;
+  return indent;
+}
+
 function readBufferLine(terminal: Terminal, bufferLineNumber: number): {
   text: string;
   startPositions: Array<{ x: number; y: number }>;
@@ -78,12 +103,12 @@ function readBufferLine(terminal: Terminal, bufferLineNumber: number): {
   const buffer = terminal.buffer.active;
   let startLineIndex = bufferLineNumber - 1;
   if (!buffer.getLine(startLineIndex)) return null;
-  while (startLineIndex > 0 && buffer.getLine(startLineIndex)?.isWrapped) {
+  while (startLineIndex > 0 && (buffer.getLine(startLineIndex)?.isWrapped || hardWrapIndent(terminal, startLineIndex) !== null)) {
     startLineIndex -= 1;
   }
 
   let endLineIndex = bufferLineNumber - 1;
-  while (endLineIndex + 1 < buffer.length && buffer.getLine(endLineIndex + 1)?.isWrapped) {
+  while (endLineIndex + 1 < buffer.length && (buffer.getLine(endLineIndex + 1)?.isWrapped || hardWrapIndent(terminal, endLineIndex + 1) !== null)) {
     endLineIndex += 1;
   }
 
@@ -93,7 +118,12 @@ function readBufferLine(terminal: Terminal, bufferLineNumber: number): {
   for (let lineIndex = startLineIndex; lineIndex <= endLineIndex && text.length <= 2048; lineIndex += 1) {
     const line = buffer.getLine(lineIndex);
     if (!line) break;
-    for (let column = 0; column < line.length; column += 1) {
+    const indent = lineIndex > startLineIndex ? hardWrapIndent(terminal, lineIndex) ?? 0 : 0;
+    let length = line.length;
+    if (lineIndex < endLineIndex && hardWrapIndent(terminal, lineIndex + 1) !== null) {
+      while (length > 0 && !(line.getCell(length - 1)?.getChars() || '').trim()) length -= 1;
+    }
+    for (let column = indent; column < length; column += 1) {
       const cell = line.getCell(column);
       if (!cell || cell.getWidth() === 0) continue;
       const chars = cell.getChars() || ' ';

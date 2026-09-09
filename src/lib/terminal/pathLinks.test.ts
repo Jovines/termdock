@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Terminal as HeadlessTerminal } from '@xterm/headless';
 import type { Terminal } from '@xterm/xterm';
 import { createTerminalPathLinkProvider, findTerminalPathMatches, resolveTerminalPath } from './pathLinks';
 
@@ -63,5 +64,52 @@ describe('terminal path links', () => {
       links?.[0]?.activate({} as MouseEvent, links[0].text);
     });
     expect(activated).toHaveBeenCalledWith('/home/qiao/vscode/web-terminal/src/');
+  });
+});
+
+
+describe('real terminal path layout', () => {
+  async function linksFor(output: string, cols: number, row: number) {
+    const terminal = new HeadlessTerminal({ cols, rows: 10, allowProposedApi: true });
+    await new Promise<void>((resolve) => terminal.write(output, resolve));
+    const activate = vi.fn();
+    let result: import('@xterm/xterm').ILink[] | undefined;
+    createTerminalPathLinkProvider(terminal as unknown as Terminal, activate)
+      .provideLinks(row, (links) => { result = links; });
+    terminal.dispose();
+    return { links: result, activate };
+  }
+
+  it('excludes Chinese labels and punctuation while retaining Chinese filenames', async () => {
+    const { links } = await linksFor('审查报告：/tmp/报告.html，完成', 80, 1);
+    expect(links?.map(link => link.text)).toEqual(['/tmp/报告.html']);
+    expect(links?.[0].range).toEqual({ start: { x: 11, y: 1 }, end: { x: 24, y: 1 } });
+  });
+
+  it('joins automatic wrapping from either row', async () => {
+    for (const row of [1, 2]) {
+      const { links } = await linksFor('报告：/tmp/Douyin_1788930589/report.md', 16, row);
+      expect(links?.map(link => link.text)).toEqual(['/tmp/Douyin_1788930589/report.md']);
+    }
+  });
+
+  it('joins a colored TUI path after CRLF and indentation from either row', async () => {
+    for (const row of [1, 2]) {
+      const { links, activate } = await linksFor('审查报告： /tmp/report.html | \x1b[36m/tmp/\r\n  Douyin_1788930589/report.md\x1b[0m', 36, row);
+      expect(links?.map(link => link.text)).toEqual(['/tmp/report.html', '/tmp/Douyin_1788930589/report.md']);
+      expect(links?.[1].range).toEqual({ start: { x: 31, y: 1 }, end: { x: 29, y: 2 } });
+      links?.[1].activate({} as MouseEvent, links[1].text);
+      expect(activate).toHaveBeenCalledWith('/tmp/Douyin_1788930589/report.md');
+    }
+  });
+
+  it.each([
+    '                          /tmp/\r\n  project/report.md',
+    '\x1b[36m/tmp/\r\n  project/report.md',
+    '                          \x1b[36m/tmp/\r\n  \x1b[31mproject/report.md',
+    '                          \x1b[36m/tmp/\r\n  /other/report.md',
+  ])('does not merge unrelated hard lines: %s', async (output) => {
+    const { links } = await linksFor(output, 36, 1);
+    expect(links?.map(link => link.text)).toEqual(['/tmp/']);
   });
 });
