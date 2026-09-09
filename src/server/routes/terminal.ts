@@ -6483,6 +6483,14 @@ router.use('/operations/orchestration', collaborationRoutes({ store: collaborati
     }
     upsertGlobalSessionRecord(next);
     await persistGlobalStateNow();
+    // The broadcast inventory must not be a stale (≤1.5s TTL) cache build:
+    // browsers apply the inventory over the session list, so an old cached
+    // name would keep the sidebar showing the previous title.
+    try {
+      await getSessionInventorySnapshot({ refresh: true });
+    } catch (error) {
+      console.warn('[collab] failed to refresh inventory after rename:', getErrorMessage(error));
+    }
     broadcastClientState();
     return { ok: true };
   } }));

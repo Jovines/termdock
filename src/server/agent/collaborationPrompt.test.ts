@@ -159,19 +159,32 @@ describe('formatCollaborationDelivery', () => {
     expect(render([message({ task })])).toContain(JSON.stringify(task));
   });
 
-  it('rides the recipient role under the header of a single-group delivery', () => {
+  it('rides the recipient name and role under the header of a single-group delivery', () => {
     const prompt = render([message({ fromSessionId: 'coder-id' })], {
       groups: [{ ...group, roles: { 'reviewer-id': '最终验收', 'coder-id': '开发与自测' } }],
     });
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
     expect(lines[1]).toBe('协作消息 · 组「发布组」(2 个成员)');
-    expect(lines[2]).toBe('你的定位:最终验收');
+    expect(lines[2]).toBe('你的名字:测试 Agent');
+    expect(lines[3]).toBe('你的定位:最终验收');
     expect(prompt).not.toContain('开发与自测');
     expect(prompt).not.toContain('coder-id:');
   });
 
-  it('never injects a role line when unset or the batch spans groups', () => {
+  it('sanitizes the recipient name line and skips it when the session is unknown', () => {
+    const prompt = render([message({})], {
+      sessions: [{ ...sessions[0]!, name: '名字·带「引号」\n换行' }],
+    });
+    const lines = prompt.split('\n');
+    expect(lines[2]).toBe('你的名字:名字 带 引号 换行');
+    for (const line of lines) expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
+    const ghost = render([message({})], { targetSessionId: 'ghost-id' });
+    expect(ghost).not.toContain('你的名字:');
+  });
+
+  it('never injects a role line when unset or the batch spans groups, but still names the recipient', () => {
+    expect(render([message({})])).toContain('你的名字:测试 Agent');
     expect(render([message({})])).not.toContain('你的定位:');
     const cross = render([message({ groupId: 'one' }), message({ id: 'two', groupId: 'two' })], {
       groups: [
@@ -179,6 +192,7 @@ describe('formatCollaborationDelivery', () => {
         { ...group, id: 'two' },
       ],
     });
+    expect(cross).toContain('你的名字:测试 Agent');
     expect(cross).not.toContain('你的定位:');
     expect(cross.split(RULE).length).toBe(3);
   });

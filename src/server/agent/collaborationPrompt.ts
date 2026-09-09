@@ -111,12 +111,17 @@ export function formatCollaborationDelivery(input: {
   // Notes (education + dynamic notices) live inside the shell, after the last
   // message, so the closing rule still marks the end of the delivered block.
   if (!blocks.length) return notes.join('\n');
-  // The recipient's own role (定位) rides the shell right under the header,
-  // but only for a single-group delivery — a mixed batch claims no group.
+  // Self-identity rides the shell under the header so the recipient always
+  // knows the name peers see (a rename lands on the next delivery — no
+  // separate notification needed) and, in a single-group delivery, its role.
+  // The name needs no group claim and survives mixed batches; the role (定位)
+  // only rides when the batch maps to exactly one group.
+  const ownName = sanitizeCollaborationName(sessionsById.get(input.targetSessionId)?.name ?? '');
   const ownRole = singleGroup
     ? sanitizeCollaborationRole(singleGroup.roles?.[input.targetSessionId] ?? '')
     : '';
   const lines = [SHELL_RULE, shellHeader];
+  if (ownName) lines.push(`你的名字:${ownName}`);
   if (ownRole) lines.push(`你的定位:${ownRole}`);
   lines.push('', blocks.join('\n\n'), ...(notes.length ? ['', ...notes] : []), SHELL_RULE);
   return lines.join('\n');
