@@ -158,6 +158,19 @@ html[data-termdock-desktop='true'] {
   --safe-top-inset: max(env(safe-area-inset-top, 0px), 38px);
 }
 
+/* The pinned sidebar starts at the native window controls. Keep this in the
+   served stylesheet so existing desktop shells do not depend on header classes.
+   Overlay drawers already reserve the top safe inset. */
+html[data-termdock-desktop='true'] [data-session-sidebar-pinned] > [data-session-sidebar-header] {
+  padding-left: 80px;
+  -webkit-app-region: drag;
+}
+
+html[data-termdock-desktop='true'] [data-session-sidebar-header] button,
+html[data-termdock-desktop='true'] [data-session-sidebar-header] [role='menu'] {
+  -webkit-app-region: no-drag;
+}
+
 	/* 桌面端：body 显式声明 no-drag，防止 Electron hiddenInset 原生标题栏
 	   区域产生隐式 drag region 覆盖按钮/链接等交互元素。
 	   同时用 body::after 在顶部放一条 38px 的 drag 把手（与 --safe-top-inset

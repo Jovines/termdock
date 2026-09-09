@@ -24,9 +24,9 @@ export function SplitPaneTitle({ session, active, onActivate }: {
       aria-pressed={active}
       title={title}
       onClick={onActivate}
-      className={`swiper-no-swiping flex h-6 min-h-6 w-full shrink-0 items-center gap-1.5 overflow-hidden border-b border-border/30 px-2 text-left text-[11px] leading-none app-chrome-bg hover:bg-surface focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1 ${active ? 'text-foreground' : 'text-muted-foreground'}`}
+      className="swiper-no-swiping flex h-6 min-h-6 w-full shrink-0 items-center gap-1.5 overflow-hidden border-b border-border px-2 text-left text-[12px] font-medium leading-none text-foreground app-chrome-bg hover:bg-surface focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
     >
-      <Terminal size={11} className={`shrink-0 ${active ? 'text-primary' : ''}`} />
+      <Terminal size={11} className={`shrink-0 ${active ? 'text-primary' : 'text-muted-foreground'}`} />
       <span className="min-w-0 flex-1 truncate">{title}</span>
       {active && <span aria-hidden="true" className="h-1 w-1 shrink-0 rounded-full bg-primary" />}
     </button>

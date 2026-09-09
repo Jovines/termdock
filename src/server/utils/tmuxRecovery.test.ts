@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectTmuxRecoveryIncident, normalizeTmuxRecoveryIncident } from './tmuxRecovery.js';
+import { detectTmuxRecoveryIncident, normalizeTmuxRecoveryIncident, retainDismissedTmuxSessions } from './tmuxRecovery.js';
 
 const candidates = [
   { sessionId: 'a', tmuxSessionName: 'tmux-a', resumable: true },
@@ -55,5 +55,34 @@ describe('tmux recovery detection', () => {
       id: 'incident', detectedAt: 4, previousServerPid: 1,
       affectedSessionIds: ['a', 'a', '', 1],
     })).toMatchObject({ affectedSessionIds: ['a'], currentServerPid: null });
+  });
+});
+
+describe('dismissed tmux losses', () => {
+  it('does not recreate a dismissed incident on refresh or a replacement server', () => {
+    for (const currentServerPid of [null, 200]) {
+      expect(detectTmuxRecoveryIncident({
+        previousServerPid: 100, currentServerPid, candidates,
+        liveSessionNames: new Set(), dismissedSessionIds: new Set(['a', 'b']),
+      })).toBeNull();
+    }
+  });
+
+  it('still reports another session loss', () => {
+    expect(detectTmuxRecoveryIncident({
+      previousServerPid: 100, currentServerPid: null, candidates,
+      liveSessionNames: new Set(), dismissedSessionIds: new Set(['a']),
+    })?.affectedSessionIds).toEqual(['b']);
+  });
+
+  it('rearms recovered sessions for a future loss and drops deleted records', () => {
+    const dismissed = retainDismissedTmuxSessions(
+      ['a', 'b', 'deleted'], candidates, new Set(['tmux-a']),
+    );
+    expect(dismissed).toEqual(['b']);
+    expect(detectTmuxRecoveryIncident({
+      previousServerPid: 200, currentServerPid: 200, candidates,
+      liveSessionNames: new Set(), dismissedSessionIds: new Set(dismissed),
+    })?.affectedSessionIds).toEqual(['a']);
   });
 });

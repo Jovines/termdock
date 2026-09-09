@@ -381,6 +381,7 @@ interface MultiTerminalViewProps {
     splitWorkspaces: SplitWorkspaceSummary[];
   }) => void;
   onInitialViewportReady?: () => void;
+  onInitialRecoveryRequired?: () => void;
 }
 
 function pickCwdById(sessions: Map<string, { cwd: string | null }>): Map<string, string | null> {
@@ -426,6 +427,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   onStatusChange,
   onSessionDataUpdate,
   onInitialViewportReady,
+  onInitialRecoveryRequired,
 }) => {
   const { t } = useI18n();
   const debugSession = useMemo(() => createDebugLogger('session'), []);
@@ -506,6 +508,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   } = useSessionPersistence();
 
   const tmuxRecovery = inventory?.tmuxRecovery ?? null;
+  useEffect(() => {
+    // Recovery needs user interaction even if the lost terminal cannot finish
+    // its initial screen sync. Expose the shell without claiming it is ready.
+    if (tmuxRecovery) onInitialRecoveryRequired?.();
+  }, [tmuxRecovery, onInitialRecoveryRequired]);
   useEffect(() => {
     setTmuxRecoveryError(null);
     setTmuxRecoveryPending(null);

@@ -1642,7 +1642,7 @@ export function LeftSidebar(
     <>
       <ServiceSwitcher />
       {/* Header — single compact row */}
-      <div className="relative z-20 shrink-0 px-2 py-2">
+      <div data-session-sidebar-header className="relative z-20 shrink-0 px-2 py-2">
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-10 border-b border-border/15" />
         <div className="flex items-center gap-1.5">
           <div className="min-w-0 flex-1 px-1">
@@ -2079,7 +2079,7 @@ export function LeftSidebar(
   );
 
   return pinned ? (
-    <div className="h-full flex flex-col app-chrome-bg border-r border-border/15">
+    <div data-session-sidebar-pinned className="h-full flex flex-col app-chrome-bg border-r border-border/15">
       {inner}
     </div>
   ) : (

@@ -35,12 +35,14 @@ export function detectTmuxRecoveryIncident(input: {
   liveSessionNames: ReadonlySet<string>;
   intentionallyDeleting?: ReadonlySet<string>;
   existingIncident?: TmuxRecoveryIncident | null;
+  dismissedSessionIds?: ReadonlySet<string>;
   now?: number;
 }): TmuxRecoveryIncident | null {
   if (input.existingIncident) return input.existingIncident;
   const intentionallyDeleting = input.intentionallyDeleting ?? new Set<string>();
   const recoverable = input.candidates.filter((candidate) =>
     candidate.resumable
+    && !input.dismissedSessionIds?.has(candidate.sessionId)
     && !intentionallyDeleting.has(candidate.tmuxSessionName));
   const missing = recoverable.filter((candidate) =>
     !input.liveSessionNames.has(candidate.tmuxSessionName));
@@ -65,4 +67,15 @@ export function detectTmuxRecoveryIncident(input: {
     currentServerPid: input.currentServerPid,
     affectedSessionIds: affected.map((candidate) => candidate.sessionId),
   };
+}
+
+// A dismissed loss stays acknowledged until that session is observed alive
+// again. Other sessions can still report new losses in the meantime.
+export function retainDismissedTmuxSessions(
+  dismissedSessionIds: readonly string[],
+  candidates: TmuxRecoveryCandidate[],
+  liveSessionNames: ReadonlySet<string>,
+): string[] {
+  return dismissedSessionIds.filter((id) => candidates.some((candidate) =>
+    candidate.sessionId === id && !liveSessionNames.has(candidate.tmuxSessionName)));
 }

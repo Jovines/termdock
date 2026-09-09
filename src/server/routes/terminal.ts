@@ -140,6 +140,7 @@ import {
 import {
   detectTmuxRecoveryIncident,
   normalizeTmuxRecoveryIncident,
+  retainDismissedTmuxSessions,
   type TmuxRecoveryIncident,
 } from '../utils/tmuxRecovery.js';
 import {
@@ -531,7 +532,8 @@ const intentionallyDeletingTmuxSessions = new Set<string>();
 let tmuxRecoveryState: {
   lastServerPid: number | null;
   incident: TmuxRecoveryIncident | null;
-} = { lastServerPid: null, incident: null };
+  dismissedSessionIds: string[];
+} = { lastServerPid: null, incident: null, dismissedSessionIds: [] };
 let persistGlobalStateTimer: ReturnType<typeof setTimeout> | null = null;
 let globalSessionStateWatcher: fs.FSWatcher | null = null;
 let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -857,6 +859,7 @@ async function loadTmuxRecoveryStateFromDisk(): Promise<void> {
     const data = await readJsonFileIfExists<{
       lastServerPid?: unknown;
       incident?: unknown;
+      dismissedSessionIds?: unknown;
     }>(TMUX_RECOVERY_STATE_FILE);
     if (!data) return;
     tmuxRecoveryState = {
@@ -864,6 +867,9 @@ async function loadTmuxRecoveryStateFromDisk(): Promise<void> {
         ? data.lastServerPid
         : null,
       incident: normalizeTmuxRecoveryIncident(data.incident),
+      dismissedSessionIds: Array.isArray(data.dismissedSessionIds)
+        ? data.dismissedSessionIds.filter((id): id is string => typeof id === 'string')
+        : [],
     };
   } catch (error) {
     console.warn('[tmux-recovery] Failed to load recovery state:', getErrorMessage(error));
@@ -2756,6 +2762,9 @@ async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]
       resumable: Boolean(record.cwd && record.agentResume?.sessionId && !backend?.agent),
     }];
   });
+  const dismissedSessionIds = retainDismissedTmuxSessions(
+    tmuxRecoveryState.dismissedSessionIds, candidates, liveSessionNames,
+  );
   const incident = detectTmuxRecoveryIncident({
     previousServerPid: tmuxRecoveryState.lastServerPid,
     currentServerPid,
@@ -2763,8 +2772,11 @@ async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]
     liveSessionNames,
     intentionallyDeleting: intentionallyDeletingTmuxSessions,
     existingIncident: tmuxRecoveryState.incident,
+    // Apply acknowledgements before rearming sessions observed alive in this scan.
+    dismissedSessionIds: new Set(tmuxRecoveryState.dismissedSessionIds),
   });
-  let changed = false;
+  let changed = dismissedSessionIds.length !== tmuxRecoveryState.dismissedSessionIds.length;
+  tmuxRecoveryState.dismissedSessionIds = dismissedSessionIds;
   if (incident !== tmuxRecoveryState.incident) {
     tmuxRecoveryState.incident = incident;
     changed = true;
@@ -6034,6 +6046,10 @@ router.post('/tmux/recovery/restore-all', async (_req, res) => {
 });
 
 router.delete('/tmux/recovery', async (_req, res) => {
+  tmuxRecoveryState.dismissedSessionIds = Array.from(new Set([
+    ...tmuxRecoveryState.dismissedSessionIds,
+    ...(tmuxRecoveryState.incident?.affectedSessionIds ?? []),
+  ]));
   tmuxRecoveryState.incident = null;
   await persistTmuxRecoveryState();
   latestSessionInventoryAt = 0;
