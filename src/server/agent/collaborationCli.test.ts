@@ -29,6 +29,19 @@ describe('collaboration CLI contract', () => {
     expect(JSON.parse(fixture_.output[0])).toMatchObject({ message_id: 'm', status: 'delivered' });
     expect(fixture_.calls[1][1]).toContain('receipt_only=true');
   });
+  it('surfaces a single queued-behind-busy hint in text mode while waiting for delivery', async () => {
+    const fixture_ = fixture([
+      { message_id: 'm', thread_id: 't', status: 'pending', last_error: 'AGENT_WORKING' },
+      { message_id: 'm', thread_id: 't', status: 'pending', last_error: 'AGENT_WORKING' },
+      { message_id: 'm', thread_id: 't', status: 'delivered' },
+    ]);
+    const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'delivered', '--text']), { backendSessionId: 'b' }, fixture_.io);
+    expect(exit).toBe(0);
+    expect(fixture_.output).toEqual([
+      '排队中：对端 Agent 正忙（AGENT_WORKING），消息将在其当前回合结束后写入。',
+      'delivered m thread=t',
+    ]);
+  });
   it('returns a distinct timeout while preserving the queued ID and never resending', async () => {
     const fixture_ = fixture([]);
     const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'read', '--timeout', '10ms']), { backendSessionId: 'b' }, fixture_.io);

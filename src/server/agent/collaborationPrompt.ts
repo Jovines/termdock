@@ -16,6 +16,27 @@ const MESSAGE_LABELS: Record<CollaborationMessageKind, string> = {
   done: '完成',
 };
 
+/**
+ * Characters that would corrupt the header structure `【group · source】`:
+ * the brackets themselves, the middle dot used as field delimiter, and
+ * control sequences (C0 controls + DEL) that could inject terminal output.
+ * Legacy and federated names may carry them, so the render layer neutralizes
+ * them defensively; user-entered names are rejected at creation instead.
+ */
+export const COLLAB_NAME_FORBIDDEN = /[【】·\x00-\x1f\x7f]/;
+
+/** Render-safe name for header/roster lines: no reserved characters,
+ * collapsed whitespace, capped display length. */
+export function sanitizeCollaborationName(name: string, max = 40): string {
+  const cleaned = name
+    .replace(/[【】]/g, '')
+    .replace(/·/g, ' ')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
+}
+
 export function formatCollaborationDelivery(input: {
   targetSessionId: string;
   messages: CollaborationMessage[];
@@ -34,9 +55,9 @@ export function formatCollaborationDelivery(input: {
   const messageBlocks = input.messages.map((message) => {
     const sourceSession = message.fromSessionId ? sessionsById.get(message.fromSessionId) : null;
     const source = message.fromSessionId
-      ? sourceSession?.name ?? message.fromSessionId
+      ? sanitizeCollaborationName(sourceSession?.name ?? message.fromSessionId)
       : '用户';
-    const group = groupsById.get(message.groupId)?.name ?? '协作组';
+    const group = sanitizeCollaborationName(groupsById.get(message.groupId)?.name ?? '协作组');
     const body = Buffer.byteLength(message.content) > 8_192
       ? `大消息已完整保存（${Buffer.byteLength(message.content)} 字节）。使用 td collab message get ${message.id} --json 获取正文；不要把这条提示当作任务正文。`
       : message.content;
@@ -57,7 +78,7 @@ export function formatCollaborationDelivery(input: {
   const sourceIds = new Set(input.messages.map((message) => message.fromSessionId));
   const peers = peerIds.filter((id) => !sourceIds.has(id)).map((sessionId) => {
     const session = sessionsById.get(sessionId);
-    return `- ${session?.name ?? '离线会话'}：\`td collab send ${sessionId} "消息内容" --text\``;
+    return `- ${session ? sanitizeCollaborationName(session.name) : '离线会话'}：\`td collab send ${sessionId} "消息内容" --text\``;
   });
   const unreachable = peerIds.filter((id) => sessionsById.get(id)?.status === 'service-unreachable');
   const routingHelp = input.showRoutingHelp === false ? [] : [
@@ -67,7 +88,10 @@ export function formatCollaborationDelivery(input: {
   const dynamicNotices = [
     ...(peerIds.some((id) => id.startsWith('remote:'))
       ? ['跨服务通信使用 td collab；转发客户端须保持运行，网页或 PWA 暂停后需返回前台继续转发。'] : []),
-    ...unreachable.map((id) => `注意：${sessionsById.get(id)?.name ?? id} 服务不可达，消息无法送达；仅可排队等待重连。`),
+    ...unreachable.map((id) => {
+      const session = sessionsById.get(id);
+      return `注意：${session ? sanitizeCollaborationName(session.name) : id} 服务不可达，消息无法送达；仅可排队等待重连。`;
+    }),
   ];
 
   return [

@@ -193,9 +193,19 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       output(await request('POST', command.action === 'spawn' ? '/spawn' : '/members', body)); return 0;
     }
     const stage = String(o['wait-until'] ?? (command.action === 'message' ? 'read' : 'queued'));
+    const busyCodes = new Set(['AGENT_WORKING', 'AGENT_WAITING', 'AGENT_ACTIVE']);
     let previous = '';
+    let busyHinted: string | null = null;
+    const hintBusy = () => {
+      const code = receipt?.status === 'pending' && busyCodes.has(String(receipt.last_error ?? '')) ? String(receipt.last_error) : null;
+      if (o.text && code && code !== busyHinted) {
+        io.write(`排队中：对端 Agent 正忙（${code}），消息将在其当前回合结束后写入。`);
+        busyHinted = code;
+      }
+    };
     for (;;) {
       if (['failed', 'expired'].includes(receipt!.status)) { output(receipt!); return 3; }
+      hintBusy();
       if (waitSatisfied(receipt!, stage, o['expect-reply'] as string)) { output(receipt!); return 0; }
       if (o.follow || command.operation === 'watch') {
         const serialized = JSON.stringify(receipt);

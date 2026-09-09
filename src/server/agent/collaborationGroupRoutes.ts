@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { CollaborationStore } from './collaborationStore.js';
 import { CollaborationError } from './collaborationProtocol.js';
+import { COLLAB_NAME_FORBIDDEN } from './collaborationPrompt.js';
 
 /** The current service owns group membership, including retained offline members. */
 export function collaborationGroupRoutes(options: {
@@ -19,6 +20,9 @@ export function collaborationGroupRoutes(options: {
         || typeof name !== 'string' || !name.trim() || !Array.isArray(sessionIds)
         || sessionIds.some((value) => typeof value !== 'string' || !value.trim())) {
         throw new CollaborationError('INVALID_GROUP', '名称和成员列表无效', 400);
+      }
+      if (COLLAB_NAME_FORBIDDEN.test(name.trim())) {
+        throw new CollaborationError('INVALID_GROUP', '名称不能包含「【】」、间隔号「·」、换行或控制字符', 400);
       }
       const existing = id ? options.store.getGroup(id) : null;
       if (id && (!existing || existing.deleted)) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);

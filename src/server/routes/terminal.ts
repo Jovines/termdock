@@ -103,7 +103,7 @@ import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/pro
 import { collaborationRoutes } from '../agent/collaborationRoutes.js';
 import { COLLAB_LIMITS, extrasFromBody, type MessageFragment, type TransportDiagnostic } from '../agent/collaborationProtocol.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind, type CollaborationMessage } from '../agent/collaborationStore.js';
-import { formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
+import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
@@ -2197,6 +2197,9 @@ async function spawnCollaborationAgentSession(
     fallbackMode: fallbackRecord?.mode,
   });
   const requestedName = typeof input.name === 'string' ? input.name.trim().slice(0, 120) : '';
+  if (requestedName && COLLAB_NAME_FORBIDDEN.test(requestedName)) {
+    throw new HttpStatusError(400, '会话名称不能包含「【】」、间隔号「·」、换行或控制字符', 'COLLAB_NAME_INVALID');
+  }
   const requestedCwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
   const opened = await openInventorySession(req, {
     name: requestedName || `${launcher.displayName} · ${group.name}`,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CollaborationGroup, CollaborationMessage } from './collaborationStore.js';
-import { formatCollaborationDelivery } from './collaborationPrompt.js';
+import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery, sanitizeCollaborationName } from './collaborationPrompt.js';
 
 const group: CollaborationGroup = {
   id: 'group-1',
@@ -35,6 +35,38 @@ const sessions = [
 
 const render = (messages: CollaborationMessage[], overrides = {}) => formatCollaborationDelivery({
   targetSessionId: 'reviewer-id', messages, groups: [group], sessions, ...overrides,
+});
+
+describe('COLLAB_NAME_FORBIDDEN / sanitizeCollaborationName', () => {
+  it('flags characters that would corrupt the header structure', () => {
+    expect(COLLAB_NAME_FORBIDDEN.test('【发布】')).toBe(true);
+    expect(COLLAB_NAME_FORBIDDEN.test('a·b')).toBe(true);
+    expect(COLLAB_NAME_FORBIDDEN.test('行一\n行二')).toBe(true);
+    expect(COLLAB_NAME_FORBIDDEN.test('\x1b[31mred')).toBe(true);
+    expect(COLLAB_NAME_FORBIDDEN.test('普通 名称 v1')).toBe(false);
+  });
+
+  it('neutralizes reserved characters for header rendering', () => {
+    expect(sanitizeCollaborationName('A · B')).toBe('A B');
+    expect(sanitizeCollaborationName('【发布】组')).toBe('发布组');
+    // ESC itself is stripped; residue like "[31m" is inert plain text once
+    // the control introducer is gone.
+    expect(sanitizeCollaborationName('第一行\n第二行\t\x1b[31m')).toBe('第一行 第二行 [31m');
+  });
+
+  it('caps over-long names with an ellipsis', () => {
+    expect(sanitizeCollaborationName('x'.repeat(80), 40)).toBe(`${'x'.repeat(39)}…`);
+    expect(sanitizeCollaborationName('short')).toBe('short');
+  });
+
+  it('never emits a forbidden character inside a rendered header', () => {
+    const evil = render([message({ fromSessionId: 'coder-id' })], {
+      groups: [{ ...group, name: '【协作】组\nv2' }],
+      sessions: [{ ...sessions[1]!, name: '名字·带\n换行' }],
+    });
+    const header = evil.split('\n')[0]!;
+    expect(header).toMatch(/^【[^【】·\n]+ · [^【】·\n]+( · 任务)?】$/);
+  });
 });
 
 describe('formatCollaborationDelivery', () => {
