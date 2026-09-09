@@ -1,5 +1,5 @@
 import { CollaborationFederation, sessionAddress } from './collaborationFederation.js';
-import { prepareBundledFrontend } from './bundledFrontend.js';
+import { prepareServiceFrontend, selectServiceFrontend } from './bundledFrontend.js';
 import { serviceConnection, serviceConnectionKeys, importServiceConnection, saveServiceConnection, invitationForService } from './serviceConnections.js';
 const pendingServiceInvitations = new WeakMap<BrowserWindow, string>();
 import {
@@ -1627,9 +1627,24 @@ async function connectWindow(
     return probe;
   }
 
+  // Existing windows keep their document when transport connectivity changes.
+  // New direct windows use the target's own frontend; a saved relay is the only
+  // reason to bootstrap a local frontend under an unreachable target origin.
+  if (known?.targetPeerId) {
+    probe = await probeServiceWithLocalNetworkPermission(rawUrl, { interactive: options.focus !== false });
+  }
+  const frontendSource = selectServiceFrontend(probe.ok, known);
+  if (!frontendSource) return probe;
+  if (frontendSource === 'bundled') probe = { ok: true, url: normalizeServiceUrl(rawUrl) };
+
   const workspaceWindow = createDesktopWindow({ serviceOrigin: key, label: serviceLabel(probe.url) });
   if (known?.targetPeerId) serviceWindowPeers.set(workspaceWindow, known.targetPeerId);
-  await prepareBundledFrontend(workspaceWindow.webContents.session, key, () => path.join(runtimePaths().serverRoot, 'dist', 'client'));
+  try {
+    await prepareServiceFrontend(workspaceWindow.webContents.session, key, frontendSource, () => path.join(runtimePaths().serverRoot, 'dist', 'client'));
+  } catch (error) {
+    workspaceWindow.destroy();
+    return { ...probe, ok: false, error: networkErrorDetails(error) };
+  }
   if (options.invitation) pendingServiceInvitations.set(workspaceWindow, options.invitation);
   serviceWindows.set(key, workspaceWindow);
   broadcastServiceActivity();

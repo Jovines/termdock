@@ -12,8 +12,10 @@ function WorkspaceFrame({ host, item, active }: { host: WorkspaceHost; item: Ser
   useEffect(() => () => host.attach(item.key, null), [host, item.key]);
   return <iframe ref={frame} title={item.service?.label || '服务工作区'}
     src={`/workspace.html?${WORKSPACE_QUERY}=${encodeURIComponent(item.key)}`}
-    className="absolute inset-0 h-full w-full border-0 bg-[var(--chrome-bg)]"
-    style={{ visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none' }}
+    className="fixed inset-0 w-full border-0 bg-[var(--chrome-bg)]"
+    // Each workspace applies its own safe areas and keyboard layout. Anchor it
+    // to the physical viewport, outside the entry root's safe-area padding.
+    style={{ height: 'var(--app-base-vh, 100%)', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none' }}
     aria-hidden={!active} tabIndex={active ? 0 : -1} allow="clipboard-read; clipboard-write; fullscreen"
     onLoad={event => host.attach(item.key, event.currentTarget.contentWindow)} />;
 }
