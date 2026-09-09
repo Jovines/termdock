@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { AgentOperationsPanel, cleanSessionSnippet } from './AgentOperationsPanel';
 
 const apiMocks = vi.hoisted(() => ({
+  uploadFiles: vi.fn(),
   getAgentLaunchers: vi.fn(),
   listAgentAutomations: vi.fn().mockResolvedValue({ automations: [], runs: [] }),
   listCollaborationGroups: vi.fn().mockResolvedValue({ groups: [], sessions: [] }),
@@ -18,6 +20,7 @@ const apiMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../terminal/api', () => ({
+  uploadFiles: apiMocks.uploadFiles,
   getAgentLaunchers: apiMocks.getAgentLaunchers.mockResolvedValue([
     { slug: 'codex', command: 'codex', displayName: 'Codex', accentColor: 'var(--primary)', icon: null, isPlugin: false },
     { slug: 'custom', command: 'custom-agent', displayName: 'Custom Agent', accentColor: 'var(--primary)', icon: null, isPlugin: true },
@@ -51,6 +54,7 @@ afterEach(() => {
   apiMocks.saveCollaborationGroup.mockReset();
   apiMocks.sendCollaborationMessage.mockReset();
   apiMocks.spawnCollaborationAgent.mockReset();
+  apiMocks.uploadFiles.mockReset();
   apiMocks.setAgentAutomationEnabled.mockReset().mockResolvedValue({ automation: {} });
   apiMocks.getAgentLaunchers.mockReset().mockResolvedValue([
     { slug: 'codex', command: 'codex', displayName: 'Codex', accentColor: 'var(--primary)', icon: null, isPlugin: false },
@@ -350,4 +354,80 @@ it('filters new results independently of ACKs and never marks filtered-out recor
   await user.click(screen.getByLabelText('只看新记录'));
   await user.selectOptions(screen.getByLabelText('筛选回复类型'), 'result');
   expect(screen.getByText('证据：检查通过')).toBeTruthy();
+});
+
+
+describe('persistent collaboration composer', () => {
+  const group = { id: 'floating', name: '常驻开发组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 };
+  async function openFloating() {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+    render(<AgentOperationsPanel initialCollaborationGroupId="floating" activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+    await userEvent.click(await screen.findByRole('button', { name: '常驻浮窗' }));
+    return screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement;
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('receives references and pasted paths, keeps the draft on restoring the panel, and releases terminal routing', async () => {
+    const input = await openFloating();
+    expect(screen.queryByRole('button', { name: '关闭 Agent 工作台' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: '协作记录' })).toBeNull();
+    fireEvent.change(input, { target: { value: '请一起检查' } });
+    const terminal = vi.fn();
+    const ack = vi.fn();
+    window.addEventListener('termdock-insert-reference', terminal);
+    window.addEventListener('termdock-insert-reference-ack', ack);
+    act(() => window.dispatchEvent(new CustomEvent('termdock-insert-reference', { detail: { text: 'specs/方案.md:79', nonce: 'ref-1' } })));
+    act(() => { expect(routeCollaborationInput("'/tmp/file with spaces.txt' ")).toBe(true); });
+    expect(input.value).toBe("请一起检查\nspecs/方案.md:79\n'/tmp/file with spaces.txt' ");
+    expect(terminal).not.toHaveBeenCalled();
+    expect(ack.mock.calls[0][0].detail).toEqual({ nonce: 'ref-1', ok: true });
+    await userEvent.click(screen.getByRole('button', { name: '完整面板' }));
+    expect((screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toContain('specs/方案.md:79');
+    expect(routeCollaborationInput('back to terminal')).toBe(false);
+    window.removeEventListener('termdock-insert-reference', terminal);
+    window.removeEventListener('termdock-insert-reference-ack', ack);
+  });
+
+  it('broadcasts once and retains references appended during a pending send', async () => {
+    const input = await openFloating();
+    let finish!: (value: unknown) => void;
+    apiMocks.sendCollaborationMessage.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    fireEvent.change(input, { target: { value: '请审查' } });
+    await userEvent.click(screen.getByRole('button', { name: '发送' }));
+    act(() => { routeCollaborationInput('追加的引用'); });
+    await act(async () => finish({ messages: [{}, {}] }));
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledExactlyOnceWith('floating', { fromSessionId: null, toSessionIds: undefined, kind: 'message', content: '请审查' });
+    await waitFor(() => expect(input.value).toBe('追加的引用'));
+  });
+
+  it('retains failed messages and supports a selected recipient plus text drops', async () => {
+    const input = await openFloating();
+    fireEvent.drop(input, { dataTransfer: { files: [], getData: (type: string) => type === 'text/plain' ? '/repo/notes.md' : '' } });
+    expect(input.value).toBe('/repo/notes.md');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: '接收人' }), 'two');
+    apiMocks.sendCollaborationMessage.mockRejectedValueOnce(new Error('连接已断开'));
+    await userEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(await screen.findByText('连接已断开')).toBeTruthy();
+    expect(input.value).toBe('/repo/notes.md');
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledWith('floating', expect.objectContaining({ toSessionIds: ['two'] }));
+  });
+});
+
+it('uploads dropped files and clipboard files through the existing page API and retains failures', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [{ id: 'files', name: '文件组', sessionIds: ['one', 'two'] }], sessions: [] });
+  render(<AgentOperationsPanel initialCollaborationGroupId="files" activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+  await userEvent.click(await screen.findByRole('button', { name: '常驻浮窗' }));
+  const input = screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement;
+  const file = new File(['example'], 'notes.txt', { type: 'text/plain' });
+  apiMocks.uploadFiles.mockResolvedValueOnce({ files: [{ path: '/tmp/notes.txt' }] });
+  fireEvent.drop(input, { dataTransfer: { files: [file] } });
+  await waitFor(() => expect(input.value).toContain('/tmp/notes.txt'));
+  expect(apiMocks.uploadFiles).toHaveBeenCalledWith('/tmp', [file]);
+  apiMocks.uploadFiles.mockRejectedValueOnce(new Error('上传失败'));
+  fireEvent.paste(input, { clipboardData: { files: [file] } });
+  expect(await screen.findByText('上传失败')).toBeTruthy();
+  expect(input.value).toContain('/tmp/notes.txt');
+  vi.unstubAllGlobals();
 });

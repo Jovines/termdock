@@ -1,3 +1,4 @@
+import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { fetchPreviewResource } from '../../utils/previewResourceCache';
 import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, lazy, Suspense, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -7537,6 +7538,10 @@ export function RightSidebar(
 
   const routeReferenceText = useCallback((text: string, key: string, suffix?: string) => {
     if (!text) return;
+    if (routeCollaborationInput(suffix ? text + suffix : text)) {
+      markReferenceInserted(key);
+      return;
+    }
     if (contextDraftEnabled) {
       setContextDraftText((current) => appendContextDraft(current, text) + (suffix ?? ''));
       // 触屏设备保持静息行：不展开编辑器、不弹软键盘，由草稿坞行内闪烁反馈追加

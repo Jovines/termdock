@@ -1,9 +1,13 @@
+import { registerCollaborationInput } from '../../collaboration/inputTarget';
+import { escapeShellPath } from '../../desktop/shellPath';
+import { getTermdockDesktopBridge } from '../../desktop/nativeBridge';
 import { remoteSessionAddress, type CollaborationPeerState } from '../../collaboration/directory';
 import { openRemoteSession } from '../../federation/remoteSession';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Bot, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
+  uploadFiles,
   getAgentLaunchers,
   listAgentAutomations,
   listCollaborationGroups,
@@ -47,6 +51,28 @@ const inputClass = 'w-full rounded-lg border border-border/20 bg-surface-2 px-3 
 const buttonClass = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40';
 
 export function AgentOperationsPanel({ activeSessionId, initialCollaborationGroupId = null, defaultSessionMode = 'shell', onClose, onNewSession }: AgentOperationsPanelProps) {
+  const [floating, setFloating] = useState(false);
+  const [position, setPosition] = useState({ x: 16, y: 80 });
+  const panelRef = useRef<HTMLElement>(null);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const clampPosition = useCallback((x: number, y: number) => {
+    const box = panelRef.current?.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const left = (viewport?.offsetLeft ?? 0) + 12;
+    const top = (viewport?.offsetTop ?? 0) + 12;
+    return { x: Math.max(left, Math.min(x, left + (viewport?.width ?? window.innerWidth) - (box?.width ?? 440) - 24)), y: Math.max(top, Math.min(y, top + (viewport?.height ?? window.innerHeight) - (box?.height ?? 340) - 24)) };
+  }, []);
+  useEffect(() => {
+    if (!floating) return;
+    const resize = () => { setViewportHeight(window.visualViewport?.height ?? window.innerHeight); setPosition(p => clampPosition(p.x, p.y)); };
+    const observer = new ResizeObserver(resize);
+    if (panelRef.current) observer.observe(panelRef.current);
+    window.addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('resize', resize);
+    resize();
+    return () => { observer.disconnect(); window.removeEventListener('resize', resize); window.visualViewport?.removeEventListener('resize', resize); };
+  }, [floating, clampPosition]);
   const [tab, setTab] = useState<Tab>(initialCollaborationGroupId ? 'collaboration' : 'automation');
   const [automations, setAutomations] = useState<AgentAutomation[]>([]);
   const [automationRuns, setAutomationRuns] = useState<AutomationRun[]>([]);
@@ -112,29 +138,37 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
     return () => window.clearInterval(timer);
   }, [refresh]);
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape' && !floating) onClose(); };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  }, [onClose, floating]);
 
   return createPortal(
     <>
-      <button
+      {!floating && <button
         type="button"
         className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
         onClick={onClose}
         aria-label="关闭 Agent 工作台"
-      />
-      <section className="fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[8%] sm:bottom-auto sm:max-h-[84vh]">
-        <header className="flex items-center gap-2 border-b border-border/15 px-4 py-3">
+      />}
+      <section ref={panelRef} aria-label={floating ? '工作组消息浮窗' : 'Agent 工作台'} style={floating ? { left: position.x, top: position.y, maxHeight: viewportHeight ? viewportHeight - 24 : 'calc(100dvh - 24px)' } : undefined} className={floating ? 'fixed z-menu-panel flex w-[min(440px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-xl' : 'fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[8%] sm:bottom-auto sm:max-h-[84vh]'}>
+        <header className={`flex items-center gap-2 border-b border-border/15 px-4 py-3 ${floating ? 'cursor-move touch-none select-none' : ''}`}
+          onPointerDown={event => {
+            if (!floating || event.button !== 0 || (event.target as Element).closest('button')) return;
+            drag.current = { x: event.clientX, y: event.clientY, left: position.x, top: position.y };
+            event.currentTarget.setPointerCapture?.(event.pointerId);
+          }}
+          onPointerMove={event => { if (drag.current) setPosition(clampPosition(drag.current.left + event.clientX - drag.current.x, drag.current.top + event.clientY - drag.current.y)); }}
+          onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
           <Bot size={17} className="text-primary" />
           <div className="min-w-0 flex-1">
             <h2 className="text-[14px] font-semibold text-foreground">{directCollaborationGroup ? `${directCollaborationGroup.name} · 协作消息` : 'Agent 工作台'}</h2>
-            <p className="text-[10px] text-muted-foreground">{directCollaborationGroup ? '发送任务、问题或工作交接' : '自动任务、会话协作与全文恢复'}</p>
+            <p className="text-[10px] text-muted-foreground">{floating ? '引用、文件路径和粘贴优先加入此处' : directCollaborationGroup ? '发送任务、问题或工作交接' : '自动任务、会话协作与全文恢复'}</p>
           </div>
+          {tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} onClick={() => setFloating(value => !value)}>{floating ? '完整面板' : '常驻浮窗'}</button>}
           <button className="rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={onClose} aria-label="关闭"><X size={16} /></button>
         </header>
-        <nav className="flex gap-1 border-b border-border/15 px-3 py-2">
+        {!floating && <nav className="flex gap-1 border-b border-border/15 px-3 py-2">
           {([
             ['automation', Clock3, '自动任务'],
             ['collaboration', Link2, '会话协作'],
@@ -144,7 +178,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
               <Icon size={14} />{label}
             </button>
           ))}
-        </nav>
+        </nav>}
         {collaborationError && <div role="alert" className="mx-4 mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{collaborationError}<button className={`${buttonClass} ml-2`} onClick={() => void refresh()}>重新加载会话</button></div>}
         {tab === 'collaboration' && peerState && ['loading', 'partial', 'error', 'unsupported'].includes(peerState.state) && <div role="status" className="mx-4 mt-3 text-[11px] text-muted-foreground">
           {peerState.state === 'loading' ? '正在加载其他服务的会话；当前服务内可先组队。'
@@ -160,7 +194,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         {notice && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {tab === 'automation' && <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />}
-          {tab === 'collaboration' && <CollaborationTab sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && <CollaborationTab floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
       </section>
@@ -323,7 +357,8 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+function CollaborationTab({ floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+  floating: boolean;
   sessionsState: 'loading' | 'loaded' | 'error';
   groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; defaultSessionMode: 'shell' | 'tmux'; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
@@ -354,6 +389,47 @@ function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessi
   const selectedGroup = selectedGroupId === 'new'
     ? null
     : groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null;
+  const [uploadingFiles, setUploadingFiles] = useState(0);
+  const drafts = useRef(new Map<string, { content: string; target: string; kind: CollaborationMessageKind }>());
+  const groupIdRef = useRef(selectedGroup?.id);
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  useEffect(() => {
+    if (groupIdRef.current === selectedGroup?.id) return;
+    if (groupIdRef.current) drafts.current.set(groupIdRef.current, { content: contentRef.current, target: targetSessionId, kind });
+    groupIdRef.current = selectedGroup?.id;
+    const saved = drafts.current.get(selectedGroup?.id ?? '');
+    setContent(saved?.content ?? ''); setTargetSessionId(saved?.target ?? '*'); setKind(saved?.kind ?? 'message');
+  }, [selectedGroup?.id]);
+  useEffect(() => {
+    if (!floating || !selectedGroup) return;
+    return registerCollaborationInput(text => {
+      setContent(current => current + (current && !/\s$/.test(current) ? '\n' : '') + text.replace(/\r\n?/g, '\n'));
+    });
+  }, [floating, selectedGroup?.id]);
+  useEffect(() => {
+    const composer = messageComposerRef.current;
+    if (!floating || !composer) return;
+    const failed = (event: Event) => setError(String((event as CustomEvent).detail));
+    composer.addEventListener('termdock:file-drop-error', failed);
+    return () => composer.removeEventListener('termdock:file-drop-error', failed);
+  }, [floating, selectedGroup?.id, setError]);
+  const insertFiles = async (files: File[]) => {
+    const groupId = selectedGroup?.id;
+    setError(null);
+    setUploadingFiles(count => count + 1);
+    try {
+      const result = await uploadFiles('/tmp', files);
+      if (result.files.length !== files.length || result.files.some(file => !file.path)) throw new Error('文件路径准备失败，请重试');
+      const text = result.files.map(file => escapeShellPath(file.path)).join(' ') + ' ';
+      if (groupIdRef.current === groupId) setContent(current => current + (current && !/\s$/.test(current) ? '\n' : '') + text);
+      else if (groupId) {
+        const saved = drafts.current.get(groupId) ?? { content: '', target: '*', kind: 'message' as const };
+        drafts.current.set(groupId, { ...saved, content: saved.content + '\n' + text });
+      }
+    } catch (error) { setError(error instanceof Error ? error.message : '文件上传失败'); }
+    finally { setUploadingFiles(count => count - 1); }
+  };
   const availableSessionIds = new Set(sessions.filter(canAddCollaborationSession).map((session) => session.sessionId));
   const selectedCount = selected.size;
   const unavailableSelectedIds = [...selected].filter((id) => !availableSessionIds.has(id));
@@ -413,7 +489,9 @@ function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessi
     finally { setBusy(null); }
   };
   const send = async () => {
-    if (!selectedGroup) return;
+    if (!selectedGroup || busy || uploadingFiles || !content.trim()) return;
+    const sentContent = content;
+    const sentGroup = selectedGroup.id;
     setBusy('send-message'); setError(null); setNotice(null);
     try {
       const result = await sendCollaborationMessage(selectedGroup.id, {
@@ -422,8 +500,13 @@ function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessi
         kind,
         content,
       });
-      setContent('');
-      setMessages((await listCollaborationMessages(selectedGroup.id)).messages);
+      if (groupIdRef.current === sentGroup) setContent(current => current === sentContent ? '' : current.startsWith(sentContent) ? current.slice(sentContent.length).replace(/^\n/, '') : current);
+      else {
+        const saved = drafts.current.get(sentGroup);
+        if (saved) drafts.current.set(sentGroup, { ...saved, content: saved.content === sentContent ? '' : saved.content.startsWith(sentContent) ? saved.content.slice(sentContent.length).replace(/^\n/, '') : saved.content });
+      }
+      const latest = await listCollaborationMessages(sentGroup).catch(() => null);
+      if (latest && groupIdRef.current === sentGroup) setMessages(latest.messages);
       const unavailable = result.deliveries?.filter((delivery) => delivery.serviceUnavailable).length ?? 0;
       const pending = result.deliveries?.filter((delivery) => delivery.pending > 0).length ?? 0;
       setNotice(unavailable > 0 ? `已保存消息；${unavailable} 个接收成员的服务不可达，尚未送达，等待重连`
@@ -484,6 +567,7 @@ function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessi
   };
 
   return <div className="space-y-5">
+    <div hidden={floating}>
     <div className="flex items-start justify-between gap-4">
       <div><h3 className="text-[13px] font-medium text-foreground">会话协作</h3><p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted-foreground">创建协作组后，一个 Agent 会话可以把任务直接交给另一个会话。比如“开发”写完代码后通知“测试”检查，测试结果再回复回来；你也可以给单个会话或全组发任务，所有交接和进展都记录在这里。</p></div>
       {selectedGroup && <button className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} onClick={() => { setSelectedGroupId('new'); setConfirmDelete(false); setNotice(null); }}><Plus size={13} />新建组</button>}
@@ -505,7 +589,9 @@ function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessi
       <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><p className={`min-w-0 flex-1 text-[10px] ${selectedCount < 2 ? 'text-muted-foreground' : 'text-primary'}`}>{selectedCount < 2 ? `还需选择 ${2 - selectedCount} 个会话` : '成员已满足要求，可以创建'}</p><div className="flex justify-end gap-2">{groups.length > 0 && <button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSelectedGroupId(groups[0]?.id ?? null)}>取消</button>}<button disabled={busy !== null || sessionsState !== 'loaded' || !name.trim() || selectedCount < 2 || unavailableSelectedIds.length > 0} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void createGroup()}>{busy === 'create-group' ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}创建协作组</button></div></div>
     </section>}
 
+    </div>
     {selectedGroup && <>
+      <div hidden={floating}>
       <section className="border-y border-border/15 py-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0"><h4 className="text-[13px] font-medium text-foreground">{selectedGroup.name}</h4><p className="mt-1 text-[10px] text-muted-foreground">{selectedGroup.sessionIds.length} 个成员 · 组 ID：<span className="break-all font-mono">{selectedGroup.id}</span></p></div>
@@ -528,9 +614,17 @@ function CollaborationTab({ sessionsState, groups, sessions, agents, activeSessi
         {activities.length === 0 && <Empty text={messagesLoading ? "正在加载协作记录…" : messages.length ? "没有符合筛选条件的新记录。可切换类型或取消“只看新记录”。" : "还没有消息。可以先发一个任务或问题。"} />}
       </div></section>
 
-      <section ref={messageComposerRef} className="border-t border-primary/20 bg-primary/5 px-3 py-3"><h4 className="text-[11px] font-medium text-foreground">发送给成员</h4><div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">接收人<select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}><option value="*">全组成员</option>{selectedGroup.sessionIds.map((id) => <option key={id} value={id}>{collaborationSessionName(sessions.find((session) => session.sessionId === id)) ?? `${id.slice(0, 8)}（离线）`}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">消息类型<select className={inputClass} value={kind} onChange={(event) => setKind(event.target.value as CollaborationMessageKind)}><option value="message">普通消息</option><option value="ask">需要回答的问题</option><option value="task">需要执行的任务</option><option value="handoff">工作交接</option><option value="done">完成通知</option></select></label></div>
-        <label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">内容<textarea className={`${inputClass} min-h-20 resize-y`} value={content} onChange={(event) => setContent(event.target.value)} placeholder="说明背景、期望产出，以及对方需要回复或完成什么…" /></label>
-        <div className="mt-2 flex items-center justify-between gap-3"><p className="text-[9px] leading-relaxed text-muted-foreground">{selectedGroup.federated ? '跨服务消息由当前客户端转发，请保持窗口或网页运行；手机后台可能暂停，返回后继续同步。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || !content.trim()} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
+      </div>
+      <section data-termdock-terminal-dropzone={floating ? activeSessionId ?? "collaboration-composer" : undefined} onDragOver={event => { if (floating) event.preventDefault(); }} onDrop={event => {
+        if (!floating) return;
+        const files = Array.from(event.dataTransfer.files);
+        if (files.length && getTermdockDesktopBridge()) return;
+        event.preventDefault(); event.stopPropagation();
+        if (files.length) void insertFiles(files);
+        else { const text = event.dataTransfer.getData("text/plain") || event.dataTransfer.getData("text/uri-list"); if (text) setContent(current => current + (current ? "\n" : "") + text); }
+      }} ref={messageComposerRef} className="border-t border-primary/20 bg-primary/5 px-3 py-3"><h4 className="text-[11px] font-medium text-foreground">{floating ? `${selectedGroup.name} · 发送给成员` : "发送给成员"}</h4><div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">接收人<select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}><option value="*">全组成员</option>{selectedGroup.sessionIds.map((id) => <option key={id} value={id}>{collaborationSessionName(sessions.find((session) => session.sessionId === id)) ?? `${id.slice(0, 8)}（离线）`}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">消息类型<select className={inputClass} value={kind} onChange={(event) => setKind(event.target.value as CollaborationMessageKind)}><option value="message">普通消息</option><option value="ask">需要回答的问题</option><option value="task">需要执行的任务</option><option value="handoff">工作交接</option><option value="done">完成通知</option></select></label></div>
+        <label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">内容<textarea onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); void insertFiles(files); } }} className={`${inputClass} min-h-20 max-h-48 resize-y`} value={content} onChange={(event) => setContent(event.target.value)} placeholder="说明背景、期望产出，以及对方需要回复或完成什么…" /></label>
+        <div className="mt-2 flex items-center justify-between gap-3"><p className="text-[9px] leading-relaxed text-muted-foreground">{uploadingFiles > 0 ? '正在准备文件路径…' : selectedGroup.federated ? '跨服务消息由当前客户端转发，请保持窗口或网页运行；手机后台可能暂停，返回后继续同步。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || uploadingFiles > 0 || !content.trim()} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
       </section>
     </>}
   </div>;

@@ -1,3 +1,5 @@
+import { routeCollaborationInput } from '../collaboration/inputTarget';
+import { escapeShellPath } from './shellPath';
 import type { ServiceDirectoryBridge } from '../services/serviceDirectory';
 import { installEncryptedFileDrops } from './encryptedFileDrops';
 export interface DesktopCliInstallation {
@@ -150,6 +152,7 @@ export function subscribeNativeFileDrops(
   nativeFileDropListeners.add(listener);
   if (!nativeFileDropBridgeInstalled) {
     const deliver = (payload: NativeFileDropPayload) => {
+      if (routeCollaborationInput(payload.paths.map(escapeShellPath).join(' ') + ' ')) return;
       for (const current of nativeFileDropListeners) current(payload);
     };
     installEncryptedFileDrops(deliver);

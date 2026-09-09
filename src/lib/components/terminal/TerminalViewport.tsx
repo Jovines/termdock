@@ -1,3 +1,4 @@
+import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { isWorkspaceActive } from '../../services/workspaceHost';
 import React from 'react';
 import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
@@ -1652,6 +1653,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
       const cleaned = sanitizeTerminalInput(rawText);
       if (!cleaned) return false;
+      if (routeCollaborationInput(cleaned)) return true;
       sendTerminalSeq(cleaned, textarea, { paste: true, submitAfterPaste: false });
       dismissMobileCopyPopover();
       return true;
@@ -1674,6 +1676,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       setPasteError(null);
       try {
         const imagePath = await uploadTerminalClipboardImage(image);
+        if (routeCollaborationInput(`${escapeShellPath(imagePath)} `)) return true;
         sendTerminalSeq(`${escapeShellPath(imagePath)} `, textarea);
         dismissMobileCopyPopover();
         return true;
