@@ -250,5 +250,92 @@ describe('background collaboration delivery', () => {
       expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
       expect(confirm).not.toHaveBeenCalled();
     });
+
+    it('re-engages the gate after the confirm cooldown lapses', async () => {
+      const firstMessage = send();
+      const history: string[] = [];
+      const confirm = vi.fn(async () => history.join('\n'));
+      resolve.mockResolvedValue({ state: 'ready', write, confirm });
+      const delivery = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500);
+      history.push(firstMessage.id);
+      await vi.advanceTimersByTimeAsync(1_200);
+      await delivery;
+      expect(store.receipt(firstMessage.id).status).toBe('delivered');
+      // Inside the cooldown a follow-up settles immediately, gate untouched:
+      // the follow-up adds no confirm probes on top of the first delivery's.
+      const callsAfterFirst = confirm.mock.calls.length;
+      const quick = send();
+      await worker.run('b');
+      expect(store.receipt(quick.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
+      expect(confirm.mock.calls.length).toBe(callsAfterFirst);
+      const confirmCallsAfterQuick = confirm.mock.calls.length;
+      // Cooldown over (30s): the next delivery is gated again — an agent may
+      // be mid-turn or finishing one, so silence means it stays pending.
+      await vi.advanceTimersByTimeAsync(30_000);
+      const late = send();
+      const gated = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(store.receipt(late.id)).toMatchObject({ status: 'pending', last_error: 'DELIVERY_IN_PROGRESS' });
+      history.push(late.id);
+      await vi.advanceTimersByTimeAsync(1_200);
+      await gated;
+      expect(store.receipt(late.id)).toMatchObject({ status: 'delivered' });
+      expect(confirm.mock.calls.length).toBeGreaterThan(confirmCallsAfterQuick);
+    });
+
+    it('settled-unconfirmed deliveries grant no cooldown — the next delivery is gated again', async () => {
+      const confirm = vi.fn(async () => null);
+      resolve.mockResolvedValue({ state: 'ready', write, confirm, approve: async () => true, capture: async () => 'screen' });
+      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
+      const first = send();
+      const attempt = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
+      await attempt;
+      expect(store.receipt(first.id)).toMatchObject({ status: 'pending', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await worker.run('b'); // attempt bound reached: settles as delivered
+      expect(store.receipt(first.id)).toMatchObject({ status: 'delivered', attempt_count: 2 });
+      const callsAtSettle = confirm.mock.calls.length;
+      // A settled-but-unconfirmed session must not be trusted: the next
+      // delivery checks the terminal again instead of riding the cooldown.
+      const second = send();
+      const next = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
+      await next;
+      expect(store.receipt(second.id)).toMatchObject({ status: 'pending', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+      expect(confirm.mock.calls.length).toBeGreaterThan(callsAtSettle);
+    });
+
+    it('submits a stuck paste once on differential evidence and completes without rewriting', async () => {
+      const message = send();
+      const confirm = vi.fn()
+        .mockResolvedValueOnce('')            // first cycle: history silent
+        .mockResolvedValueOnce(message.id);   // after recovery Enter: rendered
+      const recoverStuck = vi.fn(async () => true);
+      const capture = vi.fn(async () => 'prompt $'); // write-time baseline + post-write snapshot
+      resolve.mockResolvedValue({ state: 'ready', write, confirm, capture, recoverStuck });
+      const delivery = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500);
+      await vi.advanceTimersByTimeAsync(1_200);
+      await delivery;
+      expect(recoverStuck).toHaveBeenCalledTimes(1);
+      expect(capture).toHaveBeenCalledTimes(2); // baseline before the write, snapshot after
+      expect(write).toHaveBeenCalledTimes(1); // Enter submitted the paste; no rewrite
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
+    });
+
+    it('attempts stuck recovery at most once per delivery even while the history stays silent', async () => {
+      const message = send();
+      const confirm = vi.fn(async () => '');
+      const recoverStuck = vi.fn(async () => true);
+      resolve.mockResolvedValue({ state: 'ready', write, confirm, capture: async () => 'prompt $', recoverStuck });
+      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
+      const delivery = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
+      await delivery;
+      expect(recoverStuck).toHaveBeenCalledTimes(1);
+      expect(store.receipt(message.id)).toMatchObject({ status: 'pending', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+    });
   });
 });

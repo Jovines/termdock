@@ -27,8 +27,28 @@ const APPROVAL_DIALOG_PATTERNS = [
   /允许.*执行|确认.*执行/i,
 ];
 
+/** Agent TUIs collapse pasted input in the input box to a marker line like
+ * "[Pasted text #3 +42 lines]". While the paste sits unsubmitted the marker
+ * stays on screen; a submitted paste clears the box and only the transcript
+ * holds the content. Session-unique #N lets us diff screen captures. */
+const PASTE_MARKER_PATTERN = /\[Pasted text #(\d+)/g;
+
 export function detectApprovalDialog(content: string): boolean {
   return APPROVAL_DIALOG_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+/** Paste marker sequence numbers visible in a screen capture. */
+export function extractPasteMarkerNumbers(content: string): Set<number> {
+  return new Set([...content.matchAll(PASTE_MARKER_PATTERN)].map((match) => Number(match[1])));
+}
+
+/** True when `after` shows a paste marker that was not in `before`. Diffing
+ * prevents a recovery Enter from submitting a stale paste that predates this
+ * delivery (or someone else's draft): we only ever submit what we just put
+ * there, at most once per delivery. */
+export function hasNewPasteMarker(after: string, before: string): boolean {
+  const beforeNumbers = extractPasteMarkerNumbers(before);
+  return [...extractPasteMarkerNumbers(after)].some((number) => !beforeNumbers.has(number));
 }
 
 async function assertSamePane(
@@ -82,6 +102,23 @@ export async function approveCollaborationDialog(
 ): Promise<boolean> {
   const content = await captureTmuxPaneText(run, pane);
   if (!detectApprovalDialog(content)) return false;
+  await sendTmuxPaneKey(run, pane, 'enter');
+  return true;
+}
+
+/** Submit a paste that arrived while the agent was finishing its previous
+ *  turn and is still sitting unsubmitted in the input box. Only acts on
+ *  differential evidence — a paste marker that appeared after the write —
+ *  never on pre-existing stale markers, and returns whether Enter was sent.
+ *  Committing the whole input buffer is safe: each delivery is written once,
+ *  so each marker's content enters the transcript exactly once. */
+export async function recoverStuckPaste(
+  run: (args: string[]) => Promise<string>,
+  pane: CollaborationPaneBinding,
+  baseline: string,
+): Promise<boolean> {
+  const viewport = await captureTmuxPaneText(run, pane);
+  if (!hasNewPasteMarker(viewport, baseline)) return false;
   await sendTmuxPaneKey(run, pane, 'enter');
   return true;
 }

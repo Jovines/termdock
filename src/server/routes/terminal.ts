@@ -109,7 +109,7 @@ import { SessionSearchStore, type SessionSearchMetadata } from '../agent/session
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, type CollaborationBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
-import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane,
+import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, recoverStuckPaste, sendTmuxPaneKey, writeCollaborationTmuxPane,
   type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
 import {
   listAllHookAgents,
@@ -2124,7 +2124,8 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
       // First-delivery confirm: history proves the agent rendered our
       // message (boot sequences clear only the screen, never the history a
       // live TUI writes into). Terminal-state only — no agent hooks.
-      }, confirm: async () => captureTmuxPaneHistory(runTmux, pinned), approve: async () => approveCollaborationDialog(runTmux, pinned) };
+      }, confirm: async () => captureTmuxPaneHistory(runTmux, pinned), approve: async () => approveCollaborationDialog(runTmux, pinned),
+        recoverStuck: async (baseline) => recoverStuckPaste(runTmux, pinned, baseline) };
   }
   if (!backend || !binding.backendSessionId) return { state: 'offline', reason: 'SHELL_BACKEND_NOT_RUNNING' };
   await refreshCollaborationAgentIdentity(binding.backendSessionId, backend);
