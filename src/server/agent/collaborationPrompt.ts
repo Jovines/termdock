@@ -14,18 +14,18 @@ const SHELL_RULE = '─'.repeat(30);
 const MAX_INLINE_BODY_BYTES = 8_192;
 
 /**
- * Characters that would corrupt the delivery shell `协作消息 · 组「X」` and
- * the per-message `来自:X · kind` line: the quote brackets, the middle dot
- * used as the field delimiter, and control sequences (C0 controls + DEL)
- * that could inject terminal output. Legacy and federated names may carry
- * them, so the render layer neutralizes them defensively; user-entered
- * names are rejected at creation instead.
+ * Characters that would corrupt the delivery shell header `「X」群(N 个成员)`
+ * and the per-message `来自:X · kind` line: the quote brackets and the middle
+ * dot, which the render layer uses as structure, plus control sequences
+ * (C0 controls + DEL) that could inject terminal output. Legacy and federated
+ * names may carry them, so the render layer neutralizes them defensively;
+ * user-entered names are rejected at creation instead.
  */
 export const COLLAB_NAME_FORBIDDEN = /[【】「」·\x00-\x1f\x7f]/;
 
 /** Render-safe name for shell header / per-message source lines: reserved
  * bracket and delimiter characters become spaces (they would otherwise split
- * the `协作消息 · 组「X」` and `来自:X · kind` lines), control characters are
+ * the `「X」群` and `来自:X · kind` lines), control characters are
  * neutralized, whitespace collapses, and the display length is capped. */
 export function sanitizeCollaborationName(name: string, max = 40): string {
   const cleaned = name
@@ -38,9 +38,14 @@ export function sanitizeCollaborationName(name: string, max = 40): string {
 }
 
 /** A single delivered message: `来自:X · kind` over a fenced body, with the
- * reply route for agent-sourced messages kept outside the fence. */
-function formatCollaborationMessage(message: CollaborationMessage, source: string, fence: string): string {
-  const lines = [`来自:${source} · ${message.kind}`, '', fence, message.content, fence];
+ * reply route for agent-sourced messages kept outside the fence. A fan-out
+ * dispatch (message.fanOutIds present) is flagged `· 群发` and names the
+ * sibling recipients on their own line, so a broadcast is never mistaken for
+ * a one-to-one assignment — raw ids fall back to the sanitized id itself. */
+function formatCollaborationMessage(message: CollaborationMessage, source: string, fannedNames: string[], fence: string): string {
+  const lines = [`来自:${source} · ${message.kind}${fannedNames.length ? ' · 群发' : ''}`];
+  if (fannedNames.length) lines.push(`同时发给了:${fannedNames.join('、')}`);
+  lines.push('', fence, message.content, fence);
   if (message.task) lines.push('', `任务上报:${JSON.stringify(message.task)}`);
   if (message.fromSessionId) lines.push('', `回复:td collab reply ${message.id} "回复内容" --text`);
   return lines.join('\n');
@@ -73,17 +78,19 @@ export function formatCollaborationDelivery(input: {
       ? `大消息已完整保存（${bytes} 字节）。使用 td collab message get ${message.id} --json 获取正文；不要把这条提示当作消息正文。`
       : message.content;
     const fence = '`'.repeat(Math.max(3, ...Array.from(body.matchAll(/`+/g), (match) => match[0].length + 1)));
-    blocks.push(formatCollaborationMessage({ ...message, content: body }, source, fence));
+    const fannedNames = (message.fanOutIds ?? [])
+      .map((sessionId) => sanitizeCollaborationName(sessionsById.get(sessionId)?.name ?? sessionId));
+    blocks.push(formatCollaborationMessage({ ...message, content: body }, source, fannedNames, fence));
   }
 
   // The shell header names the group only when every block belongs to one;
-  // a mixed batch keeps the structure but drops the single-group claim. The
-  // member count rides along as the at-a-glance size of that group.
+  // a mixed batch drops the header entirely (no single-group claim to make).
+  // The member count rides along as the at-a-glance size of that group.
   const groupIds = [...new Set(input.messages.map((message) => message.groupId))];
   const singleGroup = groupIds.length === 1 ? groupsById.get(groupIds[0]!) : null;
   const shellHeader = singleGroup
-    ? `协作消息 · 组「${sanitizeCollaborationName(singleGroup.name ?? '协作组')}」(${singleGroup.sessionIds.length} 个成员)`
-    : '协作消息';
+    ? `「${sanitizeCollaborationName(singleGroup.name ?? '协作组')}」群(${singleGroup.sessionIds.length} 个成员)`
+    : '';
 
   const peerIds = Array.from(new Set(input.groups.flatMap((group) => group.sessionIds)))
     .filter((sessionId) => sessionId !== input.targetSessionId);
@@ -120,9 +127,13 @@ export function formatCollaborationDelivery(input: {
   const ownRole = singleGroup
     ? sanitizeCollaborationRole(singleGroup.roles?.[input.targetSessionId] ?? '')
     : '';
-  const lines = [SHELL_RULE, shellHeader];
+  const lines = [SHELL_RULE];
+  if (shellHeader) lines.push(shellHeader);
   if (ownName) lines.push(`你的名字:${ownName}`);
   if (ownRole) lines.push(`你的定位:${ownRole}`);
-  lines.push('', blocks.join('\n\n'), ...(notes.length ? ['', ...notes] : []), SHELL_RULE);
+  // No blank line between the identity block and the first message, nor
+  // between the last message and the notes: the shell reads as one compact
+  // block, and only message-to-message boundaries keep a blank line.
+  lines.push(blocks.join('\n\n'), ...notes, SHELL_RULE);
   return lines.join('\n');
 }

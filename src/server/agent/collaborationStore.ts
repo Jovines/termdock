@@ -70,6 +70,12 @@ export interface CollaborationMessage extends MessageExtras {
   groupId: string;
   fromSessionId: string | null;
   toSessionId: string;
+  /** Sibling recipients when a send fanned out to several members — everyone
+   * else who received the same dispatch, excluding this edge's own
+   * toSessionId. Present only on multi-recipient sends so a recipient can tell
+   * a group broadcast from a one-to-one assignment without inferring from the
+   * shared threadId. */
+  fanOutIds?: string[] | null;
   kind: CollaborationMessageKind;
   content: string;
   threadId: string;
@@ -281,6 +287,7 @@ export class CollaborationStore {
       sequence: this.nextSequence(),
       id: crypto.randomUUID(), groupId: group.id, fromSessionId: input.fromSessionId,
       toSessionId, kind: input.kind, content, threadId,
+      fanOutIds: recipients.length > 1 ? recipients.filter((id) => id !== toSessionId) : undefined,
       replyTo: input.replyTo?.trim() || null, status: 'pending', createdAt: now,
       deliveredAt: null, readAt: null,
     }));

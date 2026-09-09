@@ -124,4 +124,24 @@ describe('collaboration API with arbitrary pull consumers', () => {
       await new Promise<void>((resolve, reject) => orphan.close((error) => error ? reject(error) : resolve()));
     }
   });
+
+  it('fans one send out to several members, persisting sibling ids per edge and naming them in the inbox', async () => {
+    const big = store.save({ name: 'Big', sessionIds: ['a', 'b', 'c'] });
+    const sent = await post('/send', { session: 'a', toSessionIds: ['b', 'c'], message: '群发任务' });
+    expect(sent).toMatchObject({ status: 200, body: { ok: true } });
+    expect(store.page('b', { unread: true }).messages[0]).toMatchObject({ fromSessionId: 'a', toSessionId: 'b', content: '群发任务', fanOutIds: ['c'] });
+    expect(store.page('c', { unread: true }).messages[0]?.fanOutIds).toEqual(['b']);
+    const inbox = await (await fetch(`${url}/inbox?session=b`)).json();
+    expect(inbox.messages[0]).toMatchObject({ fromSessionId: 'a', toSessionId: 'b', fanOutIds: ['c'] });
+    expect(inbox.names).toMatchObject({ a: '一号 Agent', c: null });
+    // One-to-one sends keep the legacy targetSessionId contract and no siblings.
+    // a and b already share the beforeEach group, so scope to the new one.
+    const single = await post('/send', { session: 'a', group_id: big.id, targetSessionId: 'b', message: '单发' });
+    expect(single).toMatchObject({ status: 200, body: { ok: true } });
+    const singleEdge = store.page('b', { unread: true }).messages.find((message) => message.content === '单发')!;
+    expect(singleEdge.fanOutIds).toBeUndefined();
+    // Every recipient must share one group with the sender.
+    expect(await post('/send', { session: 'a', toSessionIds: ['b', 'outsider'], message: 'x' })).toMatchObject({ status: 400, body: { code: 'GROUP_NOT_FOUND' } });
+    expect(await post('/send', { session: 'a', message: 'x' })).toMatchObject({ status: 400, body: { code: 'NO_TARGET' } });
+  });
 });

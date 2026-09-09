@@ -10,10 +10,22 @@ export function cleanMemberName(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
 }
 
+/** What `deliver` reports back: `waitable` is true only when delivery runs in
+ *  this server's own worker (local route), so the sender can wait a short
+ *  window for the write + snapshot before the receipt is built. Federated and
+ *  relayed targets never become waitable — they answer immediately and queue. */
+export interface DeliveryOutcome {
+  delivered?: string[];
+  pending?: number;
+  serviceUnavailable?: boolean;
+  waitable?: boolean;
+  reason?: string;
+}
+
 type Dependencies = {
   store: CollaborationStore;
   resolveSession: (input: Record<string, unknown>) => string | null;
-  deliver: (id: string) => unknown;
+  deliver: (id: string) => DeliveryOutcome | Promise<DeliveryOutcome>;
   rebind?: (id: string, pane: string | null) => Promise<unknown>;
   /** Human-readable names for member sessions; absent ids become null so
    * consumers can fall back to the raw session id. */
@@ -52,6 +64,25 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     const receipts = ids.map((id) => store.receipt(id));
     res.json({ ok: true, ...receipts[0], messages, receipts });
   };
+  /** When the recipient is served by this server's own delivery worker, give
+   *  the write (and its post-write snapshot capture) a short window to finish
+   *  before the receipt leaves the send/reply call — the sender then sees the
+   *  recipient's screen right away. Un-waitable targets (relayed/federated,
+   *  offline, or a mock deliver) return immediately with the message queued. */
+  const awaitDelivery = async (id: string, outcome: DeliveryOutcome | null): Promise<void> => {
+    if (!outcome?.waitable) return;
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      const receipt = store.receipt(id);
+      const settled = receipt.status !== 'pending'
+        || receipt.snapshot != null
+        || (receipt.attempt_count > 0
+          && receipt.last_error !== 'DELIVERY_IN_PROGRESS'
+          && (receipt.next_retry_at ?? 0) > Date.now());
+      if (settled || Date.now() >= deadline) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
   router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, limits: COLLAB_LIMITS,
     routing: { background_recovery: true, explicit_rebind: Boolean(rebind), fixed_tmux_pane: true },
     statuses: ['pending', 'delivered', 'read', 'failed', 'expired'], queued_status: 'pending',
@@ -60,19 +91,33 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       done: 'adapter reports turn ended, never proof of task completion', heartbeat: 'null unless explicitly observed',
       timeout: 'stops waiting, does not cancel delivery',
       retry: 'same message id may be submitted again after a crash or uncertain transport result; consumers deduplicate by message id' } }); }));
-  router.post('/send', run((req, res, sessionId) => {
+  router.post('/send', run(async (req, res, sessionId) => {
     const target = typeof req.body.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
-    const groups = store.groupsForSession(sessionId).filter((group) => group.sessionIds.includes(target) && (!req.body.group_id || group.id === req.body.group_id));
-    if (!groups.length) throw new CollaborationError('GROUP_NOT_FOUND', 'Sender and recipient must share the specified group');
+    // A fan-out send lists every recipient in toSessionIds; the store persists
+    // each edge with its sibling fanOutIds so recipients can tell a broadcast
+    // from a one-to-one assignment. The single-recipient shape stays intact.
+    const requestedTargets: string[] = Array.isArray(req.body.toSessionIds)
+      ? [...new Set((req.body.toSessionIds as unknown[]).filter((id): id is string => typeof id === 'string' && id.trim().length > 0))]
+      : [];
+    const targets = requestedTargets.length > 0 ? requestedTargets : (target ? [target] : []);
+    if (!targets.length) throw new CollaborationError('NO_TARGET', 'send requires a targetSessionId (or toSessionIds for a fan-out)', 400);
+    const groups = store.groupsForSession(sessionId)
+      .filter((group) => targets.every((candidate) => group.sessionIds.includes(candidate)) && (!req.body.group_id || group.id === req.body.group_id));
+    if (!groups.length) throw new CollaborationError('GROUP_NOT_FOUND', 'Sender and recipients must share the specified group');
     if (groups.length > 1 && !req.body.group_id) throw new CollaborationError('AMBIGUOUS_GROUP', 'Multiple shared groups; specify --group');
     if (req.body.task) throw new CollaborationError('DISPATCH_CARRIES_TASK', 'Dispatch carries no task state; recipients report task status through replies', 400);
-    const messages = store.send({ ...extrasFromBody(req.body), groupId: groups[0].id, fromSessionId: sessionId, toSessionIds: [target],
+    const messages = store.send({ ...extrasFromBody(req.body), groupId: groups[0].id, fromSessionId: sessionId, toSessionIds: targets,
       kind: (req.body.kind ?? 'message') as CollaborationMessageKind, content: typeof req.body.message === 'string' ? req.body.message : '',
       threadId: typeof req.body.thread_id === 'string' ? req.body.thread_id : undefined });
-    deliver(target);
+    // Wake and await every local recipient edge in parallel; relayed or
+    // federated ids answer immediately with the message queued, so fan-out
+    // never stalls on a peer.
+    await Promise.all(messages.map(async (message) => {
+      await awaitDelivery(message.id, (await deliver(message.toSessionId)) ?? null);
+    }));
     sent(res, messages.map((message) => message.id));
   }));
-  router.post('/reply', run((req, res, sessionId) => {
+  router.post('/reply', run(async (req, res, sessionId) => {
     const original = ownMessage(String(req.body.messageId ?? ''), sessionId, true);
     if (!original.fromSessionId) throw new CollaborationError('NO_REPLY_TARGET', 'User messages have no agent reply target');
     const messages = store.send({ ...extrasFromBody(req.body), groupId: original.groupId, fromSessionId: sessionId,
@@ -80,7 +125,7 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       replyTo: original.id, threadId: original.threadId });
     // Reply is explicit consumption; only mark after successful validation/persistence.
     store.markRead([original.id]);
-    deliver(original.fromSessionId);
+    await awaitDelivery(messages[0]!.id, (await deliver(original.fromSessionId)) ?? null);
     sent(res, messages.map((message) => message.id));
   }));
   router.get('/message/:id', run((req, res, sessionId) => {
@@ -100,7 +145,12 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     const page = store.page(sessionId, { unread: string('unread') === 'true', since, afterId: string('after_id'), cursor: string('cursor'),
       consumer: string('consumer'), limit: string('limit') ? Number(string('limit')) : undefined,
       from: string('from'), group: string('group'), thread: string('thread'), kind: string('kind'), responseKind: string('response_kind'), order: string('order') });
-    res.json({ ok: true, ...page });
+    // Fan-out edges carry sibling recipients; the names map lets the CLI text
+    // renderer show 同时发给了:… as people instead of bare session ids. The
+    // fallback to the raw id stays server-side agnostic (federated/offline).
+    const nameIds = [...new Set(page.messages.flatMap((message) =>
+      [message.fromSessionId, ...(message.fanOutIds ?? [])].filter((id): id is string => typeof id === 'string' && id.length > 0)))];
+    res.json({ ok: true, ...page, ...(nameIds.length ? { names: resolveNames?.(nameIds) ?? {} } : {}) });
   }));
   router.post('/cursor/commit', run((req, res, sessionId) => {
     store.commitCursor(sessionId, String(req.body.cursor ?? ''), String(req.body.consumer ?? ''));

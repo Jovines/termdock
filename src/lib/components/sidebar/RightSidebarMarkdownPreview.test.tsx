@@ -1228,6 +1228,122 @@ describe('right sidebar Markdown preview rendering', () => {
     expect((await within(cells[2]).findByRole('img', { name: 'x|y' })).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fxy.png');
   });
 
+  it('renders raw-HTML <img> tags inside table cells like markdown images', async () => {
+    const { container } = renderPreview([
+      '| Before | After |',
+      '| --- | --- |',
+      '| <img src="../test_cases/evidence/mock-filter-valid.png" width="210" alt="filter valid"> | <img src="images/mock-invalid.png" width="210px" alt="filter invalid"> |',
+    ].join('\n'));
+
+    // `../` resolves against the markdown file's directory, same as ![..](..)
+    expect(screen.getAllByRole('cell')).toHaveLength(2);
+    const valid = await screen.findByRole('img', { name: 'filter valid' });
+    expect(valid.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Ftest_cases%2Fevidence%2Fmock-filter-valid.png');
+    const invalid = screen.getByRole('img', { name: 'filter invalid' });
+    expect(invalid.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fimages%2Fmock-invalid.png');
+    expect(container.textContent).not.toContain('<img src=');
+  });
+
+  it('renders standalone raw-HTML <img> lines, keeping remote srcs as-is', async () => {
+    // jsdom cannot fetch over the network; 127.0.0.1 fails fast and
+    // deterministically (ECONNREFUSED), driving MarkdownImage to its native
+    // <img> fallback, whose src keeps the remote URL untouched.
+    renderPreview('<img src="http://127.0.0.1:9/banner.png" alt="Remote banner">');
+
+    const image = await screen.findByRole('img', { name: 'Remote banner' });
+    expect(image.getAttribute('src')).toBe('http://127.0.0.1:9/banner.png');
+  });
+
+  it('keeps raw <img> tags literal when the src cannot be served', () => {
+    const { container } = renderPreview([
+      '<img src="data:image/png;base64,AAAA" alt="embedded">',
+      '<img src="javascript:alert(1)" alt="evil">',
+      '<img src="assets/shot.pdf" alt="pdf">',
+    ].join('\n'));
+
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(container.textContent).toContain('<img src="data:image/png;base64,AAAA" alt="embedded">');
+    expect(container.textContent).toContain('<img src="javascript:alert(1)" alt="evil">');
+    expect(container.textContent).toContain('<img src="assets/shot.pdf" alt="pdf">');
+  });
+
+  it('renders raw-HTML <video> tags with a streaming /video URL', () => {
+    const { container } = renderPreview('<video src="../test_cases/evidence/true-flow.mp4" controls width="360">当前 Markdown 阅读器不支持内嵌视频时，请使用上方录屏链接。</video>');
+
+    // `../` resolves against the markdown file's directory, then points at the
+    // Range-streaming /video route so the native player can seek.
+    const video = container.querySelector('video');
+    expect(video).toBeTruthy();
+    expect(video?.getAttribute('src')).toBe('/api/terminal/fs/video?path=%2Frepo%2Ftest_cases%2Fevidence%2Ftrue-flow.mp4&action=view_file');
+    expect(video?.hasAttribute('controls')).toBe(true);
+    expect((video as HTMLElement).style.width).toBe('360px');
+    // while the video plays, the author's inner fallback text is not shown
+    expect(container.textContent).not.toContain('不支持内嵌视频');
+  });
+
+  it('shows the <video> inner text when playback fails', () => {
+    const { container } = renderPreview('<video src="evidence/demo.mp4" controls>当前 Markdown 阅读器不支持内嵌视频时，请使用上方录屏链接。</video>');
+    const video = container.querySelector('video') as HTMLVideoElement;
+    expect(video).toBeTruthy();
+
+    fireEvent.error(video);
+    expect(container.querySelector('video')).toBeNull();
+    expect(container.textContent).toContain('当前 Markdown 阅读器不支持内嵌视频时，请使用上方录屏链接。');
+  });
+
+  it('keeps raw <video> tags literal when the src cannot be served', () => {
+    const { container } = renderPreview('<video src="clips/demo.mkv" controls>Fallback</video>');
+
+    expect(container.querySelector('video')).toBeNull();
+    expect(container.textContent).toContain('<video src="clips/demo.mkv" controls>');
+  });
+
+  it('renders <a><img></a> anchors pointing at the same file through the lightbox', async () => {
+    const { container } = renderPreview('<a href="../test_cases/evidence/legacy-button-sug-before-after.png"><img src="../test_cases/evidence/legacy-button-sug-before-after.png" width="900" alt="Sug页修复前后对比"></a>');
+
+    const image = await screen.findByRole('img', { name: 'Sug页修复前后对比' });
+    expect(image.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Ftest_cases%2Fevidence%2Flegacy-button-sug-before-after.png');
+    // 「点击看大图」链接与图片指向同一张图：灯箱本身就是大图视图，
+    // 冗余的空壳 <a> 被去掉。
+    expect(container.querySelector('a')).toBeNull();
+    expect(container.textContent).not.toContain('<a href=');
+  });
+
+  it('keeps the anchor around the image when it targets a different file', async () => {
+    const { container } = renderPreview('<a href="https://example.com/full"><img src="evidence/shot.png" alt="Shot"></a>');
+
+    const anchor = container.querySelector('a');
+    expect(anchor?.getAttribute('href')).toBe('https://example.com/full');
+    expect(anchor?.getAttribute('target')).toBe('_blank');
+    expect((await within(anchor as HTMLElement).findByRole('img', { name: 'Shot' })).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fevidence%2Fshot.png');
+  });
+
+  it('keeps a local different-file href so the preview click capture opens it', async () => {
+    const { container } = renderPreview('<a href="other.md"><img src="shot.png" alt="Shot"></a>');
+
+    const anchor = container.querySelector('a');
+    expect(anchor?.getAttribute('href')).toBe('other.md');
+    expect(anchor?.contains(await screen.findByRole('img', { name: 'Shot' }))).toBe(true);
+  });
+
+  it('does not nest a lightbox button inside an image anchor', () => {
+    const result = buildMarkdownPreviewRenderResult(
+      [
+        '<a href="../test_cases/evidence/x.png"><img src="../test_cases/evidence/x.png" alt="same"></a>',
+        '<a href="https://example.com/full"><img src="shot.png" alt="other"></a>',
+      ],
+      '/repo/docs/guide.md',
+      '/repo',
+      () => undefined,
+    );
+    const { container } = render(<>{result.blocks.map((block) => <div key={block.key}>{renderBlockContent(block.content)}</div>)}</>);
+
+    const anchors = container.querySelectorAll('a');
+    expect(anchors).toHaveLength(1); // 同图链接被去掉
+    expect(container.querySelectorAll('button')).toHaveLength(1); // 只有同图图片保留灯箱按钮
+    expect(anchors[0]?.querySelector('button')).toBeNull(); // 链接内不再叠一个按钮
+  });
+
   it('renders footnote references, definitions, continuations, and backrefs', () => {
     const { container } = renderPreview([
       'Metric changed[^p50].',
@@ -1370,6 +1486,22 @@ describe('markdown image SVG sizing', () => {
     // healthy raster images keep their intrinsic size when nothing binds
     expect(computeMarkdownImageDisplayBox(png, 640, 480, 0)).toEqual({ width: 640, height: 480 });
     expect(computeMarkdownImageDisplayBox(png, 100, 100, 795)).toEqual({ width: 100, height: 100 });
+  });
+
+  it('honors a raw-HTML img width attribute instead of the intrinsic size', () => {
+    const png = '/api/terminal/fs/blob?path=%2Frepo%2Fevidence%2Fmock.png';
+    // the requested width wins, height follows the intrinsic ratio
+    expect(computeMarkdownImageDisplayBox(png, 800, 600, 0, 210)).toEqual({ width: 210, height: 158 });
+    expect(computeMarkdownImageDisplayBox(png, 800, 600, 0, 100)).toEqual({ width: 100, height: 75 });
+    // wider than the container: the container cap binds instead
+    expect(computeMarkdownImageDisplayBox(png, 800, 600, 300, 210)).toEqual({ width: 210, height: 158 });
+    expect(computeMarkdownImageDisplayBox(png, 800, 600, 120, 210)).toEqual({ width: 120, height: 90 });
+    // the 480px height cap still applies, ratio preserved
+    expect(computeMarkdownImageDisplayBox(png, 200, 1000, 0, 210)).toEqual({ width: 96, height: 480 });
+    // svg ratio also follows the requested width (upscaling allowed, like browsers)
+    expect(computeMarkdownImageDisplayBox('/api/terminal/fs/blob?path=%2Frepo%2Fx.svg', 24, 24, 0, 210)).toEqual({ width: 210, height: 210 });
+    // degenerate inputs never produce a box
+    expect(computeMarkdownImageDisplayBox(png, 0, 100, 0, 210)).toBeNull();
   });
 
   it('renders a fallback img sized from its decoded natural size', async () => {

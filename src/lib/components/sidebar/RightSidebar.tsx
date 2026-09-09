@@ -785,11 +785,23 @@ export function resolveMarkdownLocalLinkTarget(
   return { path: absolutePath, fragment: decodedFragment, directory: /\/$/.test(rawPath) };
 }
 
-function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, rootPath: string | null): string | null {
+// Shared resolver for local media embedded in markdown (both the ![..](..)
+// syntax and raw-HTML <img>/<video> tags): remote https URLs pass through,
+// data:/javascript: and non-previewable types are rejected, everything else
+// resolves against the markdown file's directory (or rootPath for /-prefixed
+// paths that are not filesystem-absolute) and maps to a server URL via
+// buildUrl. Mirrors the file watcher's /blob?path=&v=N versioning upstream.
+function resolveMarkdownFsMediaSrc(
+  src: string,
+  markdownFilePath: string | null,
+  rootPath: string | null,
+  isPreviewable: (filePath: string) => boolean,
+  buildUrl: (absolutePath: string) => string,
+): string | null {
   const trimmed = src.trim();
   if (!trimmed || /^(?:javascript|data):/i.test(trimmed)) return null;
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  if (!isPreviewableImagePath(trimmed.split(/[?#]/, 1)[0])) return null;
+  if (!isPreviewable(trimmed.split(/[?#]/, 1)[0])) return null;
 
   let absolutePath: string;
   if (trimmed.startsWith('/')) {
@@ -800,7 +812,19 @@ function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, r
     absolutePath = normalizeMarkdownLocalPath(`${getParentDirectoryPath(markdownFilePath)}/${trimmed}`);
   }
 
-  return `/api/terminal/fs/blob?path=${encodeURIComponent(absolutePath)}`;
+  return buildUrl(absolutePath);
+}
+
+function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, rootPath: string | null): string | null {
+  return resolveMarkdownFsMediaSrc(src, markdownFilePath, rootPath, isPreviewableImagePath, (absolutePath) => (
+    `/api/terminal/fs/blob?path=${encodeURIComponent(absolutePath)}`
+  ));
+}
+
+function resolveMarkdownVideoSrc(src: string, markdownFilePath: string | null, rootPath: string | null): string | null {
+  // The /video route streams with Range support, so the native <video> can
+  // seek without buffering the whole file (unlike images' blob fetch).
+  return resolveMarkdownFsMediaSrc(src, markdownFilePath, rootPath, isPreviewableVideoPath, buildVideoPreviewUrl);
 }
 
 // Display-height band for normalizing SVGs in the markdown preview. SVG files
@@ -828,16 +852,23 @@ export function isSvgImageSrc(src: string): boolean {
 // container width and the 480px max height, ratio always preserved. Returns
 // null when the natural size is unusable. The same box drives the loading
 // placeholder and the final img, so swapping them causes no layout shift.
+// `requestedWidthPx` comes from a raw-HTML `<img width="210">` attribute:
+// when present the author's width wins (capped at the container), with the
+// height following the intrinsic ratio instead of the natural size.
 export function computeMarkdownImageDisplayBox(
   src: string,
   naturalWidth: number,
   naturalHeight: number,
   containerWidth: number,
+  requestedWidthPx = 0,
 ): { width: number; height: number } | null {
   if (!naturalWidth || !naturalHeight) return null;
   let width: number;
   let height: number;
-  if (isSvgImageSrc(src)) {
+  if (requestedWidthPx > 0) {
+    width = containerWidth > 0 ? Math.min(requestedWidthPx, containerWidth) : requestedWidthPx;
+    height = (naturalHeight * width) / naturalWidth;
+  } else if (isSvgImageSrc(src)) {
     height = Math.min(Math.max(naturalHeight, MARKDOWN_SVG_MIN_DISPLAY_HEIGHT), MARKDOWN_SVG_MAX_DISPLAY_HEIGHT);
     width = (naturalWidth * height) / naturalHeight;
   } else {
@@ -896,7 +927,9 @@ type MarkdownImageState =
 //     rendered at the same explicit size and fades in — zero layout shift.
 // The URL goes through useVersionedFsBlobSrc, so on-disk changes to the image
 // file (or a watch rescan / manual refresh) append `&v=N` and refetch.
-function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: string }) {
+// `requestedWidthPx` honors a raw-HTML `<img width="…">` attribute once the
+// natural size arrives; pre-headers the placeholder guesses at that width.
+function MarkdownImage({ src, alt, title, requestedWidthPx }: { src: string; alt: string; title?: string; requestedWidthPx?: number }) {
   const isVector = isSvgImageSrc(src);
   const versionedSrc = useVersionedFsBlobSrc(src);
   const fallbackSrc = useEncryptedMediaSource(versionedSrc);
@@ -982,10 +1015,12 @@ function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: 
     };
   }, [nearViewport, versionedSrc]);
 
-  const box = computeMarkdownImageDisplayBox(src, naturalSize?.width ?? 0, naturalSize?.height ?? 0, containerWidth);
+  const box = computeMarkdownImageDisplayBox(src, naturalSize?.width ?? 0, naturalSize?.height ?? 0, containerWidth, requestedWidthPx ?? 0);
   // While headers are pending, reserve a rough guess; the exact size follows
   // as soon as headers land (usually the same round-trip).
-  const placeholderBox = box ?? { width: MARKDOWN_SVG_MIN_DISPLAY_HEIGHT * 2, height: MARKDOWN_SVG_MIN_DISPLAY_HEIGHT };
+  const placeholderBox = box ?? (requestedWidthPx
+    ? { width: containerWidth > 0 ? Math.min(requestedWidthPx, containerWidth) : requestedWidthPx, height: Math.round(requestedWidthPx * 0.75) }
+    : { width: MARKDOWN_SVG_MIN_DISPLAY_HEIGHT * 2, height: MARKDOWN_SVG_MIN_DISPLAY_HEIGHT });
 
   return (
     <div ref={rootRef} className="block max-w-full" style={box ? { width: box.width, height: box.height } : undefined}>
@@ -1045,15 +1080,19 @@ function renderMarkdownImage(
   src: string,
   title: string | undefined,
   context: MarkdownRenderContext,
+  // `interactive: false` suppresses the lightbox button (used when a parent
+  // <a> already owns the click — nesting a button inside an anchor would be
+  // invalid HTML with conflicting click targets).
+  options?: { fallbackText?: string; requestedWidthPx?: number; interactive?: boolean },
 ): ReactNode {
   const imageSrc = resolveMarkdownImageSrc(src, context.markdownFilePath, context.rootPath);
-  if (!imageSrc) return `![${alt}](${src})`;
+  if (!imageSrc) return options?.fallbackText ?? `![${alt}](${src})`;
 
   const imageIndex = context.images.length;
   context.images.push({ kind: 'image', src: imageSrc, alt, title });
-  const image = <MarkdownImage src={imageSrc} alt={alt} title={title} />;
+  const image = <MarkdownImage src={imageSrc} alt={alt} title={title} requestedWidthPx={options?.requestedWidthPx} />;
 
-  return context.onImageOpen ? (
+  return context.onImageOpen && options?.interactive !== false ? (
     <button
       key={key}
       type="button"
@@ -1261,7 +1300,119 @@ function MarkdownMath({ tex, display = false }: { tex: string; display?: boolean
   return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
+// Extracts the key="value" / key='value' / key=value attributes of an HTML
+// tag into a lower-cased map (quotes stripped, later duplicates win).
+function parseMarkdownHtmlAttrs(html: string): Map<string, string> {
+  const attrs = new Map<string, string>();
+  for (const match of html.matchAll(/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi)) {
+    attrs.set(match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]);
+  }
+  return attrs;
+}
+
+// Parses the attributes of a raw-HTML `<img …>` tag. Only the attributes the
+// markdown image pipeline understands are returned: src (required), alt,
+// title, and a numeric width (bare number or with px) — other values (e.g.
+// percentages) are ignored and the image renders at its natural size.
+function parseMarkdownHtmlImgAttrs(token: string): { src: string; alt?: string; title?: string; widthPx?: number } {
+  const attrs = parseMarkdownHtmlAttrs(token);
+  const src = attrs.get('src')?.trim() ?? '';
+  const width = attrs.get('width')?.trim().match(/^(\d+(?:\.\d+)?)(?:px)?$/i);
+  return { src, alt: attrs.get('alt'), title: attrs.get('title'), widthPx: width ? Number(width[1]) : undefined };
+}
+
+// Parses a raw-HTML `<video src="…" controls width="…">fallback</video>` tag:
+// attrs from the open tag, plus the boolean controls attribute (detected on
+// the tag with quoted values removed, so words inside src don't false-positive)
+// and the inner text between the tags as the author's unsupported-reader fallback.
+function parseMarkdownHtmlVideoTag(token: string): { src: string; fallbackText: string; widthPx?: number; controls: boolean } {
+  const openEnd = token.indexOf('>');
+  const openTag = openEnd < 0 ? token : token.slice(0, openEnd + 1);
+  const attrs = parseMarkdownHtmlAttrs(openTag);
+  const src = attrs.get('src')?.trim() ?? '';
+  const width = attrs.get('width')?.trim().match(/^(\d+(?:\.\d+)?)(?:px)?$/i);
+  const quotedStripped = openTag.replace(/=\s*(?:"[^"]*"|'[^']*')/g, ' ');
+  const fallbackText = openEnd < 0 ? '' : token.slice(openEnd + 1).replace(/<\/video\s*>$/i, '').replace(/<[^>]*>/g, '').trim();
+  return { src, fallbackText, widthPx: width ? Number(width[1]) : undefined, controls: /\bcontrols\b/i.test(quotedStripped) };
+}
+
+// Inline raw-HTML `<video>` in the markdown preview. The URL is the streaming
+// /video route (Range support, so seeking works without downloading the whole
+// file); auth rides the encrypted media source like the file-preview player.
+// On load failure the author's inner text — the content these tags carry
+// exactly for readers without video — is shown instead of a dead player.
+function MarkdownVideo({ url, fallbackText, widthPx, hasControls }: { url: string; fallbackText?: string; widthPx?: number; hasControls: boolean }) {
+  const { t } = useI18n();
+  const [failed, setFailed] = useState(false);
+  const mediaUrl = useEncryptedMediaSource(url, () => setFailed(true));
+
+  // Not yet served by the worker controlling this page: mount nothing rather
+  // than an empty frame; the video appears as soon as the source is usable.
+  if (!mediaUrl) return null;
+
+  return (
+    <span className="my-2 block max-w-full overflow-hidden rounded-md border border-border/20 bg-surface-2">
+      {failed ? (
+        <span className="block px-3 py-2 text-xs text-muted-foreground">{fallbackText?.trim() || t('rightSidebar.videoUnsupported')}</span>
+      ) : (
+        <video
+          className="block max-w-full"
+          src={mediaUrl}
+          // React does not forward width/height as media-element attributes;
+          // CSS width keeps the intrinsic aspect ratio (max-w-full caps it).
+          style={widthPx ? { width: `${widthPx}px` } : undefined}
+          controls={hasControls}
+          preload="metadata"
+          playsInline
+          onError={() => setFailed(true)}
+        />
+      )}
+    </span>
+  );
+}
+
 function renderMarkdownHtmlInline(token: string, key: string, context: MarkdownRenderContext): ReactNode | null {
+  // `<a href="…"><img …></a>` — the GitHub-style "click for the full-size
+  // copy" wrapper. When the anchor points at the same file as the image, the
+  // lightbox already IS the full-size view, so the redundant anchor is
+  // dropped. A different target keeps the anchor (local files still route
+  // through the preview's a[href] click capture; remote ones open a new tab).
+  if (/^<a\b[^>]*>\s*<\s*img\b[^>]*>\s*<\/a\s*>$/i.test(token)) {
+    const openTag = token.slice(0, token.indexOf('>') + 1);
+    const href = parseMarkdownHtmlAttrs(openTag).get('href')?.trim() ?? '';
+    const imgToken = token.match(/<\s*img\b[^>]*>/i)?.[0] ?? '';
+    const { src, alt, title, widthPx } = parseMarkdownHtmlImgAttrs(imgToken);
+    if (!src) return null;
+    // The image itself must resolve; otherwise the whole tag stays literal.
+    const imgAbs = resolveMarkdownFsMediaSrc(src, context.markdownFilePath, context.rootPath, isPreviewableImagePath, (p) => p);
+    if (!imgAbs) return null;
+    const linkTarget = href ? resolveMarkdownLocalLinkTarget(href, context.markdownFilePath, context.rootPath) : null;
+    const sameFile = Boolean(linkTarget && linkTarget.path === imgAbs);
+    const safeHref = !sameFile && href ? getSafeMarkdownHref(href) : null;
+    // Render once (renderMarkdownImage registers the image in the lightbox
+    // list): interactive only when no anchor wraps it.
+    const image = renderMarkdownImage(key, alt ?? '', src, title, context, { requestedWidthPx: widthPx, interactive: safeHref ? false : undefined });
+    return safeHref ? (
+      <a key={key} href={safeHref} target="_blank" rel="noreferrer">
+        {image}
+      </a>
+    ) : image;
+  }
+  if (/^<\s*img\b[^>]*>$/i.test(token)) {
+    const { src, alt, title, widthPx } = parseMarkdownHtmlImgAttrs(token);
+    if (!src) return null;
+    // Rendered through the same pipeline as ![alt](src) images (relative path
+    // resolution against the markdown file, versioned refetch, encrypted
+    // media source, lightbox). An unresolvable src keeps the raw tag visible.
+    return renderMarkdownImage(key, alt ?? '', src, title, context, { fallbackText: token, requestedWidthPx: widthPx });
+  }
+  if (/^<\s*video\b[^>]*>[\s\S]*?<\/video\s*>$/i.test(token)) {
+    const { src, fallbackText, widthPx, controls } = parseMarkdownHtmlVideoTag(token);
+    if (!src) return null;
+    const videoUrl = resolveMarkdownVideoSrc(src, context.markdownFilePath, context.rootPath);
+    if (!videoUrl) return null;
+    return <MarkdownVideo key={key} url={videoUrl} fallbackText={fallbackText} widthPx={widthPx} hasControls={controls} />;
+  }
   if (/^<br\s*\/?>$/i.test(token)) return <br key={key} />;
 
   const match = token.match(/^<(kbd|mark|sub|sup)>(.*?)<\/\1>$/i);
@@ -1291,7 +1442,7 @@ function renderMarkdownInline(
   context: MarkdownRenderContext,
 ): ReactNode[] {
   const maskedText = maskMarkdownEscapes(text);
-  const pattern = /(\\\([^)]*\\\)|\$[^$\n]+\$|<br\s*\/?>|<(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)\b[\s\S]*?<\/(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)>|!?\[[^\]]*\]\((?:<[^>]+>|(?:[^\s()]+|\([^()\s]*\))+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)|!?\[[^\]]+\]\[[^\]]*\]|!?\[[^\]]+\]|\[\^[^\]]+\]|(`+)([\s\S]*?)\2|~~[^~]+~~|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_|<https?:\/\/[^>\s]+>|<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>|https?:\/\/[^\s<]+|www\.[^\s<]+|[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+)/gi;
+  const pattern = /(\\\([^)]*\\\)|\$[^$\n]+\$|<br\s*\/?>|<\s*img\b[^>]*>|<\s*video\b[^>]*>[\s\S]*?<\/video\s*>|<(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)\b[\s\S]*?<\/(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)>|!?\[[^\]]*\]\((?:<[^>]+>|(?:[^\s()]+|\([^()\s]*\))+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)|!?\[[^\]]+\]\[[^\]]*\]|!?\[[^\]]+\]|\[\^[^\]]+\]|(`+)([\s\S]*?)\2|~~[^~]+~~|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_|<https?:\/\/[^>\s]+>|<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>|https?:\/\/[^\s<]+|www\.[^\s<]+|[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+)/gi;
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
