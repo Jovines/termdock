@@ -3034,7 +3034,11 @@ function App() {
         pinnedActiveTs?.promptState ?? null,
       ).primary
     : '';
-  const topBarAgentBg = showPinnedLeft && pinnedActiveTs
+  const desktopSplitWorkspace = isDesktopViewport ? activeSplitWorkspace : null;
+  const desktopSplitTitle = desktopSplitWorkspace
+    ? desktopSplitWorkspace.name || `${t('tab.splitWorkspace')} ${splitWorkspaces.findIndex((workspace) => workspace.id === desktopSplitWorkspace.id) + 1}`
+    : '';
+  const topBarAgentBg = showPinnedLeft && !desktopSplitWorkspace && pinnedActiveTs
     ? pinnedActiveTs.agentStatus === 'working'
       ? 'bg-gradient-to-r from-[rgb(var(--success-rgb)_/_0.08)] to-transparent'
       : pinnedActiveTs.agentStatus === 'waiting'
@@ -3074,7 +3078,17 @@ function App() {
                 className="sm:hidden"
               />
             </button>}
-            {showPinnedLeft ? (
+            {desktopSplitWorkspace ? (
+              <div
+                data-split-workspace-title={desktopSplitWorkspace.id}
+                className={`flex min-w-0 items-center justify-center gap-1.5 overflow-hidden ${showPinnedLeft ? 'absolute left-1/2 max-w-[80%] -translate-x-1/2' : 'flex-1'}`}
+                title={desktopSplitTitle}
+              >
+                <RiLayoutGridLine size={13} className="shrink-0 text-muted-foreground" />
+                <span className="truncate text-[12px] font-medium">{desktopSplitTitle}</span>
+                <span className="shrink-0 text-[10px] text-muted-foreground">{desktopSplitWorkspace.sessionIds.length}</span>
+              </div>
+            ) : showPinnedLeft ? (
               <div className="absolute left-1/2 flex max-w-[40%] min-w-0 -translate-x-1/2 items-center justify-center gap-1.5 overflow-hidden">
                 {pinnedActiveSession ? (
                   <>

@@ -4,6 +4,7 @@ import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
+import { SplitPaneTitle } from './SplitPaneTitle';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { VIEWPORT_LAYOUT_CHANGE_EVENT } from '../hooks/useViewportHeight';
 import {
@@ -2071,6 +2072,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     session: TerminalSession,
     options: {
       suppressKeyboard?: boolean;
+      showPaneTitle?: boolean;
       keyboardPortalTarget?: HTMLElement | null;
       sharedMobileKeyboardLayout?: boolean;
       suppressPageFlipRefresh?: boolean;
@@ -2125,6 +2127,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           activateSplitPaneForWheel(isActive, () => activateSplitPane(session.id));
         }}
       >
+        {options.showPaneTitle && (
+          <SplitPaneTitle session={session} active={isActive} onActivate={() => activateSplitPane(session.id)} />
+        )}
         <div className="min-h-0 flex-1 app-chrome-bg">
           {shouldMountViewport && <TerminalView
             sessionId={session.id}
@@ -2382,6 +2387,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                       {slide.sessions.map((session, index) => (
                         <React.Fragment key={session.id}>
                           {renderTerminal(session, {
+                            showPaneTitle: !isMobileLayout,
                             suppressKeyboard: isMobileLayout && session.id !== splitToolbarOwnerId,
                             keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
                             sharedMobileKeyboardLayout: isMobileLayout,
