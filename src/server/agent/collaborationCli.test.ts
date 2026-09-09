@@ -49,6 +49,15 @@ describe('collaboration CLI contract', () => {
     expect(JSON.parse(fixture_.output.at(-1)!)).toMatchObject({ message_id: 'm', status: 'pending', code: 'WAIT_TIMEOUT', delivery_continues: true });
     expect(fixture_.calls.filter((args) => args[0] === 'POST')).toHaveLength(1);
   });
+  it('says delivery completed when only the expected result is late', async () => {
+    const fixture_ = fixture([
+      { message_id: 'm', thread_id: 't', status: 'pending' },
+      { message_id: 'm', thread_id: 't', status: 'delivered' },
+    ]);
+    const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'delivered', '--expect-reply', 'result', '--timeout', '600ms', '--text']), { backendSessionId: 'b' }, fixture_.io);
+    expect(exit).toBe(2);
+    expect(fixture_.output.at(-1)).toContain('投递已完成；等待结果超时（expect-reply=result）');
+  });
   it('cannot satisfy result wait with read or an ACK', () => {
     expect(waitSatisfied({ status: 'read', ack_at: 1, reply_ids: ['ack'], result_ids: [] }, 'read', 'result')).toBe(false);
     expect(waitSatisfied({ status: 'read', ack_at: null, reply_ids: ['result'], result_ids: ['result'] }, 'read', 'ack')).toBe(false);

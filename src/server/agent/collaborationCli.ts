@@ -18,8 +18,9 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     --wait-until queued|delivered|read --timeout 30s
     --expect-reply ack|result|any
     --response-kind ack|progress|result --metadata '<JSON object>'
-    --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
     --expires-at <ISO timestamp or epoch milliseconds>
+    reply: --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
+      (status reporting happens only via reply; send/handoff dispatch carries no task state)
   message get <message-id> [--receipt-only]
   message read <message-id> (explicit consumption; not application ACK)
   message watch <message-id> [--wait-until delivered|read] [--timeout 30s]
@@ -84,8 +85,8 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   const allowed = new Set(['json', 'jsonl', 'text', 'help']);
   const byAction: Record<string, string[]> = {
     status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
-    send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'kind'],
-    handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
+    send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
+    handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     inbox: ['unread', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
     message: ['receipt-only', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
@@ -133,6 +134,11 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       else if (value.message) io.write(`[${value.status}] ${value.message_id}\n${value.message.content}`);
       else if (value.message_id) {
         io.write(`${value.status} ${value.message_id} thread=${value.thread_id}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
+        // A timeout after the wait stage itself was reached means delivery
+        // (or reading) completed — only the expected reply/result is late.
+        if (value.code === 'WAIT_TIMEOUT' && value.stage_reached && value.expect_reply) {
+          io.write(`\n投递已完成；等待${value.expect_reply === 'result' ? '结果' : '回复'}超时（expect-reply=${value.expect_reply}）`);
+        }
         if (value.snapshot) io.write(`\n${value.snapshot}`);
       }
       else io.write(JSON.stringify(value, null, 2));
@@ -211,7 +217,11 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         const serialized = JSON.stringify(receipt);
         if (serialized !== previous) { output(receipt!); previous = serialized; }
       }
-      if (now() >= deadline) { output({ ...receipt, ok: false, code: 'WAIT_TIMEOUT', wait_until: stage, expect_reply: o['expect-reply'] ?? null, delivery_continues: true }); return 2; }
+      if (now() >= deadline) {
+        output({ ...receipt, ok: false, code: 'WAIT_TIMEOUT', wait_until: stage, stage_reached: waitSatisfied(receipt!, stage, undefined),
+          expect_reply: o['expect-reply'] ?? null, delivery_continues: true });
+        return 2;
+      }
       await sleep(Math.min(500, deadline - now()));
       if (now() >= deadline) continue;
       receipt = { ...await request('GET', `/message/${encodeURIComponent(receipt!.message_id)}?receipt_only=true`), ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}) };

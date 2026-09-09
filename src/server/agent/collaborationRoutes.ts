@@ -51,6 +51,7 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind }: 
     const groups = store.groupsForSession(sessionId).filter((group) => group.sessionIds.includes(target) && (!req.body.group_id || group.id === req.body.group_id));
     if (!groups.length) throw new CollaborationError('GROUP_NOT_FOUND', 'Sender and recipient must share the specified group');
     if (groups.length > 1 && !req.body.group_id) throw new CollaborationError('AMBIGUOUS_GROUP', 'Multiple shared groups; specify --group');
+    if (req.body.task) throw new CollaborationError('DISPATCH_CARRIES_TASK', 'Dispatch carries no task state; recipients report task status through replies', 400);
     const messages = store.send({ ...extrasFromBody(req.body), groupId: groups[0].id, fromSessionId: sessionId, toSessionIds: [target],
       kind: (req.body.kind ?? 'message') as CollaborationMessageKind, content: typeof req.body.message === 'string' ? req.body.message : '',
       threadId: typeof req.body.thread_id === 'string' ? req.body.thread_id : undefined });
