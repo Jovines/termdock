@@ -122,4 +122,27 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('仅可排队等待重连');
     expect(prompt).toContain('转发客户端须保持运行');
   });
+
+  it('omits static routing help once the session is educated', () => {
+    const prompt = render([message({})], { showRoutingHelp: false });
+    expect(prompt).toContain('【发布组 · 用户 · 任务】');
+    expect(prompt).toContain('检查构建');
+    expect(prompt).toContain('直接在当前会话处理');
+    expect(prompt).not.toContain('td collab send');
+    expect(prompt).not.toContain('td collab --help');
+    expect(prompt).not.toContain('联系其他成员');
+    expect(prompt.length).toBeLessThan(220);
+  });
+
+  it('still surfaces dynamic notices while routing help is suppressed', () => {
+    const prompt = render([], {
+      targetSessionId: 'local', showRoutingHelp: false,
+      groups: [{ ...group, sessionIds: ['local', 'remote:peer'] }],
+      sessions: [{ sessionId: 'remote:peer', name: 'Reviewer · Mac', status: 'service-unreachable' }],
+    });
+    expect(prompt).not.toContain('td collab --help');
+    expect(prompt).not.toContain('td collab send');
+    expect(prompt).toContain('服务不可达，消息无法送达');
+    expect(prompt).toContain('转发客户端须保持运行');
+  });
 });

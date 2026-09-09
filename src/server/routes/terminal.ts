@@ -989,6 +989,7 @@ void (async () => {
   pruneOrphanSessions();
   await backfillPersistedTmuxMetadata();
   collaborationDeliveryWorker.start();
+  startCollaborationConsumptionWatcher();
 })();
 caffeinateManager.startNetworkMonitor();
 
@@ -1514,6 +1515,9 @@ function removeGlobalSessionRecord(frontendSessionId: string): boolean {
   if (changed) {
     collaborationStore.removeSession(frontendSessionId);
     collaborationRouting.remove(frontendSessionId);
+    for (const key of [...collaborationScaffoldState.keys()]) {
+      if (key.startsWith(`${frontendSessionId}|`)) collaborationScaffoldState.delete(key);
+    }
   }
   return changed;
 }
@@ -1972,10 +1976,54 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
     reason: route.reason ?? '消息已入队，后台正在恢复路由并投递' };
 }
 
+// Per-session routing-help education state: static help (peer roster + help
+// pointer) rides only the first delivery, then returns when the roster
+// changes (a new member joined). In-memory only — a restart simply re-educates
+// once, which is harmless. Dynamic notices are never gated by this.
+const collaborationScaffoldState = new Map<string, { rosterSignature: string }>();
+
+function collaborationRosterSignature(frontendSessionId: string): string {
+  const peerIds = new Set(collaborationStore.groupsForSession(frontendSessionId)
+    .flatMap((group) => group.sessionIds ?? []).filter((id) => id !== frontendSessionId));
+  return [...peerIds].sort().join('|');
+}
+
+// Backend session → most recent prompt-submit observed from its hook stream.
+// The consumption watcher below compares this against a message's deliveredAt:
+// the delivery itself (an injected bracketed paste) is what triggers the next
+// prompt-submit, so activity after delivery means the message entered a turn.
+// In-memory only; after a restart the watcher simply waits for the next turn.
+const collaborationPromptObservedAt = new Map<string, number>();
+
+function startCollaborationConsumptionWatcher(): void {
+  const timer = setInterval(() => {
+    const now = Date.now();
+    for (const record of globalSessionState.sessions) {
+      const binding = collaborationRouting.get(record.sessionId);
+      if (!binding?.backendSessionId) continue;
+      const lastPromptAt = collaborationPromptObservedAt.get(binding.backendSessionId);
+      if (!lastPromptAt) continue;
+      const consumed = collaborationStore.inbox(record.sessionId, { limit: 200 })
+        .filter((message) => message.status === 'delivered' && message.deliveredAt !== null && message.deliveredAt < lastPromptAt);
+      if (consumed.length > 0) collaborationStore.markRead(consumed.map((message) => message.id), 'observed');
+    }
+  }, 5_000);
+  timer.unref?.();
+}
+
 function formatLocalCollaborationMessages(frontendSessionId: string, messages: CollaborationMessage[]): string {
+  const signature = collaborationRosterSignature(frontendSessionId);
+  // Education follows the bound agent identity, not just the pane: a rebind to
+  // a different agent session must re-educate the newcomer.
+  const binding = collaborationRouting.get(frontendSessionId);
+  const educationKey = `${frontendSessionId}|${binding?.agentSlug ?? ''}|${binding?.nativeSessionId ?? ''}`;
+  const educated = collaborationScaffoldState.get(educationKey);
+  const showRoutingHelp = !educated || educated.rosterSignature !== signature;
+  if (showRoutingHelp) collaborationScaffoldState.set(educationKey, { rosterSignature: signature });
   return formatCollaborationDelivery({ targetSessionId: frontendSessionId, messages,
     groups: collaborationStore.groupsForSession(frontendSessionId),
     sessions: [...collaborationRemoteSessions(), ...globalSessionState.sessions.map(orchestrationSessionSnapshot)],
+    showRoutingHelp,
   });
 }
 
@@ -2038,6 +2086,26 @@ async function rebindCollaborationRoute(frontendSessionId: string, paneId: strin
   return { ...collaborationRouting.get(frontendSessionId), state: 'recovering' };
 }
 
+/**
+ * Delivery gate: a rich-hook session mid-turn (working/waiting) cannot receive
+ * an injected prompt — the TUI is not reading input, keystrokes would be
+ * dropped or land in the wrong buffer. The worker keeps retrying until the
+ * agent stops (status leaves working/waiting). A queued message older than
+ * COLLAB_BUSY_FORCE_MS forces delivery anyway, so a lost hook event (agent
+ * actually idle, state stuck working) can never deadlock the queue forever.
+ * Sessions without hook state (plain shells, foreign agents) are never
+ * inferred busy — no signal, no guess.
+ */
+const COLLAB_BUSY_FORCE_MS = 20 * 60_000;
+
+function gateCollaborationDelivery(frontendSessionId: string, backend: TerminalSession): { blocked: boolean; reason?: string } {
+  const agentState = backend.agentSession;
+  if (!agentState?.rich || (agentState.status !== 'working' && agentState.status !== 'waiting')) return { blocked: false };
+  const oldest = collaborationStore.inbox(frontendSessionId, { pendingOnly: true, limit: 1 })[0];
+  if (oldest && Date.now() - oldest.createdAt >= COLLAB_BUSY_FORCE_MS) return { blocked: false };
+  return { blocked: true, reason: `AGENT_${agentState.status.toUpperCase()}` };
+}
+
 async function resolveCollaborationRoute(frontendSessionId: string): Promise<CollaborationRoute> {
   let record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
   if (!record) return { state: 'offline', reason: 'SESSION_REMOVED' };
@@ -2074,6 +2142,8 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
       backend = resolveOrchestrationBackend(record);
     }
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
+    const tmuxGate = gateCollaborationDelivery(frontendSessionId, backend);
+    if (tmuxGate.blocked) return { state: 'busy', reason: tmuxGate.reason };
     return { state: 'ready', write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
       await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages));
@@ -2088,6 +2158,8 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     return { state: 'identity-mismatch', reason: 'AGENT_IDENTITY_CHANGED' };
   }
   const target = backend;
+  const shellGate = gateCollaborationDelivery(frontendSessionId, target);
+  if (shellGate.blocked) return { state: 'busy', reason: shellGate.reason };
   return { state: 'ready', write: async (messages) => {
     if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
     if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('SHELL_BACKEND_CHANGED');
@@ -3785,6 +3857,7 @@ function applyAgentSignals(
       session.autoTitlePromptPayloads = [];
     }
     if (event.kind === 'prompt-submit') {
+      collaborationPromptObservedAt.set(sessionId, Date.now());
       // Before the first automatic title, keep accumulating short turns until
       // there is enough substance to name the session. Once titled, only the
       // latest turn is relevant to the conservative re-evaluation path.

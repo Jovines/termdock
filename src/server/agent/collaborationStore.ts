@@ -37,7 +37,7 @@ export type CollaborationMessageStatus = 'pending' | 'delivered' | 'read' | 'fai
 export interface CollaborationMessage extends MessageExtras {
   sequence?: number;
   failureReason?: string | null;
-  readSource?: 'explicit' | 'legacy_or_unspecified';
+  readSource?: 'explicit' | 'observed' | 'legacy_or_unspecified';
   deliverySource?: 'pty_written' | 'consumer_read' | 'legacy_or_unspecified';
   id: string;
   groupId: string;
@@ -273,11 +273,17 @@ export class CollaborationStore {
     return this.updateStatus(messageIds, 'delivered');
   }
 
-  markRead(messageIds: string[]): CollaborationMessage[] {
-    return this.updateStatus(messageIds, 'read');
+  /**
+   * @param source 'explicit' — a consumer acknowledged the message (CLI/UI).
+   *   'observed' — the server inferred consumption from the recipient's turn
+   *   activity (a new prompt-submit after delivery). Both are idempotent and
+   *   neither implies application-level ACK.
+   */
+  markRead(messageIds: string[], source: 'explicit' | 'observed' = 'explicit'): CollaborationMessage[] {
+    return this.updateStatus(messageIds, 'read', source);
   }
 
-  private updateStatus(messageIds: string[], status: 'delivered' | 'read'): CollaborationMessage[] {
+  private updateStatus(messageIds: string[], status: 'delivered' | 'read', readSource: 'explicit' | 'observed' = 'explicit'): CollaborationMessage[] {
     const ids = new Set(messageIds);
     this.expire();
     const now = Date.now();
@@ -285,7 +291,7 @@ export class CollaborationStore {
     this.document.messages = this.document.messages.map((message) => {
       if (!ids.has(message.id) || message.status === 'expired' || message.status === 'failed' || message.status === 'read') return message;
       const updated: CollaborationMessage = status === 'read'
-        ? { ...message, status, deliveredAt: message.deliveredAt ?? now, readAt: now, readSource: 'explicit', deliverySource: message.deliverySource ?? (message.deliveredAt === null ? 'consumer_read' : 'legacy_or_unspecified') }
+        ? { ...message, status, deliveredAt: message.deliveredAt ?? now, readAt: now, readSource, deliverySource: message.deliverySource ?? (message.deliveredAt === null ? 'consumer_read' : 'legacy_or_unspecified') }
         : message.status === 'pending' ? { ...message, status, deliveredAt: now, deliverySource: 'pty_written' } : message;
       changed.push(updated);
       return updated;

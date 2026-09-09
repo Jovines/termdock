@@ -21,6 +21,13 @@ export function formatCollaborationDelivery(input: {
   messages: CollaborationMessage[];
   groups: CollaborationGroup[];
   sessions: CollaborationPromptSession[];
+  /**
+   * false: omit the static routing help (peer roster + `td collab --help`
+   * pointer). Dynamic notices (unreachable peers, cross-service keep-alive)
+   * are always included — they report current conditions, not education.
+   * Callers gate this on a per-session education state keyed by roster.
+   */
+  showRoutingHelp?: boolean;
 }): string {
   const groupsById = new Map(input.groups.map((group) => [group.id, group]));
   const sessionsById = new Map(input.sessions.map((session) => [session.sessionId, session]));
@@ -53,9 +60,11 @@ export function formatCollaborationDelivery(input: {
     return `- ${session?.name ?? '离线会话'}：\`td collab send ${sessionId} "消息内容" --text\``;
   });
   const unreachable = peerIds.filter((id) => sessionsById.get(id)?.status === 'service-unreachable');
-  const instructions = [
+  const routingHelp = input.showRoutingHelp === false ? [] : [
     ...(peers.length ? ['联系其他成员：', ...peers] : []),
     '更多操作：`td collab --help`。',
+  ];
+  const dynamicNotices = [
     ...(peerIds.some((id) => id.startsWith('remote:'))
       ? ['跨服务通信使用 td collab；转发客户端须保持运行，网页或 PWA 暂停后需返回前台继续转发。'] : []),
     ...unreachable.map((id) => `注意：${sessionsById.get(id)?.name ?? id} 服务不可达，消息无法送达；仅可排队等待重连。`),
@@ -64,7 +73,6 @@ export function formatCollaborationDelivery(input: {
   return [
     ...(input.messages.length > 1 ? [`[Termdock 协作 · ${input.messages.length} 条]`, ''] : []),
     messageBlocks.join('\n\n'),
-    '',
-    ...instructions,
+    ...(routingHelp.length || dynamicNotices.length ? ['', ...routingHelp, ...dynamicNotices] : []),
   ].join('\n');
 }
