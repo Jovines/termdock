@@ -33,63 +33,93 @@ const sessions = [
   { sessionId: 'coder-id', agentNativeSessionId: 'native-coder', name: '开发 Agent', status: 'idle' },
 ];
 
-describe('formatCollaborationDelivery', () => {
-  it('explains how to handle a user message without suggesting an invalid reply', () => {
-    const prompt = formatCollaborationDelivery({
-      targetSessionId: 'reviewer-id',
-      messages: [message({})],
-      groups: [group],
-      sessions,
-    });
-
-    expect(prompt).toContain('[Termdock 协作收件箱 · 1 条]');
-    expect(prompt).toContain('[任务 #message-1]\n来自：用户\n协作组：发布组\n--- 消息内容 ---\n检查构建\n--- 消息结束 ---');
-    expect(prompt).toContain('发布组 [group-1] · 2 个成员');
-    expect(prompt).toContain('开发 Agent · idle\n  Agent 原生 Session ID：native-coder\n  Termdock 会话 ID：coder-id');
-    expect(prompt).toContain('优先使用该能力和上方的原生 ID');
-    expect(prompt).toContain('命令中的 <会话ID> 指 Termdock 会话 ID');
-    expect(prompt).toContain('无来源 Agent，不能运行 `td collab reply`');
-    expect(prompt).not.toContain('- 回复：');
-  });
-
-  it('shows the source session id and valid reply command for an Agent message', () => {
-    const prompt = formatCollaborationDelivery({
-      targetSessionId: 'reviewer-id',
-      messages: [message({ fromSessionId: 'coder-id', kind: 'ask', content: '测试通过了吗？\n请附上失败项。' })],
-      groups: [group],
-      sessions,
-    });
-
-    expect(prompt).toContain('[问题 #message-1]\n来自：开发 Agent\nAgent 原生 Session ID：native-coder\nTermdock 会话 ID：coder-id\n协作组：发布组');
-    expect(prompt).toContain('--- 消息内容 ---\n测试通过了吗？\n请附上失败项。\n--- 消息结束 ---');
-    expect(prompt).toContain('`td collab reply <消息ID> "回复内容"`');
-    expect(prompt).toContain('`td collab send <会话ID> "消息内容"`');
-    expect(prompt).toContain('`td collab add <协作组ID> <会话ID>`');
-    expect(prompt).toContain('`td collab remove <协作组ID> <会话ID>`');
-    expect(prompt).toContain('`td collab spawn <协作组ID> <agent-slug> --name "名称" --task "初始任务"`');
-  });
-
-  it('omits the native-channel hint when no peer has a native session id', () => {
-    const prompt = formatCollaborationDelivery({
-      targetSessionId: 'reviewer-id',
-      messages: [message({})],
-      groups: [group],
-      sessions: sessions.map(({ agentNativeSessionId: _agentNativeSessionId, ...session }) => session),
-    });
-
-    expect(prompt).not.toContain('优先使用该能力和上方的原生 ID');
-    expect(prompt).toContain('如果没有这种内建能力，则使用下方 Termdock 收件箱命令');
-    expect(prompt).toContain('Termdock 会话 ID：coder-id');
-  });
+const render = (messages: CollaborationMessage[], overrides = {}) => formatCollaborationDelivery({
+  targetSessionId: 'reviewer-id', messages, groups: [group], sessions, ...overrides,
 });
 
-it('tells the Agent that an unreachable service cannot receive messages and pending is not delivery', () => {
-  const prompt = formatCollaborationDelivery({
-    targetSessionId: 'local', messages: [],
-    groups: [{ id: 'cross-pair', name: 'Pair', sessionIds: ['local', 'remote:peer'], createdAt: 1, updatedAt: 1 }],
-    sessions: [{ sessionId: 'remote:peer', name: 'Reviewer · Mac', status: 'service-unreachable' }],
+describe('formatCollaborationDelivery', () => {
+  it('keeps user tasks prominent and provides a direct way to contact peers', () => {
+    const prompt = render([message({})]);
+    expect(prompt).toContain('【发布组 · 用户 · 任务】');
+    expect(prompt).toContain('检查构建');
+    expect(prompt).toContain('直接在当前会话处理');
+    expect(prompt).not.toContain('td collab reply');
+    expect(prompt).toContain('td collab send coder-id "消息内容" --text');
+    expect(prompt).not.toContain('native-coder');
+    expect(prompt).not.toContain('group-1');
+    expect(prompt).toContain('td collab --help');
+    expect(prompt.length).toBeLessThan(450);
   });
-  expect(prompt).toContain('服务不可达，消息无法送达');
-  expect(prompt).toContain('不要把 pending 当作成功');
-  expect(prompt).toContain('Mac 客户端须保持运行');
+
+  it('places a runnable reply next to each agent message without duplicating the sender', () => {
+    const prompt = render([message({ fromSessionId: 'coder-id', kind: 'ask', content: '测试通过了吗？\n请附上失败项。' })]);
+    expect(prompt).toContain('【发布组 · 开发 Agent】');
+    expect(prompt).toContain('测试通过了吗？\n请附上失败项。');
+    expect(prompt).toContain('td collab reply message-1 "回复内容" --text');
+    expect(prompt).not.toContain('td collab send coder-id');
+    expect(prompt).not.toContain('native-coder');
+    expect(prompt).not.toContain('td collab spawn');
+    expect(prompt).not.toContain('ACK');
+    expect(prompt).not.toContain('[Termdock 协作');
+    expect(prompt.length).toBeLessThan(450);
+  });
+
+  it('presents short conversation as prose while retaining its reply route', () => {
+    const prompt = render([message({ kind: 'reply', fromSessionId: 'coder-id', content: '建议把回复放到正文下面。' })]);
+    expect(prompt).toContain('【发布组 · 开发 Agent】\n建议把回复放到正文下面。\n回复：');
+    expect(prompt).not.toContain('```');
+  });
+
+  it('keeps each source reply address distinct in a batch', () => {
+    const prompt = render([
+      message({ id: 'one', fromSessionId: 'coder-id', content: '第一条' }),
+      message({ id: 'two', fromSessionId: 'another-id', content: '第二条' }),
+    ]);
+    expect(prompt).toContain('[Termdock 协作 · 2 条]');
+    expect(prompt).toContain('第一条\n```\n回复：`td collab reply one');
+    expect(prompt).toContain('第二条\n```\n回复：`td collab reply two');
+    expect(prompt).toContain('another-id');
+  });
+
+  it('keeps mixed messages and embedded code unambiguous', () => {
+    const body = '代码：\n```ts\nconst x = 1;\n```\n--- 正文结束 ---';
+    const prompt = render([message({ content: body }), message({ id: 'message-2', fromSessionId: 'coder-id' })]);
+    expect(prompt).toContain('````\n' + body + '\n````');
+    expect(prompt.match(/td collab reply /g)).toHaveLength(1);
+    expect(prompt).toContain('td collab reply message-2');
+    expect(prompt).toContain('直接在当前会话处理');
+  });
+
+  it('provides a full-content retrieval command for oversized UTF-8 bodies', () => {
+    const prompt = render([message({ content: '测'.repeat(3000), fromSessionId: 'coder-id' })]);
+    expect(prompt).toContain('9000 字节');
+    expect(prompt).toContain('td collab message get message-1 --json');
+    expect(prompt).not.toContain('测'.repeat(3000));
+  });
+
+  it.each(['ack', 'progress', 'result'] as const)('omits protocol metadata from ordinary %s replies', (responseKind) => {
+    const prompt = render([message({ fromSessionId: 'coder-id', kind: 'reply', responseKind })]);
+    expect(prompt).not.toContain('状态：');
+    expect(prompt).not.toContain('ACK');
+    expect(prompt).not.toContain('pending');
+    expect(prompt).not.toContain('--response-kind');
+    expect(prompt).toContain('td collab reply message-1');
+    expect(prompt.length).toBeLessThan(170);
+  });
+
+  it('keeps structured task evidence', () => {
+    const task = { task_id: 'check', status: 'blocked' as const, blocker: '缺少环境' };
+    expect(render([message({ task })])).toContain(JSON.stringify(task));
+  });
+
+  it('keeps offline delivery and relay requirements explicit', () => {
+    const prompt = render([], {
+      targetSessionId: 'local',
+      groups: [{ ...group, sessionIds: ['local', 'remote:peer'] }],
+      sessions: [{ sessionId: 'remote:peer', name: 'Reviewer · Mac', status: 'service-unreachable' }],
+    });
+    expect(prompt).toContain('服务不可达，消息无法送达');
+    expect(prompt).toContain('仅可排队等待重连');
+    expect(prompt).toContain('转发客户端须保持运行');
+  });
 });

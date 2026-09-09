@@ -27,72 +27,44 @@ export function formatCollaborationDelivery(input: {
   const messageBlocks = input.messages.map((message) => {
     const sourceSession = message.fromSessionId ? sessionsById.get(message.fromSessionId) : null;
     const source = message.fromSessionId
-      ? [
-        sourceSession?.name ?? message.fromSessionId,
-        sourceSession?.agentNativeSessionId ? `Agent 原生 Session ID：${sourceSession.agentNativeSessionId}` : null,
-        `Termdock 会话 ID：${message.fromSessionId}`,
-      ].filter(Boolean).join('\n')
+      ? sourceSession?.name ?? message.fromSessionId
       : '用户';
     const group = groupsById.get(message.groupId)?.name ?? '协作组';
+    const body = Buffer.byteLength(message.content) > 8_192
+      ? `大消息已完整保存（${Buffer.byteLength(message.content)} 字节）。使用 td collab message get ${message.id} --json 获取正文；不要把这条提示当作任务正文。`
+      : message.content;
+    const fence = '`'.repeat(Math.max(3, ...Array.from(body.matchAll(/`+/g), (match) => match[0].length + 1)));
+    const plainBody = input.messages.length === 1 && !/[\r\n`]/.test(body) && body.length <= 240;
     return [
-      `[${MESSAGE_LABELS[message.kind]} #${message.id}]`,
-      `来自：${source}`,
-      `协作组：${group}`,
-      '--- 消息内容 ---',
-      Buffer.byteLength(message.content) > 8_192
-        ? `大消息已完整保存（${Buffer.byteLength(message.content)} 字节）。使用 td collab message get ${message.id} --json 获取正文；不要把这条提示当作任务正文。`
-        : message.content,
-      '--- 消息结束 ---',
-      ...(message.responseKind ? [`回复类型：${message.responseKind}（ack=收到，progress=进展，result=结果；结果不保证成功）`] : []),
+      `【${group} · ${source}${['task', 'handoff', 'done'].includes(message.kind) ? ` · ${MESSAGE_LABELS[message.kind]}` : ''}】`,
+      ...(plainBody ? [body] : [fence, body, fence]),
       ...(message.task ? [`任务上报：${JSON.stringify(message.task)}`] : []),
+      message.fromSessionId
+        ? `回复：\`td collab reply ${message.id} "回复内容" --text\``
+        : '用户消息：直接在当前会话处理，无需回复收件箱。',
     ].join('\n');
   });
   const peerIds = Array.from(new Set(input.groups.flatMap((group) => group.sessionIds)))
     .filter((sessionId) => sessionId !== input.targetSessionId);
-  const peers = peerIds.map((sessionId) => {
+  // Keep routing IDs once, only for peers who are not already directly replyable.
+  const sourceIds = new Set(input.messages.map((message) => message.fromSessionId));
+  const peers = peerIds.filter((id) => !sourceIds.has(id)).map((sessionId) => {
     const session = sessionsById.get(sessionId);
-    return [
-      `- ${session?.name ?? '离线会话'} · ${session?.status === 'service-unreachable' ? '服务不可达，消息无法送达；仅可排队等待服务重连' : session?.status ?? 'offline'}`,
-      ...(session?.agentNativeSessionId ? [`  Agent 原生 Session ID：${session.agentNativeSessionId}`] : []),
-      `  Termdock 会话 ID：${sessionId}`,
-    ].join('\n');
+    return `- ${session?.name ?? '离线会话'}：\`td collab send ${sessionId} "消息内容" --text\``;
   });
-  const hasUserMessage = input.messages.some((message) => message.fromSessionId === null);
-  const hasAgentMessage = input.messages.some((message) => message.fromSessionId !== null);
-  const hasNativePeer = peerIds.some((sessionId) => Boolean(sessionsById.get(sessionId)?.agentNativeSessionId));
-  const groupLines = input.groups.map((group) => `- ${group.name} [${group.id}] · ${group.sessionIds.length} 个成员`);
+  const unreachable = peerIds.filter((id) => sessionsById.get(id)?.status === 'service-unreachable');
   const instructions = [
-    ...(hasNativePeer
-      ? ['- 如果你自身具备按 Agent 原生 Session ID 与其他 Session 通信的内建能力，优先使用该能力和上方的原生 ID。']
-      : []),
-    '- 如果没有这种内建能力，则使用下方 Termdock 收件箱命令；命令中的 <会话ID> 指 Termdock 会话 ID。',
-    ...(hasUserMessage ? ['- 用户消息：直接在当前会话回答或执行（无来源 Agent，不能运行 `td collab reply`）。'] : []),
-    ...(hasAgentMessage ? ['- 回复：`td collab reply <消息ID> "回复内容"`'] : []),
-    ...(peerIds.some((id) => id.startsWith('remote:')) ? ['- 跨服务成员必须使用 td collab 通信；服务不可达时消息尚未送达，不要把 pending 当作成功，也不要假定对方已收到任务。转发客户端须保持运行；网页或 PWA 暂停后，返回前台继续转发。'] : []),
-    '- 发消息：`td collab send <会话ID> "消息内容"`',
-    '- 交接：`td collab handoff <会话ID> "交接摘要"`',
-    '- 加成员：`td collab add <协作组ID> <会话ID>`',
-    '- 移成员：`td collab remove <协作组ID> <会话ID>`',
-    '- 新建 Agent：`td collab spawn <协作组ID> <agent-slug> --name "名称" --task "初始任务"`',
-    '- 查看：`td collab status` / `td collab inbox`；完整选项：`td collab --help`。默认 JSON，pending 只表示已入队。',
-    '- 确认投递：`td collab message get <消息ID> --receipt-only`；send/reply 可加 `--wait-until delivered --timeout 30s`。超时不会取消消息，重试使用同一 `--idempotency-key`。',
-    '- 只取新回复：`td collab inbox --consumer <名称> --limit 20`；处理完成后用返回的 next_cursor 执行 `td collab cursor commit <游标> --consumer <名称>`。需要明确标记读取时用 `td collab message read <消息ID>`。',
-    '- 回复应明确类型：reply 加 `--response-kind ack|progress|result`；可附 `--task-envelope` JSON（task_id、status、progress、evidence、blocker）。不要把 ACK 或 turn done 汇报为任务完成。',
-    '- Agent 状态与工具活动只作可选提示；任意接入方都可通过收件箱主动读取、确认和回复，无需专用 hooks。',
+    ...(peers.length ? ['联系其他成员：', ...peers] : []),
+    '更多操作：`td collab --help`。',
+    ...(peerIds.some((id) => id.startsWith('remote:'))
+      ? ['跨服务通信使用 td collab；转发客户端须保持运行，网页或 PWA 暂停后需返回前台继续转发。'] : []),
+    ...unreachable.map((id) => `注意：${sessionsById.get(id)?.name ?? id} 服务不可达，消息无法送达；仅可排队等待重连。`),
   ];
 
   return [
-    `[Termdock 协作收件箱 · ${input.messages.length} 条]`,
-    '',
+    ...(input.messages.length > 1 ? [`[Termdock 协作 · ${input.messages.length} 条]`, ''] : []),
     messageBlocks.join('\n\n'),
     '',
-    '协作组：',
-    ...groupLines,
-    '',
-    '同组成员：',
-    ...(peers.length > 0 ? peers : ['- 暂无其他成员']),
-    '',
-    '可用操作：',
     ...instructions,
   ].join('\n');
 }
