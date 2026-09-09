@@ -9,14 +9,19 @@ import { collaborationRoutes } from './collaborationRoutes.js';
 
 describe('collaboration API with arbitrary pull consumers', () => {
   let directory: string; let store: CollaborationStore; let server: Server; let url: string;
+  let renamed: Array<[string, string]>;
   beforeEach(async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'td-collab-http-'));
     store = new CollaborationStore(path.join(directory, 'messages.json'));
     store.save({ name: 'Generic clients', sessionIds: ['a', 'b'] });
+    renamed = [];
     const app = express(); app.use(express.json({ limit: '5mb' }));
     app.use(collaborationRoutes({ store, resolveSession: (body) => ['a', 'b', 'outsider'].includes(String(body.session)) ? String(body.session) : null,
       deliver: () => ({ delivered: [] }),
-      rebind: async (sessionId, pane) => ({ sessionId, pane, state: 'recovering' }) }));
+      rebind: async (sessionId, pane) => ({ sessionId, pane, state: 'recovering' }),
+      resolveNames: (ids) => Object.fromEntries(ids.map((id) => [id, id === 'a' ? '一号 Agent' : id === 'b' ? '二号 Agent' : null])),
+      renameSession: async (sessionId, name) => { renamed.push([sessionId, name]);
+        return renamed.length > 1 ? { ok: false, code: 'SESSION_NOT_FOUND', error: 'gone' } : { ok: true }; } }));
     server = await new Promise<Server>((resolve) => { const running = app.listen(0, '127.0.0.1', () => resolve(running)); });
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   });
@@ -71,7 +76,52 @@ describe('collaboration API with arbitrary pull consumers', () => {
     expect(cleared.body.group.roles).toEqual({});
     const listed = await (await fetch(`${url}/role?session=a&group=${group.id}`)).json();
     expect(listed.group).toMatchObject({ id: group.id, sessionIds: ['a', 'b'], roles: {} });
+    // Member names ride the group view so role lists read as people.
+    expect(listed.group.members).toEqual([
+      { sessionId: 'a', name: '一号 Agent' }, { sessionId: 'b', name: '二号 Agent' },
+    ]);
     expect((await fetch(`${url}/role?session=a&group=missing`)).status).toBe(404);
     expect((await fetch(`${url}/role?session=outsider&group=${group.id}`)).status).toBe(403);
+  });
+
+  it('lists the caller own groups with role snapshots when no group id is given', async () => {
+    const group = store.list()[0]!;
+    await post('/role', { session: 'a', group_id: group.id, session_id: 'b', role: '评审' });
+    const own = store.save({ name: 'A 专属组', sessionIds: ['a', 'c'] });
+    const listed = await (await fetch(`${url}/role?session=a`)).json();
+    expect(listed.groups).toHaveLength(2);
+    expect(listed.groups.find((g: { id: string }) => g.id === own.id)).toMatchObject({
+      name: 'A 专属组', sessionIds: ['a', 'c'], roles: {},
+      members: [{ sessionId: 'a', name: '一号 Agent' }, { sessionId: 'c', name: null }],
+    });
+    expect(listed.groups.find((g: { id: string }) => g.id === group.id)?.roles).toEqual({ b: '评审' });
+    expect((await (await fetch(`${url}/role?session=outsider`)).json()).groups).toEqual([]);
+  });
+
+  it('renames a member of a shared group, cleaning control characters from the name', async () => {
+    const ok = await post('/name', { session: 'a', session_id: 'b', name: '  二号 \nAgent  ' });
+    expect(ok).toMatchObject({ status: 200, body: { ok: true, sessionId: 'b', name: '二号 Agent' } });
+    expect(renamed).toEqual([['b', '二号 Agent']]);
+    expect(await post('/name', { session: 'outsider', session_id: 'b', name: 'x' })).toMatchObject({ status: 403, body: { code: 'NOT_A_MEMBER' } });
+    expect(await post('/name', { session: 'a', session_id: 'absent', name: 'x' })).toMatchObject({ status: 403, body: { code: 'NOT_A_MEMBER' } });
+    expect(await post('/name', { session: 'a', session_id: 'b', name: '' })).toMatchObject({ status: 400, body: { code: 'INVALID_NAME' } });
+    expect(await post('/name', { session: 'a', session_id: 'b', name: '' })).toMatchObject({ status: 400, body: { code: 'INVALID_NAME' } });
+    expect(await post('/name', { session: 'a', session_id: 'b', name: '其他' })).toMatchObject({ status: 404, body: { code: 'SESSION_NOT_FOUND' } });
+    expect(renamed).toHaveLength(2);
+  });
+
+  it('declares renaming unavailable when no renameSession is wired', async () => {
+    const store = new CollaborationStore(path.join(directory, 'unwired.json'));
+    store.save({ name: 'Generic clients', sessionIds: ['a', 'b'] });
+    const app = express(); app.use(express.json());
+    app.use(collaborationRoutes({ store, resolveSession: (body) => String(body.session) === 'a' ? 'a' : null, deliver: () => ({}) }));
+    const orphan = await new Promise<Server>((resolve) => { const running = app.listen(0, '127.0.0.1', () => resolve(running)); });
+    try {
+      const response = await fetch(`http://127.0.0.1:${(orphan.address() as { port: number }).port}/name`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session: 'a', session_id: 'b', name: 'x' }) });
+      expect(await response.json()).toMatchObject({ ok: false, code: 'RENAME_UNAVAILABLE' });
+    } finally {
+      await new Promise<void>((resolve, reject) => orphan.close((error) => error ? reject(error) : resolve()));
+    }
   });
 });

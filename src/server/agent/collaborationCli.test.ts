@@ -102,6 +102,48 @@ describe('collaboration CLI contract', () => {
     expect(await executeCollaborationCommand(parseCollaborationCommand(['role', 'list', 'g1', '--text']), {}, lister.io)).toBe(0);
     expect(lister.calls[0][0]).toBe('GET');
     expect(lister.calls[0][1]).toContain('/role?group=g1');
-    expect(lister.output).toEqual(['定位表（组内成员 2）：', '- p1（未设置）', '- p2：排版']);
+    expect(lister.output).toEqual(['定位表（2 个成员）：', '- p1（未设置）', '- p2：排版']);
+  });
+
+  it('prefers member names over bare ids when the group view carries them', async () => {
+    const lister = fixture([{ ok: true, group: { id: 'g1', name: '发布组', sessionIds: ['p1', 'p2'], roles: { p2: '排版' },
+      members: [{ sessionId: 'p1', name: '开发' }, { sessionId: 'p2', name: null }] } }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['role', 'list', 'g1', '--text']), {}, lister.io)).toBe(0);
+    expect(lister.output).toEqual(['定位表（组「发布组」· 2 个成员）：', '- 开发 (p1)（未设置）', '- p2：排版']);
+  });
+
+  it('appends the caller group roster with member roles to help when a snapshot is available', async () => {
+    const helper = fixture([{ ok: true, groups: [{ id: 'g1', name: '发布组', sessionIds: ['p1', 'p2'], roles: { p1: '组长', p2: '排版' },
+      members: [{ sessionId: 'p1', name: '开发' }, { sessionId: 'p2', name: null }] }] }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['--help']), { backendSessionId: 'p1' }, helper.io)).toBe(0);
+    expect(helper.calls[0][0]).toBe('GET');
+    expect(helper.calls[0][1]).toContain('/role');
+    expect(helper.output.at(-4)).toBe('\n本会话所在协作组的成员定位：');
+    expect(helper.output.at(-3)).toBe('组「发布组」(2 个成员)');
+    expect(helper.output.at(-2)).toBe('- 开发 (p1)：组长');
+    expect(helper.output.at(-1)).toBe('- p2：排版');
+  });
+
+  it('parses rename with trailing words joining as the new name and rejects empties', () => {
+    expect(parseCollaborationCommand(['rename', 'p1', '发布', '组', '管家']))
+      .toMatchObject({ action: 'rename', sessionId: 'p1', name: '发布 组 管家' });
+    for (const argv of [['rename'], ['rename', 'p1'], ['rename', 'p1', '  '], ['rename', 'p1', 'x', '--group', 'g1']]) {
+      expect(() => parseCollaborationCommand(argv)).toThrow();
+    }
+  });
+  it('renames a member through the orchestration route and echoes the cleaned name', async () => {
+    const renaming = fixture([{ ok: true, sessionId: 'p1', name: '发布组' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['rename', 'p1', '发布组', '--text']), { backendSessionId: 'b' }, renaming.io)).toBe(0);
+    expect(renaming.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/name'), expect.objectContaining({ session_id: 'p1', name: '发布组', backendSessionId: 'b' })]));
+    expect(renaming.output).toEqual(['已改名：p1 = 发布组']);
+  });
+
+  it('keeps bare help available when the snapshot request fails', async () => {
+    const standalone = fixture([]);
+    standalone.io.request = async () => { throw new Error('no server'); };
+    const lines: string[] = []; const io: CollaborationCliIO = { ...standalone.io, write: (line) => lines.push(line) };
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['--help']), {}, io)).toBe(0);
+    expect(lines[0]).toContain('td collab — durable messages');
+    expect(lines.some((line) => line.includes('成员定位'))).toBe(false);
   });
 });

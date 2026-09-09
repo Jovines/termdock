@@ -1347,9 +1347,10 @@ async function getLocalJson(baseUrl: string, token: string, endpoint: string, ti
 }
 
 async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<void> {
-  if (command.action === 'help') { console.log(COLLAB_HELP); return; }
   const runningState = getRunningState();
   if (!runningState?.localApiToken) {
+    // Help is a plain read: it must stay available without a running server.
+    if (command.action === 'help') { console.log(COLLAB_HELP); return; }
     console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running or its local API token is unavailable.' }));
     process.exit(1);
   }
@@ -1373,6 +1374,9 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
     }
   }
   if (!backendSessionId && !tmuxSessionName) {
+    // Bare help stays reachable from a plain shell; the roster snapshot in
+    // help needs a session identity and only appears when one is available.
+    if (command.action === 'help') { console.log(COLLAB_HELP); return; }
     console.error(JSON.stringify({ ok: false, code: 'SESSION_NOT_FOUND', error: 'td collab must run inside a Termdock-managed Session.' }));
     process.exit(1);
   }

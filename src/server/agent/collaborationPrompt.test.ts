@@ -68,7 +68,7 @@ describe('COLLAB_NAME_FORBIDDEN / sanitizeCollaborationName', () => {
     });
     const lines = evil.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('协作消息 · 组「协作 v2 组 改行」');
+    expect(lines[1]).toBe('协作消息 · 组「协作 v2 组 改行」(2 个成员)');
     const source = lines.find((line) => line.startsWith('来自:'));
     expect(source).toBe('来自:名字 带 引号 换行 · task');
     // The shell's own 「」 and · are structural, so only the sanitized name
@@ -84,7 +84,7 @@ describe('formatCollaborationDelivery', () => {
     const prompt = render([message({})]);
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('协作消息 · 组「发布组」');
+    expect(lines[1]).toBe('协作消息 · 组「发布组」(2 个成员)');
     expect(prompt).toContain('来自:用户 · task');
     expect(prompt).toContain('```\n检查构建\n```');
     expect(prompt).not.toContain('td collab reply');
@@ -165,7 +165,7 @@ describe('formatCollaborationDelivery', () => {
     });
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('协作消息 · 组「发布组」');
+    expect(lines[1]).toBe('协作消息 · 组「发布组」(2 个成员)');
     expect(lines[2]).toBe('你的定位:最终验收');
     expect(prompt).not.toContain('开发与自测');
     expect(prompt).not.toContain('coder-id:');
@@ -200,15 +200,16 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('转发客户端须保持运行');
   });
 
-  it('omits static routing help once the session is educated', () => {
+  it('decays roster education once the session is educated but keeps the --help pointer', () => {
     const prompt = render([message({})], { showRoutingHelp: false });
     expect(prompt).toContain('协作消息 · 组「发布组」');
     expect(prompt).toContain('来自:用户 · task');
     expect(prompt).toContain('```\n检查构建\n```');
     expect(prompt).not.toContain('td collab send');
-    expect(prompt).not.toContain('td collab --help');
     expect(prompt).not.toContain('联系其他成员');
-    expect(prompt.length).toBeLessThan(350);
+    // The one-line entrance to the full command surface rides every shell.
+    expect(prompt).toContain('td collab --help');
+    expect(prompt.length).toBeLessThan(400);
   });
 
   it('still surfaces dynamic notices while routing help is suppressed', () => {
@@ -217,8 +218,8 @@ describe('formatCollaborationDelivery', () => {
       groups: [{ ...group, sessionIds: ['local', 'remote:peer'] }],
       sessions: [{ sessionId: 'remote:peer', name: 'Reviewer · Mac', status: 'service-unreachable' }],
     });
-    expect(prompt).not.toContain('td collab --help');
     expect(prompt).not.toContain('td collab send');
+    expect(prompt).toContain('td collab --help');
     expect(prompt).toContain('服务不可达，消息无法送达');
     expect(prompt).toContain('转发客户端须保持运行');
   });

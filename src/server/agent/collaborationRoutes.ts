@@ -1,14 +1,28 @@
 import { Router, type Request, type Response } from 'express';
-import { CollaborationStore, type CollaborationMessageKind } from './collaborationStore.js';
+import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from './collaborationStore.js';
 import { COLLAB_LIMITS, CollaborationError, extrasFromBody } from './collaborationProtocol.js';
+
+/** Member names arrive agent-authored over a CLI; control characters would
+ * corrupt terminal shells, tmux options and persisted records. Fold them to
+ * spaces, collapse runs, and cap the length (display sanitization for the
+ * delivery shell stays in the presentation layer). */
+export function cleanMemberName(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
 
 type Dependencies = {
   store: CollaborationStore;
   resolveSession: (input: Record<string, unknown>) => string | null;
   deliver: (id: string) => unknown;
   rebind?: (id: string, pane: string | null) => Promise<unknown>;
+  /** Human-readable names for member sessions; absent ids become null so
+   * consumers can fall back to the raw session id. */
+  resolveNames?: (sessionIds: string[]) => Record<string, string | null>;
+  /** Persist a new display name for a member session (global rename, not
+   * group-scoped). Callers must already share a group with the target. */
+  renameSession?: (sessionId: string, name: string) => Promise<{ ok: boolean; code?: string; error?: string }>;
 };
-export function collaborationRoutes({ store, resolveSession, deliver, rebind }: Dependencies): Router {
+export function collaborationRoutes({ store, resolveSession, deliver, rebind, resolveNames, renameSession }: Dependencies): Router {
   const router = Router();
   const run = (handler: (req: Request, res: Response, sessionId: string) => void | Promise<void>) => async (req: Request, res: Response) => {
     try {
@@ -98,9 +112,29 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind }: 
     if (!group.sessionIds.includes(sessionId)) throw new CollaborationError('NOT_A_MEMBER', 'Session is not a member of this group', 403);
     return group;
   };
+  // Member names ride along so role lists read as people, not bare ids; the
+  // caller falls back to the session id when a name is unknown (federated or
+  // offline members have no local record).
+  const groupView = (group: CollaborationGroup) => {
+    const names = resolveNames?.(group.sessionIds) ?? {};
+    return {
+      id: group.id, name: group.name, sessionIds: group.sessionIds,
+      members: group.sessionIds.map((sessionId) => ({ sessionId, name: names[sessionId] ?? null })),
+      roles: group.roles ?? {},
+    };
+  };
   router.get('/role', run((req, res, sessionId) => {
-    const group = groupOf(String(req.query.group ?? ''), sessionId);
-    res.json({ ok: true, group: { id: group.id, name: group.name, sessionIds: group.sessionIds, roles: group.roles ?? {} } });
+    const groupId = String(req.query.group ?? '');
+    if (groupId) {
+      res.json({ ok: true, group: groupView(groupOf(groupId, sessionId)) });
+      return;
+    }
+    // Without a group this lists the caller's own groups with full role
+    // snapshots — what `td collab --help` renders so a newcomer sees every
+    // member's role in one step instead of hunting the group id first.
+    res.json({ ok: true, groups: store.groupsForSession(sessionId)
+      .filter((group) => !group.deleted)
+      .map(groupView) });
   }));
   router.post('/role', run((req, res, sessionId) => {
     const group = groupOf(String(req.body.group_id ?? ''), sessionId);
@@ -113,6 +147,21 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind }: 
     }
     const updated = store.setRole({ groupId: group.id, sessionId: req.body.session_id, role: role as string | null });
     res.json({ ok: true, group: { ...updated, roles: updated.roles ?? {} } });
+  }));
+  router.post('/name', run(async (req, res, sessionId) => {
+    if (!renameSession) throw new CollaborationError('RENAME_UNAVAILABLE', 'Member renaming is not available', 503);
+    const target = typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+    if (!store.groupsForSession(sessionId).some((group) => !group.deleted && group.sessionIds.includes(target))) {
+      throw new CollaborationError('NOT_A_MEMBER', 'Rename target must share a collaboration group with the caller', 403);
+    }
+    const name = typeof req.body.name === 'string' ? cleanMemberName(req.body.name) : '';
+    if (!name) throw new CollaborationError('INVALID_NAME', 'name must be non-empty text up to 80 characters', 400);
+    const result = await renameSession(target, name);
+    if (!result.ok) {
+      const missing = result.code === 'SESSION_NOT_FOUND';
+      throw new CollaborationError(missing ? 'SESSION_NOT_FOUND' : 'RENAME_FAILED', result.error ?? 'Unable to rename the member', missing ? 404 : 400);
+    }
+    res.json({ ok: true, sessionId: target, name });
   }));
   return router;
 }

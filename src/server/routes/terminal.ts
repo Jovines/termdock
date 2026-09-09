@@ -6459,7 +6459,33 @@ router.post('/operations/orchestration/spawn', async (req, res) => {
 });
 
 router.use('/operations/orchestration', collaborationRoutes({ store: collaborationStore, resolveSession: resolveFrontendSessionId,
-  deliver: tryDeliverCollaborationInbox, rebind: rebindCollaborationRoute }));
+  deliver: tryDeliverCollaborationInbox, rebind: rebindCollaborationRoute,
+  resolveNames: (ids) => {
+    const names = new Map([...collaborationRemoteSessions(),
+      ...globalSessionState.sessions.map(orchestrationSessionSnapshot)].map((session) => [session.sessionId, session.name]));
+    return Object.fromEntries(ids.map((id) => [id, names.get(id) ?? null]));
+  },
+  // Same semantics as the inventory PATCH rename: a display name that wins
+  // over auto-titles (customName=true clears autoTitle) and is pushed into
+  // the tmux @termdock-friendly-name option. Names arrive pre-cleaned from
+  // the collaboration route.
+  renameSession: async (frontendSessionId, name) => {
+    const index = globalSessionState.sessions.findIndex((session) => session.sessionId === frontendSessionId);
+    if (index < 0) return { ok: false, code: 'SESSION_NOT_FOUND', error: 'session not found' };
+    const next: PersistedClientSession = { ...globalSessionState.sessions[index]!, lastActivity: Date.now(),
+      name, customName: true, autoTitle: null };
+    if (next.mode === 'tmux' && next.tmuxSessionName) {
+      try {
+        await setTmuxOption(next.tmuxSessionName, '@termdock-friendly-name', name);
+      } catch (error) {
+        console.warn(`[collab] failed to set friendly name on ${next.tmuxSessionName}: ${getErrorMessage(error)}`);
+      }
+    }
+    upsertGlobalSessionRecord(next);
+    await persistGlobalStateNow();
+    broadcastClientState();
+    return { ok: true };
+  } }));
 
 router.get('/operations/session-search', (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q : '';

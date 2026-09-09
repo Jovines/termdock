@@ -77,10 +77,12 @@ export function formatCollaborationDelivery(input: {
   }
 
   // The shell header names the group only when every block belongs to one;
-  // a mixed batch keeps the structure but drops the single-group claim.
+  // a mixed batch keeps the structure but drops the single-group claim. The
+  // member count rides along as the at-a-glance size of that group.
   const groupIds = [...new Set(input.messages.map((message) => message.groupId))];
-  const shellHeader = groupIds.length === 1
-    ? `协作消息 · 组「${sanitizeCollaborationName(groupsById.get(groupIds[0]!)?.name ?? '协作组')}」`
+  const singleGroup = groupIds.length === 1 ? groupsById.get(groupIds[0]!) : null;
+  const shellHeader = singleGroup
+    ? `协作消息 · 组「${sanitizeCollaborationName(singleGroup.name ?? '协作组')}」(${singleGroup.sessionIds.length} 个成员)`
     : '协作消息';
 
   const peerIds = Array.from(new Set(input.groups.flatMap((group) => group.sessionIds)))
@@ -92,10 +94,10 @@ export function formatCollaborationDelivery(input: {
     return `- ${session ? sanitizeCollaborationName(session.name) : '离线会话'}：\`td collab send ${sessionId} "消息内容" --text\``;
   });
   const unreachable = peerIds.filter((id) => sessionsById.get(id)?.status === 'service-unreachable');
-  const routingHelp = input.showRoutingHelp === false ? [] : [
-    ...(peers.length ? ['联系其他成员：', ...peers] : []),
-    '更多操作：`td collab --help`。',
-  ];
+  // Education (peer roster examples) decays once the session knows the group;
+  // the `--help` pointer stays permanently as the one-line entrance to the
+  // full command surface — everything else can be looked up from there.
+  const routingHelp = input.showRoutingHelp === false ? [] : (peers.length ? ['联系其他成员：', ...peers] : []);
   const dynamicNotices = [
     ...(peerIds.some((id) => id.startsWith('remote:'))
       ? ['跨服务通信使用 td collab；转发客户端须保持运行，网页或 PWA 暂停后需返回前台继续转发。'] : []),
@@ -105,14 +107,14 @@ export function formatCollaborationDelivery(input: {
     }),
   ];
 
-  const notes = [...routingHelp, ...dynamicNotices];
+  const notes = [...routingHelp, ...dynamicNotices, '更多操作：`td collab --help`。'];
   // Notes (education + dynamic notices) live inside the shell, after the last
   // message, so the closing rule still marks the end of the delivered block.
   if (!blocks.length) return notes.join('\n');
   // The recipient's own role (定位) rides the shell right under the header,
   // but only for a single-group delivery — a mixed batch claims no group.
-  const ownRole = groupIds.length === 1
-    ? sanitizeCollaborationRole(groupsById.get(groupIds[0]!)?.roles?.[input.targetSessionId] ?? '')
+  const ownRole = singleGroup
+    ? sanitizeCollaborationRole(singleGroup.roles?.[input.targetSessionId] ?? '')
     : '';
   const lines = [SHELL_RULE, shellHeader];
   if (ownRole) lines.push(`你的定位:${ownRole}`);
