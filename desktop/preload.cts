@@ -43,6 +43,7 @@ function clearNativeDropState(target: HTMLElement): void {
 
 contextBridge.exposeInMainWorld('termdockDesktop', {
   platform: process.platform,
+  deviceInfo: (): Promise<Record<string, string>> => ipcRenderer.invoke('desktop:device-info'),
   collaboration: { protocolVersion: 2, peers: true, save: true },
   collaborationPeers: () => ipcRenderer.invoke('desktop:collaboration-peers'),
   collaborationList: () => ipcRenderer.invoke('desktop:collaboration-list'),

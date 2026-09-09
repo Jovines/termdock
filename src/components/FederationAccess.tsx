@@ -1,3 +1,4 @@
+import type { DeviceProfile } from '../server/federation/deviceProfile';
 import { RelayServices } from './services/RelayServices';
 import { DeviceAuthorizationRequired } from '../lib/federation/deviceAuthorization';
 import { ServiceRoutes } from './services/ServiceRoutes';
@@ -16,7 +17,7 @@ export interface FederationGrantInput {
   actions: string[];
   expiresAt?: number;
 }
-export interface FederationGrant extends FederationGrantInput { id: string; revokedAt?: number; label?: string; routeTargetServiceId?: string; routeTargetName?: string }
+export interface FederationGrant extends FederationGrantInput { id: string; revokedAt?: number; label?: string; deviceProfile?: DeviceProfile; routeTargetServiceId?: string; routeTargetName?: string }
 export interface FederationInviteInput {
   includeBackup?: boolean;
   scope: FederationGrantInput['scope'];
@@ -53,6 +54,15 @@ const button = 'appearance-none min-h-11 rounded-lg px-3 py-2 text-sm hover:bg-h
 const primaryButton = `${button} bg-primary text-primary-foreground hover:opacity-90`;
 function connectionName(connection: FederationConnection) { return connection.serviceName || new URL(connection.url).hostname; }
 function permissionName(actions: string[]) { return actions.includes('service:*') ? '完整权限' : actions.includes('session.input') ? '可操作' : actions.includes('session.view') ? '只读' : actions.includes('route.use') ? '仅中转' : '自定义权限'; }
+function DeviceInformation({ profile, subjectId }: { profile?: DeviceProfile; subjectId: string }) {
+  return <details className="mt-2 text-xs text-muted-foreground">
+    <summary className="cursor-pointer leading-relaxed">{[profile?.model || profile?.hostname || profile?.system, profile?.route, `ID ${subjectId.slice(-8)}`].filter(Boolean).join(' · ')}</summary>
+    <dl className="mt-2 space-y-2 rounded-lg bg-surface-2 p-3">
+      {([['设备型号', profile?.model], ['主机名称', profile?.hostname], ['操作系统', profile?.system], ['客户端', profile?.client], ['打开方式', profile?.mode], ['处理器', profile?.cpu], ['架构', profile?.arch], ['最近连接路径', profile?.route], ['首次记录', profile?.firstSeenAt ? new Date(profile.firstSeenAt).toLocaleString() : undefined], ['最近连接', profile?.lastSeenAt ? new Date(profile.lastSeenAt).toLocaleString() : undefined], ['设备标识', subjectId]] as const).filter(([, value]) => value).map(([label, value]) => <div key={label}><dt>{label}</dt><dd className="mt-0.5 select-text break-all text-foreground">{value}</dd></div>)}
+      <p className="leading-relaxed">{profile ? '系统、硬件与路径由设备报告；连接时间由服务记录。' : '此设备尚未报告详情，更新客户端并重新连接后可补齐。'}</p>
+    </dl>
+  </details>;
+}
 function qrColors() {
   const style = getComputedStyle(document.documentElement);
   const background = style.getPropertyValue('--background').trim(); const foreground = style.getPropertyValue('--foreground').trim();
@@ -172,6 +182,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
           <p className="mb-2 text-xs leading-relaxed text-muted-foreground">可访问此服务的设备</p>
           {loading ? <p role="status" className="flex items-center gap-2 py-5 text-sm text-muted-foreground"><Loader2 size={16} className="animate-spin" />正在读取设备…</p> : <div className="divide-y divide-border">{devices.map(device => <div key={device.subjectId} className="py-3">
             <div className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-muted-foreground">{/iPhone|iPad|Android|手机|平板/i.test(device.grants.find(grant => grant.label)?.label || (device.subjectId === currentIdentity ? navigator.userAgent : '')) ? <Smartphone size={19} /> : <Monitor size={19} />}</span><div className="min-w-0 flex-1"><div className="flex min-w-0 items-center gap-1"><p className="truncate text-sm font-medium">{device.name}</p>{onRename && (onRevoke || device.subjectId === currentIdentity) && <button type="button" aria-label={`重命名 ${device.name}`} className="inline-flex h-9 w-9 shrink-0 appearance-none items-center justify-center rounded-lg bg-transparent text-muted-foreground hover:bg-surface-2" onClick={() => { setEditingDevice(device.subjectId); setDeviceLabel(device.grants.find(grant => grant.label)?.label || ''); }}><Pencil size={14} /></button>}</div>{device.subjectId === currentIdentity && device.grants.find(grant => grant.label)?.label && <p className="truncate text-xs text-muted-foreground">{device.grants.find(grant => grant.label)?.label}</p>}<p className="mt-0.5 text-xs text-muted-foreground">{permissionName(device.grants.flatMap(grant => grant.actions))} · {scopeName(device.grants)}</p></div>{onRevoke && device.subjectId !== currentIdentity && pendingRevoke !== device.subjectId && <button type="button" className={`${button} -mr-2 text-xs text-muted-foreground hover:text-destructive`} disabled={busy} aria-label={`撤销 ${device.name} 的访问权限`} onClick={() => setPendingRevoke(device.subjectId)}>撤销</button>}</div>
+            <DeviceInformation profile={device.grants.find(grant => grant.deviceProfile)?.deviceProfile} subjectId={device.subjectId} />
             {pendingRevoke === device.subjectId && <div className="mt-3 rounded-lg border border-border bg-background p-3"><p className="text-xs leading-relaxed">撤销后，这台设备将断开连接，需重新邀请才能访问。</p><div className="mt-2 flex justify-end gap-2"><button type="button" className={`${button} text-xs text-muted-foreground`} disabled={busy} onClick={() => setPendingRevoke(undefined)}>取消</button><button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={async () => { setBusy(true); setError(''); try { for (const grant of device.grants) await onRevoke?.(grant.id); setPendingRevoke(undefined); setNotice('设备访问权限已撤销。'); } catch { setError('暂时无法撤销，请重试。'); } finally { setBusy(false); } }}>确认撤销</button></div></div>}
           </div>)}{devices.length === 0 && !loadError && <p className="py-5 text-sm text-muted-foreground">暂无设备授权。{onCreateInvite ? '可通过邀请添加设备。' : ''}</p>}</div>}
           {onCreateInvite && <button type="button" className={`${button} mt-4 inline-flex w-full items-center justify-center gap-2 border border-border text-sm`} disabled={busy} onClick={beginInvite}><Plus size={16} />邀请设备</button>}

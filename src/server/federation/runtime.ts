@@ -1,4 +1,5 @@
 import { PasswordBootstrapServer } from './passwordBootstrap.js';
+import { DeviceProfiles } from './deviceProfiles.js';
 import { DeviceNames } from './deviceNames.js';
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual, randomUUID } from 'node:crypto';
@@ -70,6 +71,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
   let passwordComputing = 0; const passwordStarts: number[] = [];
   const passwordAttempts = new Map<string, string>();
   const store = new AuthorizationStore({ serviceId, filePath: join(directory, 'grants.json'), passwordCredential: getPasswordCredentialFingerprint });
+  const deviceProfiles = new DeviceProfiles(join(directory, 'device-profiles.json'));
   const deviceNames = new DeviceNames(join(directory, 'device-names.json'));
   const invitations = new InvitationStore({ serviceId, filePath: join(directory, 'invitations.json') });
   let pairingCode = randomBytes(32).toString('base64url');
@@ -286,11 +288,12 @@ export async function createFederationRuntime(app: express.Express, directory: s
             const target = typeof packet.subjectId === 'string' ? packet.subjectId : subjectId;
             if (target !== subjectId) check('authorization.manage');
             if (!store.listEffective({ subjectId: target, serviceId }).length && !(target === subjectId && (full(subjectId) || options.listRouteAccess?.().some(grant => grant.subjectId === subjectId && grant.active)))) throw new Error('AUTHORIZATION_DENIED');
+            if (target === subjectId && packet.profile) deviceProfiles.set(subjectId, packet.profile);
             const existing = invitations.subjectLabels()[target];
             const name = packet.onlyIfMissing === true && existing && !deviceNames.list()[target] ? existing : deviceNames.set(target, packet.name, packet.onlyIfMissing === true);
             send({ type: 'result', id: packet.id, name });
           } else if (packet.type === 'grants-list') {
-            check('authorization.manage'); send({ type: 'result', id: packet.id, grants: store.list(), subjectLabels: { ...invitations.subjectLabels(), ...deviceNames.list() } });
+            check('authorization.manage'); send({ type: 'result', id: packet.id, grants: store.list(), deviceProfiles: deviceProfiles.list(), subjectLabels: { ...invitations.subjectLabels(), ...deviceNames.list() } });
           } else if (packet.type === 'grant') {
             check('authorization.manage'); send({ type: 'result', id: packet.id, grant: store.grant(packet.grant as GrantInput) });
           } else if (packet.type === 'revoke') {

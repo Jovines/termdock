@@ -1,5 +1,8 @@
 import { LoaderCircle, Terminal } from 'lucide-react';
 import { listServiceConnections, saveServiceConnection, normalizeServiceAddress, type ServiceConnection } from '../services/serviceDirectory';
+import { readDeviceProfile } from './readDeviceProfile';
+import { currentConnectionPath, currentEntryClient } from './browserIntegration';
+import type { DeviceProfile } from '../../server/federation/deviceProfile';
 import { defaultDeviceName } from './deviceName';
 import { useEffect, useState, type ReactNode } from 'react';
 import FederationAccess, { type FederationGrant, type FederationInviteInput } from '../../components/FederationAccess';
@@ -64,7 +67,13 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const readPermissions = async (timeoutMs = 5000) => {
     const client = await getActiveClient();
     const permissions = await readDeviceAuthorization(client, { timeoutMs });
-    void client.request({ type: 'device-name', name: defaultDeviceName(), onlyIfMissing: true }).catch(() => {});
+    const path = currentConnectionPath();
+    const entryId = currentEntryClient()?.targetPeerId;
+    void Promise.all([readDeviceProfile(), listServiceConnections()]).then(([profile, directory]) => {
+      const entry = directory.find(service => service.targetPeerId === entryId);
+      const route = path === 'relay' ? `经 ${entry?.label || entryId?.slice(-12) || '入口服务'} 中转` : '直连';
+      return client.request({ type: 'device-name', name: defaultDeviceName(), onlyIfMissing: true, profile: { ...profile, route } });
+    }).catch(() => {});
     setFullService(permissions.fullService);
     setCanManage(permissions.canManage);
     setReady(true); setChecking(false); setError(false);
@@ -166,7 +175,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
         const access = await client.request({ type: 'route-access' });
         const directory = await listServiceConnections();
         const routeGrants: FederationGrant[] = (Array.isArray(access.grants) ? access.grants as import('./browserIntegration').EntryRouteGrant[] : []).map(grant => ({ id: `route:${grant.id}`, subjectId: grant.subjectId, scope: { kind: 'service' }, actions: ['route.use'], routeTargetServiceId: grant.targetServiceId, routeTargetName: directory.find(service => service.targetPeerId === grant.targetServiceId)?.label || '指定服务', ...(grant.active ? {} : { revokedAt: grant.revokedAt ?? 0 }) }));
-        setGrants([...(result.grants as FederationGrant[]), ...routeGrants].map(grant => ({ ...grant, label: labels[grant.subjectId] })));
+        setGrants([...(result.grants as FederationGrant[]), ...routeGrants].map(grant => ({ ...grant, label: labels[grant.subjectId], deviceProfile: (result.deviceProfiles as Record<string, DeviceProfile> | undefined)?.[grant.subjectId] })));
       } else {
         const result = await client.request({ type: 'permissions' });
         setGrants((result.grants ?? []) as FederationGrant[]);

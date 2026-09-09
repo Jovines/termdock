@@ -59,6 +59,7 @@ export interface DesktopRuntimeUpdateState {
 
 export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   platform: string;
+  deviceInfo?(): Promise<import('../../server/federation/deviceProfile').DeviceProfile>;
   /** Available only to the managed local loopback application's top-level page. */
   getLocalInvite?(): Promise<{ url: string; targetPeerId: string; pairingCode: string; serviceName?: string } | null>;
   /** Versioned discovery/mutation contract; legacy clients omit this object. */

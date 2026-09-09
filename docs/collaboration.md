@@ -129,3 +129,9 @@ td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 回归覆盖位于 `src/lib/collaboration/directory.test.ts`、`src/lib/terminal/api.collaboration.test.ts`、`src/server/agent/collaborationGroupRoutes.test.ts`、`desktop/collaborationFederation.test.ts` 和 `src/server/agent/collaborationFederation.integration.test.ts`；加密入口同时由 `browserIntegration.routing.test.ts` 与 `transportBoundary.test.ts` 守卫。
 
 本轮兼容修复和浏览器转发按用户要求未运行自动测试。Web、服务端和桌面构建分别检查，Mac 1.4.182 与真实 iOS PWA 的连接、跨服务建组、消息送达及后台恢复仍需实机验收。
+
+### 1.4.186 设备识别信息
+
+“服务与设备 → 设备”提供可展开的信息：设备标识、系统与客户端版本、打开方式、可读取的型号/主机名称/处理器/架构，以及最近连接路径和服务记录的首次、最近连接时间。中转入口从实际选中的加密连接读取；这些信息仅供展示，不参与授权。原生桥接仅读取本机信息，由页面通过现有加密设备名称请求上报，旧服务可忽略新增字段。旧设备重新连接后补齐详情，不覆盖用户重命名。
+
+浏览器可能限制硬件型号、架构及系统版本（包括 User-Agent 简化）；缺失信息不推测。首次记录指首次上报详情，不代表首次授权。多窗口同一身份展示最近一次上报的连接路径。按用户要求未运行自动化/功能测试；已进行生产构建与桌面构建。macOS/iOS 的真实设备交互、首次加载、旧 preload、断线及仅中转场景仍待用户实机验收。

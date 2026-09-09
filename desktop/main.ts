@@ -2001,6 +2001,18 @@ function installIpcHandlers(): void {
   });
   collaborationPollTimer = setInterval(() => void collaborationFederation.refresh().catch(() => {}), 2000);
   collaborationPollTimer.unref();
+  let deviceInfo: Promise<Record<string, string>> | undefined;
+  ipcMain.handle('desktop:device-info', event => {
+    collaborationOrigin(event);
+    return deviceInfo ??= (async () => {
+      let model = '';
+      if (process.platform === 'darwin') {
+        try { model = (await execFileAsync('/usr/sbin/sysctl', ['-n', 'hw.model'], { timeout: 3000 })).stdout.trim(); } catch { /* Optional hardware information. */ }
+      }
+      return { system: process.platform === 'darwin' ? `macOS ${process.getSystemVersion()}` : `${os.type()} ${os.release()}`,
+        client: `Termdock ${app.getVersion()}`, model, arch: process.arch, cpu: os.cpus()[0]?.model || '', hostname: os.hostname(), mode: '桌面客户端' };
+    })();
+  });
   ipcMain.handle('desktop:snapshot', () => snapshot());
   const directorySender = (event: Electron.IpcMainInvokeEvent) => {
     const window = BrowserWindow.fromWebContents(event.sender);
