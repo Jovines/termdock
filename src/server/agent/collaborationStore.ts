@@ -424,10 +424,29 @@ export class CollaborationStore {
     const reports = this.document.messages.filter((message) => message.fromSessionId === sessionId);
     const tasks = new Map<string, { task_id: string; status: string; reported_at: number; message_id: string }>();
     for (const message of reports) if (message.task) tasks.set(message.task.task_id, { task_id: message.task.task_id, status: message.task.status, reported_at: message.createdAt, message_id: message.id });
+    // Aggregated from the *latest* report of each task, never inferred: an
+    // agent handed a task that has not yet replied is simply idle here —
+    // dispatch in flight is the sender-side receipt's concern (pending), not a
+    // fact about this session. blocked counts as active: the agent holds the
+    // task open. A failed terminal state only surfaces once no task is still
+    // in flight, since another in-progress task means the agent is busy.
+    const latest = [...tasks.values()];
+    const taskState: 'idle' | 'active' | 'failed' = latest.some((task) => task.status === 'ack' || task.status === 'working' || task.status === 'blocked') ? 'active'
+      : latest.some((task) => task.status === 'failed') ? 'failed'
+      : 'idle';
     return { session_state: online ? 'online' : 'offline', turn_state: turnState === 'done' ? 'ended' : turnState ?? 'unknown',
-      task_state: 'unknown', tasks: [...tasks.values()], last_heartbeat: null, last_tool_activity_at: null,
+      task_state: taskState, tasks: [...tasks.values()], last_heartbeat: null, last_tool_activity_at: null,
       last_message_at: reports.length ? Math.max(...reports.map((message) => message.createdAt)) : null,
       state_source: 'optional_adapter', task_source: 'explicit_message' };
+  }
+
+  /** Timeline of one task as reported by a session, oldest first. The lineage
+   *  starts at the recipient's first reply carrying that task_id — a bare
+   *  dispatch carries no envelope. Messages without a task simply never
+   *  match. */
+  byTask(sessionId: string, taskId: string): CollaborationMessage[] {
+    this.expire();
+    return this.document.messages.filter((message) => message.fromSessionId === sessionId && message.task?.task_id === taskId);
   }
 
   page(sessionId: string, options: { unread?: boolean; since?: number; afterId?: string; cursor?: string; consumer?: string; limit?: number; from?: string; group?: string; thread?: string; kind?: string; responseKind?: string; order?: string } = {}) {

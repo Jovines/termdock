@@ -90,7 +90,7 @@ describe('durable collaboration reliability', () => {
       task: { task_id: 'task-1', status: 'ack' } });
     expect(store.receipt(task.id).ack_at).not.toBeNull();
     expect(store.receipt(task.id).result_ids).toEqual([]);
-    expect(store.sessionFacts('b', true, 'done')).toMatchObject({ turn_state: 'ended', task_state: 'unknown', last_tool_activity_at: null });
+    expect(store.sessionFacts('b', true, 'done')).toMatchObject({ turn_state: 'ended', task_state: 'active', last_tool_activity_at: null });
     expect(store.page('a', { responseKind: 'result' }).messages).toHaveLength(0);
   });
 

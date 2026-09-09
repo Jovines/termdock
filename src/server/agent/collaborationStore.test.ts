@@ -88,6 +88,53 @@ describe('CollaborationStore', () => {
     expect(store.listMessages(trio.id)[0]?.toSessionId).toBe('c');
   });
 
+  it('aggregates task_state only from what the session reported, never from dispatch', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
+    store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'task', content: 'do it' });
+    expect(store.sessionFacts('a', true).task_state).toBe('idle');
+    expect(store.sessionFacts('b', true).task_state).toBe('idle');
+    const [dispatch] = store.inbox('b');
+    store.send({
+      groupId: group.id, fromSessionId: 'b', toSessionIds: ['a'], kind: 'reply', content: 'on it', threadId: dispatch!.threadId, replyTo: dispatch!.id,
+      task: { task_id: 't1', status: 'working' },
+    });
+    expect(store.sessionFacts('b', true).task_state).toBe('active');
+  });
+
+  it('treats a held-open blocked task as active and failed as its own state', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
+    const report = (from: string, task_id: string, status: 'working' | 'blocked' | 'failed' | 'complete') =>
+      store.send({ groupId: group.id, fromSessionId: from, toSessionIds: ['b'], kind: 'reply', content: status, task: { task_id, status } })[0];
+    report('a', 't1', 'blocked');
+    expect(store.sessionFacts('a', true).task_state).toBe('active');
+    // A failed task does not override another task still in flight.
+    report('a', 't2', 'failed');
+    expect(store.sessionFacts('a', true).task_state).toBe('active');
+    // Once nothing is in flight, the failed terminal state surfaces.
+    report('a', 't1', 'complete');
+    expect(store.sessionFacts('a', true).task_state).toBe('failed');
+    report('a', 't3', 'complete');
+    expect(store.sessionFacts('a', true).task_state).toBe('failed');
+    // A session whose every reported task completed is idle again.
+    const fresh = store.save({ name: 'Fresh', sessionIds: ['a2', 'b'] });
+    store.send({ groupId: fresh.id, fromSessionId: 'a2', toSessionIds: ['b'], kind: 'reply', content: 'done', task: { task_id: 't9', status: 'complete' } });
+    expect(store.sessionFacts('a2', true).task_state).toBe('idle');
+  });
+
+  it('lists a task timeline from the first reply carrying its id', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
+    const [dispatch] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'task', content: 'do it' });
+    expect(store.byTask('b', 't1')).toEqual([]);
+    const first = store.send({ groupId: group.id, fromSessionId: 'b', toSessionIds: ['a'], kind: 'reply', content: 'started', threadId: dispatch!.threadId, task: { task_id: 't1', status: 'working' } })[0];
+    const second = store.send({ groupId: group.id, fromSessionId: 'b', toSessionIds: ['a'], kind: 'reply', content: 'done', threadId: dispatch!.threadId, task: { task_id: 't1', status: 'complete', progress: 100 } })[0];
+    store.send({ groupId: group.id, fromSessionId: 'b', toSessionIds: ['a'], kind: 'reply', content: 'other', threadId: dispatch!.threadId, task: { task_id: 't9', status: 'working' } });
+    expect(store.byTask('b', 't1').map((message) => message.id)).toEqual([first!.id, second!.id]);
+    expect(store.sessionFacts('b', true).tasks).toHaveLength(2);
+  });
+
   it('deleting a collaboration group also deletes its message history', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
