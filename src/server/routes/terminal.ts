@@ -13,7 +13,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 import { execFile, spawn, type ChildProcess } from 'child_process';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
@@ -104,12 +104,13 @@ import { collaborationRoutes } from '../agent/collaborationRoutes.js';
 import { COLLAB_LIMITS, extrasFromBody, type MessageFragment, type TransportDiagnostic } from '../agent/collaborationProtocol.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind, type CollaborationMessage } from '../agent/collaborationStore.js';
 import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
-import { resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
+import { buildCollaborationSpawnCommand, resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, type CollaborationBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
-import { writeCollaborationTmuxPane } from '../agent/collaborationTmuxDelivery.js';
+import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane,
+  type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
 import {
   listAllHookAgents,
   refreshStaleHooksAtLaunch,
@@ -522,6 +523,18 @@ class HttpStatusError extends Error {
 
 const terminalSessions = new Map<string, TerminalSession>();
 let globalSessionState: GlobalSessionState = { sessions: [], updatedAt: Date.now() };
+
+/** 8-char base36 frontend session ids. Dozens of sessions live at once, so a
+ * short collision-checked id beats a 36-char UUID to type in CLI operations;
+ * the random draw is retried when it hits an existing session. Each of the 8
+ * bytes maps to one base36 character — toString(36) turns the 0-35 residue
+ * into a single 0-9a-z char, never a multi-digit number string. */
+function generateFrontendSessionId(): string {
+  for (;;) {
+    const id = [...randomBytes(8)].map((byte) => (byte % 36).toString(36)).join('');
+    if (!globalSessionState.sessions.some((session) => session.sessionId === id)) return id;
+  }
+}
 // ── 持久化 globalSessionState 到磁盘，防止服务重启后丢失 ──
 const GLOBAL_SESSION_STATE_FILE = `${TERMDOCK_DIR}/global-session-state.json`;
 const CLIENT_STATES_FILE = `${TERMDOCK_DIR}/client-states.json`; // 保留用于迁移
@@ -1767,7 +1780,7 @@ async function openInventorySession(
   }
 
   if (!record) {
-    const sessionId = preferredFrontendSessionId || randomUUID();
+    const sessionId = preferredFrontendSessionId || generateFrontendSessionId();
     const defaultName = normalizedMode === 'tmux' && normalizedTmuxName
       ? `tmux:${normalizedTmuxName}`
       : `terminal-${now.toString(36)}`;
@@ -1960,7 +1973,7 @@ function collaborationRemoteSessions() {
     .map((session) => [session.sessionId, { ...session, ...collaborationStore.sessionFacts(session.sessionId, session.serviceConnected === true && Date.now() - (session.serviceCheckedAt ?? 0) <= 15_000, session.status), status: session.serviceConnected !== true || Date.now() - (session.serviceCheckedAt ?? 0) > 15_000 ? 'service-unreachable' : session.status, name: `${session.name} · ${session.serviceLabel}` }])).values());
 }
 
-function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number; serviceUnavailable?: boolean; reason?: string } {
+function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number; serviceUnavailable?: boolean; waitable?: boolean; reason?: string } {
   const remote = collaborationRemoteSessions().find((session) => session.sessionId === frontendSessionId);
   if (remote) {
     const unavailable = remote.serviceConnected !== true || Date.now() - (remote.serviceCheckedAt ?? 0) > 15_000;
@@ -1971,7 +1984,7 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
   }
   collaborationDeliveryWorker.wake(frontendSessionId);
   const route = collaborationDeliveryWorker.state(frontendSessionId);
-  return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId),
+  return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId), waitable: true,
     reason: route.reason ?? '消息已入队，后台正在恢复路由并投递' };
 }
 
@@ -2063,25 +2076,11 @@ async function rebindCollaborationRoute(frontendSessionId: string, paneId: strin
 }
 
 /**
- * Delivery gate: a rich-hook session mid-turn (working/waiting) cannot receive
- * an injected prompt — the TUI is not reading input, keystrokes would be
- * dropped or land in the wrong buffer. The worker keeps retrying until the
- * agent stops (status leaves working/waiting). A queued message older than
- * COLLAB_BUSY_FORCE_MS forces delivery anyway, so a lost hook event (agent
- * actually idle, state stuck working) can never deadlock the queue forever.
- * Sessions without hook state (plain shells, foreign agents) are never
- * inferred busy — no signal, no guess.
+ * Delivery is deliberately un-gated: any reachable recipient receives the
+ * message immediately, whatever its agent is doing. Busy guessing (hook state,
+ * turn phase) is the sender's job — the send receipt carries a screen
+ * snapshot of the recipient after the write, and the sender judges from that.
  */
-const COLLAB_BUSY_FORCE_MS = 20 * 60_000;
-
-function gateCollaborationDelivery(frontendSessionId: string, backend: TerminalSession): { blocked: boolean; reason?: string } {
-  const agentState = backend.agentSession;
-  if (!agentState?.rich || (agentState.status !== 'working' && agentState.status !== 'waiting')) return { blocked: false };
-  const oldest = collaborationStore.inbox(frontendSessionId, { pendingOnly: true, limit: 1 })[0];
-  if (oldest && Date.now() - oldest.createdAt >= COLLAB_BUSY_FORCE_MS) return { blocked: false };
-  return { blocked: true, reason: `AGENT_${agentState.status.toUpperCase()}` };
-}
-
 async function resolveCollaborationRoute(frontendSessionId: string): Promise<CollaborationRoute> {
   let record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
   if (!record) return { state: 'offline', reason: 'SESSION_REMOVED' };
@@ -2118,13 +2117,14 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
       backend = resolveOrchestrationBackend(record);
     }
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
-    const tmuxGate = gateCollaborationDelivery(frontendSessionId, backend);
-    if (tmuxGate.blocked) return { state: 'busy', reason: tmuxGate.reason };
     return { state: 'ready', capture: async () => (await captureTmuxPane(pinned.paneId)).content, write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
       await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages));
       backend!.lastActivity = Date.now();
-    } };
+      // First-delivery confirm: history proves the agent rendered our
+      // message (boot sequences clear only the screen, never the history a
+      // live TUI writes into). Terminal-state only — no agent hooks.
+      }, confirm: async () => captureTmuxPaneHistory(runTmux, pinned), approve: async () => approveCollaborationDialog(runTmux, pinned) };
   }
   if (!backend || !binding.backendSessionId) return { state: 'offline', reason: 'SHELL_BACKEND_NOT_RUNNING' };
   await refreshCollaborationAgentIdentity(binding.backendSessionId, backend);
@@ -2134,8 +2134,6 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     return { state: 'identity-mismatch', reason: 'AGENT_IDENTITY_CHANGED' };
   }
   const target = backend;
-  const shellGate = gateCollaborationDelivery(frontendSessionId, target);
-  if (shellGate.blocked) return { state: 'busy', reason: shellGate.reason };
   return { state: 'ready', write: async (messages) => {
     if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
     if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('SHELL_BACKEND_CHANGED');
@@ -2166,11 +2164,7 @@ async function refreshCollaborationAgentIdentity(
   syncAgentIdentity(backendSessionId, session);
 }
 
-function deliverCollaborationInboxWhenAgentReady(
-  frontendSessionId: string,
-  backendSessionId: string,
-  attempt = 0,
-): void {
+function deliverCollaborationInboxWhenAgentReady(frontendSessionId: string): void {
   collaborationDeliveryWorker.wake(frontendSessionId);
 }
 
@@ -2216,7 +2210,7 @@ async function spawnCollaborationAgentSession(
     name: group.name,
     sessionIds: [...group.sessionIds, frontendSessionId],
   });
-  writeTerminalInput(backend, `${launcher.command}\r`);
+  writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: launcher.command })}\r`);
 
   const requestedTask = typeof input.task === 'string' ? input.task.trim().slice(0, 20_000) : '';
   collaborationStore.send({
@@ -2227,7 +2221,7 @@ async function spawnCollaborationAgentSession(
     content: requestedTask || `你已创建并加入协作组“${updatedGroup.name}”。请运行 td collab status 查看成员，并准备参与协作。`,
   });
   setTimeout(() => {
-    deliverCollaborationInboxWhenAgentReady(frontendSessionId, opened.terminalSession.sessionId);
+    deliverCollaborationInboxWhenAgentReady(frontendSessionId);
   }, 300).unref?.();
   return { group: updatedGroup, session: orchestrationSessionSnapshot(globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId)!) };
 }
@@ -5769,7 +5763,7 @@ async function adoptPtyHostSessions(): Promise<void> {
     if (!existing) {
       const now = Date.now();
       upsertGlobalSessionRecord({
-        sessionId: randomUUID(),
+        sessionId: generateFrontendSessionId(),
         name: `terminal-${now.toString(36)}`,
         backendSessionId: meta.id,
         mode: 'shell',
@@ -6455,6 +6449,161 @@ router.post('/operations/orchestration/spawn', async (req, res) => {
   } catch (error) {
     if (error instanceof HttpStatusError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     res.status(400).json({ error: getErrorMessage(error) });
+  }
+});
+
+/**
+ * Session cleanup for the collaboration CLI. Two semantic guards make the
+ * destructive surface safe from inside a group:
+ *  - a target must share a collaboration group with the caller (personal
+ *    sessions stay reachable only from the web UI), and the caller can never
+ *    clean its own session;
+ *  - cleanup refuses when removing a target would dissolve a group the caller
+ *    still belongs to (groups under 2 members are dropped with their whole
+ *    message history — dissolving your own group needs a deliberate group op,
+ *    not a member cleanup).
+ * Every execution is a two-step human-granted act: without `confirmed: true`
+ * the route only reports the plan (records, groups, tmux sessions that would
+ * be destroyed) and refuses; an agent must relay that plan to the user and
+ * re-run with explicit confirmation before anything is deleted.
+ */
+router.post('/operations/orchestration/cleanup', async (req, res) => {
+  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
+  if (!sourceSessionId) return res.status(400).json({ error: '无法识别当前会话；请从 Termdock 会话内运行 td collab' });
+  const requested: string[] = Array.isArray(req.body?.sessionIds)
+    ? [...new Set((req.body.sessionIds as unknown[]).filter((id): id is string => typeof id === 'string' && id.trim().length > 0))]
+    : [];
+  if (requested.length === 0) return res.status(400).json({ error: '至少需要一个待清理的会话 id' });
+  if (requested.includes(sourceSessionId)) return res.status(400).json({ error: '不能清理当前会话自身；如需退出协作请使用组操作或网页端' });
+
+  const recordsById = new Map(globalSessionState.sessions.map((session) => [session.sessionId, session]));
+  const missing = requested.filter((id) => !recordsById.has(id));
+  if (missing.length > 0) return res.status(404).json({ error: `以下会话不存在（可能已清理或已离线）：${missing.join('、')}` });
+  const label = (sessionId: string) => recordsById.get(sessionId)?.name.trim() || sessionId;
+
+  // Targets must share a collaboration group with the caller: CLI cleanup only
+  // covers orchestration peers, never unrelated personal terminals.
+  const callerGroupIds = new Set(collaborationStore.groupsForSession(sourceSessionId).map((group) => group.id));
+  const outsiders = requested.filter((id) => !collaborationStore.groupsForSession(id).some((group) => callerGroupIds.has(group.id)));
+  if (outsiders.length > 0) {
+    return res.status(403).json({ error: `目标会话不在你的协作组中，CLI 无法清理：${outsiders.map(label).join('、')}（个人会话请在网页端删除）` });
+  }
+
+  const requestedSet = new Set(requested);
+  const groupEffects: Array<{ id: string; name: string | null; sizeBefore: number; sizeAfter: number; dissolves: boolean; includesCaller: boolean }> = [];
+  for (const id of requested) {
+    for (const group of collaborationStore.groupsForSession(id)) {
+      if (groupEffects.some((effect) => effect.id === group.id)) continue;
+      const remaining = group.sessionIds.filter((member) => !requestedSet.has(member)).length;
+      groupEffects.push({
+        id: group.id, name: group.name ?? null, sizeBefore: group.sessionIds.length,
+        sizeAfter: remaining < 2 ? 0 : remaining, dissolves: remaining < 2,
+        includesCaller: group.sessionIds.includes(sourceSessionId),
+      });
+    }
+  }
+  const dissolvingOwn = groupEffects.find((effect) => effect.dissolves && effect.includesCaller);
+  if (dissolvingOwn) {
+    return res.status(403).json({ error: `清理会使你所在的协作组「${dissolvingOwn.name ?? dissolvingOwn.id}」解散（剩余成员不足 2，组内消息会被一并清除）；如需解散协作组请在网页端操作，组保留时再清理成员会话` });
+  }
+
+  const targets = requested.map((sessionId) => {
+    const record = recordsById.get(sessionId)!;
+    return { sessionId: record.sessionId, name: record.name.trim() || null, mode: record.mode,
+      tmuxSessionName: record.mode === 'tmux' ? (record.tmuxSessionName ?? null) : null,
+      backendSessionId: record.backendSessionId ?? null };
+  });
+  const plan = { targets, groups: groupEffects };
+  if (req.body?.confirmed !== true) {
+    return res.json({ ok: false, code: 'CLEANUP_CONFIRM_REQUIRED',
+      error: '不可恢复的风险操作：执行前必须先获得用户（人类）的明确同意',
+      instruction: `将清理计划告知用户并取得明确同意后重跑：td collab cleanup ${requested.join(' ')} --confirm`,
+      plan });
+  }
+
+  const removed: Array<{ sessionId: string; name: string | null; mode?: string; tmuxSessionName?: string | null; alreadyGone?: boolean; killed?: boolean; failure?: string }> = [];
+  for (const sessionId of requested) {
+    const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === sessionId);
+    if (!record) { removed.push({ sessionId, name: null }); continue; }
+    archiveAgentResumeRecord(record, 'closed');
+    removeGlobalSessionRecord(sessionId);
+    if (record.mode === 'tmux' && record.tmuxSessionName) {
+      try {
+        const outcome = await destroyTmuxSessionSafely(record.tmuxSessionName);
+        removed.push({ sessionId, name: record.name.trim() || null, mode: record.mode, tmuxSessionName: record.tmuxSessionName, alreadyGone: outcome.alreadyGone === true });
+      } catch (error) {
+        console.error(`[cleanup] tmux teardown failed for ${record.tmuxSessionName}:`, getErrorMessage(error));
+        removed.push({ sessionId, name: record.name.trim() || null, mode: record.mode, tmuxSessionName: record.tmuxSessionName, failure: getErrorMessage(error) });
+      }
+    } else {
+      let killed = false;
+      if (record.backendSessionId && terminalSessions.has(record.backendSessionId)) {
+        try { cleanupSession(record.backendSessionId, { killProcess: true }); killed = true; }
+        catch (error) { console.error(`[cleanup] pty teardown failed for ${sessionId}:`, getErrorMessage(error)); }
+      }
+      removed.push({ sessionId, name: record.name.trim() || null, mode: record.mode, tmuxSessionName: null, killed });
+    }
+  }
+  await persistGlobalStateNow();
+  broadcastClientState();
+  res.json({ ok: true, removed, plan });
+});
+
+// Drive a collaboration member's terminal: inject one named key, or dismiss
+// an interactive approval dialog. Wrapping key injection in our own CLI keeps
+// every manipulation of another session explicit and auditable — no ad-hoc
+// tmux calls. Scope mirrors cleanup: only members sharing a group with the
+// caller, tmux-local only, and `approve` refuses unless an approval dialog is
+// actually showing (Enter on the highlighted option). The dialogs may be
+// approving any command the member agent asked for; the caller is presumed to
+// own that decision (the delivery confirm gate uses the same primitive).
+const DRIVE_KEYS = new Set<CollaborationPaneKey>(['enter', 'escape', 'space', 'left', 'right', 'up', 'down']);
+router.post('/operations/orchestration/drive', async (req, res) => {
+  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
+  if (!sourceSessionId) return res.status(400).json({ error: '无法识别当前会话；请从 Termdock 会话内运行 td collab' });
+  const target = typeof req.body?.session === 'string' ? req.body.session.trim() : '';
+  const action = typeof req.body?.action === 'string' ? req.body.action.trim() : '';
+  if (!target || !action) return res.status(400).json({ error: 'drive 需要目标会话 id 与动作（approve|enter|escape|space|left|right|up|down|capture|run）' });
+  if (target === sourceSessionId) return res.status(400).json({ error: '不能驱动当前会话自身' });
+  const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === target);
+  if (!record) return res.status(404).json({ error: '目标会话不存在（可能已清理或已离线）' });
+  const callerGroups = collaborationStore.groupsForSession(sourceSessionId).map((group) => group.id);
+  if (!collaborationStore.groupsForSession(target).some((group) => callerGroups.includes(group.id))) {
+    return res.status(403).json({ error: '目标会话不在你的协作组中，CLI 无法驱动；如需操作个人会话请在网页端进行' });
+  }
+  if (record.mode !== 'tmux' || !record.tmuxSessionName) {
+    return res.status(409).json({ error: '目标会话不是 tmux 会话，无法从 CLI 驱动（模式：' + (record.mode ?? 'unknown') + '）' });
+  }
+  const binding = collaborationRouting.get(target);
+  const pane = binding?.pane ?? null;
+  if (!pane) return res.status(409).json({ error: '目标会话还没有可驱动的已固定终端面板（agent 可能尚未启动或已离线）' });
+  try {
+    if (action === 'approve') {
+      const approved = await approveCollaborationDialog(runTmux, pane);
+      if (!approved) return res.status(409).json({ ok: false, code: 'NO_APPROVAL_DIALOG', error: '目标面板当前没有显示审批对话框；未发送任何按键' });
+      return res.json({ ok: true, action, sessionId: target, approved: true });
+    }
+    if (action === 'capture') {
+      const snapshot = await captureTmuxPaneText(runTmux, pane);
+      return res.json({ ok: true, action, sessionId: target, snapshot });
+    }
+    if (action === 'run') {
+      const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+      if (!text) return res.status(400).json({ error: 'run 需要一行文本（放在请求的 text 字段）' });
+      if (text.length > 10_000) return res.status(400).json({ error: 'run 文本过长（上限 10000 字符）；需要更多内容请走 td collab send 投递' });
+      // Same bracketed-paste write path deliveries use: one line, one submit,
+      // embedded newlines stay inside the recipient's editor.
+      await writeCollaborationTmuxPane(runTmux, pane, text);
+      const snapshot = await captureTmuxPaneText(runTmux, pane);
+      return res.json({ ok: true, action, sessionId: target, text, snapshot });
+    }
+    if (!DRIVE_KEYS.has(action as CollaborationPaneKey)) {
+      return res.status(400).json({ error: `未知动作 ${action}；可用：approve|enter|escape|space|left|right|up|down|capture|run` });
+    }
+    await sendTmuxPaneKey(runTmux, pane, action as CollaborationPaneKey);
+    res.json({ ok: true, action, sessionId: target });
+  } catch (error) {
+    res.status(409).json({ ok: false, code: 'DRIVE_FAILED', error: getErrorMessage(error) });
   }
 });
 

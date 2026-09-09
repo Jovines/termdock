@@ -166,4 +166,89 @@ describe('background collaboration delivery', () => {
     await worker.run('b');
     expect(write.mock.calls.map(([messages]) => (messages[0] as { id: string }).id)).toEqual([first.id, second.id]);
   });
+
+  describe('first-delivery confirm gate', () => {
+    function makeWorkerWith(overrides?: Partial<ConstructorParameters<typeof CollaborationDeliveryWorker>[0]>) {
+      return new CollaborationDeliveryWorker({ store, peers: () => ['a', 'b', 'c'], isLocal: (id) => !id.startsWith('remote:'),
+        resolve, onError: () => undefined, ...overrides });
+    }
+
+    it('holds the first delivery until the message id appears in terminal history, then completes once', async () => {
+      const message = send();
+      const history: string[] = [];
+      const confirm = vi.fn(async () => history.join('\n'));
+      resolve.mockResolvedValue({ state: 'ready', write, confirm, capture: async () => '' });
+      const delivery = worker.run('b');
+      // After the first confirm window the message is still not marked delivered —
+      // a boot clear may have wiped the write; the gate waits for evidence
+      // (last_error stays DELIVERY_IN_PROGRESS while the delivery is unsettled).
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(store.receipt(message.id)).toMatchObject({ status: 'pending', last_error: 'DELIVERY_IN_PROGRESS' });
+      history.push(`transcript shows message ${message.id} rendered`);
+      await vi.advanceTimersByTimeAsync(1_200);
+      await delivery;
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: null });
+      expect(write).toHaveBeenCalledTimes(1);
+    });
+
+    it('dismisses an actually-showing approval dialog each cycle while unconfirmed, then rewrites within the bound', async () => {
+      const message = send();
+      const approve = vi.fn(async () => true);
+      resolve.mockResolvedValue({ state: 'ready', write,
+        confirm: async () => 'This command requires approval\n1. Yes\n2. Yes, and don\'t ask again\n3. No', approve, capture: async () => '' });
+      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
+      const first = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
+      await first;
+      // Dialog evidence was on screen every cycle -> Enter was pressed every cycle.
+      expect(approve).toHaveBeenCalledTimes(3);
+      expect(store.receipt(message.id)).toMatchObject({ status: 'pending', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED', next_retry_at: expect.any(Number) });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await worker.run('b');
+      // Attempt bound reached (maxUnconfirmedWrites 2): settle as delivered, never wedge the queue.
+      expect(write).toHaveBeenCalledTimes(2);
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 2, last_error: null });
+    });
+
+    it('never presses keys when no dialog evidence is captured, and still settles once the bound is reached', async () => {
+      const message = send();
+      const approve = vi.fn(async () => true);
+      resolve.mockResolvedValue({ state: 'ready', write, confirm: async () => null, approve, capture: async () => '' });
+      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
+      const first = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
+      await first;
+      expect(approve).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(4_000);
+      await worker.run('b');
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 2 });
+    });
+
+    it('gates only the first delivery per session; later deliveries settle immediately', async () => {
+      const firstMessage = send();
+      const history: string[] = [];
+      const confirm = vi.fn(async () => history.join('\n'));
+      resolve.mockResolvedValue({ state: 'ready', write, confirm });
+      const delivery = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500);
+      history.push(firstMessage.id);
+      await vi.advanceTimersByTimeAsync(1_200);
+      await delivery;
+      expect(store.receipt(firstMessage.id).status).toBe('delivered');
+      const secondMessage = send();
+      await worker.run('b');
+      expect(write).toHaveBeenCalledTimes(2);
+      expect(store.receipt(secondMessage.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
+    });
+
+    it('firstDeliveryConfirmMs: 0 disables the gate entirely', async () => {
+      const message = send();
+      const confirm = vi.fn(async () => '');
+      resolve.mockResolvedValue({ state: 'ready', write, confirm });
+      worker = makeWorkerWith({ firstDeliveryConfirmMs: 0 });
+      await worker.run('b');
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
+      expect(confirm).not.toHaveBeenCalled();
+    });
+  });
 });

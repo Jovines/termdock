@@ -7,6 +7,13 @@ export interface CollaborationRoute {
   write?: (messages: CollaborationMessage[]) => Promise<void>;
   /** Best-effort capture of the recipient terminal after a successful write. */
   capture?: () => Promise<string>;
+  /** History-inclusive capture used to confirm the agent actually rendered a
+   *  first delivery (its transcript contains our message) instead of a boot
+   *  sequence wiping it. Absent on routes without terminal access. */
+  confirm?: () => Promise<string | null>;
+  /** Dismiss an interactive approval dialog on the recipient pane (Enter on
+   *  the highlighted option). Returns false when no dialog is showing. */
+  approve?: () => Promise<boolean>;
 }
 
 export class CollaborationDeliveryWorker {
@@ -14,6 +21,11 @@ export class CollaborationDeliveryWorker {
   private states = new Map<string, { state: CollaborationRouteState; reason: string | null; checkedAt: number }>();
   private failures = new Map<string, number>();
   private submitted = new Set<string>();
+  /** Sessions whose first delivery was confirmed consumed (or settled) in
+   *  this process. Only first deliveries pass the confirm gate — a write to
+   *  an agent that has been interacting is consumed by definition of pty
+   *  semantics, and every delivery after the first rides that assumption. */
+  private confirmedSessions = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking: Promise<void> | null = null;
 
@@ -23,6 +35,16 @@ export class CollaborationDeliveryWorker {
     isLocal: (id: string) => boolean;
     resolve: (id: string) => Promise<CollaborationRoute>;
     onError: (error: unknown) => void;
+    /** First-delivery confirmation delay: after writing to a session whose
+     *  first delivery is still unsettled, wait this long and check the
+     *  recipient's terminal history for our message before marking it
+     *  delivered. 0 disables the gate; routes without `confirm` (no terminal
+     *  access) are unaffected either way. */
+    firstDeliveryConfirmMs?: number;
+    /** Total write attempts a first delivery may take while unconfirmed.
+     *  After this many writes the message settles as delivered regardless —
+     *  the gate tightens the boot window, never wedges the queue. */
+    maxUnconfirmedWrites?: number;
   }) {}
 
   start(): void {
@@ -116,10 +138,11 @@ export class CollaborationDeliveryWorker {
       return;
     }
     const message = pending[0]!;
+    const attempts = store.diagnostic(message.id)?.attempt_count ?? 0;
     if (!this.submitted.has(message.id)) {
       store.recordTransport(message.id, {
         relay_online: null, peer_reachable: true,
-        attempt_count: (store.diagnostic(message.id)?.attempt_count ?? 0) + 1,
+        attempt_count: attempts + 1,
         next_retry_at: Date.now() + 2_000, last_error: 'DELIVERY_IN_PROGRESS', checked_at: Date.now(),
       });
       try { await route.write(pending); }
@@ -138,13 +161,58 @@ export class CollaborationDeliveryWorker {
         } catch { /* best-effort */ }
       }
     }
+    // First-delivery confirm gate: the route becoming ready only proves the
+    // agent process is up, not that its TUI is reading — a write inside the
+    // boot window can be wiped by the startup clear while the message is
+    // already marked delivered. When the route can read terminal history,
+    // hold the first delivery until our message actually appears there (the
+    // agent rendered it), dismissing any approval dialog blocking the agent
+    // on the way. Unconfirmed writes are re-attempted up to the configured
+    // bound; at-least-once transport is preserved throughout.
+    const confirmMs = this.options.firstDeliveryConfirmMs ?? 1_500;
+    if (route.confirm && confirmMs > 0 && !this.confirmedSessions.has(id)
+      && attempts + 1 < (this.options.maxUnconfirmedWrites ?? 3)) {
+      if (!(await this.confirmConsumed(pending, route, confirmMs))) {
+        this.submitted.delete(message.id);
+        store.recordTransport(message.id, {
+          relay_online: null, peer_reachable: true,
+          attempt_count: attempts + 1,
+          next_retry_at: Date.now() + 4_000, last_error: 'AGENT_CONSUME_UNCONFIRMED', checked_at: Date.now(),
+        });
+        this.failures.delete(id);
+        return;
+      }
+    }
     // If persistence fails after writing, the in-process guard avoids a
     // second write on retry. Across a crash, transport is at-least-once.
     this.complete(id, message);
   }
 
+  /** Wait out the confirm window, then look for the written messages in the
+   *  recipient's terminal history. While the agent is blocked on an approval
+   *  dialog (its first Bash call needs permission) dismiss it once per cycle
+   *  — the delivery itself told the agent to run td collab, and the pane
+   *  must show an actual dialog for the key to be sent. */
+  private async confirmConsumed(
+    messages: CollaborationMessage[],
+    route: CollaborationRoute,
+    delayMs: number,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? delayMs : Math.min(1_200, delayMs)));
+      let content: string | null = null;
+      try { content = await route.confirm!(); } catch { content = null; }
+      if (content && messages.some((message) => content.includes(message.id))) return true;
+      if (content && route.approve) {
+        try { await route.approve(); } catch { /* a failed dismiss must not settle delivery */ }
+      }
+    }
+    return false;
+  }
+
   private complete(id: string, message: CollaborationMessage): void {
     const { store } = this.options;
+    this.confirmedSessions.add(id);
     store.markDelivered([message.id]);
     this.submitted.delete(message.id);
     store.recordTransport(message.id, {

@@ -29,19 +29,6 @@ describe('collaboration CLI contract', () => {
     expect(JSON.parse(fixture_.output[0])).toMatchObject({ message_id: 'm', status: 'delivered' });
     expect(fixture_.calls[1][1]).toContain('receipt_only=true');
   });
-  it('surfaces a single queued-behind-busy hint in text mode while waiting for delivery', async () => {
-    const fixture_ = fixture([
-      { message_id: 'm', thread_id: 't', status: 'pending', last_error: 'AGENT_WORKING' },
-      { message_id: 'm', thread_id: 't', status: 'pending', last_error: 'AGENT_WORKING' },
-      { message_id: 'm', thread_id: 't', status: 'delivered' },
-    ]);
-    const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'delivered', '--text']), { backendSessionId: 'b' }, fixture_.io);
-    expect(exit).toBe(0);
-    expect(fixture_.output).toEqual([
-      '排队中：对端 Agent 正忙（AGENT_WORKING），消息将在其当前回合结束后写入。',
-      'delivered m thread=t',
-    ]);
-  });
   it('returns a distinct timeout while preserving the queued ID and never resending', async () => {
     const fixture_ = fixture([]);
     const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'read', '--timeout', '10ms']), { backendSessionId: 'b' }, fixture_.io);
@@ -145,5 +132,108 @@ describe('collaboration CLI contract', () => {
     expect(await executeCollaborationCommand(parseCollaborationCommand(['--help']), {}, io)).toBe(0);
     expect(lines[0]).toContain('td collab — durable messages');
     expect(lines.some((line) => line.includes('成员定位'))).toBe(false);
+  });
+
+  it('parses cleanup with multiple ids, gates --confirm, and rejects it elsewhere', () => {
+    expect(parseCollaborationCommand(['cleanup', 'a1', 'b2', 'c3']))
+      .toMatchObject({ action: 'cleanup', sessionIds: ['a1', 'b2', 'c3'], json: true });
+    expect(parseCollaborationCommand(['cleanup', 'a1', '--confirm']).options.confirm).toBe(true);
+    expect(parseCollaborationCommand(['cleanup', 'a1', '--text']).json).toBe(false);
+    for (const argv of [['cleanup'], ['send', 'peer', 'body', '--confirm'], ['cleanup', 'a1', '--pane', '%3']]) {
+      expect(() => parseCollaborationCommand(argv)).toThrow();
+    }
+  });
+
+  it('prints the cleanup plan and refuses until a human confirmation is supplied', async () => {
+    const plan = { targets: [{ sessionId: 'a1', name: '验证会话', mode: 'tmux', tmuxSessionName: 'wt-x' }], groups: [{ id: 'g1', name: '发布组', sizeBefore: 9, sizeAfter: 8, dissolves: false }] };
+    const refusal = fixture([{ ok: false, code: 'CLEANUP_CONFIRM_REQUIRED', error: '不可恢复的风险操作', instruction: '…', plan }]);
+    const exit = await executeCollaborationCommand(parseCollaborationCommand(['cleanup', 'a1', '--text']), { backendSessionId: 'b' }, refusal.io);
+    expect(exit).toBe(1);
+    expect(refusal.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/cleanup'), expect.objectContaining({ sessionIds: ['a1'], confirmed: false })]));
+    expect(refusal.output.join('\n')).toContain('需要人类授权');
+    expect(refusal.output.join('\n')).toContain('验证会话（a1） · tmux wt-x');
+    expect(refusal.output.join('\n')).toContain('向用户（人类）说明');
+    const jsonMode = fixture([{ ok: false, code: 'CLEANUP_CONFIRM_REQUIRED', error: '…', plan }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['cleanup', 'a1']), {}, jsonMode.io)).toBe(1);
+    expect(JSON.parse(jsonMode.output[0])).toMatchObject({ ok: false, code: 'CLEANUP_CONFIRM_REQUIRED', plan: { targets: [{ sessionId: 'a1' }] } });
+  });
+
+  it('executes a confirmed cleanup and reports each removed session', async () => {
+    const plan = { targets: [{ sessionId: 'a1', name: '验证会话', mode: 'tmux', tmuxSessionName: 'wt-x' }], groups: [{ id: 'g1', name: '发布组', sizeBefore: 9, sizeAfter: 8, dissolves: false }] };
+    const executed = fixture([{ ok: true, removed: [{ sessionId: 'a1', name: '验证会话', tmuxSessionName: 'wt-x' }], plan }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['cleanup', 'a1', '--confirm']), { backendSessionId: 'b' }, executed.io)).toBe(0);
+    expect(executed.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/cleanup'), expect.objectContaining({ sessionIds: ['a1'], confirmed: true })]));
+    expect(JSON.parse(executed.output[0])).toMatchObject({ ok: true, removed: [{ sessionId: 'a1' }] });
+    const text = fixture([{ ok: true, removed: [{ sessionId: 'a1', name: '验证会话', tmuxSessionName: 'wt-x' }], plan }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['cleanup', 'a1', '--confirm', '--text']), {}, text.io)).toBe(0);
+    expect(text.output.join('\n')).toContain('tmux wt-x 已终止');
+  });
+
+  it('fans a comma-separated send out to multiple recipients and gates waiting options', async () => {
+    const sent = fixture([{ ok: true, message_id: 'm1', thread_id: 't', status: 'pending', messages: [{ id: 'm1' }] }]);
+    const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'p1,p2', '群发任务']), { backendSessionId: 'b' }, sent.io);
+    expect(exit).toBe(0);
+    expect(sent.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/send'), expect.objectContaining({ toSessionIds: ['p1', 'p2'], message: '群发任务', backendSessionId: 'b' })]));
+    expect(sent.calls[0][2]).not.toHaveProperty('targetSessionId');
+    const single = fixture([{ ok: true, message_id: 'm1', thread_id: 't', status: 'pending' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['send', 'p1', '单发']), {}, single.io)).toBe(0);
+    expect(single.calls[0][2]).toMatchObject({ targetSessionId: 'p1' });
+    expect(single.calls[0][2]).not.toHaveProperty('toSessionIds');
+    const gated = fixture([]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['send', 'p1,p2', 'x', '--wait-until', 'delivered']), {}, gated.io)).toBe(1);
+    expect(gated.calls).toHaveLength(0);
+    expect(JSON.parse(gated.output[0])).toMatchObject({ ok: false, code: 'COLLABORATION_ERROR' });
+  });
+
+  it('renders sibling recipients of a fan-out in inbox text with resolved names', async () => {
+    const inbox = fixture([{ ok: true, messages: [
+      { id: 'm1', kind: 'task', fromSessionId: 'p1', fanOutIds: ['p2'], content: '群发内容' },
+      { id: 'm2', kind: 'task', fromSessionId: 'p1', fanOutIds: ['ghost'], content: '单条' },
+      { id: 'm3', kind: 'task', fromSessionId: 'p1', content: '点名' },
+    ], names: { p2: '开发 Agent', p1: '组长' }, next_cursor: null, has_more: false }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['inbox', '--text']), {}, inbox.io)).toBe(0);
+    expect(inbox.output[0]).toBe('[task] m1 from p1 · 群发');
+    expect(inbox.output[1]).toBe('同时发给了:开发 Agent');
+    expect(inbox.output[2]).toBe('群发内容');
+    expect(inbox.output[3]).toBe('[task] m2 from p1 · 群发');
+    expect(inbox.output[4]).toBe('同时发给了:ghost');
+    expect(inbox.output[6]).toBe('[task] m3 from p1');
+  });
+
+  it('parses drive with a session id and an enumerated action, and joins run text', () => {
+    expect(parseCollaborationCommand(['drive', 'p2', 'approve'])).toMatchObject({ action: 'drive', sessionId: 'p2', operation: 'approve', json: true });
+    expect(parseCollaborationCommand(['drive', 'p2', 'enter'])).toMatchObject({ action: 'drive', sessionId: 'p2', operation: 'enter' });
+    expect(parseCollaborationCommand(['drive', 'p2', 'capture'])).toMatchObject({ action: 'drive', sessionId: 'p2', operation: 'capture' });
+    expect(parseCollaborationCommand(['drive', 'p2', 'run', '按', '回车', '继续'])).toMatchObject({ action: 'drive', sessionId: 'p2', operation: 'run', message: '按 回车 继续' });
+    for (const argv of [['drive'], ['drive', 'p2'], ['drive', 'p2', 'type'], ['drive', 'p2', 'run'], ['drive', 'p2', 'run', '   '],
+      ['drive', 'p2', 'approve', 'x'], ['drive', 'p2', 'enter', '--group', 'g1']]) {
+      expect(() => parseCollaborationCommand(argv)).toThrow();
+    }
+  });
+
+  it('drives a member terminal: run submits a line and returns the screen back', async () => {
+    const runner = fixture([{ ok: true, action: 'run', sessionId: 'p2', text: 'ls -la', snapshot: 'home  qiao\nbin  etc' }]);
+    const exit = await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'run', 'ls', '-la', '--text']), { backendSessionId: 'p1' }, runner.io);
+    expect(exit).toBe(0);
+    expect(runner.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/drive'),
+      expect.objectContaining({ session: 'p2', action: 'run', text: 'ls -la', backendSessionId: 'p1' })]));
+    expect(runner.output.join('\n')).toContain('已向 p2 发送一行并提交：ls -la');
+    expect(runner.output.join('\n')).toContain('home  qiao');
+    const capture = fixture([{ ok: true, action: 'capture', sessionId: 'p2', snapshot: 'just this screen' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'capture', '--text']), {}, capture.io)).toBe(0);
+    expect(capture.output[0]).toBe('just this screen');
+  });
+
+  it('reports drive outcomes: approve echoes success, key sends echo, and a missing dialog is a hard error', async () => {
+    const approver = fixture([{ ok: true, action: 'approve', sessionId: 'p2', approved: true }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'approve', '--text']), {}, approver.io)).toBe(0);
+    expect(approver.output[0]).toContain('已批准 p2 的审批对话框');
+    const keyer = fixture([{ ok: true, action: 'escape', sessionId: 'p2' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'escape', '--text']), {}, keyer.io)).toBe(0);
+    expect(keyer.output[0]).toContain('已向 p2 发送 escape');
+    const refusal = fixture([]);
+    refusal.io.request = async () => ({ statusCode: 409, body: JSON.stringify({ ok: false, code: 'NO_APPROVAL_DIALOG', error: '目标面板当前没有显示审批对话框；未发送任何按键' }) });
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'approve']), {}, refusal.io)).toBe(1);
+    expect(JSON.parse(refusal.output[0])).toMatchObject({ ok: false, code: 'NO_APPROVAL_DIALOG' });
   });
 });

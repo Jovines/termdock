@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'capabilities' | 'help';
-  target?: string; message?: string; groupId?: string; sessionId?: string; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
+  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'help';
+  target?: string; message?: string; groupId?: string; sessionId?: string; sessionIds?: string[]; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
   operation?: string;
@@ -13,6 +13,9 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   status | capabilities
   rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
   send <session-id> <message> | reply <message-id> <message> | handoff <session-id> <message>
+    (send fan-out: comma-separated same-group ids, e.g. send a,b "任务"; every
+    recipient sees it as 群发 with the sibling list; waiting options apply to
+    single-recipient sends only)
     --group <id> --thread <id> --idempotency-key <key>
     --file <path> | --stdin (instead of inline body; -- ends option parsing)
     --wait-until queued|delivered|read --timeout 30s
@@ -38,8 +41,22 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     rides the delivery shell header)
   rename <session-id> <name…> (rename a member of any shared group;
     trailing words join as the new name; roster and shells show it at once)
+  drive <session-id> approve|enter|escape|space|left|right|up|down|capture
+  drive <session-id> run <command…>
+    (drive the terminal of a member session you share a group with — terminal
+    operations are shell operations: approve dismisses an interactive approval
+    dialog and refuses unless one is actually showing; named keys inject one
+    key; capture reads the current screen back; run submits one line and
+    returns the screen. Cannot target your own session. Treat every drive as
+    strong control: the member's shell executes what you send.)
+  cleanup <session-id>… 移除协作会话并终止其 tmux/进程（仅限与你同组的会话；
+    不能清理当前会话自身，也不能通过清理解散你所在的组）
+    风险操作：默认只打印清理计划并拒绝执行（exit 1）——这是不可恢复的删除。
+    必须先向用户（人类）说明将清理的会话与影响并获得其明确同意，
+    才能以 --confirm 重跑执行；每次执行都需要当场的人类授权。
   --json (default) | --jsonl | --text
 Exit codes: 0 requested condition met; 1 invalid request/network error;
+cleanup without --confirm prints the plan and refuses (also 1);
 2 wait timeout (message may still deliver); 3 failed/expired.
 Message limit: ${COLLAB_LIMITS.message_bytes} UTF-8 bytes; metadata: ${COLLAB_LIMITS.metadata_bytes} bytes.
 Idempotency retention: 7 days. read/ACK/result never imply each other.
@@ -59,7 +76,7 @@ interface RoleGroupView {
   members?: Array<{ sessionId: string; name?: string | null }>;
 }
 
-const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'unread', 'follow', 'stdin', 'receipt-only', 'help']);
+const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'unread', 'follow', 'stdin', 'receipt-only', 'confirm', 'help']);
 const VALUE_OPTIONS = new Set(['group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
@@ -79,7 +96,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     } else positional.push(value);
   }
   const action = (options.help ? 'help' : positional.shift() ?? 'status') as CollaborationCommand['action'];
-  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
   if (options['wait-until'] && !['queued', 'delivered', 'read'].includes(String(options['wait-until']))) throw new Error('wait-until must be queued, delivered or read');
@@ -118,6 +135,19 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     command.sessionId = positional.shift();
     command.name = positional.join(' ');
     if (!command.sessionId || !command.name?.trim()) throw new Error('Usage: td collab rename <session-id> <name…>');
+  } else if (action === 'cleanup') {
+    command.sessionIds = [...positional];
+    if (command.sessionIds.length === 0) throw new Error('Usage: td collab cleanup <session-id> [<session-id>…]');
+  } else if (action === 'drive') {
+    command.sessionId = positional.shift();
+    command.operation = positional.shift();
+    if (!command.sessionId || !command.operation) throw new Error('Usage: td collab drive <session-id> approve|enter|escape|space|left|right|up|down|capture|run <command…>');
+    if (command.operation === 'run') {
+      command.message = positional.join(' ');
+      if (!command.message?.trim()) throw new Error('Usage: td collab drive <session-id> run <command…>');
+    } else if (positional.length || !['approve', 'enter', 'escape', 'space', 'left', 'right', 'up', 'down', 'capture'].includes(command.operation)) {
+      throw new Error(`Unknown drive action ${command.operation ?? ''}; use approve|enter|escape|space|left|right|up|down|capture|run`);
+    }
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help']);
   const byAction: Record<string, string[]> = {
@@ -127,7 +157,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     inbox: ['unread', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
     message: ['receipt-only', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
-    add: [], remove: [], spawn: ['name', 'cwd', 'task'], role: [], rename: [],
+    add: [], remove: [], spawn: ['name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: [],
   };
   for (const option of byAction[action]) allowed.add(option);
   for (const option of Object.keys(options)) if (!allowed.has(option)) throw new Error(`--${option} is not supported by ${action}`);
@@ -167,7 +197,15 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
   };
   const output = (value: Json) => {
     if (o.text) {
-      if (Array.isArray(value.messages)) for (const message of value.messages) io.write(`[${message.responseKind ?? message.kind}] ${message.id} from ${message.fromSessionId ?? 'user'}\n${message.content}`);
+      if (Array.isArray(value.messages)) for (const message of value.messages) {
+        const fanIds = Array.isArray(message.fanOutIds) ? (message.fanOutIds as string[]) : [];
+        const names = (value.names as Record<string, string | null> | undefined) ?? {};
+        io.write(`[${message.responseKind ?? message.kind}] ${message.id} from ${message.fromSessionId ?? 'user'}${fanIds.length ? ' · 群发' : ''}`);
+        // A fan-out dispatch names its sibling recipients so a broadcast is
+        // never read as a one-to-one assignment; unknown ids stay raw.
+        if (fanIds.length) io.write(`同时发给了:${fanIds.map((id) => names[id] ?? id).join('、')}`);
+        io.write(message.content);
+      }
       else if (value.message) io.write(`[${value.status}] ${value.message_id}\n${value.message.content}`);
       else if (value.message_id) {
         io.write(`${value.status} ${value.message_id} thread=${value.thread_id}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
@@ -243,9 +281,17 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       idempotencyKey = String(o['idempotency-key'] ?? randomUUID());
       const extras = { group_id: o.group, thread_id: o.thread, idempotency_key: idempotencyKey, response_kind: o['response-kind'],
         metadata: o.metadata ? JSON.parse(String(o.metadata)) : undefined, task: o['task-envelope'] ? JSON.parse(String(o['task-envelope'])) : undefined, expires_at: expiresAt };
+      // A comma-separated target list fans one dispatch out to several
+      // recipients of a shared group; every edge carries the sibling list so
+      // recipients see the 群发 framing. Reply stays one-to-one by nature.
+      const targets = command.target!.split(',').map((id) => id.trim()).filter(Boolean);
+      const fanOut = command.action !== 'reply' && targets.length > 1;
+      if (command.action !== 'reply' && !targets.length) throw new Error(`${command.action} requires a target session id`);
+      if (fanOut && (o['wait-until'] || o['expect-reply'])) throw new Error('--wait-until/--expect-reply need a single recipient; fan-out confirms queued delivery only');
       deadline = now() + duration(String(o.timeout ?? '30s'));
       receipt = await request('POST', command.action === 'reply' ? '/reply' : '/send', command.action === 'reply'
-        ? { ...extras, messageId: command.target, content } : { ...extras, targetSessionId: command.target, message: content, kind: command.action === 'handoff' ? 'handoff' : o.kind ?? 'message' });
+        ? { ...extras, messageId: command.target, content }
+        : { ...extras, ...(fanOut ? { toSessionIds: targets } : { targetSessionId: targets[0] }), message: content, kind: command.action === 'handoff' ? 'handoff' : o.kind ?? 'message' });
       // CLI receipts stay small even when the message is a large evidence package.
       delete receipt.messages;
       receipt.idempotency_key = idempotencyKey;
@@ -273,25 +319,55 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       if (o.text) io.write(`已改名：${command.sessionId} = ${(body as { name?: string }).name ?? command.name}`);
       else output(body);
       return 0;
+    } else if (command.action === 'drive') {
+      const body = await request('POST', '/drive', { session: command.sessionId, action: command.operation, text: command.message });
+      const result = body as { ok?: boolean; approved?: boolean; snapshot?: string; error?: string };
+      if (o.text) {
+        if (command.operation === 'run') {
+          io.write(`已向 ${command.sessionId} 发送一行并提交：${command.message}`);
+          if (result.snapshot) io.write(`--- ${command.sessionId} 当前屏幕 ---\n${result.snapshot}`);
+        } else if (command.operation === 'capture') {
+          if (result.snapshot) io.write(result.snapshot);
+          else io.write('（无快照）');
+        } else if (command.operation === 'approve') {
+          io.write(result.approved ? `已批准 ${command.sessionId} 的审批对话框` : '目标面板当前没有显示审批对话框；未发送任何按键');
+        } else io.write(`已向 ${command.sessionId} 发送 ${command.operation}`);
+      } else output(body);
+      return 0;
+    } else if (command.action === 'cleanup') {
+      const plan = await request('POST', '/cleanup', { sessionIds: command.sessionIds, confirmed: Boolean(o.confirm) });
+      const targets = (plan.plan?.targets ?? []) as Array<{ sessionId: string; name: string | null; mode: string | null; tmuxSessionName?: string | null }>;
+      const groups = (plan.plan?.groups ?? []) as Array<{ id: string; name: string | null; sizeBefore: number; sizeAfter: number; dissolves: boolean }>;
+      if (plan.ok !== true) {
+        if (o.text) {
+          io.write('清理计划（未执行 —— 需要人类授权）');
+          for (const target of targets) io.write(`- ${target.name ?? target.sessionId}（${target.sessionId}）${target.mode === 'tmux' && target.tmuxSessionName ? ` · tmux ${target.tmuxSessionName}` : target.mode ? ` · ${target.mode}` : ''}`);
+          if (groups.length) {
+            io.write('协作组影响：');
+            for (const group of groups) io.write(group.dissolves
+              ? `- 组「${group.name ?? group.id}」将被解散（组内消息一并清除）`
+              : `- 组「${group.name ?? group.id}」：${group.sizeBefore} 个成员 → ${group.sizeAfter} 个成员`);
+          }
+          io.write('⚠ 这是不可恢复的风险操作：将移除上述会话记录并终止其 tmux/进程。');
+          io.write('执行前必须先向用户（人类）说明以上内容并获得明确同意，再以 --confirm 重跑本命令；每次执行都需要当场的人类授权。');
+        } else output(plan);
+        return 1;
+      }
+      const removed = (plan.removed ?? []) as Array<{ sessionId: string; name?: string | null; tmuxSessionName?: string | null; alreadyGone?: boolean; killed?: boolean }>;
+      if (o.text) {
+        io.write(`已清理 ${removed.length} 个会话：`);
+        for (const entry of removed) io.write(`- ${entry.name ?? entry.sessionId}（${entry.sessionId}）：${entry.tmuxSessionName ? (entry.alreadyGone ? 'tmux 已不存在，记录已移除' : `tmux ${entry.tmuxSessionName} 已终止`) : entry.killed ? '进程已终止，记录已移除' : '记录已移除'}`);
+      } else output(plan);
+      return 0;
     } else {
       const body = command.action === 'spawn' ? { groupId: command.groupId, agentSlug: command.agentSlug, name: command.name, cwd: command.cwd, task: command.task }
         : { groupId: command.groupId, targetSessionId: command.sessionId, action: command.action };
       output(await request('POST', command.action === 'spawn' ? '/spawn' : '/members', body)); return 0;
     }
     const stage = String(o['wait-until'] ?? (command.action === 'message' ? 'read' : 'queued'));
-    const busyCodes = new Set(['AGENT_WORKING', 'AGENT_WAITING', 'AGENT_ACTIVE']);
     let previous = '';
-    let busyHinted: string | null = null;
-    const hintBusy = () => {
-      const code = receipt?.status === 'pending' && busyCodes.has(String(receipt.last_error ?? '')) ? String(receipt.last_error) : null;
-      if (o.text && code && code !== busyHinted) {
-        io.write(`排队中：对端 Agent 正忙（${code}），消息将在其当前回合结束后写入。`);
-        busyHinted = code;
-      }
-    };
     for (;;) {
       if (['failed', 'expired'].includes(receipt!.status)) { output(receipt!); return 3; }
-      hintBusy();
       if (waitSatisfied(receipt!, stage, o['expect-reply'] as string)) { output(receipt!); return 0; }
       if (o.follow || command.operation === 'watch') {
         const serialized = JSON.stringify(receipt);
