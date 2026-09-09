@@ -80,8 +80,8 @@ export function formatCollaborationDelivery(input: {
   // a mixed batch keeps the structure but drops the single-group claim.
   const groupIds = [...new Set(input.messages.map((message) => message.groupId))];
   const shellHeader = groupIds.length === 1
-    ? `协作消息 · 组「${sanitizeCollaborationName(groupsById.get(groupIds[0]!)?.name ?? '协作组')}」`
-    : '协作消息';
+    ? ['协作消息', `组「${sanitizeCollaborationName(groupsById.get(groupIds[0]!)?.name ?? '协作组')}」`]
+    : ['协作消息'];
 
   const peerIds = Array.from(new Set(input.groups.flatMap((group) => group.sessionIds)))
     .filter((sessionId) => sessionId !== input.targetSessionId);
@@ -109,5 +109,5 @@ export function formatCollaborationDelivery(input: {
   // Notes (education + dynamic notices) live inside the shell, after the last
   // message, so the closing rule still marks the end of the delivered block.
   if (!blocks.length) return notes.join('\n');
-  return [SHELL_RULE, shellHeader, '', blocks.join('\n\n'), ...(notes.length ? ['', ...notes] : []), SHELL_RULE].join('\n');
+  return [SHELL_RULE, ...shellHeader, '', blocks.join('\n\n'), ...(notes.length ? ['', ...notes] : []), SHELL_RULE].join('\n');
 }

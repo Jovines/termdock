@@ -68,7 +68,8 @@ describe('COLLAB_NAME_FORBIDDEN / sanitizeCollaborationName', () => {
     });
     const lines = evil.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('协作消息 · 组「协作 v2 组 改行」');
+    expect(lines[1]).toBe('协作消息');
+    expect(lines[2]).toBe('组「协作 v2 组 改行」');
     const source = lines.find((line) => line.startsWith('来自:'));
     expect(source).toBe('来自:名字 带 引号 换行 · task');
     // The shell's own 「」 and · are structural, so only the sanitized name
@@ -84,7 +85,8 @@ describe('formatCollaborationDelivery', () => {
     const prompt = render([message({})]);
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('协作消息 · 组「发布组」');
+    expect(lines[1]).toBe('协作消息');
+    expect(lines[2]).toBe('组「发布组」');
     expect(prompt).toContain('来自:用户 · task');
     expect(prompt).toContain('```\n检查构建\n```');
     expect(prompt).not.toContain('td collab reply');
@@ -172,7 +174,8 @@ describe('formatCollaborationDelivery', () => {
 
   it('omits static routing help once the session is educated', () => {
     const prompt = render([message({})], { showRoutingHelp: false });
-    expect(prompt).toContain('协作消息 · 组「发布组」');
+    expect(prompt).toContain('协作消息');
+    expect(prompt).toContain('组「发布组」');
     expect(prompt).toContain('来自:用户 · task');
     expect(prompt).toContain('```\n检查构建\n```');
     expect(prompt).not.toContain('td collab send');
