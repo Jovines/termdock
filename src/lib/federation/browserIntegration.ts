@@ -1,9 +1,11 @@
-import { listServiceConnections, normalizeServiceAddress, saveServiceConnection, type ServiceRoute } from '../services/serviceDirectory';
+import { listServiceConnections, normalizeServiceAddress, saveServiceConnection, rememberServiceConnection, type ServiceRoute } from '../services/serviceDirectory';
 import { connect, SecureSocket, type SecureClient } from './secureClient';
 import { createRelaySocketFactory } from './relaySocket';
 import { installWorkerBridge } from './workerBridge';
 import { DeviceAuthorizationRequired, readDeviceAuthorization } from './deviceAuthorization';
-import { BOOT_SERVICE_ID, TARGET_KEY, ENTRY_KEY, selectedTarget, saveSelectedTarget, migrateLegacyServiceState } from './clientScope';
+import { raceConnectionAttempts, preferredConnectionPath, rememberConnectionPath, type ConnectionAttempt } from './connectionAttempts';
+import { activateServiceWorkspace, getWorkspaceHost } from '../services/workspaceHost';
+import { BOOT_SERVICE_ID, ENTRY_KEY, selectedTarget, saveSelectedTarget, clearSelectedTarget, migrateLegacyServiceState } from './clientScope';
 import { getIdentity } from './deviceIdentity';
 export { getIdentity } from './deviceIdentity';
 
@@ -13,6 +15,7 @@ let connecting: Promise<SecureClient> | undefined;
 let entryClient: SecureClient | undefined;
 let activePath: 'direct' | 'relay' = 'direct';
 let probingDirect = false;
+let lastDirectProbe = 0;
 const nativeFetch = globalThis.fetch.bind(globalThis);
 export interface ConnectionIntent { url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean; routes?: ServiceRoute[] }
 
@@ -26,7 +29,7 @@ export function invalidateSecureTransport(): void {
   active?.close(); entryClient?.close(); active = undefined; entryClient = undefined;
 }
 export async function getDirectAuthStatus(): Promise<{ enabled: boolean; authenticated: boolean }> {
-  const response = await nativeFetch('/api/auth/status');
+  const response = await nativeFetch('/api/auth/status', { signal: AbortSignal.timeout(5000) });
   if (!response.ok) throw new Error('Failed to query auth status');
   return response.json();
 }
@@ -61,6 +64,11 @@ async function authenticateServicePasswordDirect(url: string, password: string):
   } finally { state.passwordKey = ''; }
 }
 async function authenticateServicePassword(url: string, password: string): Promise<ConnectionIntent> {
+  const selected = savedConnection();
+  if (selected && (selected.serviceOrigin || selected.url) === url) {
+    await authenticatePinnedPassword(selected, password);
+    return selected;
+  }
   try { return await authenticateServicePasswordDirect(url, password); }
   catch (error) {
     if (!(error instanceof TypeError) && !(error instanceof DOMException)) throw error;
@@ -151,28 +159,36 @@ function secureUrl(address: string): string {
   const url = new URL('/api/federation/secure', normalizeServiceAddress(address));
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; return url.href;
 }
-async function connectEntry(route: ServiceRoute): Promise<SecureClient> {
-  return connect({ url: secureUrl(route.url), targetPeerId: route.targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(5000) });
+async function connectEntry(route: ServiceRoute, signal?: AbortSignal): Promise<SecureClient> {
+  return connect({ url: secureUrl(route.url), targetPeerId: route.targetPeerId, identity: await getIdentity(), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) });
 }
 async function openTargetForAuthentication(intent: ConnectionIntent): Promise<SecureClient> {
-  const routes = connectionRoutes(intent);
-  for (const origin of connectionAddresses(intent)) try {
-    return await connect({ url: secureUrl(origin), targetPeerId: intent.targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(3000) });
-  } catch { /* Try only the explicitly saved entry permissions below. */ }
-  for (const route of routes) {
-    let entry: SecureClient | undefined;
+  const identity = await getIdentity();
+  const attempts: ConnectionAttempt<SecureClient>[] = connectionAddresses(intent).map(origin => ({
+    key: `direct:${origin}`,
+    run: signal => connect({ url: secureUrl(origin), targetPeerId: intent.targetPeerId, identity,
+      signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) }),
+  }));
+  for (const route of connectionRoutes(intent)) attempts.push({ key: `relay:${route.targetPeerId}:${route.url}`, run: async signal => {
+    const reused = [active, entryClient].find(client => client && !client.closed && client.targetPeerId === route.targetPeerId);
+    const entry = reused || await connectEntry(route, signal);
     try {
-      entry = await connectEntry(route);
+      if (signal.aborted) throw signal.reason;
       const ticket = await entry.request({ type: 'route-ticket', serviceId: intent.targetPeerId }, { timeoutMs: 5000 });
-      if (typeof ticket.routeToken !== 'string') continue;
+      if (signal.aborted) throw signal.reason;
+      if (typeof ticket.routeToken !== 'string') throw new Error('入口未允许此设备连接该服务。');
       const url = new URL(secureUrl(route.url)); url.pathname = '/api/federation/relay'; url.searchParams.set('routeToken', ticket.routeToken);
-      return await connect({ url: url.href, targetPeerId: intent.targetPeerId, identity: await getIdentity(), socketFactory: createRelaySocketFactory(intent.targetPeerId), signal: AbortSignal.timeout(8000) });
-    } catch { /* Another explicitly authorized entry may be reachable. */ }
-    finally { entry?.close(); }
-  }
-  throw new Error('当前无法连接。请检查网络，或请入口管理员授权此设备访问该服务。');
+      return await connect({ url: url.href, targetPeerId: intent.targetPeerId, identity, socketFactory: createRelaySocketFactory(intent.targetPeerId),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+    } finally { if (!reused) entry.close(); }
+  } });
+  const preferred = preferredConnectionPath(intent.targetPeerId);
+  attempts.sort((a, b) => Number(b.key === preferred) - Number(a.key === preferred));
+  const result = await raceConnectionAttempts(attempts, client => client.close());
+  rememberConnectionPath(intent.targetPeerId, result.key);
+  return result.value;
 }
-export async function connectDevice(intent: ConnectionIntent): Promise<SecureClient> {
+export async function connectDevice(intent: ConnectionIntent, options: { rememberOnly?: boolean } = {}): Promise<SecureClient> {
   const previous = active, previousEntry = entryClient;
   const identity = await getIdentity();
   const serviceOrigin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
@@ -185,10 +201,11 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
   let path: 'direct' | 'relay' = 'direct';
   const openedEntries = new Set<SecureClient>();
   const entryCache = new Map<string, SecureClient>();
-  const entryFor = async (route: ServiceRoute) => {
+  const entryFor = async (route: ServiceRoute, signal?: AbortSignal) => {
+    if (previous && !previous.closed && previous.targetPeerId === route.targetPeerId) return previous;
     if (previousEntry && !previousEntry.closed && previousEntry.targetPeerId === route.targetPeerId) return previousEntry;
     const cached = entryCache.get(route.targetPeerId); if (cached && !cached.closed) return cached;
-    const entry = await connectEntry(route); openedEntries.add(entry); entryCache.set(route.targetPeerId, entry); return entry;
+    const entry = await connectEntry(route, signal); openedEntries.add(entry); entryCache.set(route.targetPeerId, entry); return entry;
   };
   try {
     if (intent.routeCode && intent.entryServiceId) {
@@ -199,38 +216,54 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
       if (result.serviceId !== intent.targetPeerId) throw new Error('邀请的目标服务不一致。');
       if (intent.routeOnly) await saveServiceConnection({ id: intent.targetPeerId, url: serviceOrigin, label: intent.serviceName || new URL(serviceOrigin).host, targetPeerId: intent.targetPeerId, serviceOrigin, routes });
     }
-    let directFailure: unknown;
-    for (const address of addresses) try {
-      next = await connect({ url: secureUrl(address), targetPeerId: intent.targetPeerId, pairingCode, identity, signal: AbortSignal.timeout(routes.length || addresses.length > 1 ? 3000 : 10_000) });
+    type Transport = { client: SecureClient; entry?: SecureClient; path: 'direct' | 'relay' };
+    const attempts: ConnectionAttempt<Transport>[] = [];
+    const validate = async (client: SecureClient, signal: AbortSignal) => {
+      const abort = () => client.close();
+      signal.addEventListener('abort', abort, { once: true });
+      try {
+        if (signal.aborted) throw signal.reason;
+        await readDeviceAuthorization(client);
+        if (signal.aborted) throw signal.reason;
+      } catch (error) { client.close(); throw error; }
+      finally { signal.removeEventListener('abort', abort); }
+    };
+    for (const address of addresses) attempts.push({ key: `direct:${address}`, run: async signal => {
+      const client = await connect({ url: secureUrl(address), targetPeerId: intent.targetPeerId, pairingCode, identity,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
       pairingCode = undefined;
-      await readDeviceAuthorization(next);
-      break;
-    } catch (error) {
-      next?.close(); next = undefined;
-      if (error instanceof DeviceAuthorizationRequired) throw error;
-      directFailure = error;
-    }
-    if (!next) {
-      for (const route of routes) {
-        let candidateEntry: SecureClient | undefined;
-        try {
-          candidateEntry = await entryFor(route);
-          // A route is usable only after an explicit, target-scoped entry grant.
-          const ticket = await candidateEntry.request({ type: 'route-ticket', serviceId: intent.targetPeerId }, { timeoutMs: 5000 });
-          if (typeof ticket.routeToken !== 'string' || !ticket.routeToken) throw new Error('入口未允许此设备连接该服务。');
-          const url = new URL(secureUrl(route.url)); url.pathname = '/api/federation/relay'; url.searchParams.set('routeToken', ticket.routeToken);
-          next = await connect({ url: url.href, targetPeerId: intent.targetPeerId, pairingCode, identity, socketFactory: createRelaySocketFactory(intent.targetPeerId), signal: AbortSignal.timeout(8000) });
-          pairingCode = undefined; await readDeviceAuthorization(next);
-          nextEntry = candidateEntry; path = 'relay'; break;
-        } catch (error) {
-          next?.close(); next = undefined;
-          if (candidateEntry && candidateEntry !== previousEntry) candidateEntry.close();
-          if (error instanceof DeviceAuthorizationRequired) throw error;
-          directFailure = error;
-        }
+      await validate(client, signal);
+      return { client, path: 'direct' };
+    } });
+    for (const route of routes) attempts.push({ key: `relay:${route.targetPeerId}:${route.url}`, run: async signal => {
+      let candidateEntry: SecureClient | undefined;
+      let client: SecureClient | undefined;
+      try {
+        candidateEntry = await entryFor(route, signal);
+        if (signal.aborted) throw signal.reason;
+        const ticket = await candidateEntry.request({ type: 'route-ticket', serviceId: intent.targetPeerId }, { timeoutMs: 5000 });
+        if (signal.aborted) throw signal.reason;
+        if (typeof ticket.routeToken !== 'string' || !ticket.routeToken) throw new Error('入口未允许此设备连接该服务。');
+        const url = new URL(secureUrl(route.url)); url.pathname = '/api/federation/relay'; url.searchParams.set('routeToken', ticket.routeToken);
+        client = await connect({ url: url.href, targetPeerId: intent.targetPeerId, pairingCode, identity,
+          socketFactory: createRelaySocketFactory(intent.targetPeerId), signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+        pairingCode = undefined;
+        await validate(client, signal);
+        return { client, entry: candidateEntry, path: 'relay' };
+      } catch (error) {
+        client?.close();
+        if (candidateEntry && candidateEntry !== previousEntry && candidateEntry !== previous) candidateEntry.close();
+        throw error;
       }
-    }
-    if (!next) throw directFailure || new Error('当前网络无法连接这台服务，也没有可用的已授权入口。');
+    } });
+    const preferred = preferredConnectionPath(intent.targetPeerId);
+    attempts.sort((a, b) => Number(b.key === preferred) - Number(a.key === preferred));
+    const result = await raceConnectionAttempts(attempts, transport => {
+      transport.client.close();
+      if (transport.entry && transport.entry !== previous && transport.entry !== previousEntry) transport.entry.close();
+    }, !!pairingCode);
+    next = result.value.client; nextEntry = result.value.entry; path = result.value.path;
+    rememberConnectionPath(intent.targetPeerId, result.key);
     // A manually verified address can restore this service while an earlier
     // reconnect is still pending. Do not replace it with that stale attempt.
     if (active !== previous && active && !active.closed && active.targetPeerId === intent.targetPeerId) {
@@ -242,7 +275,15 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
     const existing = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId || (!item.targetPeerId && (item.serviceOrigin || item.url) === serviceOrigin));
     const serviceName = existing?.label || intent.serviceName || new URL(serviceOrigin).host;
     const saved = { url: serviceOrigin, targetPeerId: intent.targetPeerId, serviceName, serviceOrigin, routes: savedIntent.routes ?? routes };
-    await saveServiceConnection({ id: existing?.id || intent.targetPeerId, ...saved, label: serviceName });
+    await (options.rememberOnly ? rememberServiceConnection : saveServiceConnection)({ id: existing?.id || intent.targetPeerId, ...saved, label: serviceName });
+    // A new verified service opens its own document; keep this document's
+    // existing transport and stores bound to their original target.
+    if (BOOT_SERVICE_ID !== 'unpaired' && BOOT_SERVICE_ID !== intent.targetPeerId && getWorkspaceHost()
+      && activateServiceWorkspace({ id: existing?.id || intent.targetPeerId, ...saved, label: serviceName })) {
+      next.close();
+      for (const client of openedEntries) if (client !== previous && client !== previousEntry) client.close();
+      return previous || next;
+    }
     saveSelectedTarget(saved);
     active = next; activePath = path; entryClient = nextEntry;
     // Finish the replacement before closing old streams so their reconnects use
@@ -259,8 +300,8 @@ export async function connectDevice(intent: ConnectionIntent): Promise<SecureCli
  * improve. Do not interrupt an upload or other in-flight HTTP operation. */
 export async function preferDirectConnection(): Promise<void> {
   const previous = active, selected = savedConnection();
-  if (probingDirect || activePath !== 'relay' || !previous || previous.closed || !previous.canSwitchTransport || !selected?.serviceOrigin) return;
-  probingDirect = true; let candidate: SecureClient | undefined;
+  if (Date.now() - lastDirectProbe < 60_000 || probingDirect || activePath !== 'relay' || !previous || previous.closed || !previous.canSwitchTransport || !selected?.serviceOrigin) return;
+  probingDirect = true; lastDirectProbe = Date.now(); let candidate: SecureClient | undefined;
   try {
     for (const address of connectionAddresses(selected)) try {
       candidate = await connect({ url: secureUrl(address), targetPeerId: selected.targetPeerId, identity: await getIdentity(), signal: AbortSignal.timeout(3000) });
@@ -288,7 +329,7 @@ export async function getActiveClient(): Promise<SecureClient> {
   if (connecting) return connecting;
   const saved = savedConnection();
   if (!saved) throw new Error('DEVICE_PAIRING_REQUIRED');
-  connecting = connectDevice(saved).catch(error => {
+  connecting = connectDevice(saved, { rememberOnly: true }).catch(error => {
     if (active && !active.closed && active.targetPeerId === saved.targetPeerId) return active;
     throw error;
   }).finally(() => { connecting = undefined; });
@@ -319,13 +360,15 @@ export function installEncryptedFetch(): void {
     if (url.origin !== location.origin) throw new Error('Remote business API requires a paired encrypted service');
     if (url.pathname === '/api/meta') return nativeFetch(input, init);
     if (url.pathname === '/api/auth/status') {
-      const status = await getDirectAuthStatus();
-      if (!savedConnection()) return Response.json({ enabled: status.enabled, authenticated: false });
+      if (!savedConnection()) {
+        const status = await getDirectAuthStatus();
+        return Response.json({ enabled: status.enabled, authenticated: false });
+      }
       try {
-        await readDeviceAuthorization(await getActiveClient());
-        return Response.json({ enabled: status.enabled, authenticated: true });
+        const permissions = await readDeviceAuthorization(await getActiveClient());
+        return Response.json({ enabled: permissions.grants.length > 0, authenticated: true });
       } catch (error) {
-        if (error instanceof DeviceAuthorizationRequired) return Response.json({ enabled: status.enabled, authenticated: false });
+        if (error instanceof DeviceAuthorizationRequired) return Response.json({ enabled: true, authenticated: false });
         throw error;
       }
     }
@@ -338,7 +381,7 @@ export function installEncryptedFetch(): void {
     if (url.pathname === '/api/auth/logout') {
       if (active && !active.closed) await active.request({ type: 'logout' });
       active?.close(); entryClient?.close(); active = undefined; entryClient = undefined;
-      localStorage.removeItem(TARGET_KEY); sessionStorage.removeItem(TARGET_KEY); localStorage.removeItem(ENTRY_KEY);
+      clearSelectedTarget();
       location.reload(); return Response.json({ ok: true });
     }
     const client = await getActiveClient();

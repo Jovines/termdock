@@ -1,3 +1,4 @@
+import { viewportWindow } from '../services/workspaceViewport';
 import React from 'react';
 import { createDebugLogger } from '../utils/debug';
 import { hasFocusedEditableElement } from './useViewportHeight';
@@ -38,7 +39,7 @@ function getKeyboardHeightPx(): number {
     return Math.round(fromCssVar);
   }
 
-  const visualViewport = window.visualViewport;
+  const visualViewport = viewportWindow().visualViewport;
   if (!visualViewport) return 0;
 
   const baseHeight = Number.parseFloat(
@@ -127,11 +128,11 @@ export function useViewportKeyboardState(
           keyboardHeight,
           isOpen: nextOpen,
           isSettled: nextSettled,
-          visualViewport: window.visualViewport
+          visualViewport: viewportWindow().visualViewport
             ? {
-                width: Math.round(window.visualViewport.width),
-                height: Math.round(window.visualViewport.height),
-                offsetTop: Math.round(window.visualViewport.offsetTop),
+                width: Math.round(viewportWindow().visualViewport!.width),
+                height: Math.round(viewportWindow().visualViewport!.height),
+                offsetTop: Math.round(viewportWindow().visualViewport!.offsetTop),
               }
             : null,
         });
@@ -159,8 +160,8 @@ export function useViewportKeyboardState(
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleOrientationChange);
-    window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
-    window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
+    viewportWindow().visualViewport?.addEventListener('resize', handleVisualViewportResize);
+    viewportWindow().visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
     document.addEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
 
     // 从后台返回 / BFCache 恢复时强制重读 visualViewport，避免 isOpen 卡在
@@ -186,8 +187,8 @@ export function useViewportKeyboardState(
     return () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('orientationchange', handleOrientationChange);
-      window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
-      window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
+      viewportWindow().visualViewport?.removeEventListener('resize', handleVisualViewportResize);
+      viewportWindow().visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
       document.removeEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pageshow', handlePageShow);

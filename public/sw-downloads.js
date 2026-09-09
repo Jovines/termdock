@@ -14,7 +14,10 @@
     const port = event.ports[0];
     event.waitUntil((async () => {
       const client = event.source?.id && await self.clients.get(event.source.id);
-      if (!client || client.type !== 'window' || client.frameType !== 'top-level' || new URL(client.url).origin !== self.location.origin) throw new Error('Invalid download owner');
+      if (!client || client.type !== 'window' || new URL(client.url).origin !== self.location.origin) throw new Error('Invalid download owner');
+      const ownerUrl = new URL(client.url);
+      if (client.frameType !== 'top-level' && !(ownerUrl.pathname === '/workspace.html'
+        && /^12D3KooW[1-9A-HJ-NP-Za-km-z]{44}$/.test(ownerUrl.searchParams.get('termdock-workspace') || ''))) throw new Error('Invalid download owner');
       const { blob, filename } = event.data;
       if (!(blob instanceof Blob) || typeof filename !== 'string' || filename.length > 512) throw new Error('Invalid download');
       const cache = await caches.open(cacheName); await clean(cache);

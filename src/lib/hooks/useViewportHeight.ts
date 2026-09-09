@@ -1,3 +1,4 @@
+import { viewportWindow } from '../services/workspaceViewport';
 import React from 'react';
 import { createDebugLogger } from '../utils/debug';
 
@@ -86,10 +87,10 @@ const firstUsableDimension = (values: unknown[], fallback: number): number => {
 const getBestKnownViewportHeight = (): number => {
   if (typeof window === 'undefined') return DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX;
   return firstUsableDimension([
-    window.innerHeight,
+    viewportWindow().innerHeight,
     document.documentElement?.clientHeight,
     document.body?.clientHeight,
-    window.visualViewport?.height,
+    viewportWindow().visualViewport?.height,
     window.screen?.availHeight,
     window.screen?.height,
   ], DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX);
@@ -98,10 +99,10 @@ const getBestKnownViewportHeight = (): number => {
 const getBestKnownViewportWidth = (): number => {
   if (typeof window === 'undefined') return DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX;
   return firstUsableDimension([
-    window.innerWidth,
+    viewportWindow().innerWidth,
     document.documentElement?.clientWidth,
     document.body?.clientWidth,
-    window.visualViewport?.width,
+    viewportWindow().visualViewport?.width,
     window.screen?.availWidth,
     window.screen?.width,
   ], DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX);
@@ -120,9 +121,9 @@ const isIOSLike = () => {
 
 const isStandaloneDisplay = () => {
   if (typeof window === 'undefined') return false;
-  const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
+  const navigatorWithStandalone = viewportWindow().navigator as Navigator & { standalone?: boolean };
   return navigatorWithStandalone.standalone === true ||
-    window.matchMedia?.('(display-mode: standalone)').matches === true;
+    viewportWindow().matchMedia?.('(display-mode: standalone)').matches === true;
 };
 
 const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
@@ -159,8 +160,8 @@ const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
 export function syncInitialViewportCssVars(cssVarName = '--app-vh'): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
 
-  const visualViewportHeight = toPositivePx(window.visualViewport?.height);
-  const visualViewportOffsetTop = Math.max(0, Math.round(window.visualViewport?.offsetTop ?? 0));
+  const visualViewportHeight = toPositivePx(viewportWindow().visualViewport?.height);
+  const visualViewportOffsetTop = Math.max(0, Math.round(viewportWindow().visualViewport?.offsetTop ?? 0));
   const layoutHeight = getBestKnownViewportHeight();
   const visualViewportHeightUsable = visualViewportHeight >= MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX;
   const visibleHeight = visualViewportHeightUsable
@@ -193,7 +194,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       return 0;
     }
 
-    const visualViewport = window.visualViewport;
+    const visualViewport = viewportWindow().visualViewport;
     const windowHeight = getBestKnownViewportHeight();
     if (!visualViewport) {
       return windowHeight;
@@ -278,6 +279,16 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
         }
       } catch { /* ignore */ }
 
+      const owner = viewportWindow();
+      if (owner !== window) {
+        const style = owner.getComputedStyle(owner.document.documentElement);
+        raw = {
+          top: Math.max(raw.top, toPx(style.getPropertyValue('--safe-top-inset'))),
+          right: Math.max(raw.right, toPx(style.getPropertyValue('--safe-right-inset'))),
+          bottom: Math.max(raw.bottom, toPx(style.getPropertyValue('--safe-bottom-inset'))),
+          left: Math.max(raw.left, toPx(style.getPropertyValue('--safe-left-inset'))),
+        };
+      }
       const fallback = getIOSStandaloneSafeAreaFallback();
       const insets = {
         top: Math.max(raw.top, fallback.top),
@@ -319,8 +330,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     const syncViewportHeight = (source = 'event') => {
       rafId = null;
       const nextHeight = getViewportHeight();
-      const nextOffsetTop = Math.round(window.visualViewport?.offsetTop ?? 0);
-      const measuredViewportHeight = toPositivePx(window.visualViewport?.height);
+      const nextOffsetTop = Math.round(viewportWindow().visualViewport?.offsetTop ?? 0);
+      const measuredViewportHeight = toPositivePx(viewportWindow().visualViewport?.height);
       const rawViewportHeight = measuredViewportHeight >= MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX
         ? measuredViewportHeight
         : nextHeight;
@@ -473,8 +484,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleOrientationChange);
-    window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
-    window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
+    viewportWindow().visualViewport?.addEventListener('resize', handleVisualViewportResize);
+    viewportWindow().visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
     document.addEventListener('focusin', handleFocusIn);
     document.addEventListener('focusout', handleFocusOut);
 
@@ -487,11 +498,11 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       debugViewport('resume', {
         source,
         innerHeight: Math.round(window.innerHeight),
-        visualViewport: window.visualViewport
+        visualViewport: viewportWindow().visualViewport
           ? {
-              width: Math.round(window.visualViewport.width),
-              height: Math.round(window.visualViewport.height),
-              offsetTop: Math.round(window.visualViewport.offsetTop),
+              width: Math.round(viewportWindow().visualViewport!.width),
+              height: Math.round(viewportWindow().visualViewport!.height),
+              offsetTop: Math.round(viewportWindow().visualViewport!.offsetTop),
             }
           : null,
         hidden: document.hidden,
@@ -514,8 +525,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     return () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('orientationchange', handleOrientationChange);
-      window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
-      window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
+      viewportWindow().visualViewport?.removeEventListener('resize', handleVisualViewportResize);
+      viewportWindow().visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
       document.removeEventListener('focusin', handleFocusIn);
       document.removeEventListener('focusout', handleFocusOut);
       document.removeEventListener('visibilitychange', handleVisibilityChange);

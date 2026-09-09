@@ -1,3 +1,4 @@
+import { isWorkspaceActive } from '../../services/workspaceHost';
 import React from 'react';
 import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
@@ -3413,7 +3414,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (!sessionReadyRef.current) return;
         // 仅在前台可见的客户端主动推：后台标签 / 锁屏的手机绝不能跟在线端
         // 互相拉扯。
-        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        if (typeof document !== 'undefined' && (document.visibilityState !== 'visible' || !isWorkspaceActive())) {
           return;
         }
         const now = Date.now();

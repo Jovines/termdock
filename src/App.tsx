@@ -1,3 +1,5 @@
+import { savedConnection } from './lib/federation/browserIntegration';
+import { consumeWorkspaceSession, getWorkspaceHost } from './lib/services/workspaceHost';
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
@@ -86,10 +88,10 @@ import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloating
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
-import { DesktopServiceSwitcher } from './lib/components/DesktopServiceSwitcher';
+import { useServiceWorkspaceActivity } from './lib/components/ServiceSwitcher';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
-import { getTermdockDesktopBridge, supportsDesktopServiceActivity, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
+import { getTermdockDesktopBridge, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
 import type { SplitLayout, SplitWorkspaceSummary } from './lib/terminal/splitWorkspaces';
 import { MOBILE_SESSION_DESTROY_DROPPABLE_ID, isMobileSessionDestroyDrop } from './lib/terminal/mobileSessionDestroy';
 
@@ -2173,6 +2175,7 @@ function App() {
     }
     return { running: runningSessionShortcuts.length, review };
   }, [runningSessionShortcuts.length, sessions, terminalSessions]);
+  useServiceWorkspaceActivity(agentTabCounts.running, agentTabCounts.review);
   const activeResumeSession = activeSessionId
     ? sessions.find((session) => session.id === activeSessionId) ?? null
     : null;
@@ -2283,6 +2286,9 @@ function App() {
     let disposed = false;
 
     const consumeStoredTarget = async () => {
+      // Only the root consumes the shared SW fallback; child workspaces receive
+      // a target-scoped pending session from the host instead.
+      if (window.parent !== window && getWorkspaceHost()) { setConnectionPriorityReady(true); return; }
       try {
         const cache = await caches.open(NOTIFICATION_TARGET_CACHE);
         const response = await cache.match(NOTIFICATION_TARGET_KEY);
@@ -2290,6 +2296,7 @@ function App() {
         await cache.delete(NOTIFICATION_TARGET_KEY);
         const stored = await response.json() as {
           sessionId?: unknown;
+          targetPeerId?: unknown;
           traceId?: unknown;
           clickedAt?: unknown;
         };
@@ -2307,7 +2314,9 @@ function App() {
         });
         if (sessionId && ageMs >= 0 && ageMs <= NOTIFICATION_TARGET_MAX_AGE_MS) {
           notificationTraceRef.current = traceId;
-          requestFocusSession(sessionId);
+          if (typeof stored.targetPeerId === 'string' && stored.targetPeerId !== savedConnection()?.targetPeerId) {
+            getWorkspaceHost()?.focusSession(stored.targetPeerId, sessionId);
+          } else requestFocusSession(sessionId);
         }
       } catch (error) {
         clientLog('warn', 'PWA_NOTIFICATION_CLICK app-cache-failed', {
@@ -2343,7 +2352,10 @@ function App() {
       href: window.location.href,
       visibilityState: document.visibilityState,
     });
-    pendingFocusSessionRef.current = target;
+    const targetService = params.get('service');
+    if (targetService && targetService !== savedConnection()?.targetPeerId) getWorkspaceHost()?.focusSession(targetService, target);
+    else pendingFocusSessionRef.current = target;
+    params.delete('service');
     params.delete('session');
     params.delete('_notifTrace');
     const nextSearch = params.toString();
@@ -2364,6 +2376,7 @@ function App() {
     const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
     window.history.replaceState(window.history.state, '', nextUrl);
 
+    if (window.parent !== window && getWorkspaceHost()) return;
     const channel = new BroadcastChannel('termdock:notif');
     let closed = false;
 
@@ -2375,7 +2388,7 @@ function App() {
       }
     };
     channel.addEventListener('message', pongHandler);
-    channel.postMessage({ type: 'termdock:notif-ping', sessionId });
+    channel.postMessage({ type: 'termdock:notif-ping', sessionId, targetPeerId: params.get('service') });
 
     // 500ms 内无应答则视为唯一实例，正常处理（后续 ?session= effect 会接管）。
     const timeout = setTimeout(() => {
@@ -2391,13 +2404,15 @@ function App() {
   // 响应其他弹窗的 ping：告知对方本实例存在，并切到目标 session。
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (window.parent !== window && getWorkspaceHost()) return;
     const channel = new BroadcastChannel('termdock:notif');
 
     const pingHandler = (e: MessageEvent) => {
       if (e.data?.type === 'termdock:notif-ping') {
         channel.postMessage({ type: 'termdock:notif-pong' });
         if (typeof e.data.sessionId === 'string') {
-          requestFocusSession(e.data.sessionId);
+          if (typeof e.data.targetPeerId === 'string' && e.data.targetPeerId !== savedConnection()?.targetPeerId) getWorkspaceHost()?.focusSession(e.data.targetPeerId, e.data.sessionId);
+          else requestFocusSession(e.data.sessionId);
         }
       }
     };
@@ -2413,6 +2428,10 @@ function App() {
     const handler = (event: MessageEvent) => {
       const data = event.data;
       if (data && data.type === 'termdock:focus-session' && typeof data.sessionId === 'string') {
+        if (typeof data.targetPeerId === 'string' && data.targetPeerId !== savedConnection()?.targetPeerId) {
+          if (getWorkspaceHost()?.focusSession(data.targetPeerId, data.sessionId)) event.ports[0]?.postMessage({ type: 'termdock:focus-session-ack' });
+          return;
+        }
         event.ports[0]?.postMessage({ type: 'termdock:focus-session-ack' });
         requestFocusSession(data.sessionId);
       } else if (data?.type === 'termdock:push-subscription-changed') {
@@ -2435,6 +2454,16 @@ function App() {
     };
     window.addEventListener('termdock:focus-session', handler);
     return () => window.removeEventListener('termdock:focus-session', handler);
+  }, [requestFocusSession]);
+
+  useEffect(() => {
+    const consume = () => {
+      const sessionId = consumeWorkspaceSession(savedConnection()?.targetPeerId);
+      if (sessionId) requestFocusSession(sessionId);
+    };
+    consume();
+    window.addEventListener('termdock:workspace-session', consume);
+    return () => window.removeEventListener('termdock:workspace-session', consume);
   }, [requestFocusSession]);
 
   // 会话列表变化时，补发尚未兑现的聚焦请求（目标 session 刚恢复出来）。
@@ -3248,22 +3277,6 @@ function App() {
             </DragDropContext>
             )}
             <div className="flex shrink-0 items-center gap-1.5">
-              {supportsDesktopServiceActivity(desktopBridge) && (
-                <DesktopServiceSwitcher
-                  bridge={desktopBridge}
-                  runningCount={agentTabCounts.running}
-                  reviewCount={agentTabCounts.review}
-                  labels={{
-                    switchService: t('desktopServices.switchService'),
-                    openServices: t('desktopServices.openServices'),
-                    current: t('agent.currentSession'),
-                    running: t('agent.aiRunning'),
-                    review: t('agent.needsReview'),
-                    idle: t('desktopServices.idle'),
-                    manageServices: t('desktopServices.manageServices'),
-                  }}
-                />
-              )}
               {!showPinnedLeft && agentTabCounts.running > 0 && (
                 <span className="hidden items-center gap-1 sm:inline-flex">
                 <AgentCountBadge count={agentTabCounts.running} tone="running" title={t('agent.aiRunning')} />

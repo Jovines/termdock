@@ -5,9 +5,17 @@ const rawGet = typeof Storage === 'undefined' ? undefined : Storage.prototype.ge
 const rawSet = typeof Storage === 'undefined' ? undefined : Storage.prototype.setItem;
 const LEGACY_OWNER_KEY = 'termdock-secure-legacy-owner';
 export interface SavedTarget { url: string; targetPeerId: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routes?: { url: string; targetPeerId: string }[] }
+export const IS_WORKSPACE_DOCUMENT = typeof window !== 'undefined' && window.parent !== window && location.pathname === '/workspace.html';
 export function readSelectedTarget(): SavedTarget | null {
   if (typeof window === 'undefined') return null;
   try {
+    if (IS_WORKSPACE_DOCUMENT) {
+      const serviceId = new URLSearchParams(location.search).get('termdock-workspace');
+      const directory = JSON.parse(localStorage.getItem('termdock.federation.connections.v1') || '[]');
+      const value = Array.isArray(directory) ? directory.find(item => item?.targetPeerId === serviceId) : undefined;
+      return value && typeof value.url === 'string' && typeof value.targetPeerId === 'string'
+        ? { ...value, serviceName: value.label || value.serviceName } : null;
+    }
     const value = JSON.parse(sessionStorage.getItem(TARGET_KEY) ?? localStorage.getItem(TARGET_KEY) ?? 'null');
     return value && typeof value.url === 'string' && typeof value.targetPeerId === 'string' ? value : null;
   } catch { return null; }
@@ -18,8 +26,16 @@ export const BOOT_SERVICE_ID = selected?.targetPeerId ?? 'unpaired';
 export function selectedTarget(): SavedTarget | null { return selected; }
 export function saveSelectedTarget(value: SavedTarget): void {
   selected = value;
+  // Child workspaces must not change the root document's boot target. Their
+  // address/route metadata is already persisted in the shared service directory.
+  if (IS_WORKSPACE_DOCUMENT) return;
   const raw = JSON.stringify(value);
   sessionStorage.setItem(TARGET_KEY, raw); localStorage.setItem(TARGET_KEY, raw);
+}
+export function clearSelectedTarget(): void {
+  selected = null;
+  if (IS_WORKSPACE_DOCUMENT) return;
+  localStorage.removeItem(TARGET_KEY); sessionStorage.removeItem(TARGET_KEY); localStorage.removeItem(ENTRY_KEY);
 }
 export function scopedStorageKey(key: string, serviceId = BOOT_SERVICE_ID): string {
   return GLOBAL_KEYS.has(key) || key.startsWith('termdock-secure-') ? key : `termdock-service:${serviceId}:${key}`;
@@ -44,7 +60,7 @@ export function migrateLegacyServiceState(serviceId: string): void {
 }
 let installed = false;
 /** Existing stores share the same browser origin; scope their persisted state before importing App.
- * A target switch performs a full page reload so in-memory singletons share this same boundary. */
+ * Each retained workspace owns a document so in-memory singletons share this boundary. */
 export function installServiceStorageScope(): void {
   if (installed || typeof Storage === 'undefined') return;
   installed = true;

@@ -1,3 +1,4 @@
+import { ServiceSwitcher } from '../ServiceSwitcher';
 import { openRemoteSession } from '../../federation/remoteSession';
 import { openServiceAccess } from '../../federation/accessEvents';
 import {
@@ -1639,8 +1640,9 @@ export function LeftSidebar(
 
   const inner = (
     <>
+      <ServiceSwitcher />
       {/* Header — single compact row */}
-      <div className="shrink-0 border-b border-border/15 px-2 py-2">
+      <div className="relative z-10 shrink-0 border-b border-border/15 px-2 py-2">
         <div className="flex items-center gap-1.5">
           <div className="min-w-0 flex-1 px-1">
             <div className="flex items-baseline gap-1.5">

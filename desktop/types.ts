@@ -54,6 +54,7 @@ export interface DesktopSnapshot {
 
 export interface DesktopServiceActivity {
   origin: string;
+  targetPeerId?: string;
   label: string;
   current: boolean;
   focused: boolean;

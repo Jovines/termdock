@@ -14,6 +14,14 @@ export interface ServiceConnection {
 }
 export const SERVICE_DIRECTORY_KEY = 'termdock.federation.connections.v1';
 export const SERVICE_DIRECTORY_EVENT = 'termdock:services-changed';
+const REMOVED_SERVICES_KEY = 'termdock-secure-removed-services';
+const connectionKeys = (item: ServiceConnection): string[] => [item.id, item.targetPeerId, item.serviceOrigin || item.url].filter((key): key is string => !!key);
+function removedServiceKeys(): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(REMOVED_SERVICES_KEY) || '[]');
+    return Array.isArray(value) ? value.filter((key): key is string => typeof key === 'string') : [];
+  } catch { return []; }
+}
 export interface ServiceDirectoryBridge {
   getServiceConnection?(): Promise<(ServiceConnection & { invitation?: string }) | null>;
   serviceConnections?(): Promise<ServiceConnection[]>;
@@ -99,13 +107,31 @@ export async function saveServiceConnection(input: ServiceConnection): Promise<S
   if (bridge?.saveServiceConnection) return bridge.saveServiceConnection(item);
   const current = readBrowserServices();
   const existing = current.find(record => record.id === item.id || sameService(record, item));
+  const restoredKeys = new Set([...connectionKeys(item), ...(existing ? connectionKeys(existing) : [])]);
+  localStorage.setItem(REMOVED_SERVICES_KEY, JSON.stringify(removedServiceKeys().filter(key => !restoredKeys.has(key))));
   const next = mergeServiceConnections([...current.filter(record => record !== existing), { ...existing, ...item, id: existing?.id || item.id }]);
   writeBrowserServices(next); return next;
+}
+/** Background reconnects may update metadata but cannot undo an explicit removal
+ * from another workspace. Native and browser directories honor the same rule. */
+export async function rememberServiceConnection(input: ServiceConnection): Promise<ServiceConnection[]> {
+  const item = parseSavedService(input);
+  if (!item) throw new Error('服务地址无效。');
+  const bridge = nativeBridge();
+  if (bridge?.importServiceConnection) return bridge.importServiceConnection(item);
+  if (bridge?.serviceConnections) {
+    const current = await bridge.serviceConnections();
+    return current.some(existing => sameService(existing, item)) ? saveServiceConnection(item) : current;
+  }
+  return connectionKeys(item).some(key => removedServiceKeys().includes(key)) ? readBrowserServices() : saveServiceConnection(item);
 }
 export async function removeServiceConnection(id: string): Promise<ServiceConnection[]> {
   const bridge = nativeBridge();
   if (bridge?.removeServiceConnection) return bridge.removeServiceConnection(id);
-  const next = readBrowserServices().filter(item => item.id !== id);
+  const current = readBrowserServices();
+  const removed = current.find(item => item.id === id);
+  if (removed) localStorage.setItem(REMOVED_SERVICES_KEY, JSON.stringify([...new Set([...removedServiceKeys(), ...connectionKeys(removed)])].slice(-768)));
+  const next = current.filter(item => item.id !== id);
   writeBrowserServices(next); return next;
 }
 export function observeServiceConnections(listener: () => void): () => void {

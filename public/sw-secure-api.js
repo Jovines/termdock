@@ -54,9 +54,15 @@
     // No arbitrary "first matching window" fallback: another tab may access a different target.
     const source = event.clientId ? await self.clients.get(event.clientId) : undefined;
     if (!source || source.type !== 'window' || new URL(source.url).origin !== self.location.origin) return denied();
-    const binding = source.frameType === 'top-level' ? undefined : frameBindings.get(source.id);
-    const client = source.frameType === 'top-level' ? source : binding ? await self.clients.get(binding.ownerId) : undefined;
-    if (!client || client.frameType !== 'top-level' || new URL(client.url).origin !== self.location.origin) {
+    const isApplication = client => {
+      if (!client || new URL(client.url).origin !== self.location.origin) return false;
+      const url = new URL(client.url);
+      return client.frameType === 'top-level' || (url.pathname === '/workspace.html'
+        && /^12D3KooW[1-9A-HJ-NP-Za-km-z]{44}$/.test(url.searchParams.get('termdock-workspace') || ''));
+    };
+    const binding = isApplication(source) ? undefined : frameBindings.get(source.id);
+    const client = isApplication(source) ? source : binding ? await self.clients.get(binding.ownerId) : undefined;
+    if (!isApplication(client)) {
       frameBindings.delete(source.id); return denied();
     }
     if (binding && (!['GET', 'HEAD'].includes(event.request.method) || !canonicalPath(new URL(event.request.url).pathname)?.startsWith(binding.previewPrefix))) return denied();
@@ -91,7 +97,7 @@
       const url = new URL(request.url);
       const headPromise = wait();
       client.postMessage({ type: 'termdock-secure-fetch', path: url.pathname + url.search,
-        method: request.method, headers, body, expectedTargetPeerId: binding?.targetPeerId, previewPrefix: binding?.previewPrefix }, [channel.port2, ...(body ? [body] : [])]);
+        method: request.method, headers, body, expectedTargetPeerId: binding?.targetPeerId || new URL(client.url).searchParams.get('termdock-workspace'), previewPrefix: binding?.previewPrefix }, [channel.port2, ...(body ? [body] : [])]);
       const head = await headPromise;
       if (head?.type !== 'head' || !Number.isInteger(head.status)) throw new Error('Invalid bridge header');
       if (event.resultingClientId && request.mode === 'navigate' && typeof head.targetPeerId === 'string') {

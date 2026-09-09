@@ -84,12 +84,13 @@ async function reportNotificationClick(stage, traceId, data = {}) {
 const NOTIFICATION_TARGET_CACHE = 'termdock-notification-target-v1';
 const NOTIFICATION_TARGET_KEY = '/__termdock-notification-target';
 
-async function storeNotificationTarget(sessionId, traceId) {
+async function storeNotificationTarget(sessionId, traceId, targetPeerId) {
   if (!sessionId || typeof caches === 'undefined') return false;
   try {
     const cache = await caches.open(NOTIFICATION_TARGET_CACHE);
     await cache.put(NOTIFICATION_TARGET_KEY, new Response(JSON.stringify({
       sessionId,
+      targetPeerId,
       traceId,
       clickedAt: Date.now(),
     }), { headers: { 'Content-Type': 'application/json' } }));
@@ -109,7 +110,7 @@ async function clearStoredNotificationTarget() {
   }
 }
 
-function requestFocusAcknowledgement(client, sessionId) {
+function requestFocusAcknowledgement(client, sessionId, targetPeerId) {
   return new Promise((resolve) => {
     const channel = new MessageChannel();
     let settled = false;
@@ -126,7 +127,7 @@ function requestFocusAcknowledgement(client, sessionId) {
     };
     try {
       client.postMessage(
-        { type: 'termdock:focus-session', sessionId },
+        { type: 'termdock:focus-session', sessionId, targetPeerId },
         [channel.port2],
       );
     } catch {
@@ -148,7 +149,7 @@ self.addEventListener('notificationclick', (event) => {
       url: data.url || null,
       tag: event.notification.tag || null,
     });
-    const targetStored = await storeNotificationTarget(data.sessionId, traceId);
+    const targetStored = await storeNotificationTarget(data.sessionId, traceId, data.targetPeerId);
     await reportNotificationClick('sw-target-stored', traceId, { stored: targetStored });
 
     // Badge cleanup is strictly best-effort. iOS may expose setAppBadge while
@@ -187,12 +188,12 @@ self.addEventListener('notificationclick', (event) => {
     // 第二个页面），而由冷启动页从 Cache Storage 消费持久化的目标。
     for (const client of clients) {
       const clientUrl = new URL(client.url);
-      if (clientUrl.origin === self.location.origin && 'focus' in client) {
+      if (clientUrl.origin === self.location.origin && client.frameType === 'top-level' && 'focus' in client) {
         // Queue the requested session before focus emits the page's resume
         // event. This lets the connection scheduler promote the notification
         // target instead of briefly reconnecting the previously active tab.
         const acknowledgement = data.sessionId && 'postMessage' in client
-          ? requestFocusAcknowledgement(client, data.sessionId)
+          ? requestFocusAcknowledgement(client, data.sessionId, data.targetPeerId)
           : Promise.resolve(false);
         await client.focus();
         const acknowledged = await acknowledgement;
@@ -209,10 +210,11 @@ self.addEventListener('notificationclick', (event) => {
 
     // 无已有窗口：打开新窗口并标记 _notif=1，前端检测到有其他实例在场时自动关闭。
     if (self.clients.openWindow) {
-      const targetUrl = new URL(data.url || '/', self.location.origin);
+      const targetUrl = new URL(typeof data.targetPeerId === 'string' ? '/' : data.url || '/', self.location.origin);
       if (data.sessionId) {
         targetUrl.searchParams.set('session', data.sessionId);
       }
+      if (typeof data.targetPeerId === 'string') targetUrl.searchParams.set('service', data.targetPeerId);
       targetUrl.searchParams.set('_notif', '1');
       targetUrl.searchParams.set('_notifTrace', traceId);
       const openedClient = await self.clients.openWindow(targetUrl.href);

@@ -1,3 +1,4 @@
+import { isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../../services/workspaceHost';
 import { scheduleInteractionIdle } from '../../utils/interactionIdle';
 import { readTerminalSnapshot, writeTerminalSnapshot } from '../../utils/terminalSnapshotCache';
 import { getAppliedTerminalCursor, setTerminalSnapshotCursor } from '../../terminal/api';
@@ -165,7 +166,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isIOS, setIsIOS] = React.useState(false);
   const [isInputFocused, setIsInputFocused] = React.useState(false);
   const [isViewportFocused, setIsViewportFocused] = React.useState(false);
-  const [isDocumentVisible, setIsDocumentVisible] = React.useState(() => typeof document === 'undefined' ? true : !document.hidden);
+  const [isDocumentVisible, setIsDocumentVisible] = React.useState(() => typeof document === 'undefined' ? true : !document.hidden && isWorkspaceActive());
   const [isWindowFocused, setIsWindowFocused] = React.useState(() => typeof document === 'undefined' ? true : document.hasFocus());
   const [isStreamReady, setIsStreamReady] = React.useState(false);
   const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
@@ -586,7 +587,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (typeof window === 'undefined' || typeof document === 'undefined') {
       return;
     }
-    if (!isActiveRef.current || focusSuspendedRef.current || isMobileRef.current || document.hidden) {
+    if (!isActiveRef.current || focusSuspendedRef.current || isMobileRef.current || document.hidden || !isWorkspaceActive()) {
       return;
     }
 
@@ -596,7 +597,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     desktopResumeFocusTimerRef.current = window.setTimeout(() => {
       desktopResumeFocusTimerRef.current = null;
-      if (!isActiveRef.current || focusSuspendedRef.current || isMobileRef.current || document.hidden) {
+      if (!isActiveRef.current || focusSuspendedRef.current || isMobileRef.current || document.hidden || !isWorkspaceActive()) {
         return;
       }
 
@@ -847,7 +848,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // 探测统一由下面的 resumeRequestToken 广播处理，所有 session 走同一条路径。
   React.useEffect(() => {
     const handleVisibility = () => {
-      const visible = !document.hidden;
+      const visible = !document.hidden && isWorkspaceActive();
       setIsDocumentVisible(visible);
       if (visible && isActive) {
         scheduleDesktopResumeFocus('visibility');
@@ -863,11 +864,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
     const handleWindowBlur = () => setIsWindowFocused(false);
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener(WORKSPACE_VISIBILITY_EVENT, handleVisibility);
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('focus', handleWindowFocus);
     window.addEventListener('blur', handleWindowBlur);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener(WORKSPACE_VISIBILITY_EVENT, handleVisibility);
       window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('blur', handleWindowBlur);

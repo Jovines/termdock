@@ -1,4 +1,5 @@
-import { listServiceConnections, normalizeServiceAddress, type ServiceConnection } from '../services/serviceDirectory';
+import { LoaderCircle, Terminal } from 'lucide-react';
+import { listServiceConnections, saveServiceConnection, normalizeServiceAddress, type ServiceConnection } from '../services/serviceDirectory';
 import { defaultDeviceName } from './deviceName';
 import { useEffect, useState, type ReactNode } from 'react';
 import FederationAccess, { type FederationGrant, type FederationInviteInput } from '../../components/FederationAccess';
@@ -8,6 +9,11 @@ import { SessionAccessView } from './SessionAccessView';
 import { LoginScreen } from '../components/auth/LoginScreen';
 import { OPEN_SERVICE_ACCESS_EVENT } from './accessEvents';
 import { DeviceAuthorizationRequired, readDeviceAuthorization } from './deviceAuthorization';
+import { IS_WORKSPACE_DOCUMENT } from './clientScope';
+import { ServiceSwitcher, OPEN_SAVED_SERVICE_EVENT } from '../components/ServiceSwitcher';
+import { activateServiceWorkspace, getWorkspaceHost, isWorkspaceActive, reportWorkspace, workspaceKey, WORKSPACE_VISIBILITY_EVENT, WORKSPACE_ACTIVATE_EVENT } from '../services/workspaceHost';
+import { useSidebarStore } from '../stores/useSidebarStore';
+
 
 // Keep the invitation in memory and remove its secret from browser history immediately.
 const initialInvitation = (() => {
@@ -29,6 +35,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(!!initialInvitation);
   const [checking, setChecking] = useState(!initialInvitation);
   const [error, setError] = useState(false);
+  const [connectionMessage, setConnectionMessage] = useState('正在连接服务…');
   const [grants, setGrants] = useState<FederationGrant[]>([]);
   const [sessions, setSessions] = useState<{ sessionId: string; name: string }[]>([]);
   const [fullService, setFullService] = useState(false);
@@ -53,22 +60,31 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     window.addEventListener('termdock:open-remote-session', handler);
     return () => window.removeEventListener('termdock:open-remote-session', handler);
   }, []);
-  const readPermissions = async () => {
+  const readPermissions = async (timeoutMs = 5000) => {
     const client = await getActiveClient();
-    const permissions = await readDeviceAuthorization(client);
+    const permissions = await readDeviceAuthorization(client, { timeoutMs });
     void client.request({ type: 'device-name', name: defaultDeviceName(), onlyIfMissing: true }).catch(() => {});
     setFullService(permissions.fullService);
     setCanManage(permissions.canManage);
     setReady(true); setChecking(false); setError(false);
-    void preferDirectConnection();
+    const selected = savedConnection();
+    reportWorkspace({ phase: 'ready', ...(selected ? { service: { ...selected, id: selected.targetPeerId, label: selected.serviceName || location.host } } : {}) });
+    if (isWorkspaceActive()) void preferDirectConnection();
   };
   useEffect(() => {
-    let stopped = false, pending = false;
+    let stopped = false, pending = false, failures = 0;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const verify = async () => {
       if (stopped || pending) return;
+      if (failures && (document.hidden || !isWorkspaceActive())) return;
+      if (!navigator.onLine) {
+        setChecking(true); setError(true); setConnectionMessage('网络已断开，恢复后会自动连接'); reportWorkspace({ phase: 'offline' }); return;
+      }
       pending = true; clearTimeout(retry);
+      const started = performance.now();
+      const previous = currentSecureClient();
       try {
+        if (IS_WORKSPACE_DOCUMENT && !savedConnection()) throw new Error('工作区的服务记录已移除，请重新添加服务。');
         nativeConnection ??= window.termdockDesktop?.getServiceConnection?.();
         const native = await nativeConnection;
         if (native?.invitation) { setIncomingInvitation(parseInviteLink(native.invitation)); setOpen(true); setChecking(false); return; }
@@ -83,27 +99,38 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
           await localPairing;
           if (!savedConnection()) { if (!stopped) { setReady(false); setChecking(false); setError(false); } return; }
         }
-        if (!stopped) await readPermissions();
+        if (!stopped) await readPermissions(previous?.canSwitchTransport ? 2500 : 5000);
+        failures = 0;
+        performance.measure('termdock:connection-ready', { start: started, end: performance.now() });
       } catch (failure) {
         if (stopped) return;
         if (failure instanceof DeviceAuthorizationRequired) {
-          setReady(false); setChecking(false); setOpen(false); setError(false);
+          setReady(false); setChecking(false); setOpen(false); setError(false); reportWorkspace({ phase: 'login' });
         } else {
           // Keep an already mounted terminal intact across sleep, Wi-Fi changes,
           // or a server restart. A socket is not the device's authorization.
+          // A failed permission read can leave a half-open socket looking live.
+          // Retire only that transport, never a newer replacement.
+          if (previous && currentSecureClient() === previous) invalidateSecureTransport();
           setError(true); setChecking(true); localPairing = undefined;
-          retry = setTimeout(() => void verify(), 3000);
+          setConnectionMessage('连接暂未恢复，正在重试…');
+          reportWorkspace({ phase: 'reconnecting' });
+          failures++;
+          retry = setTimeout(() => void verify(), Math.min(5000, 300 * 2 ** Math.min(failures - 1, 5)));
+          console.debug('[connection] retry', { elapsedMs: Math.round(performance.now() - started), attempt: failures, reason: failure instanceof Error ? failure.message : 'unknown' });
         }
       } finally { pending = false; }
     };
-    let hiddenAt = document.visibilityState === 'hidden' ? Date.now() : undefined;
-    const visible = () => { if (document.visibilityState === 'visible') void verify(); };
-    const visibilityChanged = () => {
-      if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
-      if (hiddenAt !== undefined && Date.now() - hiddenAt >= 15_000) invalidateSecureTransport();
-      hiddenAt = undefined; visible();
-    };
-    const online = () => { invalidateSecureTransport(); visible(); };
+    // Visibility and network events request a bounded health check. They do not
+    // tear down a healthy channel or interrupt an upload simply for being old.
+    const visible = () => { if (document.visibilityState === 'visible' && isWorkspaceActive()) void verify(); };
+    const visibilityChanged = visible;
+    const online = () => { failures = 0; visible(); };
+    const activate = () => { useSidebarStore.getState().openLeft(); visible(); };
+    window.addEventListener(WORKSPACE_VISIBILITY_EVENT, visible);
+    window.addEventListener(WORKSPACE_ACTIVATE_EVENT, activate);
+    if (IS_WORKSPACE_DOCUMENT) useSidebarStore.getState().openLeft();
+    getWorkspaceHost()?.attach(workspaceKey(), window);
     void verify();
     document.addEventListener('visibilitychange', visibilityChanged);
     window.addEventListener('focus', visible);
@@ -115,6 +142,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     const timer = setInterval(visible, 30_000);
     return () => {
       stopped = true; clearTimeout(retry); clearInterval(timer);
+      window.removeEventListener(WORKSPACE_VISIBILITY_EVENT, visible);
+      window.removeEventListener(WORKSPACE_ACTIVATE_EVENT, activate);
       document.removeEventListener('visibilitychange', visibilityChanged);
       window.removeEventListener('focus', visible);
       window.removeEventListener('online', online);
@@ -145,12 +174,16 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     finally { setLoadingAccess(false); }
   };
   useEffect(() => {
-    if (!ready) return;
-    const show = () => { setOpen(true); void refresh(); };
+    const show = () => { setOpen(true); if (ready) void refresh(); };
     window.addEventListener(OPEN_SERVICE_ACCESS_EVENT, show);
     return () => window.removeEventListener(OPEN_SERVICE_ACCESS_EVENT, show);
   }, [ready, canManage]);
   const connect = async (intent: ConnectionIntent) => {
+    if (!intent.pairingCode && !intent.routeCode && savedConnection()?.targetPeerId !== intent.targetPeerId && getWorkspaceHost()) {
+      const service = { ...intent, id: intent.targetPeerId, label: intent.serviceName || new URL(intent.serviceOrigin || intent.url).host };
+      await saveServiceConnection(service);
+      if (activateServiceWorkspace(service)) { setOpen(false); return; }
+    }
     await connectDevice(intent);
     if (nativeConnection) nativeConnection = nativeConnection.then(value => value ? { ...value, invitation: undefined } : null);
     setIncomingInvitation(undefined);
@@ -165,10 +198,20 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       if (!result.ok) throw new Error(result.error || '暂时无法打开这台服务。');
       setOpen(false); return;
     }
+    if (activateServiceWorkspace(service)) { setOpen(false); return; }
     if (service.targetPeerId) try { await connect({ ...service, targetPeerId: service.targetPeerId, serviceName: service.label }); return; }
     catch (error) { if (!(error instanceof DeviceAuthorizationRequired)) throw error; }
     return connectServiceAddress(service.serviceOrigin || service.url);
   };
+  useEffect(() => {
+    const openSaved = (event: Event) => {
+      void openService((event as CustomEvent<ServiceConnection>).detail).catch(failure => {
+        setOpen(true); setAccessError(failure instanceof Error ? failure.message : '暂时无法打开服务');
+      });
+    };
+    window.addEventListener(OPEN_SAVED_SERVICE_EVENT, openSaved);
+    return () => window.removeEventListener(OPEN_SAVED_SERVICE_EVENT, openSaved);
+  });
   const addService = async (input: string, password?: string) => {
     if (input.includes('#termdock-invite=')) {
       const connection = parseInviteLink(input);
@@ -209,7 +252,20 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     return { url: createInviteLink({ v: 1, serviceId: client.targetPeerId, code: result.code, entryUrl: backup?.url || targetUrl, serviceUrl: targetUrl, name: serviceName, entryServiceId: backup?.targetPeerId, routeCode: backup?.routeCode }), expiresAt: result.expiresAt };
   };
   return <>
-    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking ? <div className="termdock-boot" role="status"><div className="termdock-boot-spinner" aria-hidden="true" /><span>{error ? '正在重新连接，登录信息已保留…' : 'Loading Termdock'}</span>{error && <button type="button" className="mt-4 rounded-lg border border-border px-4 py-2 text-sm text-foreground" onClick={() => setOpen(true)}>管理服务</button>}</div> : <LoginScreen onLoginSuccess={() => { void readPermissions().catch(() => setError(true)); }} />}
+    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
+      <div className="flex w-full max-w-xs flex-col items-center text-center">
+        <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-2 text-muted-foreground" aria-hidden="true">
+          <Terminal size={24} strokeWidth={1.5} />
+        </div>
+        <h1 className="max-w-full truncate text-base font-medium tracking-tight" title={serviceName}>{serviceName}</h1>
+        <div role="status" className="mt-2 flex max-w-full items-center justify-center gap-2 text-xs leading-5 text-muted-foreground">
+          {!error && <LoaderCircle size={13} className="shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
+          <span>{connectionMessage}</span>
+        </div>
+        {error && <p className="mt-2 text-xs leading-5 text-muted-foreground">登录信息已保留</p>}
+        <button type="button" className="mt-6 min-h-11 rounded-lg px-4 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setOpen(true)}>管理服务</button>
+      </div>
+    </div> : <><div className="fixed left-0 right-0 top-[var(--safe-top-inset)] z-chrome sm:right-auto sm:w-72"><ServiceSwitcher /></div><LoginScreen onLoginSuccess={() => { void readPermissions().catch(() => setError(true)); }} /></>}
     {open && <FederationAccess onConnect={connect} onClose={() => setOpen(false)} onAddService={addService} onOpenService={openService} onConnectWithPassword={async (connection, password) => { await authenticateKnownConnection(connection, password); await readPermissions(); setOpen(false); }} paired={ready || !!savedConnection()} initialInvite={incomingInvitation} currentServiceName={serviceName} currentServiceId={currentSecureClient()?.targetPeerId || savedConnection()?.targetPeerId} currentServiceOrigin={savedConnection()?.serviceOrigin} currentIdentity={deviceIdentity} grants={grants} sessions={sessions} loading={loadingAccess} loadError={accessError} onRetry={() => void refresh()}
       onRename={async (subjectId, name) => { await (await getActiveClient()).request({ type: 'device-name', subjectId, name }); await refresh(); }}
       hasBackup={!!savedConnection() && connectionRoutes(savedConnection()!).length > 0} onCreateInvite={canManage ? invite : undefined}

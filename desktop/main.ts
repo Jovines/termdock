@@ -145,6 +145,7 @@ let mainWindow: BrowserWindow | null = null;
 let startupRestoreActive = false;
 let startupProgressMessage = '正在启动 Termdock Desktop…';
 const serviceWindows = new Map<string, BrowserWindow>();
+const serviceWindowPeers = new WeakMap<BrowserWindow, string>();
 const windowServiceOrigins = new WeakMap<BrowserWindow, string>();
 const restorableServiceWindows = new WeakSet<BrowserWindow>();
 const reportedServiceActivity = new Map<string, ServiceActivityCount>();
@@ -211,6 +212,7 @@ function serviceActivitySnapshot(targetWindow: BrowserWindow): DesktopServiceAct
     );
     return [{
       origin,
+      targetPeerId: serviceWindowPeers.get(window),
       label: serviceLabel(origin),
       current: origin === currentOrigin,
       focused: window.isFocused(),
@@ -243,6 +245,7 @@ function allServiceActivity(): DesktopServiceActivity[] {
     if (window.isDestroyed()) return [];
     return [{
       origin,
+      targetPeerId: serviceWindowPeers.get(window),
       label: serviceLabel(origin),
       current: window === lastFocusedServiceWindow,
       focused: window === focused,
@@ -1587,8 +1590,17 @@ async function connectWindow(
   if (!probe.ok) return probe;
   const parsed = new URL(probe.url);
   const key = parsed.origin;
-  const existingWindow = serviceWindows.get(key);
+  const existingWindow = serviceWindows.get(key) ?? (known?.targetPeerId && !options.invitation
+    ? [...serviceWindows.values()].find(window => !window.isDestroyed() && serviceWindowPeers.get(window) === known.targetPeerId)
+    : undefined);
   if (existingWindow && !existingWindow.isDestroyed()) {
+    const existingOrigin = windowServiceOrigins.get(existingWindow);
+    // An alternate address is still the same service. Keep the existing
+    // renderer and its storage partition instead of navigating it across origins.
+    if (existingOrigin && existingOrigin !== key) {
+      if (options.focus !== false) { mainWindow?.hide(); showAndFocusWindow(existingWindow); }
+      return { ok: true, url: existingOrigin };
+    }
     if (options.persist !== false) {
       const config = readDesktopConfig();
       if (options.updateLastConnection !== false) config.lastConnectionUrl = probe.url;
@@ -1616,6 +1628,7 @@ async function connectWindow(
   }
 
   const workspaceWindow = createDesktopWindow({ serviceOrigin: key, label: serviceLabel(probe.url) });
+  if (known?.targetPeerId) serviceWindowPeers.set(workspaceWindow, known.targetPeerId);
   await prepareBundledFrontend(workspaceWindow.webContents.session, key, () => path.join(runtimePaths().serverRoot, 'dist', 'client'));
   if (options.invitation) pendingServiceInvitations.set(workspaceWindow, options.invitation);
   serviceWindows.set(key, workspaceWindow);
@@ -1998,6 +2011,11 @@ function installIpcHandlers(): void {
     return window;
   };
   const directoryChanged = () => {
+    const connections = readDesktopConfig().connections;
+    for (const [origin, window] of serviceWindows) {
+      const connection = connections.find(item => (item.serviceOrigin || item.url) === origin);
+      if (connection?.targetPeerId) serviceWindowPeers.set(window, connection.targetPeerId);
+    }
     installMenu();
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('desktop:service-connections-changed');
     broadcastServiceActivity();

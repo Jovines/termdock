@@ -14,10 +14,19 @@ import { I18nProvider } from './lib/i18n';
 import { PwaUpdateNotice } from './lib/components/PwaUpdateNotice';
 import { setupPwaUpdateReload } from './lib/utils/pwaUpdate';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
+import { ServiceWorkspaceHost } from './lib/services/ServiceWorkspaceHost';
+import { installWorkspaceHost } from './lib/services/workspaceHost';
+import { savedConnection } from './lib/federation/browserIntegration';
 
 syncInitialViewportCssVars();
 installEncryptedFetch();
-setupPwaUpdateReload();
+if (window.parent === window) setupPwaUpdateReload();
+const initialService = savedConnection();
+// Fetch the renderer while an existing device establishes its encrypted channel.
+if (initialService) void import('./App').catch(() => {});
+if (!new URLSearchParams(location.search).has('dag-playground') && !new URLSearchParams(location.search).has('diff-lab') && !new URLSearchParams(location.search).has('diff-review-lab')) {
+  installWorkspaceHost(initialService ? { ...initialService, id: initialService.targetPeerId, label: initialService.serviceName || location.host } : undefined);
+}
 
 try {
   const storedTheme = JSON.parse(window.localStorage.getItem('termdock-color-theme') || 'null') as unknown;
@@ -32,7 +41,7 @@ try {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <I18nProvider>
-      <PwaUpdateNotice />
+      {window.parent === window && <PwaUpdateNotice />}
       <ErrorBoundary>
         <Suspense fallback={<div className="termdock-boot" role="status">Loading Termdock</div>}>
         {(() => {
@@ -40,7 +49,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           if (params.get('dag-playground') === '1') return <DagPlayground />;
           if (params.get('diff-review-lab') === '1') return <DiffReviewLab />;
           if (params.get('diff-lab') === '1') return <DiffLab />;
-          return <SecureAccessGate><App /></SecureAccessGate>;
+          return <ServiceWorkspaceHost><SecureAccessGate><App /></SecureAccessGate></ServiceWorkspaceHost>;
         })()}
       </Suspense>
       </ErrorBoundary>
