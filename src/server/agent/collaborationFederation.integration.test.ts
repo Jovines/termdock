@@ -55,6 +55,25 @@ describe('real stores over the desktop collaboration bridge', () => {
     expect(nodes[1].store.getGroup(result.group.id)).not.toBeNull();
   });
 
+  it('keeps roles keyed to the right members when a local group is promoted and mirrored across services', async () => {
+    const { nodes, bridge } = setup();
+    const original = nodes[0].store.save({ name: 'Original', sessionIds: ['generic', 'second'] });
+    nodes[0].store.setRole({ groupId: original.id, sessionId: 'generic', role: '组长' });
+    nodes[0].store.setRole({ groupId: original.id, sessionId: 'second', role: '执行' });
+    const latest = nodes[0].store.getGroup(original.id)!;
+    await bridge.save(nodes[0].origin, { id: original.id, name: 'Promoted', expectedUpdatedAt: latest.updatedAt,
+      sessionIds: ['generic', 'second', qualifySession(nodes[1].origin, 'generic')] });
+    // Origin A keeps its promoted group under local member ids.
+    const promoted = nodes[0].store.list().find((group) => group.federated)!;
+    expect(promoted.roles).toEqual({ generic: '组长', second: '执行' });
+    // The distant service mirrors the group with keys pointing back at origin A.
+    await bridge.refresh();
+    expect(nodes[1].store.getGroup(promoted.id)?.roles).toEqual({
+      [qualifySession(nodes[0].origin, 'generic')]: '组长',
+      [qualifySession(nodes[0].origin, 'second')]: '执行',
+    });
+  });
+
   it('resumes a large fragmented message after both bridge and recipient restart, without partial or duplicate inbox entries', async () => {
     let time = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => time);
     const { nodes, services, bridge } = setup();

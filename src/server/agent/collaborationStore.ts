@@ -7,11 +7,36 @@ export interface CollaborationGroup {
   id: string;
   name: string;
   sessionIds: string[];
+  /** Per-member role description (定位), keyed by sessionId. Shared within the
+   * group so any member knows who does what; the recipient's own role rides
+   * every delivery shell header. Federated via the group document itself. */
+  roles?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
   federated?: boolean;
   deleted?: boolean;
   remoteSessions?: CollaborationRemoteSession[];
+}
+
+/** Characters that would corrupt a role line injected into the delivery shell
+ * (`你的定位:...`) or smuggle terminal output. Unlike names, roles are plain
+ * prose — 「」 and · are harmless there — so only control sequences are barred. */
+export const COLLAB_ROLE_FORBIDDEN = /[\x00-\x1f\x7f]/;
+export const COLLAB_ROLE_MAX_CHARS = 200;
+
+/** Data/render-safe role: control characters collapse to spaces, whitespace
+ * folds, and the display length is capped with an ellipsis. Applied on write
+ * and again defensively at render time (federated peers may carry junk). */
+export function sanitizeCollaborationRole(role: string, max = COLLAB_ROLE_MAX_CHARS): string {
+  const cleaned = role.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
+}
+
+/** Drop roles whose member has left the group; survivors keep theirs. */
+function pruneRoles(group: CollaborationGroup, sessionIds: string[]): CollaborationGroup {
+  if (!group.roles) return group;
+  const roles = Object.fromEntries(Object.entries(group.roles).filter(([id]) => sessionIds.includes(id)));
+  return Object.keys(roles).length ? { ...group, roles } : { ...group, roles: undefined };
 }
 
 export interface CollaborationRemoteSession {
@@ -111,20 +136,40 @@ export class CollaborationStore {
   save(input: { id?: string; name: string; sessionIds: string[] }): CollaborationGroup {
     const now = Date.now();
     const existing = input.id ? this.document.groups.find((group) => group.id === input.id) : null;
-    const group: CollaborationGroup = {
+    const sessionIds = Array.from(new Set(input.sessionIds.map((id) => id.trim()).filter(Boolean)));
+    const group = pruneRoles({
       ...existing,
-      ...(existing?.remoteSessions ? { remoteSessions: existing.remoteSessions.filter((session) => input.sessionIds.includes(session.sessionId)) } : {}),
+      ...(existing?.remoteSessions ? { remoteSessions: existing.remoteSessions.filter((session) => sessionIds.includes(session.sessionId)) } : {}),
       id: existing?.id ?? crypto.randomUUID(),
       name: input.name.trim(),
-      sessionIds: Array.from(new Set(input.sessionIds.map((id) => id.trim()).filter(Boolean))),
+      sessionIds,
       createdAt: existing?.createdAt ?? now,
       updatedAt: Math.max(now, (existing?.updatedAt ?? 0) + 1),
-    };
+    }, sessionIds);
     this.document.groups = existing
       ? this.document.groups.map((candidate) => candidate.id === group.id ? group : candidate)
       : [...this.document.groups, group];
     this.persist();
     return group;
+  }
+
+  /** Set or clear a member's role (定位). The target may be any group member —
+   * oneself, a peer, or a federated remote session; peers can set each other's
+   * roles. Roles ride the group document into federation and are dropped
+   * together with the member on removal. */
+  setRole(input: { groupId: string; sessionId: string; role: string | null }): CollaborationGroup {
+    const group = this.getGroup(input.groupId);
+    if (!group || group.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
+    if (!group.sessionIds.includes(input.sessionId)) throw new CollaborationError('NOT_A_MEMBER', '该会话不在协作组中，无法设置定位', 400);
+    const role = input.role === null ? null : sanitizeCollaborationRole(input.role);
+    const roles = { ...(group.roles ?? {}) };
+    if (role) roles[input.sessionId] = role;
+    else delete roles[input.sessionId];
+    const updated = { ...group, roles: Object.keys(roles).length ? roles : undefined,
+      updatedAt: Math.max(Date.now(), group.updatedAt + 1) };
+    this.document.groups = this.document.groups.map((candidate) => candidate.id === group.id ? updated : candidate);
+    this.persist();
+    return updated;
   }
 
   remove(id: string): boolean {
@@ -158,9 +203,9 @@ export class CollaborationStore {
       groups: this.document.groups.flatMap((group) => {
         if (group.id === source.id) {
           if (dissolved) return group.federated ? [{ ...group, deleted: true, updatedAt: Math.max(now, group.updatedAt + 1) }] : [];
-          return [{ ...group, sessionIds: sourceIds,
+          return [pruneRoles({ ...group, sessionIds: sourceIds,
             ...(group.remoteSessions ? { remoteSessions: group.remoteSessions.filter((session) => sourceIds.includes(session.sessionId)) } : {}),
-            updatedAt: Math.max(now, group.updatedAt + 1) }];
+            updatedAt: Math.max(now, group.updatedAt + 1) }, sourceIds)];
         }
         return group.id === target.id ? [{ ...group, sessionIds: [...new Set([...group.sessionIds, input.sessionId])], updatedAt: Math.max(now, group.updatedAt + 1) }] : [group];
       }),
@@ -177,7 +222,8 @@ export class CollaborationStore {
     this.document.groups = this.document.groups.flatMap((group) => {
       if (!group.sessionIds.includes(sessionId)) return [group];
       if (dissolvedIds.has(group.id)) return group.federated ? [{ ...group, deleted: true, updatedAt: Math.max(now, group.updatedAt + 1) }] : [];
-      return [{ ...group, sessionIds: group.sessionIds.filter((id) => id !== sessionId), updatedAt: Math.max(now, group.updatedAt + 1) }];
+      const remaining = group.sessionIds.filter((id) => id !== sessionId);
+      return [pruneRoles({ ...group, sessionIds: remaining, updatedAt: Math.max(now, group.updatedAt + 1) }, remaining)];
     });
     this.document.messages = this.document.messages.filter((message) =>
       !dissolvedIds.has(message.groupId)

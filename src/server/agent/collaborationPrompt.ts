@@ -1,4 +1,4 @@
-import type { CollaborationGroup, CollaborationMessage } from './collaborationStore.js';
+import { sanitizeCollaborationRole, type CollaborationGroup, type CollaborationMessage } from './collaborationStore.js';
 
 interface CollaborationPromptSession {
   sessionId: string;
@@ -109,5 +109,13 @@ export function formatCollaborationDelivery(input: {
   // Notes (education + dynamic notices) live inside the shell, after the last
   // message, so the closing rule still marks the end of the delivered block.
   if (!blocks.length) return notes.join('\n');
-  return [SHELL_RULE, shellHeader, '', blocks.join('\n\n'), ...(notes.length ? ['', ...notes] : []), SHELL_RULE].join('\n');
+  // The recipient's own role (定位) rides the shell right under the header,
+  // but only for a single-group delivery — a mixed batch claims no group.
+  const ownRole = groupIds.length === 1
+    ? sanitizeCollaborationRole(groupsById.get(groupIds[0]!)?.roles?.[input.targetSessionId] ?? '')
+    : '';
+  const lines = [SHELL_RULE, shellHeader];
+  if (ownRole) lines.push(`你的定位:${ownRole}`);
+  lines.push('', blocks.join('\n\n'), ...(notes.length ? ['', ...notes] : []), SHELL_RULE);
+  return lines.join('\n');
 }

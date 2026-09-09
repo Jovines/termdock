@@ -78,4 +78,30 @@ describe('collaboration CLI contract', () => {
     expect(fixture_.calls[1][1]).toContain('cursor=first');
     expect(fixture_.calls.every((args) => args[0] === 'GET')).toBe(true);
   });
+  it('parses role set/unset/list with strict arity and trailing words as the role', () => {
+    expect(parseCollaborationCommand(['role', 'set', 'g1', 'p2', '负责', '排版', '与', '发布']))
+      .toMatchObject({ action: 'role', operation: 'set', groupId: 'g1', sessionId: 'p2', role: '负责 排版 与 发布' });
+    expect(parseCollaborationCommand(['role', 'unset', 'g1', 'p2'])).toMatchObject({ action: 'role', operation: 'unset', groupId: 'g1', sessionId: 'p2' });
+    expect(parseCollaborationCommand(['role', 'list', 'g1'])).toMatchObject({ action: 'role', operation: 'list', groupId: 'g1' });
+    for (const argv of [
+      ['role', 'list'], ['role', 'list', 'g1', 'extra'], ['role', 'set', 'g1', 'p2', '  '],
+      ['role', 'set', 'g1'], ['role', 'unset', 'g1', 'p2', 'extra'], ['role', 'unset', 'g1'], ['role', 'bogus', 'g1'],
+    ]) expect(() => parseCollaborationCommand(argv)).toThrow(/role/);
+  });
+  it('executes role set with sanitized text and clears via role null on unset', async () => {
+    const setter = fixture([{ ok: true, group: { id: 'g1', sessionIds: ['p1', 'p2'], roles: { p2: '排版' } } }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['role', 'set', 'g1', 'p2', '负责', '排版', '--text']), { backendSessionId: 'p1' }, setter.io)).toBe(0);
+    expect(setter.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/role'), expect.objectContaining({ group_id: 'g1', session_id: 'p2', role: '负责 排版', backendSessionId: 'p1' })]));
+    expect(setter.output).toEqual(['定位已设置：p2 = 排版']);
+    const unseter = fixture([{ ok: true, group: { id: 'g1', sessionIds: ['p1', 'p2'], roles: {} } }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['role', 'unset', 'g1', 'p2']), {}, unseter.io)).toBe(0);
+    expect(unseter.calls[0][2]).toMatchObject({ group_id: 'g1', session_id: 'p2', role: null });
+  });
+  it('lists the full member role table with unset members marked in text mode', async () => {
+    const lister = fixture([{ ok: true, group: { id: 'g1', sessionIds: ['p1', 'p2'], roles: { p2: '排版' } } }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['role', 'list', 'g1', '--text']), {}, lister.io)).toBe(0);
+    expect(lister.calls[0][0]).toBe('GET');
+    expect(lister.calls[0][1]).toContain('/role?group=g1');
+    expect(lister.output).toEqual(['定位表（组内成员 2）：', '- p1（未设置）', '- p2：排版']);
+  });
 });

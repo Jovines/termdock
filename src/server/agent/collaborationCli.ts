@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'capabilities' | 'help';
-  target?: string; message?: string; groupId?: string; sessionId?: string; agentSlug?: string; name?: string; cwd?: string; task?: string;
+  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'capabilities' | 'help';
+  target?: string; message?: string; groupId?: string; sessionId?: string; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
   operation?: string;
@@ -31,6 +31,11 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   cursor commit <token> --consumer <name> (commit after processing the page)
   add|remove <group-id> <session-id>
   spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]
+  role list <group-id>
+  role set <group-id> <session-id> <role…> (trailing words join as the role)
+  role unset <group-id> <session-id>
+    (roles are shared within the group; members set each other's, your own
+    rides the delivery shell header)
   --json (default) | --jsonl | --text
 Exit codes: 0 requested condition met; 1 invalid request/network error;
 2 wait timeout (message may still deliver); 3 failed/expired.
@@ -59,7 +64,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     } else positional.push(value);
   }
   const action = (options.help ? 'help' : positional.shift() ?? 'status') as CollaborationCommand['action'];
-  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
   if (options['wait-until'] && !['queued', 'delivered', 'read'].includes(String(options['wait-until']))) throw new Error('wait-until must be queued, delivered or read');
@@ -81,6 +86,19 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     if (action === 'spawn') command.agentSlug = positional.shift(); else command.sessionId = positional.shift();
     if (!command.groupId || !(command.agentSlug || command.sessionId) || positional.length) throw new Error(`${action} requires two identifiers`);
     command.name = options.name as string; command.cwd = options.cwd as string; command.task = options.task as string;
+  } else if (action === 'role') {
+    command.operation = positional.shift();
+    command.groupId = positional.shift();
+    if (command.operation === 'list') {
+      if (!command.groupId || positional.length) throw new Error('Usage: td collab role list <group-id>');
+    } else if (command.operation === 'set') {
+      command.sessionId = positional.shift();
+      command.role = positional.join(' ');
+      if (!command.groupId || !command.sessionId || !command.role?.trim()) throw new Error('Usage: td collab role set <group-id> <session-id> <role…>');
+    } else if (command.operation === 'unset') {
+      command.sessionId = positional.shift();
+      if (!command.groupId || !command.sessionId || positional.length) throw new Error('Usage: td collab role unset <group-id> <session-id>');
+    } else throw new Error('Usage: td collab role list|set|unset (see td collab --help)');
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help']);
   const byAction: Record<string, string[]> = {
@@ -90,7 +108,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     inbox: ['unread', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
     message: ['receipt-only', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
-    add: [], remove: [], spawn: ['name', 'cwd', 'task'],
+    add: [], remove: [], spawn: ['name', 'cwd', 'task'], role: [],
   };
   for (const option of byAction[action]) allowed.add(option);
   for (const option of Object.keys(options)) if (!allowed.has(option)) throw new Error(`--${option} is not supported by ${action}`);
@@ -193,6 +211,24 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       // CLI receipts stay small even when the message is a large evidence package.
       delete receipt.messages;
       receipt.idempotency_key = idempotencyKey;
+    } else if (command.action === 'role') {
+      if (command.operation === 'list') {
+        const body = await request('GET', `/role?group=${encodeURIComponent(command.groupId!)}`);
+        if (o.text) {
+          const group = body.group as { name?: string; sessionIds: string[]; roles?: Record<string, string> };
+          io.write(`定位表（组内成员 ${group.sessionIds.length}）：`);
+          for (const id of group.sessionIds) io.write(`- ${id}${group.roles?.[id] ? `：${group.roles[id]}` : '（未设置）'}`);
+        } else output(body);
+        return 0;
+      }
+      const body = await request('POST', '/role', { group_id: command.groupId, session_id: command.sessionId,
+        role: command.operation === 'unset' ? null : command.role });
+      if (o.text) {
+        io.write(command.operation === 'set'
+          ? `定位已设置：${command.sessionId} = ${(body.group as { roles?: Record<string, string> }).roles?.[command.sessionId!] ?? ''}`
+          : `定位已清除：${command.sessionId}`);
+      } else output(body);
+      return 0;
     } else {
       const body = command.action === 'spawn' ? { groupId: command.groupId, agentSlug: command.agentSlug, name: command.name, cwd: command.cwd, task: command.task }
         : { groupId: command.groupId, targetSessionId: command.sessionId, action: command.action };

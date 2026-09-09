@@ -159,6 +159,36 @@ describe('formatCollaborationDelivery', () => {
     expect(render([message({ task })])).toContain(JSON.stringify(task));
   });
 
+  it('rides the recipient role under the header of a single-group delivery', () => {
+    const prompt = render([message({ fromSessionId: 'coder-id' })], {
+      groups: [{ ...group, roles: { 'reviewer-id': '最终验收', 'coder-id': '开发与自测' } }],
+    });
+    const lines = prompt.split('\n');
+    expect(lines[0]).toBe(RULE);
+    expect(lines[1]).toBe('协作消息 · 组「发布组」');
+    expect(lines[2]).toBe('你的定位:最终验收');
+    expect(prompt).not.toContain('开发与自测');
+    expect(prompt).not.toContain('coder-id:');
+  });
+
+  it('never injects a role line when unset or the batch spans groups', () => {
+    expect(render([message({})])).not.toContain('你的定位:');
+    const cross = render([message({ groupId: 'one' }), message({ id: 'two', groupId: 'two' })], {
+      groups: [
+        { ...group, id: 'one', roles: { 'reviewer-id': '验收' } },
+        { ...group, id: 'two' },
+      ],
+    });
+    expect(cross).not.toContain('你的定位:');
+    expect(cross.split(RULE).length).toBe(3);
+  });
+
+  it('defensively sanitizes hostile role text that slipped into storage', () => {
+    const prompt = render([message({})], { groups: [{ ...group, roles: { 'reviewer-id': '第一行\n第二行\x1b[31m 尾部' } }] });
+    expect(prompt).toContain('你的定位:第一行 第二行 [31m 尾部');
+    for (const line of prompt.split('\n')) expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
+  });
+
   it('keeps offline delivery and relay requirements explicit', () => {
     const prompt = render([], {
       targetSessionId: 'local',

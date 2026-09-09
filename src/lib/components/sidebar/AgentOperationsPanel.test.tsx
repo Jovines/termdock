@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
   sendCollaborationMessage: vi.fn(),
   spawnCollaborationAgent: vi.fn(),
   setAgentAutomationEnabled: vi.fn().mockResolvedValue({ automation: {} }),
+  setCollaborationMemberRole: vi.fn(),
 }));
 
 vi.mock('../../terminal/api', () => ({
@@ -41,6 +42,7 @@ vi.mock('../../terminal/api', () => ({
   sendCollaborationMessage: apiMocks.sendCollaborationMessage,
   spawnCollaborationAgent: apiMocks.spawnCollaborationAgent,
   setAgentAutomationEnabled: apiMocks.setAgentAutomationEnabled,
+  setCollaborationMemberRole: apiMocks.setCollaborationMemberRole,
   searchTerminalSessions: apiMocks.searchTerminalSessions,
 }));
 
@@ -54,6 +56,7 @@ afterEach(() => {
   apiMocks.saveCollaborationGroup.mockReset();
   apiMocks.sendCollaborationMessage.mockReset();
   apiMocks.spawnCollaborationAgent.mockReset();
+  apiMocks.setCollaborationMemberRole.mockReset();
   apiMocks.uploadFiles.mockReset();
   apiMocks.setAgentAutomationEnabled.mockReset().mockResolvedValue({ automation: {} });
   apiMocks.getAgentLaunchers.mockReset().mockResolvedValue([
@@ -271,6 +274,60 @@ describe('AgentOperationsPanel', () => {
 
     expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({ id: 'group-one', name: '发布组', sessionIds: ['one', 'two', 'three'], expectedUpdatedAt: 1 });
     expect(await screen.findByText('“发布组”成员已更新，共 3 个会话')).toBeTruthy();
+  });
+
+  it('shows each member role next to its roster card entry', async () => {
+    const group = { id: 'group-one', name: '发布组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1,
+      roles: { one: '负责开发', two: '最终验收' } };
+    const sessions = [
+      { sessionId: 'one', backendSessionId: 'backend-one', name: '开发', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'working', capability: 'agent', currentTask: '写代码', updatedAt: 1 },
+      { sessionId: 'two', backendSessionId: 'backend-two', name: '测试', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'idle', capability: 'agent', currentTask: '跑测试', updatedAt: 1 },
+    ];
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    expect(await screen.findByText('定位:负责开发')).toBeTruthy();
+    expect(screen.getByText('定位:最终验收')).toBeTruthy();
+    expect(screen.getByText('跑测试')).toBeTruthy();
+  });
+
+  it('saves an edited member role and clears it when emptied', async () => {
+    const group = { id: 'group-one', name: '发布组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1,
+      roles: { one: '开发与自测', two: '跑测试' } };
+    const sessions = [
+      { sessionId: 'one', backendSessionId: 'backend-one', name: '开发', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'working', capability: 'agent', currentTask: '写代码', updatedAt: 1 },
+      { sessionId: 'two', backendSessionId: 'backend-two', name: '测试', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'idle', capability: 'agent', currentTask: '跑测试', updatedAt: 1 },
+    ];
+    apiMocks.listCollaborationGroups
+      .mockResolvedValueOnce({ groups: [group], sessions })
+      .mockResolvedValueOnce({ groups: [{ ...group, roles: { one: '负责渲染', two: '跑测试' } }], sessions })
+      .mockResolvedValueOnce({ groups: [{ ...group, roles: { two: '跑测试' } }], sessions });
+    apiMocks.setCollaborationMemberRole.mockResolvedValue({ group: { ...group, roles: { one: '负责渲染', two: '跑测试' } } });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    await user.click(await screen.findByRole('button', { name: /管理成员/ }));
+
+    // The draft pre-fills from the stored role and saves through the API.
+    const input = screen.getByLabelText('开发 的定位') as HTMLInputElement;
+    expect(input.value).toBe('开发与自测');
+    await user.clear(input);
+    await user.type(input, '负责渲染');
+    await user.click(screen.getByRole('button', { name: '保存 开发 的定位' }));
+    expect(apiMocks.setCollaborationMemberRole).toHaveBeenCalledWith('group-one', 'one', '负责渲染');
+    expect(await screen.findByText('定位已保存，该成员每次收到消息都会看到')).toBeTruthy();
+    expect(await screen.findByText('定位:负责渲染')).toBeTruthy();
+
+    // Emptying the draft removes the role; the roster card stops showing it.
+    await user.clear(screen.getByLabelText('开发 的定位'));
+    await user.click(screen.getByRole('button', { name: '保存 开发 的定位' }));
+    expect(apiMocks.setCollaborationMemberRole).toHaveBeenLastCalledWith('group-one', 'one', null);
+    expect(await screen.findByText('定位已清除')).toBeTruthy();
+    expect(screen.queryByText('定位:负责渲染')).toBeNull();
+    expect(screen.getByText('定位:跑测试')).toBeTruthy();
   });
 
   it('creates an Agent Session and automatically joins it to the selected group', async () => {

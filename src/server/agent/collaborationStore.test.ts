@@ -135,6 +135,46 @@ describe('CollaborationStore', () => {
     expect(store.sessionFacts('b', true).tasks).toHaveLength(2);
   });
 
+  it('sets, sanitizes and clears member roles, persisting them across restarts', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
+    const withRole = store.setRole({ groupId: group.id, sessionId: 'b', role: '负责验收\t与发布\n' });
+    expect(withRole.roles).toEqual({ b: '负责验收 与发布' });
+    expect(() => store.setRole({ groupId: group.id, sessionId: 'outsider', role: 'x' })).toThrow(/不在协作组/);
+    expect(store.setRole({ groupId: group.id, sessionId: 'b', role: '' }).roles).toBeUndefined();
+    store.setRole({ groupId: group.id, sessionId: 'b', role: '最终验收人' });
+    expect(new CollaborationStore(filePath).getGroup(group.id)?.roles).toEqual({ b: '最终验收人' });
+    expect(store.setRole({ groupId: group.id, sessionId: 'b', role: 'y'.repeat(250) }).roles?.['b']).toBe(`${'y'.repeat(199)}…`);
+  });
+
+  it('drops the role of a member who leaves, while survivors keep theirs', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Team', sessionIds: ['a', 'b', 'c', 'd'] });
+    store.setRole({ groupId: group.id, sessionId: 'a', role: '排版' });
+    store.setRole({ groupId: group.id, sessionId: 'b', role: '校对' });
+    expect(store.save({ id: group.id, name: 'Team', sessionIds: ['a', 'c', 'd'] }).roles).toEqual({ a: '排版' });
+    store.setRole({ groupId: group.id, sessionId: 'c', role: '发布' });
+    store.removeSession('a');
+    expect(store.getGroup(group.id)?.roles).toEqual({ c: '发布' });
+  });
+
+  it('keeps roles keyed to members who move between groups and clears the source entry', () => {
+    const store = new CollaborationStore(filePath);
+    const first = store.save({ name: 'First', sessionIds: ['a', 'b'] });
+    const second = store.save({ name: 'Second', sessionIds: ['a', 'c'] });
+    store.setRole({ groupId: first.id, sessionId: 'b', role: '调查' });
+    store.setRole({ groupId: second.id, sessionId: 'a', role: '汇报' });
+    const moved = store.save({ id: first.id, name: 'First', sessionIds: ['a'] });
+    expect(moved.roles).toBeUndefined();
+    expect(store.getGroup(second.id)?.roles).toEqual({ a: '汇报' });
+  });
+
+  it('carries roles along through federation merge', () => {
+    const store = new CollaborationStore(filePath);
+    store.mergeFederatedGroup({ id: 'cross-roles', name: 'Pair', sessionIds: ['one', 'two'], roles: { one: '主持人' }, createdAt: 1, updatedAt: 1, federated: true, remoteSessions: [] });
+    expect(store.getGroup('cross-roles')?.roles).toEqual({ one: '主持人' });
+  });
+
   it('deleting a collaboration group also deletes its message history', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });

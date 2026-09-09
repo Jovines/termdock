@@ -3637,6 +3637,8 @@ export interface CollaborationGroup {
   id: string;
   name: string;
   sessionIds: string[];
+  /** Per-member role (定位) keyed by sessionId; rides the delivery shell header. */
+  roles?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
 }
@@ -3850,6 +3852,13 @@ export function spawnCollaborationAgent(groupId: string, input: {
   return operationsRequest<{ group: CollaborationGroup; session: OrchestrationSession }>(`/collaboration-groups/${encodeURIComponent(groupId)}/spawn`, {
     method: 'POST',
     body: JSON.stringify(input),
+  }).then((result) => { currentCollaborationDirectory().invalidate(); return result; });
+}
+
+export function setCollaborationMemberRole(groupId: string, sessionId: string, role: string | null): Promise<{ group: CollaborationGroup }> {
+  return operationsRequest<{ group: CollaborationGroup }>(`/collaboration-groups/${encodeURIComponent(groupId)}/role`, {
+    method: 'POST',
+    body: JSON.stringify({ sessionId, role }),
   }).then((result) => { currentCollaborationDirectory().invalidate(); return result; });
 }
 

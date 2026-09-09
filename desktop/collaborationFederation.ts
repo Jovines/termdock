@@ -18,6 +18,9 @@ export interface FederationGroup {
   id: string;
   name: string;
   sessionIds: string[];
+  /** Per-member roles keyed by sessionId. Keys must ride the same id remapping
+   * as sessionIds at every bridge boundary (canonicalization, groupForService). */
+  roles?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
   federated?: boolean;
@@ -69,6 +72,11 @@ function localId(origin: string, id: string): string {
 function mapMessage(message: Message, map: (id: string) => string): Message {
   return { ...message, fromSessionId: message.fromSessionId ? map(message.fromSessionId) : null, toSessionId: map(message.toSessionId) };
 }
+function mapRoles(roles: Record<string, string> | undefined, map: (id: string) => string): Record<string, string> | undefined {
+  if (!roles) return undefined;
+  const mapped = Object.fromEntries(Object.entries(roles).map(([id, role]) => [map(id), role]));
+  return Object.keys(mapped).length ? mapped : undefined;
+}
 
 /** Shared desktop/web protocol. Server replicas are durable; callers supply encrypted transport. */
 export class CollaborationFederation {
@@ -119,7 +127,8 @@ export class CollaborationFederation {
       this.reachable.add(service.origin);
       this.snapshots.set(service.origin, data);
       for (const group of data.groups) {
-        const canonical = { ...group, sessionIds: group.sessionIds.map((id) => qualifySession(service.origin, id)) };
+        const canonical = { ...group, sessionIds: group.sessionIds.map((id) => qualifySession(service.origin, id)),
+          roles: mapRoles(group.roles, (id) => qualifySession(service.origin, id)) };
         const existing = this.groups.get(group.id);
         if (!existing || canonical.updatedAt > existing.updatedAt) this.groups.set(group.id, canonical);
       }
@@ -193,7 +202,8 @@ export class CollaborationFederation {
         serviceOrigin: address.origin, serviceLabel: session?.serviceLabel ?? address.origin,
         serviceConnected: this.reachable.has(address.origin), serviceCheckedAt: Date.now() };
     });
-    return { ...group, sessionIds: group.sessionIds.map((id) => localId(origin, id)), remoteSessions };
+    return { ...group, sessionIds: group.sessionIds.map((id) => localId(origin, id)), remoteSessions,
+      roles: mapRoles(group.roles, (id) => localId(origin, id)) };
   }
 
   private async push(service: FederationService, group: FederationGroup): Promise<void> {
@@ -314,8 +324,12 @@ export class CollaborationFederation {
       throw new Error('所选成员已变化或服务不可达，请刷新后重新选择；尚未保存任何修改');
     }
     const existing = original?.federated ? { ...original, sessionIds: original.sessionIds.map((id) => qualifySession(origin, id)) } : undefined;
+    // Roles of departing members do not cross the bridge; survivors keep theirs.
+    const retainedRoles = mapRoles(original?.roles, (id) => qualifySession(origin, id));
     const group: FederationGroup = { id: existing?.id ?? `cross-${crypto.randomUUID()}`, name: input.name.trim(),
-      sessionIds: ids, createdAt: existing?.createdAt ?? Date.now(), updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1), federated: true };
+      sessionIds: ids,
+      ...(retainedRoles ? { roles: Object.fromEntries(Object.entries(retainedRoles).filter(([id]) => ids.includes(id))) } : {}),
+      createdAt: existing?.createdAt ?? Date.now(), updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1), federated: true };
     if (original && !original.federated) {
       if (local.capabilities?.groupPromotion !== 1) throw new Error('当前服务需要升级后才能将已有组转换为跨服务组；原组和记录均未修改');
       const result = await service.request(`/collaboration-groups/${encodeURIComponent(original.id)}/promote`, 'POST', {

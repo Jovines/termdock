@@ -57,6 +57,25 @@ export function collaborationGroupRoutes(options: {
           error: error instanceof Error ? error.message : '成员移动失败' });
     }
   });
+  router.post('/collaboration-groups/:groupId/role', (req, res) => {
+    try {
+      const existing = options.store.getGroup(req.params.groupId);
+      if (!existing || existing.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
+      const { sessionId, role } = req.body ?? {};
+      if (typeof sessionId !== 'string' || !existing.sessionIds.includes(sessionId)) {
+        throw new CollaborationError('NOT_A_MEMBER', '该会话不在协作组中，无法设置定位', 400);
+      }
+      if (role === undefined || (role !== null && typeof role !== 'string')) {
+        throw new CollaborationError('INVALID_ROLE', '定位必须是文本；清除请传 null', 400);
+      }
+      const updated = options.store.setRole({ groupId: existing.id, sessionId, role: role as string | null });
+      res.json({ group: { ...updated, roles: updated.roles ?? {} } });
+    } catch (error) {
+      res.status(error instanceof CollaborationError ? error.httpStatus : 400)
+        .json({ code: error instanceof CollaborationError ? error.code : 'GROUP_ROLE_FAILED',
+          error: error instanceof Error ? error.message : '定位设置失败' });
+    }
+  });
   router.post('/collaboration-groups/:groupId/promote', (req, res) => {
     try {
       const { group, expectedUpdatedAt } = req.body ?? {};

@@ -59,4 +59,19 @@ describe('collaboration API with arbitrary pull consumers', () => {
     expect((await post('/reply', { session: 'b', messageId: sent.message_id, content: 'Contradiction', response_kind: 'result', task: { task_id: 't', status: 'ack' } })).status).toBe(400);
     expect(store.getMessage(sent.message_id)?.status).toBe('pending');
   });
+  it('reads and writes member roles, requiring the caller and target to be group members', async () => {
+    const group = store.list()[0]!;
+    const set = await post('/role', { session: 'a', group_id: group.id, session_id: 'b', role: '审查全部补丁' });
+    expect(set).toMatchObject({ status: 200, body: { ok: true, group: { roles: { b: '审查全部补丁' } } } });
+    expect(await post('/role', { session: 'outsider', group_id: group.id, session_id: 'b', role: '越权' })).toMatchObject({ status: 403, body: { code: 'NOT_A_MEMBER' } });
+    expect(await post('/role', { session: 'a', group_id: group.id, session_id: 'absent', role: 'x' })).toMatchObject({ status: 400, body: { code: 'NOT_A_MEMBER' } });
+    expect(await post('/role', { session: 'a', group_id: group.id, session_id: 'b', role: 42 })).toMatchObject({ status: 400, body: { code: 'INVALID_ROLE' } });
+    expect(await post('/role', { session: 'a', group_id: group.id, session_id: 'b' })).toMatchObject({ status: 400, body: { code: 'INVALID_ROLE' } });
+    const cleared = await post('/role', { session: 'a', group_id: group.id, session_id: 'b', role: null });
+    expect(cleared.body.group.roles).toEqual({});
+    const listed = await (await fetch(`${url}/role?session=a&group=${group.id}`)).json();
+    expect(listed.group).toMatchObject({ id: group.id, sessionIds: ['a', 'b'], roles: {} });
+    expect((await fetch(`${url}/role?session=a&group=missing`)).status).toBe(404);
+    expect((await fetch(`${url}/role?session=outsider&group=${group.id}`)).status).toBe(403);
+  });
 });

@@ -120,4 +120,21 @@ describe('authoritative collaboration membership HTTP API', () => {
     }
     expect(store.list()).toEqual([]);
   });
+
+  it('sets and clears a member role through the UI endpoint', async () => {
+    const group = (await save({ name: 'Roles', sessionIds: ['custom', 'shell'] })).body.group as { id: string };
+    const role = async (sessionId: unknown, role: unknown) => {
+      const response = await fetch(`${url}/${group.id}/role`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, role }) });
+      return { status: response.status, body: await response.json() };
+    };
+    expect(await role('custom', '负责渲染\n\t与排版')).toMatchObject({ status: 200, body: { group: { roles: { custom: '负责渲染 与排版' } } } });
+    expect((await role('shell', null)).body.group.roles).toEqual({ custom: '负责渲染 与排版' });
+    expect((await role('outsider', 'x')).status).toBe(400);
+    expect((await role('custom', undefined)).status).toBe(400);
+    expect((await role('custom', 42)).status).toBe(400);
+    expect(store.getGroup(group.id)?.roles).toEqual({ custom: '负责渲染 与排版' });
+    const listed = await (await fetch(url)).json() as { groups: Array<{ id: string; roles?: Record<string, string> }> };
+    expect(listed.groups.find((item) => item.id === group.id)?.roles).toEqual({ custom: '负责渲染 与排版' });
+  });
 });
