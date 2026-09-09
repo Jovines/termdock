@@ -131,7 +131,10 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     if (o.text) {
       if (Array.isArray(value.messages)) for (const message of value.messages) io.write(`[${message.responseKind ?? message.kind}] ${message.id} from ${message.fromSessionId ?? 'user'}\n${message.content}`);
       else if (value.message) io.write(`[${value.status}] ${value.message_id}\n${value.message.content}`);
-      else if (value.message_id) io.write(`${value.status} ${value.message_id} thread=${value.thread_id}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
+      else if (value.message_id) {
+        io.write(`${value.status} ${value.message_id} thread=${value.thread_id}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
+        if (value.snapshot) io.write(`\n${value.snapshot}`);
+      }
       else io.write(JSON.stringify(value, null, 2));
       if (value.next_cursor) io.write(`next_cursor=${value.next_cursor} has_more=${value.has_more}`);
     } else if (o.jsonl && Array.isArray(value.messages) && command.action === 'inbox') {

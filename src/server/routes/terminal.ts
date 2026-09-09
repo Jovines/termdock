@@ -989,7 +989,6 @@ void (async () => {
   pruneOrphanSessions();
   await backfillPersistedTmuxMetadata();
   collaborationDeliveryWorker.start();
-  startCollaborationConsumptionWatcher();
 })();
 caffeinateManager.startNetworkMonitor();
 
@@ -1988,29 +1987,6 @@ function collaborationRosterSignature(frontendSessionId: string): string {
   return [...peerIds].sort().join('|');
 }
 
-// Backend session → most recent prompt-submit observed from its hook stream.
-// The consumption watcher below compares this against a message's deliveredAt:
-// the delivery itself (an injected bracketed paste) is what triggers the next
-// prompt-submit, so activity after delivery means the message entered a turn.
-// In-memory only; after a restart the watcher simply waits for the next turn.
-const collaborationPromptObservedAt = new Map<string, number>();
-
-function startCollaborationConsumptionWatcher(): void {
-  const timer = setInterval(() => {
-    const now = Date.now();
-    for (const record of globalSessionState.sessions) {
-      const binding = collaborationRouting.get(record.sessionId);
-      if (!binding?.backendSessionId) continue;
-      const lastPromptAt = collaborationPromptObservedAt.get(binding.backendSessionId);
-      if (!lastPromptAt) continue;
-      const consumed = collaborationStore.inbox(record.sessionId, { limit: 200 })
-        .filter((message) => message.status === 'delivered' && message.deliveredAt !== null && message.deliveredAt < lastPromptAt);
-      if (consumed.length > 0) collaborationStore.markRead(consumed.map((message) => message.id), 'observed');
-    }
-  }, 5_000);
-  timer.unref?.();
-}
-
 function formatLocalCollaborationMessages(frontendSessionId: string, messages: CollaborationMessage[]): string {
   const signature = collaborationRosterSignature(frontendSessionId);
   // Education follows the bound agent identity, not just the pane: a rebind to
@@ -2144,7 +2120,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
     const tmuxGate = gateCollaborationDelivery(frontendSessionId, backend);
     if (tmuxGate.blocked) return { state: 'busy', reason: tmuxGate.reason };
-    return { state: 'ready', write: async (messages) => {
+    return { state: 'ready', capture: async () => (await captureTmuxPane(pinned.paneId)).content, write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
       await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages));
       backend!.lastActivity = Date.now();
@@ -3857,7 +3833,6 @@ function applyAgentSignals(
       session.autoTitlePromptPayloads = [];
     }
     if (event.kind === 'prompt-submit') {
-      collaborationPromptObservedAt.set(sessionId, Date.now());
       // Before the first automatic title, keep accumulating short turns until
       // there is enough substance to name the session. Once titled, only the
       // latest turn is relevant to the conservative re-evaluation path.

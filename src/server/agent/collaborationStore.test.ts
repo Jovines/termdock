@@ -40,15 +40,14 @@ describe('CollaborationStore', () => {
     expect(store.getMessage(message!.id)).toMatchObject({ status: 'read', deliveredAt: expect.any(Number), readAt: expect.any(Number) });
   });
 
-  it('records the read source for observed vs explicit consumption', () => {
+  it('records an explicit read source for manual consumption', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
     const [injected] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'message', content: 'auto' });
     const [acknowledged] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'message', content: 'manual' });
     store.markDelivered([injected!.id, acknowledged!.id]);
-    store.markRead([injected!.id], 'observed');
     store.markRead([acknowledged!.id]);
-    expect(store.getMessage(injected!.id)).toMatchObject({ status: 'read', readSource: 'observed' });
+    expect(store.getMessage(injected!.id)?.status).toBe('delivered');
     expect(store.getMessage(acknowledged!.id)).toMatchObject({ status: 'read', readSource: 'explicit' });
   });
 

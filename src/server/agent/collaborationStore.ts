@@ -37,7 +37,9 @@ export type CollaborationMessageStatus = 'pending' | 'delivered' | 'read' | 'fai
 export interface CollaborationMessage extends MessageExtras {
   sequence?: number;
   failureReason?: string | null;
-  readSource?: 'explicit' | 'observed' | 'legacy_or_unspecified';
+  /** Post-write capture of the recipient terminal, taken right after delivery; lets the sender see the message landed. */
+  snapshot?: string | null;
+  readSource?: 'explicit' | 'legacy_or_unspecified';
   deliverySource?: 'pty_written' | 'consumer_read' | 'legacy_or_unspecified';
   id: string;
   groupId: string;
@@ -275,15 +277,13 @@ export class CollaborationStore {
 
   /**
    * @param source 'explicit' — a consumer acknowledged the message (CLI/UI).
-   *   'observed' — the server inferred consumption from the recipient's turn
-   *   activity (a new prompt-submit after delivery). Both are idempotent and
-   *   neither implies application-level ACK.
+   *   Idempotent; never implies an application-level ACK.
    */
-  markRead(messageIds: string[], source: 'explicit' | 'observed' = 'explicit'): CollaborationMessage[] {
+  markRead(messageIds: string[], source: 'explicit' | 'legacy_or_unspecified' = 'explicit'): CollaborationMessage[] {
     return this.updateStatus(messageIds, 'read', source);
   }
 
-  private updateStatus(messageIds: string[], status: 'delivered' | 'read', readSource: 'explicit' | 'observed' = 'explicit'): CollaborationMessage[] {
+  private updateStatus(messageIds: string[], status: 'delivered' | 'read', readSource: 'explicit' | 'legacy_or_unspecified' = 'explicit'): CollaborationMessage[] {
     const ids = new Set(messageIds);
     this.expire();
     const now = Date.now();
@@ -385,6 +385,13 @@ export class CollaborationStore {
     if (message?.status === 'pending') { message.status = 'failed'; message.failureReason = reason; this.persist(); }
   }
 
+  setSnapshot(id: string, snapshot: string): void {
+    const message = this.getMessage(id);
+    if (!message) return;
+    message.snapshot = snapshot;
+    this.persist();
+  }
+
   diagnostic(id: string): TransportDiagnostic | null { return this.document.transport?.[id] ?? null; }
   recordTransport(id: string, diagnostic: TransportDiagnostic): void {
     if (!this.getMessage(id)) return;
@@ -400,6 +407,7 @@ export class CollaborationStore {
     return { message_id: id, thread_id: message.threadId, status: message.status, queued_at: message.createdAt,
       delivered_at: message.deliveredAt, read_at: message.readAt, expires_at: message.expiresAt ?? null,
       failure_reason: message.failureReason ?? null, delivery_semantics: message.deliverySource ?? (message.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'), read_semantics: message.readAt ? message.readSource ?? 'legacy_or_unspecified' : 'not_read',
+      snapshot: message.snapshot ?? null,
       idempotency_key: message.idempotencyKey ?? null,
       ack_at: replies.find((reply) => reply.responseKind === 'ack')?.createdAt ?? null,
       reply_ids: replies.map((reply) => reply.id), result_ids: replies.filter((reply) => reply.responseKind === 'result').map((reply) => reply.id),

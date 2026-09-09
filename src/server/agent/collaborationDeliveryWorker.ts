@@ -5,6 +5,8 @@ export interface CollaborationRoute {
   state: CollaborationRouteState;
   reason?: string;
   write?: (messages: CollaborationMessage[]) => Promise<void>;
+  /** Best-effort capture of the recipient terminal after a successful write. */
+  capture?: () => Promise<string>;
 }
 
 export class CollaborationDeliveryWorker {
@@ -126,6 +128,15 @@ export class CollaborationDeliveryWorker {
         return;
       }
       this.submitted.add(message.id);
+      // Capture the recipient terminal before marking delivered, so a sender
+      // waiting on delivered always finds the snapshot present. The capture is
+      // strictly best-effort: a failure must never block delivery completion.
+      if (route.capture) {
+        try {
+          const snapshot = await route.capture();
+          if (snapshot) store.setSnapshot(message.id, snapshot);
+        } catch { /* best-effort */ }
+      }
     }
     // If persistence fails after writing, the in-process guard avoids a
     // second write on retry. Across a crash, transport is at-least-once.
