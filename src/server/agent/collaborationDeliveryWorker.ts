@@ -160,9 +160,13 @@ export class CollaborationDeliveryWorker {
     // rendered it). Unconfirmed writes are re-attempted up to the configured
     // bound; at-least-once transport is preserved throughout.
     const confirmMs = this.options.firstDeliveryConfirmMs ?? 1_500;
+    // A delivery that has already spent its confirm budget still has to be
+    // written — the queue must never wedge — but it settles carrying the
+    // unconfirmed reason instead of looking identical to a confirmed one.
+    const boundReachedUnconfirmed = attempts + 1 >= (this.options.maxUnconfirmedWrites ?? 3);
     const gateActive = Boolean(route.confirm) && confirmMs > 0
       && Date.now() >= (this.confirmedUntil.get(id) ?? 0)
-      && attempts + 1 < (this.options.maxUnconfirmedWrites ?? 3);
+      && !boundReachedUnconfirmed;
     // Differential baseline for stuck-paste recovery: captured before the
     // write so a later screen diff can tell our paste apart from stale ones.
     let baseline = '';
@@ -208,7 +212,7 @@ export class CollaborationDeliveryWorker {
     }
     // If persistence fails after writing, the in-process guard avoids a
     // second write on retry. Across a crash, transport is at-least-once.
-    this.complete(id, message);
+    this.complete(id, message, boundReachedUnconfirmed ? 'AGENT_CONSUME_UNCONFIRMED' : null);
   }
 
   /** Wait out the confirm window, then look for the written messages in the
@@ -241,13 +245,18 @@ export class CollaborationDeliveryWorker {
     return false;
   }
 
-  private complete(id: string, message: CollaborationMessage): void {
+  /** Settle a delivery as delivered. `unconfirmedReason`, when set, is a
+   *  diagnosis that survives the settle: the write reached the pty (there is
+   *  nothing more a retry may do) but the recipient never showed it, so the
+   *  sender can still see why. Never re-queues — that is what would wedge the
+   *  queue and duplicate the body. */
+  private complete(id: string, message: CollaborationMessage, unconfirmedReason: string | null = null): void {
     const { store } = this.options;
     store.markDelivered([message.id]);
     this.submitted.delete(message.id);
     store.recordTransport(message.id, {
       relay_online: null, peer_reachable: true, attempt_count: store.diagnostic(message.id)?.attempt_count ?? 1,
-      next_retry_at: null, last_error: null, checked_at: Date.now(),
+      next_retry_at: null, last_error: unconfirmedReason, checked_at: Date.now(),
     });
     this.failures.delete(id);
   }

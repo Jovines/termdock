@@ -2130,7 +2130,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
     return { state: 'ready', capture: async () => (await captureTmuxPane(pinned.paneId)).content, write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
-      await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages));
+      await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin);
       backend!.lastActivity = Date.now();
       // First-delivery confirm: history proves the agent rendered our
       // message (boot sequences clear only the screen, never the history a
@@ -2262,6 +2262,33 @@ async function runTmux(args: string[]): Promise<string> {
     timeout: 5000,
     maxBuffer: 2 * 1024 * 1024,
     env: buildInteractiveColorEnvironment(process.env),
+  });
+  return stdout;
+}
+
+/** runTmux with a payload on the client's stdin — how delivery hands user
+ *  content to `load-buffer -`. Kept separate from runTmux so the many callers
+ *  that never pipe anything are untouched. */
+async function runTmuxStdin(args: string[], input: string): Promise<string> {
+  const child = execFile(getTmuxBinary(), args, {
+    timeout: 5000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: buildInteractiveColorEnvironment(process.env),
+  });
+  // Write then end: tmux reads stdin to EOF for `load-buffer -`.
+  child.stdin?.end(input);
+  const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk: Buffer | string) => { stdout += chunk; });
+    child.stderr?.on('data', (chunk: Buffer | string) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0
+      ? resolve({ stdout })
+      // Carry tmux's own message: it names the failing step ("no buffer X",
+      // "target pane has exited"), which is what makes a delivery failure
+      // diagnosable from the transport diagnostic alone.
+      : reject(new Error(`tmux exited with ${code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`))));
   });
   return stdout;
 }
@@ -6626,7 +6653,7 @@ router.post('/operations/orchestration/drive', async (req, res) => {
       if (text.length > 10_000) return res.status(400).json({ error: 'run 文本过长（上限 10000 字符）；需要更多内容请走 td collab send 投递' });
       // Same bracketed-paste write path deliveries use: one line, one submit,
       // embedded newlines stay inside the recipient's editor.
-      await writeCollaborationTmuxPane(runTmux, pane, text);
+      await writeCollaborationTmuxPane(runTmux, pane, text, runTmuxStdin);
       const snapshot = await captureTmuxPaneText(runTmux, pane);
       return res.json({ ok: true, action, sessionId: target, text, snapshot });
     }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CollaborationStore } from './collaborationStore.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from './collaborationDeliveryWorker.js';
+import { formatCollaborationDelivery } from './collaborationPrompt.js';
 
 describe('background collaboration delivery', () => {
   let directory: string;
@@ -205,9 +206,11 @@ describe('background collaboration delivery', () => {
       expect(store.receipt(message.id)).toMatchObject({ status: 'pending', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED', next_retry_at: expect.any(Number) });
       await vi.advanceTimersByTimeAsync(4_000);
       await worker.run('b');
-      // Attempt bound reached (maxUnconfirmedWrites 2): settle as delivered, never wedge the queue.
+      // Attempt bound reached (maxUnconfirmedWrites 2): settle as delivered, never
+      // wedge the queue — but keep the diagnosis, so the sender can tell this
+      // apart from a delivery the agent actually showed.
       expect(write).toHaveBeenCalledTimes(2);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 2, last_error: null });
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 2, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
     });
 
     it('never presses keys when no dialog evidence is captured, and still settles once the bound is reached', async () => {
@@ -336,6 +339,30 @@ describe('background collaboration delivery', () => {
       await delivery;
       expect(recoverStuck).toHaveBeenCalledTimes(1);
       expect(store.receipt(message.id)).toMatchObject({ status: 'pending', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+    });
+
+    it('confirms every message source: the delivered text the formatter builds must contain the id the gate searches for', async () => {
+      // The gate's only evidence is `terminal history includes message.id`, so
+      // the formatter and the gate have to agree on how the id reaches the
+      // terminal. Wire the real formatter into confirm() — if a source ever
+      // stops carrying its id, this delivery can never confirm and the write
+      // repeats (the exact shape of the "one message arrived three times"
+      // report), so the assertion below fails instead of silently regressing.
+      const userMessage = store.send({ groupId, fromSessionId: null, toSessionIds: ['b'], kind: 'message', content: '请确认构建' })[0]!;
+      const rendered = formatCollaborationDelivery({
+        targetSessionId: 'b', messages: [userMessage], groups: store.groupsForSession('b'),
+        sessions: [{ sessionId: 'b', agentNativeSessionId: null, name: '测试 Agent', status: 'working' }],
+      });
+      expect(rendered).toContain(userMessage.id);
+      let shown = '';
+      resolve.mockResolvedValue({ state: 'ready', write, confirm: async () => shown, capture: async () => '' });
+      // The write is what would put `rendered` on the recipient's screen.
+      write.mockImplementation(async () => { shown = rendered; });
+      const delivery = worker.run('b');
+      await vi.advanceTimersByTimeAsync(1_500);
+      await delivery;
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(store.receipt(userMessage.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: null });
     });
   });
 });

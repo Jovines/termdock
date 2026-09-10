@@ -68,6 +68,15 @@ export async function writeCollaborationTmuxPane(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
   prompt: string,
+  /** Sends `input` to the tmux client's stdin. The steps below are one `\;`
+   *  chain (see the comment inside), and a chain is argv, so the body must not
+   *  ride in argv: tmux treats an element that is exactly `;` as a separator
+   *  even after `--`, and its backslash unescaping is version-dependent
+   *  (`\\` survives verbatim while `\;` collapses to `;`). Reading the body
+   *  from stdin sidesteps both — every byte round-trips unchanged. Required,
+   *  not optional: a run() that ignored the payload would load an empty buffer
+   *  and fail the delivery rather than deliver the wrong thing. */
+  stdin: (args: string[], input: string) => Promise<string>,
 ): Promise<void> {
   await assertSamePane(run, pane);
   // A fixed pane target is independent of the current window, keyboard focus
@@ -88,16 +97,27 @@ export async function writeCollaborationTmuxPane(
   // every tmux version.
   const buffer = `termdock-collab-${process.pid}-${bufferSequence++}`;
   try {
-    await run(['set-buffer', '-b', buffer, '--', normalizePromptForPaste(prompt)]);
-    // -r keeps LF as LF rather than the separator default of CR. The
-    // normalizer already folded every line break to CR, so no LF is left for
-    // it to rewrite — the flag is insurance, not the mechanism.
-    await run(['paste-buffer', '-p', '-r', '-d', '-b', buffer, '-t', pane.paneId]);
-    // The submit key rides outside the paste block: inside it, an editor
-    // inserts a pasted CR as text instead of acting on it. Pasting the bare
-    // CR (no -p) keeps the key in the same mode-proof channel as the text.
-    await run(['set-buffer', '-b', buffer, '--', '\r']);
-    await run(['paste-buffer', '-d', '-b', buffer, '-t', pane.paneId]);
+    // The four steps ride one client invocation joined by tmux's `\;`: the
+    // server runs them back to back in a single queue item, so no other
+    // client's paste can interleave between our text and our submit CR
+    // (measured: one contiguous block, 0ms apart, versus two invocations
+    // ~14ms apart). A failing step stops the rest — verified on 3.4 and 3.7 —
+    // which is the safe direction: a failed text paste is never followed by a
+    // bare CR into whatever the input box already held.
+    await stdin([
+      // The body arrives on stdin, not argv: it is user content, and in a
+      // `\;` chain argv is a language where `;` and `\` mean something.
+      'load-buffer', '-b', buffer, '-', ';',
+      // -r keeps LF as LF rather than the separator default of CR. The
+      // normalizer already folded every line break to CR, so no LF is left
+      // for it to rewrite — the flag is insurance, not the mechanism.
+      'paste-buffer', '-p', '-r', '-d', '-b', buffer, '-t', pane.paneId, ';',
+      // The submit key rides outside the paste block: inside it, an editor
+      // inserts a pasted CR as text instead of acting on it. Pasting the bare
+      // CR (no -p) keeps the key in the same mode-proof channel as the text.
+      'set-buffer', '-b', buffer, '--', '\r', ';',
+      'paste-buffer', '-d', '-b', buffer, '-t', pane.paneId,
+    ], normalizePromptForPaste(prompt));
   } finally {
     // -d consumed the buffer on the happy path; this sweeps up after a failed
     // paste so no stray buffer is left on the server.

@@ -87,13 +87,36 @@ describe('formatCollaborationDelivery', () => {
     expect(lines[1]).toBe('「发布组」群(2 个成员)');
     expect(prompt).toContain('来自:用户 · task');
     expect(prompt).toContain('```\n检查构建\n```');
+    // A user message has no agent to reply to (the reply route refuses it), so
+    // its anchor line is the read-back command instead.
     expect(prompt).not.toContain('td collab reply');
+    expect(prompt).toContain('详情:td collab message get message-1 --json');
     expect(prompt).toContain('td collab send coder-id "消息内容" --text');
     expect(prompt).not.toContain('native-coder');
     expect(prompt).not.toContain('group-1');
     expect(prompt).toContain('td collab --help');
     expect(lines.at(-1)).toBe(RULE);
     expect(prompt.length).toBeLessThan(500);
+  });
+
+  it('carries its id in every delivered block, whatever the source or body size', () => {
+    // The delivery-confirm gate searches the recipient terminal for the id; a
+    // block without it can never confirm and gets written again. Pin the
+    // invariant for every source and every body shape, oversized bodies too
+    // (those are replaced by a retrieval pointer, which must still name the id).
+    const built = [
+      message({ id: 'user-small' }),
+      message({ id: 'user-long', content: '长'.repeat(3_000) }),
+      message({ id: 'agent-small', fromSessionId: 'coder-id' }),
+      message({ id: 'agent-long', fromSessionId: 'coder-id', content: '长'.repeat(3_000) }),
+      message({ id: 'agent-task', fromSessionId: 'coder-id', task: { task_id: 't', status: 'complete' } }),
+      message({ id: 'fanned', fromSessionId: 'coder-id', fanOutIds: ['reviewer-id'] }),
+    ];
+    for (const item of built) expect(render([item])).toContain(item.id);
+    // One block per message: the shell header never doubles as an anchor.
+    const batch = render([message({ id: 'first' }), message({ id: 'second', fromSessionId: 'coder-id' })]);
+    expect(batch).toContain('first');
+    expect(batch).toContain('second');
   });
 
   it('labels the sender and kind above an agent message fenced in full', () => {

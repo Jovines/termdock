@@ -37,8 +37,22 @@ export function sanitizeCollaborationName(name: string, max = 40): string {
   return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
 }
 
+/** The one line of a delivered block that carries `message.id`, chosen by what
+ *  the recipient can actually do with it: an agent-sourced message gets the
+ *  reply command, a user message gets the read-back command (`td collab reply`
+ *  refuses user messages — NO_REPLY_TARGET — so naming it there would be a dead
+ *  command). The delivery-confirm gate searches the recipient terminal for
+ *  `message.id`, so every message must carry it regardless of source: this
+ *  function is the single place that decides how, and the invariant is pinned
+ *  by the "carries its id" test in collaborationPrompt.test.ts. */
+export function collaborationMessageAnchorLine(message: CollaborationMessage): string {
+  return message.fromSessionId
+    ? `回复:td collab reply ${message.id} "回复内容" --text`
+    : `详情:td collab message get ${message.id} --json`;
+}
+
 /** A single delivered message: `来自:X · kind` over a fenced body, with the
- * reply route for agent-sourced messages kept outside the fence. A fan-out
+ * anchor line (reply route / read-back route) kept outside the fence. A fan-out
  * dispatch (message.fanOutIds present) is flagged `· 群发` and names the
  * sibling recipients on their own line, so a broadcast is never mistaken for
  * a one-to-one assignment — raw ids fall back to the sanitized id itself. */
@@ -47,7 +61,7 @@ function formatCollaborationMessage(message: CollaborationMessage, source: strin
   if (fannedNames.length) lines.push(`同时发给了:${fannedNames.join('、')}`);
   lines.push('', fence, message.content, fence);
   if (message.task) lines.push('', `任务上报:${JSON.stringify(message.task)}`);
-  if (message.fromSessionId) lines.push('', `回复:td collab reply ${message.id} "回复内容" --text`);
+  lines.push('', collaborationMessageAnchorLine(message));
   return lines.join('\n');
 }
 

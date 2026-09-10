@@ -5,6 +5,21 @@ import { captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane } from
 
 const execFileAsync = promisify(execFile);
 
+/** Real stdin channel for `load-buffer -`, mirroring the production runner:
+ *  the body goes to the client's stdin, never into the argv chain. */
+function stdinFor(socket: string) {
+  return (args: string[], input: string) => new Promise<string>((resolve, reject) => {
+    const child = execFile('tmux', ['-L', socket, ...args], { timeout: 5_000 });
+    child.stdin?.end(input);
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
+    child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve(stdout) : reject(new Error(`tmux exited with ${code}: ${stderr.trim()}`))));
+  });
+}
+
 describe.skipIf(process.platform === 'win32')('collaboration tmux transport', () => {
   it('delivers to the pinned pane without a browser/client, even when another pane is active', async () => {
     const socket = `td-collab-${process.pid}-${Date.now()}`;
@@ -17,7 +32,7 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
       const other = (await run(['split-window', '-t', pane.paneId, '-P', '-F', '#{pane_id}', 'cat'])).trim();
       expect((await run(['display-message', '-p', '-t', 'peer', '#{pane_id}'])).trim()).toBe(other);
       expect((await run(['list-clients', '-t', '=peer'])).trim()).toBe('');
-      await writeCollaborationTmuxPane(run, pane, 'collab-message-unique\nsecond-line');
+      await writeCollaborationTmuxPane(run, pane, 'collab-message-unique\nsecond-line', stdinFor(socket));
       let target = '';
       for (let attempt = 0; attempt < 30; attempt++) {
         target = await run(['capture-pane', '-p', '-t', pane.paneId]);
@@ -28,7 +43,7 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
       expect(target).toContain('second-line');
       expect(await run(['capture-pane', '-p', '-t', other])).not.toContain('collab-message-unique');
       expect((await run(['display-message', '-p', '-t', 'peer', '#{pane_id}'])).trim()).toBe(other);
-      await expect(writeCollaborationTmuxPane(run, { ...pane, panePid: pane.panePid + 1 }, 'must-not-deliver')).rejects.toThrow('TMUX_PANE_CHANGED');
+      await expect(writeCollaborationTmuxPane(run, { ...pane, panePid: pane.panePid + 1 }, 'must-not-deliver', stdinFor(socket))).rejects.toThrow('TMUX_PANE_CHANGED');
       expect(await run(['capture-pane', '-p', '-t', pane.paneId])).not.toContain('must-not-deliver');
     } finally { await run(['kill-server']).catch(() => undefined); }
   }, 15_000);
@@ -51,7 +66,7 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
       const before = (await run(['display-message', '-p', '-t', pane.paneId, '#{scroll_position}'])).trim();
       expect(before).not.toBe('0'); // the user really is scrolled up
 
-      await writeCollaborationTmuxPane(run, pane, 'COPYMODE-REACHES-APP');
+      await writeCollaborationTmuxPane(run, pane, 'COPYMODE-REACHES-APP', stdinFor(socket));
 
       expect((await run(['display-message', '-p', '-t', pane.paneId, '#{pane_in_mode}'])).trim()).toBe('1');
       expect((await run(['display-message', '-p', '-t', pane.paneId, '#{scroll_position}'])).trim()).toBe(before);
@@ -83,7 +98,7 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
         if ((await run(['display-message', '-p', '-t', pane.paneId, '#{pane_current_command}'])).trim() === 'cat') break;
         await new Promise((done) => setTimeout(done, 20));
       }
-      await writeCollaborationTmuxPane(run, pane, 'LINE1\nLINE2\nLINE3');
+      await writeCollaborationTmuxPane(run, pane, 'LINE1\nLINE2\nLINE3', stdinFor(socket));
       expect(await run(['list-buffers'])).not.toContain(`termdock-collab-${process.pid}`);
       let delivered = '';
       for (let attempt = 0; attempt < 50; attempt++) {
@@ -119,7 +134,7 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
       // Two lines at once: the first CR must commit the command, which is
       // only true if the CR lands outside a paste block (inside one, a
       // bracketed-paste-aware editor inserts it as text).
-      await writeCollaborationTmuxPane(run, pane, 'echo DRIVEN_$((6*7))\necho SECOND_LINE');
+      await writeCollaborationTmuxPane(run, pane, 'echo DRIVEN_$((6*7))\necho SECOND_LINE', stdinFor(socket));
       let screen = '';
       for (let attempt = 0; attempt < 50; attempt++) {
         screen = await captureTmuxPaneText(run, pane);
