@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from './collaborationStore.js';
-import { COLLAB_LIMITS, CollaborationError, extrasFromBody } from './collaborationProtocol.js';
+import { COLLAB_LIMITS, CollaborationError, ambiguousIdMessage, extrasFromBody } from './collaborationProtocol.js';
 
 /** Member names arrive agent-authored over a CLI; control characters would
  * corrupt terminal shells, tmux options and persisted records. Fold them to
@@ -54,8 +54,16 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     }
     res.json({ ok: true, route: await rebind(sessionId, pane ?? null) });
   }));
+  /** Accepts the 8-character id a terminal shows as well as the full one; an
+   *  ambiguous prefix is refused rather than guessed, so a reply can never
+   *  land on the wrong thread. */
+  const resolveMessage = (id: string) => {
+    const resolved = store.resolveMessageId(id);
+    if (resolved.status === 'ambiguous') throw new CollaborationError('MESSAGE_ID_AMBIGUOUS', ambiguousIdMessage('消息', resolved.matches.length));
+    return resolved.status === 'ok' ? store.getMessage(resolved.id) : null;
+  };
   const ownMessage = (id: string, sessionId: string, recipientOnly = false) => {
-    const message = store.getMessage(id);
+    const message = resolveMessage(id);
     if (!message || (message.toSessionId !== sessionId && (recipientOnly || message.fromSessionId !== sessionId))) throw new CollaborationError('MESSAGE_NOT_FOUND', 'Message does not belong to this session', 404);
     return message;
   };
@@ -101,8 +109,17 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       : [];
     const targets = requestedTargets.length > 0 ? requestedTargets : (target ? [target] : []);
     if (!targets.length) throw new CollaborationError('NO_TARGET', 'send requires a targetSessionId (or toSessionIds for a fan-out)', 400);
+    // `--group` may be the 8-character id; an unresolvable one must stay a
+    // GROUP_NOT_FOUND below instead of silently falling back to the only
+    // shared group, which would send to a set the sender did not name.
+    let requestedGroupId = typeof req.body.group_id === 'string' ? req.body.group_id : '';
+    if (requestedGroupId) {
+      const resolved = store.resolveGroupId(requestedGroupId);
+      if (resolved.status === 'ambiguous') throw new CollaborationError('GROUP_ID_AMBIGUOUS', ambiguousIdMessage('协作组', resolved.matches.length));
+      requestedGroupId = resolved.status === 'ok' ? resolved.id : requestedGroupId;
+    }
     const groups = store.groupsForSession(sessionId)
-      .filter((group) => targets.every((candidate) => group.sessionIds.includes(candidate)) && (!req.body.group_id || group.id === req.body.group_id));
+      .filter((group) => targets.every((candidate) => group.sessionIds.includes(candidate)) && (!requestedGroupId || group.id === requestedGroupId));
     if (!groups.length) throw new CollaborationError('GROUP_NOT_FOUND', 'Sender and recipients must share the specified group');
     if (groups.length > 1 && !req.body.group_id) throw new CollaborationError('AMBIGUOUS_GROUP', 'Multiple shared groups; specify --group');
     if (req.body.task) throw new CollaborationError('DISPATCH_CARRIES_TASK', 'Dispatch carries no task state; recipients report task status through replies', 400);
@@ -142,9 +159,22 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     const sinceText = string('since');
     const since = sinceText === undefined ? undefined : /^\d+$/.test(sinceText) ? Number(sinceText) : Date.parse(sinceText);
     if (since !== undefined && !Number.isFinite(since)) throw new CollaborationError('INVALID_SINCE', 'since must be an ISO timestamp or epoch milliseconds');
+    // `--group` accepts the 8-character id; an unresolvable or ambiguous one
+    // keeps the caller's text, which matches no group and yields an empty page
+    // (the pre-existing behavior for an unknown group filter).
+    let groupFilter = string('group');
+    if (groupFilter) {
+      const resolved = store.resolveGroupId(groupFilter);
+      if (resolved.status === 'ok') groupFilter = resolved.id;
+    }
+    let threadFilter = string('thread');
+    if (threadFilter) {
+      const resolved = store.resolveThreadId(threadFilter);
+      if (resolved.status === 'ok') threadFilter = resolved.id;
+    }
     const page = store.page(sessionId, { unread: string('unread') === 'true', since, afterId: string('after_id'), cursor: string('cursor'),
       consumer: string('consumer'), limit: string('limit') ? Number(string('limit')) : undefined,
-      from: string('from'), group: string('group'), thread: string('thread'), kind: string('kind'), responseKind: string('response_kind'), order: string('order') });
+      from: string('from'), group: groupFilter, thread: threadFilter, kind: string('kind'), responseKind: string('response_kind'), order: string('order') });
     // Fan-out edges carry sibling recipients; the names map lets the CLI text
     // renderer show 同时发给了:… as people instead of bare session ids. The
     // fallback to the raw id stays server-side agnostic (federated/offline).
@@ -157,7 +187,9 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     res.json({ ok: true, consumer: req.body.consumer, cursor: req.body.cursor });
   }));
   const groupOf = (id: string, sessionId: string) => {
-    const group = store.getGroup(id);
+    const resolved = store.resolveGroupId(id);
+    if (resolved.status === 'ambiguous') throw new CollaborationError('GROUP_ID_AMBIGUOUS', ambiguousIdMessage('协作组', resolved.matches.length));
+    const group = resolved.status === 'ok' ? store.getGroup(resolved.id) : null;
     if (!group || group.deleted) throw new CollaborationError('GROUP_NOT_FOUND', 'Collaboration group not found', 404);
     if (!group.sessionIds.includes(sessionId)) throw new CollaborationError('NOT_A_MEMBER', 'Session is not a member of this group', 403);
     return group;

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { COLLAB_LIMITS, CollaborationError } from './collaborationProtocol.js';
+import { COLLAB_LIMITS, CollaborationError, canonicalShortId } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
   action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'help';
@@ -10,6 +10,9 @@ export interface CollaborationCommand {
   operation?: string;
 }
 export const COLLAB_HELP = `td collab — durable messages; no agent-specific hooks required
+  (everywhere an id is taken, the 8-character id shown in deliveries and --text
+   output works too; a shorter unique prefix down to 4 characters also resolves —
+   an ambiguous prefix is refused, so use more characters or the full id)
   status | capabilities
   rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
   send <session-id> <message> | reply <message-id> <message> | handoff <session-id> <message>
@@ -203,15 +206,15 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       if (Array.isArray(value.messages)) for (const message of value.messages) {
         const fanIds = Array.isArray(message.fanOutIds) ? (message.fanOutIds as string[]) : [];
         const names = (value.names as Record<string, string | null> | undefined) ?? {};
-        io.write(`[${message.responseKind ?? message.kind}] ${message.id} from ${message.fromSessionId ?? 'user'}${fanIds.length ? ' · 群发' : ''}`);
+        io.write(`[${message.responseKind ?? message.kind}] ${canonicalShortId(message.id)} from ${message.fromSessionId ?? 'user'}${fanIds.length ? ' · 群发' : ''}`);
         // A fan-out dispatch names its sibling recipients so a broadcast is
         // never read as a one-to-one assignment; unknown ids stay raw.
         if (fanIds.length) io.write(`同时发给了:${fanIds.map((id) => names[id] ?? id).join('、')}`);
         io.write(message.content);
       }
-      else if (value.message) io.write(`[${value.status}] ${value.message_id}\n${value.message.content}`);
+      else if (value.message) io.write(`[${value.status}] ${canonicalShortId(String(value.message_id ?? ''))}\n${value.message.content}`);
       else if (value.message_id) {
-        io.write(`${value.status} ${value.message_id} thread=${value.thread_id}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
+        io.write(`${value.status} ${canonicalShortId(String(value.message_id))}${value.thread_id ? ` thread=${canonicalShortId(String(value.thread_id))}` : ''}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
         // A timeout after the wait stage itself was reached means delivery
         // (or reading) completed — only the expected reply/result is late.
         if (value.code === 'WAIT_TIMEOUT' && value.stage_reached && value.expect_reply) {

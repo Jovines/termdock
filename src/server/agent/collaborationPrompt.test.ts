@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CollaborationGroup, CollaborationMessage } from './collaborationStore.js';
-import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery, sanitizeCollaborationName } from './collaborationPrompt.js';
+import { COLLAB_NAME_FORBIDDEN, collaborationMessageAnchorTokens, formatCollaborationDelivery, sanitizeCollaborationName } from './collaborationPrompt.js';
 
 const group: CollaborationGroup = {
   id: 'group-1',
@@ -100,10 +100,11 @@ describe('formatCollaborationDelivery', () => {
   });
 
   it('carries its id in every delivered block, whatever the source or body size', () => {
-    // The delivery-confirm gate searches the recipient terminal for the id; a
-    // block without it can never confirm and gets written again. Pin the
-    // invariant for every source and every body shape, oversized bodies too
+    // The delivery-confirm gate searches the recipient terminal for the anchor
+    // token; a block without it can never confirm and gets written again. Pin
+    // the invariant for every source and every body shape, oversized bodies too
     // (those are replaced by a retrieval pointer, which must still name the id).
+    const uuid = '01234567-89ab-4def-8123-456789abcdef';
     const built = [
       message({ id: 'user-small' }),
       message({ id: 'user-long', content: '长'.repeat(3_000) }),
@@ -111,12 +112,34 @@ describe('formatCollaborationDelivery', () => {
       message({ id: 'agent-long', fromSessionId: 'coder-id', content: '长'.repeat(3_000) }),
       message({ id: 'agent-task', fromSessionId: 'coder-id', task: { task_id: 't', status: 'complete' } }),
       message({ id: 'fanned', fromSessionId: 'coder-id', fanOutIds: ['reviewer-id'] }),
+      message({ id: uuid }),
     ];
-    for (const item of built) expect(render([item])).toContain(item.id);
+    for (const item of built) {
+      const token = collaborationMessageAnchorTokens([item]).get(item.id)!;
+      expect(render([item])).toContain(token);
+    }
+    // A canonical uuid shows as its 8-character prefix; a non-uuid id (a
+    // hand-written session id, a remote address) passes through whole.
+    expect(render([message({ id: uuid })])).toContain(uuid.slice(0, 8));
+    expect(render([message({ id: uuid })])).not.toContain(uuid);
+    expect(render([message({ id: '40bc89py' })])).toContain('40bc89py');
     // One block per message: the shell header never doubles as an anchor.
     const batch = render([message({ id: 'first' }), message({ id: 'second', fromSessionId: 'coder-id' })]);
     expect(batch).toContain('first');
     expect(batch).toContain('second');
+  });
+
+  it('shows full ids when two blocks in one delivery share a short id', () => {
+    // A shared prefix is not a usable anchor: the gate's `includes` search
+    // would match the sibling's block. Both blocks fall back to their full id.
+    const left = 'abcdef01-1111-4111-8111-111111111111';
+    const right = 'abcdef01-2222-4222-8222-222222222222';
+    const prompt = render([message({ id: left }), message({ id: right, fromSessionId: 'coder-id' })]);
+    expect(prompt).toContain(left);
+    expect(prompt).toContain(right);
+    // Alone each shortens again — the fallback is scoped to the delivery.
+    expect(render([message({ id: left })])).toContain('abcdef01');
+    expect(render([message({ id: left })])).not.toContain(left);
   });
 
   it('labels the sender and kind above an agent message fenced in full', () => {

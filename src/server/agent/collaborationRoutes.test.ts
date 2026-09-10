@@ -30,6 +30,59 @@ describe('collaboration API with arbitrary pull consumers', () => {
     const response = await fetch(url + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return { status: response.status, body: await response.json() };
   };
+  it('accepts the 8-character id a terminal shows, and retries it idempotently', async () => {
+    const { body: sent } = await post('/send', { session: 'a', targetSessionId: 'b', message: 'Verify', idempotency_key: 'short' });
+    const short = String(sent.message_id).slice(0, 8);
+    // The anchor line renders this short id; the reply that copies it out of
+    // the terminal must resolve back to the same message.
+    const read = await (await fetch(`${url}/message/${short}?session=b`)).json();
+    expect(read.message.id).toBe(sent.message_id);
+    expect((await post(`/message/${short}/read`, { session: 'b' })).status).toBe(200);
+    // Resolution runs before the send, so the idempotency payload hash still
+    // sees the full id: a retry of the same reply, keyed the same way, must
+    // return the original message instead of IDEMPOTENCY_CONFLICT.
+    const first = await post('/reply', { session: 'b', messageId: short, content: '收到', idempotency_key: 'short-reply' });
+    const retry = await post('/reply', { session: 'b', messageId: short, content: '收到', idempotency_key: 'short-reply' });
+    expect(first.status).toBe(200);
+    expect(retry.body.message_id).toBe(first.body.message_id);
+    expect(store.getMessage(String(first.body.message_id))?.replyTo).toBe(sent.message_id);
+  });
+
+  it('refuses an ambiguous id prefix and never resolves a too-short one', async () => {
+    // Local ids are random UUIDs, so collisions cannot be provoked through the
+    // send path; federation is the one route that accepts caller-chosen ids,
+    // which is how real collisions reach the store.
+    const shared = 'cross-feedface';
+    const federated = (suffix: string) => ({
+      id: `${shared}${suffix}`, groupId: `${shared}${suffix}`, threadId: `${shared}${suffix}`,
+      kind: 'ask' as const, content: 'body', fromSessionId: 'b', toSessionId: 'a', status: 'pending' as const, createdAt: 1,
+      replyTo: null, deliveredAt: null, readAt: null,
+    });
+    store.mergeFederatedGroup({ id: `${shared}1`, name: 'Alpha', sessionIds: ['a', 'b'], createdAt: 1, updatedAt: 1, federated: true, remoteSessions: [] });
+    store.mergeFederatedGroup({ id: `${shared}2`, name: 'Beta', sessionIds: ['a', 'b'], createdAt: 1, updatedAt: 1, federated: true, remoteSessions: [] });
+    store.mergeFederatedMessages([federated('1'), federated('2')]);
+
+    expect((await post('/reply', { session: 'a', messageId: shared, content: '?' })).body.code).toBe('MESSAGE_ID_AMBIGUOUS');
+    // 'abc' is below MIN_ID_PREFIX_LENGTH: exact-match only, so it is simply
+    // not found rather than ambiguous.
+    expect((await fetch(`${url}/message/abc?session=a`)).status).toBe(404);
+    expect(await (await fetch(`${url}/message/${shared.slice(0, 4)}?session=a`)).json()).toMatchObject({ code: 'MESSAGE_ID_AMBIGUOUS' });
+    expect((await post('/send', { session: 'a', targetSessionId: 'b', message: 'hi', group_id: shared })).body.code).toBe('GROUP_ID_AMBIGUOUS');
+    // An unknown group must not silently fall back to the shared group.
+    expect((await post('/send', { session: 'a', targetSessionId: 'b', message: 'hi', group_id: 'ffffffff' })).body.code).toBe('GROUP_NOT_FOUND');
+  });
+
+  it('resolves a group id prefix for --group and --thread filters', async () => {
+    store.mergeFederatedGroup({ id: 'cross-solo', name: 'Solo', sessionIds: ['a', 'b'], createdAt: 1, updatedAt: 1, federated: true, remoteSessions: [] });
+    const group = store.getGroup('cross-solo')!;
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'b', toSessionIds: ['a'], kind: 'ask', content: 'Grouped', threadId: 'deadbeef-0000-4000-8000-000000000000' });
+    expect(await post('/send', { session: 'a', targetSessionId: 'b', message: 'hi', group_id: 'cross-sol' })).toMatchObject({ status: 200 });
+    const inbox = await (await fetch(`${url}/inbox?session=a&group=cross-sol`)).json();
+    expect(inbox.messages.map((item: { id: string }) => item.id)).toEqual([message.id]);
+    const threaded = await (await fetch(`${url}/inbox?session=a&thread=deadbeef`)).json();
+    expect(threaded.messages.map((item: { id: string }) => item.id)).toEqual([message.id]);
+  });
+
   it('rebinds the calling session and validates explicit tmux pane ids', async () => {
     expect(await post('/route/rebind', { session: 'b', pane: '%3', targetSessionId: 'a' })).toMatchObject({
       status: 200, body: { ok: true, route: { sessionId: 'b', pane: '%3' } },

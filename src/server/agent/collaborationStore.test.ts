@@ -184,6 +184,41 @@ describe('CollaborationStore', () => {
   });
 });
 
+describe('id prefix resolution against the live store', () => {
+  let directory: string;
+  let filePath: string;
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-collab-resolve-'));
+    filePath = path.join(directory, 'collaboration.json');
+  });
+  afterEach(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  it('resolves the 8-character id a terminal shows back to the full id', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Release', sessionIds: ['manager', 'coder'] });
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'manager', toSessionIds: ['coder'], kind: 'ask', content: 'Ready?' });
+    const short = message.id.slice(0, 8);
+
+    expect(store.resolveMessageId(short)).toEqual({ status: 'ok', id: message.id });
+    expect(store.resolveMessageId(message.id)).toEqual({ status: 'ok', id: message.id });
+    expect(store.resolveMessageId('deadbeef')).toEqual({ status: 'not-found' });
+    expect(store.resolveMessageId(short.slice(0, 3))).toEqual({ status: 'not-found' });
+    expect(store.resolveGroupId(group.id.slice(0, 8))).toEqual({ status: 'ok', id: group.id });
+    // A group id the caller never created resolves to nothing, not to the
+    // nearest id that happens to share a prefix.
+    expect(store.resolveGroupId('ffffffff-0000-4000-8000-000000000000')).toEqual({ status: 'not-found' });
+  });
+
+  it('resolves thread ids for the --thread filter', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Release', sessionIds: ['manager', 'coder'] });
+    const threadId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    store.send({ groupId: group.id, fromSessionId: 'manager', toSessionIds: ['coder'], kind: 'ask', content: 'Ready?', threadId });
+    expect(store.resolveThreadId(threadId.slice(0, 8))).toEqual({ status: 'ok', id: threadId });
+    expect(store.resolveThreadId('bbbbbbbb')).toEqual({ status: 'not-found' });
+  });
+});
+
 describe('federation persistence', () => {
   it('deduplicates retried deliveries, advances receipts without changing content, and retains deletion across restarts', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-federation-'));

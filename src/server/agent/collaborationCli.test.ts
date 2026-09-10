@@ -224,6 +224,23 @@ describe('collaboration CLI contract', () => {
     expect(capture.output[0]).toBe('just this screen');
   });
 
+  it('prints the 8-character id in text mode while JSON keeps the full one', async () => {
+    const short = '765c8819';
+    const full = '765c8819-ae14-46ae-b615-186eb5fd8b1f';
+    const inbox = fixture([{ messages: [{ id: full, kind: 'ask', fromSessionId: 'p2', content: 'ready?' }] }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['inbox', '--text']), {}, inbox.io)).toBe(0);
+    expect(inbox.output[0]).toContain(short);
+    expect(inbox.output[0]).not.toContain(full);
+    // Copy-paste id first in the receipt line, full id second — the id a peer
+    // reads off the screen is the one it can paste back.
+    const receipt = fixture([{ message_id: full, thread_id: full, status: 'delivered' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['send', 'p2', 'body', '--wait-until', 'delivered', '--text']), { backendSessionId: 'b' }, receipt.io)).toBe(0);
+    expect(receipt.output[0]).toContain(`${short} thread=${short}`);
+    const json = fixture([{ messages: [{ id: full, kind: 'ask', fromSessionId: 'p2', content: 'ready?' }] }]);
+    await executeCollaborationCommand(parseCollaborationCommand(['inbox']), {}, json.io);
+    expect(json.output[0]).toContain(full);
+  });
+
   it('reports drive outcomes: approve echoes success, key sends echo, and a missing dialog is a hard error', async () => {
     const approver = fixture([{ ok: true, action: 'approve', sessionId: 'p2', approved: true }]);
     expect(await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'approve', '--text']), {}, approver.io)).toBe(0);

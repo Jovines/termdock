@@ -104,6 +104,7 @@ import { collaborationRoutes } from '../agent/collaborationRoutes.js';
 import { COLLAB_LIMITS, extrasFromBody, type MessageFragment, type TransportDiagnostic } from '../agent/collaborationProtocol.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind, type CollaborationMessage } from '../agent/collaborationStore.js';
 import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
+import { ambiguousIdMessage } from '../agent/collaborationProtocol.js';
 import { buildCollaborationSpawnCommand, resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
@@ -6392,8 +6393,20 @@ router.post('/operations/collaboration-federation', (req, res) => {
 router.use('/operations', collaborationGroupRoutes({ store: collaborationStore,
   sessions: () => globalSessionState.sessions.map(orchestrationSessionSnapshot) }));
 
+/** Group id from a URL param: the 8-character id a terminal shows resolves to
+ *  its full id, an ambiguous prefix is refused with 409, and anything else is
+ *  simply "no such group" — the same 404 each route already answers. */
+function resolveGroupParam(id: string): { group: CollaborationGroup | null; ambiguous: number } {
+  const resolved = collaborationStore.resolveGroupId(id);
+  if (resolved.status === 'ambiguous') return { group: null, ambiguous: resolved.matches.length };
+  return { group: resolved.status === 'ok' ? collaborationStore.getGroup(resolved.id) : null, ambiguous: 0 };
+}
+const ambiguousGroupResponse = (res: express.Response, count: number) =>
+  res.status(409).json({ error: ambiguousIdMessage('协作组', count), code: 'GROUP_ID_AMBIGUOUS' });
+
 router.post('/operations/collaboration-groups/:groupId/spawn', async (req, res) => {
-  const group = collaborationStore.getGroup(req.params.groupId);
+  const { group, ambiguous } = resolveGroupParam(req.params.groupId);
+  if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
   if (!group) return res.status(404).json({ error: '协作组不存在' });
   try {
     res.json(await spawnCollaborationAgentSession(req, group, null, req.body ?? {}));
@@ -6404,14 +6417,16 @@ router.post('/operations/collaboration-groups/:groupId/spawn', async (req, res) 
 });
 
 router.get('/operations/collaboration-groups/:groupId/messages', (req, res) => {
-  const group = collaborationStore.getGroup(req.params.groupId);
+  const { group, ambiguous } = resolveGroupParam(req.params.groupId);
+  if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
   if (!group) return res.status(404).json({ error: '协作组不存在' });
   res.json({ messages: collaborationStore.listMessages(group.id, Number(req.query.limit) || 200) });
 });
 
 router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => {
   try {
-    const group = collaborationStore.getGroup(req.params.groupId);
+    const { group, ambiguous } = resolveGroupParam(req.params.groupId);
+    if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
     if (!group) return res.status(404).json({ error: '协作组不存在' });
     const fromSessionId = resolveFrontendSessionId(req.body ?? {});
     const kind = typeof req.body?.kind === 'string' ? req.body.kind as CollaborationMessageKind : 'message';
@@ -6462,7 +6477,8 @@ router.post('/operations/orchestration/members', (req, res) => {
   const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : '';
   const targetSessionId = typeof req.body?.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
   const action = req.body?.action === 'remove' ? 'remove' : req.body?.action === 'add' ? 'add' : null;
-  const group = collaborationStore.getGroup(groupId);
+  const { group, ambiguous } = resolveGroupParam(groupId);
+  if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
   if (!sourceSessionId) return res.status(400).json({ error: '无法识别当前会话；请从 Termdock 会话内运行 td collab' });
   if (!group || !group.sessionIds.includes(sourceSessionId)) return res.status(403).json({ error: '当前会话不在该协作组中' });
   if (!action) return res.status(400).json({ error: '成员操作无效' });
@@ -6480,7 +6496,8 @@ router.post('/operations/orchestration/members', (req, res) => {
 router.post('/operations/orchestration/spawn', async (req, res) => {
   const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
   const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : '';
-  const group = collaborationStore.getGroup(groupId);
+  const { group, ambiguous } = resolveGroupParam(groupId);
+  if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
   if (!sourceSessionId) return res.status(400).json({ error: '无法识别当前会话；请从 Termdock 会话内运行 td collab' });
   if (!group || !group.sessionIds.includes(sourceSessionId)) return res.status(403).json({ error: '当前会话不在该协作组中' });
   try {

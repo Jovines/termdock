@@ -1,3 +1,4 @@
+import { canonicalShortId } from './collaborationProtocol.js';
 import { sanitizeCollaborationRole, type CollaborationGroup, type CollaborationMessage } from './collaborationStore.js';
 
 interface CollaborationPromptSession {
@@ -37,18 +38,44 @@ export function sanitizeCollaborationName(name: string, max = 40): string {
   return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
 }
 
-/** The one line of a delivered block that carries `message.id`, chosen by what
- *  the recipient can actually do with it: an agent-sourced message gets the
+/** The id form a delivery shows and the confirm gate searches for, per message.
+ *  Canonical UUIDs shorten to their 8-character prefix (a 36-character id wraps
+ *  in a narrow pane and has to be retyped by whoever answers it); ids that are
+ *  not canonical UUIDs pass through untouched. A prefix shared by two messages
+ *  in the same delivery would make a `includes` search match the wrong block —
+ *  including against the other one's line still sitting in terminal history —
+ *  so every colliding message falls back to its full id. The batch is the unit
+ *  because one delivery is what a confirm search scans against.
+ *
+ *  Delivered text and the confirm gate must both derive the token here: if the
+ *  text carried a short id while the gate searched the full one, the gate could
+ *  never match a delivery again and would re-write it until the attempt bound
+ *  (the "one message arrived three times" regression). */
+export function collaborationMessageAnchorTokens(messages: CollaborationMessage[]): Map<string, string> {
+  const counts = new Map<string, number>();
+  for (const message of messages) {
+    const short = canonicalShortId(message.id);
+    counts.set(short, (counts.get(short) ?? 0) + 1);
+  }
+  return new Map(messages.map((message) => {
+    const short = canonicalShortId(message.id);
+    return [message.id, counts.get(short) === 1 ? short : message.id];
+  }));
+}
+
+/** The one line of a delivered block that carries the message's id, chosen by
+ *  what the recipient can actually do with it: an agent-sourced message gets the
  *  reply command, a user message gets the read-back command (`td collab reply`
  *  refuses user messages — NO_REPLY_TARGET — so naming it there would be a dead
- *  command). The delivery-confirm gate searches the recipient terminal for
- *  `message.id`, so every message must carry it regardless of source: this
- *  function is the single place that decides how, and the invariant is pinned
- *  by the "carries its id" test in collaborationPrompt.test.ts. */
-export function collaborationMessageAnchorLine(message: CollaborationMessage): string {
+ *  command). Both routes accept the short form (the CLI resolves id prefixes),
+ *  so whichever token collaborationMessageAnchorTokens picks for this delivery is what
+ *  the recipient can paste back. Every message must carry its token regardless
+ *  of source: the invariant is pinned by the "carries its id" test in
+ *  collaborationPrompt.test.ts. */
+export function collaborationMessageAnchorLine(message: CollaborationMessage, token: string = canonicalShortId(message.id)): string {
   return message.fromSessionId
-    ? `回复:td collab reply ${message.id} "回复内容" --text`
-    : `详情:td collab message get ${message.id} --json`;
+    ? `回复:td collab reply ${token} "回复内容" --text`
+    : `详情:td collab message get ${token} --json`;
 }
 
 /** A single delivered message: `来自:X · kind` over a fenced body, with the
@@ -56,12 +83,12 @@ export function collaborationMessageAnchorLine(message: CollaborationMessage): s
  * dispatch (message.fanOutIds present) is flagged `· 群发` and names the
  * sibling recipients on their own line, so a broadcast is never mistaken for
  * a one-to-one assignment — raw ids fall back to the sanitized id itself. */
-function formatCollaborationMessage(message: CollaborationMessage, source: string, fannedNames: string[], fence: string): string {
+function formatCollaborationMessage(message: CollaborationMessage, source: string, fannedNames: string[], fence: string, token: string): string {
   const lines = [`来自:${source} · ${message.kind}${fannedNames.length ? ' · 群发' : ''}`];
   if (fannedNames.length) lines.push(`同时发给了:${fannedNames.join('、')}`);
   lines.push('', fence, message.content, fence);
   if (message.task) lines.push('', `任务上报:${JSON.stringify(message.task)}`);
-  lines.push('', collaborationMessageAnchorLine(message));
+  lines.push('', collaborationMessageAnchorLine(message, token));
   return lines.join('\n');
 }
 
@@ -81,20 +108,22 @@ export function formatCollaborationDelivery(input: {
   const groupsById = new Map(input.groups.map((group) => [group.id, group]));
   const sessionsById = new Map(input.sessions.map((session) => [session.sessionId, session]));
 
+  const tokens = collaborationMessageAnchorTokens(input.messages);
   const blocks: string[] = [];
   for (const message of input.messages) {
     const sourceSession = message.fromSessionId ? sessionsById.get(message.fromSessionId) : null;
     const source = message.fromSessionId
       ? sanitizeCollaborationName(sourceSession?.name ?? message.fromSessionId)
       : '用户';
+    const token = tokens.get(message.id) ?? message.id;
     const bytes = Buffer.byteLength(message.content);
     const body = bytes > MAX_INLINE_BODY_BYTES
-      ? `大消息已完整保存（${bytes} 字节）。使用 td collab message get ${message.id} --json 获取正文；不要把这条提示当作消息正文。`
+      ? `大消息已完整保存（${bytes} 字节）。使用 td collab message get ${token} --json 获取正文；不要把这条提示当作消息正文。`
       : message.content;
     const fence = '`'.repeat(Math.max(3, ...Array.from(body.matchAll(/`+/g), (match) => match[0].length + 1)));
     const fannedNames = (message.fanOutIds ?? [])
       .map((sessionId) => sanitizeCollaborationName(sessionsById.get(sessionId)?.name ?? sessionId));
-    blocks.push(formatCollaborationMessage({ ...message, content: body }, source, fannedNames, fence));
+    blocks.push(formatCollaborationMessage({ ...message, content: body }, source, fannedNames, fence, token));
   }
 
   // The shell header names the group only when every block belongs to one;

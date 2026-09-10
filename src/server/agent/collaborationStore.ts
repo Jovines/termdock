@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { COLLAB_LIMITS, CollaborationError, STATUS_RANK, validateExtras, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
+import { COLLAB_LIMITS, CollaborationError, STATUS_RANK, resolveIdPrefix, validateExtras, type IdResolution, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
 
 export interface CollaborationGroup {
   id: string;
@@ -137,6 +137,14 @@ export class CollaborationStore {
 
   getGroup(id: string): CollaborationGroup | null {
     return this.document.groups.find((group) => group.id === id) ?? null;
+  }
+
+  /** Typed lookups accept the 8-character id a terminal shows as well as the
+   *  full one: exact match first, then a unique prefix. Ambiguity is reported,
+   *  never guessed at, and resolution happens before any send so the
+   *  idempotency payload hash still sees the full id. */
+  resolveGroupId(id: string): IdResolution {
+    return resolveIdPrefix(this.document.groups.map((group) => group.id), id);
   }
 
   save(input: { id?: string; name: string; sessionIds: string[] }): CollaborationGroup {
@@ -305,6 +313,18 @@ export class CollaborationStore {
   getMessage(id: string): CollaborationMessage | null {
     this.expire();
     return this.document.messages.find((message) => message.id === id) ?? null;
+  }
+
+  resolveMessageId(id: string): IdResolution {
+    this.expire();
+    return resolveIdPrefix(this.document.messages.map((message) => message.id), id);
+  }
+
+  /** Thread ids are shown shortened alongside message ids, so the `--thread`
+   *  filter has to take one back the same way. */
+  resolveThreadId(id: string): IdResolution {
+    this.expire();
+    return resolveIdPrefix([...new Set(this.document.messages.map((message) => message.threadId).filter((threadId): threadId is string => Boolean(threadId)))], id);
   }
 
   inbox(sessionId: string, options: { pendingOnly?: boolean; limit?: number } = {}): CollaborationMessage[] {

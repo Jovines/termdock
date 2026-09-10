@@ -27,6 +27,42 @@ export interface MessageExtras {
 export class CollaborationError extends Error {
   constructor(public readonly code: string, message: string, public readonly httpStatus = 400) { super(message); }
 }
+
+/** Canonical message and group ids are UUIDs; a delivered terminal shows only
+ *  the first 8 characters, because a 36-character id wraps in a narrow pane
+ *  and has to be retyped by whoever answers it. Shortening is display-only and
+ *  one-way: storage, wire format, receipts and federation always carry the
+ *  full id, and every lookup resolves a prefix back to it. Ids that are not
+ *  canonical UUIDs pass through untouched — a hand-written session id
+ *  (`40bc89py`), a `remote:<origin>:<id>` address or a `cross-<uuid>` federated
+ *  group are either already short or decoded by their own structural rules
+ *  (`split(':')`), so truncating them would corrupt the parse. */
+export const SHORT_ID_LENGTH = 8;
+/** Shortest input accepted as a prefix; below this a lookup is exact-match
+ *  only, so a one-character typo never turns into an ambiguity error. */
+export const MIN_ID_PREFIX_LENGTH = 4;
+const CANONICAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function canonicalShortId(id: string): string {
+  return CANONICAL_ID.test(id) ? id.slice(0, SHORT_ID_LENGTH) : id;
+}
+export type IdResolution = { status: 'ok'; id: string } | { status: 'ambiguous'; matches: string[] } | { status: 'not-found' };
+/** Resolve what a user typed against the ids that exist, git-style: an exact
+ *  match always wins, otherwise a prefix of at least MIN_ID_PREFIX_LENGTH
+ *  characters resolves when it is unique. Callers turn 'ambiguous' into an
+ *  error built by ambiguousIdMessage. */
+export function resolveIdPrefix(ids: string[], input: string): IdResolution {
+  if (ids.includes(input)) return { status: 'ok', id: input };
+  if (input.length < MIN_ID_PREFIX_LENGTH) return { status: 'not-found' };
+  const matches = ids.filter((id) => id.startsWith(input));
+  if (matches.length === 1) return { status: 'ok', id: matches[0]! };
+  return matches.length ? { status: 'ambiguous', matches } : { status: 'not-found' };
+}
+/** Both message and group lookups answer an ambiguous prefix the same way: say
+ *  how many matched, never which ones (a prefix search can reach another
+ *  session's ids), and name the way out. */
+export function ambiguousIdMessage(kind: '消息' | '协作组', count: number): string {
+  return `${kind} id 前缀匹配到 ${count} 个对象，请提供更长的前缀或完整 id`;
+}
 export function validateExtras(input: MessageExtras): MessageExtras {
   if (input.idempotencyKey !== undefined && (typeof input.idempotencyKey !== 'string' || !input.idempotencyKey.trim() || input.idempotencyKey.length > 256)) {
     throw new CollaborationError('INVALID_IDEMPOTENCY_KEY', 'idempotency key must contain 1–256 characters');

@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CollaborationStore } from './collaborationStore.js';
+import { CollaborationStore, type CollaborationMessage } from './collaborationStore.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from './collaborationDeliveryWorker.js';
-import { formatCollaborationDelivery } from './collaborationPrompt.js';
+import { collaborationMessageAnchorTokens, formatCollaborationDelivery } from './collaborationPrompt.js';
 
 describe('background collaboration delivery', () => {
   let directory: string;
@@ -192,39 +192,37 @@ describe('background collaboration delivery', () => {
       expect(write).toHaveBeenCalledTimes(1);
     });
 
-    it('dismisses an actually-showing approval dialog each cycle while unconfirmed, then rewrites within the bound', async () => {
+    it('dismisses an actually-showing approval dialog each cycle, then settles without rewriting', async () => {
       const message = send();
       const approve = vi.fn(async () => true);
       resolve.mockResolvedValue({ state: 'ready', write,
         confirm: async () => 'This command requires approval\n1. Yes\n2. Yes, and don\'t ask again\n3. No', approve, capture: async () => '' });
-      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
       const first = worker.run('b');
       await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
       await first;
       // Dialog evidence was on screen every cycle -> Enter was pressed every cycle.
       expect(approve).toHaveBeenCalledTimes(3);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'pending', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED', next_retry_at: expect.any(Number) });
-      await vi.advanceTimersByTimeAsync(4_000);
+      // The body was written once. A still-busy agent is a diagnosis, not a
+      // lost message: re-writing would deliver it again once the agent reads
+      // its input, which is how one message became three.
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+      // Nothing is queued behind it either.
+      await vi.advanceTimersByTimeAsync(10_000);
       await worker.run('b');
-      // Attempt bound reached (maxUnconfirmedWrites 2): settle as delivered, never
-      // wedge the queue — but keep the diagnosis, so the sender can tell this
-      // apart from a delivery the agent actually showed.
-      expect(write).toHaveBeenCalledTimes(2);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 2, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+      expect(write).toHaveBeenCalledTimes(1);
     });
 
-    it('never presses keys when no dialog evidence is captured, and still settles once the bound is reached', async () => {
+    it('never presses keys when no dialog evidence is captured, and settles unconfirmed exactly once', async () => {
       const message = send();
       const approve = vi.fn(async () => true);
       resolve.mockResolvedValue({ state: 'ready', write, confirm: async () => null, approve, capture: async () => '' });
-      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
       const first = worker.run('b');
       await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
       await first;
       expect(approve).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(4_000);
-      await worker.run('b');
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 2 });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
     });
 
     it('gates only the first delivery per session; later deliveries settle immediately', async () => {
@@ -287,18 +285,17 @@ describe('background collaboration delivery', () => {
       expect(confirm.mock.calls.length).toBeGreaterThan(confirmCallsAfterQuick);
     });
 
-    it('settled-unconfirmed deliveries grant no cooldown — the next delivery is gated again', async () => {
+    it('a busy (unconfirmed) delivery still settles, and grants no cooldown for the next one', async () => {
       const confirm = vi.fn(async () => null);
       resolve.mockResolvedValue({ state: 'ready', write, confirm, approve: async () => true, capture: async () => 'screen' });
-      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
       const first = send();
       const attempt = worker.run('b');
       await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
       await attempt;
-      expect(store.receipt(first.id)).toMatchObject({ status: 'pending', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
-      await vi.advanceTimersByTimeAsync(4_000);
-      await worker.run('b'); // attempt bound reached: settles as delivered
-      expect(store.receipt(first.id)).toMatchObject({ status: 'delivered', attempt_count: 2 });
+      // Unconfirmed settles immediately with the diagnosis; the body is never
+      // written a second time.
+      expect(store.receipt(first.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+      expect(write).toHaveBeenCalledTimes(1);
       const callsAtSettle = confirm.mock.calls.length;
       // A settled-but-unconfirmed session must not be trusted: the next
       // delivery checks the terminal again instead of riding the cooldown.
@@ -306,8 +303,9 @@ describe('background collaboration delivery', () => {
       const next = worker.run('b');
       await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
       await next;
-      expect(store.receipt(second.id)).toMatchObject({ status: 'pending', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+      expect(store.receipt(second.id)).toMatchObject({ status: 'delivered', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
       expect(confirm.mock.calls.length).toBeGreaterThan(callsAtSettle);
+      expect(write).toHaveBeenCalledTimes(2); // one write per message, ever
     });
 
     it('submits a stuck paste once on differential evidence and completes without rewriting', async () => {
@@ -333,27 +331,34 @@ describe('background collaboration delivery', () => {
       const confirm = vi.fn(async () => '');
       const recoverStuck = vi.fn(async () => true);
       resolve.mockResolvedValue({ state: 'ready', write, confirm, capture: async () => 'prompt $', recoverStuck });
-      worker = makeWorkerWith({ maxUnconfirmedWrites: 2 });
       const delivery = worker.run('b');
       await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
       await delivery;
+      // Recovery is the remedy (submit what is sitting in the input box), so
+      // it runs once — but it never escalates into a second body write.
       expect(recoverStuck).toHaveBeenCalledTimes(1);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'pending', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
     });
 
-    it('confirms every message source: the delivered text the formatter builds must contain the id the gate searches for', async () => {
-      // The gate's only evidence is `terminal history includes message.id`, so
-      // the formatter and the gate have to agree on how the id reaches the
-      // terminal. Wire the real formatter into confirm() — if a source ever
-      // stops carrying its id, this delivery can never confirm and the write
-      // repeats (the exact shape of the "one message arrived three times"
-      // report), so the assertion below fails instead of silently regressing.
+    it('confirms every message source: the delivered text the formatter builds must contain the token the gate searches for', async () => {
+      // The gate's only evidence is `terminal history includes the anchor
+      // token`, so the formatter and the gate have to agree on how the id
+      // reaches the terminal. Wire the real formatter into confirm() — if a
+      // source ever stops carrying its token, or the two sides pick different
+      // forms of the id, this delivery can never confirm and the write repeats
+      // (the exact shape of the "one message arrived three times" report), so
+      // the assertion below fails instead of silently regressing.
       const userMessage = store.send({ groupId, fromSessionId: null, toSessionIds: ['b'], kind: 'message', content: '请确认构建' })[0]!;
       const rendered = formatCollaborationDelivery({
         targetSessionId: 'b', messages: [userMessage], groups: store.groupsForSession('b'),
         sessions: [{ sessionId: 'b', agentNativeSessionId: null, name: '测试 Agent', status: 'working' }],
       });
-      expect(rendered).toContain(userMessage.id);
+      // The rendered text carries the short form a terminal can show without
+      // wrapping; the gate searches that same form.
+      const token = collaborationMessageAnchorTokens([userMessage]).get(userMessage.id)!;
+      expect(token).toBe(userMessage.id.slice(0, 8));
+      expect(rendered).toContain(token);
       let shown = '';
       resolve.mockResolvedValue({ state: 'ready', write, confirm: async () => shown, capture: async () => '' });
       // The write is what would put `rendered` on the recipient's screen.
@@ -363,6 +368,20 @@ describe('background collaboration delivery', () => {
       await delivery;
       expect(write).toHaveBeenCalledTimes(1);
       expect(store.receipt(userMessage.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: null });
+    });
+
+    it('falls back to full ids when one delivery holds two messages sharing a short id', async () => {
+      // The gate's `includes` search cannot tell two blocks apart, so a shared
+      // 8-character prefix must never be what either block shows: a search for
+      // the prefix would match the sibling's line and settle the wrong message.
+      const prefix = 'abcdef01';
+      const left = { ...store.inbox('b', { limit: 1 })[0], id: `${prefix}-1111-4111-8111-111111111111` } as CollaborationMessage;
+      const right = { ...left, id: `${prefix}-2222-4222-8222-222222222222` };
+      const tokens = collaborationMessageAnchorTokens([left, right]);
+      expect(tokens.get(left.id)).toBe(left.id);
+      expect(tokens.get(right.id)).toBe(right.id);
+      // Alone, the same id shortens again — the collision is per delivery.
+      expect(collaborationMessageAnchorTokens([left]).get(left.id)).toBe(prefix);
     });
   });
 });
