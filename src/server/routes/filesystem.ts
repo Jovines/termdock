@@ -62,7 +62,12 @@ const MAX_BRANCH_DIFF_NAME_BYTES = 256 * 1024;
 const MAX_BRANCH_DIFF_LOG_BYTES = 256 * 1024;
 const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
 const MAX_NESTED_GIT_REPOS = 32;
-const NESTED_GIT_DISCOVERY_TIMEOUT_MS = 1_000;
+// Walking a large non-repo tree (datasets/, models/) costs ~1s per 50k entries,
+// and the walk order is depth-first: a budget that expires mid-walk drops every
+// repo sitting after the slow directory. 1s cut real workspaces down to a
+// handful of repos with no signal. Budget generously instead — the result is
+// cached, so this only bounds a cold scan.
+const NESTED_GIT_DISCOVERY_TIMEOUT_MS = 10_000;
 const NESTED_GIT_DISCOVERY_CACHE_TTL_MS = 60_000;
 const FS_ROUTE_TIMEOUT_MS = 6_000;
 const HEIC_PREVIEW_TIMEOUT_MS = 30_000;
@@ -2859,8 +2864,18 @@ async function getCachedNestedGitRoots(workspaceRoot: string, options: { refresh
   }
   const promise = discoverNestedGitRoots(workspaceRoot, options.signal)
     .then((result) => {
+      // A truncated walk has no expiry of its own: the cache now holds a repo
+      // list that is missing entries, and every rescan that truncates again
+      // returns that same short list — so manual refresh could never recover.
+      // Keep the longer of the two lists and let it expire, so the next scan
+      // gets a chance to finish.
       if (result.truncated && cached?.result.repositories.length) {
-        return { ...cached.result, truncated: true };
+        const merged = cached.result.repositories.length >= result.repositories.length ? cached.result : result;
+        nestedGitRootsCache.set(workspaceRoot, {
+          result: { ...merged, truncated: true },
+          expiresAt: now + NESTED_GIT_DISCOVERY_CACHE_TTL_MS,
+        });
+        return { ...merged, truncated: true };
       }
       nestedGitRootsCache.set(workspaceRoot, {
         result,
