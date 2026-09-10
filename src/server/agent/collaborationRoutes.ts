@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from './collaborationStore.js';
-import { COLLAB_LIMITS, CollaborationError, ambiguousIdMessage, extrasFromBody } from './collaborationProtocol.js';
+import { COLLAB_LIMITS, CollaborationError, MIN_ID_PREFIX_LENGTH, ambiguousIdMessage, extrasFromBody } from './collaborationProtocol.js';
 
 /** Member names arrive agent-authored over a CLI; control characters would
  * corrupt terminal shells, tmux options and persisted records. Fold them to
@@ -54,7 +54,7 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     }
     res.json({ ok: true, route: await rebind(sessionId, pane ?? null) });
   }));
-  /** Accepts the 8-character id a terminal shows as well as the full one; an
+  /** Accepts the short id a terminal shows as well as the full one; an
    *  ambiguous prefix is refused rather than guessed, so a reply can never
    *  land on the wrong thread. */
   const resolveMessage = (id: string) => {
@@ -62,9 +62,22 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     if (resolved.status === 'ambiguous') throw new CollaborationError('MESSAGE_ID_AMBIGUOUS', ambiguousIdMessage('消息', resolved.matches.length));
     return resolved.status === 'ok' ? store.getMessage(resolved.id) : null;
   };
+  /** "Nothing matched" and "matched, but not yours" used to share both a code
+   *  and a sentence, and the code is what a caller reads first: MESSAGE_NOT_FOUND
+   *  next to "does not belong to this session" reads as a broken id lookup, not
+   *  as a refusal. A caller holding a real id has hit this. So the code names
+   *  the case and the sentence says which way it failed; the status stays 404
+   *  either way, and the body still carries no content the caller may not see. */
   const ownMessage = (id: string, sessionId: string, recipientOnly = false) => {
     const message = resolveMessage(id);
-    if (!message || (message.toSessionId !== sessionId && (recipientOnly || message.fromSessionId !== sessionId))) throw new CollaborationError('MESSAGE_NOT_FOUND', 'Message does not belong to this session', 404);
+    if (!message) throw new CollaborationError('MESSAGE_NOT_FOUND', id.length < MIN_ID_PREFIX_LENGTH
+      ? `No message has this exact id; prefixes are searched from ${MIN_ID_PREFIX_LENGTH} characters up`
+      : 'No message with this id or prefix; it may have expired or been pruned', 404);
+    if (message.toSessionId !== sessionId && (recipientOnly || message.fromSessionId !== sessionId)) {
+      throw new CollaborationError('MESSAGE_NOT_YOURS', recipientOnly
+        ? 'Message exists but was not addressed to this session'
+        : 'Message exists but this session is neither its sender nor its recipient', 404);
+    }
     return message;
   };
   const sent = (res: Response, ids: string[]) => {
@@ -109,7 +122,7 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       : [];
     const targets = requestedTargets.length > 0 ? requestedTargets : (target ? [target] : []);
     if (!targets.length) throw new CollaborationError('NO_TARGET', 'send requires a targetSessionId (or toSessionIds for a fan-out)', 400);
-    // `--group` may be the 8-character id; an unresolvable one must stay a
+    // `--group` may be the short id; an unresolvable one must stay a
     // GROUP_NOT_FOUND below instead of silently falling back to the only
     // shared group, which would send to a set the sender did not name.
     let requestedGroupId = typeof req.body.group_id === 'string' ? req.body.group_id : '';
@@ -159,7 +172,7 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     const sinceText = string('since');
     const since = sinceText === undefined ? undefined : /^\d+$/.test(sinceText) ? Number(sinceText) : Date.parse(sinceText);
     if (since !== undefined && !Number.isFinite(since)) throw new CollaborationError('INVALID_SINCE', 'since must be an ISO timestamp or epoch milliseconds');
-    // `--group` accepts the 8-character id; an unresolvable or ambiguous one
+    // `--group` accepts the short id; an unresolvable or ambiguous one
     // keeps the caller's text, which matches no group and yields an empty page
     // (the pre-existing behavior for an unknown group filter).
     let groupFilter = string('group');

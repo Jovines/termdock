@@ -6393,7 +6393,7 @@ router.post('/operations/collaboration-federation', (req, res) => {
 router.use('/operations', collaborationGroupRoutes({ store: collaborationStore,
   sessions: () => globalSessionState.sessions.map(orchestrationSessionSnapshot) }));
 
-/** Group id from a URL param: the 8-character id a terminal shows resolves to
+/** Group id from a URL param: the short id a terminal shows resolves to
  *  its full id, an ambiguous prefix is refused with 409, and anything else is
  *  simply "no such group" — the same 404 each route already answers. */
 function resolveGroupParam(id: string): { group: CollaborationGroup | null; ambiguous: number } {

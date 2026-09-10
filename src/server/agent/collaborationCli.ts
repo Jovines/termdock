@@ -10,7 +10,7 @@ export interface CollaborationCommand {
   operation?: string;
 }
 export const COLLAB_HELP = `td collab — durable messages; no agent-specific hooks required
-  (everywhere an id is taken, the 8-character id shown in deliveries and --text
+  (everywhere an id is taken, the short id shown in deliveries and --text
    output works too; a shorter unique prefix down to 4 characters also resolves —
    an ambiguous prefix is refused, so use more characters or the full id)
   status | capabilities

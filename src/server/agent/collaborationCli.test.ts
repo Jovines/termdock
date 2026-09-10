@@ -224,8 +224,8 @@ describe('collaboration CLI contract', () => {
     expect(capture.output[0]).toBe('just this screen');
   });
 
-  it('prints the 8-character id in text mode while JSON keeps the full one', async () => {
-    const short = '765c8819';
+  it('prints the short id in text mode while JSON keeps the full one', async () => {
+    const short = '765c8819-a';
     const full = '765c8819-ae14-46ae-b615-186eb5fd8b1f';
     const inbox = fixture([{ messages: [{ id: full, kind: 'ask', fromSessionId: 'p2', content: 'ready?' }] }]);
     expect(await executeCollaborationCommand(parseCollaborationCommand(['inbox', '--text']), {}, inbox.io)).toBe(0);

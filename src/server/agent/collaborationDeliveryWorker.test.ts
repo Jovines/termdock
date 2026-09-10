@@ -357,7 +357,7 @@ describe('background collaboration delivery', () => {
       // The rendered text carries the short form a terminal can show without
       // wrapping; the gate searches that same form.
       const token = collaborationMessageAnchorTokens([userMessage]).get(userMessage.id)!;
-      expect(token).toBe(userMessage.id.slice(0, 8));
+      expect(token).toBe(userMessage.id.slice(0, 10));
       expect(rendered).toContain(token);
       let shown = '';
       resolve.mockResolvedValue({ state: 'ready', write, confirm: async () => shown, capture: async () => '' });
@@ -372,11 +372,16 @@ describe('background collaboration delivery', () => {
 
     it('falls back to full ids when one delivery holds two messages sharing a short id', async () => {
       // The gate's `includes` search cannot tell two blocks apart, so a shared
-      // 8-character prefix must never be what either block shows: a search for
-      // the prefix would match the sibling's line and settle the wrong message.
-      const prefix = 'abcdef01';
-      const left = { ...store.inbox('b', { limit: 1 })[0], id: `${prefix}-1111-4111-8111-111111111111` } as CollaborationMessage;
-      const right = { ...left, id: `${prefix}-2222-4222-8222-222222222222` };
+      // shortened form must never be what either block shows: a search for it
+      // would match the sibling's line and settle the wrong message. The two
+      // ids share their whole first uuid group and the character after the
+      // hyphen, which is what the current length shortens to.
+      const leftId = 'abcdef01-1111-4111-8111-111111111111';
+      const rightId = 'abcdef01-1222-4222-8222-222222222222';
+      const prefix = leftId.slice(0, 10);
+      expect(prefix).toBe(rightId.slice(0, 10));
+      const left = { ...store.inbox('b', { limit: 1 })[0], id: leftId } as CollaborationMessage;
+      const right = { ...left, id: rightId };
       const tokens = collaborationMessageAnchorTokens([left, right]);
       expect(tokens.get(left.id)).toBe(left.id);
       expect(tokens.get(right.id)).toBe(right.id);

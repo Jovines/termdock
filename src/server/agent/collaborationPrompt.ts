@@ -39,10 +39,10 @@ export function sanitizeCollaborationName(name: string, max = 40): string {
 }
 
 /** The id form a delivery shows and the confirm gate searches for, per message.
- *  Canonical UUIDs shorten to their 8-character prefix (a 36-character id wraps
- *  in a narrow pane and has to be retyped by whoever answers it); ids that are
- *  not canonical UUIDs pass through untouched. A prefix shared by two messages
- *  in the same delivery would make a `includes` search match the wrong block —
+ *  Canonical UUIDs shorten to their SHORT_ID_LENGTH prefix (a 36-character id
+ *  wraps in a narrow pane and has to be retyped by whoever answers it); ids
+ *  that are not canonical UUIDs pass through untouched. A prefix shared by two
+ *  messages in the same delivery would make a `includes` search match the wrong block —
  *  including against the other one's line still sitting in terminal history —
  *  so every colliding message falls back to its full id. The batch is the unit
  *  because one delivery is what a confirm search scans against.

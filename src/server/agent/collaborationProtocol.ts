@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+
 /** Transport facts and application reports deliberately remain separate. */
 export const COLLAB_LIMITS = {
   message_bytes: 1_048_576,
@@ -28,22 +30,71 @@ export class CollaborationError extends Error {
   constructor(public readonly code: string, message: string, public readonly httpStatus = 400) { super(message); }
 }
 
-/** Canonical message and group ids are UUIDs; a delivered terminal shows only
- *  the first 8 characters, because a 36-character id wraps in a narrow pane
- *  and has to be retyped by whoever answers it. Shortening is display-only and
- *  one-way: storage, wire format, receipts and federation always carry the
- *  full id, and every lookup resolves a prefix back to it. Ids that are not
- *  canonical UUIDs pass through untouched — a hand-written session id
- *  (`40bc89py`), a `remote:<origin>:<id>` address or a `cross-<uuid>` federated
- *  group are either already short or decoded by their own structural rules
- *  (`split(':')`), so truncating them would corrupt the parse. */
-export const SHORT_ID_LENGTH = 8;
+/** A delivered terminal shows a short id, because a 36-character one wraps in
+ *  a narrow pane and has to be retyped by whoever answers it. New ids are
+ *  minted at that length already (newCollaborationId); ids stored before that
+ *  change are UUIDs, and read-only shortening renders those as their first
+ *  SHORT_ID_LENGTH characters. Both forms are the same width and both resolve,
+ *  so the display is uniform across the old and new records.
+ *
+ *  The length is 10 rather than 8 because a UUID's 9th character is always a
+ *  hyphen: at 10 characters a legacy UUID displays as `765c8819-a`, and since
+ *  base36 never draws a hyphen that exact id cannot be minted, so a new id
+ *  landing on an older UUID's displayed form is impossible by construction
+ *  instead of merely guarded against. The space is also 36^10 ≈ 3.7e15, 1296×
+ *  the 8-character one.
+ *
+ *  Anything that is neither a UUID nor an already-short id passes through
+ *  untouched — a hand-written session id (`40bc89py`), a
+ *  `remote:<origin>:<id>` address or a `cross-<uuid>` federated group are
+ *  either already short or decoded by their own structural rules
+ *  (`split(':')`), so truncating them would corrupt the parse. Storage, wire
+ *  format, receipts and federation always carry the id as stored; nothing is
+ *  rewritten on read. */
+export const SHORT_ID_LENGTH = 10;
 /** Shortest input accepted as a prefix; below this a lookup is exact-match
- *  only, so a one-character typo never turns into an ambiguity error. */
+ *  only, so a one-character typo never turns into an ambiguity error. With
+ *  10-character ids a 4-character prefix is routinely shared, so callers who
+ *  type a prefix rather than the whole id should expect to be told to add
+ *  characters. */
 export const MIN_ID_PREFIX_LENGTH = 4;
 const CANONICAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function canonicalShortId(id: string): string {
   return CANONICAL_ID.test(id) ? id.slice(0, SHORT_ID_LENGTH) : id;
+}
+/** Lowercase base36, matching the session ids this system already mints. The
+ *  10-character space is 36^10 ≈ 3.7e15 values. */
+const ID_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
+/** Drawn from a CSPRNG: an id is the only thing standing between a caller and
+ *  a message they are not party to, and a predictable sequence would let a
+ *  member of one group walk into another's. */
+export function drawCollaborationId(): string {
+  let id = '';
+  for (let index = 0; index < SHORT_ID_LENGTH; index += 1) id += ID_ALPHABET[crypto.randomInt(ID_ALPHABET.length)];
+  return id;
+}
+/** Mint a message, thread or group id, refusing anything already in `taken`.
+ *  `taken` must hold every id in use *and* the truncated form each one
+ *  displays as: resolveIdPrefix prefers an exact match, so a new id equal to a
+ *  stored UUID's display prefix would win that race and hide the older
+ *  message. At SHORT_ID_LENGTH = 10 a UUID's displayed form cannot be drawn
+ *  at all (position 9 is a hyphen, which base36 never produces), but the guard
+ *  stays because `taken` also holds ids that are short already. Locally this
+ *  makes collisions impossible.
+ *
+ *  Across machines that merge by id — federation carries ids as given, it
+ *  cannot rewrite them — two independent draws still collide with probability
+ *  ≈ n_A·n_B/36^10, about 1 in 900 million with both sides at the
+ *  2,000-message retention cap. A collision is not detected and does not
+ *  simply drop a message: the two records merge by id, and because a
+ *  higher-ranked status overwrites the receipt, a message that was never
+ *  delivered can be reported as read. That fake receipt is what this length
+ *  buys down (mergeFederatedMessages in collaborationStore.ts). */
+export function newCollaborationId(taken: Set<string>, draw: () => string = drawCollaborationId): string {
+  for (;;) {
+    const id = draw();
+    if (!taken.has(id)) { taken.add(id); return id; }
+  }
 }
 export type IdResolution = { status: 'ok'; id: string } | { status: 'ambiguous'; matches: string[] } | { status: 'not-found' };
 /** Resolve what a user typed against the ids that exist, git-style: an exact

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { COLLAB_LIMITS, CollaborationError, STATUS_RANK, resolveIdPrefix, validateExtras, type IdResolution, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
+import { COLLAB_LIMITS, CollaborationError, STATUS_RANK, canonicalShortId, drawCollaborationId, newCollaborationId, resolveIdPrefix, validateExtras, type IdResolution, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
 
 export interface CollaborationGroup {
   id: string;
@@ -105,7 +105,10 @@ export class CollaborationStore {
   private document: CollaborationDocument = { version: 2, groups: [], messages: [] };
   private persistedDocument = JSON.stringify(this.document);
 
-  constructor(private readonly filePath: string) {
+  /** `drawId` is the random source behind newCollaborationId. It is a
+   *  constructor seam so tests can force a collision and prove the guard
+   *  below actually skips it; production always uses the CSPRNG default. */
+  constructor(private readonly filePath: string, private readonly drawId: () => string = drawCollaborationId) {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<CollaborationDocument>;
       if (Array.isArray(parsed.groups)) {
@@ -139,12 +142,31 @@ export class CollaborationStore {
     return this.document.groups.find((group) => group.id === id) ?? null;
   }
 
-  /** Typed lookups accept the 8-character id a terminal shows as well as the
-   *  full one: exact match first, then a unique prefix. Ambiguity is reported,
+  /** Typed lookups accept the short id a terminal shows as well as the full
+   *  one: exact match first, then a unique prefix. Ambiguity is reported,
    *  never guessed at, and resolution happens before any send so the
    *  idempotency payload hash still sees the full id. */
   resolveGroupId(id: string): IdResolution {
     return resolveIdPrefix(this.document.groups.map((group) => group.id), id);
+  }
+
+  /** Everything a freshly minted id must not collide with. It holds two forms
+   *  of each stored id: the id itself, and the truncated form it displays as.
+   *  The second form is what keeps a new id from landing on the visible form
+   *  of an older UUID — resolveIdPrefix prefers an exact match, so that
+   *  collision would silently answer lookups with the wrong message. Ids
+   *  arrive from federation as given and cannot be rewritten, so this only
+   *  guarantees uniqueness within what this store has seen. */
+  private takenIds(): Set<string> {
+    const taken = new Set<string>();
+    const add = (id: string | null | undefined) => {
+      if (!id) return;
+      taken.add(id);
+      taken.add(canonicalShortId(id));
+    };
+    for (const group of this.document.groups) add(group.id);
+    for (const message of this.document.messages) { add(message.id); add(message.threadId); }
+    return taken;
   }
 
   save(input: { id?: string; name: string; sessionIds: string[] }): CollaborationGroup {
@@ -154,7 +176,7 @@ export class CollaborationStore {
     const group = pruneRoles({
       ...existing,
       ...(existing?.remoteSessions ? { remoteSessions: existing.remoteSessions.filter((session) => sessionIds.includes(session.sessionId)) } : {}),
-      id: existing?.id ?? crypto.randomUUID(),
+      id: existing?.id ?? newCollaborationId(this.takenIds(), this.drawId),
       name: input.name.trim(),
       sessionIds,
       createdAt: existing?.createdAt ?? now,
@@ -289,11 +311,12 @@ export class CollaborationStore {
       if (originals.some((message) => !message)) throw new CollaborationError('IDEMPOTENCY_RECORD_GONE', 'Original message removed; this key cannot be reused yet', 409);
       return originals as CollaborationMessage[];
     }
-    const threadId = input.threadId?.trim() || crypto.randomUUID();
+    const taken = this.takenIds();
+    const threadId = input.threadId?.trim() || newCollaborationId(taken, this.drawId);
     const messages = recipients.map((toSessionId): CollaborationMessage => ({
       idempotencyKey: input.idempotencyKey, responseKind: extras.responseKind, metadata: extras.metadata, task: extras.task, expiresAt: extras.expiresAt,
       sequence: this.nextSequence(),
-      id: crypto.randomUUID(), groupId: group.id, fromSessionId: input.fromSessionId,
+      id: newCollaborationId(taken, this.drawId), groupId: group.id, fromSessionId: input.fromSessionId,
       toSessionId, kind: input.kind, content, threadId,
       fanOutIds: recipients.length > 1 ? recipients.filter((id) => id !== toSessionId) : undefined,
       replyTo: input.replyTo?.trim() || null, status: 'pending', createdAt: now,

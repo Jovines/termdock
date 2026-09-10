@@ -72,6 +72,36 @@ describe('collaboration API with arbitrary pull consumers', () => {
     expect((await post('/send', { session: 'a', targetSessionId: 'b', message: 'hi', group_id: 'ffffffff' })).body.code).toBe('GROUP_NOT_FOUND');
   });
 
+  it('gives "not yours" its own code instead of reporting a missing id', async () => {
+    const { body: sent } = await post('/send', { session: 'a', targetSessionId: 'b', message: 'Verify' });
+    // The sender may read it; an outsider gets a refusal that says so, not a
+    // MESSAGE_NOT_FOUND that sends them hunting for a broken id lookup.
+    expect((await (await fetch(`${url}/message/${sent.message_id}?session=a`)).json()).message.id).toBe(sent.message_id);
+    const notYours = await fetch(`${url}/message/${sent.message_id}?session=outsider`);
+    expect(notYours.status).toBe(404);
+    expect(await notYours.json()).toMatchObject({ code: 'MESSAGE_NOT_YOURS', error: expect.stringContaining('neither') });
+    // read is recipient-only even for the sender, so the same id fails the
+    // other way round and says which way.
+    expect(await post(`/message/${sent.message_id}/read`, { session: 'a' })).toMatchObject({
+      status: 404, body: { code: 'MESSAGE_NOT_YOURS', error: expect.stringContaining('not addressed') },
+    });
+    // An id that really is unknown stays MESSAGE_NOT_FOUND, and a prefix under
+    // the search floor explains the floor rather than blaming the id.
+    expect(await (await fetch(`${url}/message/abc?session=a`)).json()).toMatchObject({
+      code: 'MESSAGE_NOT_FOUND', error: expect.stringContaining('4'),
+    });
+    expect(await (await fetch(`${url}/message/deadbeef?session=a`)).json()).toMatchObject({
+      code: 'MESSAGE_NOT_FOUND', error: expect.stringContaining('pruned'),
+    });
+    // Reading an unknown id reports the same not-found as getting it: the
+    // ownership test never runs when nothing resolved, so "not yours" cannot
+    // be reached by a caller who simply mistyped. That is the whole point of
+    // splitting the two — the refusal must not be able to hide a lookup miss.
+    expect(await post('/message/deadbeef/read', { session: 'a' })).toMatchObject({
+      status: 404, body: { code: 'MESSAGE_NOT_FOUND', error: expect.stringContaining('pruned') },
+    });
+  });
+
   it('resolves a group id prefix for --group and --thread filters', async () => {
     store.mergeFederatedGroup({ id: 'cross-solo', name: 'Solo', sessionIds: ['a', 'b'], createdAt: 1, updatedAt: 1, federated: true, remoteSessions: [] });
     const group = store.getGroup('cross-solo')!;

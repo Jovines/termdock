@@ -193,29 +193,96 @@ describe('id prefix resolution against the live store', () => {
   });
   afterEach(() => fs.rmSync(directory, { recursive: true, force: true }));
 
-  it('resolves the 8-character id a terminal shows back to the full id', () => {
+  it('resolves a message id, and a prefix of one, back to the stored id', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Release', sessionIds: ['manager', 'coder'] });
     const [message] = store.send({ groupId: group.id, fromSessionId: 'manager', toSessionIds: ['coder'], kind: 'ask', content: 'Ready?' });
-    const short = message.id.slice(0, 8);
+    // A fresh id is short already: what the terminal shows is the id, and a
+    // unique prefix of it resolves too.
+    const short = message.id.slice(0, 6);
 
     expect(store.resolveMessageId(short)).toEqual({ status: 'ok', id: message.id });
     expect(store.resolveMessageId(message.id)).toEqual({ status: 'ok', id: message.id });
     expect(store.resolveMessageId('deadbeef')).toEqual({ status: 'not-found' });
-    expect(store.resolveMessageId(short.slice(0, 3))).toEqual({ status: 'not-found' });
-    expect(store.resolveGroupId(group.id.slice(0, 8))).toEqual({ status: 'ok', id: group.id });
+    expect(store.resolveMessageId(message.id.slice(0, 3))).toEqual({ status: 'not-found' });
+    expect(store.resolveGroupId(group.id)).toEqual({ status: 'ok', id: group.id });
+    expect(store.resolveGroupId(group.id.slice(0, 6))).toEqual({ status: 'ok', id: group.id });
     // A group id the caller never created resolves to nothing, not to the
     // nearest id that happens to share a prefix.
     expect(store.resolveGroupId('ffffffff-0000-4000-8000-000000000000')).toEqual({ status: 'not-found' });
   });
 
-  it('resolves thread ids for the --thread filter', () => {
+  it('resolves a legacy uuid both whole and as the prefix a terminal shows', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Release', sessionIds: ['manager', 'coder'] });
     const threadId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    store.send({ groupId: group.id, fromSessionId: 'manager', toSessionIds: ['coder'], kind: 'ask', content: 'Ready?', threadId });
-    expect(store.resolveThreadId(threadId.slice(0, 8))).toEqual({ status: 'ok', id: threadId });
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'manager', toSessionIds: ['coder'], kind: 'ask', content: 'Ready?', threadId });
+    // A pre-upgrade record: the terminal shows 10 characters, hyphen included,
+    // and that has to lead back to the same thread.
+    expect(store.resolveThreadId('aaaaaaaa-b')).toEqual({ status: 'ok', id: threadId });
+    expect(store.resolveThreadId(message!.threadId)).toEqual({ status: 'ok', id: threadId });
+    // An older 8-character prefix still resolves — nothing already written to
+    // a terminal or a scrollback stops working.
+    expect(store.resolveThreadId('aaaaaaaa')).toEqual({ status: 'ok', id: threadId });
     expect(store.resolveThreadId('bbbbbbbb')).toEqual({ status: 'not-found' });
+  });
+});
+
+describe('new ids are minted short and coexist with stored UUIDs', () => {
+  let directory: string;
+  let filePath: string;
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-collab-mint-'));
+    filePath = path.join(directory, 'collaboration.json');
+  });
+  afterEach(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  it('generates message, thread and group ids at the displayed length', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Release', sessionIds: ['manager', 'coder'] });
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'manager', toSessionIds: ['coder'], kind: 'ask', content: 'Ready?' });
+    // Short in storage, not just in display: what the terminal shows is the id.
+    for (const id of [group.id, message!.id, message!.threadId]) expect(id).toMatch(/^[0-9a-z]{10}$/);
+    expect(store.resolveMessageId(message!.id)).toEqual({ status: 'ok', id: message!.id });
+    expect(store.resolveGroupId(group.id)).toEqual({ status: 'ok', id: group.id });
+    // Fan-out edges share one thread but keep distinct message ids.
+    const edges = store.send({ groupId: group.id, fromSessionId: 'manager', toSessionIds: ['coder', 'manager'], kind: 'task', content: 'both' });
+    expect(new Set(edges.map((edge) => edge.id)).size).toBe(edges.length);
+    expect(new Set(edges.map((edge) => edge.threadId)).size).toBe(1);
+  });
+
+  it('leaves a legacy uuid reachable by the id it displays as', () => {
+    // A pre-upgrade record keeps its UUID; the terminal shows 10 characters of
+    // it, hyphen included.
+    const seeded = new CollaborationStore(filePath);
+    const group = seeded.save({ name: 'Old', sessionIds: ['a', 'b'] });
+    const legacyThread = '765c8819-ae14-46ae-b615-186eb5fd8b1f';
+    const [legacy] = seeded.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'ask', content: 'legacy', threadId: legacyThread });
+    expect(legacy!.threadId.slice(0, 10)).toBe('765c8819-a');
+
+    // What the caller reads off the screen resolves back to the record, and
+    // stays unambiguous even after a fresh short id is minted alongside it.
+    seeded.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'ask', content: 'fresh' });
+    expect(seeded.resolveThreadId('765c8819-a')).toEqual({ status: 'ok', id: legacyThread });
+    expect(seeded.resolveThreadId(legacyThread)).toEqual({ status: 'ok', id: legacyThread });
+  });
+
+  it('never mints an id already in use, including one that arrived by federation', () => {
+    // Federation carries ids as given: a peer's short id lands in this store
+    // unchanged, and it is a string a local draw could produce. Minting it
+    // would make an exact match outrank the prefix and hide the peer's record.
+    const seeded = new CollaborationStore(filePath);
+    const group = seeded.save({ name: 'Paired', sessionIds: ['a', 'b'] });
+    const peerThread = 's0m3p33rid'; // 10 lowercase base36, as a peer would mint
+    seeded.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'ask', content: 'from peer', threadId: peerThread });
+
+    // A generator that offers the taken id first, then distinct free ones
+    // (each draw must be unique, or the retry loop has nothing new to try).
+    let index = 0;
+    const store = new CollaborationStore(filePath, () => index++ === 0 ? peerThread : `free${String(index).padStart(6, '0')}`);
+    const [fresh] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'ask', content: 'fresh' });
+    expect(fresh!.threadId).toBe('free000002');
+    expect(store.resolveThreadId(peerThread)).toEqual({ status: 'ok', id: peerThread });
   });
 });
 

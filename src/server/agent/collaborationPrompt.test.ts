@@ -118,9 +118,9 @@ describe('formatCollaborationDelivery', () => {
       const token = collaborationMessageAnchorTokens([item]).get(item.id)!;
       expect(render([item])).toContain(token);
     }
-    // A canonical uuid shows as its 8-character prefix; a non-uuid id (a
+    // A canonical uuid shows as its short prefix; a non-uuid id (a
     // hand-written session id, a remote address) passes through whole.
-    expect(render([message({ id: uuid })])).toContain(uuid.slice(0, 8));
+    expect(render([message({ id: uuid })])).toContain(uuid.slice(0, 10));
     expect(render([message({ id: uuid })])).not.toContain(uuid);
     expect(render([message({ id: '40bc89py' })])).toContain('40bc89py');
     // One block per message: the shell header never doubles as an anchor.
@@ -132,13 +132,17 @@ describe('formatCollaborationDelivery', () => {
   it('shows full ids when two blocks in one delivery share a short id', () => {
     // A shared prefix is not a usable anchor: the gate's `includes` search
     // would match the sibling's block. Both blocks fall back to their full id.
+    // Sharing the shortened form means sharing all 8 characters of the uuid's
+    // first group *and* the character after the hyphen, so that is what the
+    // fixture has to share for the collision to exist at the current length.
     const left = 'abcdef01-1111-4111-8111-111111111111';
-    const right = 'abcdef01-2222-4222-8222-222222222222';
+    const right = 'abcdef01-1222-4222-8222-222222222222';
+    expect(left.slice(0, 10)).toBe(right.slice(0, 10));
     const prompt = render([message({ id: left }), message({ id: right, fromSessionId: 'coder-id' })]);
     expect(prompt).toContain(left);
     expect(prompt).toContain(right);
     // Alone each shortens again — the fallback is scoped to the delivery.
-    expect(render([message({ id: left })])).toContain('abcdef01');
+    expect(render([message({ id: left })])).toContain('abcdef01-1');
     expect(render([message({ id: left })])).not.toContain(left);
   });
 
