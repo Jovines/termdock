@@ -60,6 +60,10 @@ async function assertSamePane(
   if (identity !== `${pane.serverPid}:${pane.sessionId}:${pane.paneId}:${pane.panePid}`) throw new Error('TMUX_PANE_CHANGED');
 }
 
+/** Unique-per-process buffer name so concurrent deliveries to different panes
+ *  never share (or clobber) a buffer. */
+let bufferSequence = 0;
+
 export async function writeCollaborationTmuxPane(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
@@ -67,18 +71,44 @@ export async function writeCollaborationTmuxPane(
 ): Promise<void> {
   await assertSamePane(run, pane);
   // A fixed pane target is independent of the current window, keyboard focus
-  // and browser presence. One invocation preserves the bracketed submit bytes.
-  await run(['send-keys', '-t', pane.paneId, '-l', '--', buildBracketedSubmitBytes(prompt)]);
+  // and browser presence. Delivery goes through a named tmux buffer rather
+  // than `send-keys -l`: while a pane is in copy-mode, literal bytes are
+  // routed to the mode's key table (they scroll or do nothing) and never
+  // reach the app, whereas paste-buffer writes into the pty regardless of
+  // mode and leaves the mode and scroll position untouched. paste-buffer
+  // does not bracket on its own, so the payload carries its own
+  // `\x1b[200~ … \x1b[201~` wrapper plus the submitting CR.
+  const buffer = `termdock-collab-${process.pid}-${bufferSequence++}`;
+  try {
+    await run(['set-buffer', '-b', buffer, '--', buildBracketedSubmitBytes(prompt)]);
+    await run(['paste-buffer', '-d', '-b', buffer, '-t', pane.paneId]);
+  } finally {
+    // -d consumed the buffer on the happy path; this sweeps up after a failed
+    // paste so no stray buffer is left on the server.
+    await run(['delete-buffer', '-b', buffer]).catch(() => undefined);
+  }
+}
+
+/** True while the pane is in any tmux mode (copy-mode, choose-tree, …), i.e.
+ *  keys sent to it are consumed by the mode handler instead of the app. */
+export async function paneInMode(
+  run: (args: string[]) => Promise<string>,
+  pane: CollaborationPaneBinding,
+): Promise<boolean> {
+  return (await run(['display-message', '-p', '-t', pane.paneId, '#{pane_in_mode}'])).trim() === '1';
 }
 
 /** Inject a named key into a member pane after proving the pane identity
- *  unchanged. Named keys only — no freeform keystroke passthrough. */
+ *  unchanged. Named keys only — no freeform keystroke passthrough. Refuses
+ *  while the pane is in a mode: there the key would be taken by the mode
+ *  handler (Enter in copy-mode exits the user's scroll) rather than the app. */
 export async function sendTmuxPaneKey(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
   key: CollaborationPaneKey,
 ): Promise<void> {
   await assertSamePane(run, pane);
+  if (await paneInMode(run, pane)) throw new Error('TMUX_PANE_IN_MODE');
   await run(['send-keys', '-t', pane.paneId, TMUX_KEY_NAMES[key]]);
 }
 
@@ -102,6 +132,8 @@ export async function approveCollaborationDialog(
 ): Promise<boolean> {
   const content = await captureTmuxPaneText(run, pane);
   if (!detectApprovalDialog(content)) return false;
+  // sendTmuxPaneKey refuses in-mode panes, so a dialog-looking screen behind a
+  // user's scroll never turns Enter into copy-mode navigation.
   await sendTmuxPaneKey(run, pane, 'enter');
   return true;
 }
