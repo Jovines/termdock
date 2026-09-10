@@ -117,3 +117,22 @@ export function selectCollaborationPane(
   return matches.length > 1 ? { state: 'ambiguous', reason: 'MULTIPLE_AGENT_PANES' }
     : { state: 'agent-exited', reason: 'AGENT_NOT_RUNNING_OR_IDENTITY_CHANGED' };
 }
+
+/** Drive-side pane resolution. Message delivery needs an Agent (only a TUI
+ *  consumes the formatted prompt, and the confirm gate searches its
+ *  transcript), but driving is a terminal operation — `run` submits one line
+ *  and `capture` reads the screen, both of which a plain shell answers. So an
+ *  Agent pane wins when one is selectable, and the session's own pane is the
+ *  fallback when there is nothing but a shell. The caller still re-asserts
+ *  pane identity on every write. */
+export function selectDrivePane(
+  binding: CollaborationBinding,
+  panes: CollaborationPaneCandidate[],
+  activePaneId: string,
+): { state: CollaborationRouteState; pane?: CollaborationPaneCandidate; reason?: string } {
+  const agent = selectCollaborationPane(binding, panes);
+  if (agent.state === 'ready' && agent.pane?.agentSlug) return agent;
+  const plain = panes.find((pane) => pane.paneId === activePaneId) ?? panes[0];
+  if (!plain) return agent;
+  return { state: 'ready', pane: plain };
+}

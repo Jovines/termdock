@@ -107,7 +107,7 @@ import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/col
 import { buildCollaborationSpawnCommand, resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
-import { CollaborationRoutingStore, selectCollaborationPane, type CollaborationBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
+import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, type CollaborationBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
 import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, recoverStuckPaste, sendTmuxPaneKey, writeCollaborationTmuxPane,
   type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
@@ -2016,7 +2016,12 @@ function formatLocalCollaborationMessages(frontendSessionId: string, messages: C
   });
 }
 
-async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null): Promise<ReturnType<typeof selectCollaborationPane>> {
+/** `allowPlainPane` widens the candidate set from "an Agent owns the pane" to
+ *  "the session's pane exists": a plain shell member has no agentSlug, so the
+ *  agent-keyed selector can never reach it. Delivery still needs an agent (the
+ *  confirm gate and prompt formatting assume a TUI); driving a terminal —
+ *  run/capture — is a shell operation and works on any pane. */
+async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false): Promise<ReturnType<typeof selectCollaborationPane>> {
   if (!binding.tmuxSessionName) return { state: 'offline', reason: 'TMUX_BINDING_MISSING' };
   const name = `=${binding.tmuxSessionName}`;
   try { await runTmux(['has-session', '-t', name]); }
@@ -2037,7 +2042,13 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
     return { serverPid, sessionId: layout.sessionId, paneId: pane.id, panePid: pane.pid,
       agentSlug: agent?.slug ?? '', nativeSessionId, cwd: pane.currentPath };
   }));
-  return selectCollaborationPane(binding, requestedPane ? panes.filter((pane) => pane.paneId === requestedPane) : panes);
+  const candidates = requestedPane ? panes.filter((pane) => pane.paneId === requestedPane) : panes;
+  if (allowPlainPane && !binding.pane) {
+    // No pinned pane: prefer an Agent pane, fall back to the session's own
+    // pane so a plain shell member is drivable (run/capture are shell ops).
+    return selectDrivePane(binding, candidates, layout.activePaneId);
+  }
+  return selectCollaborationPane(binding, candidates);
 }
 
 async function rebindCollaborationRoute(frontendSessionId: string, paneId: string | null) {
@@ -6576,8 +6587,29 @@ router.post('/operations/orchestration/drive', async (req, res) => {
     return res.status(409).json({ error: '目标会话不是 tmux 会话，无法从 CLI 驱动（模式：' + (record.mode ?? 'unknown') + '）' });
   }
   const binding = collaborationRouting.get(target);
-  const pane = binding?.pane ?? null;
-  if (!pane) return res.status(409).json({ error: '目标会话还没有可驱动的已固定终端面板（agent 可能尚未启动或已离线）' });
+  let pane = binding?.pane ?? null;
+  if (!pane) {
+    // No pinned Agent pane: resolve the session's pane directly so a plain
+    // shell member is drivable. The actions below are terminal operations —
+    // run and capture are exactly what a general terminal offers.
+    try {
+      const inspected = await inspectCollaborationTmux(binding ?? { sessionId: target, backendSessionId: null, mode: record.mode,
+        tmuxSessionName: record.tmuxSessionName, agentSlug: null, nativeSessionId: null, pane: null }, null, true);
+      pane = inspected.pane ?? null;
+    } catch (error) {
+      return res.status(409).json({ ok: false, code: 'DRIVE_FAILED', error: getErrorMessage(error) });
+    }
+    if (!pane) return res.status(409).json({ error: '目标会话还没有可驱动的终端面板（tmux 会话可能已退出）' });
+    // Deliberately not written back to the routing store: that store drives
+    // message delivery, where a plain pane has no agent to consume anything.
+    // Each drive re-resolves and assertSamePane still guards the write.
+  }
+  // Keys are for Agents: `run` submits its own line, while a bare Enter would
+  // commit whatever draft the user has typed into a plain shell. Approving a
+  // dialog only makes sense where dialogs appear, too.
+  if (!pane.agentSlug && (action === 'approve' || DRIVE_KEYS.has(action as CollaborationPaneKey))) {
+    return res.status(409).json({ ok: false, code: 'DRIVE_REQUIRES_AGENT', error: '目标面板是纯终端（无 agent），只支持 run/capture；按键类动作需要 agent 面板' });
+  }
   try {
     if (action === 'approve') {
       const approved = await approveCollaborationDialog(runTmux, pane);

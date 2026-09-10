@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CollaborationRoutingStore, selectCollaborationPane, type CollaborationBinding, type CollaborationPaneCandidate } from './collaborationRouting.js';
+import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, type CollaborationBinding, type CollaborationPaneCandidate } from './collaborationRouting.js';
 import { resolveCollaborationBackend } from './sessionBindingRecovery.js';
 
 const pane: CollaborationPaneCandidate = { serverPid: 12, sessionId: '$1', paneId: '%1', panePid: 123,
@@ -77,5 +77,27 @@ describe('authoritative collaboration routing', () => {
       expect(selectCollaborationPane({ ...binding, pane }, [{ ...pane, ...changed }])).toMatchObject({ state: 'identity-mismatch' });
     }
     expect(selectCollaborationPane({ ...binding, pane }, [{ ...pane, agentSlug: '' }])).toMatchObject({ state: 'agent-exited' });
+  });
+
+  describe('drive-side pane resolution', () => {
+    const shell = { ...pane, paneId: '%2', panePid: 456, agentSlug: '', nativeSessionId: null, cwd: '/repo' };
+    const unpinned: CollaborationBinding = { ...binding, agentSlug: null, nativeSessionId: null, pane: null };
+
+    it('prefers an Agent pane when one is selectable', () => {
+      expect(selectDrivePane(unpinned, [shell, pane], shell.paneId)).toMatchObject({ state: 'ready', pane });
+    });
+
+    it('falls back to the session pane for a plain shell member', () => {
+      expect(selectDrivePane(unpinned, [shell], shell.paneId)).toMatchObject({ state: 'ready', pane: shell });
+    });
+
+    it('returns the agent-keyed verdict when there is no pane at all', () => {
+      expect(selectDrivePane(unpinned, [], '%9')).toMatchObject({ state: 'agent-exited' });
+    });
+
+    it('prefers the active pane among several plain panes', () => {
+      const second = { ...shell, paneId: '%3', panePid: 789 };
+      expect(selectDrivePane(unpinned, [shell, second], second.paneId)).toMatchObject({ state: 'ready', pane: second });
+    });
   });
 });

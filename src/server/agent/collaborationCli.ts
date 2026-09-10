@@ -47,8 +47,11 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     operations are shell operations: approve dismisses an interactive approval
     dialog and refuses unless one is actually showing; named keys inject one
     key; capture reads the current screen back; run submits one line and
-    returns the screen. Cannot target your own session. Treat every drive as
-    strong control: the member's shell executes what you send.)
+    returns the screen. Works on plain shell members too (no agent needed) for
+    run/capture; key actions (approve/enter/…) require an agent pane, and are
+    refused while the user has the pane scrolled into copy-mode. Cannot target
+    your own session. Treat every drive as strong control: the member's shell
+    executes what you send.)
   cleanup <session-id>… 移除协作会话并终止其 tmux/进程（仅限与你同组的会话；
     不能清理当前会话自身，也不能通过清理解散你所在的组）
     风险操作：默认只打印清理计划并拒绝执行（exit 1）——这是不可恢复的删除。

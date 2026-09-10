@@ -63,4 +63,30 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
       expect((await run(['display-message', '-p', '-t', pane.paneId, '#{scroll_position}'])).trim()).toBe(before);
     } finally { await run(['kill-server']).catch(() => undefined); }
   }, 15_000);
+
+  it('executes a driven line on a plain shell pane (no agent) and reads the screen back', async () => {
+    const socket = `td-drive-shell-${process.pid}-${Date.now()}`;
+    const run = async (args: string[]) => (await execFileAsync('tmux', ['-L', socket, ...args], { timeout: 5_000 })).stdout;
+    try {
+      await run(['new-session', '-d', '-s', 'peer', 'zsh -f -i']);
+      const identity = (await run(['display-message', '-p', '-t', 'peer', '#{pid}:#{session_id}:#{pane_id}:#{pane_pid}'])).trim().split(':');
+      // A plain shell pane: no agentSlug — this is what the widened selector
+      // must reach, and what the agent-keyed selector alone never could.
+      const pane = { serverPid: Number(identity[0]), sessionId: identity[1]!, paneId: identity[2]!, panePid: Number(identity[3]),
+        agentSlug: '', nativeSessionId: null };
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if ((await run(['display-message', '-p', '-t', pane.paneId, '#{pane_current_command}'])).trim() === 'zsh') break;
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      await writeCollaborationTmuxPane(run, pane, 'echo DRIVEN_$((6*7))');
+      let screen = '';
+      for (let attempt = 0; attempt < 50; attempt++) {
+        screen = await captureTmuxPaneText(run, pane);
+        if (screen.includes('DRIVEN_42')) break;
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      expect(screen).toContain('DRIVEN_42');
+      expect(screen).not.toContain('\x1b[200~'); // bracketed wrapper never leaks into the shell
+    } finally { await run(['kill-server']).catch(() => undefined); }
+  }, 15_000);
 });
