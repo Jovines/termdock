@@ -1,5 +1,5 @@
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
-import { buildBracketedSubmitBytes } from './promptDelivery.js';
+import { normalizePromptForPaste } from './promptDelivery.js';
 
 /** Terminal-level keys a caller may inject into a member pane. Kept
  * enumerated (never freeform): driving another session's keyboard is strong
@@ -75,12 +75,28 @@ export async function writeCollaborationTmuxPane(
   // than `send-keys -l`: while a pane is in copy-mode, literal bytes are
   // routed to the mode's key table (they scroll or do nothing) and never
   // reach the app, whereas paste-buffer writes into the pty regardless of
-  // mode and leaves the mode and scroll position untouched. paste-buffer
-  // does not bracket on its own, so the payload carries its own
-  // `\x1b[200~ … \x1b[201~` wrapper plus the submitting CR.
+  // mode and leaves the mode and scroll position untouched.
+  //
+  // The bracketed-paste wrapper is left to tmux (-p) instead of riding in the
+  // payload. tmux adds the pair exactly when the application has bracketed
+  // paste on and adds nothing when it does not — so an agent TUI sees one
+  // paste while a plain shell sees clean text — and the marker bytes never
+  // enter the buffer, where tmux 3.7+ would run them through vis(3) and land
+  // a literal `^[` in the pane instead of a control byte. The same vis pass
+  // is why the body must carry no ESC: escape bytes are exactly what it
+  // rewrites, and an ESC-free body makes the pass a byte-for-byte no-op on
+  // every tmux version.
   const buffer = `termdock-collab-${process.pid}-${bufferSequence++}`;
   try {
-    await run(['set-buffer', '-b', buffer, '--', buildBracketedSubmitBytes(prompt)]);
+    await run(['set-buffer', '-b', buffer, '--', normalizePromptForPaste(prompt)]);
+    // -r keeps LF as LF rather than the separator default of CR. The
+    // normalizer already folded every line break to CR, so no LF is left for
+    // it to rewrite — the flag is insurance, not the mechanism.
+    await run(['paste-buffer', '-p', '-r', '-d', '-b', buffer, '-t', pane.paneId]);
+    // The submit key rides outside the paste block: inside it, an editor
+    // inserts a pasted CR as text instead of acting on it. Pasting the bare
+    // CR (no -p) keeps the key in the same mode-proof channel as the text.
+    await run(['set-buffer', '-b', buffer, '--', '\r']);
     await run(['paste-buffer', '-d', '-b', buffer, '-t', pane.paneId]);
   } finally {
     // -d consumed the buffer on the happy path; this sweeps up after a failed

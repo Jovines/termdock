@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { captureTmuxPaneText, recoverStuckPaste, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
+import { captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -58,10 +58,48 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
       expect(await run(['list-buffers'])).not.toContain(`termdock-collab-${process.pid}`);
       const delivered = await (async () => { try { return (await execFileAsync('sh', ['-c', 'sleep 0.4; cat /tmp/td-collab-cm.out'])).stdout; } catch { return ''; } })();
       expect(delivered).toContain('COPYMODE-REACHES-APP');
+      // cat never asked for bracketed paste, so no marker may appear in the
+      // byte stream — neither as control bytes nor as vis(3)-escaped text.
+      expect(delivered).not.toContain('\x1b[200~');
+      expect(delivered).not.toContain('[200~');
       // Named keys stay out of the mode: Enter here would copy-and-cancel.
       await expect(sendTmuxPaneKey(run, pane, 'enter')).rejects.toThrow('TMUX_PANE_IN_MODE');
       expect((await run(['display-message', '-p', '-t', pane.paneId, '#{scroll_position}'])).trim()).toBe(before);
     } finally { await run(['kill-server']).catch(() => undefined); }
+  }, 15_000);
+
+  it('lets tmux wrap the paste exactly once for an app that asked for bracketed paste', async () => {
+    const socket = `td-collab-bp-${process.pid}-${Date.now()}`;
+    const run = async (args: string[]) => (await execFileAsync('tmux', ['-L', socket, ...args], { timeout: 5_000 })).stdout;
+    const out = `/tmp/td-collab-bp-${process.pid}.out`;
+    try {
+      // cat cannot speak DECSET, so the bracketed-paste flag comes from this
+      // launcher — the same MODE_BRACKETPASTE bit an agent TUI sets.
+      await run(['new-session', '-d', '-s', 'peer', `sh -c 'printf "\\033[?2004h"; stty raw -echo; cat > ${out}'`]);
+      const identity = (await run(['display-message', '-p', '-t', 'peer', '#{pid}:#{session_id}:#{pane_id}:#{pane_pid}'])).trim().split(':');
+      const pane = { serverPid: Number(identity[0]), sessionId: identity[1]!, paneId: identity[2]!, panePid: Number(identity[3]),
+        agentSlug: 'test-consumer', nativeSessionId: null };
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if ((await run(['display-message', '-p', '-t', pane.paneId, '#{pane_current_command}'])).trim() === 'cat') break;
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      await writeCollaborationTmuxPane(run, pane, 'LINE1\nLINE2\nLINE3');
+      expect(await run(['list-buffers'])).not.toContain(`termdock-collab-${process.pid}`);
+      let delivered = '';
+      for (let attempt = 0; attempt < 50; attempt++) {
+        delivered = await (async () => { try { return (await execFileAsync('sh', ['-c', `cat ${out}`])).stdout; } catch { return ''; } })();
+        if (delivered.endsWith('\r')) break;
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      // Exactly one wrapper pair, added by tmux, around CR-joined lines, then
+      // the bare submit CR outside the block: the payload is one paste block
+      // submitting once — never doubled markers, never escaped text, never a
+      // LF that a separator rule could rewrite.
+      expect(delivered).toBe('\x1b[200~LINE1\rLINE2\rLINE3\x1b[201~\r');
+    } finally {
+      await run(['kill-server']).catch(() => undefined);
+      await execFileAsync('rm', ['-f', out]).catch(() => undefined);
+    }
   }, 15_000);
 
   it('executes a driven line on a plain shell pane (no agent) and reads the screen back', async () => {
@@ -78,14 +116,18 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
         if ((await run(['display-message', '-p', '-t', pane.paneId, '#{pane_current_command}'])).trim() === 'zsh') break;
         await new Promise((done) => setTimeout(done, 20));
       }
-      await writeCollaborationTmuxPane(run, pane, 'echo DRIVEN_$((6*7))');
+      // Two lines at once: the first CR must commit the command, which is
+      // only true if the CR lands outside a paste block (inside one, a
+      // bracketed-paste-aware editor inserts it as text).
+      await writeCollaborationTmuxPane(run, pane, 'echo DRIVEN_$((6*7))\necho SECOND_LINE');
       let screen = '';
       for (let attempt = 0; attempt < 50; attempt++) {
         screen = await captureTmuxPaneText(run, pane);
-        if (screen.includes('DRIVEN_42')) break;
+        if (screen.includes('DRIVEN_42') && screen.includes('SECOND_LINE')) break;
         await new Promise((done) => setTimeout(done, 20));
       }
-      expect(screen).toContain('DRIVEN_42');
+      expect(screen).toContain('DRIVEN_42');   // first line really executed
+      expect(screen).toContain('SECOND_LINE'); // second line arrived as its own command
       expect(screen).not.toContain('\x1b[200~'); // bracketed wrapper never leaks into the shell
     } finally { await run(['kill-server']).catch(() => undefined); }
   }, 15_000);

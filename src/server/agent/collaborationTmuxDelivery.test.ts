@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { detectApprovalDialog, extractPasteMarkerNumbers, hasNewPasteMarker, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
 
-const PANE = { serverPid: 1, sessionId: '$0', paneId: '%0', panePid: 2, agentSlug: null, nativeSessionId: null };
+const PANE = { serverPid: 1, sessionId: '$0', paneId: '%0', panePid: 2, agentSlug: '', nativeSessionId: null };
 const IDENTITY = '1:$0:%0:2';
 
 /** Fake tmux runner: answers the identity probe, records every command. */
@@ -64,13 +64,34 @@ describe('buffer-channel delivery', () => {
   it('writes through set-buffer + paste-buffer and sweeps the buffer afterwards', async () => {
     const { run, calls } = recorder();
     await writeCollaborationTmuxPane(run, PANE, 'collab-message');
-    expect(calls.map((args) => args[0])).toEqual(['display-message', 'set-buffer', 'paste-buffer', 'delete-buffer']);
+    expect(calls.map((args) => args[0])).toEqual(['display-message', 'set-buffer', 'paste-buffer', 'set-buffer', 'paste-buffer', 'delete-buffer']);
     const setBuffer = calls[1]!;
     expect(setBuffer[1]).toBe('-b');
     expect(setBuffer[2]).toMatch(/^termdock-collab-\d+-\d+$/);
-    expect(setBuffer.at(-1)).toBe('\x1b[200~collab-message\x1b[201~\r');
-    expect(calls[2]).toEqual(['paste-buffer', '-d', '-b', setBuffer[2], '-t', '%0']);
-    expect(calls[3]).toEqual(['delete-buffer', '-b', setBuffer[2]]);
+    expect(setBuffer.at(-1)).toBe('collab-message');
+    // -p lets tmux add the bracket pair only for apps that asked for it.
+    expect(calls[2]).toEqual(['paste-buffer', '-p', '-r', '-d', '-b', setBuffer[2], '-t', '%0']);
+    // The submit CR travels the same mode-proof channel, but as a bare paste
+    // so it stays a key instead of a literal inside the paste block.
+    expect(calls[3]).toEqual(['set-buffer', '-b', setBuffer[2], '--', '\r']);
+    expect(calls[4]).toEqual(['paste-buffer', '-d', '-b', setBuffer[2], '-t', '%0']);
+    expect(calls[5]).toEqual(['delete-buffer', '-b', setBuffer[2]]);
+  });
+
+  it('carries no ESC and no LF in the buffer, so tmux 3.7+ has nothing to rewrite', async () => {
+    const { run, calls } = recorder();
+    // Each delivery sets the text body and then the bare submit CR; the body
+    // is the second-to-last set-buffer.
+    const bodyFor = async (prompt: string) => {
+      await writeCollaborationTmuxPane(run, PANE, prompt);
+      return calls.filter((args) => args[0] === 'set-buffer').at(-2)!.at(-1)!;
+    };
+    const multiline = await bodyFor('first\nsecond\r\nthird');
+    expect(multiline).toBe('first\rsecond\rthird');
+    expect(multiline).not.toContain('\x1b');
+    expect(multiline).not.toContain('\n');
+    // The normalizer's ESC substitution is what keeps the body escape-free.
+    expect(await bodyFor('safe\x1b[201~injected')).toBe('safe␛[201~injected');
   });
 
   it('still sweeps the buffer when the paste fails', async () => {
