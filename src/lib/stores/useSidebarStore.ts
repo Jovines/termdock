@@ -32,6 +32,7 @@ const PINNED_EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:pinned-explorer-
 const SELECTED_FILE_PATHS_CACHE_KEY = 'termdock:right-sidebar:selected-files-by-session:v2';
 const SHOW_HIDDEN_FILES_CACHE_KEY = 'termdock:right-sidebar:show-hidden-files:v1';
 const FILE_SORT_MODES_CACHE_KEY = 'termdock:right-sidebar:file-sort-modes:v1';
+const NESTED_GIT_SCAN_ROOTS_CACHE_KEY = 'termdock:right-sidebar:nested-git-scan-roots:v1';
 // 分组开关 / 折叠状态：复用 LeftSidebar 旧 localStorage key 以保留用户已有偏好。
 // 旧编码是裸 localStorage（'1' 与 JSON 数组），与 readCache 包装格式不兼容，
 // 因此这里用专用 reader/writer 沿用旧格式。
@@ -387,8 +388,19 @@ function getInitialFileSortModes(): Record<string, FileSortMode> {
   return readCache(FILE_SORT_MODES_CACHE_KEY, isFileSortModes) ?? {};
 }
 
+function isNestedGitScanRoots(value: unknown): value is Record<string, true> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((enabled) => enabled === true);
+}
+
+function getInitialNestedGitScanRoots(): Record<string, true> {
+  return readCache(NESTED_GIT_SCAN_ROOTS_CACHE_KEY, isNestedGitScanRoots) ?? {};
+}
+
 let fileSortModesHydration: Promise<void> | null = null;
 const fileSortModeSaveSequences = new Map<string, number>();
+let nestedGitScanRootsHydration: Promise<void> | null = null;
+const nestedGitScanRootSaveSequences = new Map<string, number>();
 let pinnedExplorerRootsHydration: Promise<void> | null = null;
 const pinnedExplorerRootsOrigin = globalThis.crypto?.randomUUID?.() ?? `pins-${Math.random().toString(36).slice(2)}`;
 
@@ -472,6 +484,9 @@ interface SidebarState {
   directoryCache: Map<string, FileTreeNode[]>;
   fileSortModes: Record<string, FileSortMode>;
   fileSortModesHydrated: boolean;
+  /** Workspace roots whose Git tab scans for nested sub-repos. Absent = single-repo. */
+  nestedGitScanRoots: Record<string, true>;
+  nestedGitScanRootsHydrated: boolean;
 
   // Whether dotfiles / hidden entries are shown in the file explorer.
   showHiddenFiles: boolean;
@@ -546,6 +561,8 @@ interface SidebarState {
   reconcileDirectoryCache: (path: string, entries: FileEntry[]) => void;
   hydrateFileSortModes: () => Promise<void>;
   setDirectorySortMode: (path: string, mode: FileSortMode) => Promise<void>;
+  hydrateNestedGitScanRoots: () => Promise<void>;
+  setNestedGitScanRoot: (rootPath: string, enabled: boolean) => Promise<void>;
   invalidateDirectoryCache: (path: string, recursive?: boolean) => void;
   applyFileWatchEvents: (events: FileWatchEvent[]) => void;
   bumpFileWatchEpoch: () => void;
@@ -580,6 +597,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   directoryCache: new Map(),
   fileSortModes: getInitialFileSortModes(),
   fileSortModesHydrated: false,
+  nestedGitScanRoots: getInitialNestedGitScanRoots(),
+  nestedGitScanRootsHydrated: false,
   showHiddenFiles: getInitialShowHiddenFiles(),
   groupByFolder: readGroupByFolder(),
   collapsedGroups: readCollapsedGroups(),
@@ -1077,6 +1096,52 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         const directoryCache = new Map(s.directoryCache);
         directoryCache.delete(path);
         return { fileSortModes, directoryCache };
+      });
+    }
+  },
+
+  hydrateNestedGitScanRoots: async () => {
+    if (useSidebarStore.getState().nestedGitScanRootsHydrated) return;
+    if (nestedGitScanRootsHydration) return nestedGitScanRootsHydration;
+    nestedGitScanRootsHydration = (async () => {
+      const settings = await getSettings();
+      const serverRoots = settings.nestedGitScanRoots ?? {};
+      clearCache(NESTED_GIT_SCAN_ROOTS_CACHE_KEY);
+      set({ nestedGitScanRoots: serverRoots, nestedGitScanRootsHydrated: true });
+    })().finally(() => {
+      nestedGitScanRootsHydration = null;
+    });
+    return nestedGitScanRootsHydration;
+  },
+
+  setNestedGitScanRoot: async (rootPath, enabled) => {
+    try {
+      await useSidebarStore.getState().hydrateNestedGitScanRoots();
+    } catch {
+      // A settings read failure should not block the explicit write below.
+    }
+    const wasEnabled = Boolean(useSidebarStore.getState().nestedGitScanRoots[rootPath]);
+    const sequence = (nestedGitScanRootSaveSequences.get(rootPath) ?? 0) + 1;
+    nestedGitScanRootSaveSequences.set(rootPath, sequence);
+    set((s) => {
+      const nestedGitScanRoots = { ...s.nestedGitScanRoots };
+      if (enabled) nestedGitScanRoots[rootPath] = true;
+      else delete nestedGitScanRoots[rootPath];
+      return { nestedGitScanRoots, nestedGitScanRootsHydrated: true };
+    });
+    try {
+      const settings = await updateSettings({ nestedGitScanRoot: { rootPath, enabled } });
+      if (nestedGitScanRootSaveSequences.get(rootPath) !== sequence) return;
+      // Trust the server's copy: it is the shared source of truth across clients.
+      set({ nestedGitScanRoots: settings.nestedGitScanRoots ?? {} });
+      clearCache(NESTED_GIT_SCAN_ROOTS_CACHE_KEY);
+    } catch {
+      if (nestedGitScanRootSaveSequences.get(rootPath) !== sequence) return;
+      set((s) => {
+        const nestedGitScanRoots = { ...s.nestedGitScanRoots };
+        if (wasEnabled) nestedGitScanRoots[rootPath] = true;
+        else delete nestedGitScanRoots[rootPath];
+        return { nestedGitScanRoots };
       });
     }
   },

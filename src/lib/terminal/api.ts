@@ -1638,6 +1638,8 @@ export interface SettingsState {
   newSessionAgentSlug: string | null;
   runningSessionButtonEnabled: boolean;
   fileSortModes: Record<string, 'modified'>;
+  /** Workspace roots opted into nested sub-repo scanning. Absent = single-repo. */
+  nestedGitScanRoots: Record<string, true>;
   pinnedExplorerRoots: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
 }
 
@@ -1665,7 +1667,7 @@ export function getSettings(): Promise<SettingsState> {
   return settingsRequest;
 }
 
-export async function updateSettings(settings: { locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
+export async function updateSettings(settings: { locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -3148,6 +3150,10 @@ export interface GitRepositoryFilter {
   branch?: string | null;
   count: number;
   staged: number;
+  // True while count/staged are placeholders: the repo exists but its changed
+  // files have not been read yet (discovery-only pass). The UI must render
+  // this differently from a repo that was read and genuinely has no changes.
+  deferred?: boolean;
 }
 
 export interface GitRepositoryBundle {
@@ -3162,6 +3168,7 @@ export interface GitRepositoryBundle {
   files: GitChangedFile[];
   context: GitContext | null;
   untrackedDeferred?: boolean;
+  deferred?: boolean;
   error?: string;
 }
 
@@ -3487,7 +3494,7 @@ export async function getUntrackedFiles(cwd?: string, signal?: AbortSignal, requ
   return response.json();
 }
 
-export type GitActionRequest =
+type GitActionVariant =
   | { action: 'stage-file'; cwd: string; paths: [string] }
   | { action: 'stage-all'; cwd: string }
   | { action: 'unstage-file'; cwd: string; paths: [string] }
@@ -3498,6 +3505,16 @@ export type GitActionRequest =
   | { action: 'push'; cwd: string; remote?: string; branch?: string }
   | { action: 'pull'; cwd: string; remote?: string; branch?: string }
   | { action: 'restore-worktree-file'; cwd: string; paths: [string]; confirm: { acknowledged: true; phrase: string } };
+
+export type GitActionRequest = GitActionVariant & {
+  /**
+   * Which /git-bundle cache slot the sidebar will read back once this action
+   * finishes. The server rebuilds that same slot, so sending the wrong variant
+   * leaves the change list showing pre-action data.
+   */
+  includeNested?: boolean;
+  discoverOnly?: boolean;
+};
 
 export interface GitActionResponse {
   ok: true;
@@ -3514,12 +3531,13 @@ export interface GitActionResponse {
   bundle?: GitBundleResponse;
 }
 
-export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean; refresh?: boolean; cacheOnly?: boolean; action?: string; requestSlotId?: string; requestTimeoutMs?: number | null } = {}): Promise<GitBundleResponse> {
+export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean; refresh?: boolean; cacheOnly?: boolean; discoverOnly?: boolean; action?: string; requestSlotId?: string; requestTimeoutMs?: number | null } = {}): Promise<GitBundleResponse> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
   if (options.includeNested) params.set('includeNested', 'true');
   if (options.refresh) params.set('refresh', 'true');
   if (options.cacheOnly) params.set('cacheOnly', 'true');
+  if (options.discoverOnly) params.set('discoverOnly', 'true');
   params.set('action', options.action ?? (options.refresh ? 'manual_git_refresh' : 'open_sidebar_git_refresh'));
   if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
   const qs = params.toString();
@@ -3579,6 +3597,9 @@ export interface ApplyDiffHunkRequest {
   path: string;
   mode: DiffHunkApplyMode;
   patch: string;
+  /** See GitActionRequest: the cache slot the sidebar reads back afterwards. */
+  includeNested?: boolean;
+  discoverOnly?: boolean;
 }
 
 export interface ApplyDiffHunkResponse {

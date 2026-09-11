@@ -388,6 +388,8 @@ export type TranslationDictionary = {
     gitRepositoryEmpty: string;
     selectRepositoryForGitActions: string;
     selectRepositoryForDiff: string;
+    /** Badge for a repo whose changes have not been read yet. */
+    repoNotLoaded: string;
     repoChangedCount: (params: TranslatorParams) => string;
     repoStagedCount: (params: TranslatorParams) => string;
     noChanges: string;
@@ -408,6 +410,8 @@ export type TranslationDictionary = {
     wrapLongLines: string;
     wrapOn: string;
     wrapOff: string;
+    multiRepoScan: string;
+    multiRepoScanTitle: string;
     horizontalScrollHint: string;
     stageFile: string;
     stageAll: string;

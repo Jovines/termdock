@@ -152,6 +152,15 @@ const FILE_PREVIEW_READING_STATE_WRITE_MS = 250;
 const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
+
+/**
+ * Whether this workspace root opted into nested sub-repo discovery. Off means
+ * the server never walks the tree, which is the difference between ~10ms and
+ * multi-second Git tab loads on a large single repo.
+ */
+function isNestedGitScanEnabled(rootPath: string | null | undefined): boolean {
+  return Boolean(rootPath && useSidebarStore.getState().nestedGitScanRoots[rootPath]);
+}
 // File-watch reconnect backoff: the /fs/watch stream dies on server restart,
 // deploy, or network hiccups. Retry with capped backoff. Shared native watches
 // report a `reconnected` rescan only when a change occurred during hand-off, so
@@ -6495,6 +6504,7 @@ export function RightSidebar(
   const selectFile = useSidebarStore((s) => s.selectFile);
   const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
   const toggleShowHiddenFiles = useSidebarStore((s) => s.toggleShowHiddenFiles);
+  const nestedGitScanEnabled = useSidebarStore((s) => Boolean(rootPath && s.nestedGitScanRoots[rootPath]));
   const changedFiles = useSidebarStore((s) => s.changedFiles);
   const setChangedFiles = useSidebarStore((s) => s.setChangedFiles);
   const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
@@ -6530,7 +6540,7 @@ export function RightSidebar(
   const gitBundleRequestIdRef = useRef(0);
   const [gitBundleComponentId] = useState(() => ++gitBundleComponentSeq);
   const gitBundleAbortRef = useRef<AbortController | null>(null);
-  const gitBundlePendingRef = useRef<{ cwd: string; includeNested: boolean; refresh: boolean; cacheOnly: boolean; promise: Promise<GitBundleResponse | null> } | null>(null);
+  const gitBundlePendingRef = useRef<{ cwd: string; includeNested: boolean; refresh: boolean; cacheOnly: boolean; discoverOnly: boolean; promise: Promise<GitBundleResponse | null> } | null>(null);
   const untrackedRequestSeqRef = useRef(0);
   const untrackedRequestIdsRef = useRef<Map<string, number>>(new Map());
   const untrackedAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
@@ -6808,6 +6818,13 @@ export function RightSidebar(
     background?: boolean;
     cacheOnly?: boolean;
     replaceRepoRoot?: string;
+    /**
+     * This bundle is authoritative for the whole workspace: discard anything not
+     * in it, even when the incoming result looks degraded. Used when the user
+     * flips the nested-scan switch, where "keep what we had" would freeze the
+     * pane on repos that no longer belong to the current mode.
+     */
+    replaceWorkspace?: boolean;
   } = {}) => {
     if (!isCurrentSidebarRoot(rootPath)) {
       logGitBundleClientEvent('apply_skipped_root_changed', {
@@ -6853,11 +6870,26 @@ export function RightSidebar(
       });
       return;
     }
+    // A discovery-only bundle carries the repo list but deliberately no file
+    // lists for nested repos. Replacing wholesale would blank every repo the
+    // user already opened, so keep what is loaded and only refresh the places
+    // that came back with real data.
+    const isDiscoverOnly = repositories.some((repo) => repo.deferred);
+    if (isDiscoverOnly && !options.replaceWorkspace) {
+      const loadedRoots = new Set(
+        repositories.filter((repo) => !repo.deferred || repo.root === rootPath).map((repo) => repo.root),
+      );
+      const kept = Array.from(currentChangedFiles.values())
+        .filter((file) => !loadedRoots.has(getChangedFileRepoRoot(file, rootPath) ?? ''));
+      files = [...kept, ...bundle.files];
+    }
     const currentNestedCount = countNestedChangedFiles(currentChangedFiles.values(), rootPath);
     const nextNestedCount = countNestedChangedFiles(bundle.files, rootPath);
     const nextHasNestedRepos = repositories.some((repo) => repo.root !== rootPath);
     const shouldKeepCurrentChanges = Boolean(
       options.background
+        && !isDiscoverOnly
+        && !options.replaceWorkspace
         && currentChangedFiles.size > 0
         && (
           (bundle.files.length === 0 && !bundle.error)
@@ -7037,17 +7069,30 @@ export function RightSidebar(
     lastAutoRefreshRootRef.current = null;
   }, [resetGitBundleLoading, rootPath]);
 
-  const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean; background?: boolean; refresh?: boolean; cacheOnly?: boolean; replaceRepoRoot?: string } = {}) => {
+  const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean; background?: boolean; refresh?: boolean; cacheOnly?: boolean; replaceRepoRoot?: string; discoverOnly?: boolean; replaceWorkspace?: boolean } = {}) => {
     if (!cwd) return null;
     const expectedRootPath = rootPath;
-    const includeNested = options.includeNested ?? true;
+    // The opt-in lives server-side, so a cold client must read it before deciding.
+    // Hydration is memoized, so this is a no-op on every later call.
+    try {
+      await useSidebarStore.getState().hydrateNestedGitScanRoots();
+    } catch {
+      // Fall through with whatever the cached flag says rather than failing the load.
+    }
+    // `cwd === rootPath` is load-bearing: per-repo fetches pass cwd = repoRoot and
+    // must not inherit a workspace-level preference.
+    const nestedScanEnabled = cwd === rootPath && isNestedGitScanEnabled(rootPath);
+    const includeNested = options.includeNested ?? nestedScanEnabled;
     const refresh = options.refresh ?? options.reloadDiff ?? false;
     const cacheOnly = options.cacheOnly ?? false;
     const background = options.background ?? false;
+    // The server keys its cache on (nested?, discover?) — a `single discover` slot
+    // would be written but never read, so discovery only ever applies to nested.
+    const discoverOnly = includeNested && (options.discoverOnly ?? false);
     if (refresh) untrackedCompletedRootsRef.current.clear();
     const pending = gitBundlePendingRef.current;
-    if (pending && pending.cwd === cwd && pending.includeNested === includeNested && pending.refresh === refresh && pending.cacheOnly === cacheOnly) {
-      logGitBundleClientEvent('reuse_pending', { cwd, includeNested, refresh, cacheOnly });
+    if (pending && pending.cwd === cwd && pending.includeNested === includeNested && pending.refresh === refresh && pending.cacheOnly === cacheOnly && pending.discoverOnly === discoverOnly) {
+      logGitBundleClientEvent('reuse_pending', { cwd, includeNested, refresh, cacheOnly, discoverOnly });
       return pending.promise;
     }
     const requestId = gitBundleRequestIdRef.current + 1;
@@ -7086,6 +7131,7 @@ export function RightSidebar(
         includeNested,
         refresh,
         cacheOnly,
+        discoverOnly,
         action: refresh ? 'manual_git_refresh' : 'open_sidebar_git_refresh',
         requestSlotId,
         requestTimeoutMs: refresh ? null : undefined,
@@ -7113,14 +7159,15 @@ export function RightSidebar(
       }
       applyGitBundle(bundle, {
         reloadDiff: options.reloadDiff,
-        syncActiveRepo: includeNested,
+        syncActiveRepo: options.replaceWorkspace ? true : includeNested,
         background,
         cacheOnly,
         replaceRepoRoot: options.replaceRepoRoot,
+        replaceWorkspace: options.replaceWorkspace,
       });
       return bundle;
     })();
-    gitBundlePendingRef.current = { cwd, includeNested, refresh, cacheOnly, promise };
+    gitBundlePendingRef.current = { cwd, includeNested, refresh, cacheOnly, discoverOnly, promise };
     try {
       const result = await promise;
       if (gitBundleRequestIdRef.current === requestId && result && isCurrentSidebarRoot(expectedRootPath)) {
@@ -7180,7 +7227,6 @@ export function RightSidebar(
     // refreshes both direct and symlinked children in one pass.
     await loadGitBundle(rootPath, {
       reloadDiff: true,
-      includeNested: true,
       refresh: true,
     });
   }, [loadGitBundle, rootPath]);
@@ -7434,7 +7480,7 @@ export function RightSidebar(
   useEffect(() => {
     if (!gitKnownUnavailable || !rootPath || gitBundleLoading) return;
     const handle = window.setTimeout(() => {
-      void loadGitBundle(rootPath, { includeNested: true, background: true });
+      void loadGitBundle(rootPath, { background: true });
     }, 3_000);
     return () => window.clearTimeout(handle);
   }, [gitKnownUnavailable, rootPath, gitBundleLoading, loadGitBundle]);
@@ -7450,7 +7496,13 @@ export function RightSidebar(
     lastAutoRefreshRootRef.current = rootPath;
     const delay = gitPaneActive && !isMobile ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS;
     const handle = window.setTimeout(() => {
-      void loadGitBundle(rootPath, { includeNested: true, background: true });
+      // Open with discovery only: list every repo, read just the root one.
+      // Scanning all nested repos up front costs hundreds of ms on a
+      // multi-repo workspace and is wasted for every repo the user never
+      // opens. Picking a repo loads it on demand in selectGitRepoRoot.
+      // Single-repo workspaces skip the walk entirely, so discovery is moot
+      // there — loadGitBundle drops discoverOnly when includeNested is off.
+      void loadGitBundle(rootPath, { background: true, discoverOnly: true });
     }, delay);
     return () => {
       window.clearTimeout(handle);
@@ -8018,6 +8070,17 @@ export function RightSidebar(
     return map;
   }, [gitRepositories]);
 
+  // How many changed files we have actually loaded per repo. A repo missing
+  // from this map has never been read, which is different from a repo that was
+  // read and came back clean.
+  const repoCountsByRoot = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const repo of gitRepositories) {
+      if (!repo.deferred) counts.set(repo.root, repo.files.length);
+    }
+    return counts;
+  }, [gitRepositories]);
+
   const activeGitRepoSummary = useMemo(() => (
     activeGitRepoRoot ? gitRepoFilters.find((repo) => repo.root === activeGitRepoRoot) ?? null : null
   ), [activeGitRepoRoot, gitRepoFilters]);
@@ -8224,9 +8287,18 @@ export function RightSidebar(
   const showGitRepoFilter = gitRepoFilters.length > 1;
 
   const gitRepoSwitcherItems = useMemo(() => [
-    { root: null as string | null, label: t('rightSidebar.allRepositories'), count: changedFiles.size, branch: null as string | null },
-    ...gitRepoFilters.map((repo) => ({ root: repo.root, label: repo.label, count: repo.count, branch: repo.branch ?? null })),
-  ], [changedFiles.size, gitRepoFilters, t]);
+    { root: null as string | null, label: t('rightSidebar.allRepositories'), count: changedFiles.size, branch: null as string | null, deferred: false },
+    ...gitRepoFilters.map((repo) => ({
+      root: repo.root,
+      label: repo.label,
+      // A deferred repo reports count 0 because nothing was read yet, not
+      // because it is clean. Show the loaded count when we have one, so the
+      // badge never implies "no changes" for a repo we have not looked at.
+      count: repo.deferred ? (repoCountsByRoot.get(repo.root) ?? 0) : repo.count,
+      branch: repo.branch ?? null,
+      deferred: Boolean(repo.deferred) && !repoCountsByRoot.has(repo.root),
+    })),
+  ], [changedFiles.size, gitRepoFilters, repoCountsByRoot, t]);
 
   const activeGitRepoSwitcherItem = gitRepoSwitcherItems[activeGitRepoIndex] ?? gitRepoSwitcherItems[0];
   const showChangeAiMode = Boolean(activeGitRepoRoot);
@@ -8564,7 +8636,13 @@ export function RightSidebar(
                       {repo.branch}
                     </span>
                   )}
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${repo.count > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>{repo.count}</span>
+                  {repo.deferred ? (
+                    <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground/70">
+                      {t('rightSidebar.repoNotLoaded')}
+                    </span>
+                  ) : (
+                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${repo.count > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>{repo.count}</span>
+                  )}
                 </button>
               );
             })}
@@ -9652,11 +9730,11 @@ export function RightSidebar(
     setCompletedGitAction(null);
     setRunningGitAction({ action: request.action, path: pathForBusy });
     try {
-      const started = await runGitAction(request);
+      const started = await runGitAction({ ...request, includeNested: isNestedGitScanEnabled(rootPath) });
       const result = await waitForGitActionJob(started, request, label, pathForBusy);
       if (!isCurrentSidebarRoot(expectedRootPath)) return false;
       const refreshedBundle = rootPath
-        ? await getGitBundle(rootPath, undefined, { includeNested: true, cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
+        ? await getGitBundle(rootPath, undefined, { includeNested: isNestedGitScanEnabled(rootPath), cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
         : result.bundle;
       if (!isCurrentSidebarRoot(expectedRootPath)) return false;
       if (refreshedBundle) applyGitBundle(refreshedBundle, { reloadDiff: true, cacheOnly: true });
@@ -9676,10 +9754,10 @@ export function RightSidebar(
   // the change list and bumps diffRefreshKey so the diff reloads.
   const runDiffHunkAction = useCallback(async (request: ApplyDiffHunkRequest) => {
     const expectedRootPath = rootPath;
-    const result = await applyDiffHunk(request);
+    const result = await applyDiffHunk({ ...request, includeNested: isNestedGitScanEnabled(rootPath) });
     if (!isCurrentSidebarRoot(expectedRootPath)) return;
     const refreshedBundle = rootPath
-      ? await getGitBundle(rootPath, undefined, { includeNested: true, cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
+      ? await getGitBundle(rootPath, undefined, { includeNested: isNestedGitScanEnabled(rootPath), cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
       : result.bundle;
     if (!isCurrentSidebarRoot(expectedRootPath)) return;
     if (refreshedBundle) applyGitBundle(refreshedBundle, { reloadDiff: true, cacheOnly: true });
@@ -9702,7 +9780,75 @@ export function RightSidebar(
     setPushBranch('');
     selectFile(getFirstChangedFileSelectionPathForRepo(repoRoot));
     if (!gitPaneActive) setRightTab('diff');
-  }, [getFirstChangedFileSelectionPathForRepo, gitPaneActive, rootPath, selectFile, setRightTab]);
+    // Repos arrive deferred from a discovery-only pass: their file lists are
+    // not loaded until the user picks one. Fetch just that repo through the
+    // single-repo path (~16ms) instead of rescanning the whole workspace.
+    if (repoRoot && repoRoot !== rootPath) {
+      const repo = gitRepositories.find((candidate) => candidate.root === repoRoot);
+      if (repo?.deferred) {
+        void loadGitBundle(repoRoot, { includeNested: false, background: true, replaceRepoRoot: repoRoot });
+      }
+    }
+  }, [getFirstChangedFileSelectionPathForRepo, gitPaneActive, gitRepositories, loadGitBundle, rootPath, selectFile, setRightTab]);
+
+  // Repos that fall out of the workspace when the scan switch flips off.
+  // Aborting alone is not enough: a late untracked result merges into
+  // changedFiles before any repo-existence check runs, so the request id has to
+  // be invalidated first — that check is the only guard ahead of the merge.
+  const cancelUntrackedScansForNestedRoots = useCallback((keepRoot: string | null) => {
+    const roots = new Set<string>([
+      ...untrackedAbortControllersRef.current.keys(),
+      ...untrackedRunningRootsRef.current,
+      ...untrackedCompletedRootsRef.current,
+    ]);
+    for (const repoRoot of roots) {
+      if (repoRoot === keepRoot) continue;
+      untrackedRequestIdsRef.current.delete(repoRoot);
+      untrackedAbortControllersRef.current.get(repoRoot)?.abort();
+      untrackedAbortControllersRef.current.delete(repoRoot);
+      cancelIoSlot(`right-sidebar-git-untracked:${repoRoot}`);
+      untrackedRunningRootsRef.current.delete(repoRoot);
+      untrackedCompletedRootsRef.current.delete(repoRoot);
+    }
+  }, []);
+
+  const toggleNestedGitScan = useCallback(async (enabled: boolean) => {
+    const requestRoot = rootPath;
+    if (!requestRoot) return;
+    await useSidebarStore.getState().setNestedGitScanRoot(requestRoot, enabled);
+    if (!isCurrentSidebarRoot(requestRoot)) return;
+    if (enabled) {
+      // Replace wholesale so the deferred repo list is visible immediately;
+      // each repo's files still load only when the user picks it.
+      await loadGitBundle(requestRoot, {
+        includeNested: true,
+        discoverOnly: true,
+        replaceWorkspace: true,
+        background: true,
+        reloadDiff: true,
+      });
+      return;
+    }
+    // Collapsing to a single repo leaves per-repo state behind that would
+    // otherwise point at repositories the sidebar no longer knows about.
+    cancelUntrackedScansForNestedRoots(requestRoot);
+    setSwitchBranch('');
+    setPushRemote('');
+    setPushBranch('');
+    setBranchAuditRepoRoots((current) => current.filter((repoRoot) => repoRoot === requestRoot));
+    const selection = selectedChangedFile;
+    if (selection && getChangedFileRepoRoot(selection, requestRoot) !== requestRoot) {
+      // Only a changed-file selection is dropped; a plain explorer selection
+      // shares selectedFilePath and must survive the toggle.
+      selectFile(null);
+    }
+    await loadGitBundle(requestRoot, {
+      includeNested: false,
+      replaceWorkspace: true,
+      background: true,
+      reloadDiff: true,
+    });
+  }, [cancelUntrackedScansForNestedRoots, isCurrentSidebarRoot, loadGitBundle, rootPath, selectFile, selectedChangedFile]);
 
   const handleSwitchBranch = useCallback(async () => {
     if (!activeGitActionRepoRoot || requiresGitActionRepoSelection) {
@@ -9778,7 +9924,7 @@ export function RightSidebar(
           const result = await waitForGitActionJob(status, request, label);
           if (cancelled || !isCurrentSidebarRoot(rootPath)) return;
           const synced = rootPath
-            ? await getGitBundle(rootPath, undefined, { includeNested: true, cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
+            ? await getGitBundle(rootPath, undefined, { includeNested: isNestedGitScanEnabled(rootPath), cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
             : result.bundle;
           if (synced) applyGitBundle(synced, { reloadDiff: true, cacheOnly: true });
         } catch (error) {
@@ -10651,6 +10797,24 @@ export function RightSidebar(
           : [-Math.floor(elapsedSeconds / 86_400), 'day' as const];
     return formatter.format(value, unit);
   }, [gitCacheClock, gitCacheUpdatedAt]);
+
+  // Fixed label on purpose: swapping text on toggle would reflow the control
+  // row. The pressed state carries the meaning instead.
+  const nestedGitScanToggle = rootPath && !gitKnownUnavailable ? (
+    <button
+      type="button"
+      onClick={() => void toggleNestedGitScan(!nestedGitScanEnabled)}
+      aria-pressed={nestedGitScanEnabled}
+      title={t('rightSidebar.multiRepoScanTitle')}
+      className={`inline-flex h-7 shrink-0 items-center rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
+        nestedGitScanEnabled
+          ? 'bg-primary/15 text-primary'
+          : 'bg-surface-2 text-muted-foreground hover:text-foreground'
+      }`}
+    >
+      {t('rightSidebar.multiRepoScan')}
+    </button>
+  ) : null;
 
   const diffRefreshButton = rootPath ? (
     <div className="inline-flex shrink-0 items-center gap-1.5">
@@ -11526,6 +11690,7 @@ export function RightSidebar(
                   </div>
                   <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
                     {renderRepoSwitcherButton()}
+                    {nestedGitScanToggle}
                     {modeToggle}
                     {renderDiffViewTypeToggle()}
                     {changeAuditButton}
@@ -11628,6 +11793,7 @@ export function RightSidebar(
                       </div>
                       <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
                         {renderRepoSwitcherButton()}
+                        {nestedGitScanToggle}
                         {modeToggle}
                         {pinned && renderDiffViewTypeToggle()}
                         {changeAuditButton}

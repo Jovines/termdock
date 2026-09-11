@@ -488,6 +488,8 @@ interface GitRepositoryFilter {
   branch?: string | null;
   count: number;
   staged: number;
+  // True while count/staged are placeholders rather than a real read.
+  deferred?: boolean;
 }
 
 interface GitRepositoryBundle {
@@ -502,6 +504,10 @@ interface GitRepositoryBundle {
   files: GitChangedFile[];
   context: GitBundlePayload['context'];
   untrackedDeferred?: boolean;
+  // Set on nested repos during a discovery-only pass: the repo is known to
+  // exist, but its changed files have not been read yet. Distinct from
+  // "read and found nothing", which the UI must not confuse it with.
+  deferred?: boolean;
   error?: string;
 }
 
@@ -1504,6 +1510,7 @@ function buildGitRepositoryFilters(workspaceRoot: string, repositories: GitRepos
       branch: repo.context?.branch ?? null,
       count: repo.files.length,
       staged: countStagedFiles(repo.files),
+      deferred: repo.deferred,
     }))
     .sort((a, b) => {
       const rootLabel = path.basename(workspaceRoot) || workspaceRoot;
@@ -1574,7 +1581,7 @@ function updateGitBundleCachesWithUntracked(repoRoot: string, files: GitChangedF
   }
 }
 
-async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean, signal?: AbortSignal, options: { gitTimeoutMs?: number | null } = {}): Promise<GitBundlePayload> {
+async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean, signal?: AbortSignal, options: { gitTimeoutMs?: number | null; discoverOnly?: boolean } = {}): Promise<GitBundlePayload> {
   if (!includeNested) {
     if (signal) throwIfAborted(signal, 'git.bundle');
     const bundle = await buildGitBundle(resolvedCwd, gitRoot, signal, options);
@@ -1603,10 +1610,34 @@ async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, inc
   const { repositories: nestedRepositories, truncated } = await getCachedNestedGitRoots(gitRoot, { refresh: true, signal });
   if (signal) throwIfAborted(signal, 'git.bundle');
   const nestedDisplayRoots = buildNestedRepoDisplayRootSet(gitRoot, nestedRepositories);
-  const repositories = await Promise.all([
-    buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot, gitRoot, signal, options),
-    ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot, signal, options)),
-  ]);
+  // Discovery-only: read the root repo, but do not run `git status` against
+  // every nested repo. On a workspace with dozens of sub-repos — or one repo
+  // holding an unignored .venv — that fan-out dominates the request and the
+  // user only ever looks at one repo at a time. Nested repos come back as
+  // placeholders marked `deferred`; selecting one fetches it on demand via the
+  // single-repo path.
+  const rootRepository = await buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot, gitRoot, signal, options);
+  const nestedBundles: GitRepositoryBundle[] = options.discoverOnly
+    ? nestedRepositories.map((repo) => ({
+      id: repo.root,
+      root: repo.root,
+      displayRoot: repo.displayRoot,
+      relativeRoot: getRepoRelativeRoot(gitRoot, repo.root, repo.displayRoot),
+      name: getRepoRelativeRoot(gitRoot, repo.root, repo.displayRoot),
+      depth: getRepoDepth(gitRoot, repo.root, repo.displayRoot),
+      nested: true,
+      available: true,
+      files: [],
+      context: null,
+      // Deliberately no untrackedDeferred: adding one would make the client
+      // fan out an untracked scan per nested repo during a discovery pass,
+      // which is exactly the cost this placeholder exists to avoid.
+      deferred: true,
+    }))
+    : await Promise.all(
+      nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot, signal, options)),
+    );
+  const repositories = [rootRepository, ...nestedBundles];
   if (signal) throwIfAborted(signal, 'git.bundle');
   const primary = repositories[0];
   if (primary) {
@@ -1631,8 +1662,8 @@ async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, inc
   };
 }
 
-async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean, refresh: boolean, allowStale = false, signal?: AbortSignal): Promise<GitBundlePayload> {
-  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested);
+async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean, refresh: boolean, allowStale = false, signal?: AbortSignal, discoverOnly = false): Promise<GitBundlePayload> {
+  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested, discoverOnly);
   const now = Date.now();
   if (signal) throwIfAborted(signal, 'git.bundle');
   const cached = gitBundleCache.get(cacheKey);
@@ -1654,7 +1685,7 @@ async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeN
     return { ...bundle, cached: true, stale: false, cacheAgeMs: 0 };
   }
 
-  const promise = buildWorkspaceGitBundle(resolvedCwd, gitRoot, includeNested, signal)
+  const promise = buildWorkspaceGitBundle(resolvedCwd, gitRoot, includeNested, signal, { discoverOnly })
     .then((bundle) => {
       const updatedAt = Date.now();
       gitBundleCache.set(cacheKey, { bundle, expiresAt: updatedAt + GIT_BUNDLE_CACHE_TTL_MS, updatedAt });
@@ -1667,8 +1698,8 @@ async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeN
   return promise;
 }
 
-async function refreshGitBundleCacheDetached(resolvedCwd: string, gitRoot: string, includeNested: boolean, options: { gitTimeoutMs?: number | null } = {}): Promise<GitBundlePayload> {
-  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested);
+async function refreshGitBundleCacheDetached(resolvedCwd: string, gitRoot: string, includeNested: boolean, options: { gitTimeoutMs?: number | null; discoverOnly?: boolean } = {}): Promise<GitBundlePayload> {
+  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested, options.discoverOnly === true);
   const pending = gitBundleBuildPromises.get(cacheKey);
   if (pending) return pending;
   const promise = buildWorkspaceGitBundle(resolvedCwd, gitRoot, includeNested, undefined, options)
@@ -1684,8 +1715,8 @@ async function refreshGitBundleCacheDetached(resolvedCwd: string, gitRoot: strin
   return promise;
 }
 
-function getGitBundleCache(gitRoot: string, includeNested: boolean, allowStale = false): GitBundlePayload | null {
-  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested);
+function getGitBundleCache(gitRoot: string, includeNested: boolean, allowStale = false, discoverOnly = false): GitBundlePayload | null {
+  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested, discoverOnly);
   const cached = gitBundleCache.get(cacheKey);
   if (!cached) return null;
   const now = Date.now();
@@ -2736,8 +2767,11 @@ const gitRootCache = new Map<string, { root: string | null; expiresAt: number }>
 const gitBundleCache = new Map<string, { bundle: GitBundlePayload; expiresAt: number; updatedAt: number }>();
 const gitBundleBuildPromises = new Map<string, Promise<GitBundlePayload>>();
 
-function getGitBundleCacheKey(gitRoot: string, includeNested: boolean): string {
-  return `${gitRoot}\u0000${includeNested ? 'nested' : 'single'}`;
+// A discovery-only pass holds no per-repo file lists, so it must never share
+// a cache slot with a full bundle: selecting a repo would then serve the
+// placeholder, or a full scan would be shadowed by it.
+function getGitBundleCacheKey(gitRoot: string, includeNested: boolean, discoverOnly = false): string {
+  return `${gitRoot}\u0000${includeNested ? 'nested' : 'single'}${discoverOnly ? ' discover' : ''}`;
 }
 
 function clearGitBundleCacheForRoot(root: string): void {
@@ -4662,6 +4696,10 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
     const refresh = req.query.refresh === 'true';
     const cacheOnly = req.query.cacheOnly === 'true';
     const includeNested = req.query.includeNested === 'true';
+    // Discovery only ever splits the nested payload into deferred placeholders.
+    // Without nested repos there is nothing to defer, and honoring it here would
+    // build a `single discover` cache slot that nothing else reads or writes.
+    const discoverOnly = includeNested && req.query.discoverOnly === 'true';
     if (!cwd) {
       res.json({ available: false, files: [], context: null, error: 'No cwd provided' });
       return;
@@ -4683,14 +4721,14 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       res.json(payload);
       return;
     }
-    logFsIoEvent({ id: requestId, action, op: 'git.bundle', event: 'git-root-resolved', cwd: resolvedCwd, repoRoot: gitRoot, extra: { requestSlotId, includeNested, refresh, cacheOnly } });
+    logFsIoEvent({ id: requestId, action, op: 'git.bundle', event: 'git-root-resolved', cwd: resolvedCwd, repoRoot: gitRoot, extra: { requestSlotId, includeNested, refresh, cacheOnly, discoverOnly } });
     const allowStale = !refresh;
-    const cachedBundle = allowStale && includeNested ? getGitBundleCache(gitRoot, true, true) : null;
+    const cachedBundle = allowStale && includeNested ? getGitBundleCache(gitRoot, true, true, discoverOnly) : null;
     const effectiveIncludeNested = includeNested;
     const nestedDeferred = false;
 
     if (cacheOnly) {
-      const bundle = cachedBundle ?? getGitBundleCache(gitRoot, effectiveIncludeNested, true);
+      const bundle = cachedBundle ?? getGitBundleCache(gitRoot, effectiveIncludeNested, true, discoverOnly);
       const payload = bundle ?? {
         available: true,
         files: [],
@@ -4720,9 +4758,9 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
     }
 
     const bundle = cachedBundle ?? (refresh
-      ? await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, effectiveIncludeNested, { gitTimeoutMs: null })
+      ? await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, effectiveIncludeNested, { gitTimeoutMs: null, discoverOnly })
       : await withTimeout(
-        getCachedGitBundle(resolvedCwd, gitRoot, effectiveIncludeNested, false, allowStale, controller.signal),
+        getCachedGitBundle(resolvedCwd, gitRoot, effectiveIncludeNested, false, allowStale, controller.signal, discoverOnly),
         GIT_ROUTE_TIMEOUT_MS,
         'Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.',
         'GIT_BUNDLE_TIMEOUT',
@@ -5037,6 +5075,13 @@ router.post('/git-action', async (req: Request, res: Response) => {
       confirm?: { acknowledged?: boolean; phrase?: string };
       remote?: unknown;
       branch?: unknown;
+      /**
+       * Which /git-bundle cache slot the caller reads back afterwards. The
+       * rebuild below must repopulate that same slot, or a single-repo client
+       * ends up reading a slot this action never wrote.
+       */
+      includeNested?: unknown;
+      discoverOnly?: unknown;
     };
     const { action, cwd } = body;
 
@@ -5055,6 +5100,9 @@ router.post('/git-action', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Not a git repository', code: 'NOT_GIT_REPOSITORY' });
       return;
     }
+
+    const includeNested = body.includeNested === true;
+    const discoverOnly = includeNested && body.discoverOnly === true;
 
     const existing = gitActionJobs.get(getGitActionJobKey(gitRoot, action));
     if (existing?.status === 'running') {
@@ -5076,7 +5124,7 @@ router.post('/git-action', async (req: Request, res: Response) => {
       try {
         const output = await runGitActionCommand(body, gitRoot);
         clearGitBundleCacheForRoot(gitRoot);
-        const bundle = await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, true);
+        const bundle = await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, includeNested, { discoverOnly });
         job.status = 'done';
         job.output = output;
         job.message = output.trim() || 'Git action completed';
@@ -5134,13 +5182,16 @@ router.post('/apply-hunk', async (req: Request, res: Response) => {
   const requestId = ++fsIoRequestSeq;
   const startedAt = Date.now();
   const action = getRequestAction(req, 'apply_diff_hunk');
-  const body = req.body as { cwd?: unknown; path?: unknown; mode?: unknown; patch?: unknown };
+  const body = req.body as { cwd?: unknown; path?: unknown; mode?: unknown; patch?: unknown; includeNested?: unknown; discoverOnly?: unknown };
   const cwd = typeof body.cwd === 'string' ? body.cwd : '';
   const requestedPath = typeof body.path === 'string' ? body.path : '';
   const mode: HunkApplyMode | undefined = typeof body.mode === 'string' && HUNK_APPLY_MODES.includes(body.mode as HunkApplyMode)
     ? body.mode as HunkApplyMode
     : undefined;
   const patch = typeof body.patch === 'string' ? body.patch : '';
+  // Mirrors /git-action: repopulate the same cache slot the caller will read.
+  const includeNested = body.includeNested === true;
+  const discoverOnly = includeNested && body.discoverOnly === true;
   let gitRootForLog: string | null = null;
   logFsIoEvent({ id: requestId, action, op: 'git.apply-hunk', event: 'request-start', path: requestedPath, cwd, extra: { mode, patchBytes: getDiffByteLength(patch) } });
   try {
@@ -5168,7 +5219,7 @@ router.post('/apply-hunk', async (req: Request, res: Response) => {
     }
     await runGitApply(gitRoot, mode, patch, GIT_APPLY_TIMEOUT_MS);
     clearGitBundleCacheForRoot(gitRoot);
-    const bundle = await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, true);
+    const bundle = await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, includeNested, { discoverOnly });
     logFsIo({ id: requestId, action, op: 'git.apply-hunk', startedAt, status: 'ok', path: requestedPath, cwd, repoRoot: gitRoot, extra: { mode } });
     res.json({ ok: true, bundle });
   } catch (error) {

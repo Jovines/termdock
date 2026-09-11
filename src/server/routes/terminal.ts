@@ -48,6 +48,8 @@ import {
   getFileSortModesSetting,
   setFileSortModesSetting,
   setFileSortModeSetting,
+  getNestedGitScanRootsSetting,
+  setNestedGitScanRootSetting,
   getPinnedExplorerRootsSetting,
   setPinnedExplorerRootsSetting,
   setPinnedExplorerRootSetting,
@@ -6983,6 +6985,7 @@ async function getSettingsPayload() {
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
     fileSortModes: getFileSortModesSetting(),
+    nestedGitScanRoots: getNestedGitScanRootsSetting(),
     pinnedExplorerRoots: getPinnedExplorerRootsSetting(),
     localAccess: {
       ...localAccess,
@@ -7132,6 +7135,19 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setFileSortModeSetting(preference.path as string, preference.mode);
+  }
+
+  if (body.nestedGitScanRoot && typeof body.nestedGitScanRoot === 'object') {
+    const preference = body.nestedGitScanRoot as { rootPath?: unknown; enabled?: unknown };
+    const isAbsoluteRootPath = (value: unknown): value is string => typeof value === 'string'
+      && value.length > 0
+      && value.length <= 4096
+      && (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value));
+    if (!isAbsoluteRootPath(preference.rootPath) || typeof preference.enabled !== 'boolean') {
+      res.status(400).json({ error: 'Invalid nested git scan preference', code: 'NESTED_GIT_SCAN_ROOT_INVALID' });
+      return;
+    }
+    setNestedGitScanRootSetting(preference.rootPath, preference.enabled);
   }
 
   if (body.pinnedExplorerRoots && typeof body.pinnedExplorerRoots === 'object' && !Array.isArray(body.pinnedExplorerRoots)) {

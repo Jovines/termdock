@@ -50,6 +50,11 @@ export interface SettingsDoc {
   runningSessionButtonEnabled: boolean;
   /** Explorer folders whose direct children are sorted by modification time. */
   fileSortModes: Record<string, 'modified'>;
+  /**
+   * Workspace roots the user marked as holding nested sub-repos. Absent means
+   * single-repo, which skips the (expensive) nested discovery walk entirely.
+   */
+  nestedGitScanRoots: Record<string, true>;
   /** Explorer entries pinned per project root and shared by every connected client. */
   pinnedExplorerRoots: PinnedExplorerRoots;
   updatedAt: number;
@@ -131,6 +136,13 @@ function isAbsoluteFilePath(value: string): boolean {
     && (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value));
 }
 
+export function normalizeNestedGitScanRoots(value: unknown): Record<string, true> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([rootPath, enabled]) => enabled === true && isAbsoluteFilePath(rootPath))
+    .slice(-500)) as Record<string, true>;
+}
+
 export function normalizePinnedExplorerRoots(value: unknown): PinnedExplorerRoots {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const normalized: PinnedExplorerRoots = {};
@@ -203,6 +215,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
+    nestedGitScanRoots: normalizeNestedGitScanRoots(raw.nestedGitScanRoots),
     pinnedExplorerRoots: normalizePinnedExplorerRoots(raw.pinnedExplorerRoots),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
@@ -570,6 +583,20 @@ export function setFileSortModeSetting(filePath: string, mode: 'name' | 'modifie
     if (mode === 'modified') next[filePath] = mode;
     else delete next[filePath];
     settings.fileSortModes = normalizeFileSortModes(next);
+  });
+}
+
+export function getNestedGitScanRootsSetting(): Record<string, true> {
+  return { ...loadSettings().nestedGitScanRoots };
+}
+
+export function setNestedGitScanRootSetting(rootPath: string, enabled: boolean): SettingsDoc {
+  return updateSettings((settings) => {
+    const next = { ...settings.nestedGitScanRoots };
+    // Only the non-default (opted-in) state is stored, so `{}` means "all single-repo".
+    if (enabled) next[rootPath] = true;
+    else delete next[rootPath];
+    settings.nestedGitScanRoots = normalizeNestedGitScanRoots(next);
   });
 }
 
