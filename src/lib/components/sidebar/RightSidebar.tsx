@@ -322,6 +322,23 @@ function resolveActiveGitRepoRootFromBundle(bundle: GitBundleResponse, preferred
   return (bundle.repositories ?? []).some((repo) => repo.root === preferred) ? preferred : null;
 }
 
+// A repo group's header carries the only control that expands the group again,
+// and headers render only while the change list covers every repository at
+// once. The collapsed set is a per-absolute-root cache that outlives that
+// header: flipping the multi-repo scan off, drilling into a single repo, or
+// reloading into a single-repo bundle all hide the header while the root stays
+// in the set. Honoring the stale collapse then hides every file under it and
+// leaves the pane showing change counts above an empty list with nothing to
+// click. So a group that cannot be collapsed by hand never counts as collapsed.
+export function showsGitRepoGroupHeader(params: {
+  activeGitRepoRoot: string | null;
+  groupCount: number;
+  label: string;
+  rootName: string;
+}): boolean {
+  return !params.activeGitRepoRoot && (params.groupCount > 1 || params.label !== params.rootName);
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
@@ -8766,8 +8783,13 @@ export function RightSidebar(
   function buildDiffNavigatorGroups(): DiffNavigatorGroup[] {
     return filteredChangedFileGroups.map((group) => {
       const staged = countStagedChanges(group.files.map(([, file]) => file));
-      const showRepoHeader = !activeGitRepoRoot && (filteredChangedFileGroups.length > 1 || group.label !== rootName);
-      const collapsed = Boolean(group.root && collapsedGitRepoGroups.has(group.root));
+      const showRepoHeader = showsGitRepoGroupHeader({
+        activeGitRepoRoot,
+        groupCount: filteredChangedFileGroups.length,
+        label: group.label,
+        rootName,
+      });
+      const collapsed = Boolean(showRepoHeader && group.root && collapsedGitRepoGroups.has(group.root));
       const groupKey = group.root ?? group.label;
       return {
         key: groupKey,
@@ -8956,7 +8978,17 @@ export function RightSidebar(
       fileBySelectionPath.set(getChangedFileSelectionPath(entry[1]), entry);
     }
     for (const group of filteredChangedFileGroups) {
-      if (group.root && collapsedGitRepoGroups.has(group.root)) continue;
+      const groupCollapsed = Boolean(
+        group.root
+        && showsGitRepoGroupHeader({
+          activeGitRepoRoot,
+          groupCount: filteredChangedFileGroups.length,
+          label: group.label,
+          rootName,
+        })
+        && collapsedGitRepoGroups.has(group.root),
+      );
+      if (groupCollapsed) continue;
       if (diffChangeListMode !== 'tree') {
         ordered.push(...group.files);
         continue;
@@ -8968,7 +9000,7 @@ export function RightSidebar(
       }
     }
     return ordered;
-  }, [collapsedGitRepoGroups, diffChangeListMode, filteredChangedFileGroups, filteredChangedFiles]);
+  }, [activeGitRepoRoot, collapsedGitRepoGroups, diffChangeListMode, filteredChangedFileGroups, filteredChangedFiles, rootName]);
 
   useEffect(() => {
     if (!diffPaneActive || orderedChangedFilesForDiff.length === 0) return;
