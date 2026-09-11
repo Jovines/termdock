@@ -1597,6 +1597,13 @@ async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, inc
       files: bundle.files,
       context: bundle.context,
       error: bundle.error,
+      // The client only ever reads this flag off the repository, never off the
+      // top-level payload: it is what makes it re-fetch untracked files after
+      // an 800ms `ls-files` timeout. Leaving it unset here means the whole
+      // untracked half of the change list silently disappears — an empty pane
+      // on a repo whose changes are all untracked. buildGitRepositoryBundle
+      // sets it for nested repos; single-repo mode is the odd one out.
+      untrackedDeferred: bundle.untrackedDeferred,
     };
     return {
       ...bundle,
