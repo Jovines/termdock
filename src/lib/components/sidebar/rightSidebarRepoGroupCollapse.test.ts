@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from 'vitest';
-import { showsGitRepoGroupHeader } from './RightSidebar';
+import { collectKnownGitRepoRoots, showsGitRepoGroupHeader } from './RightSidebar';
 
 // `buildDiffNavigatorGroups` and `orderedChangedFilesForDiff` both consult this
 // predicate before honoring the persisted collapsed set, because a collapsed
@@ -25,5 +25,26 @@ describe('repo group collapse follows header visibility', () => {
 
   it('keeps the header when the workspace sits inside a larger repo', () => {
     expect(showsGitRepoGroupHeader({ activeGitRepoRoot: null, groupCount: 1, label: 'monorepo', rootName: 'app' })).toBe(true);
+  });
+});
+
+// The self-healing effect that drops an active root when its repo leaves the
+// workspace validates against this set. A deferred placeholder lists in
+// `repoFilters` with `context: null`, so it is absent from the loaded-context
+// options the git actions use — reading the active root off those dropped the
+// selection the moment a placeholder chip was clicked.
+describe('known repo roots include unread placeholders', () => {
+  it('counts a deferred placeholder listed only in the filters', () => {
+    const roots = collectKnownGitRepoRoots(
+      [{ root: '/work/app' }, { root: '/work/app/vendor/lib', deferred: true, context: null }],
+      [{ root: '/work/app', context: { available: true } }],
+    );
+    expect(roots.has('/work/app/vendor/lib')).toBe(true);
+    expect(roots.has('/work/app')).toBe(true);
+    expect(roots.size).toBe(2);
+  });
+
+  it('counts a repo that only the repository list carries', () => {
+    expect(collectKnownGitRepoRoots([], [{ root: '/work/app' }]).has('/work/app')).toBe(true);
   });
 });

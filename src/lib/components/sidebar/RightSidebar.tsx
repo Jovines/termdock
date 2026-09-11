@@ -339,6 +339,20 @@ export function showsGitRepoGroupHeader(params: {
   return !params.activeGitRepoRoot && (params.groupCount > 1 || params.label !== params.rootName);
 }
 
+// Every repo root the workspace knows about, whether or not it has been read.
+// A discovery pass lists nested repos as deferred placeholders whose context is
+// still null, but they are real repos the user can select — so existence checks
+// must run against this, not against the loaded-context set the git actions use.
+export function collectKnownGitRepoRoots(
+  ...sources: ReadonlyArray<ReadonlyArray<{ root: string }>>
+): Set<string> {
+  const roots = new Set<string>();
+  for (const source of sources) {
+    for (const repo of source) roots.add(repo.root);
+  }
+  return roots;
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
@@ -8320,13 +8334,24 @@ export function RightSidebar(
   const activeGitRepoSwitcherItem = gitRepoSwitcherItems[activeGitRepoIndex] ?? gitRepoSwitcherItems[0];
   const showChangeAiMode = Boolean(activeGitRepoRoot);
 
+  // Repos that exist in this workspace, loaded or not. This is what the active
+  // root is validated against — deliberately not `gitActionRepoOptions`, which
+  // only lists repos whose context already loaded: a deferred placeholder is a
+  // repo the user can pick, so validating against the loaded set dropped the
+  // selection the instant a placeholder chip was clicked, before its bundle
+  // could arrive with a context.
+  const knownGitRepoRoots = useMemo(
+    () => collectKnownGitRepoRoots(gitRepoFilters, gitRepositories),
+    [gitRepoFilters, gitRepositories],
+  );
+
   useEffect(() => {
-    if (activeGitRepoRoot && !gitActionRepoOptions.some((repo) => repo.value === activeGitRepoRoot)) {
+    if (activeGitRepoRoot && !knownGitRepoRoots.has(activeGitRepoRoot)) {
       setActiveGitRepoRoot(null);
       writeActiveGitRepoRoot(rootPath, null);
     }
     setChangeAuditRepoRoots((current) => current.filter((repoRoot) => gitRepoFilters.some((repo) => repo.root === repoRoot)));
-  }, [activeGitRepoRoot, gitActionRepoOptions, gitRepoFilters, rootPath]);
+  }, [activeGitRepoRoot, gitRepoFilters, knownGitRepoRoots, rootPath]);
 
   const switchBranchOptions = useMemo<GitPickerOption[]>(() => {
     const values = new Set<string>();
