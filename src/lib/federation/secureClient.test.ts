@@ -11,6 +11,52 @@ function harness(handle: (packet: Packet, reply: (packet: Packet) => void) => vo
   return { client: new SecureClient(clientWire, { peerId: 'device' } as Identity, 'service'), received };
 }
 describe('SecureClient packet operations', () => {
+  it('prepares renewal five minutes before expiry and defers while requests are pending', async () => {
+    const now = Date.now();
+    const { client } = harness(() => {});
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      clock.mockReturnValue(now + 54 * 60_000);
+      expect(client.renewalDue).toBe(false);
+      clock.mockReturnValue(now + 55 * 60_000 + 10);
+      expect(client.renewalDue).toBe(true);
+      expect(client.canSwitchTransport).toBe(true);
+      const pending = client.request({ type: 'permissions' });
+      const rejected = expect(pending).rejects.toThrow('done');
+      expect(client.canSwitchTransport).toBe(false);
+      client.close(new Error('done'));
+      await rejected;
+      expect(client.renewalDue).toBe(false);
+    } finally { clock.mockRestore(); client.close(); }
+  });
+
+  it('retires logical sockets with a planned close instead of an error', async () => {
+    vi.stubGlobal('CloseEvent', class extends Event {
+      constructor(type: string, readonly init: CloseEventInit = {}) { super(type); }
+      get code() { return this.init.code; } get reason() { return this.init.reason; }
+    });
+    const { client, received } = harness((packet, reply) => {
+      if (packet.type === 'ws-open') reply({ id: packet.id, type: 'ws-ready' });
+    });
+    try {
+      const socket = client.openSocket('/api/terminal/one/ws');
+      await new Promise<void>(resolve => { socket.onopen = () => resolve(); });
+      const error = vi.fn(), closed = vi.fn(); socket.onerror = error; socket.onclose = closed;
+      expect(client.canSwitchTransport).toBe(true);
+      socket.send(JSON.stringify({ type: 'input', data: 'once' }));
+      expect(client.canSwitchTransport).toBe(false);
+      await vi.waitFor(() => expect(received.filter(packet => packet.type === 'ws-data')).toHaveLength(1));
+      const clock = vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 2001);
+      try { expect(client.canSwitchTransport).toBe(true); } finally { clock.mockRestore(); }
+      client.retire();
+      expect(client.closed).toBe(true);
+      expect(closed).toHaveBeenCalledOnce();
+      expect(closed.mock.calls[0][0]).toMatchObject({ code: 1012, reason: 'Encrypted transport renewed' });
+      expect(error).not.toHaveBeenCalled();
+      expect(received.filter(packet => packet.type === 'ws-data')).toHaveLength(1);
+    } finally { client.close(); vi.unstubAllGlobals(); }
+  });
+
   it('queues a burst of status-only reads and releases both successful and rejected bodies', async () => {
     let active = 0, maximum = 0;
     const errors = new Set<string>();

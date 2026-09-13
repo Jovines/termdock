@@ -1,4 +1,5 @@
-import { createIdentity, secureConnection, type Identity } from '../../server/federation/secureProtocol.js';
+import { createIdentity, secureConnection, MAX_SECURE_CONNECTION_AGE_MS, type Identity } from '../../server/federation/secureProtocol.js';
+import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from './transportLifecycle.js';
 import { AsyncQueue, PacketChannel, fromBase64, toBase64, type Packet } from '../../server/federation/packets.js';
 import { socketDuplex } from '../../server/federation/socketDuplex.js';
 import { MAX_ACTIVE_HTTP_REQUESTS, MAX_OPEN_SECURE_SOCKETS } from '../../server/federation/streamLimits.js';
@@ -59,11 +60,22 @@ export class SecureSocket extends EventTarget {
 }
 
 export class SecureClient {
+  private readonly establishedAt = performance.now();
+  private readonly establishedWallTime = Date.now();
+  private lastInputAt = -Infinity;
   private pending = new Map<string, Pending>();
   private waiting: Waiter[] = [];
   private stopped = false;
   private closeReason?: Error;
-  get canSwitchTransport(): boolean { return ![...this.pending.values()].some(operation => operation.kind === 'http') && !this.waiting.some(operation => operation.kind === 'http'); }
+  get canSwitchTransport(): boolean {
+    return !this.channel.hasPendingWrites && performance.now() - this.lastInputAt >= 2000
+      && ![...this.pending.values()].some(operation => operation.kind !== 'socket')
+      && !this.waiting.some(operation => operation.kind !== 'socket');
+  }
+  get renewalDue(): boolean {
+    return !this.stopped && Math.max(performance.now() - this.establishedAt, Date.now() - this.establishedWallTime)
+      >= MAX_SECURE_CONNECTION_AGE_MS - 5 * 60_000;
+  }
   get closed(): boolean { return this.stopped; }
   constructor(private channel: PacketChannel, readonly identity: Identity, readonly targetPeerId: string) {
     void this.read().catch(error => this.close(failure(error)));
@@ -138,7 +150,13 @@ export class SecureClient {
     let id: string | undefined;
     const waiting = new AbortController();
     const socket = new SecureSocket(path,
-      data => { if (id) this.channel.send({ id, type: 'ws-data', data }); },
+      data => {
+        if (!id) return;
+        // Give recently typed input time to reach the PTY before planned
+        // replacement. Heartbeats and output acknowledgements need no pause.
+        try { if (JSON.parse(data)?.type === 'input') this.lastInputAt = performance.now(); } catch { /* non-JSON logical socket */ }
+        this.channel.send({ id, type: 'ws-data', data });
+      },
       () => { waiting.abort(); if (id) { try { this.channel.send({ id, type: 'ws-close' }); } finally { this.release(id); } } });
     void this.reserve('socket', waiting.signal).then(allocation => {
       id = allocation.id;
@@ -234,6 +252,14 @@ export class SecureClient {
       }, { highWaterMark: CHUNK_BYTES, size: chunk => chunk.byteLength });
       return new Response(body, { status: head.status, headers: responseHeaders });
     } catch (error) { abort(); release(); throw error; }
+  }
+  /** Called only after a replacement has authenticated and no requests remain.
+   * Do not replay input: terminal consumers reattach using their output cursor. */
+  retire(): void {
+    for (const pending of this.pending.values()) {
+      pending.socket?.accept({ id: '', type: 'ws-close', code: TRANSPORT_RENEWED_CODE, reason: TRANSPORT_RENEWED_REASON });
+    }
+    this.close();
   }
   close(error = new Error('Secure connection closed')) {
     if (this.stopped) return; this.stopped = true; this.closeReason = error;

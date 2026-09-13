@@ -22,12 +22,22 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
 }) => {
   const { t } = useI18n();
   const isTransientReconnect = !!connectionError && RECONNECTING_RE.test(connectionError);
+  const isRecovering = !!((isConnecting && !connectionError) || isTransientReconnect);
+  const [showRecovery, setShowRecovery] = React.useState(false);
+  React.useEffect(() => {
+    if (!isRecovering) { setShowRecovery(false); return; }
+    // Fast transport renewal should not flash a warning. A sustained outage
+    // still gets feedback, and fatal errors below are never delayed.
+    const timer = setTimeout(() => setShowRecovery(true), 1500);
+    return () => clearTimeout(timer);
+  }, [isRecovering]);
 
-  if ((isConnecting && !connectionError) || isTransientReconnect) {
+  if (isRecovering) {
+    if (!showRecovery) return null;
     return (
       <div className="absolute inset-x-0 bottom-0 flex items-end justify-center pb-2 pointer-events-none">
         <span className="text-[11px] text-muted-foreground/60 animate-pulse tracking-wide">
-          {connectionError || t('connection.reconnecting')}
+          {t('connection.reconnecting')}
         </span>
       </div>
     );

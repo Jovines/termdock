@@ -4,6 +4,7 @@ import { selectedTarget } from '../federation/clientScope';
 import { prepareEncryptedDownload } from './secureDownload';
 import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
 import { secureSocket } from '../federation/browserIntegration';
+import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from '../federation/transportLifecycle';
 import { clearPreviewResourceCache, fetchPreviewResource } from '../utils/previewResourceCache';
 import type {
   TerminalSession,
@@ -885,6 +886,10 @@ export function connectTerminalStream(
       // A preceding error already scheduled the retry. Do not clear its timer
       // when the browser subsequently delivers close for the same failure.
       if (retryState.isClosed || ignoredSockets.has(ws) || handlingError) return;
+      if (ev.code === TRANSPORT_RENEWED_CODE && ev.reason === TRANSPORT_RENEWED_REASON) {
+        newConn.reconnectNow();
+        return;
+      }
       clearTimeouts();
       stopHeartbeat(newConn);
       handlingError = true;

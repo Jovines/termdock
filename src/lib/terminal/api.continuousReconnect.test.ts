@@ -10,6 +10,7 @@ import {
   reconnectTerminalConnectionNow,
   suspendTerminalConnectionReconnects,
   resizeTerminal,
+  sendTerminalInput,
   VISIBLE_WAKEUP_PROBE_TIMEOUT_MS,
 } from './api';
 
@@ -55,6 +56,28 @@ class FakeWebSocket {
 }
 
 describe('connectTerminalStream reconnect policy', () => {
+  it('reattaches immediately after planned renewal and does not resend delivered input', async () => {
+    const onEvent = vi.fn();
+    const disconnect = connectTerminalStream('renewal', onEvent);
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN; socket.onopen?.();
+    const send = vi.spyOn(socket, 'send');
+    socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'connected', streamEpoch: 'epoch', replayLastSeq: 7 }) }));
+    await sendTerminalInput('renewal', 'once');
+    expect(send).toHaveBeenCalledWith(JSON.stringify({ type: 'input', data: 'once' }));
+    socket.closeFromServer(1012, 'Encrypted transport renewed');
+    vi.advanceTimersByTime(0);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const replacement = FakeWebSocket.instances[1];
+    expect(replacement.url).toContain('since=7'); expect(replacement.url).toContain('epoch=epoch');
+    const resent = vi.spyOn(replacement, 'send');
+    replacement.readyState = FakeWebSocket.OPEN; replacement.onopen?.();
+    expect(resent).not.toHaveBeenCalledWith(JSON.stringify({ type: 'input', data: 'once' }));
+    replacement.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'connected' }) }));
+    expect(onEvent).toHaveBeenLastCalledWith({ type: 'connected' });
+    disconnect();
+  });
+
   it('preserves the retry across error followed by close after waking', () => {
     const onEvent = vi.fn();
     const disconnect = connectTerminalStream('wake-error-close', onEvent, vi.fn(), {

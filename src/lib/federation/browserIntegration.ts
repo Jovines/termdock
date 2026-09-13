@@ -16,6 +16,8 @@ let entryClient: SecureClient | undefined;
 let activePath: 'direct' | 'relay' = 'direct';
 let probingDirect = false;
 let lastDirectProbe = 0;
+let renewing = false;
+let lastRenewalAttemptAt = -Infinity;
 const nativeFetch = globalThis.fetch.bind(globalThis);
 export interface ConnectionIntent { url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean; routes?: ServiceRoute[] }
 
@@ -202,7 +204,7 @@ export async function openAuthorizedServiceClient(intent: ConnectionIntent, sign
   } catch (error) { client.close(); throw error; }
   finally { signal.removeEventListener('abort', abort); }
 }
-export async function connectDevice(intent: ConnectionIntent, options: { rememberOnly?: boolean } = {}): Promise<SecureClient> {
+export async function connectDevice(intent: ConnectionIntent, options: { rememberOnly?: boolean; renewIfCurrent?: SecureClient } = {}): Promise<SecureClient> {
   const previous = active, previousEntry = entryClient;
   const identity = await getIdentity();
   const serviceOrigin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
@@ -277,6 +279,25 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
       if (transport.entry && transport.entry !== previous && transport.entry !== previousEntry) transport.entry.close();
     }, !!pairingCode);
     next = result.value.client; nextEntry = result.value.entry; path = result.value.path;
+    if (options.renewIfCurrent) {
+      // A request or a manual service change may have happened during the
+      // handshake. Never retire its transport or overwrite its saved selection.
+      if (active !== options.renewIfCurrent || previous !== options.renewIfCurrent
+        || previous.closed || !previous.canSwitchTransport
+        || savedConnection()?.targetPeerId !== intent.targetPeerId) {
+        next.close();
+        for (const entry of openedEntries) if (entry !== entryClient && entry !== active) entry.close();
+        return active ?? previous!;
+      }
+      active = next; activePath = path; entryClient = nextEntry;
+      rememberConnectionPath(intent.targetPeerId, result.key);
+      previous.retire();
+      for (const client of new Set([previousEntry, ...openedEntries])) {
+        if (client && client !== previous && client !== next && client !== nextEntry) client.close();
+      }
+      window.dispatchEvent(new Event(SECURE_STATE_EVENT));
+      return next;
+    }
     rememberConnectionPath(intent.targetPeerId, result.key);
     // A manually verified address can restore this service while an earlier
     // reconnect is still pending. Do not replace it with that stale attempt.
@@ -310,11 +331,24 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
     throw error;
   }
 }
+/** Prepare a fresh authenticated channel while the old one can still serve
+ * traffic. Failure leaves it intact; its original cryptographic limits remain. */
+export async function renewSecureTransport(): Promise<void> {
+  const previous = active, selected = savedConnection();
+  if (renewing || probingDirect || connecting || !previous?.renewalDue
+    || !previous.canSwitchTransport || !selected || performance.now() - lastRenewalAttemptAt < 30_000) return;
+  lastRenewalAttemptAt = performance.now();
+  renewing = true;
+  try { await connectDevice(selected, { renewIfCurrent: previous }); }
+  catch (error) {
+    console.debug('[connection] renewal deferred', { reason: error instanceof Error ? error.message : 'unknown' });
+  } finally { renewing = false; }
+}
 /** Periodically prefer direct connectivity again after VPN/LAN conditions
  * improve. Do not interrupt an upload or other in-flight HTTP operation. */
 export async function preferDirectConnection(): Promise<void> {
   const previous = active, selected = savedConnection();
-  if (Date.now() - lastDirectProbe < 60_000 || probingDirect || activePath !== 'relay' || !previous || previous.closed || !previous.canSwitchTransport || !selected?.serviceOrigin) return;
+  if (Date.now() - lastDirectProbe < 60_000 || renewing || probingDirect || activePath !== 'relay' || !previous || previous.closed || !previous.canSwitchTransport || !selected?.serviceOrigin) return;
   probingDirect = true; lastDirectProbe = Date.now(); let candidate: SecureClient | undefined;
   try {
     for (const address of connectionAddresses(selected)) try {
@@ -338,7 +372,13 @@ export async function preferDirectConnection(): Promise<void> {
 }
 export function currentConnectionPath(): 'direct' | 'relay' { return activePath; }
 export async function getActiveClient(): Promise<SecureClient> {
-  if (active && !active.closed) return active;
+  if (active && !active.closed) {
+    // Regular permission checks also reach here while the terminal is idle.
+    // Renewal prepares in the background; this caller retains its live channel.
+    const current = active;
+    void renewSecureTransport();
+    return current;
+  }
   active = undefined;
   if (connecting) return connecting;
   const saved = savedConnection();

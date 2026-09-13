@@ -34,6 +34,7 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 export class PacketChannel {
   private outgoing = new AsyncQueue<Uint8Array>(256);
   private outgoingBytes = 0;
+  get hasPendingWrites(): boolean { return this.outgoingBytes > 0; }
   readonly done: Promise<void>;
   constructor(private duplex: ByteDuplex) {
     const self = this;

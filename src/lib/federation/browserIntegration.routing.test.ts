@@ -35,6 +35,83 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it.each(['direct', 'relay'] as const)('renews an aging %s channel only after its replacement is verified', async mode => {
+    const dial = mocks.connect.getMockImplementation()!;
+    if (mode === 'relay') mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !args.socketFactory) throw new Error('direct unavailable');
+      return dial(args);
+    });
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://b.example', targetPeerId: 'B', routes: mode === 'relay' ? [{ url: 'https://a.example', targetPeerId: 'A' }] : [] };
+    mocks.saved.mockReturnValue(target);
+    const old = await integration.connectDevice(target);
+    const retire = vi.fn(() => {
+      expect(integration.currentSecureClient()).not.toBe(old);
+      expect(integration.currentConnectionPath()).toBe(mode);
+      expect(clients.get('B')!.request).toHaveBeenCalledWith({ type: 'permissions' }, undefined);
+    });
+    Object.assign(old, { renewalDue: false, retire });
+    const count = mocks.connect.mock.calls.length;
+    await integration.renewSecureTransport();
+    expect(mocks.connect).toHaveBeenCalledTimes(count);
+    Object.assign(old, { renewalDue: true });
+    const saves = mocks.save.mock.calls.length;
+    Object.assign(old, { canSwitchTransport: false });
+    await integration.renewSecureTransport();
+    expect(mocks.connect).toHaveBeenCalledTimes(count);
+    Object.assign(old, { canSwitchTransport: true });
+    expect(await integration.getActiveClient()).toBe(old);
+    await vi.waitFor(() => expect(retire).toHaveBeenCalledOnce());
+    expect(mocks.save).toHaveBeenCalledTimes(saves);
+    expect(old.close).not.toHaveBeenCalled();
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['request', 'failure', 'selection', 'concurrent'] as const)('keeps the current channel safe during renewal: %s', async scenario => {
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://b.example', targetPeerId: 'B' };
+    mocks.saved.mockReturnValue(target);
+    const old = await integration.connectDevice(target);
+    const retire = vi.fn();
+    Object.assign(old, { renewalDue: true, retire });
+    const dial = mocks.connect.getMockImplementation()!;
+    let candidate: Awaited<ReturnType<typeof dial>>;
+    let release!: () => void;
+    const pause = new Promise<void>(resolve => { release = resolve; });
+    mocks.connect.mockImplementationOnce(async args => {
+      if (scenario === 'failure') throw new Error('replacement offline');
+      candidate = await dial(args);
+      await pause;
+      return candidate;
+    });
+    const renewing = integration.renewSecureTransport();
+    if (scenario !== 'failure') {
+      await vi.waitFor(() => expect(candidate).toBeDefined());
+      expect(old.close).not.toHaveBeenCalled(); expect(retire).not.toHaveBeenCalled();
+      if (scenario === 'request') Object.assign(old, { canSwitchTransport: false });
+      if (scenario === 'selection') mocks.saved.mockReturnValue({ ...target, targetPeerId: 'C' });
+      if (scenario === 'concurrent') {
+        const count = mocks.connect.mock.calls.length;
+        await integration.renewSecureTransport();
+        expect(mocks.connect).toHaveBeenCalledTimes(count);
+      }
+      release();
+    }
+    await renewing;
+    if (scenario === 'concurrent') expect(retire).toHaveBeenCalledOnce();
+    else {
+      expect(integration.currentSecureClient()).toBe(old);
+      expect(retire).not.toHaveBeenCalled(); expect(old.close).not.toHaveBeenCalled();
+      if (candidate!) expect(candidate.close).toHaveBeenCalled();
+    }
+    if (scenario === 'failure') {
+      const count = mocks.connect.mock.calls.length;
+      await integration.renewSecureTransport();
+      expect(mocks.connect).toHaveBeenCalledTimes(count);
+    }
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
   it.each(['direct', 'relay'] as const)('keeps collaboration reads and local writes on the encrypted %s target with an old preload', async (mode) => {
     const base = mocks.connect.getMockImplementation()!;
     if (mode === 'relay') mocks.connect.mockImplementation(async args => {
