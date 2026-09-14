@@ -80,9 +80,13 @@ function hardWrapIndent(terminal: Terminal, index: number): number | null {
   const before = previous.translateToString(true).trimEnd();
   const after = next.translateToString(true);
   const tail = findTerminalPathMatches(before).at(-1);
-  const continuation = after.match(/^( +)([^\s]+\/[^\s]+)/u);
+  const continuation = after.match(/^( +)([^\s]+)/u);
   if (!tail || tail.endIndex !== before.length || !tail.text.endsWith('/') || !continuation
     || /^[~./]/u.test(continuation[2])) return null;
+  // The last wrapped row may contain only a filename (optionally :line:column).
+  // Keep plain prose out of hard-wrap joins even when it shares the path color.
+  const continuationPath = continuation[2].replace(/:\d+(?::\d+)?$/u, '');
+  if (!continuationPath.includes('/') && !/^[^/:]+\.[\p{L}\p{N}_-]+$/u.test(continuationPath)) return null;
   let lastColumn = previous.length - 1;
   while (lastColumn >= 0 && !(previous.getCell(lastColumn)?.getChars() || '').trim()) lastColumn -= 1;
   const indent = continuation[1].length;
@@ -91,7 +95,8 @@ function hardWrapIndent(terminal: Terminal, index: number): number | null {
   let segmentWidth = 0;
   for (let column = indent; column < next.length; column += 1) {
     const cell = next.getCell(column);
-    if (!cell || cell.getChars() === '/') break;
+    if (cell?.getWidth() === 0) continue;
+    if (!cell || /[\s/:]/u.test(cell.getChars() || ' ')) break;
     segmentWidth += cell.getWidth();
   }
   const remainingColumns = previous.length - lastColumn - 1;

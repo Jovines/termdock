@@ -117,8 +117,34 @@ describe('real terminal path layout', () => {
     }
   });
 
+  it('joins a three-row relative path ending in a filename and line number', async () => {
+    const parts = [
+      'business_modules/Search/Search/search_impl/src/main/',
+      'java/com/ss/android/ugc/aweme/helper/',
+      'AmbientBackgroundHelper.kt',
+    ];
+    for (const row of [1, 2, 3]) {
+      const { links, activate } = await linksFor(
+        `  1. \x1b[36m${parts[0]}\r\n     ${parts[1]}\r\n     ${parts[2]}:662\x1b[0m 隐藏判断点：`, 60, row,
+      );
+      expect(links?.map(link => link.text)).toEqual([parts.join('')]);
+      expect(links?.[0].range).toEqual({ start: { x: 6, y: 1 }, end: { x: 31, y: 3 } });
+      links?.[0].activate({} as MouseEvent, links[0].text);
+      expect(activate).toHaveBeenCalledWith(parts.join(''));
+    }
+  });
+
+  it('does not use following prose to decide whether a short filename wrapped', async () => {
+    const { links } = await linksFor(
+      '\x1b[36m/tmp/\r\n  a.kt\x1b[0m followed by a long explanatory sentence', 60, 1,
+    );
+    expect(links?.map(link => link.text)).toEqual(['/tmp/']);
+  });
+
   it.each([
     '                          /tmp/\r\n  project/report.md',
+    '                          \x1b[36m/tmp/\r\n  ordinary prose',
+    '                          \x1b[36m/tmp/\r\n  \x1b[31mreport.kt:662',
     '\x1b[36m/tmp/\r\n  project/report.md',
     '                          \x1b[36m/tmp/\r\n  \x1b[31mproject/report.md',
     '                          \x1b[36m/tmp/\r\n  /other/report.md',
