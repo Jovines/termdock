@@ -2,7 +2,7 @@ import { encodeTerminalKey } from '../../terminal/keyboard';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { isWorkspaceActive } from '../../services/workspaceHost';
 import React from 'react';
-import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
+import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
 import { readTerminalClipboardImage, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
 import { useI18n } from '../../i18n';
@@ -1619,6 +1619,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
       const cleaned = sanitizeTerminalInput(rawText);
       if (!cleaned) return false;
+      setPasteError(null);
       if (routeCollaborationInput(cleaned)) return true;
       sendTerminalSeq(cleaned, textarea, { paste: true, submitAfterPaste: false });
       dismissMobileCopyPopover();
@@ -1653,7 +1654,26 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [dismissMobileCopyPopover, sendTerminalSeq]);
 
     const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
+      setPasteError(null);
       try {
+        if (!getTermdockDesktopBridge()?.readClipboardImage) {
+          if (typeof navigator.clipboard?.read === 'function') {
+            // Request access once, within the button's user gesture. Reuse the
+            // returned items for text too: a later readText() can be denied by iOS.
+            const items = await navigator.clipboard.read();
+            const image = await readTerminalClipboardImage({ read: async () => items });
+            if (image) return pasteImageIntoTerminal(image, textarea);
+            for (const item of items) {
+              if (!item.types.includes('text/plain')) continue;
+              const text = await (await item.getType('text/plain')).text();
+              return pasteTextIntoTerminal(text, textarea);
+            }
+            return false;
+          }
+          // Older browsers exposing only readText must call it before any await.
+          if (!navigator.clipboard?.readText) return false;
+          return pasteTextIntoTerminal(await navigator.clipboard.readText(), textarea);
+        }
         const image = await readTerminalClipboardImage(navigator.clipboard);
         if (image) return pasteImageIntoTerminal(image, textarea);
         if (!navigator.clipboard?.readText) {
