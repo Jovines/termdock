@@ -4,6 +4,7 @@ import type { CollaborationRouteState } from './collaborationRouting.js';
 
 export interface CollaborationRoute {
   state: CollaborationRouteState;
+  isShell?: boolean;
   reason?: string;
   write?: (messages: CollaborationMessage[]) => Promise<void>;
   /** Best-effort capture of the recipient terminal after a successful write. */
@@ -138,7 +139,7 @@ export class CollaborationDeliveryWorker {
     let route: CollaborationRoute;
     try { route = await this.options.resolve(id); }
     catch (error) { route = { state: 'unavailable', reason: `ROUTE_RECOVERY_FAILED: ${error instanceof Error ? error.message : String(error)}` }; }
-    this.states.set(id, { state: route.state, reason: route.reason ?? null, checkedAt: Date.now() });
+    this.states.set(id, { state: route.isShell ? 'shell' : route.state, reason: route.reason ?? null, checkedAt: Date.now() });
     // Re-read after asynchronous recovery: a consumer may have read the
     // message, or its TTL may have elapsed while tmux was being inspected.
     const pending = store.inbox(id, { pendingOnly: true, limit: 1 });
@@ -148,6 +149,13 @@ export class CollaborationDeliveryWorker {
       return;
     }
     const message = pending[0]!;
+    if (route.isShell && message.shellConfirmed !== true) {
+      if (route.capture) {
+        try { store.setSnapshot(message.id, await route.capture()); } catch { /* best effort */ }
+      }
+      this.retry(id, pending, `SHELL_CONFIRMATION_REQUIRED: 目标当前处于 shell，消息可能作为命令执行。确定发送请运行 td collab message confirm-shell ${message.id}`, true);
+      return;
+    }
     const attempts = store.diagnostic(message.id)?.attempt_count ?? 0;
     // Confirm gate: the route becoming ready only proves the agent process is
     // up, not that its TUI is consuming — a write landing while the agent
@@ -164,7 +172,7 @@ export class CollaborationDeliveryWorker {
     // as three copies). Only a write that throws is treated as a failed
     // delivery and retried — that path is unchanged.
     const confirmMs = this.options.firstDeliveryConfirmMs ?? 1_500;
-    const gateActive = Boolean(route.confirm) && confirmMs > 0
+    const gateActive = !route.isShell && Boolean(route.confirm) && confirmMs > 0
       && Date.now() >= (this.confirmedUntil.get(id) ?? 0);
     // Differential baseline for stuck-paste recovery: captured before the
     // write so a later screen diff can tell our paste apart from stale ones.

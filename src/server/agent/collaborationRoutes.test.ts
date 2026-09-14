@@ -30,6 +30,17 @@ describe('collaboration API with arbitrary pull consumers', () => {
     const response = await fetch(url + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return { status: response.status, body: await response.json() };
   };
+  it('lets only the sender confirm the original pending shell message', async () => {
+    const { body } = await post('/send', { session: 'a', targetSessionId: 'b', message: 'Verify' });
+    const route = `/message/${body.message_id}/confirm-shell`;
+    expect((await post(route, { session: 'b' })).status).toBe(403);
+    const confirmed = await post(route, { session: 'a' });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.message_id).toBe(body.message_id);
+    expect(store.getMessage(body.message_id)?.shellConfirmed).toBe(true);
+    expect(store.inbox('b')).toHaveLength(1);
+  });
+
   it('accepts the 8-character id a terminal shows, and retries it idempotently', async () => {
     const { body: sent } = await post('/send', { session: 'a', targetSessionId: 'b', message: 'Verify', idempotency_key: 'short' });
     const short = String(sent.message_id).slice(0, 8);

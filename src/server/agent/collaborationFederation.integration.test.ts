@@ -40,6 +40,22 @@ function setup() {
 }
 
 describe('real stores over the desktop collaboration bridge', () => {
+  it.each(['hello', 'evidence '.repeat(20_000)])('syncs sender shell confirmation on an existing pending message (%#)', async (content) => {
+    const { nodes, bridge } = setup();
+    await bridge.save(nodes[0].origin, { name: 'Pair', sessionIds: ['generic', qualifySession(nodes[1].origin, 'generic')] });
+    await bridge.refresh();
+    const group = nodes[0].store.list()[0];
+    const [message] = nodes[0].store.send({ groupId: group.id, fromSessionId: 'generic', toSessionIds: [qualifySession(nodes[1].origin, 'generic')], kind: 'ask', content });
+    await bridge.refresh();
+    expect(nodes[1].store.getMessage(message.id)?.shellConfirmed).not.toBe(true);
+    nodes[0].store.confirmShell(message.id);
+    await bridge.refresh();
+    expect(nodes[1].store.getMessage(message.id)).toMatchObject({ shellConfirmed: true, status: 'pending', content });
+    expect(nodes[1].store.inbox('generic')).toHaveLength(1);
+    nodes[1].store = new CollaborationStore(nodes[1].file);
+    expect(nodes[1].store.getMessage(message.id)?.shellConfirmed).toBe(true);
+  });
+
   it('promotes a local group without copying or deleting its history in separate requests', async () => {
     const { nodes, services, bridge } = setup();
     const original = nodes[0].store.save({ name: 'Original', sessionIds: ['generic', 'second'] });

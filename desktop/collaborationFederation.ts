@@ -185,6 +185,8 @@ export class CollaborationFederation {
     const existing = this.messages.get(message.id);
     const rank = STATUS_RANK;
     if (!existing || rank[message.status] > rank[existing.status]) this.messages.set(message.id, message);
+    const merged = this.messages.get(message.id);
+    if (merged && (existing?.shellConfirmed === true || message.shellConfirmed === true)) merged.shellConfirmed = true;
     // Match the bounded durable server history.
     if (this.messages.size > 2000) {
       const removable = [...this.messages.values()].find((item) => item.status !== 'pending' && item.status !== 'failed');
@@ -210,7 +212,8 @@ export class CollaborationFederation {
     const rank = STATUS_RANK;
     const known = new Map((this.snapshots.get(service.origin)?.messages ?? []).map((message) => [message.id, message]));
     const messages = [...this.messages.values()].filter((message) => message.groupId === group.id
-      && (!known.has(message.id) || rank[message.status] > rank[known.get(message.id)!.status]))
+      && (!known.has(message.id) || rank[message.status] > rank[known.get(message.id)!.status]
+        || (message.shellConfirmed === true && known.get(message.id)?.shellConfirmed !== true)))
       .map((message) => mapMessage(message, (id) => localId(service.origin, id)));
     // Group creation/deletion still travels when there are no message changes.
     if (!messages.length) {

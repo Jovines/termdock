@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type CollaborationRouteState = 'recovering' | 'detached' | 'ready' | 'agent-exited' | 'offline' | 'ambiguous' | 'identity-mismatch' | 'unavailable';
+export type CollaborationRouteState = 'shell' | 'recovering' | 'detached' | 'ready' | 'agent-exited' | 'offline' | 'ambiguous' | 'identity-mismatch' | 'unavailable';
 
 export interface CollaborationPaneBinding {
   serverPid: number;
@@ -89,6 +89,7 @@ export class CollaborationRoutingStore {
 
 export interface CollaborationPaneCandidate extends CollaborationPaneBinding {
   cwd: string;
+  isShell?: boolean;
 }
 
 // Once pinned, changing the active pane cannot change the recipient. A reused
@@ -102,10 +103,6 @@ export function selectCollaborationPane(
     const pane = panes.find((candidate) => candidate.serverPid === previous.serverPid
       && candidate.sessionId === previous.sessionId && candidate.paneId === previous.paneId && candidate.panePid === previous.panePid);
     if (!pane) return { state: 'identity-mismatch', reason: 'TMUX_PANE_CHANGED' };
-    if (!pane.agentSlug) return { state: 'agent-exited', reason: 'AGENT_NOT_RUNNING' };
-    if (pane.agentSlug !== previous.agentSlug || (previous.nativeSessionId && pane.nativeSessionId && previous.nativeSessionId !== pane.nativeSessionId)) {
-      return { state: 'identity-mismatch', reason: 'AGENT_IDENTITY_CHANGED' };
-    }
     return { state: 'ready', pane };
   }
   const candidates = panes.filter((pane) => pane.agentSlug && (!binding.agentSlug || binding.agentSlug === pane.agentSlug)
@@ -113,9 +110,11 @@ export function selectCollaborationPane(
   const exact = binding.nativeSessionId ? candidates.filter((pane) => pane.nativeSessionId === binding.nativeSessionId) : [];
   const matches = exact.length ? exact : candidates;
   if (matches.length === 1) return { state: 'ready', pane: matches[0] };
-  if (!matches.length && panes.some((pane) => pane.agentSlug)) return { state: 'identity-mismatch', reason: 'AGENT_IDENTITY_CHANGED' };
-  return matches.length > 1 ? { state: 'ambiguous', reason: 'MULTIPLE_AGENT_PANES' }
-    : { state: 'agent-exited', reason: 'AGENT_NOT_RUNNING_OR_IDENTITY_CHANGED' };
+  if (matches.length > 1) return { state: 'ambiguous', reason: 'MULTIPLE_AGENT_PANES' };
+  // Agent recognition is a hint for initial selection, never a delivery gate.
+  if (panes.length === 1) return { state: 'ready', pane: panes[0] };
+  return panes.length ? { state: 'ambiguous', reason: 'MULTIPLE_TERMINAL_PANES' }
+    : { state: 'offline', reason: 'TMUX_PANE_NOT_FOUND' };
 }
 
 /** Drive-side pane resolution. Message delivery needs an Agent (only a TUI

@@ -8,6 +8,12 @@ function fixture(responses: Record<string, unknown>[]) {
   return { output, calls, io };
 }
 describe('collaboration CLI contract', () => {
+  it('confirms shell delivery without resending the message body', async () => {
+    const f = fixture([{ ok: true, message_id: 'm', status: 'pending' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['message', 'confirm-shell', 'm']), { backendSessionId: 'b' }, f.io)).toBe(0);
+    expect(f.calls[0][0]).toBe('POST');
+    expect(f.calls[0][1]).toContain('/message/m/confirm-shell');
+  });
   it('parses flags separately from message body and supports literal option-like text', () => {
     const command = parseCollaborationCommand(['send', 'peer', '--idempotency-key', 'case', '--wait-until', 'delivered', '--', '--json is literal text']);
     expect(command).toMatchObject({ target: 'peer', message: '--json is literal text', json: true, options: { 'idempotency-key': 'case', 'wait-until': 'delivered' } });

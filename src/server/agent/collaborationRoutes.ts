@@ -162,6 +162,14 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     const message = ownMessage(String(req.params.id), sessionId);
     res.json({ ok: true, ...store.receipt(message.id), ...(req.query.receipt_only === 'true' ? {} : { message }) });
   }));
+  router.post('/message/:id/confirm-shell', run(async (req, res, sessionId) => {
+    const message = ownMessage(String(req.params.id), sessionId);
+    if (message.fromSessionId !== sessionId) throw new CollaborationError('NOT_MESSAGE_SENDER', 'Only the sender can confirm shell delivery', 403);
+    store.confirmShell(message.id);
+    const outcome = await deliver(message.toSessionId);
+    await awaitDelivery(message.id, outcome);
+    sent(res, [message.id]);
+  }));
   router.post('/message/:id/read', run((req, res, sessionId) => {
     const message = ownMessage(String(req.params.id), sessionId, true);
     store.markRead([message.id]);

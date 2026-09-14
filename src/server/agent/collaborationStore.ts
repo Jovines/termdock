@@ -61,6 +61,7 @@ export type CollaborationMessageStatus = 'pending' | 'delivered' | 'read' | 'fai
 
 export interface CollaborationMessage extends MessageExtras {
   sequence?: number;
+  shellConfirmed?: boolean;
   failureReason?: string | null;
   /** Post-write capture of the recipient terminal, taken right after delivery; lets the sender see the message landed. */
   snapshot?: string | null;
@@ -367,6 +368,15 @@ export class CollaborationStore {
     return [...new Set(this.document.messages.filter((message) => message.status === 'pending').map((message) => message.toSessionId))];
   }
 
+  confirmShell(messageId: string): void {
+    const message = this.getMessage(messageId);
+    if (!message || message.status !== 'pending') throw new CollaborationError('MESSAGE_NOT_PENDING', 'Only pending messages can be confirmed');
+    message.shellConfirmed = true;
+    const diagnostic = this.diagnostic(messageId);
+    if (diagnostic) this.recordTransport(messageId, { ...diagnostic, next_retry_at: null });
+    this.persist();
+  }
+
   markDelivered(messageIds: string[]): CollaborationMessage[] {
     return this.updateStatus(messageIds, 'delivered');
   }
@@ -454,7 +464,16 @@ export class CollaborationStore {
       try { validateExtras(message); } catch { continue; }
       const index = this.document.messages.findIndex((item) => item.id === message.id);
       if (index < 0) { this.document.messages.push({ ...message, sequence: this.nextSequence() }); changed = true; }
-      else if (rank[message.status] > rank[this.document.messages[index].status]) {
+      else {
+        const existing = this.document.messages[index];
+        if (message.shellConfirmed === true && !existing.shellConfirmed
+          && message.fromSessionId === existing.fromSessionId && message.toSessionId === existing.toSessionId
+          && message.groupId === existing.groupId && message.content === existing.content) {
+          existing.shellConfirmed = true;
+          changed = true;
+        }
+      }
+      if (index >= 0 && rank[message.status] > rank[this.document.messages[index].status]) {
         const existing = this.document.messages[index];
         // A receipt may advance status, but never rewrite an existing message.
         this.document.messages[index] = { ...existing, status: message.status,
@@ -599,7 +618,7 @@ export class CollaborationStore {
     const existing = this.getMessage(fragment.message_id);
     if (existing) {
       if (existing.groupId !== fragment.group_id) throw new CollaborationError('FRAGMENT_CONFLICT', 'Message belongs to another group', 409);
-      return { message_id: existing.id, received: fragment.total, total: fragment.total, complete: true };
+      // Reassemble updates too: a pending message can acquire sender shell confirmation.
     }
     const fragments = this.document.fragments ??= {};
     for (const [id, state] of Object.entries(fragments)) if (state.createdAt + COLLAB_LIMITS.fragment_ttl_ms < Date.now()) delete fragments[id];

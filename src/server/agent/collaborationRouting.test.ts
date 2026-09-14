@@ -72,11 +72,14 @@ describe('authoritative collaboration routing', () => {
     expect(selectCollaborationPane(binding, [unknown])).toMatchObject({ state: 'ready' });
   });
 
-  it('rejects a reused tmux session/pane and a replaced Agent', () => {
-    for (const changed of [{ serverPid: 13 }, { sessionId: '$2' }, { panePid: 456 }, { paneId: '%3' }, { agentSlug: 'codex' }, { nativeSessionId: 'new' }]) {
+  it('rejects a reused tmux session/pane but does not gate on Agent recognition', () => {
+    for (const changed of [{ serverPid: 13 }, { sessionId: '$2' }, { panePid: 456 }, { paneId: '%3' }]) {
       expect(selectCollaborationPane({ ...binding, pane }, [{ ...pane, ...changed }])).toMatchObject({ state: 'identity-mismatch' });
     }
-    expect(selectCollaborationPane({ ...binding, pane }, [{ ...pane, agentSlug: '' }])).toMatchObject({ state: 'agent-exited' });
+    for (const changed of [{ agentSlug: '' }, { agentSlug: 'codex' }, { nativeSessionId: 'new' }]) {
+      expect(selectCollaborationPane({ ...binding, pane }, [{ ...pane, ...changed }])).toMatchObject({ state: 'ready' });
+    }
+    expect(selectCollaborationPane(binding, [{ ...pane, agentSlug: '' }])).toMatchObject({ state: 'ready' });
   });
 
   describe('drive-side pane resolution', () => {
@@ -92,7 +95,7 @@ describe('authoritative collaboration routing', () => {
     });
 
     it('returns the agent-keyed verdict when there is no pane at all', () => {
-      expect(selectDrivePane(unpinned, [], '%9')).toMatchObject({ state: 'agent-exited' });
+      expect(selectDrivePane(unpinned, [], '%9')).toMatchObject({ state: 'offline' });
     });
 
     it('prefers the active pane among several plain panes', () => {

@@ -28,6 +28,7 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     reply: --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
       (status reporting happens only via reply; send/handoff dispatch carries no task state)
   message get <message-id> [--receipt-only]
+  message confirm-shell <message-id> (sender confirms delivery into a shell; continues the same message)
   message read <message-id> (explicit consumption; not application ACK)
   message watch <message-id> [--wait-until delivered|read] [--timeout 30s]
   inbox [--unread] [--since <ISO or epoch-ms>] [--after-id <id>]
@@ -115,7 +116,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     if ([Boolean(command.message), Boolean(options.file), Boolean(options.stdin)].filter(Boolean).length !== 1) throw new Error('Choose inline body, --file, or --stdin');
   } else if (action === 'message') {
     command.operation = positional.shift(); command.target = positional.shift();
-    if (!['get', 'watch', 'read'].includes(command.operation ?? '') || !command.target || positional.length) throw new Error('Usage: td collab message get|watch|read <id>');
+    if (!['get', 'watch', 'read', 'confirm-shell'].includes(command.operation ?? '') || !command.target || positional.length) throw new Error('Usage: td collab message get|watch|read|confirm-shell <id>');
   } else if (action === 'cursor') {
     command.operation = positional.shift(); command.target = positional.shift();
     if (command.operation !== 'commit' || !command.target || !options.consumer || positional.length) throw new Error('Usage: td collab cursor commit <token> --consumer <name>');
@@ -223,6 +224,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         if (value.snapshot) io.write(`\n${value.snapshot}`);
       }
       else io.write(JSON.stringify(value, null, 2));
+      if (value.last_error) io.write(String(value.last_error));
       if (value.next_cursor) io.write(`next_cursor=${value.next_cursor} has_more=${value.has_more}`);
     } else if (o.jsonl && Array.isArray(value.messages) && command.action === 'inbox') {
       for (const message of value.messages) io.write(JSON.stringify({ type: 'message', ...message }));
@@ -271,7 +273,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     if (command.action === 'cursor') { output(await request('POST', '/cursor/commit', { cursor: command.target, consumer: o.consumer })); return 0; }
     if (command.action === 'message') {
       const route = `/message/${encodeURIComponent(command.target!)}`;
-      if (command.operation === 'read') { output(await request('POST', `${route}/read`)); return 0; }
+      if (command.operation === 'read' || command.operation === 'confirm-shell') { output(await request('POST', `${route}/${command.operation}`)); return 0; }
       receipt = await request('GET', `${route}${o['receipt-only'] || command.operation === 'watch' ? '?receipt_only=true' : ''}`);
       if (command.operation === 'get' && !o.follow && !o['wait-until'] && !o['expect-reply']) { output(receipt); return 0; }
     } else if (['send', 'reply', 'handoff'].includes(command.action)) {

@@ -33,6 +33,20 @@ describe('background collaboration delivery', () => {
     return store.send({ groupId, fromSessionId: 'a', toSessionIds: [target], kind: 'message', content: 'Please verify', expiresAt })[0]!;
   }
 
+  it('requires sender confirmation only for a known shell, preserving the queued message', async () => {
+    const message = send();
+    resolve.mockResolvedValue({ state: 'ready', isShell: true, write, capture: async () => '$ ' });
+    await worker.run('b');
+    expect(write).not.toHaveBeenCalled();
+    expect(worker.state('b').state).toBe('shell');
+    expect(store.receipt(message.id)).toMatchObject({ status: 'pending', snapshot: '$ ', last_error: expect.stringContaining('confirm-shell') });
+    store.confirmShell(message.id);
+    expect(new CollaborationStore(file).getMessage(message.id)?.shellConfirmed).toBe(true);
+    await worker.run('b');
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(store.getMessage(message.id)?.status).toBe('delivered');
+  });
+
   it('drains durable messages after restart without a browser or hook event', async () => {
     const message = send();
     store = new CollaborationStore(file);

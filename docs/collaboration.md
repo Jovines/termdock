@@ -62,7 +62,7 @@ td collab reply <message-id> '检查完成' \
 
 服务启动后自动检查协作成员和持久化待投递队列，不需要浏览器打开、调用 status 或产生新的 Agent hook。每个 peer 的恢复、投递和显式重绑串行执行，多个 peer 可独立推进。消息按接收方队列顺序提交；路由或写入失败保留消息，按 2 秒至 30 秒退避重试。回执中的 `last_error`、`next_retry_at` 解释阻塞原因；`attempt_count` 只统计真正进入终端写入的尝试，路由尚未就绪时为 0 是正常的。
 
-tmux 存活而 TD 后端缺失时，只挂接现存会话，不新建 tmux 会话、不启动或恢复 Agent。目标首次定位后固定到 tmux server/session/pane 和 pane 进程身份，投递不跟随活动 pane，也不改变焦点。多个候选无法唯一定位、tmux 重建或 Agent 身份不符时保留队列；在目标会话内显式运行：
+tmux 存活而 TD 后端缺失时，只挂接现存会话，不新建 tmux 会话、不启动或恢复 Agent。目标首次定位后固定到 tmux server/session/pane 和 pane 进程身份，投递不跟随活动 pane，也不改变焦点。多个候选无法唯一定位或 tmux 重建时保留队列；在目标会话内显式运行：
 
 ```sh
 td collab rebind            # 当前会话只有一个可识别 Agent 时
@@ -71,7 +71,7 @@ td collab rebind --pane %3  # 明确指定当前 tmux 会话内的 Agent pane
 
 重绑只作用于调用方 peer，成功后继续投递积压消息。它不会把 `delivered` 改回待投递，也不会启动新的 Agent。
 
-`td collab status` 中的 `route_state` / `route_error` / `route_checked_at` 描述路由观测：`recovering`（等待或正在检查）、`detached`（tmux 后端尚未挂接成功）、`ready`（可投递）、`agent-exited`（未检测到目标 Agent）、`offline`（会话或后端已不存在）、`ambiguous`（多个候选）、`identity-mismatch`（目标身份变化）、`unavailable`（检查或恢复出错）。路由 ready 不表示 Agent 空闲；不能将其他活动 pane 的 turn 状态归给当前 peer。
+`td collab status` 中的 `route_state` / `route_error` / `route_checked_at` 描述路由观测：`recovering`（等待或正在检查）、`detached`（tmux 后端尚未挂接成功）、`ready`（可投递）、`shell`（目标处于 shell，发送需确认；未知程序不会被认定为 Agent 退出）、`offline`（会话或后端已不存在）、`ambiguous`（多个候选）、`identity-mismatch`（目标身份变化）、`unavailable`（检查或恢复出错）。路由 ready 不表示 Agent 空闲；不能将其他活动 pane 的 turn 状态归给当前 peer。
 
 **投递保证的边界：**提交结果仍是“已写入终端”，不等于应用 ACK。成功回执已保存的消息不会被后台重放；同一进程内，即使写入后的回执保存失败，也避免再次写入。但终端输入和本地文件不能组成原子事务：进程恰在写入之后、保存回执之前崩溃时，重启可能重复提交同一消息 ID。因此这是允许重复的重试传输，接收方应按消息 ID 去重；需要应用确认时使用 `read`、显式 ACK 和消费游标。TTL 在提交前检查；已开始但结果尚不确定的提交不会被中途标为 expired。
 
@@ -147,3 +147,9 @@ td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 “服务与设备 → 设备”提供可展开的信息：设备标识、系统与客户端版本、打开方式、可读取的型号/主机名称/处理器/架构，以及最近连接路径和服务记录的首次、最近连接时间。中转入口从实际选中的加密连接读取；这些信息仅供展示，不参与授权。原生桥接仅读取本机信息，由页面通过现有加密设备名称请求上报，旧服务可忽略新增字段。旧设备重新连接后补齐详情，不覆盖用户重命名。
 
 浏览器可能限制硬件型号、架构及系统版本（包括 User-Agent 简化）；缺失信息不推测。首次记录指首次上报详情，不代表首次授权。多窗口同一身份展示最近一次上报的连接路径。按用户要求未运行自动化/功能测试；已进行生产构建与桌面构建。macOS/iOS 的真实设备交互、首次加载、旧 preload、断线及仅中转场景仍待用户实机验收。
+
+## Shell 投递确认
+
+投递按绑定终端定位，不再要求程序名匹配已知 Agent，也不因 Agent 类型或原生会话 ID 变化而拦截同一 pane。投递后的终端快照用于发送方判断结果。
+
+仅在明确检测到目标处于 shell 时暂停该消息，回执返回 `SHELL_CONFIRMATION_REQUIRED` 和确认命令。发送方确认内容可以写入 shell 后执行 `td collab message confirm-shell <message-id>`，继续原消息，不创建副本；确认持久化并通过协作同步传递。跨机双方及运行同步的客户端需更新到支持此确认的新版本。

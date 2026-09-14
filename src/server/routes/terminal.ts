@@ -2043,7 +2043,8 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
     const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
     const nativeSessionId = agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null;
     return { serverPid, sessionId: layout.sessionId, paneId: pane.id, panePid: pane.pid,
-      agentSlug: agent?.slug ?? '', nativeSessionId, cwd: pane.currentPath };
+      agentSlug: agent?.slug ?? '', nativeSessionId, cwd: pane.currentPath,
+      isShell: shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') };
   }));
   const candidates = requestedPane ? panes.filter((pane) => pane.paneId === requestedPane) : panes;
   if (allowPlainPane && !binding.pane) {
@@ -2078,8 +2079,7 @@ async function rebindCollaborationRoute(frontendSessionId: string, paneId: strin
       if (!backend) throw new Error('SHELL_BACKEND_NOT_RUNNING');
       await refreshCollaborationAgentIdentity(binding.backendSessionId!, backend);
       const agent = detectSessionAgent(backend);
-      if (!agent) throw new Error('AGENT_NOT_RUNNING');
-      binding.agentSlug = agent.slug;
+      binding.agentSlug = agent?.slug ?? null;
       binding.nativeSessionId = backend.agentSession?.sessionId ?? null;
     }
     if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
@@ -2131,7 +2131,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
       backend = resolveOrchestrationBackend(record);
     }
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
-    return { state: 'ready', capture: async () => (await captureTmuxPane(pinned.paneId)).content, write: async (messages) => {
+    return { state: 'ready', isShell: pane.isShell, capture: async () => (await captureTmuxPane(pinned.paneId)).content, write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
       await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin);
       backend!.lastActivity = Date.now();
@@ -2143,13 +2143,11 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
   }
   if (!backend || !binding.backendSessionId) return { state: 'offline', reason: 'SHELL_BACKEND_NOT_RUNNING' };
   await refreshCollaborationAgentIdentity(binding.backendSessionId, backend);
-  if (!detectSessionAgent(backend)) return { state: 'agent-exited', reason: 'AGENT_NOT_RUNNING' };
-  if ((binding.agentSlug && backend.agent?.slug !== binding.agentSlug)
-    || (binding.nativeSessionId && backend.agentSession?.sessionId && backend.agentSession.sessionId !== binding.nativeSessionId)) {
-    return { state: 'identity-mismatch', reason: 'AGENT_IDENTITY_CHANGED' };
-  }
   const target = backend;
-  return { state: 'ready', write: async (messages) => {
+  return { state: 'ready',
+    isShell: backend.activeProgram?.source !== 'unknown' && shellNamesBackend.has(backend.activeProgram?.command?.toLowerCase() ?? ''),
+    capture: async () => target.autoTitleContext,
+    write: async (messages) => {
     if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
     if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('SHELL_BACKEND_CHANGED');
     target.ptyProcess.write(buildBracketedSubmitBytes(formatLocalCollaborationMessages(frontendSessionId, messages)));
