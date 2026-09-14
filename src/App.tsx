@@ -3367,7 +3367,7 @@ function App() {
                 defaultTmuxSessionName={newSessionTmuxName}
                 connectionPrioritySessionId={connectionPrioritySessionId}
                 connectionPriorityReady={connectionPriorityReady}
-                desktopPinnedRightSidebar={showPinnedRight}
+                desktopRightSidebarEnabled={isDesktopViewport}
                 desktopFloatingTitle={isDesktopViewport}
                 desktopPinnedLeftSidebarWidth={showPinnedLeft ? sidebarLeftWidth : 0}
                 desktopViewportWidth={viewportWidth}
@@ -5199,7 +5199,8 @@ function App() {
     </div>
   ) : null;
 
-  if (showPinnedLeft || showPinnedRight) {
+  // Keep the terminal tree mounted when sessions have different pin states.
+  if (isDesktopViewport) {
     return (
       <div className="w-screen h-full flex flex-row">
         {showPinnedLeft && <>

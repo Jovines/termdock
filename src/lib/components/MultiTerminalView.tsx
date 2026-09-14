@@ -39,6 +39,7 @@ import {
   PINNED_SIDEBAR_SEPARATOR_WIDTH_PX,
   clampPinnedRightSidebarWidth,
   getRightSidebarWidthContextKey,
+  readRightPinnedForContext,
   readRightSidebarWidthForContext,
   useSidebarStore,
 } from '../stores/useSidebarStore';
@@ -371,7 +372,7 @@ interface MultiTerminalViewProps {
   defaultTmuxSessionName?: string;
   connectionPrioritySessionId?: string | null;
   connectionPriorityReady?: boolean;
-  desktopPinnedRightSidebar?: boolean;
+  desktopRightSidebarEnabled?: boolean;
   desktopFloatingTitle?: boolean;
   desktopPinnedLeftSidebarWidth?: number;
   desktopViewportWidth?: number;
@@ -421,7 +422,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   defaultTmuxSessionName = '',
   connectionPrioritySessionId = null,
   connectionPriorityReady = true,
-  desktopPinnedRightSidebar = false,
+  desktopRightSidebarEnabled = false,
   desktopFloatingTitle = false,
   desktopPinnedLeftSidebarWidth = 0,
   desktopViewportWidth = 0,
@@ -553,6 +554,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const sidebarOverlayOpen = useSidebarStore((s) => s.leftOpen || s.rightOpen);
   const sidebarWidthContextKey = useSidebarStore((s) => s.rightSidebarWidthContextKey);
   const sidebarWidth = useSidebarStore((s) => s.rightSidebarWidth);
+  const sidebarPinned = useSidebarStore((s) => s.rightPinned);
 
   // 订阅 useTerminalStore 的 cwd（分组按 cwd 归类）。只取 id→cwd 的 Map，
   // 浅比较避免终端高频输出导致的重渲染。
@@ -597,7 +599,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [activeSessionId, workspaceSlides]);
   const pinnedRightSidebarInsetBySlideKey = useMemo(() => {
     const insets = new Map<string, number>();
-    if (!desktopPinnedRightSidebar || desktopViewportWidth <= 0) return insets;
+    if (!desktopRightSidebarEnabled || desktopViewportWidth <= 0) return insets;
     for (const slide of workspaceSlides) {
       const firstSession = slide.sessions[0];
       if (!firstSession) continue;
@@ -606,6 +608,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         cwdById.get(firstSession.id) ?? null,
         slide.workspace?.id ?? null,
       );
+      const pinned = widthContextKey === sidebarWidthContextKey
+        ? sidebarPinned
+        : readRightPinnedForContext(
+            firstSession.id,
+            cwdById.get(firstSession.id) ?? null,
+            slide.workspace?.id ?? null,
+          );
+      if (!pinned) continue;
       // Selection changes before App publishes the sidebar context. Never
       // apply another workspace's live width to this already fitted slide.
       const requestedWidth = widthContextKey === sidebarWidthContextKey
@@ -626,7 +636,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [
     cwdById,
     desktopPinnedLeftSidebarWidth,
-    desktopPinnedRightSidebar,
+    desktopRightSidebarEnabled,
+    sidebarPinned,
     sidebarWidthContextKey,
     sidebarWidth,
     desktopViewportWidth,

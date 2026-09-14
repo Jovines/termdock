@@ -41,6 +41,7 @@ const COLLAPSED_GROUPS_KEY = 'termdock-sidebar-collapsed-folder-groups';
 const LEFT_PINNED_KEY = 'termdock-left-sidebar-pinned';
 const LEFT_SIDEBAR_WIDTH_KEY = 'termdock-left-sidebar-width';
 const RIGHT_PINNED_KEY = 'termdock-right-sidebar-pinned';
+const RIGHT_PINNED_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:pinned-by-session:v1';
 const RIGHT_SIDEBAR_WIDTH_KEY = 'termdock-right-sidebar-width';
 const RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:widths-by-session:v1';
 const SPLIT_SIDEBAR_STATE_INITIALIZED_CACHE_KEY = 'termdock:right-sidebar:split-state-initialized:v1';
@@ -99,6 +100,24 @@ function writeRightPinned(pinned: boolean): void {
   try {
     window.localStorage.setItem(RIGHT_PINNED_KEY, pinned ? '1' : '0');
   } catch { /* best-effort */ }
+}
+
+function readRightPinnedCache(): Record<string, boolean> {
+  return readCache(RIGHT_PINNED_BY_CONTEXT_CACHE_KEY, (value): value is Record<string, boolean> => (
+    !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.values(value).every((pinned) => typeof pinned === 'boolean')
+  )) ?? {};
+}
+
+function writeRightPinnedForContext(contextKey: string | null, pinned: boolean): void {
+  if (!contextKey) {
+    writeRightPinned(pinned);
+    return;
+  }
+  writeCache(RIGHT_PINNED_BY_CONTEXT_CACHE_KEY, {
+    ...readRightPinnedCache(),
+    [contextKey]: pinned,
+  });
 }
 
 export function readRightSidebarWidth(): number {
@@ -355,6 +374,21 @@ export function readRightSidebarWidthForContext(
     }
   }
   return readRightSidebarWidth();
+}
+
+export function readRightPinnedForContext(
+  sessionId: string | null,
+  rootPath: string | null,
+  splitWorkspaceId: string | null,
+): boolean {
+  const cache = readRightPinnedCache();
+  const contextKey = getRightSidebarWidthContextKey(sessionId, rootPath, splitWorkspaceId);
+  if (contextKey && cache[contextKey] !== undefined) return cache[contextKey];
+  if (splitWorkspaceId) {
+    const sessionContextKey = getSidebarContextKey(sessionId, rootPath);
+    if (sessionContextKey && cache[sessionContextKey] !== undefined) return cache[sessionContextKey];
+  }
+  return readRightPinnedPreference();
 }
 
 function readInitializedSplitSidebarStates(): Set<string> {
@@ -637,12 +671,12 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   toggleRightPinned: () =>
     set((s) => {
       const next = !s.rightPinned;
-      writeRightPinned(next);
+      writeRightPinnedForContext(s.rightSidebarWidthContextKey, next);
       return { rightPinned: next, rightOpen: true };
     }),
   setRightPinned: (pinned) =>
-    set(() => {
-      writeRightPinned(pinned);
+    set((s) => {
+      writeRightPinnedForContext(s.rightSidebarWidthContextKey, pinned);
       return { rightPinned: pinned };
     }),
   setRightSidebarWidth: (width) =>
@@ -768,12 +802,25 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       writeRightSidebarWidthForContext(rightSidebarWidthContextKey, persistedRightSidebarWidth);
     }
     const persistedExplorerRoot = contextKey ? explorerRootCache[contextKey] : undefined;
+    const pinnedCache = readRightPinnedCache();
+    let persistedRightPinned = rightSidebarWidthContextKey
+      ? pinnedCache[rightSidebarWidthContextKey]
+      : undefined;
+    if (splitWorkspaceId && rightSidebarWidthContextKey && persistedRightPinned === undefined) {
+      persistedRightPinned = (sessionContextKey ? pinnedCache[sessionContextKey] : undefined)
+        ?? readRightPinnedPreference();
+      writeRightPinnedForContext(rightSidebarWidthContextKey, persistedRightPinned);
+    }
     const persistedSelectedFilePath = contextKey ? readSelectedFilePathCache()[contextKey] : undefined;
     return {
       rootPath: path,
       contextKey,
       rightSidebarWidthContextKey,
       rightSidebarWidth: persistedRightSidebarWidth ?? readRightSidebarWidth(),
+      rightPinned: persistedRightPinned ?? readRightPinnedPreference(),
+      // A pinned session may leave rightOpen set; do not turn it into an
+      // overlay when switching to an unpinned session.
+      rightOpen: s.rightSidebarWidthContextKey === rightSidebarWidthContextKey ? s.rightOpen : false,
       rightTab: cached?.rightTab ?? persistedRightTab ?? 'files',
       explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
@@ -800,6 +847,9 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       ?? (state.rightSidebarWidthContextKey === splitContextKey
         ? state.rightSidebarWidth
         : undefined);
+    const pinnedCache = readRightPinnedCache();
+    const splitPinned = pinnedCache[splitContextKey]
+      ?? (state.rightSidebarWidthContextKey === splitContextKey ? state.rightPinned : undefined);
     const splitState = state.contextKey === splitContextKey
       ? {
           rightTab: state.rightTab,
@@ -813,7 +863,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
           gitBundleCacheInfo: state.gitBundleCacheInfo,
         }
       : state.projectStateCache.get(splitContextKey);
-    if (splitWidth === undefined && !splitState) return state;
+    if (splitWidth === undefined && splitPinned === undefined && !splitState) return state;
 
     const nextWidthCache = { ...widthCache };
     const projectStateCache = new Map(state.projectStateCache);
@@ -822,6 +872,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       const sessionContextKey = getSidebarContextKey(session.sessionId, session.rootPath);
       if (!sessionContextKey) continue;
       if (splitWidth !== undefined) nextWidthCache[sessionContextKey] = splitWidth;
+      if (splitPinned !== undefined) pinnedCache[sessionContextKey] = splitPinned;
       if (splitState) {
         projectStateCache.set(sessionContextKey, {
           ...splitState,
@@ -839,6 +890,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       writeCache(RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY, nextWidthCache);
     }
     if (splitState) writeExplorerRootCache(explorerRootCache);
+    if (splitPinned !== undefined) writeCache(RIGHT_PINNED_BY_CONTEXT_CACHE_KEY, pinnedCache);
     trimCache(projectStateCache, 12, new Set(state.contextKey ? [state.contextKey] : []));
     return { projectStateCache, explorerRootCache };
   }),
