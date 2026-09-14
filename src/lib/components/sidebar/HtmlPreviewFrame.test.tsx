@@ -6,8 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFrame';
 
 vi.mock('../../federation/browserIntegration', () => ({ getActiveClient: async () => ({ fetch: vi.fn() }) }));
-vi.mock('../../federation/secureHtmlPreview', () => ({ prepareSecureHtmlPreview: async () => ({ html: '<!doctype html><p>Safe preview</p>', shellUrl: '/preview-shell.html#test', errors: [], attach: () => () => {}, dispose: () => {} }) }));
-afterEach(() => cleanup());
+const { attach, detach } = vi.hoisted(() => ({ attach: vi.fn(), detach: vi.fn() }));
+vi.mock('../../federation/secureHtmlPreview', () => ({ prepareSecureHtmlPreview: async () => ({ html: '<!doctype html><p>Safe preview</p>', shellUrl: '/preview-shell.html#test', errors: [], attach: attach.mockImplementation(() => detach), dispose: () => {} }) }));
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 function renderPreview() {
   const ref = createRef<HtmlPreviewFrameHandle>();
@@ -48,5 +49,25 @@ describe('HtmlPreviewFrame', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByRole('button', { name: '全屏预览' })).toBeTruthy();
     expect(document.body.querySelector('.fixed.inset-0.z-modal-panel')).toBeNull();
+  });
+
+  it('rebinds the resource bridge when fullscreen replaces the iframe, in both directions', async () => {
+    const { container } = renderPreview();
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(1));
+    const original = container.querySelector('iframe');
+
+    fireEvent.click(screen.getByRole('button', { name: '全屏预览' }));
+    const fullscreen = document.body.querySelector('.fixed iframe');
+    expect(fullscreen).not.toBe(original);
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(attach).toHaveBeenLastCalledWith(fullscreen, expect.any(Function)));
+    expect(detach).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    const restored = container.querySelector('iframe');
+    expect(restored).not.toBe(fullscreen);
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(attach).toHaveBeenLastCalledWith(restored, expect.any(Function)));
+    expect(detach).toHaveBeenCalledTimes(2);
   });
 });

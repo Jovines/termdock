@@ -1,3 +1,4 @@
+import { encodeTerminalKey } from '../../terminal/keyboard';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { isWorkspaceActive } from '../../services/workspaceHost';
 import React from 'react';
@@ -128,46 +129,11 @@ function sanitizeTerminalInput(input: string): string {
 const MOBILE_BULK_INPUT_DEBOUNCE_MS = 80;
 const MOBILE_BULK_DELETE_THRESHOLD = 8;
 
-/**
- * 桌面端特殊键 → ANSI 转义序列映射
- * 所有这些序列都不应再被 TerminalView.handleViewportInput 二次叠加修饰符，
- * 由调用方传 { skipModifierTransform: true } 保证。
- */
-const F_KEY_SEQ: Record<string, string> = {
-  F1: '\x1bOP',  F2: '\x1bOQ',  F3: '\x1bOR',  F4: '\x1bOS',
-  F5: '\x1b[15~', F6: '\x1b[17~', F7: '\x1b[18~', F8: '\x1b[19~',
-  F9: '\x1b[20~', F10: '\x1b[21~', F11: '\x1b[23~', F12: '\x1b[24~',
-};
-
 function buildArrowSeq(terminal: Terminal, dir: 'A' | 'B' | 'C' | 'D'): string {
   // application cursor mode (DECCKM)：vim/less 等会切到 \x1bO?,
   // shell 默认为 \x1b[?。xterm 在 modes 上暴露了这个状态。
   const applicationCursor = terminal.modes?.applicationCursorKeysMode === true;
   return applicationCursor ? `\x1bO${dir}` : `\x1b[${dir}`;
-}
-
-/**
- * 把 React.KeyboardEvent 映射到终端转义序列。仅返回 PTY 应当收到的字节。
- * 不命中返回 null，调用方继续走默认逻辑（textarea 接管打印字符）。
- */
-function mapSpecialKey(event: React.KeyboardEvent, terminal: Terminal): string | null {
-  switch (event.key) {
-    case 'ArrowUp':    return buildArrowSeq(terminal, 'A');
-    case 'ArrowDown':  return buildArrowSeq(terminal, 'B');
-    case 'ArrowRight': return buildArrowSeq(terminal, 'C');
-    case 'ArrowLeft':  return buildArrowSeq(terminal, 'D');
-    case 'Home':       return '\x1b[H';
-    case 'End':        return '\x1b[F';
-    case 'PageUp':     return '\x1b[5~';
-    case 'PageDown':   return '\x1b[6~';
-    case 'Insert':     return '\x1b[2~';
-    case 'Delete':     return '\x1b[3~';
-    case 'Tab':        return '\t';
-    case 'Escape':     return '\x1b';
-    default:
-      if (F_KEY_SEQ[event.key]) return F_KEY_SEQ[event.key];
-      return null;
-  }
 }
 
 function isImeComposingKeyEvent(event: React.KeyboardEvent): boolean {
@@ -1465,7 +1431,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, []);
 
     /**
-     * 把 LineEditOps 序列编码成一段 PTY 字节流：箭头用与 mapSpecialKey
+     * 把 LineEditOps 序列编码成一段 PTY 字节流：箭头用与 encodeTerminalKey
      * 一致的 application/normal 模式序列，退格 \x7f，插入原样文本。
      * 整段合并为一次 inputHandler 调用 = 一次 websocket 发送。
      */
@@ -4115,7 +4081,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           };
 
           localResizeObserver = new ResizeObserver((entries) => {
-            if (!shouldProcessObservedResize(enableTouchScrollRef.current, isLayoutVisibleRef.current)) {
+            if (!shouldProcessObservedResize(!!enableTouchScrollRef.current, isLayoutVisibleRef.current)) {
               debugTerminal('resize observer skipped: hidden mobile session');
               return;
             }
@@ -5070,8 +5036,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }}
               onKeyDown={(event) => {
                 const isImeComposingKey = isImeComposingKeyEvent(event);
-                // ===== 桌面端独有：先处理 Cmd/Ctrl/Alt 修饰组合 =====
-                if (!enableTouchScroll) {
+                // Hardware keyboards use the same mapping on desktop and touch devices.
+                if (!isImeComposingKey && !isComposingRef.current) {
+                  if (event.getModifierState('AltGraph')) return;
                   const term = terminalRef.current;
                   const cmd = event.metaKey;
                   const ctrl = event.ctrlKey;
@@ -5160,23 +5127,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     return;
                   }
 
-                  // ---- Ctrl + Space → NUL ----
-                  if (ctrl && !alt && !shift && key === ' ') {
-                    event.preventDefault();
-                    sendTerminalSeq('\x00', event.currentTarget);
-                    return;
-                  }
-
-                  // ---- Ctrl + letter → 控制字符 ----
-                  if (ctrl && !alt && !cmd && key.length === 1) {
-                    const code = key.toLowerCase().charCodeAt(0);
-                    if (code >= 0x40 && code <= 0x7f) {
-                      event.preventDefault();
-                      sendTerminalSeq(String.fromCharCode(code & 0x1f), event.currentTarget);
-                      return;
-                    }
-                  }
-
                   if (alt && !ctrl && !cmd && !shift && key === 'Backspace') {
                     event.preventDefault();
                     sendTerminalSeq('\x1b\x7f', event.currentTarget);
@@ -5201,27 +5151,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     return;
                   }
 
-                  // ---- Alt + letter → ESC-prefix ----
-                  if (alt && !ctrl && !cmd && key.length === 1) {
+                  // Text/IME stays in the textarea; only encoded keys bypass it.
+                  // Keep regular Enter on flushAndSendEnter (including IME suppression).
+                  const seq = encodeTerminalKey(event, term?.modes?.applicationCursorKeysMode === true);
+                  if (seq !== null) {
                     event.preventDefault();
-                    sendTerminalSeq(`\x1b${key}`, event.currentTarget);
+                    sendTerminalSeq(seq, event.currentTarget);
                     return;
-                  }
-
-                  // ---- 特殊键（方向 / Home / End / F1–F12 / Tab / Esc 等）----
-                  // IME 合成中，这些按键可能是输入法的候选选择/翻页控制。
-                  // 尤其是中文输入法按 Tab 选词时，不能抢先发给 PTY，否则
-                  // 浏览器不会正常提交 composition，行内提示会悬挂在终端下方。
-                  if (isImeComposingKey || isComposingRef.current) {
-                    return;
-                  }
-                  if (term) {
-                    const seq = mapSpecialKey(event, term);
-                    if (seq !== null) {
-                      event.preventDefault();
-                      sendTerminalSeq(seq, event.currentTarget);
-                      return;
-                    }
                   }
                 }
 
@@ -5264,7 +5200,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
 
                 if (event.key === 'Backspace') {
-                  if (isComposingRef.current) {
+                  if (isImeComposingKey || isComposingRef.current) {
                     return;
                   }
 

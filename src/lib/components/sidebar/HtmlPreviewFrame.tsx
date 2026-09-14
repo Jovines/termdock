@@ -22,7 +22,7 @@ export const HtmlPreviewFrame = forwardRef<HtmlPreviewFrameHandle, HtmlPreviewFr
   onFullscreenChange,
 }, ref) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [iframe, setIframe] = useState<HTMLIFrameElement | null>(null);
   const [prepared, setPrepared] = useState<SecureHtmlPreview>();
   const [previewError, setPreviewError] = useState('');
   useEffect(() => {
@@ -37,9 +37,11 @@ export const HtmlPreviewFrame = forwardRef<HtmlPreviewFrameHandle, HtmlPreviewFr
     return () => { abort.abort(); preview?.dispose(); };
   }, [src]);
   useEffect(() => {
-    if (!prepared || !iframeRef.current) return;
-    return prepared.attach(iframeRef.current, setPreviewError);
-  }, [prepared]);
+    if (!prepared || !iframe) return;
+    // The fullscreen portal replaces the DOM frame; its new window needs its
+    // own resource handshake even when the prepared document is unchanged.
+    return prepared.attach(iframe, setPreviewError);
+  }, [prepared, iframe]);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [pseudoFullscreen, setPseudoFullscreen] = useState(false);
   const expanded = nativeFullscreen || pseudoFullscreen;
@@ -115,7 +117,7 @@ export const HtmlPreviewFrame = forwardRef<HtmlPreviewFrameHandle, HtmlPreviewFr
       {previewError && <div role="status" className="shrink-0 border-b border-border px-3 py-2 text-xs text-muted-foreground">{previewError}</div>}
       {!prepared && !previewError && <div role="status" className="p-3 text-xs text-muted-foreground">正在安全加载预览资源…</div>}
       <iframe
-        ref={iframeRef}
+        ref={setIframe}
         src={prepared?.shellUrl}
         referrerPolicy="no-referrer"
         title={title}
