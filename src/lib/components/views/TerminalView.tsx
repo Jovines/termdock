@@ -235,7 +235,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const bufferChunks = terminalState?.bufferChunks ?? [];
   const isConnecting = terminalState?.isConnecting ?? false;
   const terminalSessionId = terminalSessionRef;
-  const handleDirectoryLinkActivate = React.useCallback(async (pathText: string) => {
+  const handleDirectoryLinkActivate = React.useCallback(async (pathText: string, line?: number) => {
     const path = resolveTerminalPath(pathText, terminalState?.cwd || terminalState?.directory);
     if (!path) return;
     let targetPath = path;
@@ -256,7 +256,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       sidebar.setRightTab('files');
       sidebar.openRight();
       window.dispatchEvent(new CustomEvent(TERMINAL_DIRECTORY_OPEN_EVENT, {
-        detail: { path: targetPath, kind },
+        detail: { path: targetPath, kind, line },
       }));
     } catch {
       // Terminal output can outlive a deleted/moved path. Keep that stale text

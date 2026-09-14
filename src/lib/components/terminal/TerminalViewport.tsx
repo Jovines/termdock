@@ -381,7 +381,7 @@ interface TerminalViewportProps {
   }) => void;
   onWriteProgress?: (lastWrittenChunkId: number) => void;
   onCursorPositionChange?: (position: { x: number; y: number; rows: number }) => void;
-  onDirectoryLinkActivate?: (path: string) => void;
+  onDirectoryLinkActivate?: (path: string, line?: number) => void;
   terminalSettings: TerminalSettings;
   theme: TerminalTheme;
   className?: string;
@@ -3811,8 +3811,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           const fitAddon = new FitAddon();
           terminal.loadAddon(fitAddon);
           terminal.loadAddon(new WebLinksAddon());
-          terminal.registerLinkProvider(createTerminalPathLinkProvider(terminal, (path) => {
-            directoryLinkActivateRef.current?.(path);
+          terminal.registerLinkProvider(createTerminalPathLinkProvider(terminal, (path, line) => {
+            directoryLinkActivateRef.current?.(path, line);
           }));
           const unicode11Addon = new Unicode11Addon();
           terminal.loadAddon(unicode11Addon);

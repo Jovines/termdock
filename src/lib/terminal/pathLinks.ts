@@ -6,12 +6,14 @@ export interface TerminalPathMatch {
   text: string;
   startIndex: number;
   endIndex: number;
+  line?: number;
 }
 
 // A token may contain shell-escaped spaces, but stops at punctuation that is
 // normally used to wrap a path in prose/Markdown. URL-looking tokens are
 // deliberately rejected so the existing WebLinksAddon remains authoritative.
 const PATH_TOKEN_PATTERN = /(?:\\[ \t]|[^\s`"'<>|()[\]{}=,:;!?：，；！？。、“”‘’])+/gu;
+const PATH_CONTINUATION_PATTERN = new RegExp(`^( *)(${PATH_TOKEN_PATTERN.source})`, 'u');
 const TRAILING_PROSE_PUNCTUATION = /[,;:!?]+$/u;
 const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//iu;
 
@@ -34,10 +36,14 @@ export function findTerminalPathMatches(line: string): TerminalPathMatch[] {
     const original = match[0];
     const text = original.replace(TRAILING_PROSE_PUNCTUATION, '');
     if (!looksLikePath(text)) continue;
+    const suffix = line.slice(match.index + text.length).match(/^:(\d+)(?::\d+)?(?=$|[\s:，,;；。!！?？)\]}`])/u);
+    const lineNumber = suffix ? Number(suffix[1]) : undefined;
+    const validLine = lineNumber !== undefined && Number.isSafeInteger(lineNumber) && lineNumber > 0;
     matches.push({
       text,
+      ...(validLine ? { line: lineNumber } : {}),
       startIndex: match.index,
-      endIndex: match.index + text.length,
+      endIndex: match.index + text.length + (validLine ? suffix![0].length : 0),
     });
   }
   return matches;
@@ -80,12 +86,13 @@ function hardWrapIndent(terminal: Terminal, index: number): number | null {
   const before = previous.translateToString(true).trimEnd();
   const after = next.translateToString(true);
   const tail = findTerminalPathMatches(before).at(-1);
-  const continuation = after.match(/^( +)([^\s]+)/u);
+  const continuation = after.match(PATH_CONTINUATION_PATTERN);
   if (!tail || tail.endIndex !== before.length || !tail.text.endsWith('/') || !continuation
     || /^[~./]/u.test(continuation[2])) return null;
-  // The last wrapped row may contain only a filename (optionally :line:column).
+  // Share the path tokenizer so line/column suffixes and prose punctuation
+  // terminate filenames identically on the first row and on continuation rows.
   // Keep plain prose out of hard-wrap joins even when it shares the path color.
-  const continuationPath = continuation[2].replace(/:\d+(?::\d+)?$/u, '');
+  const continuationPath = continuation[2];
   if (!continuationPath.includes('/') && !/^[^/:]+\.[\p{L}\p{N}_-]+$/u.test(continuationPath)) return null;
   let lastColumn = previous.length - 1;
   while (lastColumn >= 0 && !(previous.getCell(lastColumn)?.getChars() || '').trim()) lastColumn -= 1;
@@ -159,7 +166,7 @@ function readBufferLine(terminal: Terminal, bufferLineNumber: number): {
 
 export function createTerminalPathLinkProvider(
   terminal: Terminal,
-  activate: (text: string) => void,
+  activate: (text: string, line?: number) => void,
 ): ILinkProvider {
   return {
     provideLinks(bufferLineNumber, callback) {
@@ -174,7 +181,7 @@ export function createTerminalPathLinkProvider(
           start: line.startPositions[match.startIndex] ?? { x: match.startIndex + 1, y: bufferLineNumber },
           end: line.endPositions[match.endIndex - 1] ?? { x: match.endIndex, y: bufferLineNumber },
         },
-        activate: () => activate(match.text),
+        activate: () => match.line === undefined ? activate(match.text) : activate(match.text, match.line),
       }));
       callback(links.length > 0 ? links : undefined);
     },

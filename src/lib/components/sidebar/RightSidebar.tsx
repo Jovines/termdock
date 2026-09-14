@@ -10605,12 +10605,13 @@ export function RightSidebar(
 
   useEffect(() => {
     const handleTerminalDirectoryOpen = (event: Event) => {
-      const detail = (event as CustomEvent<{ path?: unknown; kind?: unknown }>).detail;
+      const detail = (event as CustomEvent<{ path?: unknown; kind?: unknown; line?: unknown }>).detail;
       const path = detail?.path;
       if (typeof path !== 'string' || !path.startsWith('/')) return;
 
       setFileQuery('');
       setLineRange(null);
+      setScrollToLine(null);
       const insideProject = Boolean(rootPath && (path === rootPath || path.startsWith(`${rootPath}/`)));
       if (detail.kind === 'file') {
         const parentPath = getParentPath(path);
@@ -10618,6 +10619,9 @@ export function RightSidebar(
         // first and then issue the new tree reveal. Point at the file itself:
         // FileTree expands its ancestors and scrolls the selected row into view.
         handleFileSelect(path);
+        if (typeof detail.line === 'number' && Number.isSafeInteger(detail.line) && detail.line > 0) {
+          setScrollToLine(detail.line);
+        }
         if (insideProject) {
           setExplorerRoot(null);
         } else {
