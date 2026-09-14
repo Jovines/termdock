@@ -11754,6 +11754,20 @@ export function RightSidebar(
                     {nestedGitScanToggle}
                     {modeToggle}
                     {renderDiffViewTypeToggle()}
+                    <button
+                      type="button"
+                      onClick={toggleDiffWrap}
+                      aria-pressed={diffWrap}
+                      title={t('rightSidebar.wrapLongLines')}
+                      className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2 text-[10px] font-semibold transition active:scale-95 ${
+                        diffWrap
+                          ? 'bg-primary/15 text-primary'
+                          : 'bg-surface-2 text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      <span className="font-mono text-[12px] leading-none">Aa</span>
+                      <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                    </button>
                     {changeAuditButton}
                     {diffRefreshButton}
                   </div>
@@ -11792,7 +11806,6 @@ export function RightSidebar(
               files={buildDiffReviewFiles()}
               activePane={diffPaneActive}
               wrap={diffWrap}
-              showScrollHint={!diffWrap}
               diffViewType={diffViewType}
               inlineMode={diffInlineMode}
               diffOptions={diffOptions}
@@ -11924,7 +11937,6 @@ export function RightSidebar(
                   files={buildDiffReviewFiles()}
                   activePane={diffPaneActive}
                   wrap={diffWrap}
-                  showScrollHint={!diffWrap}
                   diffViewType={effectiveDiffViewType}
                   inlineMode={diffInlineMode}
                   diffOptions={diffOptions}

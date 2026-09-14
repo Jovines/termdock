@@ -29,7 +29,6 @@ interface DiffStreamItemProps {
   estimatedHeight?: number;
   lightweight?: boolean;
   wrap: boolean;
-  showScrollHint: boolean;
   viewType?: DiffViewType;
   inlineMode?: DiffInlineMode;
   diffOptions?: GitDiffOptions;
@@ -61,7 +60,6 @@ export function DiffStreamItem({
   estimatedHeight,
   lightweight = false,
   wrap,
-  showScrollHint,
   viewType,
   inlineMode,
   diffOptions,
@@ -138,10 +136,15 @@ export function DiffStreamItem({
     if (!body) return;
 
     const recordHeight = () => {
-      if (!viewerReadyRef.current || contentReadyRef.current) return;
+      if (!viewerReadyRef.current) return;
+      // Measure the viewer, not the slot's old minHeight. Otherwise a tall
+      // wrapped card can never shrink after switching back to unwrapped text.
+      const content = body.firstElementChild as HTMLElement | null;
+      if (!content) return;
       const nextBodyHeight = Math.ceil(Math.max(
-        body.getBoundingClientRect().height,
-        body.scrollHeight,
+        content.getBoundingClientRect().height,
+        content.scrollHeight,
+        64,
       ));
       const previousHeight = measuredBodyHeightRef.current;
       if (nextBodyHeight > 0 && previousHeight !== nextBodyHeight) {
@@ -151,19 +154,26 @@ export function DiffStreamItem({
       const item = containerRef.current;
       if (!item) return;
       const headerHeight = headerRef.current?.getBoundingClientRect().height ?? DIFF_HEADER_ESTIMATE;
-      const nextItemHeight = Math.ceil(Math.max(
-        item.scrollHeight,
-        headerHeight + nextBodyHeight + 1,
-      ));
+      const nextItemHeight = Math.ceil(headerHeight + nextBodyHeight + 1);
       if (nextItemHeight <= 0 || lastIntrinsicHeightRef.current === nextItemHeight) return;
       lastIntrinsicHeightRef.current = nextItemHeight;
       if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
       settleTimerRef.current = window.setTimeout(() => {
         settleTimerRef.current = null;
-        if (!viewerReadyRef.current || contentReadyRef.current) return;
+        if (!viewerReadyRef.current) return;
         const settledHeight = lastIntrinsicHeightRef.current;
         if (settledHeight === null) return;
         const previousItemHeight = measuredItemHeightRef.current;
+        if (contentReadyRef.current) {
+          // Ready content still changes height on wrap/view toggles, resize,
+          // font load or collapsed sections. Keep the virtual canvas current.
+          measuredItemHeightRef.current = settledHeight;
+          if (Math.abs(previousItemHeight - settledHeight) >= 1) {
+            onHeightChange?.(selectionPath, previousItemHeight, settledHeight);
+          }
+          onContentReady?.(selectionPath);
+          return;
+        }
         pendingCommitHeightRef.current = settledHeight;
         if (Math.abs(previousItemHeight - settledHeight) < 1 || !onHeightChange) {
           measuredItemHeightRef.current = settledHeight;
@@ -179,8 +189,10 @@ export function DiffStreamItem({
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(recordHeight);
     observer.observe(body);
+    if (body.firstElementChild) observer.observe(body.firstElementChild);
+    if (headerRef.current) observer.observe(headerRef.current);
     return () => observer.disconnect();
-  }, [commitContentReady, onHeightChange, selectionPath, viewerReady, visible]);
+  }, [commitContentReady, onContentReady, onHeightChange, selectionPath, viewerReady, visible, wrap, viewType, inlineMode]);
 
   const holdingMeasuredContent = visible && !contentReady;
 
@@ -223,7 +235,6 @@ export function DiffStreamItem({
             referenceFilePath={absolutePath}
             changedFile={file as GitChangedFile}
             wrap={wrap}
-            showScrollHint={showScrollHint}
             viewType={viewType}
             inlineMode={inlineMode}
             diffOptions={diffOptions}

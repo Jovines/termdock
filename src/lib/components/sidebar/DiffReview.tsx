@@ -50,7 +50,6 @@ interface DiffReadyVersion {
   diffOverride: string | null | undefined;
   reloadKey: number;
   wrap: boolean;
-  showScrollHint: boolean;
   viewType: DiffViewType | undefined;
   inlineMode: DiffInlineMode | undefined;
   algorithm: GitDiffOptions['algorithm'] | undefined;
@@ -63,7 +62,6 @@ function matchesDiffReadyVersion(left: DiffReadyVersion | undefined, right: Diff
     && left.diffOverride === right.diffOverride
     && left.reloadKey === right.reloadKey
     && left.wrap === right.wrap
-    && left.showScrollHint === right.showScrollHint
     && left.viewType === right.viewType
     && left.inlineMode === right.inlineMode
     && left.algorithm === right.algorithm
@@ -159,7 +157,6 @@ export interface DiffReviewProps {
   compact?: boolean;
   desktopLayout?: 'split' | 'stacked';
   wrap: boolean;
-  showScrollHint: boolean;
   diffViewType?: DiffViewType;
   inlineMode?: DiffInlineMode;
   diffOptions?: GitDiffOptions;
@@ -219,7 +216,6 @@ export function DiffReview({
   compact,
   desktopLayout,
   wrap,
-  showScrollHint,
   diffViewType,
   inlineMode,
   diffOptions,
@@ -310,7 +306,6 @@ export function DiffReview({
     diffOverride: file.diffOverride,
     reloadKey,
     wrap,
-    showScrollHint,
     viewType: diffViewType,
     inlineMode,
     algorithm: diffOptions?.algorithm,
@@ -751,7 +746,6 @@ export function DiffReview({
         estimatedHeight={estimatedHeight}
         lightweight={false}
         wrap={wrap}
-        showScrollHint={showScrollHint}
         viewType={diffViewType}
         inlineMode={inlineMode}
         diffOptions={diffOptions}
@@ -769,7 +763,7 @@ export function DiffReview({
         onHeightChange={handleItemHeightChange}
       />
     );
-  }, [activePane, copiedReferenceKey, diffOptions, diffViewType, handleItemContentReady, handleItemHeightChange, inlineMode, insertedReferenceKey, matchesSelectedKey, mountedKeys, onClearAuditRecord, onHunkGitAction, onInsertDiffReference, onReferenceCopied, reloadKey, renderStreamBadge, showScrollHint, wrap]);
+  }, [activePane, copiedReferenceKey, diffOptions, diffViewType, handleItemContentReady, handleItemHeightChange, inlineMode, insertedReferenceKey, matchesSelectedKey, mountedKeys, onClearAuditRecord, onHunkGitAction, onInsertDiffReference, onReferenceCopied, reloadKey, renderStreamBadge, wrap]);
 
   const detailBody = (
     <div

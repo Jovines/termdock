@@ -7,7 +7,8 @@ import {
   getInlineDiffSimilarity,
   getJetBrainsStyleDiffRanges,
   getPreciseWordDiffRanges,
-  pairChangedLinesForDisplay,
+  getChangedLineDisplayBlocks,
+  splitChangedLineBlock,
   retainComparableInlineRanges,
   tokenizeInlineDiffLine,
 } from './inlineDiff';
@@ -19,6 +20,16 @@ function parseSingleHunk(body: string) {
 @@ -1,3 +1,3 @@
 ${body}`);
   return file.hunks[0];
+}
+
+function displayPairs(deletes: { content: string; lineNumber: number }[], inserts: { content: string; lineNumber: number }[]) {
+  return getChangedLineDisplayBlocks([
+    ...deletes.map((line) => ({ ...line, type: 'delete' as const, isDelete: true as const })),
+    ...inserts.map((line) => ({ ...line, type: 'insert' as const, isInsert: true as const })),
+  ]).flatMap((block) => block.deletes.flatMap((line, index) => block.inserts[index] ? [{
+    oldLineNumber: 'lineNumber' in line ? line.lineNumber : -1,
+    newLineNumber: 'lineNumber' in block.inserts[index] ? block.inserts[index].lineNumber : -1,
+  }] : []));
 }
 
 describe('inline diff token heuristics', () => {
@@ -210,8 +221,35 @@ describe('inline diff token heuristics', () => {
     expect(moved).toEqual([]);
   });
 
+  it('preserves unequal replacement blocks between unchanged context', () => {
+    const hunk = parseSingleHunk(`-calculateRetryBudget(request);
++notifyObservers(session.status);
++publishSnapshot(workspace);`);
+    const blocks = splitChangedLineBlock(hunk.changes);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].deletes.map((line) => line.content)).toEqual(['calculateRetryBudget(request);']);
+    expect(blocks[0].inserts.map((line) => line.content)).toEqual(['notifyObservers(session.status);', 'publishSnapshot(workspace);']);
+    const reversed = splitChangedLineBlock(parseSingleHunk(`-notifyObservers(session.status);
+-publishSnapshot(workspace);
++calculateRetryBudget(request);`).changes);
+    expect(reversed).toHaveLength(1);
+    expect(reversed[0].deletes).toHaveLength(2);
+    expect(reversed[0].inserts).toHaveLength(1);
+  });
+
+  it('refines expanded prose even below the line anchor similarity threshold', () => {
+    const before = '先检查文件，再执行构建。';
+    const after = '先仔细检查文件，再执行完整构建。随后检查所有测试和浏览器里的实际页面效果，确认不同尺寸下的显示与预期一致，最后记录验证结果。';
+    expect(getInlineDiffSimilarity(before, after)).toBeLessThan(0.42);
+    const ranges = computeSmartInlineRanges([parseSingleHunk(`-${before}\n+${after}`)], 'words');
+    expect(ranges.newRanges.length).toBeGreaterThan(0);
+    const highlights = ranges.newRanges.map((range) => after.slice(range.start, range.start + range.length));
+    expect(highlights.some((text) => text.includes('仔细'))).toBe(true);
+    expect(highlights.some((text) => text.includes('检查文件'))).toBe(false);
+  });
+
   it('pairs grouped delete and insert lines for split display alignment', () => {
-    const pairs = pairChangedLinesForDisplay(
+    const pairs = displayPairs(
       [
         { lineNumber: 2, content: "import type { ChangeAuditRecord, GitChangedFile } from '../../terminal/api';" },
         { lineNumber: 3, content: "import { DiffViewer, type DiffViewType } from './DiffViewer';" },
@@ -226,7 +264,7 @@ describe('inline diff token heuristics', () => {
   });
 
   it('keeps adjacent object properties aligned when their value expressions are replaced', () => {
-    const pairs = pairChangedLinesForDisplay(
+    const pairs = displayPairs(
       [
         { lineNumber: 559, content: '        start: start - line.start,' },
         { lineNumber: 560, content: '        length: end - start,' },
@@ -241,7 +279,6 @@ describe('inline diff token heuristics', () => {
       [559, 769],
       [560, 770],
     ]);
-    expect(pairs[1]?.score).toBe(0.55);
   });
 
   it('keeps property-name anchors out of generic and multi-line similarity', () => {
@@ -255,8 +292,8 @@ describe('inline diff token heuristics', () => {
     )).toBeLessThan(0.5);
   });
 
-  it('does not use a repeated property name as an ambiguous row anchor', () => {
-    const pairs = pairChangedLinesForDisplay(
+  it('keeps ambiguous property replacements in source order', () => {
+    const pairs = displayPairs(
       [
         { lineNumber: 1, content: 'name: calculateRetryBudget(request),' },
         { lineNumber: 2, content: 'name: serializeWorkspaceSnapshot(root),' },
@@ -267,7 +304,7 @@ describe('inline diff token heuristics', () => {
       ],
     );
 
-    expect(pairs).toEqual([]);
+    expect(pairs).toEqual([{ oldLineNumber: 1, newLineNumber: 10 }, { oldLineNumber: 2, newLineNumber: 11 }]);
   });
 
   it('keeps unique middle anchors when a word diff is too large for the full matrix', () => {
@@ -291,9 +328,10 @@ describe('inline diff token heuristics', () => {
       content: index === 80 ? 'const stableFirst = loadWorkspace();' : index === 330 ? 'return stableResult;' : `newOnlyLine${index}();`,
     }));
 
-    expect(pairChangedLinesForDisplay(deletes, inserts)).toEqual([
-      { oldLineNumber: 121, newLineNumber: 581, score: 1 },
-      { oldLineNumber: 311, newLineNumber: 831, score: 1 },
-    ]);
+    const pairs = displayPairs(deletes, inserts);
+    expect(pairs).toContainEqual({ oldLineNumber: 121, newLineNumber: 581 });
+    expect(pairs).toContainEqual({ oldLineNumber: 311, newLineNumber: 831 });
+    expect(new Set(pairs.map((pair) => pair.oldLineNumber)).size).toBe(pairs.length);
+    expect(new Set(pairs.map((pair) => pair.newLineNumber)).size).toBe(pairs.length);
   });
 });

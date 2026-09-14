@@ -446,7 +446,6 @@ export function UniversalDiffReview({
       files={files}
       activePane
       wrap={wrap}
-      showScrollHint={!wrap}
       renderStreamBadge={(status, item) => {
         const group = groupByKey.get(item.key);
         return <ChangeStatusWithAuditBadge changeStatus={status} auditStatus={group} renderChangeBadge={(changeStatus) => <ChangeBadge status={changeStatus} />} />;

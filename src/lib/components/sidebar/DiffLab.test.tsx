@@ -140,38 +140,73 @@ describe('DiffLab regression fixtures', () => {
     },
   );
 
-  it('keeps inserted lines one-sided and aligns the following modified line in split view', async () => {
+  it('top-aligns an expanded modification and keeps word edits at their source lines', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=insertThenModify&view=split&inline=words&wrap=on');
-    await waitFor(() => expect(container.querySelectorAll('.diff.diff-split .diff-line').length).toBeGreaterThan(0));
-    const rows = Array.from(container.querySelectorAll('.diff.diff-split .diff-line')).map((row) => ({
-      className: row.className,
-      texts: Array.from(row.querySelectorAll('.diff-code')).map((cell) => cell.textContent?.trim()),
-    }));
-
-    const insertedOnlyRows = rows.filter((row) => row.texts[0] === '' && Boolean(row.texts[1]));
-    const timeoutRows = rows.filter((row) => row.texts.some((text) => text?.includes('timeoutMs')));
-
-    expect(insertedOnlyRows.map((row) => row.texts[1])).toEqual([
-      'config.enableDiffLab = true;',
-      "config.inlineMode = 'words';",
-      "config.algorithm = 'histogram';",
+    await waitFor(() => expect(container.querySelector('.diff-line-compare')).toBeTruthy());
+    const changedRows = Array.from(container.querySelectorAll('.diff-line')).filter((row) => !row.classList.contains('diff-line-normal'));
+    const texts = changedRows.map((row) => Array.from(row.querySelectorAll('.diff-code')).map((cell) => cell.textContent?.trim()));
+    expect(texts).toEqual([
+      ['config.timeoutMs = 1000;', 'config.enableDiffLab = true;'],
+      ['', "config.inlineMode = 'words';"],
+      ['', "config.algorithm = 'histogram';"],
+      ['', 'config.timeoutMs = 1500;'],
     ]);
-    expect(timeoutRows).toHaveLength(1);
-    expect(timeoutRows[0].className).toContain('diff-line-compare');
-    expect(timeoutRows[0].texts).toEqual(['config.timeoutMs = 1000;', 'config.timeoutMs = 1500;']);
+    expect(Array.from(container.querySelectorAll('.diff-code-edit')).map((edit) => edit.textContent)).toEqual(['1000', '1500']);
   });
 
-  it('keeps unrelated replacements one-sided without authoritative inline highlights', async () => {
+  it('keeps a multi-line rewrite compact instead of alternating gaps between weak matches', async () => {
+    const { container } = renderLab('?diff-lab=1&fixture=multilineRewrite&view=split&inline=words&wrap=on');
+    await waitFor(() => expect(container.querySelector('.diff-line-compare')).toBeTruthy());
+    const rows = Array.from(container.querySelectorAll('.diff-line'));
+    const first = rows.findIndex((row) => row.classList.contains('diff-line-compare'));
+    const cells = Array.from(rows[first].querySelectorAll('.diff-code'));
+    expect(cells[0].textContent).toContain('const deletes = block.filter');
+    expect(cells[1].textContent).toContain('for (const { deletes, inserts }');
+    let sawEmptyRight = false;
+    for (const row of rows.slice(first)) {
+      if (row.classList.contains('diff-line-normal')) break;
+      const right = row.querySelectorAll('.diff-code')[1].textContent;
+      if (!right) sawEmptyRight = true;
+      else expect(sawEmptyRight).toBe(false);
+    }
+    expect(sawEmptyRight).toBe(true);
+  });
+
+  it('keeps low-similarity replacements side by side without fabricated inline highlights', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=unrelatedReplacement&view=split&inline=words&wrap=on');
     await waitFor(() => expect(container.querySelectorAll('.diff.diff-split .diff-line').length).toBeGreaterThan(0));
     const changedRows = Array.from(container.querySelectorAll('.diff-line')).filter((row) => (
       row.textContent?.includes('calculateRetryBudget') || row.textContent?.includes('notifyObservers')
     ));
 
-    expect(changedRows).toHaveLength(2);
-    expect(changedRows.some((row) => row.classList.contains('diff-line-old-only'))).toBe(true);
-    expect(changedRows.some((row) => row.classList.contains('diff-line-new-only'))).toBe(true);
+    expect(changedRows).toHaveLength(1);
+    expect(changedRows[0].classList.contains('diff-line-compare')).toBe(true);
     expect(changedRows.every((row) => row.querySelector('.diff-code-edit') === null)).toBe(true);
+  });
+
+  it.each(['on', 'off'])('covers embedded stream rendering with three-digit gutters, wrap=%s', async (wrap) => {
+    const { container } = renderLab(`?diff-lab=1&fixture=multilineRewrite&view=split&inline=words&wrap=${wrap}&embedded=1`);
+    await waitFor(() => expect(container.querySelector('.diff-line-compare')).toBeTruthy());
+    expect(container.querySelector('.termdock-diff-card-mobile')).toBeTruthy();
+    expect(container.querySelector('.diff-gutter')?.textContent).toBe('714');
+    expect(container.textContent).not.toContain('Swipe left/right to see the full diff');
+  });
+
+  it.each(['on', 'off'])('aligns expanded Chinese prose with inline edits, wrap=%s', async (wrap) => {
+    const { container } = renderLab(`?diff-lab=1&fixture=chineseParagraphExpansion&view=split&inline=words&wrap=${wrap}`);
+    await waitFor(() => expect(container.querySelector('.diff-code-edit')).toBeTruthy());
+    const rows = Array.from(container.querySelectorAll('.diff-line-compare'));
+    expect(rows).toHaveLength(1);
+    const cells = Array.from(rows[0].querySelectorAll('.diff-code'));
+    expect(cells[0].textContent).toContain('6. 查看字节');
+    expect(cells[1].textContent).toContain('6. 查看或读取字节');
+    expect(Array.from(rows[0].querySelectorAll('.diff-gutter')).map((cell) => cell.textContent)).toEqual(['52', '52']);
+    expect(rows[0].querySelector('.diff-gutter-omit')).toBeNull();
+    expect(cells.every((cell) => cell.querySelector('.diff-code-edit'))).toBe(true);
+    // Surviving text must stay readable as context, not be painted wholesale.
+    for (const cell of cells) {
+      expect(Array.from(cell.querySelectorAll('.diff-code-edit')).some((edit) => edit.textContent?.includes('无法取得具体信息后'))).toBe(false);
+    }
   });
 
   it.each([
@@ -243,18 +278,14 @@ describe('DiffLab regression fixtures', () => {
     expect(auditRow?.classList.contains('diff-line-new-only')).toBe(true);
   });
 
-  it('does not pair a comment with a string just because their words overlap', async () => {
+  it('keeps source order in one replacement when words move between comments and strings', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=commentStringCollision&view=split&inline=words&wrap=on');
-    await waitFor(() => expect(container.querySelector('.diff-hunk')).toBeTruthy());
-    const rows = Array.from(container.querySelectorAll('.diff-line'));
-    const mixedSyntaxPair = rows.some((row) => {
-      const cells = Array.from(row.querySelectorAll('.diff-code'));
-      return cells[0]?.textContent?.trim().startsWith('//') !== cells[1]?.textContent?.trim().startsWith('//')
-        && Boolean(cells[0]?.textContent?.trim())
-        && Boolean(cells[1]?.textContent?.trim());
-    });
-
-    expect(mixedSyntaxPair).toBe(false);
+    await waitFor(() => expect(container.querySelector('.diff-line-compare')).toBeTruthy());
+    const rows = Array.from(container.querySelectorAll('.diff-line-compare'));
+    expect(rows.map((row) => Array.from(row.querySelectorAll('.diff-code')).map((cell) => cell.textContent?.trim()))).toEqual([
+      ['// retry request after backoff', "logger.info('retry request after backoff');"],
+      ["logger.info('request failed');", '// request failed permanently'],
+    ]);
   });
 
   it('keeps real edits strong and pure additions/deletions soft across multiple hunks', async () => {
@@ -270,7 +301,7 @@ describe('DiffLab regression fixtures', () => {
     expect(pureRows.every((row) => row.querySelector('.diff-code-edit') === null)).toBe(true);
   });
 
-  it('uses repeated lines as stable anchors and pairs only the real replacement', async () => {
+  it('keeps repeated unchanged lines anchored while compacting the adjacent replacement', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=repeatedScaffolding&view=split&inline=words&wrap=on');
     await waitFor(() => expect(container.querySelectorAll('.diff.diff-split .diff-line').length).toBeGreaterThan(0));
     const rows = Array.from(container.querySelectorAll('.diff-line'));
@@ -281,9 +312,9 @@ describe('DiffLab regression fixtures', () => {
       && row.querySelectorAll('.diff-code')[0]?.textContent === row.querySelectorAll('.diff-code')[1]?.textContent
     ));
 
-    expect(loggerRow?.classList.contains('diff-line-new-only')).toBe(true);
-    expect(modernRow?.classList.contains('diff-line-compare')).toBe(true);
-    expect(modernRow?.querySelectorAll('.diff-code-edit')).toHaveLength(2);
+    expect(loggerRow?.classList.contains('diff-line-compare')).toBe(true);
+    expect(modernRow?.classList.contains('diff-line-new-only')).toBe(true);
+    expect(Array.from(container.querySelectorAll('.diff-code-edit')).map((edit) => edit.textContent)).toEqual(['renderLegacy', 'renderModern']);
     expect(unchangedLegacyRow).toBeTruthy();
     expect(unchangedLegacyRow?.querySelector('.diff-code-edit')).toBeNull();
   });

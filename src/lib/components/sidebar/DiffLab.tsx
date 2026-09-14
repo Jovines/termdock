@@ -2,6 +2,62 @@ import { useEffect, useMemo, useState } from 'react';
 import { canUseSplitDiffView, DiffViewer, SPLIT_DIFF_MEDIA_QUERY, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 
 export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string; oldSource?: string }> = {
+  chineseParagraphExpansion: {
+    label: 'Chinese paragraph expansion (AGENTS.md)',
+    path: 'AGENTS.md',
+    diff: `diff --git a/AGENTS.md b/AGENTS.md
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -51,3 +51,3 @@
+ 5. 编辑任务不自动授权提交或发布。
+-6. 查看字节内部平台链接或页面时优先查找并使用 \`bytedcli\` 对应子命令获取结构化信息；仅在确认 \`bytedcli\` 不支持、受鉴权或能力限制，或无法取得具体信息后，才使用 AI Chrome / \`agent-browser\` 等浏览器方式补充，禁止一开始直接使用浏览器。
++6. 查看或读取字节内部平台的数据、链接或页面时，先使用对应的结构化 CLI：飞书群聊、文档、Base、Minutes 等优先使用 \`lark-cli\`，其他内部平台先查找并使用 \`bytedcli\` 对应子命令。只有确认 CLI 不支持、受鉴权或能力限制，或无法取得具体信息后，才允许用 AI Chrome、\`agent-browser\`、Computer Use 或其他桌面 GUI 方式补充。用户说“读一下群消息”“看一下页面内容”等，默认是数据读取请求，不因为目标应用已经打开或登录就视为桌面操作请求；只有用户明确要求点击、输入、拖拽等可见界面操作时，才可直接使用 Computer Use。
+ 7. 值班机 / DevBox 共享运维仓库例外。`,
+  },
+  multilineRewrite: {
+    label: 'Multi-line alignment function rewrite',
+    path: 'DiffViewer.tsx',
+    diff: `diff --git a/DiffViewer.tsx b/DiffViewer.tsx
+--- a/DiffViewer.tsx
++++ b/DiffViewer.tsx
+@@ -714,28 +714,14 @@
+       block.push(hunk.changes[cursor]);
+       cursor += 1;
+     }
+-    const deletes = block.filter((item) => item.type === 'delete');
+-    const inserts = block.filter((item) => item.type === 'insert');
+-    const pairs = pairChangedLinesForDisplay(
+-      deletes.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
+-      inserts.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
+-    );
+-    const oldIndexByLine = new Map(deletes.map((item, index) => [getChangeLineNumber(item) ?? -1, index]));
+-    const newIndexByLine = new Map(inserts.map((item, index) => [getChangeLineNumber(item) ?? -1, index]));
+-    let oldCursor = 0;
+-    let newCursor = 0;
+-    for (const pair of pairs) {
+-      const pairedOldIndex = oldIndexByLine.get(pair.oldLineNumber);
+-      const pairedNewIndex = newIndexByLine.get(pair.newLineNumber);
+-      if (pairedOldIndex === undefined || pairedNewIndex === undefined) continue;
+-      while (newCursor < pairedNewIndex) changes.push(inserts[newCursor++]);
+-      while (oldCursor < pairedOldIndex) changes.push(deletes[oldCursor++]);
+-      changes.push(deletes[pairedOldIndex], inserts[pairedNewIndex]);
+-      oldCursor = pairedOldIndex + 1;
+-      newCursor = pairedNewIndex + 1;
++    for (const { deletes, inserts } of splitChangedLineBlock(block)) {
++      // react-diff-view pairs a deletion immediately followed by an insertion.
++      // Top-align replacement blocks; only the excess lines stay one-sided.
++      for (let index = 0; index < Math.max(deletes.length, inserts.length); index += 1) {
++        if (deletes[index]) changes.push(deletes[index]);
++        if (inserts[index]) changes.push(inserts[index]);
++      }
+     }
+-    while (newCursor < inserts.length) changes.push(inserts[newCursor++]);
+-    while (oldCursor < deletes.length) changes.push(deletes[oldCursor++]);
+   }
+   return { ...hunk, changes };
+ }
+`,
+  },
   kotlin: {
     label: 'Kotlin function signature + callback',
     path: 'SearchHintIconHelper.kt',
@@ -659,7 +715,7 @@ export function DiffLab() {
             oldSourceOverride={fixture.oldSource}
             active
             wrap={wrap}
-            showScrollHint={!wrap}
+            embedded={new URLSearchParams(window.location.search).get('embedded') === '1'}
             viewType={effectiveViewType}
             inlineMode={inlineMode}
           />

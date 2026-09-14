@@ -10,12 +10,6 @@ export interface MovedLineCandidate {
   score: number;
 }
 
-export interface PairedChangedLine {
-  oldLineNumber: number;
-  newLineNumber: number;
-  score: number;
-}
-
 export interface InlineDiffRange {
   start: number;
   length: number;
@@ -158,11 +152,6 @@ function structuralSkeleton(value: string): string {
     .replace(/\s+/gu, ' ');
 }
 
-function leadingPropertyName(value: string): string | null {
-  const match = value.match(/^\s*(?:([A-Za-z_$][A-Za-z0-9_$]*)|['"]([^'"]+)['"])\s*:/u);
-  return match?.[1] ?? match?.[2] ?? null;
-}
-
 export function getInlineDiffSimilarity(left: string, right: string): number {
   const trimmedLeft = left.trim();
   const trimmedRight = right.trim();
@@ -192,107 +181,106 @@ export function getInlineDiffSimilarity(left: string, right: string): number {
   return sameSubstantiveSkeleton ? Math.max(0.72, lexicalScore) : lexicalScore;
 }
 
-export function pairChangedLinesForDisplay(
-  deletes: Array<Pick<ChangeData, 'content'> & { lineNumber: number }>,
-  inserts: Array<Pick<ChangeData, 'content'> & { lineNumber: number }>,
-  threshold = 0.42,
-): PairedChangedLine[] {
-  if (deletes.length === 0 || inserts.length === 0) return [];
-  if (deletes.length * inserts.length > 40_000) {
-    const oldKeys = deletes.map((change) => {
-      const trimmed = change.content.trim();
-      return /[\p{L}\p{N}_$]/u.test(trimmed) ? trimmed : '';
-    });
-    const newKeys = inserts.map((change) => {
-      const trimmed = change.content.trim();
-      return /[\p{L}\p{N}_$]/u.test(trimmed) ? trimmed : '';
-    });
-    return patienceAnchors(oldKeys, newKeys)
-      .filter((pair) => oldKeys[pair.left] !== '')
-      .map((pair) => ({
-        oldLineNumber: deletes[pair.left].lineNumber,
-        newLineNumber: inserts[pair.right].lineNumber,
-        score: getInlineDiffSimilarity(deletes[pair.left].content, inserts[pair.right].content),
-      }));
-  }
-  const deletedProperties = deletes.map((change) => leadingPropertyName(change.content));
-  const insertedProperties = inserts.map((change) => leadingPropertyName(change.content));
-  const countProperties = (properties: Array<string | null>) => {
-    const counts = new Map<string, number>();
-    for (const property of properties) {
-      if (property) counts.set(property, (counts.get(property) ?? 0) + 1);
-    }
-    return counts;
-  };
-  const deletedPropertyCounts = countProperties(deletedProperties);
-  const insertedPropertyCounts = countProperties(insertedProperties);
-  const similarities = deletes.map((deletion, oldIndex) => (
-    inserts.map((insertion, newIndex) => {
-      const similarity = getInlineDiffSimilarity(deletion.content, insertion.content);
-      // A unique object/config property name is a strong display identity even
-      // when its complete value expression changes. Keep this boost local to
-      // row alignment: the generic similarity is also used by moved-line and
-      // multi-line inline-refinement logic, where this assumption is unsafe.
-      const property = deletedProperties[oldIndex];
-      return property
-        && property === insertedProperties[newIndex]
-        && deletedPropertyCounts.get(property) === 1
-        && insertedPropertyCounts.get(property) === 1
-        ? Math.max(0.55, similarity)
-        : similarity;
-    })
-  ));
-  const scores = similarities.map((row, oldIndex) => (
-    row.map((similarity, newIndex) => {
-      const oldPosition = deletes.length <= 1 ? 0 : oldIndex / (deletes.length - 1);
-      const newPosition = inserts.length <= 1 ? 0 : newIndex / (inserts.length - 1);
-      const proximityTieBreaker = (1 - Math.abs(oldPosition - newPosition)) * 0.0001;
-      return similarity >= threshold ? similarity + proximityTieBreaker : similarity;
-    })
-  ));
-  const matrix = Array.from(
-    { length: deletes.length + 1 },
-    () => Array<number>(inserts.length + 1).fill(0),
-  );
-  for (let oldIndex = deletes.length - 1; oldIndex >= 0; oldIndex -= 1) {
-    for (let newIndex = inserts.length - 1; newIndex >= 0; newIndex -= 1) {
-      const weightedScore = scores[oldIndex][newIndex];
-      const paired = weightedScore >= threshold
-        ? (weightedScore - threshold + 0.01) + matrix[oldIndex + 1][newIndex + 1]
-        : Number.NEGATIVE_INFINITY;
-      matrix[oldIndex][newIndex] = Math.max(
-        paired,
-        matrix[oldIndex + 1][newIndex],
-        matrix[oldIndex][newIndex + 1],
-      );
-    }
-  }
+interface ChangedLineBlock {
+  deletes: ChangeData[];
+  inserts: ChangeData[];
+  anchored: boolean;
+}
 
-  const pairs: PairedChangedLine[] = [];
-  let oldIndex = 0;
-  let newIndex = 0;
-  while (oldIndex < deletes.length && newIndex < inserts.length) {
-    const weightedScore = scores[oldIndex][newIndex];
-    const pairValue = weightedScore - threshold + 0.01;
-    const isPair = weightedScore >= threshold
-      && Math.abs(
-        pairValue + matrix[oldIndex + 1][newIndex + 1] - matrix[oldIndex][newIndex],
-      ) < 0.000001;
-    if (isPair) {
-      pairs.push({
-        oldLineNumber: deletes[oldIndex].lineNumber,
-        newLineNumber: inserts[newIndex].lineNumber,
-        score: similarities[oldIndex][newIndex],
-      });
-      oldIndex += 1;
-      newIndex += 1;
-    } else if (matrix[oldIndex + 1][newIndex] >= matrix[oldIndex][newIndex + 1]) {
-      oldIndex += 1;
+// Adapted from JetBrains LineFragmentSplitter (Copyright 2000-2021
+// JetBrains s.r.o. and contributors, Apache-2.0). Source at:
+// https://github.com/JetBrains/intellij-community/blob/3e1b6c548e1d267865221e3bd70053242f8afb06/platform/util/diff/src/com/intellij/diff/comparison/LineFragmentSplitter.kt
+// Split on matched newlines / matched first words, not arbitrary line
+// similarity. Unmatched spans remain two-sided replacement blocks.
+export function splitChangedLineBlock(block: ChangeData[]): ChangedLineBlock[] {
+  const deletes = block.filter(isDelete);
+  const inserts = block.filter(isInsert);
+  if (!deletes.length || !inserts.length) return [{ deletes, inserts, anchored: false }];
+  const oldText = deletes.map((line) => line.content).join('\n');
+  const newText = inserts.map((line) => line.content).join('\n');
+  const oldWords = getJetBrainsWordChunks(oldText, true);
+  const newWords = getJetBrainsWordChunks(newText, true);
+  const pairs = optimizeWordChunkPairs(oldWords, newWords, oldText, newText);
+  const lineEnds = (words: JetBrainsChunk[], count: number) => {
+    let line = 0;
+    return [...words.map((word) => { if (word.value === '\n') line += 1; return line; }), count];
+  };
+  const oldEnds = lineEnds(oldWords, deletes.length);
+  const newEnds = lineEnds(newWords, inserts.length);
+  const blocks: ChangedLineBlock[] = [];
+  let oldCursor = 0;
+  let newCursor = 0;
+  let hasEqualWords = false;
+  let pending: (ChangedLineBlock & { hasWords: boolean; whitespaceOnly: boolean }) | undefined;
+  const addBlock = (oldEnd: number, newEnd: number) => {
+    if (oldCursor > oldEnd || newCursor > newEnd || (oldCursor === oldEnd && newCursor === newEnd)) return;
+    const oldLines = deletes.slice(oldCursor, oldEnd);
+    const newLines = inserts.slice(newCursor, newEnd);
+    const before = oldLines.map((line) => line.content).join('\n');
+    const after = newLines.map((line) => line.content).join('\n');
+    const current = {
+      deletes: oldLines, inserts: newLines, anchored: hasEqualWords,
+      hasWords: getJetBrainsWordChunks(before + '\n' + after).length > 0,
+      whitespaceOnly: before.replace(/\s/gu, '') === after.replace(/\s/gu, ''),
+    };
+    if (pending && ((!pending.anchored && !current.anchored)
+      || (pending.whitespaceOnly && current.whitespaceOnly) || !pending.hasWords || !current.hasWords)) {
+      pending.deletes.push(...current.deletes);
+      pending.inserts.push(...current.inserts);
+      pending.anchored ||= current.anchored;
+      pending.hasWords ||= current.hasWords;
+      pending.whitespaceOnly &&= current.whitespaceOnly;
     } else {
-      newIndex += 1;
+      if (pending) blocks.push(pending);
+      pending = current;
+    }
+    oldCursor = oldEnd;
+    newCursor = newEnd;
+  };
+  for (const pair of pairs) {
+    const oldNewline = oldWords[pair.left].value === '\n';
+    const newNewline = newWords[pair.right].value === '\n';
+    if (oldNewline && newNewline) {
+      addBlock(oldEnds[pair.left], newEnds[pair.right]);
+      hasEqualWords = false;
+    } else {
+      const oldFirst = pair.left === 0 || oldWords[pair.left - 1].value === '\n';
+      const newFirst = pair.right === 0 || newWords[pair.right - 1].value === '\n';
+      if (oldFirst && newFirst) {
+        addBlock(oldEnds[pair.left - 1] ?? 0, newEnds[pair.right - 1] ?? 0);
+        hasEqualWords = false;
+      }
+      hasEqualWords = true;
     }
   }
-  return pairs;
+  addBlock(deletes.length, inserts.length);
+  if (pending) blocks.push(pending);
+  return blocks;
+}
+
+// IntelliJ's default BY_WORD policy squashes adjoining word fragments back
+// into one display region (ComparisonManagerImpl.processBlocks). Only truly
+// unchanged lines delimit regions, as in the preceding ByLine stage. Git may
+// include those lines in a replacement when indentation or ordering changed.
+export function getChangedLineDisplayBlocks(block: ChangeData[]): ChangedLineBlock[] {
+  const deletes = block.filter(isDelete);
+  const inserts = block.filter(isInsert);
+  const pairs = lcsPairs(deletes.map((line) => line.content.trim()), inserts.map((line) => line.content.trim()));
+  const result: ChangedLineBlock[] = [];
+  let oldCursor = 0;
+  let newCursor = 0;
+  for (const pair of pairs) {
+    if (oldCursor < pair.left || newCursor < pair.right) {
+      result.push({ deletes: deletes.slice(oldCursor, pair.left), inserts: inserts.slice(newCursor, pair.right), anchored: false });
+    }
+    result.push({ deletes: [deletes[pair.left]], inserts: [inserts[pair.right]], anchored: true });
+    oldCursor = pair.left + 1;
+    newCursor = pair.right + 1;
+  }
+  if (oldCursor < deletes.length || newCursor < inserts.length) {
+    result.push({ deletes: deletes.slice(oldCursor), inserts: inserts.slice(newCursor), anchored: false });
+  }
+  return result;
 }
 
 export function findMovedLineCandidates(
@@ -534,7 +522,7 @@ function isContinuousScript(value: string): boolean {
     || !/\p{Alphabetic}/u.test(value);
 }
 
-function getJetBrainsWordChunks(text: string): JetBrainsChunk[] {
+function getJetBrainsWordChunks(text: string, includeNewlines = false): JetBrainsChunk[] {
   const chunks: JetBrainsChunk[] = [];
   let wordStart = -1;
   for (let offset = 0; offset < text.length;) {
@@ -551,7 +539,7 @@ function getJetBrainsWordChunks(text: string): JetBrainsChunk[] {
         chunks.push({ start: wordStart, end: offset, value: text.slice(wordStart, offset) });
         wordStart = -1;
       }
-      if (alpha) chunks.push({ start: offset, end: offset + charLength, value });
+      if (alpha || (includeNewlines && value === '\n')) chunks.push({ start: offset, end: offset + charLength, value });
     }
     offset += charLength;
   }
@@ -559,6 +547,71 @@ function getJetBrainsWordChunks(text: string): JetBrainsChunk[] {
     chunks.push({ start: wordStart, end: text.length, value: text.slice(wordStart) });
   }
   return chunks;
+}
+
+// Adapted from JetBrains ChunkOptimizer.WordChunkOptimizer (Apache-2.0,
+// Copyright 2000-2021 JetBrains s.r.o. and contributors). Merge adjacent
+// matching runs and shift ambiguous matches to whitespace boundaries.
+function optimizeWordChunkPairs(left: JetBrainsChunk[], right: JetBrainsChunk[], leftText: string, rightText: string): MatchPair[] {
+  type Run = { start1: number; end1: number; start2: number; end2: number };
+  const rawRuns: Run[] = [];
+  for (const pair of lcsPairs(left.map((word) => word.value), right.map((word) => word.value))) {
+    const last = rawRuns[rawRuns.length - 1];
+    if (last && last.end1 === pair.left && last.end2 === pair.right) {
+      last.end1 += 1;
+      last.end2 += 1;
+    } else {
+      rawRuns.push({ start1: pair.left, end1: pair.left + 1, start2: pair.right, end2: pair.right + 1 });
+    }
+  }
+  const separated = (words: JetBrainsChunk[], text: string, boundary: number) => {
+    const a = words[boundary - 1];
+    const b = words[boundary];
+    return !a || !b || a.value === '\n' || b.value === '\n' || /[ \t\n]/u.test(text.slice(a.end, b.start));
+  };
+  const runs: Run[] = [];
+  for (const run of rawRuns) {
+    runs.push(run);
+    while (runs.length >= 2) {
+      const a = runs[runs.length - 2];
+      const b = runs[runs.length - 1];
+      if (a.end1 !== b.start1 && a.end2 !== b.start2) break;
+      const count1 = a.end1 - a.start1;
+      const count2 = b.end1 - b.start1;
+      let forward = 0;
+      while (forward < count2 && left[a.end1 + forward]?.value === right[a.end2 + forward]?.value) forward += 1;
+      let backward = 0;
+      while (backward < count1 && left[b.start1 - backward - 1]?.value === right[b.start2 - backward - 1]?.value) backward += 1;
+      if (forward === count2) {
+        runs.splice(-2, 2, { start1: a.start1, start2: a.start2, end1: a.end1 + count2, end2: a.end2 + count2 });
+        continue;
+      }
+      if (backward === count1) {
+        runs.splice(-2, 2, { start1: b.start1 - count1, start2: b.start2 - count1, end1: b.end1, end2: b.end2 });
+        continue;
+      }
+      const touchLeft = a.end1 === b.start1;
+      const words = touchLeft ? left : right;
+      const text = touchLeft ? leftText : rightText;
+      const start = touchLeft ? b.start1 : b.start2;
+      if (separated(words, text, start)) break;
+      let shift = 0;
+      for (let step = 1; step <= forward; step += 1) {
+        if (separated(words, text, start + step)) { shift = step; break; }
+      }
+      if (!shift) {
+        for (let step = 1; step <= backward; step += 1) {
+          if (separated(words, text, start - step)) { shift = -step; break; }
+        }
+      }
+      a.end1 += shift;
+      a.end2 += shift;
+      b.start1 += shift;
+      b.start2 += shift;
+      break;
+    }
+  }
+  return runs.flatMap((run) => Array.from({ length: run.end1 - run.start1 }, (_, index) => ({ left: run.start1 + index, right: run.start2 + index })));
 }
 
 function getJetBrainsCharChunks(text: string): JetBrainsChunk[] {
@@ -696,10 +749,9 @@ export function getJetBrainsStyleDiffRanges(
 ): [InlineDiffRange[], InlineDiffRange[]] {
   const leftChunks = mode === 'words' ? getJetBrainsWordChunks(left) : getJetBrainsCharChunks(left);
   const rightChunks = mode === 'words' ? getJetBrainsWordChunks(right) : getJetBrainsCharChunks(right);
-  const chunkPairs = lcsPairs(
-    leftChunks.map((chunk) => chunk.value),
-    rightChunks.map((chunk) => chunk.value),
-  );
+  const chunkPairs = mode === 'words'
+    ? optimizeWordChunkPairs(leftChunks, rightChunks, left, right)
+    : lcsPairs(leftChunks.map((chunk) => chunk.value), rightChunks.map((chunk) => chunk.value));
   const matches: MatchPair[] = [];
   for (const pair of chunkPairs) {
     const leftChunk = leftChunks[pair.left];
@@ -815,48 +867,28 @@ function appendRefinedBlock(
   inserts: ChangeData[],
   mode: SmartInlineDiffMode,
   ranges: SmartInlineRanges,
-  force: boolean,
 ): void {
   if (deletes.length === 0 || inserts.length === 0) return;
   const oldBlock = buildBlockText(deletes);
   const newBlock = buildBlockText(inserts);
-  if (!force) {
-    const oldKinds = deletes.map((change) => getLineSemanticKind(change.content));
-    const newKinds = inserts.map((change) => getLineSemanticKind(change.content));
-    if (oldKinds.join(',') !== newKinds.join(',')) return;
+  // Use the same word boundaries as ByWordRt, including individual CJK
+  // characters. A normalized whole-line similarity threshold loses expanded
+  // prose even when much of the old text survives. Only suppress refinement
+  // when there is no shared substantive word (punctuation alone is not useful).
+  {
+    const oldWords = new Set(getJetBrainsWordChunks(oldBlock.text)
+      .map((chunk) => chunk.value).filter((word) => /[\p{L}\p{N}_$]/u.test(word)));
+    if (!getJetBrainsWordChunks(newBlock.text).some((chunk) => oldWords.has(chunk.value))) return;
   }
-  // Unpaired regions are refined only when their aggregate content is still
-  // recognisably the same code (most commonly one line reformatted to many).
-  // This prevents common punctuation in unrelated replacement lines from
-  // creating authoritative-looking inline highlights.
-  if (!force && getInlineDiffSimilarity(oldBlock.text, newBlock.text) < 0.5) return;
   const [oldEdits, newEdits] = getJetBrainsStyleDiffRanges(oldBlock.text, newBlock.text, mode);
   ranges.oldRanges.push(...projectBlockRanges(oldEdits, oldBlock));
   ranges.newRanges.push(...projectBlockRanges(newEdits, newBlock));
 }
 
 function appendMappedChangeBlock(block: ChangeData[], mode: SmartInlineDiffMode, ranges: SmartInlineRanges): void {
-  const deletes = block.filter(isDelete);
-  const inserts = block.filter(isInsert);
-  if (deletes.length === 0 || inserts.length === 0) return;
-  const pairs = pairChangedLinesForDisplay(
-    deletes.map((change) => ({ content: change.content, lineNumber: getLineNumber(change) })),
-    inserts.map((change) => ({ content: change.content, lineNumber: getLineNumber(change) })),
-  );
-  const oldIndexByLine = new Map(deletes.map((change, index) => [getLineNumber(change), index]));
-  const newIndexByLine = new Map(inserts.map((change, index) => [getLineNumber(change), index]));
-  let oldCursor = 0;
-  let newCursor = 0;
-  for (const pair of pairs) {
-    const oldIndex = oldIndexByLine.get(pair.oldLineNumber);
-    const newIndex = newIndexByLine.get(pair.newLineNumber);
-    if (oldIndex === undefined || newIndex === undefined) continue;
-    appendRefinedBlock(deletes.slice(oldCursor, oldIndex), inserts.slice(newCursor, newIndex), mode, ranges, false);
-    appendRefinedBlock([deletes[oldIndex]], [inserts[newIndex]], mode, ranges, true);
-    oldCursor = oldIndex + 1;
-    newCursor = newIndex + 1;
+  for (const { deletes, inserts } of splitChangedLineBlock(block)) {
+    appendRefinedBlock(deletes, inserts, mode, ranges);
   }
-  appendRefinedBlock(deletes.slice(oldCursor), inserts.slice(newCursor), mode, ranges, false);
 }
 
 export function computeSmartInlineRanges(hunks: HunkData[], mode: SmartInlineDiffMode): SmartInlineRanges {

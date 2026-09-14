@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ChevronDown as RiChevronDown, ChevronUp as RiChevronUp, GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
+import { ChevronDown as RiChevronDown, ChevronUp as RiChevronUp, GitCompare as RiGitCompare, Loader2 as RiLoader } from 'lucide-react';
 import { Diff, Hunk, getChangeKey, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -7,8 +7,9 @@ import { cancelIoSlot, getFileDiff, getGitBlobContent, isPreviewableImagePath, r
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import { readCache, writeCache } from '../../utils/localStorageCache';
-import { findMovedLineCandidates, pairChangedLinesForDisplay } from './inlineDiff';
+import { findMovedLineCandidates, getChangedLineDisplayBlocks } from './inlineDiff';
 import { parseDiffInWorker, type DiffWorkerResult } from './diffWorkerClient';
+import { DiffSplitScrollArea } from './DiffSplitScrollArea';
 import { resolveLanguage } from '../../utils/syntaxHighlight';
 import { useDiffDisplayPrefs, type DiffContextPref, type DiffWhitespacePref } from './diffDisplayPrefs';
 
@@ -352,7 +353,6 @@ interface DiffViewerProps {
    * tell the user the content can be swiped horizontally. Only shown when
    * `wrap` is off — the hint would lie otherwise.
    */
-  showScrollHint?: boolean;
   /** Re-fetch the current diff even when the file path did not change. */
   reloadKey?: number;
   /**
@@ -744,28 +744,14 @@ function alignAdjacentChangesForSplitView(hunk: HunkData): HunkData {
       block.push(hunk.changes[cursor]);
       cursor += 1;
     }
-    const deletes = block.filter((item) => item.type === 'delete');
-    const inserts = block.filter((item) => item.type === 'insert');
-    const pairs = pairChangedLinesForDisplay(
-      deletes.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
-      inserts.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
-    );
-    const oldIndexByLine = new Map(deletes.map((item, index) => [getChangeLineNumber(item) ?? -1, index]));
-    const newIndexByLine = new Map(inserts.map((item, index) => [getChangeLineNumber(item) ?? -1, index]));
-    let oldCursor = 0;
-    let newCursor = 0;
-    for (const pair of pairs) {
-      const pairedOldIndex = oldIndexByLine.get(pair.oldLineNumber);
-      const pairedNewIndex = newIndexByLine.get(pair.newLineNumber);
-      if (pairedOldIndex === undefined || pairedNewIndex === undefined) continue;
-      while (newCursor < pairedNewIndex) changes.push(inserts[newCursor++]);
-      while (oldCursor < pairedOldIndex) changes.push(deletes[oldCursor++]);
-      changes.push(deletes[pairedOldIndex], inserts[pairedNewIndex]);
-      oldCursor = pairedOldIndex + 1;
-      newCursor = pairedNewIndex + 1;
+    for (const { deletes, inserts } of getChangedLineDisplayBlocks(block)) {
+      // react-diff-view pairs a deletion immediately followed by an insertion.
+      // Top-align replacement blocks; only the excess lines stay one-sided.
+      for (let index = 0; index < Math.max(deletes.length, inserts.length); index += 1) {
+        if (deletes[index]) changes.push(deletes[index]);
+        if (inserts[index]) changes.push(inserts[index]);
+      }
     }
-    while (newCursor < inserts.length) changes.push(inserts[newCursor++]);
-    while (oldCursor < deletes.length) changes.push(deletes[oldCursor++]);
   }
   return { ...hunk, changes };
 }
@@ -918,24 +904,7 @@ function isDiffNavTypingTarget(element: Element | null): boolean {
  * Self-dismisses on first tap so it doesn't get in the way of repeat
  * visits — the user has seen it once, they know now.
  */
-function DiffScrollHint() {
-  const { t } = useI18n();
-  const [dismissed, setDismissed] = useState(false);
-  if (dismissed) return null;
-  return (
-    <button
-      type="button"
-      onClick={() => setDismissed(true)}
-      className="flex w-full items-center justify-center gap-1.5 border-b border-border/15 bg-surface-2/40 px-2 py-1 text-[10px] text-muted-foreground transition active:scale-[0.99] hover:bg-surface-2 hover:text-foreground"
-      title={t('rightSidebar.horizontalScrollHint')}
-    >
-      <RiMoveHorizontal size={11} className="shrink-0" />
-      <span className="truncate">{t('rightSidebar.horizontalScrollHint')}</span>
-    </button>
-  );
-}
-
-export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
   const { t, locale } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const initialCacheRef = useRef<{
@@ -1711,11 +1680,6 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
               </div>
             </div>
           )}
-          {/* Scroll hint: only shown when wrap is off (otherwise it would
-              lie) and only once per file per visit, dismissed by tap. The
-              user still gets the visual cue without it nagging on every
-              open. */}
-          {showScrollHint && !wrap && file.hunks.length > 0 && <DiffScrollHint />}
           {/*
             `termdock-diff-scroll` opts this card into a CSS rule that
             sets `touch-action: pan-x` on the inner overflow element. That
@@ -1730,7 +1694,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
               {t('diffViewer.binaryOrEmpty')}
             </div>
           ) : (
-            <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`}>
+            <DiffSplitScrollArea enabled={viewType === 'split' && !wrap} label={t('rightSidebar.horizontalScrollHint')} className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`}>
               <div className="min-w-full">
                 {file.hunks.map((hunk, index) => {
                     const hunkFlatIndex = hunkFlatCursor;
@@ -1999,7 +1963,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                   </div>
                 )}
               </div>
-            </div>
+            </DiffSplitScrollArea>
           )}
         </div>
         );

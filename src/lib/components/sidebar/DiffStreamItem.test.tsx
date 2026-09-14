@@ -18,7 +18,6 @@ const baseProps = {
   activePane: true,
   lightweight: false,
   wrap: true,
-  showScrollHint: false,
   auditRecords: [],
   renderBadge: () => null,
 };
@@ -33,7 +32,7 @@ describe('DiffStreamItem virtualization', () => {
     HTMLElement.prototype.getBoundingClientRect = vi.fn(function (this: HTMLElement) {
       const height = this.hasAttribute('data-diff-stream-header')
         ? 40
-        : this.hasAttribute('data-diff-stream-body')
+        : (this.hasAttribute('data-diff-stream-body') || this.hasAttribute('data-mocked-diff-viewer'))
           ? bodyRectHeight
           : Number.parseFloat(this.style.height) || 240;
       return ({
@@ -143,6 +142,36 @@ describe('DiffStreamItem virtualization', () => {
     act(() => vi.advanceTimersByTime(DIFF_SETTLE_TIME));
     expect(onHeightChange).toHaveBeenCalledTimes(2);
     expect(onHeightChange).toHaveBeenLastCalledWith(baseProps.selectionPath, 241, 641);
+  });
+
+  it('updates the virtual slot when ready content shrinks and grows across wrap toggles', () => {
+    vi.useFakeTimers();
+    const onHeightChange = vi.fn();
+    const { container, rerender } = render(<DiffStreamItem {...baseProps} visible onHeightChange={onHeightChange} />);
+    fireEvent.click(container.querySelector('[data-mocked-diff-viewer]') as HTMLElement);
+    act(() => vi.advanceTimersByTime(DIFF_SETTLE_TIME));
+    rerender(<DiffStreamItem {...baseProps} visible estimatedHeight={241} onHeightChange={onHeightChange} />);
+
+    bodyRectHeight = 100;
+    rerender(<DiffStreamItem {...baseProps} visible wrap={false} estimatedHeight={241} onHeightChange={onHeightChange} />);
+    act(() => vi.advanceTimersByTime(DIFF_SETTLE_TIME));
+    expect(onHeightChange).toHaveBeenLastCalledWith(baseProps.selectionPath, 241, 141);
+    expect(container.querySelector('[data-diff-measuring-overlay]')).toBeNull();
+
+    bodyRectHeight = 600;
+    rerender(<DiffStreamItem {...baseProps} visible wrap estimatedHeight={141} onHeightChange={onHeightChange} />);
+    act(() => vi.advanceTimersByTime(DIFF_SETTLE_TIME));
+    expect(onHeightChange).toHaveBeenLastCalledWith(baseProps.selectionPath, 141, 641);
+  });
+
+  it('can shrink a recycled tall slot instead of measuring its stale placeholder', () => {
+    vi.useFakeTimers();
+    bodyRectHeight = 100;
+    const onHeightChange = vi.fn();
+    const { container } = render(<DiffStreamItem {...baseProps} visible estimatedHeight={1200} onHeightChange={onHeightChange} />);
+    fireEvent.click(container.querySelector('[data-mocked-diff-viewer]') as HTMLElement);
+    act(() => vi.advanceTimersByTime(DIFF_SETTLE_TIME));
+    expect(onHeightChange).toHaveBeenCalledWith(baseProps.selectionPath, 1200, 141);
   });
 
   it('releases the neighbour loading queue shortly after the rendered body is ready', () => {

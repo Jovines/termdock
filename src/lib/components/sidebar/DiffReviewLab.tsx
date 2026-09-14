@@ -11,7 +11,7 @@ import type { DiffNavigatorGroup } from './DiffFileNavigator';
 const FILE_COUNT = 40;
 const REPO_ROOT = '/tmp/termdock-diff-review-lab';
 
-function buildDiff(path: string, lineCount: number): string {
+function buildDiff(path: string, lineCount: number, longLines = false): string {
   const lines: string[] = [
     `diff --git a/${path} b/${path}`,
     `--- a/${path}`,
@@ -21,21 +21,21 @@ function buildDiff(path: string, lineCount: number): string {
   for (let i = 0; i < lineCount; i += 1) {
     if (i % 5 === 0) lines.push(`-const removed_${i} = ${i};`);
     if (i % 3 === 0) lines.push(`+const added_${i} = ${i} * 2;`);
-    lines.push(` context line ${i} in ${path}`);
+    lines.push(` context line ${i} in ${path}${longLines ? ' long content for repeated wrap and resize checks'.repeat(10) : ''}`);
   }
   return lines.join('\n');
 }
 
-function buildMockFiles(revealed: Set<number>, delayed: boolean): DiffReviewFile[] {
+function buildMockFiles(revealed: Set<number>, delayed: boolean, longLines: boolean): DiffReviewFile[] {
   return Array.from({ length: FILE_COUNT }, (_, index) => {
     // Deterministic but varied heights: short, medium and very tall files.
     const lineCount = 6 + ((index * 7) % 60);
     const path = `src/module${String(index).padStart(2, '0')}/File${index}.ts`;
     const key = `${REPO_ROOT}/${path}`;
-    const fullDiff = buildDiff(path, lineCount);
+    const fullDiff = buildDiff(path, lineCount, longLines);
     // Until revealed, show a tiny 1-line stub so the item is short; when the
     // timer reveals it, the diff grows — mimicking real async loading.
-    const stub = buildDiff(path, 1);
+    const stub = buildDiff(path, 1, longLines);
     return {
       key,
       path,
@@ -51,6 +51,9 @@ function buildMockFiles(revealed: Set<number>, delayed: boolean): DiffReviewFile
 }
 
 export function DiffReviewLab() {
+  const [wrap, setWrap] = useState(() => new URLSearchParams(window.location.search).get('wrap') !== 'off');
+  const [split, setSplit] = useState(() => new URLSearchParams(window.location.search).get('view') === 'split');
+  const longLines = useMemo(() => new URLSearchParams(window.location.search).get('long') === '1', []);
   const delayMs = useMemo(() => {
     if (typeof window === 'undefined') return 0;
     const raw = new URLSearchParams(window.location.search).get('delay');
@@ -76,7 +79,7 @@ export function DiffReviewLab() {
     return () => timers.forEach((t) => window.clearTimeout(t));
   }, [delayed, delayMs]);
 
-  const files = useMemo(() => buildMockFiles(revealed, delayed), [revealed, delayed]);
+  const files = useMemo(() => buildMockFiles(revealed, delayed, longLines), [revealed, delayed, longLines]);
   const groups = useMemo<DiffNavigatorGroup[]>(() => [{
     key: 'mock-repo',
     root: REPO_ROOT,
@@ -116,6 +119,8 @@ export function DiffReviewLab() {
   return (
     <div className="flex h-screen flex-col bg-background text-foreground" data-diff-review-lab>
       <div className="shrink-0 border-b border-border/20 px-3 py-2 text-xs text-muted-foreground">
+        <button type="button" className="mr-2 rounded bg-surface-2 px-2 py-1" onClick={() => setWrap((value) => !value)} aria-pressed={wrap}>Wrap {wrap ? 'on' : 'off'}</button>
+        <button type="button" className="mr-2 rounded bg-surface-2 px-2 py-1" onClick={() => setSplit((value) => !value)} aria-pressed={split}>{split ? 'Split' : 'Unified'}</button>
         DiffReview Lab · {files.length} mock files · selected: <span data-lab-selected>{selectedKey ?? 'none'}</span> · slide {slideIndex}
       </div>
       <div className="min-h-0 flex-1">
@@ -144,8 +149,8 @@ export function DiffReviewLab() {
           onMobileSlideChange={setSlideIndex}
           renderLeading={() => null}
           renderStreamBadge={(status) => <span className="text-[10px] text-muted-foreground">{status}</span>}
-          wrap
-          showScrollHint={false}
+          wrap={wrap}
+          diffViewType={split ? 'split' : 'unified'}
           activePane
         />
       </div>

@@ -133,7 +133,6 @@ describe('DiffReview click anchoring', () => {
         mobile={false}
         backLabel="Back"
         wrap
-        showScrollHint={false}
         activePane
       />,
     );
@@ -163,7 +162,6 @@ describe('DiffReview click anchoring', () => {
         mobile={false}
         backLabel="Back"
         wrap
-        showScrollHint={false}
         activePane
       />,
     );
@@ -223,7 +221,6 @@ describe('DiffReview click anchoring', () => {
         mobile={false}
         backLabel="Back"
         wrap
-        showScrollHint={false}
         activePane
       />,
     );
@@ -292,7 +289,6 @@ describe('DiffReview click anchoring', () => {
         mobile={false}
         backLabel="Back"
         wrap
-        showScrollHint={false}
         activePane
       />,
     );

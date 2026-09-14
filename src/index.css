@@ -1025,15 +1025,13 @@ html[data-theme='light'] .termdock-diff {
 }
 
 .termdock-diff .diff-gutter-col {
-  width: 1%;
-}
-
-.termdock-diff-wrap .diff-gutter-col {
   width: var(--termdock-diff-gutter-width, 3ch);
 }
 
+/* An absent side is alignment space, not a deletion. react-diff-view's
+   default red omission bar incorrectly marks pure insertions as removals. */
 .termdock-diff .diff-gutter-omit::before {
-  margin-left: 50%;
+  content: none;
 }
 
 .diff-code {
@@ -1056,6 +1054,57 @@ html[data-theme='light'] .termdock-diff {
   white-space: pre !important;
   word-break: normal !important;
   overflow-wrap: normal !important;
+}
+
+/* Split long lines must not overflow into the opposite revision. The shared
+   spacer gives even short lines the same scroll range; gutters remain fixed. */
+.termdock-diff-split-nowrap {
+  overflow-x: hidden;
+}
+
+.termdock-diff-split-nowrap .diff-code {
+  position: relative;
+  overflow: hidden;
+}
+
+.termdock-diff-split-nowrap .diff-code::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: calc(100% + var(--diff-scroll-overflow, 0px) - 1px);
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.termdock-diff-horizontal-bars {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.termdock-diff-horizontal-bars > div {
+  height: 12px;
+  min-width: 0;
+  overflow-x: auto;
+  margin-left: var(--termdock-diff-gutter-width, 3ch);
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) transparent;
+}
+
+.termdock-diff-horizontal-bars > div::-webkit-scrollbar {
+  display: block;
+  width: 0;
+  height: 10px;
+}
+
+.termdock-diff-horizontal-bars > div::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 4px;
+}
+
+.termdock-diff-horizontal-bars > div > div {
+  width: calc(100% + var(--diff-scroll-overflow, 0px));
+  height: 1px;
 }
 
 .diff-decoration {
@@ -1680,9 +1729,10 @@ html[data-theme='light'] .termdock-code .token.important {
 /* A pinned sidebar can stay in split mode even when it is narrower than the
    desktop-oriented 48rem canvas above. In wrap mode the table must follow the
    sidebar width; otherwise the stale minimum makes the body horizontally
-   scrollable by the difference between the two widths. Keep the 48rem canvas
-   for raw/non-wrapping split diffs, where horizontal scrolling is intentional. */
-.diff-split.termdock-diff-wrap .diff {
+   scrollable by the difference between the two widths. The synchronized
+   non-wrapping view also keeps both columns within the available width. */
+.diff-split.termdock-diff-wrap .diff,
+.diff-split.termdock-diff-split-nowrap .diff {
   min-width: 100%;
 }
 
@@ -1715,16 +1765,10 @@ html[data-theme='light'] .termdock-code .token.important {
   font-size: 8.5px;
 }
 
+/* Embedded stream cards use this style on desktop as well as mobile.
+   Reserve the digit width in both wrap modes; percentages overlap the code. */
 .termdock-diff-card-mobile .diff-gutter-col {
-  width: 1%;
-}
-
-.termdock-diff-card-mobile .termdock-diff-wrap .diff-gutter-col {
-  width: max(2.75ch, var(--termdock-diff-gutter-width, 2.75ch));
-}
-
-.termdock-diff-card-mobile .diff-gutter-omit::before {
-  margin-left: 50%;
+  width: max(2.75ch, var(--termdock-diff-gutter-width, 3ch));
 }
 
 .termdock-diff-card-mobile .diff-code {
