@@ -24,7 +24,7 @@ import {
   History as RiHistoryLine,
   GripVertical as RiDragHandle,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport, TmuxSessionSummary } from '../../terminal/types';
@@ -298,6 +298,7 @@ export function LeftSidebar(
     selectAgent: selectNewSessionAgent,
   } = useNewSessionAgentPreference();
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const headerMenuPanelRef = useRef<HTMLDivElement | null>(null);
   const splitLayoutMenuRef = useRef<HTMLDivElement | null>(null);
   const pendingUpdate = Boolean(
     updateState?.latestVersion
@@ -605,6 +606,44 @@ export function LeftSidebar(
       .finally(() => { if (!cancelled) setAgentResumeHistoryLoading(false); });
     return () => { cancelled = true; };
   }, [newSessionComposerOpen, t]);
+
+  useLayoutEffect(() => {
+    if (!headerMenuOpen) return;
+    const host = headerMenuRef.current;
+    const panel = headerMenuPanelRef.current;
+    if (!host || !panel) return;
+    const viewport = window.visualViewport;
+    const positionMenu = () => {
+      const margin = 8;
+      const leftEdge = (viewport?.offsetLeft ?? 0) + margin;
+      const topEdge = (viewport?.offsetTop ?? 0) + margin;
+      const width = Math.max(0, (viewport?.width ?? window.innerWidth) - margin * 2);
+      const height = Math.max(0, (viewport?.height ?? window.innerHeight) - margin * 2);
+      panel.style.maxWidth = `${width}px`;
+      panel.style.maxHeight = `${height}px`;
+      const anchor = host.getBoundingClientRect();
+      // Keep the menu in its local stacking context, but constrain it to the viewport.
+      const left = Math.max(leftEdge, Math.min(anchor.right - panel.offsetWidth, leftEdge + width - panel.offsetWidth));
+      const top = Math.max(topEdge, Math.min(anchor.bottom + 4, topEdge + height - panel.offsetHeight));
+      panel.style.left = `${left - anchor.left}px`;
+      panel.style.top = `${top - anchor.top}px`;
+    };
+    positionMenu();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionMenu);
+    observer?.observe(host);
+    observer?.observe(panel);
+    window.addEventListener('resize', positionMenu);
+    window.addEventListener('scroll', positionMenu, true);
+    viewport?.addEventListener('resize', positionMenu);
+    viewport?.addEventListener('scroll', positionMenu);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', positionMenu);
+      window.removeEventListener('scroll', positionMenu, true);
+      viewport?.removeEventListener('resize', positionMenu);
+      viewport?.removeEventListener('scroll', positionMenu);
+    };
+  }, [headerMenuOpen, drawerWidthPx]);
 
   useEffect(() => {
     if (!headerMenuOpen) return;
@@ -1680,7 +1719,7 @@ export function LeftSidebar(
                 )}
               </button>
               {headerMenuOpen && (
-                <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-60 overflow-hidden rounded-xl border border-border/15 bg-surface p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in">
+                <div ref={headerMenuPanelRef} role="menu" className="absolute z-30 w-60 overflow-y-auto overscroll-contain rounded-xl border border-border/15 bg-surface p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in">
                   {pendingUpdate && updateState?.latestVersion && (
                     <div className="mb-1 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.10)] px-2.5 py-2.5 text-foreground">
                       <div className="flex items-start gap-2">
