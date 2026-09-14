@@ -1,3 +1,4 @@
+import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
 import { savedConnection } from './lib/federation/browserIntegration';
 import { consumeWorkspaceSession, getWorkspaceHost } from './lib/services/workspaceHost';
 import React, { useEffect, useCallback, useState, useRef } from 'react';
@@ -44,7 +45,7 @@ import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
 import { markStartupMilestone } from './lib/utils/startupPerformance';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { requiresSessionCloseConfirmation } from './lib/terminal/sessionClose';
-import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
+import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, getTermdockUpdateState, checkTermdockUpdate, confirmTermdockUpdateRestart } from './lib/terminal/api';
 import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState, TermdockUpdateState } from './lib/terminal/api';
@@ -794,6 +795,7 @@ function App() {
   const sidebarContextKey = useSidebarStore((s) => s.contextKey);
   const sidebarSelectedFilePath = useSidebarStore((s) => s.selectedFilePath);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
+  const collaborationGroups = useSessionOrderStore((state) => state.collaborationGroups);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const [isDesktopViewport, setIsDesktopViewport] = useState(() => (
@@ -1690,14 +1692,27 @@ function App() {
     return true;
   }, [isDesktopViewport, sessions, terminalSessions]);
 
+  // 顶栏 tab 分组（贯穿式胶囊）：groups = 按 cwd 聚拢的组，每组一个胶囊容器。
+  const { groups: tabGroups, arranged: arrangedSessions } = React.useMemo(
+    () => deriveGroupedOrder(
+      sessions,
+      (s) => terminalSessions.get(s.id)?.cwd ?? null,
+      groupByFolder,
+      t('sidebar.ungrouped'),
+      splitWorkspaces,
+      collaborationGroups,
+    ),
+    [sessions, terminalSessions, groupByFolder, t, splitWorkspaces, collaborationGroups],
+  );
+
   const handleDragEnd = useCallback((result: DropResult) => {
     if (finishSessionDrag(result)) return;
     if (!result.destination || result.source.index === result.destination.index) return;
-    const newOrder = [...sessions];
-    const [moved] = newOrder.splice(result.source.index, 1);
-    newOrder.splice(result.destination.index, 0, moved);
-    applySessionOrder(newOrder.map((session) => session.id));
-  }, [applySessionOrder, finishSessionDrag, sessions]);
+    window.dispatchEvent(new CustomEvent('reorder-navigation-session', { detail: {
+      sourceId: arrangedSessions[result.source.index]?.id,
+      targetId: arrangedSessions[result.destination.index]?.id,
+    } }));
+  }, [finishSessionDrag, arrangedSessions]);
 
   const renameSession = useCallback((sessionId: string, newName: string) => {
     const trimmed = newName.trim();
@@ -2111,17 +2126,6 @@ function App() {
     setDebugInfo(info);
   }, []);
 
-  // 顶栏 tab 分组（贯穿式胶囊）：groups = 按 cwd 聚拢的组，每组一个胶囊容器。
-  const { groups: tabGroups } = React.useMemo(
-    () => deriveGroupedOrder(
-      sessions,
-      (s) => terminalSessions.get(s.id)?.cwd ?? null,
-      groupByFolder,
-      t('sidebar.ungrouped'),
-    ),
-    [sessions, terminalSessions, groupByFolder, t],
-  );
-
   // 分组模式下的拖拽：单个 DragDropContext，按 result.type 区分两种拖动。
   //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序保持不变。
   //  - type 'session'：组内排序；禁止跨组拖动（分组依据是 cwd，跨组无意义）。
@@ -2137,14 +2141,15 @@ function App() {
     if (result.source.droppableId !== result.destination.droppableId) return;
     if (result.source.index === result.destination.index) return;
     const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
-    applySessionOrder(reorderSessionsWithinGroup(tabGroups, groupKey, result.source.index, result.destination.index));
+    const group = tabGroups.find((candidate) => candidate.key === groupKey);
+    if (!group) return;
+    window.dispatchEvent(new CustomEvent('reorder-navigation-session', { detail: {
+      sourceId: group.sessions[result.source.index]?.id,
+      targetId: group.sessions[result.destination.index]?.id,
+    } }));
   }, [tabGroups, applySessionOrder, finishSessionDrag]);
 
   // 位置角标 N/total 按当前可见的分组后顺序算，避免分组时编号与视觉顺序不一致。
-  const arrangedSessions = React.useMemo(
-    () => tabGroups.length > 0 ? tabGroups.flatMap((group) => group.sessions) : sessions,
-    [tabGroups, sessions],
-  );
   const runningSessionShortcuts = React.useMemo(
     () => arrangedSessions.flatMap((session) => {
       const terminalSession = terminalSessions.get(session.id);
@@ -3231,7 +3236,7 @@ function App() {
               className="scrollbar-hidden flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap"
               style={{ touchAction: 'pan-x' }}
             >
-              {sessions.map((session, index) => {
+              {arrangedSessions.map((session, index) => {
                 const isEditing = session.id === editingSessionId;
                 if (isEditing) {
                   return (

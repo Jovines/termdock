@@ -1,3 +1,4 @@
+import { useSessionOrderStore } from '../stores/useSessionOrderStore';
 import { useSettledViewportWindow } from '../hooks/useSettledViewportWindow';
 import React, { useEffect, useLayoutEffect, useCallback, useState, useRef, useMemo } from 'react';
 import { Swiper, SwiperSlide } from 'swiper/react';
@@ -553,6 +554,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // 分组状态（与顶栏 tab / 侧边栏共享同一份）。
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
+  const collaborationGroups = useSessionOrderStore((state) => state.collaborationGroups);
   const sidebarOverlayOpen = useSidebarStore((s) => s.leftOpen || s.rightOpen);
   const sidebarWidthContextKey = useSidebarStore((s) => s.rightSidebarWidthContextKey);
   const sidebarWidth = useSidebarStore((s) => s.rightSidebarWidth);
@@ -578,8 +580,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       (session) => cwdById.get(session.id) ?? null,
       groupByFolder,
       '',
+      splitWorkspaces,
+      collaborationGroups,
     ),
-    [sessions, cwdById, groupByFolder],
+    [sessions, cwdById, groupByFolder, splitWorkspaces, collaborationGroups],
   );
   const arrangedRef = useRef<TerminalSession[]>(arranged);
   arrangedRef.current = arranged;

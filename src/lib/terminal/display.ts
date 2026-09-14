@@ -131,21 +131,79 @@ export function reorderSessionsWithinGroup<T extends { id: string }>(
   });
 }
 
-// 单一真相：根据分组开关，派生出贯穿式分组顺序。
-// 顶栏 tab 与 Swiper 各自调用、结果确定性一致，保证「渲染顺序严格同序同集合」。
-//   - arranged：分组聚拢后的完整顺序（所有 session）→ 驱动 DOM 渲染顺序 + Swiper
-//   - groups：  顶栏胶囊 / 侧边栏渲染组用
-// 注：所有 tab 常显、滑动连续穿过全部，不做折叠 / 激活组隐藏。
+export interface SessionOrderGroup {
+  sessionIds: string[];
+  federated?: boolean;
+}
+
+export function normalizeSessionOrderGroups<T extends SessionOrderGroup>(
+  groups: readonly T[],
+  availableSessionIds: ReadonlySet<string>,
+): T[] {
+  const claimed = new Set<string>();
+  return groups.flatMap((group) => {
+    const sessionIds = [...new Set(group.sessionIds)].filter((id) => availableSessionIds.has(id) && !claimed.has(id));
+    if (sessionIds.length < (group.federated ? 1 : 2)) return [];
+    sessionIds.forEach((id) => claimed.add(id));
+    return [{ ...group, sessionIds }];
+  });
+}
+
+// Shared visual order for the sidebar, tabs and terminal navigation. Collaboration
+// owns its members; a fully contained split orders panes inside that collaboration.
+// Cross-folder entities follow their first member's directory.
 export function deriveGroupedOrder<T extends { id: string }>(
   sessions: T[],
   cwdOf: (session: T) => string | null,
   groupByFolder: boolean,
   ungroupedLabel: string,
+  workspaces: readonly SessionOrderGroup[] = [],
+  collaborations: readonly SessionOrderGroup[] = [],
 ): { arranged: T[]; groups: FolderGroup<T>[] } {
-  if (!groupByFolder) {
-    return { arranged: sessions, groups: [] };
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const groups = normalizeSessionOrderGroups(collaborations, new Set(byId.keys()));
+  const entityById = new Map<string, string[]>();
+  const anchorById = new Map<string, T>();
+  const validSplits = workspaces.filter((workspace) => workspace.sessionIds.length >= 2
+    && workspace.sessionIds.every((id) => byId.has(id)));
+  const attach = (ids: string[], anchorId: string) => {
+    const anchor = byId.get(anchorId)!;
+    ids.forEach((id) => { entityById.set(id, ids); anchorById.set(id, anchor); });
+  };
+  for (const group of groups) {
+    const memberIds = new Set(group.sessionIds);
+    const splitById = new Map<string, string[]>();
+    for (const split of validSplits) {
+      if (split.sessionIds.every((id) => memberIds.has(id))) {
+        split.sessionIds.forEach((id) => splitById.set(id, split.sessionIds));
+      }
+    }
+    const emitted = new Set<string>();
+    const orderedIds = group.sessionIds.flatMap((id) => {
+      if (emitted.has(id)) return [];
+      const ids = splitById.get(id) ?? [id];
+      ids.forEach((memberId) => emitted.add(memberId));
+      return ids;
+    });
+    attach(orderedIds, group.sessionIds[0]);
   }
-  const groups = buildFolderGroups(sessions, cwdOf, ungroupedLabel);
-  const arranged = groups.flatMap((g) => g.sessions);
-  return { arranged, groups };
+  for (const split of validSplits) {
+    if (!split.sessionIds.some((id) => entityById.has(id))) attach(split.sessionIds, split.sessionIds[0]);
+  }
+  const arrange = (items: T[]) => {
+    const emitted = new Set<string>();
+    return items.flatMap((session) => {
+      if (emitted.has(session.id)) return [];
+      const ids = entityById.get(session.id) ?? [session.id];
+      ids.forEach((id) => emitted.add(id));
+      return ids.map((id) => byId.get(id)!);
+    });
+  };
+  if (!groupByFolder) return { arranged: arrange(sessions), groups: [] };
+  const folderGroups = buildFolderGroups(
+    sessions,
+    (session) => cwdOf(anchorById.get(session.id) ?? session),
+    ungroupedLabel,
+  ).map((group) => ({ ...group, sessions: arrange(group.sessions) }));
+  return { arranged: folderGroups.flatMap((group) => group.sessions), groups: folderGroups };
 }

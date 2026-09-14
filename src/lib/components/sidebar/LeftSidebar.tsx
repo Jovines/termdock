@@ -1,3 +1,4 @@
+import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { ServiceSwitcher } from '../ServiceSwitcher';
 import { openRemoteSession } from '../../federation/remoteSession';
 import { openServiceAccess } from '../../federation/accessEvents';
@@ -28,7 +29,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { DragDropContext, Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport, TmuxSessionSummary } from '../../terminal/types';
-import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
+import { getCwdLeafName, getSessionDisplayName, deriveGroupedOrder, normalizeSessionOrderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
 import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
@@ -128,17 +129,7 @@ export function normalizeSidebarCollaborationGroups(
   groups: readonly CollaborationGroup[],
   availableSessionIds: ReadonlySet<string>,
 ): SidebarCollaborationGroup[] {
-  const claimedSessionIds = new Set<string>();
-  const normalized: SidebarCollaborationGroup[] = [];
-  for (const group of groups) {
-    const sessionIds = Array.from(new Set(group.sessionIds)).filter(
-      (id) => availableSessionIds.has(id) && !claimedSessionIds.has(id),
-    );
-    if (sessionIds.length < (group.federated ? 1 : 2)) continue;
-    sessionIds.forEach((id) => claimedSessionIds.add(id));
-    normalized.push({ ...group, sessionIds });
-  }
-  return normalized;
+  return normalizeSessionOrderGroups(groups, availableSessionIds);
 }
 
 // Keep one drag list per workgroup; visual split sections do not introduce
@@ -284,7 +275,8 @@ export function LeftSidebar(
   const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
   const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
   const [collaborationActionError, setCollaborationActionError] = useState<string | null>(null);
-  const [rawCollaborationGroups, setRawCollaborationGroups] = useState<CollaborationGroup[]>([]);
+  const rawCollaborationGroups = useSessionOrderStore((state) => state.collaborationGroups);
+  const setRawCollaborationGroups = useSessionOrderStore((state) => state.setCollaborationGroups);
   const [newSessionOptions, setNewSessionOptions] = useState<{
     mode: 'shell' | 'tmux';
     cwd?: string;
@@ -336,10 +328,6 @@ export function LeftSidebar(
   const collaborationGroups = useMemo(
     () => normalizeSidebarCollaborationGroups(rawCollaborationGroups, new Set(sessionsById.keys())),
     [rawCollaborationGroups, sessionsById],
-  );
-  const collaborationSessionIds = useMemo(
-    () => new Set(collaborationGroups.flatMap((group) => group.sessionIds)),
-    [collaborationGroups],
   );
   const refreshCollaborationGroups = useCallback(async () => {
     const refreshId = ++collaborationRefreshIdRef.current;
@@ -912,46 +900,14 @@ export function LeftSidebar(
 
   // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
   // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
-  const folderGroups = useMemo(() => {
-    if (!groupByFolder) return [];
-    const baseGroups = buildFolderGroups(
-      sessions,
-      (session) => sessionStates.get(session.id)?.cwd ?? null,
-      t('sidebar.ungrouped'),
-    );
-    const anchoredEntityIdsByFolder = new Map<string, Set<string>>();
-    const anchoredSplitSessionIds = new Set<string>();
-    for (const workspace of splitWorkspaces) {
-      if (workspace.sessionIds.some((id) => collaborationSessionIds.has(id))) continue;
-      const anchorId = workspace.sessionIds[0];
-      if (!anchorId) continue;
-      const folderKey = folderGroupKeyForCwd(sessionStates.get(anchorId)?.cwd ?? null);
-      const workspaceIds = anchoredEntityIdsByFolder.get(folderKey) ?? new Set<string>();
-      workspace.sessionIds.forEach((id) => {
-        workspaceIds.add(id);
-        anchoredSplitSessionIds.add(id);
-      });
-      anchoredEntityIdsByFolder.set(folderKey, workspaceIds);
-    }
-    for (const collaboration of collaborationGroups) {
-      const anchorId = collaboration.sessionIds[0];
-      if (!anchorId) continue;
-      const folderKey = folderGroupKeyForCwd(sessionStates.get(anchorId)?.cwd ?? null);
-      const collaborationIds = anchoredEntityIdsByFolder.get(folderKey) ?? new Set<string>();
-      collaboration.sessionIds.forEach((id) => collaborationIds.add(id));
-      anchoredEntityIdsByFolder.set(folderKey, collaborationIds);
-    }
-    return baseGroups.flatMap((group) => {
-      const allowedIds = new Set(
-        group.sessions.filter((session) => (
-          !anchoredSplitSessionIds.has(session.id) && !collaborationSessionIds.has(session.id)
-        )).map((session) => session.id),
-      );
-      anchoredEntityIdsByFolder.get(group.key)?.forEach((id) => allowedIds.add(id));
-      const groupedSessions = sessions.filter((session) => allowedIds.has(session.id));
-      return groupedSessions.length > 0 ? [{ ...group, sessions: groupedSessions }] : [];
-    });
-  }, [collaborationGroups, collaborationSessionIds, groupByFolder, sessions, sessionStates, splitWorkspaces, t]);
+  const folderGroups = useMemo(() => deriveGroupedOrder(
+    sessions,
+    (session) => sessionStates.get(session.id)?.cwd ?? null,
+    groupByFolder,
+    t('sidebar.ungrouped'),
+    splitWorkspaces,
+    collaborationGroups,
+  ).groups, [collaborationGroups, groupByFolder, sessions, sessionStates, splitWorkspaces, t]);
 
   const flatSidebarEntities = useMemo(
     () => buildSidebarEntities(sessions, splitWorkspaces, sessionsById, collaborationGroups),
@@ -1070,6 +1026,51 @@ export function LeftSidebar(
       (error) => { setCollaborationActionError(error instanceof Error ? error.message : '成员排序失败'); return refreshCollaborationGroups(); },
     );
   }, [rawCollaborationGroups, refreshCollaborationGroups, splitWorkspaces, onReorderSplitWorkspace]);
+
+  // Tabs expose individual sessions, but moving them must respect the sidebar's
+  // entities: reorder members inside an entity, move the whole entity outside it.
+  useEffect(() => {
+    const handleReorder = (event: Event) => {
+      const { sourceId, targetId } = (event as CustomEvent<{ sourceId: string; targetId: string }>).detail;
+      if (!sourceId || !targetId || sourceId === targetId) return;
+      const arranged = deriveGroupedOrder(
+        sessions, (session) => sessionStates.get(session.id)?.cwd ?? null,
+        groupByFolder, '', splitWorkspaces, collaborationGroups,
+      ).arranged.map((session) => session.id);
+      const sourceIndex = arranged.indexOf(sourceId);
+      const targetIndex = arranged.indexOf(targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return;
+      const collaboration = collaborationGroups.find((group) => group.sessionIds.includes(sourceId));
+      if (collaboration?.sessionIds.includes(targetId)) {
+        const ids = buildCollaborationSections(collaboration.sessionIds, splitWorkspaces).flatMap((section) => section.sessionIds);
+        reorderCollaborationMembers(collaboration.id, ids.indexOf(sourceId), ids.indexOf(targetId));
+        return;
+      }
+      const standaloneSplits = splitWorkspaces.filter((workspace) => workspace.sessionIds.length >= 2
+        && workspace.sessionIds.every((id) => sessionsById.has(id))
+        && !collaborationGroups.some((group) => workspace.sessionIds.some((id) => group.sessionIds.includes(id))));
+      const workspace = standaloneSplits.find((candidate) => candidate.sessionIds.includes(sourceId));
+      if (workspace?.sessionIds.includes(targetId)) {
+        const ids = [...workspace.sessionIds];
+        ids.splice(ids.indexOf(sourceId), 1);
+        ids.splice(workspace.sessionIds.indexOf(targetId), 0, sourceId);
+        onReorderSplitWorkspace(workspace.id, ids);
+        return;
+      }
+      const entityIds = (id: string) => collaborationGroups.find((group) => group.sessionIds.includes(id))?.sessionIds
+        ?? standaloneSplits.find((split) => split.sessionIds.includes(id))?.sessionIds ?? [id];
+      const moving = new Set(entityIds(sourceId));
+      const target = new Set(entityIds(targetId));
+      const remaining = arranged.filter((id) => !moving.has(id));
+      const targetPositions = remaining.flatMap((id, index) => target.has(id) ? [index] : []);
+      const insertion = sourceIndex < targetIndex ? Math.max(...targetPositions) + 1 : Math.min(...targetPositions);
+      remaining.splice(insertion, 0, ...arranged.filter((id) => moving.has(id)));
+      onReorderSessions(remaining);
+    };
+    window.addEventListener('reorder-navigation-session', handleReorder);
+    return () => window.removeEventListener('reorder-navigation-session', handleReorder);
+  }, [sessions, sessionStates, groupByFolder, splitWorkspaces, collaborationGroups, sessionsById,
+    reorderCollaborationMembers, onReorderSplitWorkspace, onReorderSessions]);
 
   const handleCollaborationMemberDragEnd = useCallback((result: DropResult): boolean => {
     if (result.type !== 'collaboration-member') return false;
