@@ -1,6 +1,6 @@
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
 import { savedConnection } from './lib/federation/browserIntegration';
-import { consumeWorkspaceSession, getWorkspaceHost } from './lib/services/workspaceHost';
+import { consumeWorkspaceSession, getWorkspaceHost, reportWorkspace } from './lib/services/workspaceHost';
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
@@ -588,6 +588,9 @@ function App() {
   // active xterm still needs to replay history and complete its first fit.
   // Keep the boot surface until MultiTerminalView confirms that whole path.
   const [hasRestoredSessionChrome, setHasRestoredSessionChrome] = React.useState(false);
+  React.useEffect(() => {
+    if (hasRestoredSessionChrome) reportWorkspace({ rendered: true });
+  }, [hasRestoredSessionChrome]);
   const [agentResumeAction, setAgentResumeAction] = React.useState<AgentResumeActionState | null>(null);
   const [agentResumeNotice, setAgentResumeNotice] = React.useState<AgentResumeNotice | null>(null);
   const [splitWorkspaces, setSplitWorkspaces] = React.useState<SplitWorkspaceSummary[]>([]);

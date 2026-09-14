@@ -690,11 +690,11 @@ export function LeftSidebar(
     }
   }, [attachingTmuxName, recoverableTmuxSessions]);
 
-  const handleQuickLaunchAgent = (agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference) => {
+  const handleQuickLaunchAgent = (agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference, command?: string) => {
     onNewSession({
       ...newSessionOptions,
       cwd: newSessionOptions.cwd?.trim() || undefined,
-      command: agent?.command,
+      command: command ?? agent?.command,
     });
     setNewSessionComposerOpen(false);
     closeIfOverlay();
@@ -1682,15 +1682,15 @@ export function LeftSidebar(
     <>
       <ServiceSwitcher />
       {/* Header — single compact row */}
-      <div data-session-sidebar-header className="relative z-20 shrink-0 px-2 py-2">
-        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-10 border-b border-border/15" />
+      <div data-session-sidebar-header className="relative z-20 shrink-0 px-3 py-0.5">
+        <div aria-hidden="true" className="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-px bg-border opacity-40" />
         <div className="flex items-center gap-1.5">
-          <div className="min-w-0 flex-1 px-1">
-            <div className="flex items-baseline gap-1.5">
-              <span className="text-[13px] font-semibold text-foreground">{t('sidebar.sessions')}</span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[12px] font-medium text-muted-foreground">{t('sidebar.sessions')}</span>
               <span className="text-[11px] text-muted-foreground">{sessions.length}</span>
               {runningCount > 0 && (
-                <span className="ml-1 flex items-center gap-1.5">
+                <span className="ml-0.5 flex items-center">
                   <AgentCountBadge count={runningCount} tone="running" title={t('agent.aiRunning')} />
                 </span>
               )}
@@ -1701,7 +1701,7 @@ export function LeftSidebar(
               <button
                 type="button"
                 onClick={() => setHeaderMenuOpen((open) => !open)}
-                className={`relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+                className={`relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
                 aria-expanded={headerMenuOpen}
                 aria-haspopup="menu"
                 aria-label={pendingUpdate && updateState?.latestVersion
@@ -1814,7 +1814,7 @@ export function LeftSidebar(
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
               aria-label={t('common.close')}
             >
               <RiCloseLine size={14} />
@@ -1829,7 +1829,7 @@ export function LeftSidebar(
         <button type="button" aria-label="关闭协作错误提示" className="shrink-0" onClick={() => setCollaborationActionError(null)}><RiCloseLine size={14} /></button>
       </div>}
       {/* Session list */}
-      <div className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
+      <div className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
         {recoverableTmuxSessions.length > 0 && (
           <section className="mb-2 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
             <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">
@@ -2078,7 +2078,7 @@ export function LeftSidebar(
 
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (
-        <div className="relative z-10 shrink-0 border-t border-border/15 bg-[var(--chrome-bg)] p-2">
+        <div className="relative z-10 shrink-0 border-t border-border bg-[var(--chrome-bg)] p-2">
           <div className={`grid gap-1.5 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
             <button
               type="button"
@@ -2119,7 +2119,7 @@ export function LeftSidebar(
   );
 
   return pinned ? (
-    <div data-session-sidebar-pinned className="h-full flex flex-col app-chrome-bg border-r border-border/15">
+    <div data-session-sidebar-pinned className="h-full flex flex-col app-chrome-bg border-r border-border">
       {inner}
     </div>
   ) : (

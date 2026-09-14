@@ -98,13 +98,13 @@ function BrowserServiceSwitcher() {
     return null;
   };
   if (services.length <= 1) return null;
-  return <div className="min-w-0 shrink-0 px-2 py-2" data-sidebar-gesture-ignore>
+  return <div className="min-w-0 shrink-0 px-3 pt-1 pb-0" data-sidebar-gesture-ignore>
     <nav ref={strip} aria-label="切换服务"
-      className="relative flex min-w-0 gap-1 overflow-x-auto overscroll-x-contain rounded-lg [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      className="relative flex min-w-0 gap-1 overflow-x-auto overscroll-x-contain rounded-xl bg-surface p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {services.map(service => <button key={service.id} type="button" onClick={() => void choose(service)}
         aria-current={service.targetPeerId === currentId ? 'page' : undefined} title={service.label}
         style={{ flex: services.length > 3 ? '0 0 30%' : '1 1 0%' }}
-        className={`inline-flex min-h-10 min-w-0 items-center justify-center gap-1 rounded-lg px-2 text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${service.targetPeerId === currentId ? 'bg-surface-elevated font-semibold text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}>
+        className={`inline-flex min-h-8 min-w-0 items-center justify-center gap-1 rounded-lg px-2 text-[11px] leading-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${service.targetPeerId === currentId ? 'bg-surface-elevated font-medium text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}>
         <span className="truncate">{service.label}</span>{badges(service)}
       </button>)}
     </nav>

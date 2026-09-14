@@ -718,7 +718,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         ref={setPanelRef}
         data-sidebar={side}
         className={`fixed inset-y-0 z-sidebar-panel flex flex-col chrome-glow-panel will-change-transform ${
-          isLeft ? 'border-r border-border/15' : 'border-l border-border/15'
+          isLeft ? 'border-r border-border' : 'border-l border-border/15'
         }`}
         style={{
           ...(isLeft ? { left: 0 } : { right: 0 }),

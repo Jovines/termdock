@@ -112,6 +112,18 @@ export type TranslationDictionary = {
     resumeHistoryLoadFailed: string;
     resumeHistoryFailed: string;
     resumeHistoryRemoveFailed: string;
+    customStartupCommand: string;
+    changeStartupCommand: string;
+    saveStartupCommand: string;
+    startupCommandSaved: string;
+    saveStartupCommandFailed: string;
+    addStartupCommand: string;
+    deleteStartupCommand: string;
+    startupCommand: string;
+    resetStartupCommand: string;
+    startupCommandPlaceholder: string;
+    agentStartupCommandHint: string;
+    terminalStartupCommandHint: string;
     workingDirectory: string;
     directoryPlaceholder: string;
     browseDirectories: string;

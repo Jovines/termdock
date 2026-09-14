@@ -48,6 +48,13 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [accessError, setAccessError] = useState('');
   const [serviceName, setServiceName] = useState(savedConnection()?.serviceName ?? location.hostname);
   const [remoteSession, setRemoteSession] = useState<string | undefined>(pendingSession);
+  useEffect(() => {
+    // Login and shared-session views are usable destinations too. The full app
+    // reports separately once its initial terminal restoration is complete.
+    if ((!ready && !checking) || (ready && (!fullService || !!remoteSession))) {
+      reportWorkspace({ rendered: true });
+    }
+  }, [ready, checking, fullService, remoteSession]);
   useEffect(() => { void getIdentity().then(identity => setDeviceIdentity(identity.peerId)).catch(() => setError(true)); }, []);
   useEffect(() => {
     const handler = (event: Event) => {
@@ -139,7 +146,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     const activate = () => { useSidebarStore.getState().openLeft(); visible(); };
     window.addEventListener(WORKSPACE_VISIBILITY_EVENT, visible);
     window.addEventListener(WORKSPACE_ACTIVATE_EVENT, activate);
-    if (IS_WORKSPACE_DOCUMENT) useSidebarStore.getState().openLeft();
+    // Only an explicit switch opens the sidebar via WORKSPACE_ACTIVATE_EVENT.
+    // A restored workspace should open its terminal like the entry document.
     getWorkspaceHost()?.attach(workspaceKey(), window);
     void verify();
     document.addEventListener('visibilitychange', visibilityChanged);

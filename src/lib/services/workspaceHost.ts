@@ -8,6 +8,8 @@ export interface ServiceWorkspace {
   key: string;
   service?: ServiceConnection;
   phase: WorkspacePhase;
+  /** The destination UI has committed, beyond transport authorization. */
+  rendered?: boolean;
   runningCount: number;
   reviewCount: number;
   touchedAt: number;
@@ -17,7 +19,7 @@ export interface WorkspaceHost {
   snapshot(): WorkspaceSnapshot;
   subscribe(listener: () => void): () => void;
   activate(service: ServiceConnection, keepSidebar?: boolean): boolean;
-  report(key: string, data: Partial<Pick<ServiceWorkspace, 'service' | 'phase' | 'runningCount' | 'reviewCount'>>): void;
+  report(key: string, data: Partial<Pick<ServiceWorkspace, 'service' | 'phase' | 'rendered' | 'runningCount' | 'reviewCount'>>): void;
   attach(key: string, view: Window | null): void;
   focusSession(serviceId: string, sessionId: string): boolean;
 }
@@ -56,6 +58,22 @@ export function reportWorkspace(data: Parameters<WorkspaceHost['report']>[1]): v
   getWorkspaceHost()?.report(workspaceKey(), data);
 }
 const PENDING_SESSION = 'termdock-secure-workspace-session:';
+const LAST_WORKSPACE = 'termdock-secure-last-workspace';
+function readLastWorkspace(): string | null {
+  // Preserve each open tab's selection; a cold PWA launch uses the durable copy.
+  for (const name of ['sessionStorage', 'localStorage'] as const) {
+    try {
+      const value = window[name].getItem(LAST_WORKSPACE);
+      if (value) return value;
+    } catch { /* Try the other storage if this one is unavailable. */ }
+  }
+  return null;
+}
+function rememberLastWorkspace(serviceId: string): void {
+  for (const name of ['sessionStorage', 'localStorage'] as const) {
+    try { window[name].setItem(LAST_WORKSPACE, serviceId); } catch { /* Optional restore. */ }
+  }
+}
 export function consumeWorkspaceSession(serviceId: string | undefined): string | undefined {
   if (!serviceId) return;
   try {
@@ -73,7 +91,7 @@ export function installWorkspaceHost(initial?: ServiceConnection): WorkspaceHost
   if (window.__termdockWorkspaceHost) return window.__termdockWorkspaceHost;
   let state: WorkspaceSnapshot = { activeKey: 'root', items: [{ key: 'root', service: initial, phase: 'connecting', runningCount: 0, reviewCount: 0, touchedAt: Date.now() }] };
   try {
-    const lastId = sessionStorage.getItem('termdock-secure-last-workspace');
+    const lastId = readLastWorkspace();
     const last = initial && lastId !== initial.targetPeerId ? readBrowserServices().find(item => item.targetPeerId === lastId) : undefined;
     if (last?.targetPeerId) state = { activeKey: last.targetPeerId, items: [...state.items, { key: last.targetPeerId, service: last, phase: 'connecting', runningCount: 0, reviewCount: 0, touchedAt: Date.now() }] };
   } catch { /* Restore only the entry when optional storage is unavailable. */ }
@@ -106,7 +124,7 @@ export function installWorkspaceHost(initial?: ServiceConnection): WorkspaceHost
       const next: ServiceWorkspace = existing ? { ...existing, service, touchedAt: Date.now() }
         : { key, service, phase: 'connecting', runningCount: 0, reviewCount: 0, touchedAt: Date.now() };
       state = { activeKey: key, items: existing ? state.items.map(item => item === existing ? next : item) : [...state.items, next] };
-      try { sessionStorage.setItem('termdock-secure-last-workspace', service.targetPeerId); } catch { /* Optional restore. */ }
+      rememberLastWorkspace(service.targetPeerId);
       if (keepSidebar) pendingSidebar.add(key);
       emit();
       for (const [id, view] of views) visibility(id, view);

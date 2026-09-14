@@ -51,7 +51,7 @@ describe('NewSessionComposer launcher choices', () => {
       </I18nProvider>,
     );
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Agent' }), { target: { value: 'codex' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Startup command' }), { target: { value: 'codex' } });
     expect(onLaunchAgent).not.toHaveBeenCalled();
     expect(onSelectAgent).not.toHaveBeenCalled();
 
@@ -60,7 +60,7 @@ describe('NewSessionComposer launcher choices', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Start Codex' }));
     expect(onLaunchAgent).toHaveBeenCalledOnce();
-    expect(onLaunchAgent).toHaveBeenCalledWith(codex);
+    expect(onLaunchAgent).toHaveBeenCalledWith(codex, 'codex');
   });
 
   it('reuses the directory browser and confirms the current folder explicitly', () => {

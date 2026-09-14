@@ -13,6 +13,7 @@ export const VIEWPORT_LAYOUT_CHANGE_EVENT = 'termdock:viewport-layout-change';
 const MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 240;
 const DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 640;
 const DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX = 360;
+const IOS_VIEWPORT_SETTLE_MS = 1500;
 
 interface SafeAreaInsets {
   top: number;
@@ -233,6 +234,9 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     }
 
     let rafId: number | null = null;
+    let settleUntil = 0;
+    let pendingSource: string | null = null;
+    let lastMeasurement = '';
     let safeAreaProbe: HTMLDivElement | null = null;
     const ensureSafeAreaProbe = () => {
       if (safeAreaProbe?.isConnected) return safeAreaProbe;
@@ -364,7 +368,10 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       // terminal under-translate by exactly that intermittent offsetTop.
       const keyboardViewportHeight = Math.min(nextHeight, rawViewportHeight);
       const visibleHeight = Math.max(0, Math.min(baseVh, visualBottom));
-      const measuredKeyboardHeight = Math.max(0, Math.round(baseVh - visibleHeight - safeBottom));
+      // The mobile root is fixed at the layout origin. A viewport pan is not
+      // extra room for its toolbar: adding offsetTop here leaves the toolbar
+      // under the system input accessory until Safari resets the pan.
+      const measuredKeyboardHeight = Math.max(0, Math.round(baseVh - keyboardViewportHeight - safeBottom));
       const editableFocused = hasFocusedEditableElement();
       const applyKeyboardInset = shouldApplyViewportKeyboardInset({
         measuredHeight: measuredKeyboardHeight,
@@ -436,18 +443,41 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       }));
     };
 
+    const requestMeasurement = () => {
+      if (rafId !== null) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        const owner = viewportWindow();
+        const viewport = owner.visualViewport;
+        const measurement = [owner.innerWidth, owner.innerHeight, viewport?.width,
+          viewport?.height, viewport?.offsetTop, viewport?.offsetLeft,
+          document.visibilityState, hasFocusedEditableElement()].join(':');
+        const source = pendingSource;
+        pendingSource = null;
+        if (source || measurement !== lastMeasurement) {
+          lastMeasurement = measurement;
+          syncViewportHeight(source || 'viewport.settle');
+        }
+        // Safari can finish its keyboard/accessory animation after the last
+        // viewport event. Read the eventual geometry, without republishing
+        // unchanged measurements (which would force another terminal fit).
+        if (performance.now() < settleUntil) requestMeasurement();
+      });
+    };
+
     const scheduleSync = (source = 'event') => {
       if (source.includes('visibilitychange') || source.includes('pageshow')) {
         debugViewport('schedule', { source });
       }
-      if (rafId !== null) {
-        return;
+      pendingSource = source;
+      if (isIOSLike() && document.visibilityState === 'visible') {
+        settleUntil = performance.now() + IOS_VIEWPORT_SETTLE_MS;
       }
-      rafId = window.requestAnimationFrame(() => syncViewportHeight(source));
+      requestMeasurement();
     };
 
-    // Read at mount and on actual viewport/focus/lifecycle events. There is
-    // no elapsed-time assumption about when the browser has settled.
+    // Apply events immediately; the bounded iOS follow-up also catches silent
+    // geometry changes. It never delays layout or locks a historical height.
     scheduleSync('mount');
 
     const handleResize = () => scheduleSync('resize');
@@ -458,6 +488,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     const handleFocusOut = () => scheduleSync('focusout');
 
     const resetKeyboardSession = (source: string) => {
+      settleUntil = 0;
       const activeElement = document.activeElement;
       if (activeElement instanceof HTMLElement && hasFocusedEditableElement()) {
         activeElement.blur();

@@ -127,7 +127,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       const target = event.target;
-      if (!(target instanceof HTMLElement)) {
+      // Icon taps target SVG elements and must preserve terminal focus too.
+      if (!(target instanceof Element)) {
         return;
       }
       const button = target.closest('button');
@@ -597,7 +598,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
-          data-mobile-native-action="true"
           onPointerDown={stopToolbarButtonBubble}
           onTouchStart={stopToolbarButtonBubble}
           onClick={handleFileClick}
