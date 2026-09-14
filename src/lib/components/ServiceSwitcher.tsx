@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { BellDot, LoaderCircle } from 'lucide-react';
 import { listServiceConnections, observeServiceConnections, type ServiceConnection } from '../services/serviceDirectory';
-import { activateServiceWorkspace, getWorkspaceHost, reportWorkspace, type WorkspaceSnapshot } from '../services/workspaceHost';
+import { activateServiceWorkspace, getWorkspaceHost, reportWorkspace, type WorkspaceSnapshot, type WorkspaceAttentionSession } from '../services/workspaceHost';
 import { savedConnection, SECURE_STATE_EVENT } from '../federation/browserIntegration';
 import type { DesktopServiceActivity } from '../desktop/nativeBridge';
 
@@ -10,11 +10,13 @@ const emptySubscribe = () => () => {};
 const emptySnapshot = () => empty;
 export const OPEN_SAVED_SERVICE_EVENT = 'termdock:open-saved-service';
 
-export function useServiceWorkspaceActivity(runningCount: number, reviewCount: number): void {
+export function useServiceWorkspaceActivity(runningCount: number, reviewCount: number, attentionSessions?: readonly WorkspaceAttentionSession[]): void {
   useEffect(() => {
     window.termdockDesktop?.reportServiceActivity?.({ runningCount, reviewCount });
-    reportWorkspace({ runningCount, reviewCount });
   }, [runningCount, reviewCount]);
+  useEffect(() => {
+    reportWorkspace({ runningCount, reviewCount, attentionSessions });
+  }, [runningCount, reviewCount, attentionSessions]);
 }
 
 /** Native desktop already has independent service windows. */

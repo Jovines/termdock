@@ -2932,9 +2932,12 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
         if (Math.abs(my) > 8) suppressTapCloseUntilRef.current = Date.now() + 300;
         setDragOffsetY(Math.max(0, my));
       },
-      onDragEnd: ({ movement: [, my], velocity: [, vy] }) => {
-        if (imageZoomed) return;
+      onDragEnd: ({ movement: [mx, my], velocity: [, vy], pinching, canceled }) => {
         setDragging(false);
+        if (pinching || canceled || imageZoomed || Math.abs(my) < Math.abs(mx) * 1.15) {
+          setDragOffsetY(0);
+          return;
+        }
         if (Math.abs(my) > 8) suppressTapCloseUntilRef.current = Date.now() + 300;
         if (shouldCloseMarkdownImageLightboxDrag(my, vy)) {
           onClose();
@@ -3009,10 +3012,6 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
           className="relative min-h-0 flex-1 overflow-hidden"
           data-markdown-image-lightbox-stage
           data-sidebar-gesture-ignore
-          onPointerDown={(event) => event.stopPropagation()}
-          onPointerMove={(event) => event.stopPropagation()}
-          onTouchStart={(event) => event.stopPropagation()}
-          onTouchMove={(event) => event.stopPropagation()}
           onClick={scheduleTapClose}
         >
           <div
@@ -3025,12 +3024,19 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
             }}
           >
             <Swiper
+              // Swiper handles movement on document: let touch/pointer events
+              // bubble there. data-sidebar-gesture-ignore isolates this viewer
+              // from the sidebar's navigation gestures.
               onSwiper={(instance) => {
                 swiperRef.current = instance;
                 instance.allowTouchMove = canNavigate && !imageZoomed;
               }}
               onSlideChange={(instance) => {
                 if (instance.activeIndex !== index) onChange(instance.activeIndex);
+              }}
+              onSliderMove={() => {
+                clearTapCloseTimer();
+                suppressTapCloseUntilRef.current = Date.now() + 450;
               }}
               initialSlide={index}
               speed={260}

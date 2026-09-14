@@ -90,6 +90,7 @@ import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloating
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
+import { WorkspaceRetentionSettings } from './lib/components/settings/WorkspaceRetentionSettings';
 import { useServiceWorkspaceActivity } from './lib/components/ServiceSwitcher';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
@@ -2184,7 +2185,13 @@ function App() {
     }
     return { running: runningSessionShortcuts.length, review };
   }, [runningSessionShortcuts.length, sessions, terminalSessions]);
-  useServiceWorkspaceActivity(agentTabCounts.running, agentTabCounts.review);
+  const attentionSessionShortcuts = React.useMemo(() => arrangedSessions.flatMap(session => {
+    const state = terminalSessions.get(session.id);
+    if (state?.agentStatus !== 'waiting' && !state?.agentNeedsReview) return [];
+    const { primary } = getSessionDisplayLines(session, state.activeProgram, state.cwd, SHELL_NAMES, state.shellTitle, state.promptState);
+    return [{ id: state.terminalSessionId ?? session.id, label: primary, waiting: state.agentStatus === 'waiting' }];
+  }), [arrangedSessions, terminalSessions]);
+  useServiceWorkspaceActivity(agentTabCounts.running, agentTabCounts.review, attentionSessionShortcuts);
   const activeResumeSession = activeSessionId
     ? sessions.find((session) => session.id === activeSessionId) ?? null
     : null;
@@ -3469,6 +3476,8 @@ function App() {
                   </button>
                   <span className="w-8 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">{fontSize}px</span>
                 </div>
+
+                <WorkspaceRetentionSettings />
 
                 {/* Renderer */}
                 <div className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">

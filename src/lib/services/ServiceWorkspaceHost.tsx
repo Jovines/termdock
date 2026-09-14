@@ -11,7 +11,19 @@ const snapshotEmpty = () => empty;
 function WorkspaceFrame({ host, item, visible, active }: { host: WorkspaceHost; item: ServiceWorkspace; visible: boolean; active: boolean }) {
   const frame = useRef<HTMLIFrameElement>(null);
   useEffect(() => { frame.current?.toggleAttribute('inert', !active); }, [active]);
-  useEffect(() => () => host.attach(item.key, null), [host, item.key]);
+  useLayoutEffect(() => {
+    const element = frame.current;
+    return () => {
+      // Run while the document still exists: iframe removal need not deliver
+      // pagehide, and trailing local writes must survive workspace eviction.
+      try {
+        const view = element?.contentWindow;
+        const event = view?.document.createEvent('Event');
+        if (event) { event.initEvent('termdock:before-update', false, false); view?.dispatchEvent(event); }
+      } catch { /* A document can already be navigating or gone. */ }
+      host.attach(item.key, null);
+    };
+  }, [host, item.key]);
   return <iframe ref={frame} title={item.service?.label || '服务工作区'}
     src={`/workspace.html?${WORKSPACE_QUERY}=${encodeURIComponent(item.key)}`}
     className="fixed inset-0 w-full border-0 bg-[var(--chrome-bg)]"
@@ -41,9 +53,10 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
   const switching = visibleKey !== snapshot.activeKey;
   const restoring = switching && presentedKey === null;
   useLayoutEffect(() => {
+    host?.present(visibleKey);
     if (!switching) setPresentedKey(visibleKey);
     root?.toggleAttribute('inert', visibleKey !== 'root' || switching);
-  }, [root, visibleKey, switching]);
+  }, [host, root, visibleKey, switching]);
   useEffect(() => {
     setSlow(false);
     if (!switching) return;

@@ -612,6 +612,9 @@ export type TranslationDictionary = {
     title: string;
     font: string;
     render: string;
+    workspaceLimit: string;
+    workspaceUnlimited: string;
+    workspaceLimitHint: string;
     theme: string;
     darkTheme: string;
     lightTheme: string;
@@ -928,6 +931,19 @@ export type TranslationDictionary = {
     selectRunningSession: string;
     runningSessionGestureHint: string;
     currentSession: string;
+  };
+  serviceAttention: {
+    title: string;
+    summary: string;
+    currentService: string;
+    waiting: string;
+    offline: string;
+    login: string;
+    empty: string;
+    viewService: string;
+    scope: string;
+    changed: string;
+    unavailable: string;
   };
   connection: {
     reconnecting: string;

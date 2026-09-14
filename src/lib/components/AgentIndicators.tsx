@@ -12,6 +12,7 @@
 
 import React from 'react';
 import { WorkspacePortal } from '../services/WorkspacePortal';
+import { ServiceAttentionDialog, useServiceAttention } from './ServiceAttentionDialog';
 import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
@@ -611,7 +612,12 @@ export function AgentFloatingSessionButtons({
   const { isOpen: keyboardOpen } = useViewportKeyboardState({ enabled: !isDesktopLayout });
   const floatingChromeVisible = isDesktopLayout
     || (!sidebarLeftOpen && !sidebarRightOpen && !keyboardOpen);
-  const attentionVisible = reviewCount > 0 && floatingChromeVisible;
+  const serviceAttention = useServiceAttention(reviewCount);
+  const [attentionOpen, setAttentionOpen] = React.useState(false);
+  React.useEffect(() => {
+    if (!serviceAttention.active || !floatingChromeVisible) setAttentionOpen(false);
+  }, [serviceAttention.active, floatingChromeVisible]);
+  const attentionVisible = serviceAttention.total > 0 && floatingChromeVisible;
   const canJumpToRunningSession = runningSessions.length > 1
     || (runningSessions.length === 1 && runningSessions[0]?.id !== activeSessionId);
   const runningVisible = runningButtonEnabled
@@ -962,7 +968,7 @@ export function AgentFloatingSessionButtons({
   );
 
   const renderAttentionButton = (): React.ReactElement => {
-    const label = t('agent.jumpToNext');
+    const label = serviceAttention.hasOtherAttention ? t('serviceAttention.title') : t('agent.jumpToNext');
     const position = positions.attention;
     const dragging = draggingKind === 'attention';
     return (
@@ -975,7 +981,8 @@ export function AgentFloatingSessionButtons({
         onClick={(event) => {
           event.stopPropagation();
           if (suppressClickRef.current.attention) return;
-          jumpToNextAgentAttention();
+          if (serviceAttention.hasOtherAttention) setAttentionOpen(true);
+          else jumpToNextAgentAttention();
         }}
         className={`fixed z-chrome-hint inline-flex items-center justify-center rounded-full bg-[var(--warning)] text-[color:var(--warning-foreground)] shadow-[0_8px_24px_var(--app-shadow-strong)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.35)] animate-fade-in ${
           dragging
@@ -983,17 +990,19 @@ export function AgentFloatingSessionButtons({
             : 'cursor-grab transition-[left,top,transform,box-shadow] duration-200 active:scale-95'
         }`}
         style={{
+          display: attentionOpen ? 'none' : undefined,
           left: position.x,
           top: position.y,
           width: MOBILE_ATTENTION_SIZE_PX,
           height: MOBILE_ATTENTION_SIZE_PX,
           touchAction: 'none',
         }}
-        aria-label={`${label}: ${reviewCount}`}
+        aria-label={`${label}: ${serviceAttention.total}`}
+        aria-haspopup={serviceAttention.hasOtherAttention ? 'dialog' : undefined}
         title={label}
       >
         <RiBellDot size={17} className="shrink-0" />
-        {renderCountBadge(reviewCount, 'attention')}
+        {renderCountBadge(serviceAttention.total, 'attention')}
       </button>
     );
   };
@@ -1087,14 +1096,16 @@ export function AgentFloatingSessionButtons({
     );
   };
 
-  if ((!attentionVisible && !runningVisible) || containerElement === null || typeof document === 'undefined') {
+  if ((!attentionVisible && !runningVisible && !attentionOpen) || containerElement === null || typeof document === 'undefined') {
     return null;
   }
 
   return (
     <WorkspacePortal>
       {attentionVisible && renderAttentionButton()}
-      {runningVisible && renderRunningButton()}
+      {runningVisible && !attentionOpen && renderRunningButton()}
+      {attentionOpen && serviceAttention.active && floatingChromeVisible && <ServiceAttentionDialog
+        groups={serviceAttention.groups} currentKey={serviceAttention.currentKey} onClose={() => setAttentionOpen(false)} />}
     </WorkspacePortal>
   );
 }

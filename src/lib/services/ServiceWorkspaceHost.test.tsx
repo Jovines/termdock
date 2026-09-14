@@ -51,14 +51,14 @@ describe('workspace floating controls', () => {
     act(() => { host.report('remote', { rendered: true, phase: 'ready', reviewCount: 1 }); });
     expect(root.style.visibility).toBe('hidden');
     expect(root.hasAttribute('inert')).toBe(true);
-    expect(screen.queryByRole('button', { name: 'Jump to next session needing attention: 1' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Attention across services: 2' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Jump to next running session: 1' })).toBeNull();
     expect(host.snapshot().items.map(item => item.reviewCount)).toEqual([1, 1]);
 
     act(() => { host.activate(entry, false); });
     expect(root.style.visibility).toBe('visible');
     expect(root.hasAttribute('inert')).toBe(false);
-    expect(screen.getByRole('button', { name: 'Jump to next session needing attention: 1' })).toBe(attention);
+    expect(screen.getByRole('button', { name: 'Attention across services: 2' })).toBe(attention);
     expect(document.querySelectorAll('[data-attention-button]')).toHaveLength(1);
     if (!desktop) {
       act(() => { useSidebarStore.setState({ leftOpen: true }); });

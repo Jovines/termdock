@@ -1,9 +1,11 @@
 import { parseSavedService, readBrowserServices, type ServiceConnection } from './serviceDirectory';
+import { WORKSPACE_LIMIT_KEY, isWorkspaceLimit, readWorkspaceLimit, selectRetainedWorkspaces } from './workspaceRetention';
 
 export const WORKSPACE_QUERY = 'termdock-workspace';
 export const WORKSPACE_VISIBILITY_EVENT = 'termdock:workspace-visibility';
 export const WORKSPACE_ACTIVATE_EVENT = 'termdock:workspace-activate';
 export type WorkspacePhase = 'connecting' | 'ready' | 'reconnecting' | 'offline' | 'login';
+export interface WorkspaceAttentionSession { id: string; label: string; waiting: boolean }
 export interface ServiceWorkspace {
   key: string;
   service?: ServiceConnection;
@@ -12,14 +14,18 @@ export interface ServiceWorkspace {
   rendered?: boolean;
   runningCount: number;
   reviewCount: number;
+  attentionSessions?: readonly WorkspaceAttentionSession[];
   touchedAt: number;
 }
 export interface WorkspaceSnapshot { activeKey: string; items: readonly ServiceWorkspace[] }
 export interface WorkspaceHost {
   snapshot(): WorkspaceSnapshot;
-  subscribe(listener: () => void): () => void;
+  subscribe(listener: () => void, ownerKey?: string): () => void;
+  present(key: string | null): void;
+  retentionLimit(): number;
+  setRetentionLimit(limit: number): void;
   activate(service: ServiceConnection, keepSidebar?: boolean): boolean;
-  report(key: string, data: Partial<Pick<ServiceWorkspace, 'service' | 'phase' | 'rendered' | 'runningCount' | 'reviewCount'>>): void;
+  report(key: string, data: Partial<Pick<ServiceWorkspace, 'service' | 'phase' | 'rendered' | 'runningCount' | 'reviewCount' | 'attentionSessions'>>): void;
   attach(key: string, view: Window | null): void;
   focusSession(serviceId: string, sessionId: string): boolean;
 }
@@ -37,7 +43,7 @@ export function getWorkspaceHost(): WorkspaceHost | undefined {
     if (host && host !== parentHost) {
       parentHost = host;
       parentProxy = { ...host, subscribe(listener) {
-        const unsubscribe = host.subscribe(listener);
+        const unsubscribe = host.subscribe(listener, workspaceKey());
         const leaving = (event: PageTransitionEvent) => { if (!event.persisted) unsubscribe(); };
         window.addEventListener('pagehide', leaving);
         return () => { unsubscribe(); window.removeEventListener('pagehide', leaving); };
@@ -95,10 +101,21 @@ export function installWorkspaceHost(initial?: ServiceConnection): WorkspaceHost
     const last = initial && lastId !== initial.targetPeerId ? readBrowserServices().find(item => item.targetPeerId === lastId) : undefined;
     if (last?.targetPeerId) state = { activeKey: last.targetPeerId, items: [...state.items, { key: last.targetPeerId, service: last, phase: 'connecting', runningCount: 0, reviewCount: 0, touchedAt: Date.now() }] };
   } catch { /* Restore only the entry when optional storage is unavailable. */ }
-  const listeners = new Set<() => void>();
+  let limit = readWorkspaceLimit();
+  let presentedKey: string | null = state.activeKey === 'root' ? 'root' : null;
+  const listeners = new Map<() => void, string | undefined>();
   const views = new Map<string, Window>([['root', window]]);
   const pendingSidebar = new Set<string>();
-  const emit = () => { for (const listener of [...listeners]) listener(); };
+  const emit = () => { for (const listener of [...listeners.keys()]) listener(); };
+  const prune = () => {
+    const retained = selectRetainedWorkspaces(state.items, state.activeKey, presentedKey, limit);
+    const retainedKeys = new Set(retained.map(item => item.key));
+    state = { ...state, items: retained };
+    // Parent-held callbacks otherwise keep removed iframe realms alive.
+    for (const [listener, owner] of listeners) if (owner && !retainedKeys.has(owner)) listeners.delete(listener);
+    for (const id of views.keys()) if (!retainedKeys.has(id)) views.delete(id);
+    for (const id of pendingSidebar) if (!retainedKeys.has(id)) pendingSidebar.delete(id);
+  };
   const visibility = (key: string, view: Window) => {
     try {
       const event = view.document.createEvent('CustomEvent'); event.initCustomEvent(WORKSPACE_VISIBILITY_EVENT, false, false, { active: state.activeKey === key });
@@ -115,7 +132,16 @@ export function installWorkspaceHost(initial?: ServiceConnection): WorkspaceHost
   };
   const host: WorkspaceHost = {
     snapshot: () => state,
-    subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    subscribe: (listener, ownerKey) => { listeners.set(listener, ownerKey); return () => { listeners.delete(listener); }; },
+    present(key) { presentedKey = key; },
+    retentionLimit: () => limit,
+    setRetentionLimit(value) {
+      if (!isWorkspaceLimit(value)) return;
+      limit = value;
+      try { localStorage.setItem(WORKSPACE_LIMIT_KEY, value === Infinity ? 'unlimited' : String(value)); }
+      catch { /* Still apply for this open page when persistence is denied. */ }
+      prune(); emit();
+    },
     activate(input, keepSidebar = true) {
       const service = parseSavedService(input);
       if (!service?.targetPeerId) return false;
@@ -124,6 +150,7 @@ export function installWorkspaceHost(initial?: ServiceConnection): WorkspaceHost
       const next: ServiceWorkspace = existing ? { ...existing, service, touchedAt: Date.now() }
         : { key, service, phase: 'connecting', runningCount: 0, reviewCount: 0, touchedAt: Date.now() };
       state = { activeKey: key, items: existing ? state.items.map(item => item === existing ? next : item) : [...state.items, next] };
+      prune();
       rememberLastWorkspace(service.targetPeerId);
       if (keepSidebar) pendingSidebar.add(key);
       emit();
@@ -138,7 +165,10 @@ export function installWorkspaceHost(initial?: ServiceConnection): WorkspaceHost
       if (JSON.stringify(next) === JSON.stringify(previous)) return;
       state = { ...state, items: state.items.map(item => item === previous ? next : item) }; emit();
     },
-    attach(key, view) { if (view) { views.set(key, view); visibility(key, view); } else views.delete(key); },
+    attach(key, view) {
+      if (view && state.items.some(item => item.key === key)) { views.set(key, view); visibility(key, view); }
+      else views.delete(key);
+    },
     focusSession(serviceId, sessionId) {
       const service = readBrowserServices().find(item => item.targetPeerId === serviceId);
       if (!service) return false;
