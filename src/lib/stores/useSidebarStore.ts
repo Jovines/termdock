@@ -326,7 +326,7 @@ function getSidebarContextKey(sessionId: string | null, rootPath: string | null)
   return sessionId ? `${sessionId}\u0000${rootPath}` : rootPath;
 }
 
-function getRightSidebarWidthContextKey(
+export function getRightSidebarWidthContextKey(
   sessionId: string | null,
   rootPath: string | null,
   splitWorkspaceId: string | null,

@@ -3086,13 +3086,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             && (before.cols !== proposed.cols || before.rows !== proposed.rows)) {
             resizePresentationRef.current?.begin();
           }
-          terminal.resize(proposed.cols, proposed.rows);
-          repairedAfterResize = repairXtermBufferInvariants(terminal, proposed.rows);
-          // terminal.resize() can transiently expose arbitrary scrollback while
-          // keyboard-driven row changes reflow the buffer. Restore an existing
-          // bottom-follow state synchronously, before the browser can paint.
-          if (preserveBottom) {
-            terminal.scrollToBottom();
+          // Public scrollToBottom() uses xterm's smooth-scroll duration. Disable
+          // it for the whole resize so restoring bottom-follow cannot animate
+          // through unrelated scrollback after the new geometry is painted.
+          const smoothScrollDuration = terminal.options.smoothScrollDuration;
+          try {
+            terminal.options.smoothScrollDuration = 0;
+            terminal.resize(proposed.cols, proposed.rows);
+            repairedAfterResize = repairXtermBufferInvariants(terminal, proposed.rows);
+            if (preserveBottom) terminal.scrollToBottom();
+          } finally {
+            terminal.options.smoothScrollDuration = smoothScrollDuration;
           }
           remainderPxRef.current = 0;
         }

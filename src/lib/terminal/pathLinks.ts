@@ -77,16 +77,25 @@ function hardWrapIndent(terminal: Terminal, index: number): number | null {
   const previous = terminal.buffer.active.getLine(index - 1);
   const next = terminal.buffer.active.getLine(index);
   if (!previous || !next || next.isWrapped) return null;
-  const before = previous.translateToString(true);
+  const before = previous.translateToString(true).trimEnd();
   const after = next.translateToString(true);
   const tail = findTerminalPathMatches(before).at(-1);
   const continuation = after.match(/^( +)([^\s]+\/[^\s]+)/u);
   if (!tail || tail.endIndex !== before.length || !tail.text.endsWith('/') || !continuation
     || /^[~./]/u.test(continuation[2])) return null;
   let lastColumn = previous.length - 1;
-  while (lastColumn >= 0 && !previous.getCell(lastColumn)?.getChars()) lastColumn -= 1;
+  while (lastColumn >= 0 && !(previous.getCell(lastColumn)?.getChars() || '').trim()) lastColumn -= 1;
   const indent = continuation[1].length;
-  if (lastColumn < previous.length - Math.max(8, indent + 2)) return null;
+  // Word-wrapping TUIs move a whole path segment to the next row, leaving
+  // more than a few blank cells. Measure cells rather than UTF-16 characters.
+  let segmentWidth = 0;
+  for (let column = indent; column < next.length; column += 1) {
+    const cell = next.getCell(column);
+    if (!cell || cell.getChars() === '/') break;
+    segmentWidth += cell.getWidth();
+  }
+  const remainingColumns = previous.length - lastColumn - 1;
+  if (remainingColumns >= Math.max(8, indent + 2, segmentWidth)) return null;
   const left = previous.getCell(lastColumn);
   const right = next.getCell(indent);
   if (!left || !right || left.isFgDefault() || right.isFgDefault()

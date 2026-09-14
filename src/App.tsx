@@ -3054,11 +3054,11 @@ function App() {
   const body = (
     <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
-        <div className="flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
+        <div className="relative flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
           <div
-            className={`shrink-0 items-center gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
+            className={`${isDesktopViewport ? 'absolute inset-x-0 top-0 z-20' : 'relative'} shrink-0 items-center gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
               showPinnedLeft
-                ? 'relative flex justify-end'
+                ? 'flex justify-end'
                 : 'flex justify-between'
             } ${
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
@@ -3368,7 +3368,7 @@ function App() {
                 connectionPrioritySessionId={connectionPrioritySessionId}
                 connectionPriorityReady={connectionPriorityReady}
                 desktopPinnedRightSidebar={showPinnedRight}
-                desktopPinnedRightSidebarWidth={effectiveRightSidebarWidth}
+                desktopFloatingTitle={isDesktopViewport}
                 desktopPinnedLeftSidebarWidth={showPinnedLeft ? sidebarLeftWidth : 0}
                 desktopViewportWidth={viewportWidth}
                 onSessionDataUpdate={handleSessionDataUpdate}

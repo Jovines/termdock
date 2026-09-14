@@ -525,32 +525,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (activationRefreshMode === 'none') {
       return;
     }
-    // 双 rAF 先等 swiper transform 收尾并校准尺寸。这里不完整重画、也不滚底；
-    // 真正的稳定化刷新统一留给 transition 结束后的那一轮，避免可见的双重扫屏。
-    let raf1 = 0;
-    let raf2 = 0;
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        terminalControllerRef.current?.requestRefresh('page-flip', {
-          reconcileServerSize: true,
-          skipScrollToBottom: true,
-        });
-      });
+    // Desktop selection snaps Swiper before paint. The orchestrator already
+    // schedules one frame; a second pass 360ms later only revisits a settled
+    // grid. Real geometry changes remain covered by ResizeObserver.
+    terminalControllerRef.current?.requestRefresh('page-flip', {
+      reconcileServerSize: true,
+      skipScrollToBottom: true,
     });
-    const postTransitionTimer = window.setTimeout(() => {
-      const controller = terminalControllerRef.current;
-      controller?.requestRefresh('page-flip', {
-        // Recheck settled geometry without repainting unchanged content.
-        // Actual resize and renderer context recovery already repaint.
-        skipScrollToBottom: true,
-        reconcileServerSize: true,
-      });
-    }, 360);
-    return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
-      window.clearTimeout(postTransitionTimer);
-    };
   }, [isActive, isMobile, suppressPageFlipRefresh, terminalSessionId]);
 
   React.useEffect(() => {

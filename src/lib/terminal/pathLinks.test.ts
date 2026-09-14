@@ -103,6 +103,20 @@ describe('real terminal path layout', () => {
     }
   });
 
+  it.each(['', '        '])('joins the screenshot path with painted trailing padding %j', async (padding) => {
+    const prefix = '/Users/bytedance/.agents/logs/cf2a0e6e/';
+    const suffix = 'ambient-always-display/logcat.log';
+    for (const row of [1, 2]) {
+      const { links, activate } = await linksFor(
+        `- 完整日志： \x1b[36m${prefix}${padding}\r\n  ${suffix}\x1b[0m`, 60, row,
+      );
+      expect(links?.map(link => link.text)).toEqual([prefix + suffix]);
+      expect(links?.[0].range).toEqual({ start: { x: 14, y: 1 }, end: { x: 35, y: 2 } });
+      links?.[0].activate({} as MouseEvent, links[0].text);
+      expect(activate).toHaveBeenCalledWith(prefix + suffix);
+    }
+  });
+
   it.each([
     '                          /tmp/\r\n  project/report.md',
     '\x1b[36m/tmp/\r\n  project/report.md',

@@ -1,5 +1,5 @@
 import { useSettledViewportWindow } from '../hooks/useSettledViewportWindow';
-import React, { useEffect, useCallback, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useCallback, useState, useRef, useMemo } from 'react';
 import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
@@ -38,6 +38,7 @@ import { useTerminalStore } from '../stores/useTerminalStore';
 import {
   PINNED_SIDEBAR_SEPARATOR_WIDTH_PX,
   clampPinnedRightSidebarWidth,
+  getRightSidebarWidthContextKey,
   readRightSidebarWidthForContext,
   useSidebarStore,
 } from '../stores/useSidebarStore';
@@ -371,7 +372,7 @@ interface MultiTerminalViewProps {
   connectionPrioritySessionId?: string | null;
   connectionPriorityReady?: boolean;
   desktopPinnedRightSidebar?: boolean;
-  desktopPinnedRightSidebarWidth?: number;
+  desktopFloatingTitle?: boolean;
   desktopPinnedLeftSidebarWidth?: number;
   desktopViewportWidth?: number;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
@@ -421,7 +422,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   connectionPrioritySessionId = null,
   connectionPriorityReady = true,
   desktopPinnedRightSidebar = false,
-  desktopPinnedRightSidebarWidth = 0,
+  desktopFloatingTitle = false,
   desktopPinnedLeftSidebarWidth = 0,
   desktopViewportWidth = 0,
   onStatusChange,
@@ -550,6 +551,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // 分组状态（与顶栏 tab / 侧边栏共享同一份）。
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const sidebarOverlayOpen = useSidebarStore((s) => s.leftOpen || s.rightOpen);
+  const sidebarWidthContextKey = useSidebarStore((s) => s.rightSidebarWidthContextKey);
+  const sidebarWidth = useSidebarStore((s) => s.rightSidebarWidth);
 
   // 订阅 useTerminalStore 的 cwd（分组按 cwd 归类）。只取 id→cwd 的 Map，
   // 浅比较避免终端高频输出导致的重渲染。
@@ -598,8 +601,15 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     for (const slide of workspaceSlides) {
       const firstSession = slide.sessions[0];
       if (!firstSession) continue;
-      const requestedWidth = slide.sessions.some((session) => session.id === activeSessionId)
-        ? desktopPinnedRightSidebarWidth
+      const widthContextKey = getRightSidebarWidthContextKey(
+        firstSession.id,
+        cwdById.get(firstSession.id) ?? null,
+        slide.workspace?.id ?? null,
+      );
+      // Selection changes before App publishes the sidebar context. Never
+      // apply another workspace's live width to this already fitted slide.
+      const requestedWidth = widthContextKey === sidebarWidthContextKey
+        ? sidebarWidth
         : readRightSidebarWidthForContext(
             firstSession.id,
             cwdById.get(firstSession.id) ?? null,
@@ -614,11 +624,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
     return insets;
   }, [
-    activeSessionId,
     cwdById,
     desktopPinnedLeftSidebarWidth,
     desktopPinnedRightSidebar,
-    desktopPinnedRightSidebarWidth,
+    sidebarWidthContextKey,
+    sidebarWidth,
     desktopViewportWidth,
     workspaceSlides,
   ]);
@@ -1084,7 +1094,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     setFocusTransferRequest(null);
   }, [sessions, activeSessionId, logSwiperState, syncSwiperToActiveIndex]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (swiperDrivenActiveSessionIdRef.current === activeSessionId) {
       logSwiperState('[swiper:sync-skip-swiper-driven]', { activeSessionId });
       swiperDrivenActiveSessionIdRef.current = null;
@@ -1267,7 +1277,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [updateSwiperLayout]);
 
   // Notify parent of session data changes
-  useEffect(() => {
+  useLayoutEffect(() => {
     // App has already hydrated its tab chrome synchronously from the same
     // persistence cache. Publishing this component's initial empty state would
     // erase that stable first paint, then reinsert every tab after restore.
@@ -2373,7 +2383,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 <div
                   className="h-full min-w-0"
                   data-pinned-right-sidebar-inset={pinnedRightSidebarInsetBySlideKey.get(slide.key) ?? 0}
-                  style={{ paddingRight: pinnedRightSidebarInsetBySlideKey.get(slide.key) ?? 0 }}
+                  style={{
+                    paddingRight: pinnedRightSidebarInsetBySlideKey.get(slide.key) ?? 0,
+                    // Each slide owns its title space, even while offscreen.
+                    // Switching single/split views must not resize every PTY.
+                    paddingTop: desktopFloatingTitle && !isSplit ? '2.5rem' : undefined,
+                  }}
                 >
                   {isSplit ? (
                     <div
