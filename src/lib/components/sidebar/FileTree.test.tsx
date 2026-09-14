@@ -216,7 +216,7 @@ describe('FileTree file deletion', () => {
     await user.click(screen.getByTitle('More folder actions'));
 
     const menu = screen.getByRole('button', { name: 'Pin' }).parentElement;
-    expect(menu?.parentElement).toBe(directoryRow.parentElement);
+    expect(menu?.parentElement?.parentElement).toBe(directoryRow);
     expect(directoryRow.parentElement?.contains(childRow)).toBe(false);
   });
 

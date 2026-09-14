@@ -373,6 +373,7 @@ interface MultiTerminalViewProps {
   connectionPrioritySessionId?: string | null;
   connectionPriorityReady?: boolean;
   desktopRightSidebarEnabled?: boolean;
+  onToggleRightSidebar?: () => void;
   desktopFloatingTitle?: boolean;
   desktopPinnedLeftSidebarWidth?: number;
   desktopViewportWidth?: number;
@@ -423,6 +424,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   connectionPrioritySessionId = null,
   connectionPriorityReady = true,
   desktopRightSidebarEnabled = false,
+  onToggleRightSidebar,
   desktopFloatingTitle = false,
   desktopPinnedLeftSidebarWidth = 0,
   desktopViewportWidth = 0,
@@ -2156,7 +2158,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         }}
       >
         {options.showPaneTitle && (
-          <SplitPaneTitle session={session} active={isActive} onActivate={() => activateSplitPane(session.id)} />
+          <SplitPaneTitle
+            session={session}
+            active={isActive}
+            onActivate={() => activateSplitPane(session.id)}
+            onToggleRightSidebar={isActive ? onToggleRightSidebar : undefined}
+          />
         )}
         <div className="min-h-0 flex-1 app-chrome-bg">
           {shouldMountViewport && <TerminalView

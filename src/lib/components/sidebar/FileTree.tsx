@@ -550,9 +550,9 @@ const FileTreeItem = memo(function FileTreeItem({
               ? 'bg-surface-elevated text-foreground'
               : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
         }`}
-        style={{ paddingLeft: `${depth * 14 + 8}px` }}
         title={node.path}
       >
+        {depth > 0 && <span aria-hidden="true" className="shrink-0" style={{ width: `${depth * 14 - 4}px` }} />}
         {dropTarget && (
           <span className="pointer-events-none absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-md">
             {t('fileTree.dropToUploadHere')}
@@ -571,7 +571,7 @@ const FileTreeItem = memo(function FileTreeItem({
             </span>
           </>
         )}
-        <span className={`min-w-0 flex-1 select-text whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>
+        <span className={`flex-1 select-text whitespace-nowrap text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>
           {node.name}
           {sortMode === 'modified' && (
             <span className="ml-1 inline-flex align-middle text-primary" title={t('fileTree.sortedByModified')} aria-label={t('fileTree.sortedByModified')}>
@@ -584,6 +584,11 @@ const FileTreeItem = memo(function FileTreeItem({
             </span>
           )}
         </span>
+        <div
+          className={`sticky right-0 z-20 flex shrink-0 items-center rounded pl-1 ${isSelected ? 'bg-surface-elevated' : 'bg-surface group-hover:bg-surface-2'}`}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
         {hasDirectoryActions && (
@@ -615,8 +620,6 @@ const FileTreeItem = memo(function FileTreeItem({
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </span>
         )}
-        </div>
-
         {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
           <div
             ref={directoryMenuRef}
@@ -724,6 +727,8 @@ const FileTreeItem = memo(function FileTreeItem({
           </button>
           </div>
         )}
+        </div>
+        </div>
       </div>
 
       {showChildren && visibleChildren && visibleChildren.length > 0 && (
@@ -1630,7 +1635,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   }
 
   return (
-    <div className="termdock-native-select space-y-px px-2 py-2">
+    <div className="termdock-native-select w-max min-w-full space-y-px px-2 py-2">
       {rootTruncated && (
         <div className="mb-2 rounded-xl bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-2 text-[11px] text-[color:var(--warning)]">
           {t('fileTree.truncatedHint')}

@@ -1,14 +1,17 @@
-import { Terminal } from 'lucide-react';
+import { PanelRight, Terminal } from 'lucide-react';
+import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { getSessionDisplayLines } from '../terminal/display';
 import type { TerminalSessionInfo } from './MultiTerminalView';
 
 /** Subscribe per pane so background title changes remain visible without focus. */
-export function SplitPaneTitle({ session, active, onActivate }: {
+export function SplitPaneTitle({ session, active, onActivate, onToggleRightSidebar }: {
   session: TerminalSessionInfo;
   active: boolean;
   onActivate: () => void;
+  onToggleRightSidebar?: () => void;
 }) {
+  const { t } = useI18n();
   const title = useTerminalStore((store) => {
     const state = store.sessions.get(session.id);
     return getSessionDisplayLines(
@@ -18,17 +21,30 @@ export function SplitPaneTitle({ session, active, onActivate }: {
   });
 
   return (
+    <div className="swiper-no-swiping flex h-6 min-h-6 shrink-0 items-center border-b border-border app-chrome-bg">
     <button
       type="button"
       data-split-pane-title={session.id}
       aria-pressed={active}
       title={title}
       onClick={onActivate}
-      className="swiper-no-swiping flex h-6 min-h-6 w-full shrink-0 items-center gap-1.5 overflow-hidden border-b border-border px-2 text-left text-[12px] font-medium leading-none text-foreground app-chrome-bg hover:bg-surface focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
+      className="flex h-full min-w-0 flex-1 items-center gap-1.5 overflow-hidden px-2 text-left text-[12px] font-medium leading-none text-foreground hover:bg-surface focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
     >
       <Terminal size={11} className={`shrink-0 ${active ? 'text-primary' : 'text-muted-foreground'}`} />
       <span className="min-w-0 flex-1 truncate">{title}</span>
       {active && <span aria-hidden="true" className="h-1 w-1 shrink-0 rounded-full bg-primary" />}
     </button>
+    {onToggleRightSidebar && (
+      <button
+        type="button"
+        onClick={onToggleRightSidebar}
+        aria-label={t('tab.explorerTitle')}
+        title={t('tab.explorerTitle')}
+        className="inline-flex h-full w-7 shrink-0 items-center justify-center text-muted-foreground hover:bg-surface hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
+      >
+        <PanelRight size={14} />
+      </button>
+    )}
+    </div>
   );
 }

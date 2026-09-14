@@ -3368,6 +3368,7 @@ function App() {
                 connectionPrioritySessionId={connectionPrioritySessionId}
                 connectionPriorityReady={connectionPriorityReady}
                 desktopRightSidebarEnabled={isDesktopViewport}
+                onToggleRightSidebar={handleToggleRightSidebar}
                 desktopFloatingTitle={isDesktopViewport}
                 desktopPinnedLeftSidebarWidth={showPinnedLeft ? sidebarLeftWidth : 0}
                 desktopViewportWidth={viewportWidth}

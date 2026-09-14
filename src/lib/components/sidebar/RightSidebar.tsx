@@ -11497,7 +11497,7 @@ export function RightSidebar(
                 onDragEnter={handleFileTreeDragOver}
                 onDragLeave={handleFileTreeDragLeave}
                 onDrop={handleFileTreeDrop}
-                className="shrink-0 overflow-y-auto overscroll-contain bg-surface relative"
+                className="shrink-0 overflow-auto overscroll-contain bg-surface relative"
                 style={{ width: fileTreeWidthPx }}
               >
                 {dragOver && (
@@ -11617,7 +11617,7 @@ export function RightSidebar(
                   onDragEnter={handleFileTreeDragOver}
                   onDragLeave={handleFileTreeDragLeave}
                   onDrop={handleFileTreeDrop}
-                  className="h-full overflow-y-auto overscroll-contain bg-surface relative"
+                  className="h-full overflow-auto overscroll-contain bg-surface relative"
                 >
                   {dragOver && (
                     <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 flex justify-center">
