@@ -1680,7 +1680,6 @@ export function LeftSidebar(
 
   const inner = (
     <>
-      <ServiceSwitcher />
       {/* Header — single compact row */}
       <div data-session-sidebar-header className="relative z-20 shrink-0 px-3 py-0.5">
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-px bg-border opacity-40" />
@@ -2041,6 +2040,8 @@ export function LeftSidebar(
         )}
       </div>
 
+      <ServiceSwitcher />
+
       {newSessionComposerOpen && (
         <NewSessionComposer
           directories={sessions.flatMap((session) => {
@@ -2078,8 +2079,8 @@ export function LeftSidebar(
 
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (
-        <div className="relative z-10 shrink-0 border-t border-border bg-[var(--chrome-bg)] p-2">
-          <div className={`grid gap-1.5 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
+        <div className="relative z-10 shrink-0 bg-[var(--chrome-bg)] px-3 pb-3 pt-1 md:border-t md:border-border md:p-2">
+          <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
             <button
               type="button"
               onClick={handleQuickLaunchTerminal}

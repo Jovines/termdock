@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { BellDot, LoaderCircle } from 'lucide-react';
+import { BellDot, LoaderCircle, MoreHorizontal } from 'lucide-react';
+import { openServiceAccess } from '../federation/accessEvents';
 import { listServiceConnections, observeServiceConnections, type ServiceConnection } from '../services/serviceDirectory';
 import { activateServiceWorkspace, getWorkspaceHost, reportWorkspace, type WorkspaceSnapshot, type WorkspaceAttentionSession } from '../services/workspaceHost';
 import { savedConnection, SECURE_STATE_EVENT } from '../federation/browserIntegration';
@@ -9,6 +10,19 @@ const empty: WorkspaceSnapshot = { activeKey: 'root', items: [] };
 const emptySubscribe = () => () => {};
 const emptySnapshot = () => empty;
 export const OPEN_SAVED_SERVICE_EVENT = 'termdock:open-saved-service';
+
+function compactServiceLabel(service: ServiceConnection, services: ServiceConnection[]): string {
+  try {
+    const address = new URL(service.serviceOrigin || service.url);
+    if (service.label !== address.host && service.label !== address.origin) return service.label;
+    // Keep nonstandard ports, and ports that distinguish services on the same host.
+    const needsPort = services.some(other => {
+      const candidate = new URL(other.serviceOrigin || other.url);
+      return candidate.hostname === address.hostname && candidate.port !== address.port;
+    });
+    return !needsPort && address.port === '9834' ? address.hostname : address.host;
+  } catch { return service.label; }
+}
 
 export function useServiceWorkspaceActivity(runningCount: number, reviewCount: number, attentionSessions?: readonly WorkspaceAttentionSession[]): void {
   useEffect(() => {
@@ -100,16 +114,24 @@ function BrowserServiceSwitcher() {
     return null;
   };
   if (services.length <= 1) return null;
-  return <div className="min-w-0 shrink-0 px-3 pt-1 pb-0" data-sidebar-gesture-ignore>
+  return <div className="min-w-0 shrink-0 bg-[var(--chrome-bg)] px-3 pb-1 pt-2 md:order-first md:bg-transparent md:pb-0 md:pt-1" data-sidebar-gesture-ignore>
+    <div className="flex w-full items-center gap-1 md:gap-0 md:rounded-xl md:bg-surface md:p-1">
     <nav ref={strip} aria-label="切换服务"
-      className="relative flex min-w-0 gap-1 overflow-x-auto overscroll-x-contain rounded-xl bg-surface p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      className="relative flex min-w-0 flex-1 gap-0.5 overflow-x-auto overscroll-x-contain md:gap-1 md:rounded-lg [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {services.map(service => <button key={service.id} type="button" onClick={() => void choose(service)}
         aria-current={service.targetPeerId === currentId ? 'page' : undefined} title={service.label}
-        style={{ flex: services.length > 3 ? '0 0 30%' : '1 1 0%' }}
-        className={`inline-flex min-h-8 min-w-0 items-center justify-center gap-1 rounded-lg px-2 text-[11px] leading-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${service.targetPeerId === currentId ? 'bg-surface-elevated font-medium text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}>
-        <span className="truncate">{service.label}</span>{badges(service)}
+        className={`inline-flex min-h-11 min-w-0 flex-[1_0_auto] items-center justify-center rounded-lg text-[11px] leading-4 transition-colors motion-reduce:transition-none md:min-h-8 ${services.length > 3 ? 'md:flex-[0_0_30%]' : 'md:flex-[1_1_0%]'} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${service.targetPeerId === currentId ? 'font-medium text-foreground md:bg-surface-elevated' : 'text-muted-foreground hover:bg-surface hover:text-foreground md:hover:bg-surface-2'}`}>
+        <span className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-lg px-2 py-1.5 ${service.targetPeerId === currentId ? 'bg-surface-elevated md:bg-transparent' : ''}`}>
+          <span className="max-w-[11rem] truncate md:hidden">{compactServiceLabel(service, services)}</span>
+          <span className="hidden truncate md:inline">{service.label}</span>{badges(service)}
+        </span>
       </button>)}
     </nav>
+    <button type="button" onClick={openServiceAccess} aria-label="管理服务" title="管理服务"
+      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary md:hidden">
+      <MoreHorizontal size={18} />
+    </button>
+    </div>
     {error && <p role="alert" className="mt-1 text-[11px] text-[color:var(--warning)]">{error}</p>}
   </div>;
 }

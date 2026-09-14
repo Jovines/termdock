@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ServiceWorkspaceHost } from './ServiceWorkspaceHost';
-import { installWorkspaceHost } from './workspaceHost';
+import { installWorkspaceHost, WORKSPACE_ACTIVATE_EVENT } from './workspaceHost';
 import { WorkspacePortal } from './WorkspacePortal';
 import { AgentFloatingSessionButtons } from '../components/AgentIndicators';
 import { useSidebarStore } from '../stores/useSidebarStore';
@@ -17,6 +17,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   delete window.__termdockWorkspaceHost;
 });
 
@@ -32,6 +33,53 @@ function boundary(button: HTMLElement) {
 }
 
 describe('workspace floating controls', () => {
+  it.each([false, true])('anchors loading beside the service strip, desktop=%s', desktop => {
+    const host = installWorkspaceHost(entry)!;
+    host.report('root', { rendered: true, phase: 'ready' });
+    render(<ServiceWorkspaceHost>
+      <div data-sidebar-gesture-ignore data-testid="service-strip"><nav aria-label="切换服务" /></div>
+    </ServiceWorkspaceHost>);
+    const strip = screen.getByTestId('service-strip');
+    vi.spyOn(strip, 'getBoundingClientRect').mockReturnValue({
+      left: 0, right: 340, top: desktop ? 40 : 740, bottom: desktop ? 88 : 788,
+      width: 340, height: 48, x: 0, y: desktop ? 40 : 740, toJSON() {},
+    });
+    act(() => { host.activate(remote); });
+    const panel = screen.getByRole('dialog', { name: '切换服务' }).firstElementChild as HTMLElement;
+    expect(panel.style.left).toBe('12px');
+    expect(panel.style.width).toBe('316px');
+    expect(panel.style.top).toBe(desktop ? '96px' : '732px');
+    expect(panel.style.transform).toBe(desktop ? 'none' : 'translateY(-100%)');
+    fireEvent.click(screen.getByRole('button', { name: '取消切换' }));
+    expect(host.snapshot().activeKey).toBe('root');
+  });
+
+  it('keeps the first-switch sidebar intent until the destination listener is installed', () => {
+    const host = installWorkspaceHost(entry)!;
+    host.report('root', { phase: 'ready', rendered: true });
+    render(<ServiceWorkspaceHost><button>Entry session</button></ServiceWorkspaceHost>);
+    act(() => { host.activate(remote); });
+    const frame = screen.getByTitle('Remote') as HTMLIFrameElement;
+    const view = frame.contentWindow!;
+    // Native load may run before React has installed SecureAccessGate's effect.
+    fireEvent.load(frame);
+    let activations = 0;
+    view.addEventListener(WORKSPACE_ACTIVATE_EVENT, () => { activations++; });
+    act(() => { host.attach('remote', view); });
+    expect(activations).toBe(1);
+    // A repeated registration/load must not reopen a sidebar the user closed.
+    fireEvent.load(frame);
+    act(() => { host.attach('remote', view); });
+    expect(activations).toBe(1);
+    expect(frame.style.visibility).toBe('hidden');
+    act(() => { host.report('remote', { rendered: true, phase: 'ready' }); });
+    expect(frame.style.visibility).toBe('visible');
+    expect(screen.queryByRole('dialog', { name: '切换服务' })).toBeNull();
+    act(() => { host.activate(entry, false); host.activate(remote); });
+    expect(activations).toBe(2);
+    expect(frame.style.visibility).toBe('visible');
+  });
+
   it.each([false, true])('keeps background controls hidden and inert, desktop=%s', desktop => {
     const host = installWorkspaceHost(entry)!;
     host.report('root', { phase: 'ready', rendered: true, reviewCount: 1 });

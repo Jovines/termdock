@@ -25,13 +25,15 @@ function WorkspaceFrame({ host, item, visible, active }: { host: WorkspaceHost; 
     };
   }, [host, item.key]);
   return <iframe ref={frame} title={item.service?.label || '服务工作区'}
+    data-workspace-key={item.key}
     src={`/workspace.html?${WORKSPACE_QUERY}=${encodeURIComponent(item.key)}`}
     className="fixed inset-0 w-full border-0 bg-[var(--chrome-bg)]"
     // Each workspace applies its own safe areas and keyboard layout. Anchor it
     // to the physical viewport, outside the entry root's safe-area padding.
     style={{ height: 'var(--app-base-vh, 100%)', visibility: visible ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none' }}
-    aria-hidden={!active} tabIndex={active ? 0 : -1} allow="clipboard-read; clipboard-write; fullscreen"
-    onLoad={event => host.attach(item.key, event.currentTarget.contentWindow)} />;
+    // SecureAccessGate attaches after installing its activation listener.
+    // iframe load can precede that effect and swallow the pending sidebar intent.
+    aria-hidden={!active} tabIndex={active ? 0 : -1} allow="clipboard-read; clipboard-write; fullscreen" />;
 }
 
 export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
@@ -44,6 +46,7 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
     snapshot.activeKey === 'root' ? 'root' : null);
   const [revealedKey, setRevealedKey] = useState<string>();
   const [slow, setSlow] = useState(false);
+  const [switchPosition, setSwitchPosition] = useState<{ left: number; top: number; width: number; transform: string }>();
   const destination = snapshot.items.find(item => item.key === snapshot.activeKey);
   // Keep the previous document painted until the destination's UI, rather
   // than just its socket or iframe load event, is ready. Hidden frames retain
@@ -52,6 +55,29 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
     ? snapshot.activeKey : presentedKey;
   const switching = visibleKey !== snapshot.activeKey;
   const restoring = switching && presentedKey === null;
+  useLayoutEffect(() => {
+    if (!switching || restoring) { setSwitchPosition(undefined); return; }
+    const position = () => {
+      const frame = Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe[data-workspace-key]'))
+        .find(element => element.dataset.workspaceKey === presentedKey);
+      const owner = presentedKey === 'root' ? root : frame?.contentDocument;
+      const nav = owner?.querySelector<HTMLElement>('nav[aria-label="切换服务"]');
+      const strip = nav?.closest<HTMLElement>('[data-sidebar-gesture-ignore]');
+      const bounds = strip?.getBoundingClientRect();
+      if (!bounds || bounds.width === 0 || bounds.right <= 0) { setSwitchPosition(undefined); return; }
+      const offset = frame?.getBoundingClientRect();
+      const above = bounds.top + (offset?.top ?? 0) >= 160;
+      setSwitchPosition({
+        left: bounds.left + (offset?.left ?? 0) + 12,
+        top: (above ? bounds.top - 8 : bounds.bottom + 8) + (offset?.top ?? 0),
+        width: Math.max(0, bounds.width - 24),
+        transform: above ? 'translateY(-100%)' : 'none',
+      });
+    };
+    position();
+    window.addEventListener('resize', position);
+    return () => window.removeEventListener('resize', position);
+  }, [switching, restoring, presentedKey, root]);
   useLayoutEffect(() => {
     host?.present(visibleKey);
     if (!switching) setPresentedKey(visibleKey);
@@ -124,7 +150,7 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
         </div>
       ) : <><div className="termdock-boot-spinner" aria-hidden="true" /><span>Loading Termdock</span></>}
     </div>}
-    {switching && !restoring && <div className="fixed inset-0 z-modal-panel flex items-center justify-center bg-background/40 px-6" role="dialog" aria-modal="true" aria-label="切换服务"
+    {switching && !restoring && <div className="fixed inset-0 z-modal-panel flex items-end justify-center px-3 pb-[calc(env(safe-area-inset-bottom)+96px)]" role="dialog" aria-modal="true" aria-label="切换服务"
       onKeyDown={event => {
         if (event.key === 'Escape' && previous?.service) {
           event.preventDefault();
@@ -137,17 +163,18 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
           else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
         }
       }}>
-      <div className="w-full max-w-xs rounded-2xl border border-border/15 bg-surface-elevated p-5 text-foreground shadow-xl">
-        <div role="status" aria-live="polite" className="flex items-center gap-3">
-          <LoaderCircle size={20} className="shrink-0 animate-spin text-primary motion-reduce:animate-none" aria-hidden="true" />
+      <div style={switchPosition ? { position: 'absolute', ...switchPosition } : undefined}
+        className="flex w-full max-w-sm flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-border bg-surface-elevated px-3 py-1.5 text-foreground shadow-lg">
+        <div role="status" aria-live="polite" className="flex min-w-0 flex-1 items-center gap-2">
+          <LoaderCircle size={16} className="shrink-0 animate-spin text-primary motion-reduce:animate-none" aria-hidden="true" />
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">{destination?.service?.label || '服务工作区'}</div>
             <div className="mt-1 text-xs text-muted-foreground">{connectionStatus}</div>
           </div>
         </div>
-        <div className="mt-4 flex items-center justify-end gap-2">
+        <div className="flex items-center justify-end gap-1">
           {slow && <button type="button" className="min-h-11 rounded-lg px-3 text-xs text-muted-foreground hover:bg-surface-2" onClick={() => setRevealedKey(snapshot.activeKey)}>查看连接页面</button>}
-          {previous?.service && <button type="button" autoFocus className="min-h-11 rounded-lg bg-surface-2 px-4 text-sm hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => host.activate(previous.service!)}>取消切换</button>}
+          {previous?.service && <button type="button" autoFocus aria-label="取消切换" className="min-h-11 shrink-0 rounded-lg px-3 text-xs text-muted-foreground hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => host.activate(previous.service!)}>取消</button>}
         </div>
       </div>
     </div>}

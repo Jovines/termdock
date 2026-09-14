@@ -128,7 +128,7 @@ const FileDownloadAction = memo(function FileDownloadAction({ path }: { path: st
       role="button"
       tabIndex={-1}
       onClick={(e) => void handleClick(e)}
-      className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(status === 'pending')} ${status === 'pending' ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+      className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(status === 'pending')} ${status === 'pending' ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
       title={status === 'error' ? errorMsg ?? t('rightSidebar.downloadFailed') : t('rightSidebar.downloadFile')}
     >
       {status === 'pending' ? <RiLoader size={12} className="animate-spin" /> : <RiDownload size={12} />}
@@ -594,7 +594,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {hasDirectoryActions && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -603,7 +603,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {!isDirectory && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
             {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
@@ -613,7 +613,7 @@ const FileTreeItem = memo(function FileTreeItem({
           <span
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
             title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
@@ -934,7 +934,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {node.type === 'directory' && (onDirectoryPinToggle || onSearchFromDirectory) && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -943,7 +943,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {!isDirectory && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
             {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
@@ -953,7 +953,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           <span
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
             title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
@@ -1176,7 +1176,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
               onPathReference(entry.path, referenceKey);
             }}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
             title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >

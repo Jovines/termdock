@@ -1,4 +1,6 @@
+import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
+import { useInitialGitLoad, waitForGitPreferences } from './useInitialGitLoad';
 import { fetchPreviewResource } from '../../utils/previewResourceCache';
 import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, lazy, Suspense, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -3737,11 +3739,11 @@ function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder
           }
           openMenu();
         }}
-        className="group flex w-full items-center justify-between gap-2 rounded-md border border-border/15 bg-surface-2 px-2.5 py-1.5 text-left transition hover:bg-surface-elevated disabled:cursor-not-allowed disabled:opacity-50"
+        className="group flex w-full items-center justify-between gap-2 min-h-10 rounded-md border border-transparent bg-surface-2 px-3 py-2 text-left transition hover:bg-surface-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <span className="min-w-0">
-          <span className="block text-[9px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
-          <span className={`block truncate text-[12px] ${value ? 'text-foreground' : 'text-muted-foreground/70'}`}>
+        <span className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="shrink-0 text-[11px] text-muted-foreground">{label}</span>
+          <span className={`min-w-0 flex-1 truncate text-[13px] ${value ? 'text-foreground' : 'text-muted-foreground/70'}`}>
             {current?.label ?? (value || placeholder)}
           </span>
         </span>
@@ -4120,9 +4122,11 @@ function Pane({ active, mounted = true, fallback = null, children }: { active: b
 function GitChangesLoadingState({ slow }: { slow: boolean }) {
   const { t } = useI18n();
   return (
-    <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
-      <RiLoader size={20} className="mx-auto mb-2 animate-spin text-muted-foreground/80" />
-      <div>{t('rightSidebar.loadingGitChanges')}</div>
+    <div role="status" className="px-3 py-6 text-center text-xs text-muted-foreground">
+      <div className="flex items-center justify-center gap-2">
+        <RiLoader size={13} className="motion-safe:animate-spin" />
+        <span>{t('rightSidebar.loadingGitChanges')}</span>
+      </div>
       {slow && <div className="mt-1 text-xs text-muted-foreground/75">{t('rightSidebar.loadingGitChangesSlow')}</div>}
     </div>
   );
@@ -4482,7 +4486,7 @@ function GitActionMenu({ actions, running, completed }: {
           setOpen((current) => !current);
         }}
         disabled={actions.every((action) => action.disabled) && !running && !completed}
-        className={`inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 disabled:opacity-50 ${
+        className={`inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md transition active:scale-95 disabled:opacity-50 ${
           open
             ? 'bg-surface-elevated text-foreground'
             : completedAction
@@ -7111,11 +7115,8 @@ export function RightSidebar(
     const expectedRootPath = rootPath;
     // The opt-in lives server-side, so a cold client must read it before deciding.
     // Hydration is memoized, so this is a no-op on every later call.
-    try {
-      await useSidebarStore.getState().hydrateNestedGitScanRoots();
-    } catch {
-      // Fall through with whatever the cached flag says rather than failing the load.
-    }
+    await waitForGitPreferences(useSidebarStore.getState().hydrateNestedGitScanRoots);
+    if (!isCurrentSidebarRoot(expectedRootPath)) return null;
     // `cwd === rootPath` is load-bearing: per-repo fetches pass cwd = repoRoot and
     // must not inherit a workspace-level preference.
     const nestedScanEnabled = cwd === rootPath && isNestedGitScanEnabled(rootPath);
@@ -7180,7 +7181,8 @@ export function RightSidebar(
           cwd,
           error: bundle.error ?? bundle.context?.error,
         });
-        return null;
+        if (controller.signal.aborted) return null;
+        throw new Error(bundle.error ?? bundle.context?.error ?? 'Failed to load Git changes');
       }
       if (gitBundleRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath)) {
         logGitBundleClientEvent('stale_result', {
@@ -7220,7 +7222,7 @@ export function RightSidebar(
       }
       return result;
     } catch (err) {
-      if (gitBundleRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath) || isAbortError(err)) {
+      if (gitBundleRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath) || controller.signal.aborted) {
         logGitBundleClientEvent('aborted', {
           requestId,
           activeRequestId: gitBundleRequestIdRef.current,
@@ -7478,6 +7480,7 @@ export function RightSidebar(
   }, []);
 
   const gitKnownUnavailable = Boolean(rootPath && gitBundleLastLoadedAt !== null && isConfirmedNonGitContext(gitContext));
+  const initialGitChangesLoading = Boolean(rootPath && !gitBundleError && changedFiles.size === 0 && gitBundleLastLoadedAt === null);
   // Non-Git workspaces have no Git/Changes tabs. File preview is reached from
   // the Files pane on mobile and remains alongside the tree on desktop.
   const effectiveRightTab = gitKnownUnavailable ? 'files' : rightTab;
@@ -7525,26 +7528,20 @@ export function RightSidebar(
   // Git/Changes share the server-owned cache. A warm cache returns immediately;
   // a cold cache is populated by the server on first open. Manual refresh still
   // forces a rebuild instead of accepting stale cache data.
-  useEffect(() => {
-    const shouldLoadGit = isOpen && (gitPaneActive || diffPaneActive);
-    if (!shouldLoadGit || !rootPath || gitBundleLoading) return;
-    if (!rootEntriesLoaded) return;
-    if (lastAutoRefreshRootRef.current === rootPath) return;
-    lastAutoRefreshRootRef.current = rootPath;
-    const delay = gitPaneActive && !isMobile ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS;
-    const handle = window.setTimeout(() => {
-      // Open with discovery only: list every repo, read just the root one.
-      // Scanning all nested repos up front costs hundreds of ms on a
-      // multi-repo workspace and is wasted for every repo the user never
-      // opens. Picking a repo loads it on demand in selectGitRepoRoot.
-      // Single-repo workspaces skip the walk entirely, so discovery is moot
-      // there — loadGitBundle drops discoverOnly when includeNested is off.
-      void loadGitBundle(rootPath, { background: true, discoverOnly: true });
-    }, delay);
-    return () => {
-      window.clearTimeout(handle);
-    };
-  }, [diffPaneActive, gitBundleLoading, gitPaneActive, isMobile, isOpen, loadGitBundle, rootEntriesLoaded, rootPath]);
+  const loadInitialGitBundle = useCallback((path: string) => {
+    // Open with discovery only: list every repo, read just the root one.
+    // Picking a nested repo loads its changes on demand in selectGitRepoRoot.
+    void loadGitBundle(path, { discoverOnly: true });
+  }, [loadGitBundle]);
+  // Git does not depend on the Files pane's directory listing succeeding.
+  useInitialGitLoad({
+    active: isOpen && (gitPaneActive || diffPaneActive),
+    rootPath,
+    loading: gitBundleLoading,
+    delay: gitPaneActive && !isMobile ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS,
+    lastStartedRoot: lastAutoRefreshRootRef,
+    load: loadInitialGitBundle,
+  });
 
   useEffect(() => {
     if (!isOpen || !gitPaneActive) return;
@@ -8744,7 +8741,7 @@ export function RightSidebar(
           insertPathReference(absolutePath, referenceKey);
         }}
         {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
-        className={`inline-flex h-6 shrink-0 items-center justify-center overflow-hidden rounded-full text-[11px] font-semibold opacity-100 transition-[max-width,padding,opacity,transform,background-color,color] active:scale-95 ${
+        className={`inline-flex h-6 shrink-0 items-center justify-center overflow-hidden rounded-md text-[11px] font-semibold opacity-100 transition-[max-width,padding,opacity,transform,background-color,color] active:scale-95 ${
           keepVisible
             ? 'max-w-20 px-2'
             : 'max-w-20 px-2 md:max-w-0 md:px-0 md:opacity-0 md:group-hover:max-w-20 md:group-hover:px-2 md:group-hover:opacity-100'
@@ -10129,7 +10126,7 @@ export function RightSidebar(
   );
 
   const branchAuditModulePanel = rootPath ? (
-    <div className="border-b border-border/10 px-1 py-3">
+    <div className="border-b border-border/40 px-1 py-4 last:border-b-0">
       <button
         type="button"
         onClick={() => setBranchAuditModuleOpen((open) => { const next = !open; writeCache(BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY, next); return next; })}
@@ -10141,7 +10138,7 @@ export function RightSidebar(
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[12px] font-semibold text-foreground">{t('rightSidebar.branchAuditTitle')}</span>
-          <span className="block truncate text-[10px] text-muted-foreground">{branchAuditScopeLabel}</span>
+          <span className="block truncate text-[11px] text-muted-foreground">{branchAuditScopeLabel}</span>
         </span>
         <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition group-hover:bg-surface-elevated group-hover:text-foreground ${branchAuditModuleOpen ? 'rotate-90' : ''}`}>
           <RiChevronRight size={13} />
@@ -10177,16 +10174,16 @@ export function RightSidebar(
                 >
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{entry.repoLabel}</span>
-                    <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.diff.hunks?.length ?? 0} hunk</span>
+                    <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[11px] text-muted-foreground">{entry.diff.hunks?.length ?? 0} hunk</span>
                   </div>
-                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                     <span className="rounded bg-surface px-1.5 py-0.5">{entry.diff.currentBranch ?? 'HEAD'}</span>
                     <span className="text-muted-foreground/60">→</span>
                     <span className="rounded bg-surface px-1.5 py-0.5">{entry.diff.baseRef ?? entry.diff.baseBranch}</span>
                     <span className="rounded bg-surface px-1.5 py-0.5">{t('rightSidebar.branchAuditViewDiff')}</span>
                   </div>
                   {formatAuditTimestamp(entry.createdAt, locale) && (
-                    <div className="mt-1 truncate text-[10px] text-muted-foreground/70">
+                    <div className="mt-1 truncate text-[11px] text-muted-foreground/70">
                       {formatAuditTimestamp(entry.createdAt, locale)}
                     </div>
                   )}
@@ -10218,16 +10215,16 @@ export function RightSidebar(
                 >
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{group.repoLabel}</span>
-                    <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.records.length} hunk</span>
+                    <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[11px] text-muted-foreground">{group.records.length} hunk</span>
                   </div>
-                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                     <span className="rounded bg-surface px-1.5 py-0.5">{group.branchName ?? 'HEAD'}</span>
                     <span className="text-muted-foreground/60">→</span>
                     <span className="rounded bg-surface px-1.5 py-0.5">{group.baseRef}</span>
                     {group.diffFingerprint && <span className="rounded bg-surface px-1.5 py-0.5">{group.diffFingerprint}</span>}
                   </div>
                   {formatAuditTimestamp(group.latestInjectedAt, locale) && (
-                    <div className="mt-1 truncate text-[10px] text-muted-foreground/70">
+                    <div className="mt-1 truncate text-[11px] text-muted-foreground/70">
                       {t('rightSidebar.branchAuditGeneratedAt', { time: formatAuditTimestamp(group.latestInjectedAt, locale) ?? '' })}
                     </div>
                   )}
@@ -10267,7 +10264,7 @@ export function RightSidebar(
           });
         }}
         aria-expanded={effectiveGitQuickActionsOpen}
-        className={`group flex w-full items-center gap-2 px-1 py-1.5 text-left transition ${gitPaneActive ? 'cursor-default' : 'rounded-lg hover:bg-surface-2 active:scale-[0.99]'}`}
+        className={`group flex w-full items-center gap-2 px-1 pb-1 pt-4 text-left transition ${gitPaneActive ? 'cursor-default' : 'rounded-lg hover:bg-surface-2 active:scale-[0.99]'}`}
       >
         <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground group-hover:text-foreground">
           <RiGitBranch size={14} />
@@ -10276,7 +10273,7 @@ export function RightSidebar(
           {t('rightSidebar.gitQuickActions')}
         </span>
         <span className="flex shrink-0 items-center gap-1">
-          <span className={`inline-flex min-w-[4.5rem] items-center justify-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${activeGitActionSummary.staged > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>
+          <span className={`inline-flex items-center justify-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${activeGitActionSummary.staged > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>
             {gitDetailsLoading && <RiLoader size={10} className="animate-spin" />}
             {activeGitActionSummary.staged > 0 ? t('rightSidebar.stagedCount', { count: activeGitActionSummary.staged }) : t('rightSidebar.noStagedChangesShort')}
           </span>
@@ -10290,11 +10287,11 @@ export function RightSidebar(
       {effectiveGitQuickActionsOpen && (
         <div className="space-y-0">
           {gitActionRepoOptions.length > 1 && (
-            <div className="border-b border-border/10 px-1 py-3">
+            <div className="border-b border-border/40 px-1 py-4 last:border-b-0">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.gitRepositorySectionTitle')}</div>
-                  <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{activeGitActionRepoLabel}</div>
+                  <div className="text-[12px] font-medium text-foreground">{t('rightSidebar.gitRepositorySectionTitle')}</div>
+                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{activeGitActionRepoLabel}</div>
                 </div>
               </div>
               <GitTargetPicker
@@ -10316,17 +10313,17 @@ export function RightSidebar(
               )}
             </div>
           )}
-          <div className="border-b border-border/10 px-1 py-3">
+          <div className="border-b border-border/40 px-1 py-4 last:border-b-0">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="min-w-0">
-                <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.branchSectionTitle')}</div>
-                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{activeGitActionBranchLabel}</div>
+                <div className="text-[12px] font-medium text-foreground">{t('rightSidebar.branchSectionTitle')}</div>
+                <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{switchBranch !== activeGitActionBranchLabel ? activeGitActionBranchLabel : null}</div>
               </div>
               <button
                 type="button"
                 onClick={() => void handleSwitchBranch()}
                 disabled={!canSwitchBranch}
-                className={`relative inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${switchBranchActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                className={`relative inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${switchBranchActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
                 title={t('rightSidebar.switchBranch')}
               >
                 <span className={runningGitAction?.action === 'switch-branch' || switchBranchActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.switchBranch')}</span>
@@ -10345,11 +10342,11 @@ export function RightSidebar(
               onChange={setSwitchBranch}
             />
           </div>
-          <div className="border-b border-border/10 px-1 py-3">
+          <div className="border-b border-border/40 px-1 py-4 last:border-b-0">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="min-w-0">
-                <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.commitSectionTitle')}</div>
-                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                <div className="text-[12px] font-medium text-foreground">{t('rightSidebar.commitSectionTitle')}</div>
+                <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
                   {requiresGitActionRepoSelection
                     ? t('rightSidebar.selectRepositoryForGitActions')
                     : activeGitActionSummary.staged > 0 ? t('rightSidebar.commitReadyHint', { count: activeGitActionSummary.staged }) : t('rightSidebar.commitNeedsStaged')}
@@ -10359,7 +10356,7 @@ export function RightSidebar(
                 type="button"
                 onClick={() => void handleQuickCommit()}
                 disabled={Boolean(runningGitAction) || requiresGitActionRepoSelection || activeGitActionSummary.staged === 0 || !commitMessage.trim()}
-                className={`relative inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition active:scale-95 ${commitActionCompleted ? 'bg-accent/10 text-accent disabled:bg-accent/10 disabled:text-accent' : 'bg-primary text-primary-foreground hover:bg-primary/90 disabled:bg-surface-2 disabled:text-muted-foreground'} disabled:cursor-not-allowed`}
+                className={`relative inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-[12px] font-medium transition active:scale-95 ${commitActionCompleted ? 'bg-accent/10 text-accent disabled:bg-accent/10 disabled:text-accent' : 'bg-primary text-primary-foreground hover:bg-primary/90 disabled:bg-surface-2 disabled:text-muted-foreground'} disabled:cursor-not-allowed`}
                 title={requiresGitActionRepoSelection ? t('rightSidebar.selectRepositoryForGitActions') : activeGitActionSummary.staged === 0 ? t('rightSidebar.commitNeedsStaged') : t('rightSidebar.commitChanges')}
               >
                 <span className={runningGitAction?.action === 'commit' || commitActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.commitChanges')}</span>
@@ -10378,18 +10375,18 @@ export function RightSidebar(
               }}
               placeholder={t('rightSidebar.commitMessagePlaceholder')}
               disabled={Boolean(runningGitAction)}
-              className="w-full rounded-md border border-border/15 bg-surface-2 px-2.5 py-1.5 text-[12px] text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:border-primary/35 focus:ring-1 focus:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-60"
+              className="w-full min-h-10 rounded-md border border-transparent bg-surface-2 px-3 py-2 text-[13px] placeholder:text-[13px] text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:border-primary focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
               maxLength={300}
             />
           </div>
-          <div className="border-b border-border/10 px-1 py-3">
+          <div className="border-b border-border/40 px-1 py-4 last:border-b-0">
             <button
               type="button"
               onClick={() => setRecentCommitsOpen((open) => !open)}
               className="group flex w-full items-center justify-between gap-2 rounded-lg px-1 py-1.5 text-left transition hover:bg-surface-2 active:scale-[0.99]"
               aria-expanded={recentCommitsOpen}
             >
-              <span className="min-w-0 text-[11px] font-semibold text-foreground">{t('rightSidebar.recentCommitsTitle')}</span>
+              <span className="min-w-0 text-[12px] font-medium text-foreground">{t('rightSidebar.recentCommitsTitle')}</span>
               <span className="flex shrink-0 items-center gap-1.5">
                 {recentCommitsLoading && <RiLoader size={12} className="animate-spin text-muted-foreground" />}
                 <span className={`flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition group-hover:bg-surface-elevated group-hover:text-foreground ${recentCommitsOpen ? 'rotate-90' : ''}`}>
@@ -10478,15 +10475,15 @@ export function RightSidebar(
               </div>
             )}
           </div>
-          <div className="px-1 py-3">
+          <div className="border-b border-border/40 px-1 py-4 last:border-b-0">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.pushSectionTitle')}</div>
+              <div className="text-[12px] font-medium text-foreground">{t('rightSidebar.pushSectionTitle')}</div>
               <div className="flex shrink-0 items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => void handleQuickPull()}
                   disabled={!canPull}
-                  className={`relative inline-flex h-7 min-w-[3.25rem] items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pullActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                  className={`relative inline-flex h-8 min-w-[3.25rem] items-center justify-center rounded-md px-3 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pullActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
                   title={t('rightSidebar.pullChanges')}
                 >
                   <span className={runningGitAction?.action === 'pull' || pullActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.pullChanges')}</span>
@@ -10497,7 +10494,7 @@ export function RightSidebar(
                   type="button"
                   onClick={() => void handleQuickPush()}
                   disabled={!canPush}
-                  className={`relative inline-flex h-7 min-w-[3.25rem] items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pushActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                  className={`relative inline-flex h-8 min-w-[3.25rem] items-center justify-center rounded-md px-3 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pushActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
                   title={t('rightSidebar.pushChanges')}
                 >
                   <span className={runningGitAction?.action === 'push' || pushActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.pushChanges')}</span>
@@ -10808,7 +10805,7 @@ export function RightSidebar(
           <button
             type="button"
             onClick={goToProjectRoot}
-            className={`inline-flex max-w-[9rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-medium transition active:scale-95 ${fileTreeRoot === rootPath ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex max-w-[9rem] shrink-0 items-center gap-1 rounded-md px-2 py-0.5 font-medium transition active:scale-95 ${fileTreeRoot === rootPath ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
             title={rootPath}
           >
             <RiHome size={10} className="shrink-0" />
@@ -10819,7 +10816,7 @@ export function RightSidebar(
             const isFile = entry.kind === 'file';
             const active = isFile ? selectedFilePath === path : fileTreeRoot === path;
             return (
-              <span key={path} className={`group inline-flex max-w-[12rem] shrink-0 items-center rounded-full transition ${active ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`} title={path}>
+              <span key={path} className={`group inline-flex max-w-[12rem] shrink-0 items-center rounded-md transition ${active ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`} title={path}>
                 <button
                   type="button"
                   onClick={() => (isFile ? handleFileSelect(path) : setExplorerRoot(path))}
@@ -10831,7 +10828,7 @@ export function RightSidebar(
                 <button
                   type="button"
                   onClick={() => unpinExplorerRoot(path)}
-                  className="mr-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                  className="mr-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
                   aria-label={t('rightSidebar.unpinFolder', { name: getPathBasename(path) })}
                   title={t('rightSidebar.unpinFolder', { name: getPathBasename(path) })}
                 >
@@ -10873,7 +10870,7 @@ export function RightSidebar(
       onClick={() => void toggleNestedGitScan(!nestedGitScanEnabled)}
       aria-pressed={nestedGitScanEnabled}
       title={t('rightSidebar.multiRepoScanTitle')}
-      className={`inline-flex h-7 shrink-0 items-center rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
+      className={`inline-flex h-7 shrink-0 items-center rounded-md px-2.5 text-[11px] font-medium transition active:scale-95 ${
         nestedGitScanEnabled
           ? 'bg-primary/15 text-primary'
           : 'bg-surface-2 text-muted-foreground hover:text-foreground'
@@ -10957,8 +10954,10 @@ export function RightSidebar(
     </div>
   ) : null;
 
-  const gitSummaryChips = (changedFiles.size > 0 || gitContext?.available || gitBundleLastLoadedAt) ? (
-    <div className="flex flex-wrap items-center gap-1 text-[10px] font-medium">
+  // Reserve the summary row before Git responds. Keep chips on one scrollable
+  // line so late branch/status data cannot push the Changes toolbar down.
+  const gitSummaryChips = (
+    <div className="flex h-5 flex-nowrap items-center gap-1 overflow-x-auto whitespace-nowrap text-[10px] font-medium [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
       {gitContext?.available && gitContext.branch && (
         <span className="inline-flex min-w-0 max-w-[8rem] items-center gap-0.5 truncate rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground" title={gitContext.branch}>
           <RiGitBranch size={10} className="shrink-0" />
@@ -10997,7 +10996,7 @@ export function RightSidebar(
           type="button"
           onClick={() => void runSidebarGitAction({ action: 'stage-all', cwd: rootPath }, t('rightSidebar.stageAll'))}
           disabled={Boolean(runningGitAction)}
-          className="rounded-full bg-accent/10 px-2 py-0.5 font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+          className="rounded-md bg-accent/10 px-2 py-0.5 font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
           title={t('rightSidebar.stageAll')}
         >
           {t('rightSidebar.stageAll')}
@@ -11008,14 +11007,14 @@ export function RightSidebar(
           type="button"
           onClick={() => setConfirmGitAction({ kind: 'stash-all', repoRoot: rootPath, repoLabel: rootName })}
           disabled={Boolean(runningGitAction)}
-          className="rounded-full bg-surface-2 px-2 py-0.5 font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+          className="rounded-md bg-surface-2 px-2 py-0.5 font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
           title={t('rightSidebar.stashAll')}
         >
           {t('rightSidebar.stashAll')}
         </button>
       )}
     </div>
-  ) : null;
+  );
 
   return (
     <Sidebar
@@ -11469,7 +11468,7 @@ export function RightSidebar(
               />
             </div>
           ) : (
-          <div className="h-full overflow-y-auto overscroll-contain px-2 py-2">
+          <div className="h-full overflow-y-auto overscroll-contain bg-surface px-3 pb-6">
             {gitQuickActionsPanel ? (
               gitQuickActionsPanel
             ) : gitBundleLoading ? (
@@ -11693,7 +11692,7 @@ export function RightSidebar(
         </Pane>
 
         <Pane active={diffPaneActive} mounted={hasMountedDiffPane || diffPaneActive}>
-          {() => (!isMobile ? (
+          {() => (initialGitChangesLoading ? <ChangesLoadingSkeleton /> : !isMobile ? (
             <DiffReview
               mobile={false}
               desktopLayout="split"
@@ -11726,9 +11725,7 @@ export function RightSidebar(
               }}
               aiContent={showChangeAiMode ? ((controls) => renderChangeWalkthroughPanel(controls)) : undefined}
               emptyContent={(
-                gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
-                  <GitChangesLoadingState slow={gitBundleSlow} />
-                ) : gitBundleError && changedFiles.size === 0 ? (
+                initialGitChangesLoading ? null : gitBundleError && changedFiles.size === 0 ? (
                   <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
                 ) : changedFiles.size === 0 ? (
                   <div className="px-3 py-6 text-center text-xs text-muted-foreground">
@@ -11895,9 +11892,7 @@ export function RightSidebar(
                   )}
                   aiContent={showChangeAiMode ? ((controls) => renderChangeWalkthroughPanel(controls)) : undefined}
                   emptyContent={(
-                    gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
-                      <GitChangesLoadingState slow={gitBundleSlow} />
-                    ) : gitBundleError && changedFiles.size === 0 ? (
+                    initialGitChangesLoading ? null : gitBundleError && changedFiles.size === 0 ? (
                       <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
                     ) : changedFiles.size === 0 ? (
                       <div className="px-3 py-6 text-center text-xs text-muted-foreground">

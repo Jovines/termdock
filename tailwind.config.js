@@ -27,7 +27,10 @@ export default {
           DEFAULT: 'var(--destructive)',
           foreground: 'var(--destructive-foreground)',
         },
-        border: 'var(--border)',
+        // Hex-valued CSS variables need an explicit alpha expression in Tailwind 3.
+        border: ({ opacityValue }) => opacityValue === undefined
+          ? 'var(--border)'
+          : `color-mix(in srgb, var(--border) calc(${opacityValue} * 100%), transparent)`,
         'border-strong': 'var(--border-strong)',
         input: 'var(--input)',
         ring: 'var(--ring)',

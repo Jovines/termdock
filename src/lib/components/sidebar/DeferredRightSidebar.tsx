@@ -1,5 +1,7 @@
+import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
 import { lazy, Suspense, useEffect, useRef, type ComponentProps } from 'react';
-import { X } from 'lucide-react';
+import { X, Search, PencilLine, MoreHorizontal, GitBranch, GitCompare, Folder } from 'lucide-react';
+import { useSidebarStore } from '../../stores/useSidebarStore';
 import { scheduleInteractionIdle } from '../../utils/interactionIdle';
 import { Sidebar } from './Sidebar';
 import { useI18n } from '../../i18n';
@@ -17,35 +19,50 @@ export function DeferredRightSidebar(props: Props) {
     return scheduleInteractionIdle(() => { void loadSidebar().catch(() => undefined); }, 3000);
   }, []);
   const { t } = useI18n();
+  const rootPath = useSidebarStore((s) => s.rootPath);
+  const rightTab = useSidebarStore((s) => s.rightTab);
+  const setRightTab = useSidebarStore((s) => s.setRightTab);
+  const rootName = rootPath?.replace(/\/+$/, '').split('/').pop() || t('rightSidebar.workspace');
   if (props.isOpen || props.pinned) opened.current = true;
   const shell = (
     <Sidebar side="right" isOpen={props.isOpen} drawerWidthPx={props.drawerWidthPx}
       onClose={props.onClose} onOpen={props.onOpen} pinned={props.pinned}>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div className="flex shrink-0 items-center gap-3 px-3 py-2">
-          <div aria-hidden="true" className="flex min-w-0 flex-1 items-center gap-2 motion-safe:animate-pulse">
-            <div className="h-7 w-7 rounded-lg bg-surface-elevated" />
-            <div className="h-2 w-28 max-w-[50%] rounded-full bg-surface-elevated" />
-          </div>
-          <button type="button" onClick={props.onClose} aria-label={t('common.close')}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95">
-            <X size={14} />
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-hidden bg-surface px-4 py-5" role="status" aria-label={t('common.loading')}>
-          <span className="sr-only">{t('common.loading')}</span>
-          <div aria-hidden="true" className="space-y-5 motion-safe:animate-pulse">
-            <div className="mb-7 flex items-center gap-2">
-              <div className="h-2 w-16 rounded-full bg-surface-elevated" />
-              <div className="h-4 w-6 rounded-md bg-surface-2" />
-            </div>
-            {['w-3/5', 'w-4/5', 'w-1/2', 'w-2/3', 'w-2/5'].map((width, index) => (
-              <div key={width} className="flex items-center gap-3" style={{ opacity: 1 - index * 0.15 }}>
-                <div className="h-4 w-4 shrink-0 rounded bg-surface-elevated" />
-                <div className={`h-2 rounded-full bg-surface-elevated ${width}`} />
+        <div className="shrink-0 border-b border-border/15 bg-surface px-2 pt-2">
+          <div className="flex items-center gap-1.5">
+            <div className="min-w-0 flex-1 px-1">
+              <div className="flex min-h-[1.25rem] items-baseline gap-1.5">
+                <span className="truncate text-[13px] font-semibold text-foreground">{rootName}</span>
               </div>
+            </div>
+            <div aria-hidden="true" className="flex items-center gap-1.5">
+              {[Search, PencilLine, MoreHorizontal].map((Icon, index) => (
+                <span key={index} className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                  <Icon size={14} />
+                </span>
+              ))}
+            </div>
+            <button type="button" onClick={props.onClose} aria-label={t('common.close')}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95">
+              <X size={14} />
+            </button>
+          </div>
+          <div className="mt-2 grid grid-cols-3 gap-0.5 rounded-md bg-surface-2 p-0.5">
+            {([
+              ['git', GitBranch, 'rightSidebar.tabGit'],
+              ['diff', GitCompare, 'rightSidebar.tabChanges'],
+              ['files', Folder, 'rightSidebar.tabFiles'],
+            ] as const).map(([tab, Icon, label]) => (
+              <button key={tab} type="button" onClick={() => setRightTab(tab)}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium ${rightTab === tab ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground'}`}>
+                <Icon size={12} />{t(label)}
+              </button>
             ))}
           </div>
+          <div className="h-2" />
+        </div>
+        <div className="min-h-0 flex-1 bg-surface">
+          <ChangesLoadingSkeleton />
         </div>
       </div>
     </Sidebar>

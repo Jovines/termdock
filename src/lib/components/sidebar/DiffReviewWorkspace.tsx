@@ -61,12 +61,12 @@ export function DiffReviewModeToggle({
   showAi?: boolean;
 }) {
   return (
-    <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-full bg-surface-2 p-0.5">
+    <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-md bg-surface-2 p-0.5">
       <button
         type="button"
         onClick={() => onModeChange('list')}
         aria-pressed={mode === 'list'}
-        className={`inline-flex h-6 w-7 items-center justify-center rounded-full transition active:scale-95 ${
+        className={`inline-flex h-6 w-7 items-center justify-center rounded-md transition active:scale-95 ${
           mode === 'list'
             ? 'bg-surface-elevated text-foreground shadow-sm'
             : 'text-muted-foreground hover:text-foreground'
@@ -78,7 +78,7 @@ export function DiffReviewModeToggle({
         type="button"
         onClick={() => onModeChange('tree')}
         aria-pressed={mode === 'tree'}
-        className={`inline-flex h-6 w-7 items-center justify-center rounded-full transition active:scale-95 ${
+        className={`inline-flex h-6 w-7 items-center justify-center rounded-md transition active:scale-95 ${
           mode === 'tree'
             ? 'bg-surface-elevated text-foreground shadow-sm'
             : 'text-muted-foreground hover:text-foreground'
@@ -91,7 +91,7 @@ export function DiffReviewModeToggle({
           type="button"
           onClick={() => onModeChange('ai')}
           aria-pressed={mode === 'ai'}
-          className={`inline-flex h-6 w-7 items-center justify-center rounded-full transition active:scale-95 ${
+          className={`inline-flex h-6 w-7 items-center justify-center rounded-md transition active:scale-95 ${
             mode === 'ai'
               ? 'bg-surface-elevated text-foreground shadow-sm'
               : 'text-muted-foreground hover:text-foreground'
