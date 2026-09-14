@@ -11,7 +11,7 @@
  */
 
 import React from 'react';
-import { createPortal } from 'react-dom';
+import { WorkspacePortal } from '../services/WorkspacePortal';
 import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
@@ -1091,11 +1091,10 @@ export function AgentFloatingSessionButtons({
     return null;
   }
 
-  return createPortal(
-    <>
+  return (
+    <WorkspacePortal>
       {attentionVisible && renderAttentionButton()}
       {runningVisible && renderRunningButton()}
-    </>,
-    document.body,
+    </WorkspacePortal>
   );
 }

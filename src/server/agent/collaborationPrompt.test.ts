@@ -201,7 +201,10 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).not.toContain('pending');
     expect(prompt).not.toContain('--response-kind');
     expect(prompt).toContain('td collab reply message-1');
-    expect(prompt.length).toBeLessThan(400);
+    expect(prompt).toContain('td collab capture <会话ID> --text');
+    expect(prompt).toContain('不打断对方');
+    expect(prompt).toContain('远端用 send 询问');
+    expect(prompt.length).toBeLessThan(550);
   });
 
   it('keeps structured task evidence', () => {
@@ -278,6 +281,8 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).not.toContain('联系其他成员');
     // The one-line entrance to the full command surface rides every shell.
     expect(prompt).toContain('td collab --help');
+    expect(prompt).not.toContain('td collab capture');
+    expect(prompt).not.toContain('想看伙伴');
     expect(prompt.length).toBeLessThan(400);
   });
 

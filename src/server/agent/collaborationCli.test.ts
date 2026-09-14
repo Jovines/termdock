@@ -217,6 +217,37 @@ describe('collaboration CLI contract', () => {
     }
   });
 
+  it('shows copyable capture commands beside peers only in text status', async () => {
+    const data = { source: { sessionId: 'self' }, peers: [
+      { sessionId: 'p2', name: '开发' }, { sessionId: 'remote:peer', name: '远端' },
+    ] };
+    const f = fixture([data]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['status', '--text']), {}, f.io)).toBe(0);
+    expect(f.output.join('\n')).toContain('开发：td collab capture p2 --text');
+    expect(f.output.join('\n')).toContain('远端成员，请用 td collab send remote:peer');
+    expect(f.output.join('\n')).not.toContain('capture remote:peer');
+    const json = fixture([data]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['status']), {}, json.io)).toBe(0);
+    expect(JSON.parse(json.output[0])).toEqual(data);
+    expect(json.output).toHaveLength(1);
+  });
+
+  it('captures a peer through the read-only shortcut in text and JSON formats', async () => {
+    for (const format of ['--text', '--json']) {
+      const f = fixture([{ ok: true, action: 'capture', sessionId: 'p2', snapshot: 'working' }]);
+      const command = parseCollaborationCommand(['capture', 'p2', format]);
+      expect(await executeCollaborationCommand(command, {}, f.io)).toBe(0);
+      expect(f.calls).toHaveLength(1);
+      expect(f.calls[0][1]).toContain('/drive');
+      expect(f.calls[0][2]).toMatchObject({ session: 'p2', action: 'capture' });
+      expect(f.calls[0][2]).not.toHaveProperty('text', expect.any(String));
+      expect(format === '--text' ? f.output[0] : JSON.parse(f.output[0]).snapshot).toBe('working');
+    }
+    for (const argv of [['capture'], ['capture', 'p2', 'run'], ['capture', 'p2', '--group', 'g1']]) {
+      expect(() => parseCollaborationCommand(argv)).toThrow();
+    }
+  });
+
   it('drives a member terminal: run submits a line and returns the screen back', async () => {
     const runner = fixture([{ ok: true, action: 'run', sessionId: 'p2', text: 'ls -la', snapshot: 'home  qiao\nbin  etc' }]);
     const exit = await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'run', 'ls', '-la', '--text']), { backendSessionId: 'p1' }, runner.io);

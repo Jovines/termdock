@@ -20,6 +20,7 @@ if (process.argv.slice(2).some(arg => arg === '--federation-pairing' || arg === 
   process.exit(await runFederationCli(process.argv.slice(2)));
 }
 
+import { parseAutomationCommand, executeAutomationCommand, AUTOMATION_HELP, type AutomationCommand } from './agent/automationCli.js';
 import { parseCollaborationCommand, executeCollaborationCommand, COLLAB_HELP, type CollaborationCommand } from './agent/collaborationCli.js';
 import fs from 'fs';
 import http from 'http';
@@ -170,6 +171,7 @@ interface CliOptions {
   pluginRemove?: string;
   agentEvent?: { slug: string; event: string; status?: string };
   collab?: CollaborationCommand;
+  automation?: AutomationCommand;
 }
 
 interface ServerState {
@@ -280,6 +282,7 @@ Short commands:
   agent-event <slug> <event> [status]
                      Emit one lifecycle/status event from an Agent hook.
   pi                 Same as agent-plugin
+  automation         Manage scheduled tasks (see td automation --help)
   collab status      Show this Session's collaboration groups and peers
   collab inbox       Read messages without acknowledging (see collab --help)
   collab send <session-id> <message>
@@ -672,6 +675,7 @@ function parseArgs(argv: string[]): CliOptions {
   let pluginRemove: string | undefined;
   let agentEvent: { slug: string; event: string; status?: string } | undefined;
   let collab: CliOptions['collab'];
+  let automation: AutomationCommand | undefined;
 
   // Short command aliases for the common path. Keep these positional-only so
   // long-form flags remain the single source of truth for option semantics.
@@ -764,6 +768,10 @@ function parseArgs(argv: string[]): CliOptions {
         console.error(`${ICON.err} ${c.red('Usage: td agent-event <slug> <event> [status]')}`);
         process.exit(1);
       }
+    } else if (command === 'automation') {
+      try { automation = parseAutomationCommand(argv.slice(1)); }
+      catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: getMessage(error) })); process.exit(1); }
+      argv = [];
     } else if (command === 'collab') {
       try { collab = parseCollaborationCommand(argv.slice(1)); }
       catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: error instanceof Error ? error.message : String(error) })); process.exit(1); }
@@ -1136,6 +1144,7 @@ function parseArgs(argv: string[]): CliOptions {
     pluginRemove,
     agentEvent,
     collab,
+    automation,
   };
 }
 
@@ -1316,7 +1325,7 @@ async function postLocalJson(baseUrl: string, token: string, endpoint: string, p
   });
 }
 
-async function getLocalJson(baseUrl: string, token: string, endpoint: string, timeoutMs = 30_000): Promise<{ statusCode: number; body: string }> {
+async function getLocalJson(baseUrl: string, token: string, endpoint: string, timeoutMs = 30_000, method: 'GET' | 'DELETE' = 'GET'): Promise<{ statusCode: number; body: string }> {
   const url = new URL(endpoint, baseUrl);
   const isHttps = url.protocol === 'https:';
   const requestImpl = isHttps ? https.request : http.request;
@@ -1328,7 +1337,7 @@ async function getLocalJson(baseUrl: string, token: string, endpoint: string, ti
       hostname: url.hostname,
       port: url.port,
       path: `${url.pathname}${url.search}`,
-      method: 'GET',
+      method,
       ca,
       headers: {
         'X-Termdock-Local-Token': token,
@@ -1346,14 +1355,7 @@ async function getLocalJson(baseUrl: string, token: string, endpoint: string, ti
   });
 }
 
-async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<void> {
-  const runningState = getRunningState();
-  if (!runningState?.localApiToken) {
-    // Help is a plain read: it must stay available without a running server.
-    if (command.action === 'help') { console.log(COLLAB_HELP); return; }
-    console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running or its local API token is unavailable.' }));
-    process.exit(1);
-  }
+async function detectLocalSessionContext() {
   const backendSessionId = process.env.TERMDOCK_BACKEND_SESSION_ID?.trim() || null;
   let tmuxSessionName: string | null = null;
   if (process.env.TMUX) {
@@ -1373,6 +1375,43 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
       // send both identities whenever tmux inspection succeeds.
     }
   }
+  return { backendSessionId, tmuxSessionName };
+}
+
+async function runAutomation(command: AutomationCommand): Promise<void> {
+  if (command.action === 'help') { console.log(AUTOMATION_HELP); return; }
+  const state = getRunningState();
+  if (!state?.localApiToken) {
+    console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running or its local API token is unavailable.' }));
+    process.exitCode = 1; return;
+  }
+  const baseUrl = state.localUrl ?? `${state.scheme ?? 'http'}://${state.host === '0.0.0.0' ? 'localhost' : state.host}:${state.port}`;
+  process.exitCode = await executeAutomationCommand(command, {
+    request: (method, endpoint, body) => method === 'POST'
+      ? postLocalJson(baseUrl, state.localApiToken!, endpoint, body)
+      : getLocalJson(baseUrl, state.localApiToken!, endpoint, 30_000, method),
+    self: async () => {
+      const context = await detectLocalSessionContext();
+      if (!context.backendSessionId && !context.tmuxSessionName) throw new Error('--self requires a Termdock-managed session');
+      const query = new URLSearchParams(Object.fromEntries(Object.entries(context).filter((entry): entry is [string, string] => typeof entry[1] === 'string')));
+      const response = await getLocalJson(baseUrl, state.localApiToken!, `/api/terminal/operations/orchestration/peers?${query}`);
+      const data = JSON.parse(response.body);
+      if (response.statusCode !== 200 || !data.source?.sessionId) throw new Error(data.error || 'Current session could not be resolved');
+      return data.source.sessionId;
+    },
+    stdin: readStdinText, write: (line) => console.log(line),
+  });
+}
+
+async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<void> {
+  const runningState = getRunningState();
+  if (!runningState?.localApiToken) {
+    // Help is a plain read: it must stay available without a running server.
+    if (command.action === 'help') { console.log(COLLAB_HELP); return; }
+    console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running or its local API token is unavailable.' }));
+    process.exit(1);
+  }
+  const { backendSessionId, tmuxSessionName } = await detectLocalSessionContext();
   if (!backendSessionId && !tmuxSessionName) {
     // Bare help stays reachable from a plain shell; the roster snapshot in
     // help needs a session identity and only appears when one is available.
@@ -3593,6 +3632,11 @@ async function main(): Promise<void> {
 
   if (options.agentEvent) {
     runAgentEvent(options.agentEvent);
+  }
+
+  if (options.automation) {
+    await runAutomation(options.automation);
+    return;
   }
 
   if (options.collab) {

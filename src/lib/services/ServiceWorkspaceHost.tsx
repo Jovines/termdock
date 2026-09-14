@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import { getWorkspaceHost, WORKSPACE_QUERY, type WorkspaceSnapshot, type WorkspaceHost, type ServiceWorkspace } from './workspaceHost';
 import { LoaderCircle } from 'lucide-react';
 import { syncThemeColorMeta } from '../utils/themeColorMeta';
+import { WorkspacePortalContext } from './WorkspacePortal';
 
 const empty: WorkspaceSnapshot = { activeKey: 'root', items: [] };
 const subscribeEmpty = () => () => {};
@@ -24,7 +25,7 @@ function WorkspaceFrame({ host, item, visible, active }: { host: WorkspaceHost; 
 export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
   const host = window.parent === window ? getWorkspaceHost() : undefined;
   const snapshot = useSyncExternalStore(host?.subscribe || subscribeEmpty, host?.snapshot || snapshotEmpty);
-  const root = useRef<HTMLDivElement>(null);
+  const [root, setRoot] = useState<HTMLDivElement | null>(null);
   // Restoring a saved workspace on launch has no previous screen. Never
   // expose the entry terminal underneath it or present it as a user switch.
   const [presentedKey, setPresentedKey] = useState<string | null>(() =>
@@ -41,8 +42,8 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
   const restoring = switching && presentedKey === null;
   useLayoutEffect(() => {
     if (!switching) setPresentedKey(visibleKey);
-    root.current?.toggleAttribute('inert', visibleKey !== 'root' || switching);
-  }, [visibleKey, switching]);
+    root?.toggleAttribute('inert', visibleKey !== 'root' || switching);
+  }, [root, visibleKey, switching]);
   useEffect(() => {
     setSlow(false);
     if (!switching) return;
@@ -95,8 +96,10 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
   }, [host]);
   if (!host) return children;
   return <div className="relative h-full w-full overflow-hidden bg-[var(--chrome-bg)]">
-    <div ref={root} className="h-full w-full" aria-hidden={visibleKey !== 'root' || switching}
-      style={{ visibility: visibleKey === 'root' ? 'visible' : 'hidden' }}>{children}</div>
+    <div ref={setRoot} className="isolate h-full w-full" aria-hidden={visibleKey !== 'root' || switching}
+      style={{ visibility: visibleKey === 'root' ? 'visible' : 'hidden' }}>
+      <WorkspacePortalContext.Provider value={root}>{children}</WorkspacePortalContext.Provider>
+    </div>
     {snapshot.items.filter(item => item.key !== 'root').map(item => <WorkspaceFrame key={item.key} host={host} item={item} visible={visibleKey === item.key} active={!switching && visibleKey === item.key} />)}
     {restoring && <div className="termdock-boot z-modal-panel" role="status" aria-live="polite">
       {slow || destination?.phase === 'offline' || destination?.phase === 'reconnecting' ? (

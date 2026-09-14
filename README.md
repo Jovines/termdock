@@ -468,3 +468,33 @@ npm publish
 ## 许可证
 
 MIT
+
+### Scheduled tasks from the CLI
+
+`td automation --help` exposes the same scheduled tasks as the web UI. Commands
+return JSON by default (exit 0 on success, 1 on failure), so agents can retain the
+returned `automation.id` and manage their own reminders:
+
+```bash
+td automation create --name 'Review team progress' --every 30 --self \
+  --prompt 'Review collaboration group progress and continue the work'
+td automation list
+td automation show <automation-id>
+td automation pause <automation-id>
+td automation resume <automation-id>
+td automation run <automation-id>
+td automation delete <automation-id>
+```
+
+`--self` identifies the current Termdock session, including tmux sessions surviving
+a service restart. Use `--session <full-session-id>` for another local session, or
+`--command '<agent launch command>'` to open a new session on each run. Existing
+session targets must have an Agent running when the task fires. New sessions use
+the CLI's working directory unless `--cwd` is specified. Prompts can also come
+from `--file <path>` or `--stdin` instead of `--prompt`.
+
+Schedules support `--every <whole minutes>` (1–43200) or `--at HH:MM` with optional
+`--weekdays 1,2,3,4,5` (0=Sunday, 6=Saturday; omitted means every day), using the
+server's timezone. Tasks repeat while enabled and the service is running;
+`--disabled` creates a paused task. A successful run means the task was dispatched,
+not that the Agent has completed the work. Scheduling is local to this service.

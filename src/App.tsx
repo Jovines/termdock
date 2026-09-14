@@ -1,4 +1,5 @@
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
+import { ViewportDiagnostics } from './lib/components/terminal/ViewportDiagnostics';
 import { savedConnection } from './lib/federation/browserIntegration';
 import { consumeWorkspaceSession, getWorkspaceHost, reportWorkspace } from './lib/services/workspaceHost';
 import React, { useEffect, useCallback, useState, useRef } from 'react';
@@ -3369,7 +3370,7 @@ function App() {
                 terminalSettings={terminalSettings}
                 colorTheme={colorTheme}
                 toolbarPresets={toolbarPresets}
-                showDebug={showDebug}
+                showDebug={showDebug && isDesktopViewport}
                 terminalFocusAvailable={terminalFocusAvailable}
                 defaultSessionMode={newSessionMode}
                 defaultTmuxSessionName={newSessionTmuxName}
@@ -5179,7 +5180,9 @@ function App() {
 
       {/* Debug Info Panel */}
       {showDebug && (
-        <div className="fixed bottom-0 left-0 right-0 z-toast max-h-48 overflow-y-auto border-t border-border/15 bg-surface p-3 animate-fade-in">
+        <>
+        {!isDesktopViewport && <ViewportDiagnostics onClose={() => setShowDebug(false)} />}
+        <div className="fixed bottom-0 left-0 right-0 z-toast hidden max-h-48 overflow-y-auto border-t border-border/15 bg-surface p-3 animate-fade-in md:block">
           <div className="flex items-center justify-between mb-2">
             <h4 className="ui-kicker">Debug Info</h4>
             <button
@@ -5194,6 +5197,7 @@ function App() {
             {JSON.stringify(debugInfo, null, 2)}
           </pre>
         </div>
+        </>
       )}
     </div>
   );

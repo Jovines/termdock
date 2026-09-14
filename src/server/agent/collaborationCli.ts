@@ -13,6 +13,8 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   (everywhere an id is taken, the short id shown in deliveries and --text
    output works too; a shorter unique prefix down to 4 characters also resolves —
    an ambiguous prefix is refused, so use more characters or the full id)
+  Scheduled self-reminders: td automation create --name 'Review progress' --every 30 --self --prompt 'Review group progress and continue'
+  Scheduling help: td automation --help
   status | capabilities
   rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
   send <session-id> <message> | reply <message-id> <message> | handoff <session-id> <message>
@@ -45,6 +47,10 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     rides the delivery shell header)
   rename <session-id> <name…> (rename a member of any shared group;
     trailing words join as the new name; roster and shells show it at once)
+  capture <session-id> [--text]
+    (查看伙伴正在做什么：读取同组、本机 tmux 成员的当前屏幕，不发送按键、不打断对方。
+    需要了解进展、排查卡住或决定是否跟进时先 capture；不是完整聊天历史或完成凭证。
+    用 status --text 查成员 ID；不支持远端成员，远端请 send 询问进展。)
   drive <session-id> approve|enter|escape|space|left|right|up|down|capture
   drive <session-id> run <command…>
     (drive the terminal of a member session you share a group with — terminal
@@ -102,7 +108,13 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
       } else throw new Error(`Unknown collaboration option: --${flag}`);
     } else positional.push(value);
   }
-  const action = (options.help ? 'help' : positional.shift() ?? 'status') as CollaborationCommand['action'];
+  const requestedAction = options.help ? 'help' : positional.shift() ?? 'status';
+  // A discoverable read-only entry point, sharing capture's existing scope and transport.
+  if (requestedAction === 'capture') {
+    if (positional.length !== 1) throw new Error('Usage: td collab capture <session-id> [--text]');
+    positional.push('capture');
+  }
+  const action = (requestedAction === 'capture' ? 'drive' : requestedAction) as CollaborationCommand['action'];
   if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
@@ -254,7 +266,21 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       } catch { /* help stays available without a server or session */ }
       return 0;
     }
-    if (command.action === 'capabilities' || command.action === 'status') { output(await request('GET', command.action === 'status' ? '/peers' : '/capabilities')); return 0; }
+    if (command.action === 'capabilities' || command.action === 'status') {
+      const result = await request('GET', command.action === 'status' ? '/peers' : '/capabilities');
+      output(result);
+      if (command.action === 'status' && o.text && Array.isArray(result.peers) && result.peers.length) {
+        io.write('查看伙伴当前屏幕（只读，仅本机 tmux）：');
+        for (const peer of result.peers) {
+          const id = peer.sessionId;
+          if (typeof id !== 'string' || id === result.source?.sessionId) continue;
+          io.write(`- ${peer.name || id}：${id.startsWith('remote:')
+            ? `远端成员，请用 td collab send ${id} "当前进展？" --text`
+            : `td collab capture ${id} --text`}`);
+        }
+      }
+      return 0;
+    }
     if (command.action === 'rebind') { output(await request('POST', '/route/rebind', { pane: o.pane ?? null })); return 0; }
     if (command.action === 'inbox') {
       let cursor = o.cursor as string | undefined;

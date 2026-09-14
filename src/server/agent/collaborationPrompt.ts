@@ -157,7 +157,9 @@ export function formatCollaborationDelivery(input: {
     }),
   ];
 
-  const notes = [...routingHelp, ...dynamicNotices, '更多操作：`td collab --help`。'];
+  const captureHelp = '想看伙伴正在做什么、是否卡住：先用 `td collab capture <会话ID> --text` 只读当前屏幕，不打断对方；ID 用 `td collab status --text` 查。仅同组本机 tmux；远端用 send 询问。快照不等于任务完成，按需查看，避免循环轮询。';
+  const notes = [...routingHelp, ...dynamicNotices, '更多操作：`td collab --help`。',
+    ...(input.showRoutingHelp === false ? [] : [captureHelp])];
   // Notes (education + dynamic notices) live inside the shell, after the last
   // message, so the closing rule still marks the end of the delivered block.
   if (!blocks.length) return notes.join('\n');
