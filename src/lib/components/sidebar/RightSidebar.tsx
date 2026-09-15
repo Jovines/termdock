@@ -6474,6 +6474,7 @@ export function RightSidebar(
   const [recentCommitsOpen, setRecentCommitsOpen] = useState(false);
   const [recentCommitQuery, setRecentCommitQuery] = useState('');
   const deferredRecentCommitQuery = useDeferredValue(recentCommitQuery);
+  const [commitSyncStatus, setCommitSyncStatus] = useState<Record<string, 'ahead' | 'behind' | 'synced'>>({});
   const [recentCommits, setRecentCommits] = useState<string[]>([]);
   const [recentCommitsLoading, setRecentCommitsLoading] = useState(false);
   const [recentCommitsLoadingMore, setRecentCommitsLoadingMore] = useState(false);
@@ -8259,6 +8260,7 @@ export function RightSidebar(
         setRecentCommitsHasMore(false);
         return;
       }
+      setCommitSyncStatus((current) => reset ? (result.commitSyncStatus ?? {}) : { ...current, ...result.commitSyncStatus });
       setRecentCommits((current) => (reset ? result.commits : [...current, ...result.commits]));
       setRecentCommitsHasMore(result.hasMore);
     } catch (error) {
@@ -8278,7 +8280,7 @@ export function RightSidebar(
   useEffect(() => {
     if (!recentCommitsOpen) return;
     void loadRecentCommits({ reset: true });
-  }, [deferredRecentCommitQuery, loadRecentCommits, recentCommitsOpen]);
+  }, [deferredRecentCommitQuery, loadRecentCommits, recentCommitsOpen, activeGitActionContext?.ahead, activeGitActionContext?.behind, activeGitActionContext?.upstream]);
 
   const handleRecentCommitsScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const target = event.currentTarget;
@@ -10431,6 +10433,11 @@ export function RightSidebar(
                         >
                           <span className="shrink-0 text-[color:var(--diff-hunk-accent)]">{hash}</span>
                           <span className="min-w-0 flex-1 truncate text-muted-foreground" title={message}>{message}</span>
+                          {commitSyncStatus[hash] && (
+                            <span className={`shrink-0 rounded px-1 font-sans text-[10px] ${commitSyncStatus[hash] === 'ahead' ? 'bg-accent/10 text-accent' : commitSyncStatus[hash] === 'behind' ? 'bg-surface-2 text-[color:var(--warning)]' : 'text-muted-foreground'}`}>
+                              {t(commitSyncStatus[hash] === 'ahead' ? 'rightSidebar.commitAhead' : commitSyncStatus[hash] === 'behind' ? 'rightSidebar.commitBehind' : 'rightSidebar.commitSynced')}
+                            </span>
+                          )}
                           {commitDiffLoading === hash && <RiLoader size={11} className="shrink-0 animate-spin text-muted-foreground" />}
                         </button>
                       );

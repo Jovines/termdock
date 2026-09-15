@@ -20,6 +20,7 @@ if (process.argv.slice(2).some(arg => arg === '--federation-pairing' || arg === 
   process.exit(await runFederationCli(process.argv.slice(2)));
 }
 
+import { parseNotifyCommand, NOTIFY_HELP, NOTIFY_PROMPT, type NotifyCommand } from './agent/notifyCli.js';
 import { detectLocalSessionContext, resolveLocalCollaborationContext } from './agent/localSessionContext.js';
 import { parseAutomationCommand, executeAutomationCommand, AUTOMATION_HELP, type AutomationCommand } from './agent/automationCli.js';
 import { parseCollaborationCommand, executeCollaborationCommand, COLLAB_HELP, type CollaborationCommand } from './agent/collaborationCli.js';
@@ -173,6 +174,7 @@ interface CliOptions {
   agentEvent?: { slug: string; event: string; status?: string };
   collab?: CollaborationCommand;
   automation?: AutomationCommand;
+  notify?: NotifyCommand;
 }
 
 interface ServerState {
@@ -283,6 +285,8 @@ Short commands:
   agent-event <slug> <event> [status]
                      Emit one lifecycle/status event from an Agent hook.
   pi                 Same as agent-plugin
+  n [message]       Progress reminder; run td n for help and Agent instructions
+  notify [message]  Same as n (see td n --prompt)
   automation         Manage scheduled tasks (see td automation --help)
   collab status      Show this Session's collaboration groups and peers
   collab inbox       Read messages without acknowledging (see collab --help)
@@ -677,6 +681,7 @@ function parseArgs(argv: string[]): CliOptions {
   let agentEvent: { slug: string; event: string; status?: string } | undefined;
   let collab: CliOptions['collab'];
   let automation: AutomationCommand | undefined;
+  let notify: NotifyCommand | undefined;
 
   // Short command aliases for the common path. Keep these positional-only so
   // long-form flags remain the single source of truth for option semantics.
@@ -769,6 +774,10 @@ function parseArgs(argv: string[]): CliOptions {
         console.error(`${ICON.err} ${c.red('Usage: td agent-event <slug> <event> [status]')}`);
         process.exit(1);
       }
+    } else if (command === 'notify' || command === 'n') {
+      try { notify = parseNotifyCommand(argv.slice(1)); }
+      catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: getMessage(error) })); process.exit(1); }
+      argv = [];
     } else if (command === 'automation') {
       try { automation = parseAutomationCommand(argv.slice(1)); }
       catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: getMessage(error) })); process.exit(1); }
@@ -1146,6 +1155,7 @@ function parseArgs(argv: string[]): CliOptions {
     agentEvent,
     collab,
     automation,
+    notify,
   };
 }
 
@@ -1354,6 +1364,26 @@ async function getLocalJson(baseUrl: string, token: string, endpoint: string, ti
     req.on('error', reject);
     req.end();
   });
+}
+
+async function runNotify(command: NotifyCommand): Promise<void> {
+  if (command.help) { console.log(NOTIFY_HELP); return; }
+  if (command.prompt) { console.log(NOTIFY_PROMPT); return; }
+  try {
+    const state = getRunningState();
+    if (!state?.localApiToken) throw new Error('Termdock is not running or its local API token is unavailable.');
+    const context = await resolveLocalCollaborationContext(command.session);
+    if (!Object.keys(context).length) throw new Error('Cannot identify the session; run inside Termdock or pass --session <full-session-id>.');
+    const baseUrl = state.localUrl ?? `${state.scheme ?? 'http'}://${state.host === '0.0.0.0' ? 'localhost' : state.host}:${state.port}`;
+    const response = await postLocalJson(baseUrl, state.localApiToken, '/api/terminal/operations/notify', {
+      ...context, message: command.message, title: command.title,
+    }, 5000);
+    console.log(response.body);
+    process.exitCode = response.statusCode === 200 ? 0 : 1;
+  } catch (error) {
+    console.error(JSON.stringify({ ok: false, error: getMessage(error) }));
+    process.exitCode = 1;
+  }
 }
 
 async function runAutomation(command: AutomationCommand): Promise<void> {
@@ -3609,6 +3639,11 @@ async function main(): Promise<void> {
 
   if (options.agentEvent) {
     runAgentEvent(options.agentEvent);
+  }
+
+  if (options.notify) {
+    await runNotify(options.notify);
+    return;
   }
 
   if (options.automation) {

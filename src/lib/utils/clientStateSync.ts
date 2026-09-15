@@ -54,7 +54,18 @@ export interface ControlUpdateStateEvent {
   state: TermdockUpdateState;
 }
 
+export interface ControlSessionNoticeEvent {
+  type: 'session-notice';
+  id: string;
+  sessionId: string;
+  sessionName: string;
+  title?: string;
+  message: string;
+  createdAt: number;
+}
+
 export type ControlEvent =
+  | ControlSessionNoticeEvent
   | ControlSnapshot
   | ControlConfigUpdatedEvent
   | ControlContextDraftEvent
@@ -182,13 +193,24 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot | TermdockUpdateState; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null; pinnedExplorerRoots?: unknown } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot | TermdockUpdateState; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null; pinnedExplorerRoots?: unknown; id?: unknown; sessionId?: unknown; sessionName?: unknown; message?: unknown; title?: unknown; createdAt?: unknown } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
       return;
     }
     if (!msg) return;
+    if (msg.type === 'session-notice') {
+      if (typeof msg.id !== 'string' || typeof msg.sessionId !== 'string' || typeof msg.sessionName !== 'string'
+        || typeof msg.message !== 'string' || !msg.message.trim() || msg.message.length > 4000
+        || (msg.title !== undefined && (typeof msg.title !== 'string' || msg.title.length > 120))
+        || typeof msg.createdAt !== 'number') return;
+      const notice = msg as ControlSessionNoticeEvent;
+      for (const listener of sync.listeners) {
+        try { listener(notice); } catch (error) { console.error('[clientStateSync] listener threw:', error); }
+      }
+      return;
+    }
     if (msg.type === 'update-state') {
       const state = msg.state as Partial<TermdockUpdateState> | undefined;
       if (!state || typeof state.status !== 'string' || typeof state.currentVersion !== 'string') return;

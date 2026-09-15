@@ -447,6 +447,9 @@ export type TranslationDictionary = {
     commitMessagePlaceholder: string;
     commitChanges: string;
     commitNeedsStaged: string;
+    commitAhead: string;
+    commitBehind: string;
+    commitSynced: string;
     recentCommitsTitle: string;
     recentCommitsSearchPlaceholder: string;
     recentCommitsLoadMore: string;

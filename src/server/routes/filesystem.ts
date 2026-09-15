@@ -1,3 +1,4 @@
+import { readRecentCommitHistory } from '../utils/recentCommitHistory.js';
 import { AUTH_COOKIE, isSessionValid } from '../utils/authProtection.js';
 import { Router, type Request, type Response } from 'express';
 import crypto from 'crypto';
@@ -5005,38 +5006,15 @@ router.get('/git-recent-commits', async (req: Request, res: Response) => {
       return;
     }
     repoRootForLog = repoRoot;
-    const fetchCount = limit + 1;
-    const logArgs = ['log', '--oneline', `--skip=${skip}`, `-${fetchCount}`];
-    if (query) {
-      logArgs.push('--regexp-ignore-case', '--all-match', `--grep=${query}`);
-    }
-    let output = await withTimeout(
-      execGit(logArgs, repoRoot, controller.signal).catch(emptyOnNonAbortGitError),
+    const { commits: page, hasMore, commitSyncStatus, upstream } = await withTimeout(
+      readRecentCommitHistory((args) => execGit(args, repoRoot, controller.signal), { skip, limit, query }),
       GIT_ROUTE_TIMEOUT_MS,
-      'Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+      'Recent commits took too long.',
       'GIT_RECENT_COMMITS_TIMEOUT',
-      () => controller.abort(new OperationTimeoutError('Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_RECENT_COMMITS_TIMEOUT')),
+      () => controller.abort(new OperationTimeoutError('Recent commits took too long.', 'GIT_RECENT_COMMITS_TIMEOUT')),
     );
-    let commits = output.split('\n').map((line) => line.trim()).filter(Boolean);
-    if (query && commits.length === 0 && /^[0-9a-f]{4,40}$/i.test(query)) {
-      const hashSearchLimit = Math.max(fetchCount + skip, 200);
-      output = await withTimeout(
-        execGit(['log', '--oneline', '--abbrev=40', `-${hashSearchLimit}`], repoRoot, controller.signal).catch(emptyOnNonAbortGitError),
-        GIT_ROUTE_TIMEOUT_MS,
-        'Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.',
-        'GIT_RECENT_COMMITS_TIMEOUT',
-        () => controller.abort(new OperationTimeoutError('Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_RECENT_COMMITS_TIMEOUT')),
-      );
-      commits = output
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.toLowerCase().startsWith(query.toLowerCase()))
-        .slice(skip, skip + fetchCount);
-    }
-    const hasMore = commits.length > limit;
-    const page = commits.slice(0, limit);
     logFsIo({ id: requestId, action, op: 'git.recent-commits', startedAt, status: 'ok', cwd: resolvedCwd, repoRoot, count: page.length, extra: { requestSlotId, query, skip, limit, hasMore } });
-    res.json({ available: true, cwd: resolvedCwd, root: repoRoot, commits: page, hasMore, skip, limit, query });
+    res.json({ available: true, cwd: resolvedCwd, root: repoRoot, commits: page, hasMore, skip, limit, query, commitSyncStatus, upstream });
   } catch (error) {
     const payload = getErrorPayload(error);
     logFsIo({ id: requestId, action, op: 'git.recent-commits', startedAt, status: 'error', cwd, repoRoot: repoRootForLog, code: payload.code, error: payload.error, extra: { requestSlotId, query, skip, limit } });

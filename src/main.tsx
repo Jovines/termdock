@@ -12,6 +12,7 @@ const DiffReviewLab = lazy(() => import('./lib/components/sidebar/DiffReviewLab'
 import { ErrorBoundary } from './lib/components/ui/ErrorBoundary';
 import { syncInitialViewportCssVars } from './lib/hooks/useViewportHeight';
 import { I18nProvider } from './lib/i18n';
+import { SessionNoticeBridge, SessionNoticeCenter } from './lib/components/SessionNotice';
 import { PwaUpdateNotice } from './lib/components/PwaUpdateNotice';
 import { setupPwaUpdateReload } from './lib/utils/pwaUpdate';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
@@ -43,7 +44,7 @@ try {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <I18nProvider>
-      {window.parent === window && <PwaUpdateNotice />}
+      {window.parent === window && <><PwaUpdateNotice /><SessionNoticeCenter /></>}
       <ErrorBoundary>
         <Suspense fallback={<div className="termdock-boot" role="status">Loading Termdock</div>}>
         {(() => {
@@ -51,7 +52,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           if (params.get('dag-playground') === '1') return <DagPlayground />;
           if (params.get('diff-review-lab') === '1') return <DiffReviewLab />;
           if (params.get('diff-lab') === '1') return <DiffLab />;
-          return <ServiceWorkspaceHost><SecureAccessGate><App /></SecureAccessGate></ServiceWorkspaceHost>;
+          return <ServiceWorkspaceHost><SecureAccessGate><SessionNoticeBridge /><App /></SecureAccessGate></ServiceWorkspaceHost>;
         })()}
       </Suspense>
       </ErrorBoundary>

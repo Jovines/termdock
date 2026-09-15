@@ -1,3 +1,4 @@
+import { progressRoutes } from '../notifications/progressRoutes.js';
 import { ensureNodePty } from '../utils/ensureNodePty.js';
 import { PtySpawnBackoff, PtySpawnDeferredError } from '../utils/ptySpawnBackoff.js';
 import { collaborationGroupRoutes } from '../agent/collaborationGroupRoutes.js';
@@ -6460,6 +6461,20 @@ router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => 
     res.status(400).json({ error: getErrorMessage(error) });
   }
 });
+
+router.use('/operations/notify', progressRoutes({
+  resolveSession: resolveFrontendSessionId,
+  sessionName: (id) => globalSessionState.sessions.find((session) => session.sessionId === id)?.name,
+  send: (event) => {
+    const payload = JSON.stringify(event);
+    let connections = 0;
+    for (const ws of controlClients.values()) {
+      if (ws.readyState !== ws.OPEN) continue;
+      try { ws.send(payload); connections++; } catch { /* Disconnected client. */ }
+    }
+    return connections;
+  },
+}));
 
 router.get('/operations/orchestration/peers', async (req, res) => {
   const sourceSessionId = resolveFrontendSessionId(req.query);

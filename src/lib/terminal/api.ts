@@ -3381,6 +3381,8 @@ export async function getCommitDiff(options: { cwd?: string | null; repoRoot?: s
 }
 
 export interface RecentCommitsResponse {
+  commitSyncStatus?: Record<string, 'ahead' | 'behind' | 'synced'>;
+  upstream?: string | null;
   available: boolean;
   cwd?: string;
   root?: string;

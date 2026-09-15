@@ -1,3 +1,4 @@
+import { SessionNoticeUnreadBadge } from '../SessionNoticeUnreadBadge';
 import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { ServiceSwitcher } from '../ServiceSwitcher';
 import { openRemoteSession } from '../../federation/remoteSession';
@@ -923,6 +924,7 @@ export function LeftSidebar(
             } ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>
             {displayName}
           </span>
+          <SessionNoticeUnreadBadge sessionIds={[session.id]} />
         </button>
         {beforeActions}
         <button
@@ -2020,6 +2022,7 @@ export function LeftSidebar(
                                 {groupReview > 0 && (
                                   <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)] animate-pulse" />
                                 )}
+                                <SessionNoticeUnreadBadge sessionIds={group.sessions.map(session => session.id)} />
                                 <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
                               </button>
                               {!collapsed && (
