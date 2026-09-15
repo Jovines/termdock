@@ -21,7 +21,7 @@ export function SplitPaneTitle({ session, active, onActivate, onToggleRightSideb
   });
 
   return (
-    <div className="swiper-no-swiping flex h-6 min-h-6 shrink-0 items-center border-b border-border app-chrome-bg">
+    <div data-pane-titlebar="true" className="swiper-no-swiping flex h-6 min-h-6 shrink-0 items-center border-b border-border app-chrome-bg">
     <button
       type="button"
       data-split-pane-title={session.id}

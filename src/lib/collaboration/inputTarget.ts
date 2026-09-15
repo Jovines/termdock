@@ -1,9 +1,20 @@
+import { collaborationPaneId, useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 type InputReceiver = (text: string) => void;
-const receivers = new Map<string, InputReceiver>();
+const receivers = new Map<string, { receive: InputReceiver; requiresFocus: boolean }>();
 let activeKey: string | undefined;
-function activeReceiver() { return receivers.get(activeKey ?? ''); }
+function activeReceiver() {
+  const pane = useCollaborationPanelDock.getState().activePaneId;
+  for (const [key, entry] of receivers) {
+    if (entry.requiresFocus && pane === collaborationPaneId(key)) return entry.receive;
+  }
+  const entry = receivers.get(activeKey ?? '');
+  return entry && !entry.requiresFocus ? entry.receive : undefined;
+}
 export function focusCollaborationInput(key: string): void {
-  if (receivers.has(key)) activeKey = key;
+  const entry = receivers.get(key);
+  if (!entry) return;
+  if (entry.requiresFocus) useCollaborationPanelDock.getState().setActivePane(collaborationPaneId(key));
+  else activeKey = key;
 }
 
 /** Only explicit insert/paste actions use this target; terminal typing stays local. */
@@ -14,9 +25,9 @@ export function routeCollaborationInput(text: string): boolean {
   return true;
 }
 
-export function registerCollaborationInput(next: InputReceiver, key = 'default'): () => void {
-  receivers.set(key, next);
-  activeKey = key;
+export function registerCollaborationInput(next: InputReceiver, key = 'default', requiresFocus = false): () => void {
+  receivers.set(key, { receive: next, requiresFocus });
+  if (!requiresFocus) activeKey = key;
   const insert = (event: Event) => {
     const { text, nonce } = (event as CustomEvent<{ text?: string; nonce?: string }>).detail ?? {};
     if (!text || activeReceiver() !== next) return;
@@ -26,7 +37,7 @@ export function registerCollaborationInput(next: InputReceiver, key = 'default')
   };
   window.addEventListener('termdock-insert-reference', insert, true);
   return () => {
-    if (receivers.get(key) === next) {
+    if (receivers.get(key)?.receive === next) {
       receivers.delete(key);
       if (activeKey === key) activeKey = [...receivers.keys()].at(-1);
     }

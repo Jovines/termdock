@@ -434,6 +434,28 @@ describe('persistent collaboration composer', () => {
   }
   afterEach(() => vi.unstubAllGlobals());
 
+  it('clears a restart-time sync error after polling recovers without losing the draft or hiding send failures', async () => {
+    const timers = vi.spyOn(window, 'setInterval');
+    try {
+      apiMocks.listCollaborationMessages.mockRejectedValueOnce(new Error('Secure transport unavailable'));
+      const input = await openFloating();
+      expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('Secure transport unavailable'));
+      fireEvent.change(input, { target: { value: '保留这份草稿' } });
+      const poll = timers.mock.calls.find(([, delay]) => delay === 3_000)?.[0];
+      expect(typeof poll).toBe('function');
+      await act(async () => { (poll as () => void)(); });
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(input.value).toBe('保留这份草稿');
+
+      apiMocks.sendCollaborationMessage.mockRejectedValueOnce(new Error('消息发送未确认'));
+      await userEvent.click(screen.getByRole('button', { name: '发送' }));
+      expect(await screen.findByText('消息发送未确认')).toBeTruthy();
+      await act(async () => { (poll as () => void)(); });
+      expect(screen.getByText('消息发送未确认')).toBeTruthy();
+      expect(input.value).toBe('保留这份草稿');
+    } finally { timers.mockRestore(); }
+  });
+
   it('receives references and pasted paths, keeps the draft on restoring the panel, and releases terminal routing', async () => {
     const input = await openFloating();
     expect(screen.queryByRole('button', { name: '关闭 Agent 工作台' })).toBeNull();

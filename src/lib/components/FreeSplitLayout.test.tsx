@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 // @vitest-environment jsdom
 import { useEffect } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -7,7 +8,7 @@ import { FreeSplitLayout } from './FreeSplitLayout';
 import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 const api = vi.hoisted(() => ({ getSettings: vi.fn().mockResolvedValue({}), updateSettings: vi.fn().mockResolvedValue({}) }));
 vi.mock('../terminal/api', () => api);
-afterEach(() => { cleanup(); useCollaborationPanelDock.setState({ docks: {}, hosts: {} }); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); useCollaborationPanelDock.setState({ docks: {}, hosts: {}, activePaneId: null }); vi.clearAllMocks(); });
 it('renders four independent controls and resizes without remounting terminal contents', async () => {
   const mounts = vi.fn(), unmounts = vi.fn();
   function Terminal({ id }: { id: string }) { useEffect(() => { mounts(id); return () => { unmounts(id); }; }, [id]); return <button data-split-pane-title={id}>{id}</button>; }
@@ -51,12 +52,12 @@ it('drags a leaf into the upper row and cancels an outside drop without losing p
   expect(pane('d').style.width).toBe('100%');
   expect(pane('c').style.transform).toBe('');
   expect(view.container.querySelector('[data-drag-placeholder]')).toBeNull();
-  const before = pane('a').style.cssText;
+  const before = [pane('a').style.left, pane('a').style.top, pane('a').style.width, pane('a').style.height];
   fireEvent.pointerDown(screen.getByRole('button', { name: 'a' }), { button: 0, clientX: 260, clientY: 20 });
   fireEvent.pointerMove(container, { clientX: 550, clientY: 650 });
   fireEvent.pointerMove(container, { clientX: -10, clientY: -10 });
   fireEvent.pointerUp(container, { clientX: -10, clientY: -10 });
-  expect(pane('a').style.cssText).toBe(before);
+  expect([pane('a').style.left, pane('a').style.top, pane('a').style.width, pane('a').style.height]).toEqual(before);
   expect(view.container.querySelectorAll('[data-layout-pane]')).toHaveLength(4);
   vi.unstubAllGlobals();
 });
@@ -90,4 +91,24 @@ it('keeps multiple groups in independent dock leaves and removes only the closed
   await waitFor(() => expect(view.container.querySelectorAll('[data-layout-pane]')).toHaveLength(3));
   expect(useCollaborationPanelDock.getState().hosts.beta).toBe(beta);
   expect(useCollaborationPanelDock.getState().hosts.alpha).toBeUndefined();
+});
+
+it('selects portal panes, releases old text focus and restores the terminal when docking closes', async () => {
+  function Composer() {
+    const host = useCollaborationPanelDock(state => state.hosts.focus);
+    return host ? createPortal(<textarea aria-label="panel draft" />, host) : null;
+  }
+  const view = render(<><FreeSplitLayout layoutId="focus" panes={[{ id: 'terminal', content: <textarea aria-label="terminal input" /> }]} /><Composer /></>);
+  await act(async () => {});
+  act(() => useCollaborationPanelDock.getState().setDock('focus', { sessionId: 'terminal', side: 'right' }));
+  const composer = await screen.findByRole('textbox', { name: 'panel draft' });
+  const terminal = screen.getByRole('textbox', { name: 'terminal input' });
+  act(() => terminal.focus());
+  expect(useCollaborationPanelDock.getState().activePaneId).toBe('terminal');
+  fireEvent.pointerDown(composer);
+  expect(document.activeElement).not.toBe(terminal);
+  expect(useCollaborationPanelDock.getState().activePaneId).toBe('@collaboration:focus');
+  expect(view.container.querySelector('[data-pane-active="true"]')?.getAttribute('data-layout-pane')).toBe('@collaboration:focus');
+  act(() => useCollaborationPanelDock.getState().setDock('focus', null));
+  expect(useCollaborationPanelDock.getState().activePaneId).toBe('terminal');
 });

@@ -1,3 +1,4 @@
+import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 import { legacySplitTree } from '../terminal/freeSplitLayout';
 import { FreeSplitLayout } from './FreeSplitLayout';
 import { useSessionOrderStore } from '../stores/useSessionOrderStore';
@@ -431,6 +432,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const debugTerminal = useMemo(() => createDebugLogger('terminal'), []);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const selectedPaneId = useCollaborationPanelDock(state => state.activePaneId);
+  useEffect(() => { useCollaborationPanelDock.getState().setActivePane(activeSessionId); }, [activeSessionId]);
   const [pendingSwitchSessionId, setPendingSwitchSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [resumeRequest, setResumeRequest] = useState<ResumeRequest>({
@@ -1571,6 +1574,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     sessionId: string,
     options: { preserveMobileKeyboard?: boolean } = {},
   ) => {
+    useCollaborationPanelDock.getState().setActivePane(sessionId);
     const previousSessionId = activeSessionIdRef.current;
     const shouldKeepKeyboardOpen = !!previousSessionId &&
       keyboardOpenBySessionRef.current[previousSessionId] === true;
@@ -1648,6 +1652,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const handleSwitchSession = useCallback((sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
+      useCollaborationPanelDock.getState().setActivePane(sessionId);
       if (sessionId === activeSessionIdRef.current) return;
       // A sidebar selection always changes the visible slide immediately.
       // Readiness only controls how long the target remains pending/loading.
@@ -2012,7 +2017,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       containerStyle?: React.CSSProperties;
     } = {},
   ) => {
-    const isActive = session.id === activeSessionId;
+    const isActive = session.id === activeSessionId && !selectedPaneId?.startsWith('@collaboration:');
     const isLayoutVisible = visibleSessionIds.has(session.id) && !options.hidden;
     const shouldMountViewport = connectionPriorityReady && shouldMountSessionViewport({
       sessionId: session.id,

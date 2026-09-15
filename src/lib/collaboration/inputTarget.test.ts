@@ -1,3 +1,4 @@
+import { useCollaborationPanelDock, collaborationPaneId } from '../stores/useCollaborationPanelDock';
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import { focusCollaborationInput, registerCollaborationInput, routeCollaborationInput } from './inputTarget';
@@ -38,4 +39,22 @@ it('routes references to the focused group and preserves another receiver when o
   expect(b).toHaveBeenCalledWith('for B');
   closeB();
   expect(routeCollaborationInput('closed')).toBe(false);
+});
+
+it('docked composers receive inserts only while their pane is selected', () => {
+  const a = vi.fn(), b = vi.fn();
+  useCollaborationPanelDock.getState().setActivePane('terminal');
+  const closeA = registerCollaborationInput(a, 'dock-a', true);
+  const closeB = registerCollaborationInput(b, 'dock-b', true);
+  expect(routeCollaborationInput('terminal reference')).toBe(false);
+  focusCollaborationInput('dock-a');
+  expect(routeCollaborationInput('A reference')).toBe(true);
+  expect(a).toHaveBeenCalledExactlyOnceWith('A reference');
+  useCollaborationPanelDock.getState().setActivePane(collaborationPaneId('dock-b'));
+  routeCollaborationInput('B reference');
+  expect(b).toHaveBeenCalledExactlyOnceWith('B reference');
+  useCollaborationPanelDock.getState().setActivePane('terminal');
+  expect(routeCollaborationInput('back to terminal')).toBe(false);
+  closeA(); closeB();
+  useCollaborationPanelDock.getState().setActivePane(null);
 });

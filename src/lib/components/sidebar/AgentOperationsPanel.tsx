@@ -232,7 +232,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         aria-label="关闭 Agent 工作台"
       />}
       <section onPointerDown={event => { if (docked) event.stopPropagation(); }} ref={panelRef} aria-label={docked ? '工作组消息分屏' : floating ? '工作组消息浮窗' : 'Agent 工作台'} style={floating && !docked ? { display: floatingVisible ? undefined : 'none', left: position.x, top: position.y, ...(panelSize ? { width: `min(calc(100vw - 24px), max(280px, ${panelSize.width * 100}vw))`, height: `min(calc(100dvh - 24px), max(220px, ${panelSize.height * 100}dvh))` } : {}), maxHeight: viewportHeight ? viewportHeight - 24 : 'calc(100dvh - 24px)' } : undefined} className={docked ? 'flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface' : floating ? 'fixed z-menu-panel flex w-[min(400px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-xl' : 'fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[8%] sm:bottom-auto sm:max-h-[84vh]'}>
-        <header data-panel-drag-title={docked ? "true" : undefined} onDragStart={event => event.preventDefault()} className={`flex items-center gap-2 border-b border-border/15 ${docked ? 'h-6 min-h-6 shrink-0 cursor-grab select-none bg-[var(--chrome-bg)] px-2 active:cursor-grabbing' : floating ? 'px-3 py-2 cursor-move touch-none select-none' : 'px-4 py-3'}`}
+        <header data-pane-titlebar={docked ? "true" : undefined} data-panel-drag-title={docked ? "true" : undefined} onDragStart={event => event.preventDefault()} className={`flex items-center gap-2 border-b border-border/15 ${docked ? 'h-6 min-h-6 shrink-0 cursor-grab select-none bg-[var(--chrome-bg)] px-2 active:cursor-grabbing' : floating ? 'px-3 py-2 cursor-move touch-none select-none' : 'px-4 py-3'}`}
           onPointerDown={event => {
             if (!floating || docked || event.button !== 0 || (event.target as Element).closest('button')) return;
             drag.current = { x: event.clientX, y: event.clientY, left: position.x, top: position.y };
@@ -289,11 +289,11 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         </div>}
         {launcherError && <div className="mx-4 mt-3 text-[11px] text-muted-foreground">{launcherError}</div>}
         {error && <div className="mx-4 mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{error}</div>}
-        {notice && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
+        {notice && !floating && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className={`min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain ${floating ? 'p-3' : 'p-4'}`}>
           {tab === 'automation' && <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />}
           {preferenceError && <p role="alert" className="text-[11px] text-destructive">{preferenceError}</p>}
-          {tab === 'collaboration' && panelState && <CollaborationTab initialDrafts={latestDrafts.current} onDraftChange={(groupId, draft) => { latestDrafts.current = { ...latestDrafts.current, [groupId]: draft }; }} selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && panelState && <CollaborationTab notice={notice} initialDrafts={latestDrafts.current} onDraftChange={(groupId, draft) => { latestDrafts.current = { ...latestDrafts.current, [groupId]: draft }; }} selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
         {floating && !docked && <button type="button" aria-label="调整协作浮窗大小" className="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize touch-none text-muted-foreground hover:text-primary"
@@ -479,7 +479,8 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+  notice: string | null;
   selectedGroupId: string | null;
   setSelectedGroupId: (id: string | null) => void;
   floatingVisible: boolean;
@@ -496,6 +497,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [messages, setMessages] = useState<CollaborationMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
   const [responseFilter, setResponseFilter] = useState('all');
   const [onlyNew, setOnlyNew] = useState(true);
   const [seenMessages, setSeenMessages] = useState<Set<string>>(new Set());
@@ -511,6 +513,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
   const [spawnCwd, setSpawnCwd] = useState('');
   const [spawnTask, setSpawnTask] = useState('');
   const messageComposerRef = useRef<HTMLElement | null>(null);
+  const requiresPaneFocus = useCollaborationPanelDock(state => !!state.docks[selectedGroupId ?? '']);
   const positionedInitialGroupRef = useRef(false);
   const selectedGroup = selectedGroupId === 'new'
     ? null
@@ -561,8 +564,8 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
     if (!floating || !floatingVisible || !selectedGroup) return;
     return registerCollaborationInput(text => {
       setContent(current => current + (current && !/\s$/.test(current) ? '\n' : '') + text.replace(/\r\n?/g, '\n'));
-    }, selectedGroup.id);
-  }, [floating, floatingVisible, selectedGroup?.id]);
+    }, selectedGroup.id, requiresPaneFocus);
+  }, [floating, floatingVisible, selectedGroup?.id, requiresPaneFocus]);
   useEffect(() => {
     const composer = messageComposerRef.current;
     if (!floating || !composer) return;
@@ -614,6 +617,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
 
   useEffect(() => {
     setMessages([]);
+    setMessagesError(null);
     if (!selectedGroup) { setMessagesLoading(false); return; }
     setMessagesLoading(true);
     let cancelled = false;
@@ -621,14 +625,14 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
     const load = () => {
       const current = ++version;
       void listCollaborationMessages(selectedGroup.id)
-        .then((data) => { if (!cancelled && current === version) setMessages(data.messages); })
-        .catch((error) => { if (!cancelled && current === version) setError(error instanceof Error ? error.message : '消息加载失败'); })
+        .then((data) => { if (!cancelled && current === version) { setMessages(data.messages); setMessagesError(null); } })
+        .catch((error) => { if (!cancelled && current === version) setMessagesError(error instanceof Error ? error.message : '消息加载失败'); })
         .finally(() => { if (!cancelled && current === version) setMessagesLoading(false); });
     };
     load();
     const timer = window.setInterval(load, 3_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [selectedGroup?.id, setError]);
+  }, [selectedGroup?.id]);
 
   useEffect(() => {
     if (!initialGroupId || selectedGroup?.id !== initialGroupId || positionedInitialGroupRef.current) return;
@@ -746,6 +750,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
   };
 
   return <div className={floating ? 'space-y-0' : 'space-y-5'}>
+    {messagesError && <p role="alert" className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">消息同步暂时失败，正在自动重试：{messagesError}</p>}
     <div hidden={floating}>
     <div className="flex items-start justify-between gap-4">
       <div><h3 className="text-[13px] font-medium text-foreground">会话协作</h3><p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted-foreground">创建协作组后，一个 Agent 会话可以把任务直接交给另一个会话。比如“开发”写完代码后通知“测试”检查，测试结果再回复回来；你也可以给单个会话或全组发任务，所有交接和进展都记录在这里。</p></div>
@@ -814,7 +819,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
             event.preventDefault(); void send();
           }
         }} onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); void insertFiles(files); } }} className={`${inputClass} min-h-16 max-h-48 resize-y`} value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入消息，可粘贴引用或文件…" /></label>
-        <div className="mt-2 flex items-center justify-between gap-3"><p className="text-[9px] leading-relaxed text-muted-foreground">{uploadingFiles > 0 ? '正在准备文件路径…' : selectedGroup.federated ? '跨服务消息由当前客户端转发，请保持窗口或网页运行；手机后台可能暂停，返回后继续同步。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || uploadingFiles > 0 || !content.trim() || !recipients.length} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} title="发送（⌘ / Ctrl + Enter）" onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
+        <div className="mt-2 flex items-center justify-between gap-3"><p role="status" aria-live="polite" title={floating && notice ? notice : undefined} className={`min-w-0 flex-1 text-[9px] leading-relaxed ${floating ? 'truncate' : ''} ${floating && notice ? 'text-primary' : 'text-muted-foreground'}`}>{uploadingFiles > 0 ? '正在准备文件路径…' : floating && notice ? notice : selectedGroup.federated ? '跨服务消息由当前客户端转发，请保持窗口或网页运行；手机后台可能暂停，返回后继续同步。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || uploadingFiles > 0 || !content.trim() || !recipients.length} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} title="发送（⌘ / Ctrl + Enter）" onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
       </section>
     </>}
   </div>;
