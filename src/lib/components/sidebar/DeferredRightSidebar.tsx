@@ -1,4 +1,5 @@
 import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
+import { GitLoadingSkeleton } from './GitLoadingSkeleton';
 import { lazy, Suspense, useEffect, useRef, type ComponentProps } from 'react';
 import { X, Search, PencilLine, MoreHorizontal, GitBranch, GitCompare, Folder } from 'lucide-react';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -62,7 +63,7 @@ export function DeferredRightSidebar(props: Props) {
           <div className="h-2" />
         </div>
         <div className="min-h-0 flex-1 bg-surface">
-          <ChangesLoadingSkeleton />
+          {rightTab === 'git' ? <GitLoadingSkeleton /> : <ChangesLoadingSkeleton />}
         </div>
       </div>
     </Sidebar>

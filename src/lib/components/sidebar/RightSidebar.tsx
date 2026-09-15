@@ -1,4 +1,5 @@
 import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
+import { GitLoadingSkeleton } from './GitLoadingSkeleton';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { useInitialGitLoad, waitForGitPreferences } from './useInitialGitLoad';
 import { fetchPreviewResource } from '../../utils/previewResourceCache';
@@ -4120,16 +4121,7 @@ function Pane({ active, mounted = true, fallback = null, children }: { active: b
 }
 
 function GitChangesLoadingState({ slow }: { slow: boolean }) {
-  const { t } = useI18n();
-  return (
-    <div role="status" className="px-3 py-6 text-center text-xs text-muted-foreground">
-      <div className="flex items-center justify-center gap-2">
-        <RiLoader size={13} className="motion-safe:animate-spin" />
-        <span>{t('rightSidebar.loadingGitChanges')}</span>
-      </div>
-      {slow && <div className="mt-1 text-xs text-muted-foreground/75">{t('rightSidebar.loadingGitChangesSlow')}</div>}
-    </div>
-  );
+  return <GitLoadingSkeleton slow={slow} />;
 }
 
 function GitChangesErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -7115,8 +7107,9 @@ export function RightSidebar(
     const expectedRootPath = rootPath;
     // The opt-in lives server-side, so a cold client must read it before deciding.
     // Hydration is memoized, so this is a no-op on every later call.
+    const preparationRequestId = gitBundleRequestIdRef.current;
     await waitForGitPreferences(useSidebarStore.getState().hydrateNestedGitScanRoots);
-    if (!isCurrentSidebarRoot(expectedRootPath)) return null;
+    if (gitBundleRequestIdRef.current !== preparationRequestId || !isCurrentSidebarRoot(expectedRootPath)) return null;
     // `cwd === rootPath` is load-bearing: per-repo fetches pass cwd = repoRoot and
     // must not inherit a workspace-level preference.
     const nestedScanEnabled = cwd === rootPath && isNestedGitScanEnabled(rootPath);
@@ -7309,6 +7302,10 @@ export function RightSidebar(
   useEffect(() => {
     if (!isOpen) {
       gitBundleRequestIdRef.current += 1;
+      // The invalidated request's finally cannot release its loading lease.
+      // Reopening must be able to start again, even before that request settles.
+      resetGitBundleLoading();
+      lastAutoRefreshRootRef.current = null;
       gitDetailsRequestIdRef.current += 1;
       untrackedRequestSeqRef.current += 1;
       gitBundleAbortRef.current?.abort();
@@ -7350,7 +7347,7 @@ export function RightSidebar(
       // Keep diff view mode + wrap preference across close/open so the
       // user's chosen reading mode is preserved within a session.
     }
-  }, [isMobile, isOpen, setRightSearchOpen]);
+  }, [isMobile, isOpen, resetGitBundleLoading, setRightSearchOpen]);
 
   // Focus the search input whenever the search box opens, regardless of whether
   // it was opened by the header button or a global keyboard shortcut.
@@ -10317,7 +10314,7 @@ export function RightSidebar(
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="text-[12px] font-medium text-foreground">{t('rightSidebar.branchSectionTitle')}</div>
-                <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{switchBranch !== activeGitActionBranchLabel ? activeGitActionBranchLabel : null}</div>
+                <div className="mt-0.5 h-4 truncate text-[11px] leading-4 text-muted-foreground">{switchBranch !== activeGitActionBranchLabel ? activeGitActionBranchLabel : null}</div>
               </div>
               <button
                 type="button"
@@ -11350,7 +11347,6 @@ export function RightSidebar(
             >
               <RiGitBranch size={12} />
               {t('rightSidebar.tabGit')}
-              {gitBundleLoading && effectiveRightTab === 'git' ? <RiLoader size={12} className="animate-spin text-muted-foreground" /> : null}
             </button>
             <button
               type="button"
@@ -11363,9 +11359,7 @@ export function RightSidebar(
             >
               <RiGitCompare size={12} />
               {t('rightSidebar.tabChanges')}
-              {gitBundleLoading ? (
-                <RiLoader size={12} className="animate-spin text-muted-foreground" />
-              ) : changedFiles.size > 0 ? (
+              {changedFiles.size > 0 ? (
                 <span className="text-[10px] text-accent">{changedFiles.size}</span>
               ) : null}
             </button>
@@ -11468,9 +11462,9 @@ export function RightSidebar(
               />
             </div>
           ) : (
-          <div className="h-full overflow-y-auto overscroll-contain bg-surface px-3 pb-6">
+          <div className="h-full overflow-y-auto overscroll-contain bg-surface pb-6">
             {gitQuickActionsPanel ? (
-              gitQuickActionsPanel
+              <div className="px-3">{gitQuickActionsPanel}</div>
             ) : gitBundleLoading ? (
               <GitChangesLoadingState slow={gitBundleSlow} />
             ) : gitBundleError ? (

@@ -723,7 +723,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         style={{
           ...(isLeft ? { left: 0 } : { right: 0 }),
           width: drawerWidthPx,
-          maxWidth: '94vw',
+          maxWidth: isLeft ? '94vw' : '95vw',
           transform: `translateX(${initialXRef.current}px)`,
           transition: 'none',
           touchAction: 'pan-y',

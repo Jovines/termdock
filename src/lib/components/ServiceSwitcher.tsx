@@ -34,12 +34,12 @@ export function useServiceWorkspaceActivity(runningCount: number, reviewCount: n
 }
 
 /** Native desktop already has independent service windows. */
-export function ServiceSwitcher() {
+export function ServiceSwitcher({ onReselect }: { onReselect?: () => void }) {
   if (window.termdockDesktop) return null;
-  return <BrowserServiceSwitcher />;
+  return <BrowserServiceSwitcher onReselect={onReselect} />;
 }
 
-function BrowserServiceSwitcher() {
+function BrowserServiceSwitcher({ onReselect }: { onReselect?: () => void }) {
   const [services, setServices] = useState<ServiceConnection[]>([]);
   const [nativeActivity, setNativeActivity] = useState<DesktopServiceActivity[]>([]);
   const [currentId, setCurrentId] = useState(savedConnection()?.targetPeerId);
@@ -85,7 +85,10 @@ function BrowserServiceSwitcher() {
   }, [currentId, services]);
   const choose = async (service: ServiceConnection) => {
     setError('');
-    if (service.targetPeerId && service.targetPeerId === currentId) return;
+    if (service.targetPeerId && service.targetPeerId === currentId) {
+      onReselect?.();
+      return;
+    }
     try {
       const native = window.termdockDesktop;
       if (native?.openServiceConnection) {

@@ -67,6 +67,7 @@ interface LeftSidebarProps {
     customName?: boolean;
   }>;
   activeSessionId: string | null;
+  onJumpToNextAttention?: () => void;
   sessionStates: Map<string, {
     cwd: string | null;
     activeProgram: string | null;
@@ -246,7 +247,7 @@ function StatusDot({
 export function LeftSidebar(
   {
     isOpen, drawerWidthPx, onClose, onOpen,
-    sessions, activeSessionId, sessionStates,
+    sessions, activeSessionId, sessionStates, onJumpToNextAttention,
     onNewSession, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, splitWorkspaces,
     onSetSplitLayout, onReorderSplitWorkspace, onCombineSplitSessions,
     onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
@@ -265,6 +266,7 @@ export function LeftSidebar(
 ) {
   const { t } = useI18n();
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [, requestAttentionScroll] = useState(0);
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
   const [agentOperationsOpen, setAgentOperationsOpen] = useState(false);
@@ -300,6 +302,10 @@ export function LeftSidebar(
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  const sessionListRef = useRef<HTMLDivElement | null>(null);
+  const activeItemLayoutRef = useRef<{
+    item: HTMLButtonElement; top: number; height: number; viewportHeight: number;
+  } | null>(null);
   const collaborationRefreshIdRef = useRef(0);
   const sidebarMemberDragActiveRef = useRef(false);
   const sourceCollaborationGroupIdRef = useRef<string | null>(null);
@@ -520,10 +526,39 @@ export function LeftSidebar(
     return running;
   }, [sessions, sessionStates]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    activeItemRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }, [activeSessionId, isOpen, visibleSessions.length, collapsedGroups]);
+  // Server switches populate sessions, cwd groups and collaboration metadata in
+  // separate commits. Follow the final row geometry, even when the session ID
+  // and count stay the same. Ignore status-only renders and manual scrolling.
+  useLayoutEffect(() => {
+    const item = activeItemRef.current;
+    const list = sessionListRef.current;
+    if (!isOpen || !item || !list) {
+      activeItemLayoutRef.current = null;
+      return;
+    }
+    const viewport = list.getBoundingClientRect();
+    const row = item.getBoundingClientRect();
+    const layout = {
+      item,
+      top: Math.round(row.top - viewport.top + list.scrollTop),
+      height: Math.round(row.height),
+      viewportHeight: list.clientHeight,
+    };
+    const previous = activeItemLayoutRef.current;
+    activeItemLayoutRef.current = layout;
+    if (previous?.item === layout.item && previous.top === layout.top
+      && previous.height === layout.height && previous.viewportHeight === layout.viewportHeight) return;
+    if (sidebarMemberDragActiveRef.current || list.clientHeight === 0) return;
+    // Scroll only this list, synchronously: an in-flight smooth scroll can keep
+    // targeting the old position after grouping moves the row on iOS.
+    const padding = 8;
+    const top = row.top - viewport.top;
+    const bottom = row.bottom - viewport.top;
+    if (top < padding) list.scrollTop += top - padding;
+    else if (bottom > list.clientHeight - padding) {
+      list.scrollTop += bottom - list.clientHeight + padding;
+    }
+  });
 
   // 当前 active session 所在的分组 key（按 cwd 派生），用于「翻页→自动展开/收起」机制。
   // 关闭分组开关或无 active session 时返回 null，不参与自动管理。
@@ -1828,7 +1863,7 @@ export function LeftSidebar(
         <button type="button" aria-label="关闭协作错误提示" className="shrink-0" onClick={() => setCollaborationActionError(null)}><RiCloseLine size={14} /></button>
       </div>}
       {/* Session list */}
-      <div className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
+      <div ref={sessionListRef} className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
         {recoverableTmuxSessions.length > 0 && (
           <section className="mb-2 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
             <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">
@@ -2040,7 +2075,14 @@ export function LeftSidebar(
         )}
       </div>
 
-      <ServiceSwitcher />
+      <ServiceSwitcher onReselect={() => {
+        if (!onJumpToNextAttention) return;
+        // Also reveal an unread row that is already selected but was manually
+        // scrolled out of view; its identity and layout need not change.
+        activeItemLayoutRef.current = null;
+        requestAttentionScroll((request) => request + 1);
+        onJumpToNextAttention();
+      }} />
 
       {newSessionComposerOpen && (
         <NewSessionComposer

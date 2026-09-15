@@ -970,18 +970,8 @@ function App() {
   // Left and right have different ergonomic widths:
   //  - Right (file tree + diff): wide so we can fit a dual-column workspace.
   //  - Left  (session list):     narrow; one row per session is enough.
-  //
-  // Landscape phones get the desktop-sized right drawer so the diff
-  // viewer can show its full workbench (file list + diff + hunk
-  // outline) instead of the cramped single-column mobile layout. The
-  // device's *short* side is < 1024px so the regular desktop check
-  // returns false — the orientation check is what tells us there's
-  // enough horizontal real estate for a wide drawer.
-  const useDesktopDrawer = isDesktopViewport || isLandscape;
   const useDesktopLeftDrawer = isDesktopViewport || isLandscape;
-  const rightDrawerWidthPx = useDesktopDrawer
-    ? Math.min(Math.max(viewportWidth * 0.9, 360), viewportWidth - 56)
-    : Math.min(viewportWidth * 0.92, 420);
+  const rightDrawerWidthPx = viewportWidth * 0.95;
   const leftDrawerWidthPx = useDesktopLeftDrawer
     ? Math.min(Math.max(viewportWidth * 0.22, 280), 340)
     : Math.min(viewportWidth * 0.86, 380);
@@ -5105,6 +5095,7 @@ function App() {
         onReorderSessions={applySessionOrder}
         onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
+        onJumpToNextAttention={attentionSessionIds.length > 0 ? handleJumpToNextAttention : undefined}
         onOpenQuota={() => setIsQuotaOpen(true)}
         updateState={termdockUpdateState}
         updateActionPending={updateActionPending}
@@ -5251,6 +5242,7 @@ function App() {
             onReorderSessions={applySessionOrder}
             onSessionMenu={openTabMenu}
             onOpenSettings={handleOpenSettings}
+            onJumpToNextAttention={attentionSessionIds.length > 0 ? handleJumpToNextAttention : undefined}
             onOpenQuota={() => setIsQuotaOpen(true)}
             updateState={termdockUpdateState}
             updateActionPending={updateActionPending}
