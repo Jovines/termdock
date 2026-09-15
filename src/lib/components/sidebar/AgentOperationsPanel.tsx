@@ -1,4 +1,4 @@
-import { useCollaborationPanelDock, type CollaborationDock } from '../../stores/useCollaborationPanelDock';
+import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { registerCollaborationInput } from '../../collaboration/inputTarget';
 import { escapeShellPath } from '../../desktop/shellPath';
@@ -100,9 +100,9 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
   useEffect(() => {
     if (!floating) useCollaborationPanelDock.getState().setDock(null);
   }, [floating]);
-  const changePanelMode = async (mode: 'floating' | 'docked', side: CollaborationDock['side'] = 'right') => {
+  const changePanelMode = async (mode: 'floating' | 'docked') => {
     if (savingFloating || (mode === 'docked' && !activeSessionId)) return;
-    const nextDock = { sessionId: activeSessionId!, side };
+    const nextDock = { sessionId: activeSessionId!, side: 'right' as const };
     setSavingFloating(true);
     try {
       await saveCollaborationPanel({ mode, ...(mode === 'docked' ? { dock: nextDock } : {}) });
@@ -264,10 +264,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         {floating && !docked && <div className="flex flex-wrap items-center gap-1 border-b border-border/15 px-3 py-1.5">
           <button type="button" disabled={savingFloating} aria-pressed={panelMode === 'floating'} className={`${choiceClass} ${panelMode === 'floating' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('floating')}>浮窗</button>
           <button type="button" disabled={savingFloating || !activeSessionId} aria-pressed={panelMode === 'docked'} className={`${choiceClass} ${panelMode === 'docked' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('docked')}>占用分屏</button>
-          {panelMode === 'docked' && dock?.sessionId !== activeSessionId && <button className={`${choiceClass} border-transparent text-primary`} disabled={savingFloating || !activeSessionId} onClick={() => void changePanelMode('docked', dock?.side)}>移到当前终端</button>}
-          {panelMode === 'docked' && <label className="ml-auto text-[10px] text-muted-foreground">移至 <select aria-label="协作分屏位置" value="" disabled={savingFloating} onChange={event => void changePanelMode('docked', event.target.value as CollaborationDock['side'])} className="rounded border border-border/20 bg-surface-2 px-1 py-1 text-foreground">
-            <option value="" disabled>当前终端…</option><option value="right">右侧</option><option value="left">左侧</option><option value="bottom">下方</option><option value="top">上方</option>
-          </select></label>}
+
         </div>}
         {!floating && <nav className="flex gap-1 border-b border-border/15 px-3 py-2">
           {([
@@ -281,7 +278,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
           ))}
         </nav>}
         {collaborationError && <div role="alert" className="mx-4 mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{collaborationError}<button className={`${buttonClass} ml-2`} onClick={() => void refresh()}>重新加载会话</button></div>}
-        {tab === 'collaboration' && peerState && ['loading', 'partial', 'error', 'unsupported'].includes(peerState.state) && <div role="status" className="mx-4 mt-3 text-[11px] text-muted-foreground">
+        {!floating && tab === 'collaboration' && peerState && ['loading', 'partial', 'error', 'unsupported'].includes(peerState.state) && <div role="status" className="mx-4 mt-3 text-[11px] text-muted-foreground">
           {peerState.state === 'loading' ? '正在加载其他服务的会话；当前服务内可先组队。'
             : peerState.state === 'unsupported' ? '当前客户端不支持跨服务会话，请更新客户端；当前服务内可继续组队。'
             : peerState.state === 'partial' ? '部分服务的协作会话暂不可用；已有成员会保留，恢复后继续同步。'
