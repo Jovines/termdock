@@ -1,23 +1,25 @@
 import { GripVertical } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { getSettings } from '../terminal/api';
-import { collaborationPanelClientId, saveCollaborationPanel } from '../collaboration/panelPreferences';
-import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
+import { collaborationGroupPreferences, openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../collaboration/panelPreferences';
+import { collaborationPaneId, useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 import { fourPaneBoundaries, layoutRects, leafIds, movePane, normalizeSplitNode, presetLayout, pruneLayout, resizeFourBoundary, resizeNode, splitLeaf, type PaneRect, type PaneSide, type SplitNode } from '../terminal/freeSplitLayout';
 
-const COLLABORATION = '@collaboration';
+const isCollaborationPane = (id: string) => id.startsWith('@collaboration:');
 const rectStyle = (r: PaneRect): CSSProperties => ({ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.width * 100}%`, height: `${r.height * 100}%` });
-function CollaborationHost() {
+function CollaborationHost({ groupId }: { groupId: string }) {
   const setHost = useCollaborationPanelDock(state => state.setHost);
-  return <div ref={setHost} className="h-full min-h-0 min-w-0 bg-surface" />;
+  const ref = useCallback((host: HTMLDivElement | null) => setHost(groupId, host), [groupId, setHost]);
+  return <div ref={ref} className="h-full min-h-0 min-w-0 bg-surface" />;
 }
 
 export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree, focusId, mobile = false }: {
   initialTree?: SplitNode; layoutId: string; panes: { id: string; content: ReactNode }[]; preset?: 'horizontal' | 'vertical' | 'grid'; focusId?: string | null; mobile?: boolean;
 }) {
-  const dock = useCollaborationPanelDock(state => state.dock);
+  const docks = useCollaborationPanelDock(state => state.docks);
   const idsKey = JSON.stringify(panes.map(p => p.id));
-  const hasDock = !!dock && panes.some(p => p.id === dock.sessionId);
+  const scopedDocks = Object.entries(docks).filter(([, dock]) => panes.some(p => p.id === dock.sessionId));
+  const dockSpec = JSON.stringify(scopedDocks);
   const container = useRef<HTMLDivElement>(null);
   const [tree, setTree] = useState<SplitNode>(() => initialTree ?? presetLayout(panes.map(p => p.id), mobile ? 'vertical' : preset));
   const treeRef = useRef(tree); treeRef.current = tree;
@@ -27,7 +29,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
   const [drop, setDrop] = useState<{ id: string; side: PaneSide | 'center' } | null>(null);
   const previousPreset = useRef(preset);
   const previousIds = useRef(panes.map(p => p.id));
-  const lastDock = useRef('');
+  const lastDock = useRef<Record<string, string>>({});
   const dirty = useRef(false);
   const persist = () => {
     if (!dirty.current) return;
@@ -39,11 +41,19 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
     void getSettings().then(settings => {
       if (cancelled) return;
       const panel = settings.collaborationPanels?.[collaborationPanelClientId()];
-      // Restore the dock before pruning saved leaves; the sidebar opens its composer asynchronously.
-      if (panel?.floatingGroupId && panel.mode === 'docked' && panel.dock && panes.some(p => p.id === panel.dock!.sessionId) && !useCollaborationPanelDock.getState().dock) {
-        useCollaborationPanelDock.getState().setDock(panel.dock);
+      for (const id of openCollaborationGroups(panel)) {
+        const savedGroup = collaborationGroupPreferences(panel, id);
+        if (savedGroup.mode === 'docked' && savedGroup.dock && panes.some(p => p.id === savedGroup.dock!.sessionId) && !useCollaborationPanelDock.getState().docks[id]) {
+          useCollaborationPanelDock.getState().setDock(id, savedGroup.dock);
+        }
       }
-      const saved = normalizeSplitNode(panel?.layouts?.[layoutId]);
+      let saved = normalizeSplitNode(panel?.layouts?.[layoutId]);
+      if (saved && panel?.floatingGroupId) {
+        const migrate = (node: SplitNode): SplitNode => 'id' in node
+          ? { id: node.id === '@collaboration' ? collaborationPaneId(panel.floatingGroupId!) : node.id }
+          : { ...node, first: migrate(node.first), second: migrate(node.second) };
+        saved = migrate(saved);
+      }
       if (saved) setTree(saved);
       setReady(true);
     }).catch(() => { if (!cancelled) setError('布局加载失败，请刷新重试'); });
@@ -55,7 +65,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
     const ids = JSON.parse(idsKey) as string[];
     const reset = previousPreset.current !== preset;
     previousPreset.current = preset;
-    const dockKey = hasDock ? `${dock!.sessionId}:${dock!.side}` : '';
+
     let next = reset ? presetLayout(ids, preset) : treeRef.current;
     const oldIds = previousIds.current;
     if (!reset && oldIds.length === ids.length && oldIds.every(id => ids.includes(id)) && oldIds.some((id, i) => id !== ids[i])) {
@@ -64,16 +74,22 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
       next = remap(next);
     }
     previousIds.current = ids;
-    const allowed = new Set([...ids, ...(hasDock ? [COLLABORATION] : [])]);
+    const allowed = new Set([...ids, ...scopedDocks.map(([id]) => collaborationPaneId(id))]);
     next = pruneLayout(next, allowed) ?? presetLayout(ids, preset);
     for (const id of ids) if (!leafIds(next).includes(id)) next = { axis: 'x', ratio: 0.5, first: next, second: { id } };
-    if (hasDock && (!leafIds(next).includes(COLLABORATION) || (lastDock.current && lastDock.current !== dockKey))) {
-      next = pruneLayout(next, new Set(ids))!;
-      next = splitLeaf(next, dock!.sessionId, COLLABORATION, dock!.side);
+    const nextDockKeys: Record<string, string> = {};
+    for (const [groupId, dock] of scopedDocks) {
+      const id = collaborationPaneId(groupId);
+      const key = `${dock.sessionId}:${dock.side}`;
+      nextDockKeys[groupId] = key;
+      if (!leafIds(next).includes(id) || (lastDock.current[groupId] && lastDock.current[groupId] !== key)) {
+        next = pruneLayout(next, new Set([...allowed].filter(leaf => leaf !== id)))!;
+        next = splitLeaf(next, dock.sessionId, id, dock.side);
+      }
     }
-    lastDock.current = dockKey;
+    lastDock.current = nextDockKeys;
     if (JSON.stringify(next) !== JSON.stringify(treeRef.current)) { change(next); persist(); }
-  }, [ready, idsKey, preset, hasDock, dock?.sessionId, dock?.side]);
+  }, [ready, idsKey, preset, dockSpec]);
   useEffect(() => {
     const flush = () => persist();
     window.addEventListener('pagehide', flush);
@@ -82,7 +98,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
 
   const geometry = layoutRects(tree);
   const four = fourPaneBoundaries(tree);
-  const allPanes = [...panes, ...(hasDock ? [{ id: COLLABORATION, content: <CollaborationHost /> }] : [])];
+  const allPanes = [...panes, ...scopedDocks.map(([groupId]) => ({ id: collaborationPaneId(groupId), content: <CollaborationHost groupId={groupId} /> }))];
   const drag = useRef<{ id: string; x: number; y: number; moved: boolean; originX: number; originY: number; scale: number } | null>(null);
   const dropRef = useRef(drop); dropRef.current = drop;
   const activeResize = useRef<{ path?: string; side?: PaneSide; rect: PaneRect; axis: 'x' | 'y' } | null>(null);
@@ -155,7 +171,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
       const hidden = !rect || (!!focusId && pane.id !== focusId);
       return <div key={pane.id} data-layout-pane={pane.id} className={`absolute min-h-0 min-w-0 overflow-hidden bg-[var(--chrome-bg)] ${dragPreview?.id === pane.id ? 'pointer-events-none z-30 rounded-lg ring-1 ring-primary/60 opacity-90 shadow-xl' : ''}`} style={{ ...rectStyle(focusId === pane.id ? { x: 0, y: 0, width: 1, height: 1 } : rect ?? { x: 0, y: 0, width: 0, height: 0 }), padding: allPanes.length > 1 ? '0.5px' : 0, transition: 'none', visibility: hidden ? 'hidden' : undefined, ...(dragPreview?.id === pane.id ? { transform: `translate(${dragPreview.dx}px, ${dragPreview.dy}px) scale(${dragPreview.scale})`, transformOrigin: `${dragPreview.originX}px ${dragPreview.originY}px` } : {}) }}
         onDragStart={event => { if ((event.target as Element).closest('[data-split-pane-title], [data-panel-drag-title]')) event.preventDefault(); }}>{pane.content}
-        {mobile && allPanes.length > 1 && pane.id !== COLLABORATION && <button type="button" data-panel-drag-title="true" aria-label="拖动面板到其他区域" className="swiper-no-swiping absolute right-1 top-1 z-20 rounded bg-surface p-1 text-muted-foreground"><GripVertical size={14} /></button>}
+        {mobile && allPanes.length > 1 && !isCollaborationPane(pane.id) && <button type="button" data-panel-drag-title="true" aria-label="拖动面板到其他区域" className="swiper-no-swiping absolute right-1 top-1 z-20 rounded bg-surface p-1 text-muted-foreground"><GripVertical size={14} /></button>}
         {drop?.id === pane.id && <div className="pointer-events-none absolute z-30 border-2 border-primary bg-primary/20" style={{ top: drop.side === 'bottom' ? '50%' : 0, bottom: drop.side === 'top' ? '50%' : 0, left: drop.side === 'right' ? '50%' : 0, right: drop.side === 'left' ? '50%' : 0 }}></div>}
       </div>;
     })}

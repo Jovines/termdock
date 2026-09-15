@@ -23,6 +23,7 @@ export interface PinnedExplorerEntry {
 export type PinnedExplorerRoots = Record<string, PinnedExplorerEntry[]>;
 
 export interface CollaborationPanelState {
+  groups?: Record<string, CollaborationPanelState>;
   layouts?: Record<string, unknown>;
   mode?: 'floating' | 'docked';
   size?: { width: number; height: number };
@@ -712,12 +713,13 @@ export function watchPinnedExplorerRootsSetting(
   };
 }
 
-export function normalizeCollaborationPanels(value: unknown): Record<string, CollaborationPanelState> {
+export function normalizeCollaborationPanels(value: unknown, depth = 0): Record<string, CollaborationPanelState> {
   const result: Record<string, CollaborationPanelState> = Object.create(null);
   if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
   for (const [id, raw] of Object.entries(value).slice(-100)) {
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id) || !raw || typeof raw !== 'object') continue;
     const state: CollaborationPanelState = {};
+    if (depth === 0 && raw.groups) state.groups = normalizeCollaborationPanels(raw.groups, 1);
     if (raw.layouts && typeof raw.layouts === 'object' && !Array.isArray(raw.layouts)) {
       state.layouts = Object.fromEntries(Object.entries(raw.layouts).slice(-100).filter(([, tree]) => JSON.stringify(tree).length < 50000));
     }
@@ -752,6 +754,7 @@ export function setCollaborationPanelSetting(clientId: string, patch: unknown) {
   return updateSettings(settings => {
     const previous = settings.collaborationPanels[clientId] ?? {};
     settings.collaborationPanels[clientId] = { ...previous, ...normalized,
+      groups: { ...previous.groups, ...Object.fromEntries(Object.entries(normalized.groups ?? {}).map(([id, group]) => [id, { ...previous.groups?.[id], ...group }])) },
       drafts: { ...previous.drafts, ...normalized.drafts }, layouts: { ...previous.layouts, ...normalized.layouts } };
   });
 }

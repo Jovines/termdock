@@ -7,7 +7,7 @@ import { FreeSplitLayout } from './FreeSplitLayout';
 import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 const api = vi.hoisted(() => ({ getSettings: vi.fn().mockResolvedValue({}), updateSettings: vi.fn().mockResolvedValue({}) }));
 vi.mock('../terminal/api', () => api);
-afterEach(() => { cleanup(); useCollaborationPanelDock.setState({ dock: null, host: null }); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); useCollaborationPanelDock.setState({ docks: {}, hosts: {} }); vi.clearAllMocks(); });
 it('renders four independent controls and resizes without remounting terminal contents', async () => {
   const mounts = vi.fn(), unmounts = vi.fn();
   function Terminal({ id }: { id: string }) { useEffect(() => { mounts(id); return () => { unmounts(id); }; }, [id]); return <button data-split-pane-title={id}>{id}</button>; }
@@ -26,12 +26,12 @@ it('renders four independent controls and resizes without remounting terminal co
 it('adds collaboration as a fourth leaf and collapses its space on returning to floating', async () => {
   render(<FreeSplitLayout layoutId="group" panes={['a', 'b', 'c'].map(id => ({ id, content: <div>{id}</div> }))} />);
   await act(async () => {});
-  act(() => useCollaborationPanelDock.getState().setDock({ sessionId: 'c', side: 'right' }));
+  act(() => useCollaborationPanelDock.getState().setDock('group', { sessionId: 'c', side: 'right' }));
   await waitFor(() => expect(screen.getAllByRole('separator')).toHaveLength(4));
-  expect(useCollaborationPanelDock.getState().host).not.toBeNull();
-  act(() => useCollaborationPanelDock.getState().setDock(null));
+  expect(useCollaborationPanelDock.getState().hosts.group).toBeTruthy();
+  act(() => useCollaborationPanelDock.getState().setDock('group', null));
   await waitFor(() => expect(screen.getAllByRole('separator')).toHaveLength(2));
-  expect(useCollaborationPanelDock.getState().host).toBeNull();
+  expect(useCollaborationPanelDock.getState().hosts.group).toBeUndefined();
 });
 it('drags a leaf into the upper row and cancels an outside drop without losing panes', async () => {
   vi.stubGlobal('PointerEvent', MouseEvent);
@@ -70,7 +70,24 @@ it('restores a moved collaboration leaf before the sidebar has mounted its compo
     } },
   } } });
   const view = render(<FreeSplitLayout layoutId="restored" panes={['a', 'b', 'c'].map(id => ({ id, content: <div>{id}</div> }))} />);
-  await waitFor(() => expect(useCollaborationPanelDock.getState().host).not.toBeNull());
-  const panel = view.container.querySelector<HTMLElement>('[data-layout-pane="@collaboration"]')!;
+  await waitFor(() => expect(useCollaborationPanelDock.getState().hosts.group).toBeTruthy());
+  const panel = view.container.querySelector<HTMLElement>('[data-layout-pane="@collaboration:group"]')!;
   expect(panel.style.top).toBe('35%'); expect(panel.style.width).toBe('100%');
+});
+
+it('keeps multiple groups in independent dock leaves and removes only the closed group', async () => {
+  const view = render(<FreeSplitLayout layoutId="multi" panes={['a', 'b'].map(id => ({ id, content: <div>{id}</div> }))} />);
+  await act(async () => {});
+  act(() => {
+    useCollaborationPanelDock.getState().setDock('alpha', { sessionId: 'a', side: 'right' });
+    useCollaborationPanelDock.getState().setDock('beta', { sessionId: 'b', side: 'bottom' });
+  });
+  await waitFor(() => expect(Object.keys(useCollaborationPanelDock.getState().hosts)).toHaveLength(2));
+  const beta = useCollaborationPanelDock.getState().hosts.beta;
+  expect(beta).not.toBe(useCollaborationPanelDock.getState().hosts.alpha);
+  expect(view.container.querySelectorAll('[data-layout-pane]')).toHaveLength(4);
+  act(() => useCollaborationPanelDock.getState().setDock('alpha', null));
+  await waitFor(() => expect(view.container.querySelectorAll('[data-layout-pane]')).toHaveLength(3));
+  expect(useCollaborationPanelDock.getState().hosts.beta).toBe(beta);
+  expect(useCollaborationPanelDock.getState().hosts.alpha).toBeUndefined();
 });

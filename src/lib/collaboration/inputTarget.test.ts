@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { registerCollaborationInput, routeCollaborationInput } from './inputTarget';
+import { focusCollaborationInput, registerCollaborationInput, routeCollaborationInput } from './inputTarget';
 import { subscribeNativeFileDrops, type NativeFileDropPayload, type TermdockDesktopBridge } from '../desktop/nativeBridge';
 
 describe('collaboration input priority', () => {
@@ -23,4 +23,19 @@ describe('collaboration input priority', () => {
     expect(firstTerminal).toHaveBeenCalledTimes(1);
     firstOff(); secondOff(); delete window.termdockDesktop;
   });
+});
+
+it('routes references to the focused group and preserves another receiver when one closes', () => {
+  const a = vi.fn(), b = vi.fn();
+  const closeA = registerCollaborationInput(a, 'a');
+  const closeB = registerCollaborationInput(b, 'b');
+  focusCollaborationInput('a');
+  routeCollaborationInput('for A');
+  expect(a).toHaveBeenCalledWith('for A');
+  expect(b).not.toHaveBeenCalled();
+  closeA();
+  routeCollaborationInput('for B');
+  expect(b).toHaveBeenCalledWith('for B');
+  closeB();
+  expect(routeCollaborationInput('closed')).toBe(false);
 });

@@ -1,4 +1,5 @@
-import { collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
+import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
+import { openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { SessionNoticeUnreadBadge } from '../SessionNoticeUnreadBadge';
 import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { ServiceSwitcher } from '../ServiceSwitcher';
@@ -272,25 +273,22 @@ export function LeftSidebar(
   const [, requestAttentionScroll] = useState(0);
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
-  const [agentOperationsOpen, setAgentOperationsOpen] = useState(false);
-  const [agentOperationsGroupId, setAgentOperationsGroupId] = useState<string | null>(null);
-  const [agentOperationsFloating, setAgentOperationsFloating] = useState(false);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
+  const agentOperationsOpen = workbenchOpen || Object.keys(groupPanels).length > 0;
   const panelIntent = useRef(false);
   useEffect(() => {
     let cancelled = false;
     void getSettings().then(settings => {
-      const groupId = settings.collaborationPanels?.[collaborationPanelClientId()]?.floatingGroupId;
-      if (cancelled || panelIntent.current || !groupId) return;
-      setAgentOperationsGroupId(groupId);
-      setAgentOperationsFloating(true);
-      setAgentOperationsOpen(true);
-    }).catch(() => { /* A failed preference read must not block the sidebar. */ });
+      if (cancelled || panelIntent.current) return;
+      setGroupPanels(Object.fromEntries(openCollaborationGroups(settings.collaborationPanels?.[collaborationPanelClientId()]).map(id => [id, true])));
+    }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
-  const persistFloatingPanel = async (groupId: string | null) => {
+  const persistFloatingPanel = async (id: string, nextGroupId: string | null) => {
     panelIntent.current = true;
-    await saveCollaborationPanel({ floatingGroupId: groupId });
-    setAgentOperationsFloating(groupId !== null);
+    await saveCollaborationPanel({ floatingGroupId: nextGroupId }, id);
+    setGroupPanels(current => ({ ...current, [id]: nextGroupId !== null }));
   };
   const [agentResumeHistory, setAgentResumeHistory] = useState<AgentResumeHistoryEntry[]>([]);
   const [agentResumeHistoryLoading, setAgentResumeHistoryLoading] = useState(false);
@@ -300,13 +298,18 @@ export function LeftSidebar(
   const [collaborationActionError, setCollaborationActionError] = useState<string | null>(null);
   const openAgentOperations = async (groupId: string | null) => {
     panelIntent.current = true;
+    if (!groupId) { setWorkbenchOpen(true); return; }
+    const group = useSessionOrderStore.getState().collaborationGroups.find(candidate => candidate.id === groupId);
+    const anchor = useCollaborationPanelDock.getState().docks[groupId]?.sessionId;
+    const target = sessions.find(session => session.id === anchor)
+      ?? sessions.find(session => session.id === activeSessionId && group?.sessionIds.includes(session.id))
+      ?? sessions.find(session => group?.sessionIds.includes(session.id));
+    if (target) window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
+    if (groupPanels[groupId] !== undefined) return;
     try {
-      if (agentOperationsFloating) await persistFloatingPanel(groupId);
-      setAgentOperationsGroupId(groupId);
-      setAgentOperationsOpen(true);
-    } catch {
-      setCollaborationActionError('常驻浮窗状态保存失败，请重试');
-    }
+      await saveCollaborationPanel({ floatingGroupId: groupId }, groupId);
+      setGroupPanels(current => ({ ...current, [groupId]: true }));
+    } catch { setCollaborationActionError('协作面板打开失败，请重试'); }
   };
   const rawCollaborationGroups = useSessionOrderStore((state) => state.collaborationGroups);
   const setRawCollaborationGroups = useSessionOrderStore((state) => state.setCollaborationGroups);
@@ -2142,18 +2145,13 @@ export function LeftSidebar(
         />
       )}
 
-      {agentOperationsOpen && (
-        <AgentOperationsPanel
-          key={agentOperationsGroupId ?? 'workbench'}
-          activeSessionId={activeSessionId}
-          initialCollaborationGroupId={agentOperationsGroupId}
-          initialFloating={agentOperationsFloating}
-          onFloatingChange={persistFloatingPanel}
-          defaultSessionMode={defaultSessionMode}
-          onClose={() => { panelIntent.current = true; setAgentOperationsOpen(false); setAgentOperationsGroupId(null); }}
-          onNewSession={(options) => onNewSession(options)}
-        />
-      )}
+      {workbenchOpen && <AgentOperationsPanel onFloatingChange={async id => { if (id) { await openAgentOperations(id); setWorkbenchOpen(false); } }} activeSessionId={activeSessionId} defaultSessionMode={defaultSessionMode}
+        onClose={() => setWorkbenchOpen(false)} onNewSession={options => onNewSession(options)} />}
+      {Object.entries(groupPanels).map(([groupId, floating]) => <AgentOperationsPanel key={groupId}
+        activeSessionId={activeSessionId} initialCollaborationGroupId={groupId} initialFloating={floating}
+        onFloatingChange={next => persistFloatingPanel(groupId, next)} defaultSessionMode={defaultSessionMode}
+        onClose={() => { panelIntent.current = true; setGroupPanels(current => { const next = { ...current }; delete next[groupId]; return next; }); }}
+        onNewSession={options => onNewSession(options)} />)}
 
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (

@@ -202,3 +202,17 @@ it('persists panel positions and drafts separately for different clients', () =>
   expect(restored.phone.position).toEqual({ x: 1, y: 0 });
   expect(restored.phone.floatingGroupId).toBeNull();
 });
+
+it('persists independent group dock and floating preferences on the same client', () => {
+  const file = tempSettingsPath();
+  const settings = loadSettingsFile(file);
+  settings.collaborationPanels = normalizeCollaborationPanels({ desktop: { groups: {
+    alpha: { floatingGroupId: 'alpha', mode: 'docked', dock: { sessionId: 'one', side: 'right' } },
+    beta: { floatingGroupId: 'beta', mode: 'floating', position: { x: 0.2, y: 0.6 } },
+  } } });
+  saveSettingsFile(settings, file);
+  const groups = loadSettingsFile(file).collaborationPanels.desktop.groups!;
+  expect(groups.alpha.dock).toEqual({ sessionId: 'one', side: 'right' });
+  expect(groups.beta.position).toEqual({ x: 0.2, y: 0.6 });
+  expect(groups.beta.dock).toBeUndefined();
+});

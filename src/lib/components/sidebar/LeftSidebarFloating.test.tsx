@@ -31,5 +31,5 @@ it('restores the server floating preference and persists closing it', async () =
   expect(screen.getByRole('heading', { name: 'Release team · 协作消息' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '关闭' }));
   await waitFor(() => expect(screen.queryByRole('region', { name: '工作组消息浮窗' })).toBeNull());
-  expect(settings.update).toHaveBeenCalledWith({ collaborationPanel: { clientId: collaborationPanelClientId(), state: { floatingGroupId: null } } });
+  expect(settings.update).toHaveBeenCalledWith({ collaborationPanel: { clientId: collaborationPanelClientId(), state: { groups: { release: { floatingGroupId: null } } } } });
 });

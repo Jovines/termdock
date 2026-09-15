@@ -1,6 +1,6 @@
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
-import { collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
-import { registerCollaborationInput } from '../../collaboration/inputTarget';
+import { collaborationGroupPreferences, collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
+import { focusCollaborationInput, registerCollaborationInput } from '../../collaboration/inputTarget';
 import { escapeShellPath } from '../../desktop/shellPath';
 import { getTermdockDesktopBridge } from '../../desktop/nativeBridge';
 import { remoteSessionAddress, type CollaborationPeerState } from '../../collaboration/directory';
@@ -64,8 +64,8 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
   useEffect(() => { setFloating(initialFloating); }, [initialFloating]);
   const [savingFloating, setSavingFloating] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(initialCollaborationGroupId);
-  const dock = useCollaborationPanelDock(state => state.dock);
-  const dockHost = useCollaborationPanelDock(state => state.host);
+  const dock = useCollaborationPanelDock(state => state.docks[initialCollaborationGroupId ?? 'workbench']);
+  const dockHost = useCollaborationPanelDock(state => state.hosts[initialCollaborationGroupId ?? 'workbench']);
   const [panelMode, setPanelMode] = useState<'floating' | 'docked'>('floating');
   const [panelSize, setPanelSize] = useState<{ width: number; height: number } | null>(null);
   const latestDrafts = useRef<CollaborationPanelState['drafts']>({});
@@ -78,12 +78,12 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
     let cancelled = false;
     void getSettings().then(settings => {
       if (cancelled) return;
-      const saved = settings.collaborationPanels?.[collaborationPanelClientId()] ?? {};
+      const saved = collaborationGroupPreferences(settings.collaborationPanels?.[collaborationPanelClientId()], initialCollaborationGroupId);
       if (saved.position) relativePosition.current = saved.position;
       if (saved.size) setPanelSize(saved.size);
       latestDrafts.current = saved.drafts ?? {};
       setPanelMode(saved.mode ?? 'floating');
-      if (saved.mode === 'docked' && saved.dock) useCollaborationPanelDock.getState().setDock(saved.dock);
+      if (saved.mode === 'docked' && saved.dock) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', saved.dock);
       setPanelState(saved);
     }).catch(() => {
       if (!cancelled) setPreferenceError('面板草稿加载失败，请重新打开面板重试');
@@ -94,20 +94,20 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
   useEffect(() => {
     const onError = (event: Event) => setPreferenceError(String((event as CustomEvent).detail));
     window.addEventListener('termdock-panel-save-error', onError);
-    return () => { window.removeEventListener('termdock-panel-save-error', onError); useCollaborationPanelDock.getState().setDock(null); };
+    return () => { window.removeEventListener('termdock-panel-save-error', onError); useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null); };
   }, []);
   const docked = floating && panelMode === 'docked' && !!dockHost;
   useEffect(() => {
-    if (!floating) useCollaborationPanelDock.getState().setDock(null);
+    if (!floating) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null);
   }, [floating]);
   const changePanelMode = async (mode: 'floating' | 'docked') => {
     if (savingFloating || (mode === 'docked' && !activeSessionId)) return;
     const nextDock = { sessionId: activeSessionId!, side: 'right' as const };
     setSavingFloating(true);
     try {
-      await saveCollaborationPanel({ mode, ...(mode === 'docked' ? { dock: nextDock } : {}) });
+      await saveCollaborationPanel({ mode, ...(mode === 'docked' ? { dock: nextDock } : {}) }, initialCollaborationGroupId);
       setPanelMode(mode);
-      useCollaborationPanelDock.getState().setDock(mode === 'docked' ? nextDock : null);
+      useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', mode === 'docked' ? nextDock : null);
     } catch { setPreferenceError('面板布局保存失败，请重试'); }
     finally { setSavingFloating(false); }
   };
@@ -166,7 +166,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
     try {
       await onFloatingChange?.(next ? selectedGroup!.id : null);
       setFloating(next);
-      if (next && panelMode === 'docked' && activeSessionId) useCollaborationPanelDock.getState().setDock({ sessionId: activeSessionId, side: dock?.side ?? panelState?.dock?.side ?? 'right' });
+      if (next && panelMode === 'docked' && activeSessionId) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', { sessionId: activeSessionId, side: dock?.side ?? panelState?.dock?.side ?? 'right' });
       if (close) onClose();
     } catch (error) {
       setError(`常驻浮窗状态保存失败，请重试：${error instanceof Error ? error.message : '连接失败'}`);
@@ -247,7 +247,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
             if (!box) return;
             relativePosition.current = relativePanelPosition(position.x, position.y, (viewport?.offsetLeft ?? 0) + 12, (viewport?.offsetTop ?? 0) + 12,
               (viewport?.width ?? window.innerWidth) - box.width - 24, (viewport?.height ?? window.innerHeight) - box.height - 24);
-            void saveCollaborationPanel({ position: relativePosition.current }).catch(() => setPreferenceError('浮窗位置保存失败，请重新拖动重试'));
+            void saveCollaborationPanel({ position: relativePosition.current }, initialCollaborationGroupId).catch(() => setPreferenceError('浮窗位置保存失败，请重新拖动重试'));
           }} onPointerCancel={() => { drag.current = null; }}>
           <Bot size={docked ? 13 : 17} className="shrink-0 text-primary" />
           <div className="min-w-0 flex-1">
@@ -310,14 +310,14 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
             const box = panelRef.current?.getBoundingClientRect();
             const viewport = window.visualViewport;
             if (box) relativePosition.current = relativePanelPosition(position.x, position.y, (viewport?.offsetLeft ?? 0) + 12, (viewport?.offsetTop ?? 0) + 12, (viewport?.width ?? window.innerWidth) - box.width - 24, (viewport?.height ?? window.innerHeight) - box.height - 24);
-            if (panelSize) void saveCollaborationPanel({ size: panelSize, position: relativePosition.current }).catch(() => setPreferenceError('浮窗大小保存失败，请重新调整重试'));
+            if (panelSize) void saveCollaborationPanel({ size: panelSize, position: relativePosition.current }, initialCollaborationGroupId).catch(() => setPreferenceError('浮窗大小保存失败，请重新调整重试'));
           }} onPointerCancel={() => { resizingFloating.current = false; }}
           onKeyDown={event => {
             if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
             event.preventDefault();
             const box = panelRef.current?.getBoundingClientRect();
             const size = { width: Math.max(0.15, Math.min(1, (panelSize?.width ?? (box?.width ?? 400) / window.innerWidth) + (event.key === 'ArrowRight' ? 0.03 : event.key === 'ArrowLeft' ? -0.03 : 0))), height: Math.max(0.15, Math.min(1, (panelSize?.height ?? (box?.height ?? 300) / window.innerHeight) + (event.key === 'ArrowDown' ? 0.03 : event.key === 'ArrowUp' ? -0.03 : 0))) };
-            setPanelSize(size); void saveCollaborationPanel({ size }).catch(() => setPreferenceError('浮窗大小保存失败，请重试'));
+            setPanelSize(size); void saveCollaborationPanel({ size }, initialCollaborationGroupId).catch(() => setPreferenceError('浮窗大小保存失败，请重试'));
           }}><span aria-hidden="true">⌟</span></button>}
       </section>
     </>,
@@ -514,10 +514,11 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
   const positionedInitialGroupRef = useRef(false);
   const selectedGroup = selectedGroupId === 'new'
     ? null
-    : groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null;
+    : (selectedGroupId ? groups.find((group) => group.id === selectedGroupId) : groups[0]) ?? null;
   const [uploadingFiles, setUploadingFiles] = useState(0);
   const drafts = useRef(new Map<string, { content: string; targets: string[] | null }>(Object.entries(initialDrafts ?? {})));
   const groupIdRef = useRef<string | undefined>(undefined);
+  const restoringDraft = useRef(false);
   const targetsRef = useRef(targetSessionIds);
   targetsRef.current = targetSessionIds;
   const contentRef = useRef(content);
@@ -530,6 +531,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
       void saveCollaborationPanel({ drafts: { [groupIdRef.current]: draft } }).catch(() => setError('草稿保存失败，请返回该组重试'));
     }
     groupIdRef.current = selectedGroup?.id;
+    restoringDraft.current = true;
     const saved = drafts.current.get(selectedGroup?.id ?? '');
     setContent(saved?.content ?? ''); setTargetSessionIds(saved?.targets ?? null);
   }, [selectedGroup?.id]);
@@ -538,6 +540,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
     void saveCollaborationPanel(patch).catch(() => setError('草稿保存失败，请保持面板打开，修改内容后重试'));
   }, [setError]);
   useEffect(() => {
+    if (restoringDraft.current) { restoringDraft.current = false; return; }
     if (!selectedGroup || groupIdRef.current !== selectedGroup.id) return;
     const patch = { drafts: { [selectedGroup.id]: { content, targets: targetSessionIds } } };
     onDraftChange(selectedGroup.id, patch.drafts[selectedGroup.id]);
@@ -558,7 +561,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
     if (!floating || !floatingVisible || !selectedGroup) return;
     return registerCollaborationInput(text => {
       setContent(current => current + (current && !/\s$/.test(current) ? '\n' : '') + text.replace(/\r\n?/g, '\n'));
-    });
+    }, selectedGroup.id);
   }, [floating, floatingVisible, selectedGroup?.id]);
   useEffect(() => {
     const composer = messageComposerRef.current;
@@ -791,7 +794,7 @@ function CollaborationTab({ initialDrafts, onDraftChange, selectedGroupId, setSe
       </div></section>
 
       </div>
-      <section data-termdock-terminal-dropzone={floating ? activeSessionId ?? "collaboration-composer" : undefined} onDragOver={event => { if (floating) event.preventDefault(); }} onDrop={event => {
+      <section onFocusCapture={() => focusCollaborationInput(selectedGroup.id)} onPointerDownCapture={() => focusCollaborationInput(selectedGroup.id)} data-termdock-terminal-dropzone={floating ? activeSessionId ?? "collaboration-composer" : undefined} onDragOver={event => { if (floating) event.preventDefault(); }} onDrop={event => {
         if (!floating) return;
         const files = Array.from(event.dataTransfer.files);
         if (files.length && getTermdockDesktopBridge()) return;

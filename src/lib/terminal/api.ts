@@ -1628,6 +1628,7 @@ export interface LocalAccessState {
 }
 
 export interface CollaborationPanelState {
+  groups?: Record<string, CollaborationPanelState>;
   layouts?: Record<string, unknown>;
   mode?: 'floating' | 'docked';
   size?: { width: number; height: number };

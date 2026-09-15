@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FreeSplitLayout } from '../FreeSplitLayout';
@@ -559,7 +559,7 @@ describe('persistent collaboration composer', () => {
     await userEvent.click(screen.getByRole('button', { name: '占用分屏' }));
     expect(await screen.findByRole('region', { name: '工作组消息分屏' })).toBeTruthy();
     expect((screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toBe('布局切换保留');
-    expect(useCollaborationPanelDock.getState().dock).toEqual({ sessionId: 'one', side: 'right' });
+    expect(useCollaborationPanelDock.getState().docks.floating).toEqual({ sessionId: 'one', side: 'right' });
     fireEvent.keyDown(screen.getByRole('separator'), { key: 'ArrowLeft' });
     await waitFor(() => expect(apiMocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ collaborationPanel: expect.objectContaining({ state: expect.objectContaining({ layouts: expect.any(Object) }) }) })));
     expect(screen.queryByRole('button', { name: '完整面板' })).toBeNull();
@@ -638,4 +638,32 @@ it('uploads dropped files and clipboard files through the existing page API and 
   expect(await screen.findByText('上传失败')).toBeTruthy();
   expect(input.value).toContain('/tmp/notes.txt');
   vi.unstubAllGlobals();
+});
+
+it('opening B preserves the docked A composer, draft, recipients and message destination', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [
+    { id: 'alpha', name: 'Alpha', sessionIds: ['one'], createdAt: 1, updatedAt: 1 },
+    { id: 'beta', name: 'Beta', sessionIds: ['one'], createdAt: 1, updatedAt: 1 },
+  ], sessions: [] });
+  apiMocks.getSettings.mockResolvedValue({ collaborationPanels: { [collaborationPanelClientId()]: {
+    groups: { alpha: { floatingGroupId: 'alpha', mode: 'docked', dock: { sessionId: 'one', side: 'right' } } },
+    drafts: { alpha: { content: 'alpha draft', targets: ['one'] }, beta: { content: 'beta draft', targets: null } },
+  } } });
+  apiMocks.sendCollaborationMessage.mockResolvedValue({ messages: [] });
+  const panel = (id: string) => <AgentOperationsPanel key={id} initialFloating initialCollaborationGroupId={id} activeSessionId="one" onClose={() => {}} onNewSession={() => {}} />;
+  const layout = <FreeSplitLayout layoutId="isolation" panes={[{ id: 'one', content: <div>terminal</div> }]} />;
+  const view = render(<>{layout}{panel('alpha')}</>);
+  const a = await screen.findByDisplayValue('alpha draft');
+  await waitFor(() => expect(a.closest('[data-layout-pane]')?.getAttribute('data-layout-pane')).toBe('@collaboration:alpha'));
+  view.rerender(<>{layout}{panel('alpha')}{panel('beta')}</>);
+  const b = await screen.findByDisplayValue('beta draft');
+  expect(screen.getByDisplayValue('alpha draft')).toBe(a);
+  expect(a.closest('[data-layout-pane]')?.getAttribute('data-layout-pane')).toBe('@collaboration:alpha');
+  fireEvent.change(b, { target: { value: 'only beta' } });
+  fireEvent.click(within(b.closest('[aria-label]') as HTMLElement).getByRole('button', { name: '发送' }));
+  await waitFor(() => expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledWith('beta', expect.objectContaining({ content: 'only beta' })));
+  expect(screen.getByDisplayValue('alpha draft')).toBe(a);
+  view.rerender(<>{layout}{panel('alpha')}</>);
+  expect(screen.getByDisplayValue('alpha draft')).toBe(a);
 });
