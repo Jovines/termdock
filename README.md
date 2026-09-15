@@ -469,6 +469,26 @@ npm publish
 
 MIT
 
+### 协作 CLI 的来源身份
+
+后台工具进程无需位于 tmux pane 内，也可以显式指定自己的协作身份：
+
+```bash
+td collab --session <自己的完整会话ID> status
+td collab --session <自己的完整会话ID> send <接收者ID> "消息"
+td collab --session <自己的完整会话ID> reply <消息ID> "回复"
+td collab --session <自己的完整会话ID> rebind --pane %173
+```
+
+`--session` 适用于所有 `collab` 子命令，指定来源成员；`rebind --pane` 单独指定绑定位置。
+来源 ID 使用 `td collab status` 输出中的完整 Termdock 成员 `sessionId`，不是
+`wt-…` tmux 名称、后端 ID 或 Claude 会话 ID。可从仍可用的同组会话查询成员列表。
+也可设置 `TERMDOCK_COLLAB_SESSION_ID`，命令行参数优先。显式身份会跳过环境和
+tmux 检测；无效 ID 由服务端拒绝，不回退到其他身份。现有本地 API 认证和组权限检查仍然生效。
+此功能以同一系统用户下的进程彼此信任为前提；`--session` 是来源选择，不是身份认证，
+不提供这些进程之间的防冒充隔离。
+未指定时仍使用后端环境变量或明确的 `TMUX_PANE` 自动识别；缺少 pane 时不会猜测 tmux 的默认会话。
+
 ### Scheduled tasks from the CLI
 
 `td automation --help` exposes the same scheduled tasks as the web UI. Commands

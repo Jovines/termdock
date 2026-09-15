@@ -108,14 +108,23 @@ export class CollaborationFederation {
     const services = this.services();
     this.serviceErrors.clear();
     const snapshots = await Promise.all(services.map(async (service) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const data = await service.request('/collaboration-federation') as Snapshot;
+        // A loading/suspended Electron renderer can leave executeJavaScript
+        // pending before its own fetch timeout even starts. Bound each service
+        // independently, below the directory's 20-second IPC deadline.
+        const data = await Promise.race([
+          Promise.resolve().then(() => service.request('/collaboration-federation')),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('服务协作目录响应超时')), 18_000);
+          }),
+        ]) as Snapshot;
         if (!Array.isArray(data.groups) || !Array.isArray(data.sessions) || !Array.isArray(data.messages)) throw new Error('协作目录响应无效，请更新服务');
         return { service, data };
       } catch (error) {
         this.serviceErrors.set(service.origin, error instanceof Error ? error.message.slice(0, 300) : '协作目录请求失败');
         return null;
-      }
+      } finally { clearTimeout(timer); }
     }));
     this.reachable.clear();
     for (const snapshot of snapshots) {

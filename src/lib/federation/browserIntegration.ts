@@ -371,6 +371,23 @@ export async function preferDirectConnection(): Promise<void> {
   } finally { candidate?.close(); probingDirect = false; }
 }
 export function currentConnectionPath(): 'direct' | 'relay' { return activePath; }
+/** Cancel only this caller's wait; other requests may share the connection. */
+async function waitForActiveClient(signal?: AbortSignal | null): Promise<SecureClient> {
+  if (!signal) return getActiveClient();
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    void getActiveClient().then(client => {
+      signal.removeEventListener('abort', abort);
+      if (signal.aborted) reject(signal.reason);
+      else resolve(client);
+    }, error => {
+      signal.removeEventListener('abort', abort);
+      reject(error);
+    });
+  });
+}
 export async function getActiveClient(): Promise<SecureClient> {
   if (active && !active.closed) {
     // Regular permission checks also reach here while the terminal is idle.
@@ -438,7 +455,8 @@ export function installEncryptedFetch(): void {
       clearSelectedTarget();
       location.reload(); return Response.json({ ok: true });
     }
-    const client = await getActiveClient();
+    const signal = init?.signal !== undefined ? init.signal : input instanceof Request ? input.signal : undefined;
+    const client = await waitForActiveClient(signal);
     if (input instanceof Request) return client.fetch(input, init);
     return client.fetch(url.pathname + url.search, init);
   };

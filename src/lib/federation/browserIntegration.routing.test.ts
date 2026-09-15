@@ -35,6 +35,38 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it.each(['init', 'request', 'override', 'already-aborted'] as const)('honors %s cancellation while the first encrypted connection is pending', async mode => {
+    const integration = await import('./browserIntegration');
+    integration.installEncryptedFetch();
+    mocks.saved.mockReturnValue({ url: 'https://b.example', targetPeerId: 'B' });
+    const dial = mocks.connect.getMockImplementation()!;
+    let release!: () => void;
+    const pause = new Promise<void>(resolve => { release = resolve; });
+    const encryptedFetch = vi.fn(async () => Response.json({ sessions: [] }));
+    mocks.connect.mockImplementation(async args => {
+      await pause;
+      return Object.assign(await dial(args), { fetch: encryptedFetch });
+    });
+    const controller = new AbortController();
+    const reason = new DOMException('request cancelled', 'AbortError');
+    if (mode === 'already-aborted') controller.abort(reason);
+    const url = 'https://b.example/api/terminal/operations/collaboration-federation';
+    const input = mode === 'request' || mode === 'override'
+      ? new Request(url, { signal: mode === 'override' ? AbortSignal.abort() : controller.signal }) : url;
+    const pending = window.fetch(input, mode === 'request' ? undefined : { signal: controller.signal });
+    const rejected = expect(pending).rejects.toBe(reason);
+    controller.abort(reason);
+    await rejected;
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(encryptedFetch).not.toHaveBeenCalled();
+    // A cancelled discovery must not cancel another caller's reconnect.
+    const surviving = window.fetch(url);
+    release();
+    expect((await surviving).ok).toBe(true);
+    expect(encryptedFetch).toHaveBeenCalledTimes(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
   it.each(['direct', 'relay'] as const)('renews an aging %s channel only after its replacement is verified', async mode => {
     const dial = mocks.connect.getMockImplementation()!;
     if (mode === 'relay') mocks.connect.mockImplementation(async args => {

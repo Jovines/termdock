@@ -20,6 +20,7 @@ if (process.argv.slice(2).some(arg => arg === '--federation-pairing' || arg === 
   process.exit(await runFederationCli(process.argv.slice(2)));
 }
 
+import { detectLocalSessionContext, resolveLocalCollaborationContext } from './agent/localSessionContext.js';
 import { parseAutomationCommand, executeAutomationCommand, AUTOMATION_HELP, type AutomationCommand } from './agent/automationCli.js';
 import { parseCollaborationCommand, executeCollaborationCommand, COLLAB_HELP, type CollaborationCommand } from './agent/collaborationCli.js';
 import fs from 'fs';
@@ -1355,29 +1356,6 @@ async function getLocalJson(baseUrl: string, token: string, endpoint: string, ti
   });
 }
 
-async function detectLocalSessionContext() {
-  const backendSessionId = process.env.TERMDOCK_BACKEND_SESSION_ID?.trim() || null;
-  let tmuxSessionName: string | null = null;
-  if (process.env.TMUX) {
-    try {
-      const paneId = process.env.TMUX_PANE?.trim();
-      const { stdout } = await execFileAsync(process.env.TMUX_BIN || 'tmux', [
-        'display-message', '-p', ...(/^%\d+$/.test(paneId ?? '') ? ['-t', paneId!] : []), '#S',
-      ], {
-        timeout: 2_000,
-        maxBuffer: 16 * 1024,
-      });
-      const detected = stdout.trim();
-      if (detected && !detected.includes('\n') && detected.length <= 128) tmuxSessionName = detected;
-    } catch {
-      // Keep a working backend context if tmux inspection fails. A surviving
-      // pane may retain an obsolete backend id after TD reattaches it, so
-      // send both identities whenever tmux inspection succeeds.
-    }
-  }
-  return { backendSessionId, tmuxSessionName };
-}
-
 async function runAutomation(command: AutomationCommand): Promise<void> {
   if (command.action === 'help') { console.log(AUTOMATION_HELP); return; }
   const state = getRunningState();
@@ -1411,19 +1389,18 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
     console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running or its local API token is unavailable.' }));
     process.exit(1);
   }
-  const { backendSessionId, tmuxSessionName } = await detectLocalSessionContext();
-  if (!backendSessionId && !tmuxSessionName) {
+  const context = await resolveLocalCollaborationContext(command.options.session as string | undefined);
+  if (Object.keys(context).length === 0) {
     // Bare help stays reachable from a plain shell; the roster snapshot in
     // help needs a session identity and only appears when one is available.
     if (command.action === 'help') { console.log(COLLAB_HELP); return; }
-    console.error(JSON.stringify({ ok: false, code: 'SESSION_NOT_FOUND', error: 'td collab must run inside a Termdock-managed Session.' }));
+    console.error(JSON.stringify({ ok: false, code: 'SESSION_NOT_FOUND', error: 'Cannot identify the collaboration session. Pass --session <full-session-id> or set TERMDOCK_COLLAB_SESSION_ID; see td collab --help.' }));
     process.exit(1);
   }
-  const context = { backendSessionId, tmuxSessionName };
   const baseUrl = runningState.localUrl
     ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
   process.exitCode = await executeCollaborationCommand(command,
-    Object.fromEntries(Object.entries(context).filter((entry): entry is [string, string] => typeof entry[1] === 'string')),
+    context,
     { request: (method, endpoint, body, timeout) => method === 'GET'
         ? getLocalJson(baseUrl, runningState.localApiToken!, endpoint, timeout)
         : postLocalJson(baseUrl, runningState.localApiToken!, endpoint, body, timeout),

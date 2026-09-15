@@ -9,7 +9,12 @@ import { CollaborationStore } from './collaborationStore.js';
 import { CollaborationRoutingStore } from './collaborationRouting.js';
 import { resolveCollaborationSessionId } from './sessionBindingRecovery.js';
 
-it('keeps original group membership when a surviving tmux pane carries a stale backend id', async () => {
+it.each([
+  { mode: 'stale backend', args: ['status'], explicit: false, invalid: false },
+  { mode: 'detached status', args: ['--session', 'original-peer', 'status'], explicit: true, invalid: false },
+  { mode: 'detached rebind', args: ['rebind', '--session', 'original-peer', '--pane', '%173'], explicit: true, invalid: false },
+  { mode: 'unknown explicit identity', args: ['status', '--session', 'missing-peer'], explicit: false, invalid: true },
+])('resolves collaboration identity: $mode', async ({ args, explicit, invalid }) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'td-cli-upgrade-'));
   const stateDirectory = path.join(directory, '.termdock');
   fs.mkdirSync(stateDirectory);
@@ -20,8 +25,10 @@ it('keeps original group membership when a surviving tmux pane carries a stale b
   const routing = new CollaborationRoutingStore(path.join(stateDirectory, 'collaboration-routing.json'));
   routing.bind({ sessionId: 'original-peer', backendSessionId: 'replacement-backend', mode: 'tmux', tmuxSessionName: 'original-tmux', agentSlug: null, nativeSessionId: null, pane: null });
   const records = [{ sessionId: 'original-peer', backendSessionId: null, tmuxSessionName: null }];
-  const server = http.createServer((req, res) => {
-    const context = Object.fromEntries(new URL(req.url!, 'http://localhost').searchParams);
+  const server = http.createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const context = req.method === 'POST' ? JSON.parse(body) : Object.fromEntries(new URL(req.url!, 'http://localhost').searchParams);
     const id = resolveCollaborationSessionId(context, records, routing);
     res.setHeader('Content-Type', 'application/json');
     res.statusCode = id ? 200 : 404;
@@ -35,8 +42,8 @@ it('keeps original group membership when a surviving tmux pane carries a stale b
     const tmux = path.join(directory, 'tmux-fixture');
     fs.writeFileSync(tmux, '#!/usr/bin/env node\nif (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(["display-message", "-p", "-t", "%7", "#S"])) process.exit(1);\nconsole.log("original-tmux");\n', { mode: 0o700 });
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn(process.execPath, ['--import', preload, '--import', 'tsx', fileURLToPath(new URL('../cli.ts', import.meta.url)), 'collab', 'status'], {
-        env: { ...process.env, TERMDOCK_COLLAB_TEST_DIRECTORY: directory, TERMDOCK_BACKEND_SESSION_ID: 'obsolete-backend', TMUX: 'isolated', TMUX_PANE: '%7', TMUX_BIN: tmux },
+      const child = spawn(process.execPath, ['--import', preload, '--import', 'tsx', fileURLToPath(new URL('../cli.ts', import.meta.url)), 'collab', ...args], {
+        env: { ...process.env, TERMDOCK_COLLAB_TEST_DIRECTORY: directory, TERMDOCK_COLLAB_SESSION_ID: '', TERMDOCK_BACKEND_SESSION_ID: explicit ? '' : 'obsolete-backend', TMUX: explicit ? '' : 'isolated', TMUX_PANE: explicit ? '' : '%7', TMUX_BIN: tmux },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let stdout = ''; let stderr = '';
@@ -46,6 +53,11 @@ it('keeps original group membership when a surviving tmux pane carries a stale b
       child.on('error', reject);
       child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
     });
+    if (invalid) {
+      expect(result.code).toBe(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({ code: 'SESSION_NOT_FOUND' });
+      return;
+    }
     expect(result.code).toBe(0);
     expect(result.stderr).toBe('');
     expect(JSON.parse(result.stdout)).toMatchObject({ groups: [{ id: 'original-group' }], source: { sessionId: 'original-peer' } });

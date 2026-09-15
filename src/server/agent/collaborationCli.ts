@@ -10,9 +10,19 @@ export interface CollaborationCommand {
   operation?: string;
 }
 export const COLLAB_HELP = `td collab — durable messages; no agent-specific hooks required
-  (everywhere an id is taken, the short id shown in deliveries and --text
+  (except --session, wherever an id is taken, the short id shown in deliveries and --text
    output works too; a shorter unique prefix down to 4 characters also resolves —
    an ambiguous prefix is refused, so use more characters or the full id)
+  Source identity (all collab commands): --session <full-Termdock-session-id>
+    or TERMDOCK_COLLAB_SESSION_ID. CLI option wins; explicit identity bypasses
+    environment/tmux detection. Use your own full member ID from status output,
+    not a tmux name, backend ID or Claude session ID. Unknown IDs are refused.
+    This selects a source in the trusted local-user context; it is not proof
+    of identity or isolation between processes running as the same OS user.
+    Example: td collab --session <your-full-session-id> status
+    Rebind identity and location separately:
+      td collab --session <your-full-session-id> rebind --pane %3
+    Without explicit identity, the backend environment / tmux pane is detected.
   Scheduled self-reminders: td automation create --name 'Review progress' --every 30 --self --prompt 'Review group progress and continue'
   Scheduling help: td automation --help
   status | capabilities
@@ -90,7 +100,7 @@ interface RoleGroupView {
 }
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'unread', 'follow', 'stdin', 'receipt-only', 'confirm', 'help']);
-const VALUE_OPTIONS = new Set(['group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane']);
+const VALUE_OPTIONS = new Set(['session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -116,6 +126,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   }
   const action = (requestedAction === 'capture' ? 'drive' : requestedAction) as CollaborationCommand['action'];
   if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (typeof options.session === 'string' && !options.session.trim()) throw new Error('--session requires a non-empty full Termdock session id');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
   if (options['wait-until'] && !['queued', 'delivered', 'read'].includes(String(options['wait-until']))) throw new Error('wait-until must be queued, delivered or read');
@@ -168,7 +179,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
       throw new Error(`Unknown drive action ${command.operation ?? ''}; use approve|enter|escape|space|left|right|up|down|capture|run`);
     }
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
-  const allowed = new Set(['json', 'jsonl', 'text', 'help']);
+  const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session']);
   const byAction: Record<string, string[]> = {
     status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
@@ -180,7 +191,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   };
   for (const option of byAction[action]) allowed.add(option);
   for (const option of Object.keys(options)) if (!allowed.has(option)) throw new Error(`--${option} is not supported by ${action}`);
-  if (action === 'message' && command.operation === 'read' && Object.keys(options).some((option) => !['json', 'jsonl', 'text', 'help'].includes(option))) throw new Error('message read does not accept wait or filtering options');
+  if (action === 'message' && command.operation === 'read' && Object.keys(options).some((option) => !['json', 'jsonl', 'text', 'help', 'session'].includes(option))) throw new Error('message read does not accept wait or filtering options');
   return command;
 }
 export function duration(value: string): number {

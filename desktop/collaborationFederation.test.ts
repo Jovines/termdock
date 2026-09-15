@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CollaborationFederation, qualifySession, sessionAddress, type FederationGroup, type FederationService, type FederationSession } from './collaborationFederation.js';
 
 function fixture(origins = ['https://one.test', 'https://two.test']) {
@@ -30,6 +30,29 @@ function fixture(origins = ['https://one.test', 'https://two.test']) {
 }
 
 describe('cross-service collaboration transport', () => {
+  it('returns healthy peers when a renderer hangs, ignores late results, and allows retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bridge, records, services } = fixture(['https://one.test', 'https://two.test', 'https://three.test']);
+      const request = services[2].request;
+      let release!: (value: unknown) => void;
+      services[2].request = () => new Promise(resolve => { release = resolve; });
+      const pending = bridge.peers(records[0].origin);
+      await vi.advanceTimersByTimeAsync(18_000);
+      const peers = await pending;
+      expect(peers.sessions.map(session => session.serviceOrigin)).toEqual([records[1].origin]);
+      expect(peers.services[2]).toMatchObject({ connected: false, error: '服务协作目录响应超时' });
+      release({ groups: [], sessions: records[2].sessions, messages: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(peers.services[2].connected).toBe(false);
+      services[2].request = request;
+      const retried = await bridge.peers(records[0].origin);
+      expect(retried.services.every(service => service.connected)).toBe(true);
+      expect(retried.sessions).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('discovers candidates without forwarding pending messages as a side effect', async () => {
     const { bridge, records } = fixture();
     await bridge.save(records[0].origin, { name: 'Pair', sessionIds: ['same-id', qualifySession(records[1].origin, 'same-id')] });
