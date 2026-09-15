@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
+import { collaborationPanelClientId } from '../../collaboration/panelPreferences';
 import { LeftSidebar } from './LeftSidebar';
 
 const settings = vi.hoisted(() => ({ get: vi.fn(), update: vi.fn() }));
@@ -13,7 +14,7 @@ vi.mock('../../terminal/api', async importOriginal => ({
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it('restores the server floating preference and persists closing it', async () => {
-  settings.get.mockResolvedValue({ collaborationFloatingGroupId: 'release', locale: 'en' });
+  settings.get.mockResolvedValue({ collaborationPanels: { [collaborationPanelClientId()]: { floatingGroupId: 'release' } }, locale: 'en' });
   settings.update.mockResolvedValue({ collaborationFloatingGroupId: null });
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({
@@ -30,5 +31,5 @@ it('restores the server floating preference and persists closing it', async () =
   expect(screen.getByRole('heading', { name: 'Release team · 协作消息' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '关闭' }));
   await waitFor(() => expect(screen.queryByRole('region', { name: '工作组消息浮窗' })).toBeNull());
-  expect(settings.update).toHaveBeenCalledWith({ collaborationFloatingGroupId: null });
+  expect(settings.update).toHaveBeenCalledWith({ collaborationPanel: { clientId: collaborationPanelClientId(), state: { floatingGroupId: null } } });
 });

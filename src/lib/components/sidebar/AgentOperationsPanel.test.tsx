@@ -3,10 +3,15 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { FreeSplitLayout } from '../FreeSplitLayout';
+import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
+import { collaborationPanelClientId } from '../../collaboration/panelPreferences';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { AgentOperationsPanel, cleanSessionSnippet } from './AgentOperationsPanel';
 
 const apiMocks = vi.hoisted(() => ({
+  getSettings: vi.fn().mockResolvedValue({}),
+  updateSettings: vi.fn().mockResolvedValue({}),
   uploadFiles: vi.fn(),
   getAgentLaunchers: vi.fn(),
   listAgentAutomations: vi.fn().mockResolvedValue({ automations: [], runs: [] }),
@@ -21,6 +26,8 @@ const apiMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../terminal/api', () => ({
+  getSettings: apiMocks.getSettings,
+  updateSettings: apiMocks.updateSettings,
   uploadFiles: apiMocks.uploadFiles,
   getAgentLaunchers: apiMocks.getAgentLaunchers.mockResolvedValue([
     { slug: 'codex', command: 'codex', displayName: 'Codex', accentColor: 'var(--primary)', icon: null, isPlugin: false },
@@ -48,6 +55,8 @@ vi.mock('../../terminal/api', () => ({
 
 afterEach(() => {
   cleanup();
+  apiMocks.getSettings.mockReset().mockResolvedValue({});
+  apiMocks.updateSettings.mockClear();
   localStorage.clear();
   apiMocks.listCollaborationMessages.mockReset().mockResolvedValue({ messages: [] });
   apiMocks.listAgentAutomations.mockReset().mockResolvedValue({ automations: [], runs: [] });
@@ -224,7 +233,7 @@ describe('AgentOperationsPanel', () => {
     expect(screen.getByRole('button', { name: '会话协作' }).className).toContain('text-primary');
     expect(await screen.findByRole('heading', { name: '发布组 · 协作消息' })).toBeTruthy();
     expect(await screen.findByRole('heading', { name: '发布组' })).toBeTruthy();
-    expect(screen.getByPlaceholderText(/说明背景、期望产出/)).toBeTruthy();
+    expect(screen.getByPlaceholderText(/输入消息/)).toBeTruthy();
   });
 
   it('retains unavailable original members when adding another session', async () => {
@@ -387,7 +396,7 @@ it('labels remote members and reports unreachable delivery without claiming succ
   render(<AgentOperationsPanel activeSessionId="one" initialCollaborationGroupId="cross-pair" onClose={() => undefined} onNewSession={() => undefined} />);
   expect(await screen.findByText('Mac mini')).toBeTruthy();
   expect(screen.getByText('服务不可达')).toBeTruthy();
-  await user.type(screen.getByPlaceholderText(/说明背景、期望产出/), '请检查');
+  await user.type(screen.getByPlaceholderText(/输入消息/), '请检查');
   await user.click(screen.getByRole('button', { name: '发送' }));
   expect(await screen.findByText(/1 个接收成员的服务不可达，尚未送达/)).toBeTruthy();
 });
@@ -507,17 +516,91 @@ describe('persistent collaboration composer', () => {
     await waitFor(() => expect(input.value).toBe('追加的引用'));
   });
 
+  it('restores server drafts for this client and flushes edits when the panel closes', async () => {
+    const clientId = collaborationPanelClientId();
+    apiMocks.getSettings.mockResolvedValueOnce({ collaborationPanels: {
+      [clientId]: { drafts: { floating: { content: '已保存草稿', targets: ['two'] } } },
+      anotherClient: { drafts: { floating: { content: '别的设备', targets: ['one'] } } },
+    } });
+    const input = await openFloating();
+    expect(input.value).toBe('已保存草稿');
+    expect(screen.getByRole('button', { name: 'two（离线）' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.change(input, { target: { value: '更新草稿' } });
+    cleanup();
+    await waitFor(() => expect(apiMocks.updateSettings).toHaveBeenCalledWith({ collaborationPanel: {
+      clientId, state: { drafts: { floating: { content: '更新草稿', targets: ['two'] } } },
+    } }));
+  });
+
+  it('sends with Command or Control Enter but ignores IME composition and empty recipients', async () => {
+    const input = await openFloating();
+    apiMocks.sendCollaborationMessage.mockResolvedValue({ messages: [] });
+    fireEvent.change(input, { target: { value: '快捷发送' } });
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true, isComposing: true });
+    expect(apiMocks.sendCollaborationMessage).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(input.value).toBe(''));
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { value: '再次发送' } });
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(input.value).toBe(''));
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledTimes(2);
+    await userEvent.click(screen.getByRole('button', { name: 'one（离线）' }));
+    await userEvent.click(screen.getByRole('button', { name: 'one（离线）' }));
+    fireEvent.change(input, { target: { value: '没有接收人' } });
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('docks beside a terminal, resizes independently, and keeps the draft when returning to floating', async () => {
+    const input = await openFloating();
+    render(<FreeSplitLayout layoutId="one" panes={[{ id: "one", content: <div>终端区域</div> }]} />);
+    fireEvent.change(input, { target: { value: '布局切换保留' } });
+    await userEvent.click(screen.getByRole('button', { name: '占用分屏' }));
+    expect(await screen.findByRole('region', { name: '工作组消息分屏' })).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toBe('布局切换保留');
+    expect(useCollaborationPanelDock.getState().dock).toEqual({ sessionId: 'one', side: 'right' });
+    fireEvent.keyDown(screen.getByRole('separator'), { key: 'ArrowLeft' });
+    await waitFor(() => expect(apiMocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ collaborationPanel: expect.objectContaining({ state: expect.objectContaining({ layouts: expect.any(Object) }) }) })));
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: '协作分屏位置' }), 'bottom');
+    await waitFor(() => expect(useCollaborationPanelDock.getState().dock?.side).toBe('bottom'));
+    await userEvent.click(screen.getByRole('button', { name: '浮窗' }));
+    expect(await screen.findByRole('region', { name: '工作组消息浮窗' })).toBeTruthy();
+    expect(screen.queryByRole('separator')).toBeNull();
+    expect((screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toBe('布局切换保留');
+  });
+
+  it('sends to multiple recipients, allows deselection, and restores broadcast', async () => {
+    const input = await openFloating();
+    fireEvent.change(input, { target: { value: '一起检查' } });
+    const one = screen.getByRole('button', { name: 'one（离线）' });
+    const two = screen.getByRole('button', { name: 'two（离线）' });
+    await userEvent.click(one);
+    await userEvent.click(two);
+    expect(one.getAttribute('aria-pressed')).toBe('true');
+    expect(two.getAttribute('aria-pressed')).toBe('true');
+    await userEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenLastCalledWith('floating', expect.objectContaining({ toSessionIds: ['one', 'two'], kind: 'message' }));
+    fireEvent.change(input, { target: { value: '再次检查' } });
+    await userEvent.click(one);
+    await userEvent.click(two);
+    expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(screen.getByRole('button', { name: '全组成员' }));
+    await userEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenLastCalledWith('floating', expect.objectContaining({ toSessionIds: undefined }));
+  });
+
   it('retains failed messages and supports a selected recipient plus text drops', async () => {
     const input = await openFloating();
     fireEvent.drop(input, { dataTransfer: { files: [], getData: (type: string) => type === 'text/plain' ? '/repo/notes.md' : '' } });
     expect(input.value).toBe('/repo/notes.md');
     await userEvent.click(screen.getByRole('button', { name: 'two（离线）' }));
-    await userEvent.click(screen.getByRole('button', { name: '需要执行的任务' }));
+    expect(screen.queryByText('消息类型')).toBeNull();
     apiMocks.sendCollaborationMessage.mockRejectedValueOnce(new Error('连接已断开'));
     await userEvent.click(screen.getByRole('button', { name: '发送' }));
     expect(await screen.findByText('连接已断开')).toBeTruthy();
     expect(input.value).toBe('/repo/notes.md');
-    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledWith('floating', expect.objectContaining({ toSessionIds: ['two'], kind: 'task' }));
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledWith('floating', expect.objectContaining({ toSessionIds: ['two'], kind: 'message' }));
   });
 });
 

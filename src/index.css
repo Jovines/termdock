@@ -1835,3 +1835,12 @@ html[data-theme='light'] .termdock-code .token.important {
 .model3d-feature-label {
   transform: translate(-50%, -50%);
 }
+
+/* Split titles move panes inside the page, including in native desktop shells. */
+.split-pane-drag-handle,
+[data-panel-drag-title],
+[data-split-container] [role='separator'] {
+  -webkit-app-region: no-drag !important;
+  touch-action: none;
+  user-select: none;
+}

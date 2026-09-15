@@ -45,6 +45,8 @@ import {
   getNewSessionAgentSlugSetting,
   setNewSessionAgentSlugSetting,
   getRunningSessionButtonEnabledSetting,
+  getCollaborationPanelsSetting,
+  setCollaborationPanelSetting,
   getCollaborationFloatingGroupIdSetting,
   setCollaborationFloatingGroupIdSetting,
   getServiceSwitcherExpandedSetting,
@@ -7001,6 +7003,7 @@ async function getSettingsPayload() {
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
+    collaborationPanels: getCollaborationPanelsSetting(),
     collaborationFloatingGroupId: getCollaborationFloatingGroupIdSetting(),
     serviceSwitcherExpanded: getServiceSwitcherExpandedSetting(),
     fileSortModes: getFileSortModesSetting(),
@@ -7135,6 +7138,9 @@ router.put('/settings', async (req, res) => {
     setNewSessionAgentSlugSetting(slug);
   }
 
+  if (body.collaborationPanel && typeof body.collaborationPanel.clientId === 'string') {
+    setCollaborationPanelSetting(body.collaborationPanel.clientId, body.collaborationPanel.state);
+  }
   if (body.collaborationFloatingGroupId === null || (typeof body.collaborationFloatingGroupId === 'string' && body.collaborationFloatingGroupId.trim())) {
     setCollaborationFloatingGroupIdSetting(body.collaborationFloatingGroupId?.trim() ?? null);
   }

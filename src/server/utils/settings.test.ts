@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  normalizeCollaborationPanels,
   loadSettingsFile,
   loadSettingsFileAsync,
   normalizeFileSortModes,
@@ -186,4 +187,18 @@ describe('settings persistence', () => {
     expect(() => loadSettingsFile(settingsFile)).toThrow(/Refusing to overwrite malformed settings/);
     expect(fs.readFileSync(settingsFile, 'utf-8')).toBe(malformed);
   });
+});
+
+it('persists panel positions and drafts separately for different clients', () => {
+  const file = tempSettingsPath();
+  const settings = loadSettingsFile(file);
+  settings.collaborationPanels = normalizeCollaborationPanels({
+    desktop: { floatingGroupId: 'group', position: { x: 0.8, y: 0.3 }, drafts: { group: { content: 'desktop draft', targets: ['one', 'two'] } } },
+    phone: { floatingGroupId: null, position: { x: 9, y: -1 }, drafts: { group: { content: '', targets: null } } },
+  });
+  saveSettingsFile(settings, file);
+  const restored = loadSettingsFile(file).collaborationPanels;
+  expect(restored.desktop.drafts?.group).toEqual({ content: 'desktop draft', targets: ['one', 'two'] });
+  expect(restored.phone.position).toEqual({ x: 1, y: 0 });
+  expect(restored.phone.floatingGroupId).toBeNull();
 });

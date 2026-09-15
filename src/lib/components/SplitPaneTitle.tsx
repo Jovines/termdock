@@ -1,4 +1,4 @@
-import { PanelRight, Terminal } from 'lucide-react';
+import { GripVertical, PanelRight, Terminal } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { getSessionDisplayLines } from '../terminal/display';
@@ -25,13 +25,16 @@ export function SplitPaneTitle({ session, active, onActivate, onToggleRightSideb
     <button
       type="button"
       data-split-pane-title={session.id}
+      draggable={false}
+      onDragStart={event => event.preventDefault()}
       aria-pressed={active}
-      title={title}
+      title={`${title} · 拖动标题移动，边缘拆分，中央交换`}
       onClick={onActivate}
-      className="flex h-full min-w-0 flex-1 items-center gap-1.5 overflow-hidden px-2 text-left text-[12px] font-medium leading-none text-foreground hover:bg-surface focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
+      className="split-pane-drag-handle flex h-full min-w-0 cursor-grab active:cursor-grabbing flex-1 items-center gap-1.5 overflow-hidden px-2 text-left text-[12px] font-medium leading-none text-foreground hover:bg-surface focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
     >
       <Terminal size={11} className={`shrink-0 ${active ? 'text-primary' : 'text-muted-foreground'}`} />
       <span className="min-w-0 flex-1 truncate">{title}</span>
+      <GripVertical size={12} aria-hidden="true" className="shrink-0 text-muted-foreground" />
       {active && <span aria-hidden="true" className="h-1 w-1 shrink-0 rounded-full bg-primary" />}
     </button>
     {onToggleRightSidebar && (

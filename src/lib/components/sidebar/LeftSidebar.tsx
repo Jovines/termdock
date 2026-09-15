@@ -1,3 +1,4 @@
+import { collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { SessionNoticeUnreadBadge } from '../SessionNoticeUnreadBadge';
 import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { ServiceSwitcher } from '../ServiceSwitcher';
@@ -39,7 +40,6 @@ import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import {
   getSettings,
-  updateSettings,
   listAgentResumeHistory,
   listCollaborationGroups,
   subscribeCollaborationGroups,
@@ -279,8 +279,9 @@ export function LeftSidebar(
   useEffect(() => {
     let cancelled = false;
     void getSettings().then(settings => {
-      if (cancelled || panelIntent.current || !settings.collaborationFloatingGroupId) return;
-      setAgentOperationsGroupId(settings.collaborationFloatingGroupId);
+      const groupId = settings.collaborationPanels?.[collaborationPanelClientId()]?.floatingGroupId;
+      if (cancelled || panelIntent.current || !groupId) return;
+      setAgentOperationsGroupId(groupId);
       setAgentOperationsFloating(true);
       setAgentOperationsOpen(true);
     }).catch(() => { /* A failed preference read must not block the sidebar. */ });
@@ -288,7 +289,7 @@ export function LeftSidebar(
   }, []);
   const persistFloatingPanel = async (groupId: string | null) => {
     panelIntent.current = true;
-    await updateSettings({ collaborationFloatingGroupId: groupId });
+    await saveCollaborationPanel({ floatingGroupId: groupId });
     setAgentOperationsFloating(groupId !== null);
   };
   const [agentResumeHistory, setAgentResumeHistory] = useState<AgentResumeHistoryEntry[]>([]);

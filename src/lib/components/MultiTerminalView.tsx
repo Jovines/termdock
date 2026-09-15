@@ -1,3 +1,5 @@
+import { legacySplitTree } from '../terminal/freeSplitLayout';
+import { FreeSplitLayout } from './FreeSplitLayout';
 import { useSessionOrderStore } from '../stores/useSessionOrderStore';
 import { useSettledViewportWindow } from '../hooks/useSettledViewportWindow';
 import React, { useEffect, useLayoutEffect, useCallback, useState, useRef, useMemo } from 'react';
@@ -55,17 +57,13 @@ import { AlertTriangle, Check, Columns2, Folder, Plus, RotateCcw, X } from 'luci
 import { useI18n } from '../i18n';
 import {
   combineSplitWorkspaces,
-  equalRatios,
   findSplitWorkspace,
-  getSplitGridDimensions,
-  normalizeRatios,
   normalizeSplitWorkspaces,
   pruneSplitWorkspaces,
   removeSessionFromSplitWorkspace,
   removeSplitWorkspaceForSession,
   reorderSplitWorkspaceSessions,
   renameSplitWorkspace,
-  resizeAdjacentRatios,
   type SplitLayout,
   type SplitWorkspace,
   type SplitWorkspaceSummary,
@@ -126,12 +124,6 @@ const SPLIT_WORKSPACES_STORAGE_KEY = 'termdock:split-workspaces:v2';
 const LEGACY_SPLIT_WORKSPACE_STORAGE_KEY = 'termdock:split-workspace:v1';
 const MIN_SPLIT_RATIO = 0.1;
 const MAX_SPLIT_RATIO = 0.9;
-const MOBILE_MIN_SPLIT_RATIO = 0.28;
-const MOBILE_SPLIT_LONG_PRESS_MS = 300;
-const MOBILE_SPLIT_MOVE_CANCEL_PX = 8;
-const MOBILE_SPLIT_HIT_SLOP_PX = 12;
-const DESKTOP_SPLIT_MIN_WIDTH_PX = 280;
-const DESKTOP_SPLIT_MIN_HEIGHT_PX = 160;
 
 function detectMobileSplitLayout(): { mobile: boolean; landscape: boolean } {
   if (typeof window === 'undefined') return { mobile: false, landscape: false };
@@ -483,7 +475,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const isRestoringRef = useRef(true);
   const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<string | null>) | null>(null);
   const lastDuplicateMappingSnapshotRef = useRef('');
-  const splitDragCleanupRef = useRef<(() => void) | null>(null);
   const suppressMobileKeyboardOpenUntilRef = useRef(0);
 
   useEffect(() => {
@@ -848,7 +839,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     return () => window.clearTimeout(timer);
   }, [splitNotice]);
 
-  useEffect(() => () => splitDragCleanupRef.current?.(), []);
 
   activeSessionIdRef.current = activeSessionId;
   resumeRequestTokenRef.current = resumeRequest.token;
@@ -1654,98 +1644,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     activateSplitPane(sessionId, { preserveMobileKeyboard: false });
   }, [activateSplitPane]);
 
-  const startSplitResize = useCallback((
-    event: React.PointerEvent<HTMLButtonElement>,
-    container: HTMLDivElement,
-    vertical: boolean,
-    workspaceId: string,
-    dividerIndex: number,
-    trackKind: 'linear' | 'grid-columns' | 'grid-rows' = 'linear',
-    trackCount?: number,
-  ) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const divider = event.currentTarget;
-    const pointerId = event.pointerId;
-    const pointerStart = { x: event.clientX, y: event.clientY };
-    divider.setPointerCapture?.(pointerId);
-    const rect = container.getBoundingClientRect();
-    let dragging = !isMobileLayout;
-    let longPressTimer: number | null = null;
-
-    const update = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId !== pointerId) return;
-      if (!dragging) {
-        const distance = Math.hypot(
-          pointerEvent.clientX - pointerStart.x,
-          pointerEvent.clientY - pointerStart.y,
-        );
-        if (distance > MOBILE_SPLIT_MOVE_CANCEL_PX && longPressTimer !== null) {
-          window.clearTimeout(longPressTimer);
-          longPressTimer = null;
-        }
-        return;
-      }
-      pointerEvent.preventDefault();
-      const pointerRatio = vertical
-        ? (pointerEvent.clientY - rect.top) / rect.height
-        : (pointerEvent.clientX - rect.left) / rect.width;
-      const dimension = vertical ? rect.height : rect.width;
-      const minPanePx = isMobileLayout
-        ? 0
-        : vertical
-          ? DESKTOP_SPLIT_MIN_HEIGHT_PX
-          : DESKTOP_SPLIT_MIN_WIDTH_PX;
-      setSplitWorkspaces((current) => current.map((workspace) => {
-        if (workspace.id !== workspaceId) return workspace;
-        const resolvedTrackCount = trackCount ?? workspace.sessionIds.length;
-        const sourceRatios = trackKind === 'grid-columns'
-          ? workspace.gridColumnRatios
-          : trackKind === 'grid-rows'
-            ? workspace.gridRowRatios
-            : workspace.ratios;
-        const ratios = normalizeRatios(sourceRatios, resolvedTrackCount);
-        const pairTotal = ratios[dividerIndex]! + ratios[dividerIndex + 1]!;
-        const minimumRatio = minPanePx > 0
-          ? Math.min(pairTotal / 2, minPanePx / Math.max(1, dimension))
-          : Math.min(pairTotal / 2, MOBILE_MIN_SPLIT_RATIO);
-        const resizedRatios = resizeAdjacentRatios(ratios, dividerIndex, pointerRatio, minimumRatio);
-        if (trackKind === 'grid-columns') return { ...workspace, gridColumnRatios: resizedRatios };
-        if (trackKind === 'grid-rows') return { ...workspace, gridRowRatios: resizedRatios };
-        return { ...workspace, ratios: resizedRatios };
-      }));
-    };
-    const stop = () => {
-      if (longPressTimer !== null) {
-        window.clearTimeout(longPressTimer);
-        longPressTimer = null;
-      }
-      window.removeEventListener('pointermove', update);
-      window.removeEventListener('pointerup', stop);
-      window.removeEventListener('pointercancel', stop);
-      divider.classList.remove('bg-primary');
-      if (isMobileLayout) {
-        document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: false } }));
-      }
-      splitDragCleanupRef.current = null;
-    };
-    splitDragCleanupRef.current?.();
-    splitDragCleanupRef.current = stop;
-    window.addEventListener('pointermove', update);
-    window.addEventListener('pointerup', stop);
-    window.addEventListener('pointercancel', stop);
-
-    if (isMobileLayout) {
-      document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: true } }));
-      longPressTimer = window.setTimeout(() => {
-        longPressTimer = null;
-        dragging = true;
-        divider.classList.add('bg-primary');
-        navigator.vibrate?.(8);
-      }, MOBILE_SPLIT_LONG_PRESS_MS);
-    }
-  }, [isMobileLayout]);
-
   // Handle session switching from custom event
   const handleSwitchSession = useCallback((sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
@@ -2353,50 +2251,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 ? 'vertical'
                 : 'horizontal'
               : workspace?.layout ?? 'horizontal';
-            const verticalSplit = effectiveLayout === 'vertical';
-            const ratios = workspace?.ratios.length === slide.sessions.length
-              ? workspace.ratios
-              : equalRatios(slide.sessions.length);
-            const keyboardFocusSessionIndex = mobileKeyboardOpenSessionId
-              ? slide.sessions.findIndex((session) => session.id === mobileKeyboardOpenSessionId)
-              : -1;
             const mobileKeyboardFocusMode = isMobileLayout && mobileKeyboardOpenSessionId
               ? slide.sessions.some((session) => session.id === mobileKeyboardOpenSessionId)
               : false;
             const splitToolbarOwnerId = slide.sessions.some((session) => session.id === activeSessionId)
               ? activeSessionId
               : slide.sessions[0]?.id;
-            const linearTracks = ratios.flatMap((ratio, index) => [
-              mobileKeyboardFocusMode && index !== keyboardFocusSessionIndex ? '0px' : `minmax(0, ${ratio}fr)`,
-              ...(index < ratios.length - 1 ? [mobileKeyboardFocusMode ? '0px' : '1px'] : []),
-            ]).join(' ');
-            const { columns: gridColumns, rows: gridRows } = getSplitGridDimensions(slide.sessions.length);
-            const gridColumnRatios = normalizeRatios(workspace?.gridColumnRatios, gridColumns);
-            const gridRowRatios = normalizeRatios(workspace?.gridRowRatios, gridRows);
-            const gridColumnDividerOffsets = gridColumnRatios
-              .slice(0, -1)
-              .map((_, index) => gridColumnRatios.slice(0, index + 1).reduce((sum, ratio) => sum + ratio, 0));
-            const gridRowDividerOffsets = gridRowRatios
-              .slice(0, -1)
-              .map((_, index) => gridRowRatios.slice(0, index + 1).reduce((sum, ratio) => sum + ratio, 0));
-            const gridLastRowCount = slide.sessions.length % gridColumns;
-            const splitGridStyle: React.CSSProperties = {
-              ...(effectiveLayout === 'grid'
-                ? {
-                    gridTemplateColumns: gridColumnRatios.map((ratio) => `minmax(0, ${ratio}fr)`).join(' '),
-                    gridTemplateRows: gridRowRatios.map((ratio) => `minmax(0, ${ratio}fr)`).join(' '),
-                    gap: '1px',
-                  }
-                : verticalSplit
-                  ? { gridTemplateRows: linearTracks }
-                  : { gridTemplateColumns: linearTracks }),
-              ...(isMobileLayout
-                ? {
-                    marginTop: 'var(--kb-margin-top, 0px)',
-                    transition: 'none',
-                  }
-                : {}),
-            };
             return (
               <SwiperSlide
                 key={slide.key}
@@ -2423,136 +2283,15 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                         : undefined
                       }
                     >
-                    <div
-                      data-split-container="true"
-                      className="relative grid min-h-0 min-w-0 flex-1 overflow-hidden"
-                      style={splitGridStyle}
-                    >
-                      {slide.sessions.map((session, index) => (
-                        <React.Fragment key={session.id}>
-                          {renderTerminal(session, {
-                            showPaneTitle: !isMobileLayout,
-                            suppressKeyboard: isMobileLayout && session.id !== splitToolbarOwnerId,
-                            keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
-                            sharedMobileKeyboardLayout: isMobileLayout,
-                            suppressPageFlipRefresh: true,
-                            hidden: mobileKeyboardFocusMode && keyboardFocusSessionIndex !== index,
-                            containerStyle: effectiveLayout === 'grid'
-                              && gridLastRowCount > 0
-                              && index === slide.sessions.length - 1
-                              ? { gridColumn: `span ${gridColumns - gridLastRowCount + 1}` }
-                              : undefined,
-                          })}
-                          {effectiveLayout !== 'grid' && index < slide.sessions.length - 1 && workspace && (
-                            <button
-                              type="button"
-                              className={`swiper-no-swiping relative z-20 touch-none select-none bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary ${
-                                verticalSplit ? 'cursor-row-resize' : 'cursor-col-resize'
-                              } ${mobileKeyboardFocusMode ? 'invisible pointer-events-none' : ''}`}
-                              onPointerDownCapture={(event) => {
-                                const container = event.currentTarget.closest('[data-split-container="true"]');
-                                if (container instanceof HTMLDivElement) {
-                                  startSplitResize(event, container, verticalSplit, workspace.id, index);
-                                }
-                              }}
-                              onDoubleClick={(event) => {
-                                if (isMobileLayout) return;
-                                event.preventDefault();
-                                event.stopPropagation();
-                                setSplitWorkspaces((current) => current.map((candidate) => (
-                                  candidate.id === workspace.id
-                                    ? { ...candidate, ratios: equalRatios(candidate.sessionIds.length) }
-                                    : candidate
-                                )));
-                              }}
-                              onContextMenu={(event) => {
-                                if (isMobileLayout) event.preventDefault();
-                              }}
-                              aria-label={t('tab.split')}
-                            >
-                              <span
-                                aria-hidden="true"
-                                data-split-divider-hitarea="true"
-                                className={`absolute ${verticalSplit ? 'inset-x-0' : 'inset-y-0'}`}
-                                style={verticalSplit
-                                  ? { top: -MOBILE_SPLIT_HIT_SLOP_PX, bottom: -MOBILE_SPLIT_HIT_SLOP_PX }
-                                  : { left: -MOBILE_SPLIT_HIT_SLOP_PX, right: -MOBILE_SPLIT_HIT_SLOP_PX }
-                                }
-                              />
-                            </button>
-                          )}
-                        </React.Fragment>
-                      ))}
-                      {effectiveLayout === 'grid' && workspace && gridColumnDividerOffsets.map((offset, index) => (
-                        <button
-                          key={`grid-column-divider:${index}`}
-                          type="button"
-                          data-split-grid-column-divider={index}
-                          className="swiper-no-swiping absolute top-0 z-20 w-px -translate-x-1/2 touch-none select-none cursor-col-resize bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary"
-                          style={{
-                            left: `${offset * 100}%`,
-                            bottom: gridLastRowCount === 0 || index < gridLastRowCount - 1
-                              ? 0
-                              : `${(gridRowRatios.at(-1) ?? 0) * 100}%`,
-                          }}
-                          onPointerDownCapture={(event) => {
-                            const container = event.currentTarget.closest('[data-split-container="true"]');
-                            if (container instanceof HTMLDivElement) {
-                              startSplitResize(event, container, false, workspace.id, index, 'grid-columns', gridColumns);
-                            }
-                          }}
-                          onDoubleClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setSplitWorkspaces((current) => current.map((candidate) => (
-                              candidate.id === workspace.id
-                                ? { ...candidate, gridColumnRatios: equalRatios(gridColumns) }
-                                : candidate
-                            )));
-                          }}
-                          aria-label={t('tab.split')}
-                        >
-                          <span
-                            aria-hidden="true"
-                            data-split-divider-hitarea="true"
-                            className="absolute inset-y-0"
-                            style={{ left: -MOBILE_SPLIT_HIT_SLOP_PX, right: -MOBILE_SPLIT_HIT_SLOP_PX }}
-                          />
-                        </button>
-                      ))}
-                      {effectiveLayout === 'grid' && workspace && gridRowDividerOffsets.map((offset, index) => (
-                        <button
-                          key={`grid-row-divider:${index}`}
-                          type="button"
-                          data-split-grid-row-divider={index}
-                          className="swiper-no-swiping absolute inset-x-0 z-20 h-px -translate-y-1/2 touch-none select-none cursor-row-resize bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary"
-                          style={{ top: `${offset * 100}%` }}
-                          onPointerDownCapture={(event) => {
-                            const container = event.currentTarget.closest('[data-split-container="true"]');
-                            if (container instanceof HTMLDivElement) {
-                              startSplitResize(event, container, true, workspace.id, index, 'grid-rows', gridRows);
-                            }
-                          }}
-                          onDoubleClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setSplitWorkspaces((current) => current.map((candidate) => (
-                              candidate.id === workspace.id
-                                ? { ...candidate, gridRowRatios: equalRatios(gridRows) }
-                                : candidate
-                            )));
-                          }}
-                          aria-label={t('tab.split')}
-                        >
-                          <span
-                            aria-hidden="true"
-                            data-split-divider-hitarea="true"
-                            className="absolute inset-x-0"
-                            style={{ top: -MOBILE_SPLIT_HIT_SLOP_PX, bottom: -MOBILE_SPLIT_HIT_SLOP_PX }}
-                          />
-                        </button>
-                      ))}
-                    </div>
+                    <FreeSplitLayout layoutId={slide.key} preset={workspace?.layout ?? 'horizontal'} initialTree={legacySplitTree(slide.sessions.map(session => session.id), effectiveLayout, workspace?.ratios, workspace?.gridColumnRatios, workspace?.gridRowRatios)} mobile={isMobileLayout}
+                      focusId={mobileKeyboardFocusMode ? mobileKeyboardOpenSessionId : null}
+                      panes={slide.sessions.map(session => ({ id: session.id, content: renderTerminal(session, {
+                        showPaneTitle: !isMobileLayout,
+                        suppressKeyboard: isMobileLayout && session.id !== splitToolbarOwnerId,
+                        keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
+                        sharedMobileKeyboardLayout: isMobileLayout,
+                        suppressPageFlipRefresh: true,
+                      }) }))} />
                     {isMobileLayout && (
                       <div
                         ref={setSplitKeyboardPortalTarget}
@@ -2561,7 +2300,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                       />
                     )}
                     </div>
-                  ) : renderTerminal(slide.sessions[0]!)}
+                  ) : <FreeSplitLayout layoutId={slide.key} preset={workspace?.layout ?? 'horizontal'} mobile={isMobileLayout} panes={[{ id: slide.sessions[0]!.id, content: renderTerminal(slide.sessions[0]!) }]} />}
                 </div>
               </SwiperSlide>
             );

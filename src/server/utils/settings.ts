@@ -22,7 +22,18 @@ export interface PinnedExplorerEntry {
 
 export type PinnedExplorerRoots = Record<string, PinnedExplorerEntry[]>;
 
+export interface CollaborationPanelState {
+  layouts?: Record<string, unknown>;
+  mode?: 'floating' | 'docked';
+  size?: { width: number; height: number };
+  dock?: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' };
+  floatingGroupId?: string | null;
+  position?: { x: number; y: number };
+  drafts?: Record<string, { content: string; targets: string[] | null }>;
+}
+
 export interface SettingsDoc {
+  collaborationPanels: Record<string, CollaborationPanelState>;
   [key: string]: unknown;
   version: 1;
   preventSleep: boolean;
@@ -216,6 +227,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
       : 12_000,
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
+    collaborationPanels: normalizeCollaborationPanels(raw.collaborationPanels),
     collaborationFloatingGroupId: typeof raw.collaborationFloatingGroupId === 'string' && raw.collaborationFloatingGroupId.trim() ? raw.collaborationFloatingGroupId.trim() : null,
     serviceSwitcherExpanded: raw.serviceSwitcherExpanded === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
@@ -698,4 +710,48 @@ export function watchPinnedExplorerRootsSetting(
     if (timer) clearTimeout(timer);
     watcher.close();
   };
+}
+
+export function normalizeCollaborationPanels(value: unknown): Record<string, CollaborationPanelState> {
+  const result: Record<string, CollaborationPanelState> = Object.create(null);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
+  for (const [id, raw] of Object.entries(value).slice(-100)) {
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id) || !raw || typeof raw !== 'object') continue;
+    const state: CollaborationPanelState = {};
+    if (raw.layouts && typeof raw.layouts === 'object' && !Array.isArray(raw.layouts)) {
+      state.layouts = Object.fromEntries(Object.entries(raw.layouts).slice(-100).filter(([, tree]) => JSON.stringify(tree).length < 50000));
+    }
+    if (raw.mode === 'floating' || raw.mode === 'docked') state.mode = raw.mode;
+    if (raw.size && Number.isFinite(raw.size.width) && Number.isFinite(raw.size.height)) state.size = {
+      width: Math.max(0.15, Math.min(1, raw.size.width)), height: Math.max(0.15, Math.min(1, raw.size.height)),
+    };
+    if (raw.dock && typeof raw.dock.sessionId === 'string' && ['left', 'right', 'top', 'bottom'].includes(raw.dock.side)) {
+      state.dock = { sessionId: raw.dock.sessionId, side: raw.dock.side };
+    }
+    if (raw.floatingGroupId === null || typeof raw.floatingGroupId === 'string') state.floatingGroupId = raw.floatingGroupId;
+    if (raw.position && Number.isFinite(raw.position.x) && Number.isFinite(raw.position.y)) {
+      state.position = { x: Math.max(0, Math.min(1, raw.position.x)), y: Math.max(0, Math.min(1, raw.position.y)) };
+    }
+    if (raw.drafts && typeof raw.drafts === 'object' && !Array.isArray(raw.drafts)) {
+      state.drafts = Object.create(null);
+      for (const [groupId, draft] of Object.entries(raw.drafts).slice(-100)) {
+        const entry = draft as { content?: unknown; targets?: unknown } | null;
+        if (!entry || typeof entry.content !== 'string' || !(entry.targets === null || Array.isArray(entry.targets))) continue;
+        state.drafts![groupId] = { content: entry.content, targets: entry.targets === null ? null : [...new Set(entry.targets.filter((id): id is string => typeof id === 'string'))] };
+      }
+    }
+    result[id] = state;
+  }
+  return result;
+}
+
+export function getCollaborationPanelsSetting() { return loadSettings().collaborationPanels; }
+export function setCollaborationPanelSetting(clientId: string, patch: unknown) {
+  const normalized = normalizeCollaborationPanels({ [clientId]: patch })[clientId];
+  if (!normalized) return;
+  return updateSettings(settings => {
+    const previous = settings.collaborationPanels[clientId] ?? {};
+    settings.collaborationPanels[clientId] = { ...previous, ...normalized,
+      drafts: { ...previous.drafts, ...normalized.drafts }, layouts: { ...previous.layouts, ...normalized.layouts } };
+  });
 }
