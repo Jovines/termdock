@@ -8,7 +8,7 @@ import { openRemoteSession } from '../../federation/remoteSession';
 import { shortId } from '../../utils/shortId';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Bot, GripVertical, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   getSettings,
   type CollaborationPanelState,
@@ -232,7 +232,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         aria-label="关闭 Agent 工作台"
       />}
       <section onPointerDown={event => { if (docked) event.stopPropagation(); }} ref={panelRef} aria-label={docked ? '工作组消息分屏' : floating ? '工作组消息浮窗' : 'Agent 工作台'} style={floating && !docked ? { display: floatingVisible ? undefined : 'none', left: position.x, top: position.y, ...(panelSize ? { width: `min(calc(100vw - 24px), max(280px, ${panelSize.width * 100}vw))`, height: `min(calc(100dvh - 24px), max(220px, ${panelSize.height * 100}dvh))` } : {}), maxHeight: viewportHeight ? viewportHeight - 24 : 'calc(100dvh - 24px)' } : undefined} className={docked ? 'flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface' : floating ? 'fixed z-menu-panel flex w-[min(400px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-xl' : 'fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[8%] sm:bottom-auto sm:max-h-[84vh]'}>
-        <header className={`flex items-center gap-2 border-b border-border/15 ${floating ? `px-3 py-2 ${docked ? '' : 'cursor-move touch-none select-none'}` : 'px-4 py-3'}`}
+        <header data-panel-drag-title={docked ? "true" : undefined} onDragStart={event => event.preventDefault()} className={`flex items-center gap-2 border-b border-border/15 ${docked ? 'h-6 min-h-6 shrink-0 cursor-grab select-none bg-[var(--chrome-bg)] px-2 active:cursor-grabbing' : floating ? 'px-3 py-2 cursor-move touch-none select-none' : 'px-4 py-3'}`}
           onPointerDown={event => {
             if (!floating || docked || event.button !== 0 || (event.target as Element).closest('button')) return;
             drag.current = { x: event.clientX, y: event.clientY, left: position.x, top: position.y };
@@ -249,15 +249,19 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
               (viewport?.width ?? window.innerWidth) - box.width - 24, (viewport?.height ?? window.innerHeight) - box.height - 24);
             void saveCollaborationPanel({ position: relativePosition.current }).catch(() => setPreferenceError('浮窗位置保存失败，请重新拖动重试'));
           }} onPointerCancel={() => { drag.current = null; }}>
-          <Bot size={17} className="text-primary" />
+          <Bot size={docked ? 13 : 17} className="shrink-0 text-primary" />
           <div className="min-w-0 flex-1">
-            <h2 data-panel-drag-title={docked ? "true" : undefined} className={`${floating ? 'truncate text-[12px]' : 'text-[14px]'} font-semibold text-foreground`} title={docked ? '拖动标题移动面板；放在边缘拆分，中央交换' : directCollaborationGroup?.name}>{directCollaborationGroup ? `${directCollaborationGroup.name} · 协作消息` : 'Agent 工作台'}</h2>
-            <p className="text-[10px] text-muted-foreground">{floating ? '引用、文件路径和粘贴优先加入此处' : directCollaborationGroup ? '选择成员，发送协作消息' : '自动任务、会话协作与全文恢复'}</p>
+            <h2 className={`${floating ? 'truncate text-[12px]' : 'text-[14px]'} font-semibold text-foreground`} title={docked ? '拖动标题移动面板；放在边缘拆分，中央交换' : directCollaborationGroup?.name}>{directCollaborationGroup ? `${directCollaborationGroup.name} · 协作消息` : 'Agent 工作台'}</h2>
+            {!docked && <p className="text-[10px] text-muted-foreground">{floating ? '引用、文件路径和粘贴优先加入此处' : directCollaborationGroup ? '选择成员，发送协作消息' : '自动任务、会话协作与全文恢复'}</p>}
           </div>
-          {tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '完整面板' : '常驻浮窗'}</button>}
-          <button className="rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" disabled={savingFloating} onClick={() => { if (floating) void changeFloating(false, true); else onClose(); }} aria-label="关闭"><X size={16} /></button>
+          {!docked && tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '完整面板' : '常驻浮窗'}</button>}
+          {docked && <>
+            <GripVertical size={14} aria-hidden="true" className="shrink-0 text-muted-foreground" />
+            <button type="button" aria-label="切换为浮窗" title="切换为浮窗" disabled={savingFloating} className="rounded p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => void changePanelMode('floating')}><ExternalLink size={14} /></button>
+          </>}
+          <button className={`${docked ? 'rounded p-1' : 'rounded-lg p-2'} text-muted-foreground hover:bg-surface-2 hover:text-foreground`} disabled={savingFloating} onClick={() => { if (floating) void changeFloating(false, true); else onClose(); }} aria-label="关闭"><X size={16} /></button>
         </header>
-        {floating && <div className="flex flex-wrap items-center gap-1 border-b border-border/15 px-3 py-1.5">
+        {floating && !docked && <div className="flex flex-wrap items-center gap-1 border-b border-border/15 px-3 py-1.5">
           <button type="button" disabled={savingFloating} aria-pressed={panelMode === 'floating'} className={`${choiceClass} ${panelMode === 'floating' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('floating')}>浮窗</button>
           <button type="button" disabled={savingFloating || !activeSessionId} aria-pressed={panelMode === 'docked'} className={`${choiceClass} ${panelMode === 'docked' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('docked')}>占用分屏</button>
           {panelMode === 'docked' && dock?.sessionId !== activeSessionId && <button className={`${choiceClass} border-transparent text-primary`} disabled={savingFloating || !activeSessionId} onClick={() => void changePanelMode('docked', dock?.side)}>移到当前终端</button>}

@@ -562,9 +562,27 @@ describe('persistent collaboration composer', () => {
     expect(useCollaborationPanelDock.getState().dock).toEqual({ sessionId: 'one', side: 'right' });
     fireEvent.keyDown(screen.getByRole('separator'), { key: 'ArrowLeft' });
     await waitFor(() => expect(apiMocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ collaborationPanel: expect.objectContaining({ state: expect.objectContaining({ layouts: expect.any(Object) }) }) })));
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: '协作分屏位置' }), 'bottom');
-    await waitFor(() => expect(useCollaborationPanelDock.getState().dock?.side).toBe('bottom'));
-    await userEvent.click(screen.getByRole('button', { name: '浮窗' }));
+    expect(screen.queryByRole('button', { name: '完整面板' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '占用分屏' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: '协作分屏位置' })).toBeNull();
+    vi.stubGlobal('PointerEvent', MouseEvent);
+    const panel = screen.getByRole('region', { name: '工作组消息分屏' });
+    const container = panel.closest<HTMLElement>('[data-split-container]')!;
+    const pane = panel.closest<HTMLElement>('[data-layout-pane]')!;
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800, toJSON() {} });
+    // Start on header whitespace, not only the heading text. Portal events must reach the layout.
+    fireEvent.pointerDown(panel.querySelector('header')!, { button: 0, clientX: 600, clientY: 20 });
+    fireEvent.pointerMove(container, { clientX: 200, clientY: 400 });
+    expect(pane.style.transform).toContain('translate(-400px, 380px)');
+    fireEvent.pointerUp(container, { clientX: 200, clientY: 400 });
+    expect(pane.style.transform).toBe('');
+    expect(pane.style.left).toBe('0%');
+    // Header controls remain clickable and never start a layout drag.
+    fireEvent.pointerDown(screen.getByRole('button', { name: '切换为浮窗' }), { button: 0, clientX: 20, clientY: 20 });
+    fireEvent.pointerMove(container, { clientX: 200, clientY: 200 });
+    expect(pane.style.transform).toBe('');
+    fireEvent.pointerUp(container);
+    await userEvent.click(screen.getByRole('button', { name: '切换为浮窗' }));
     expect(await screen.findByRole('region', { name: '工作组消息浮窗' })).toBeTruthy();
     expect(screen.queryByRole('separator')).toBeNull();
     expect((screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toBe('布局切换保留');

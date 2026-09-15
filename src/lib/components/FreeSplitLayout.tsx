@@ -86,6 +86,28 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
   const drag = useRef<{ id: string; x: number; y: number; moved: boolean; originX: number; originY: number; scale: number } | null>(null);
   const dropRef = useRef(drop); dropRef.current = drop;
   const activeResize = useRef<{ path?: string; side?: PaneSide; rect: PaneRect; axis: 'x' | 'y' } | null>(null);
+  // Portal children are DOM descendants but not React descendants of this layout.
+  // Capture starts on the DOM container so terminal and collaboration titles share the path.
+  useEffect(() => {
+    const host = container.current;
+    if (!host || !ready) return;
+    const start = (event: PointerEvent) => {
+      if (event.button !== 0 || !(event.target instanceof Element)) return;
+      const handle = event.target.closest('[data-split-pane-title], [data-panel-drag-title]');
+      const control = event.target.closest('button, a, input, textarea, select');
+      if (!handle || (control && control !== handle)) return;
+      const pane = handle.closest<HTMLElement>('[data-layout-pane]');
+      if (!pane || !host.contains(pane)) return;
+      document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: true } }));
+      const box = pane.getBoundingClientRect();
+      drag.current = { id: pane.dataset.layoutPane!, x: event.clientX, y: event.clientY, moved: false,
+        originX: event.clientX - box.left, originY: event.clientY - box.top,
+        scale: Math.min(0.8, 480 / Math.max(1, box.width), 320 / Math.max(1, box.height)) };
+      host.setPointerCapture?.(event.pointerId);
+    };
+    host.addEventListener('pointerdown', start, true);
+    return () => host.removeEventListener('pointerdown', start, true);
+  }, [ready]);
   const resize = (clientX: number, clientY: number) => {
     const box = container.current?.getBoundingClientRect(), active = activeResize.current;
     if (!box || !active) return;
@@ -132,13 +154,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
       const rect = geometry.panes.find(p => p.id === pane.id)?.rect;
       const hidden = !rect || (!!focusId && pane.id !== focusId);
       return <div key={pane.id} data-layout-pane={pane.id} className={`absolute min-h-0 min-w-0 overflow-hidden bg-[var(--chrome-bg)] ${dragPreview?.id === pane.id ? 'pointer-events-none z-30 rounded-lg ring-1 ring-primary/60 opacity-90 shadow-xl' : ''}`} style={{ ...rectStyle(focusId === pane.id ? { x: 0, y: 0, width: 1, height: 1 } : rect ?? { x: 0, y: 0, width: 0, height: 0 }), padding: allPanes.length > 1 ? '0.5px' : 0, transition: 'none', visibility: hidden ? 'hidden' : undefined, ...(dragPreview?.id === pane.id ? { transform: `translate(${dragPreview.dx}px, ${dragPreview.dy}px) scale(${dragPreview.scale})`, transformOrigin: `${dragPreview.originX}px ${dragPreview.originY}px` } : {}) }}
-        onPointerDownCapture={event => {
-          if (!ready || event.button !== 0 || !(event.target as Element).closest('[data-split-pane-title], [data-panel-drag-title]')) return;
-          document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: true } }));
-          const box = event.currentTarget.getBoundingClientRect();
-          drag.current = { id: pane.id, x: event.clientX, y: event.clientY, moved: false, originX: event.clientX - box.left, originY: event.clientY - box.top, scale: Math.min(0.8, 480 / Math.max(1, box.width), 320 / Math.max(1, box.height)) };
-          container.current?.setPointerCapture?.(event.pointerId);
-        }} onDragStart={event => { if ((event.target as Element).closest('[data-split-pane-title], [data-panel-drag-title]')) event.preventDefault(); }}>{pane.content}
+        onDragStart={event => { if ((event.target as Element).closest('[data-split-pane-title], [data-panel-drag-title]')) event.preventDefault(); }}>{pane.content}
         {mobile && allPanes.length > 1 && pane.id !== COLLABORATION && <button type="button" data-panel-drag-title="true" aria-label="拖动面板到其他区域" className="swiper-no-swiping absolute right-1 top-1 z-20 rounded bg-surface p-1 text-muted-foreground"><GripVertical size={14} /></button>}
         {drop?.id === pane.id && <div className="pointer-events-none absolute z-30 border-2 border-primary bg-primary/20" style={{ top: drop.side === 'bottom' ? '50%' : 0, bottom: drop.side === 'top' ? '50%' : 0, left: drop.side === 'right' ? '50%' : 0, right: drop.side === 'left' ? '50%' : 0 }}></div>}
       </div>;
