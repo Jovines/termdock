@@ -32,3 +32,19 @@ export async function readTerminalClipboardImage(clipboard?: Pick<Clipboard, 're
   }
   return null;
 }
+
+/** Always upload to the active service, including remote services via a local
+ * entry point. Never insert a native Mac path or call a legacy preload upload. */
+export async function readTerminalClipboardFiles(): Promise<File[]> {
+  const files = await getTermdockDesktopBridge()?.readClipboardFiles?.();
+  return (files ?? []).map(file => new File([file.bytes], file.name, { type: 'application/octet-stream' }));
+}
+
+export async function uploadTerminalClipboardFiles(input: File[]): Promise<string[]> {
+  if (!input.length) return [];
+  const { files } = await uploadFiles('/tmp', input);
+  if (files.length !== input.length || files.some(file => !file.path)) {
+    throw new Error('Upload did not return every file path');
+  }
+  return files.map(file => file.path);
+}

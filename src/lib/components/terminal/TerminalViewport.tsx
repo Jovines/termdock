@@ -4,7 +4,7 @@ import { isWorkspaceActive } from '../../services/workspaceHost';
 import React from 'react';
 import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
-import { readTerminalClipboardImage, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
+import { readTerminalClipboardFiles, uploadTerminalClipboardFiles, readTerminalClipboardImage, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
 import { useI18n } from '../../i18n';
 import { flushSync } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
@@ -1653,9 +1653,29 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }, [dismissMobileCopyPopover, sendTerminalSeq]);
 
+    const pasteFilesIntoTerminal = React.useCallback(async (files: File[], textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
+      setPasteError(null);
+      try {
+        const paths = await uploadTerminalClipboardFiles(files);
+        if (!paths.length) return false;
+        const text = `${paths.map(escapeShellPath).join(' ')} `;
+        if (routeCollaborationInput(text)) return true;
+        sendTerminalSeq(text, textarea);
+        dismissMobileCopyPopover();
+        return true;
+      } catch (error) {
+        setPasteError(error instanceof Error ? error.message : 'File upload failed');
+        return false;
+      }
+    }, [dismissMobileCopyPopover, sendTerminalSeq]);
+
     const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
       setPasteError(null);
       try {
+        if (getTermdockDesktopBridge()?.readClipboardFiles) {
+          const files = await readTerminalClipboardFiles();
+          if (files.length) return pasteFilesIntoTerminal(files, textarea);
+        }
         if (!getTermdockDesktopBridge()?.readClipboardImage) {
           if (typeof navigator.clipboard?.read === 'function') {
             // Request access once, within the button's user gesture. Reuse the
@@ -1685,7 +1705,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         setPasteError(error instanceof Error ? error.message : 'Clipboard read failed');
         return false;
       }
-    }, [pasteImageIntoTerminal, pasteTextIntoTerminal]);
+    }, [pasteFilesIntoTerminal, pasteImageIntoTerminal, pasteTextIntoTerminal]);
 
     /**
      * 根据 xterm 当前光标位置计算 IME 组合文本锚点。桌面 textarea 会缩成
@@ -5037,7 +5057,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 syncTextareaToPty(event.currentTarget);
               }}
               onPaste={(event) => {
-                const image = Array.from(event.clipboardData.files).find(file => file.type.startsWith('image/'));
+                if (window.termdockDesktop?.readClipboardFiles) {
+                  event.preventDefault();
+                  void readClipboardIntoTerminal(event.currentTarget);
+                  return;
+                }
+                const files = Array.from(event.clipboardData.files);
+                if (files.length && (files.length > 1 || !files[0].type.startsWith('image/'))) {
+                  event.preventDefault();
+                  void pasteFilesIntoTerminal(files, event.currentTarget);
+                  return;
+                }
+                const image = files[0];
                 if (image) {
                   event.preventDefault();
                   void pasteImageIntoTerminal(image, event.currentTarget);
@@ -5079,7 +5110,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
                   // ---- Cmd/Ctrl + V：粘贴 ----
                   if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) {
-                    if (window.termdockDesktop?.readClipboardImage) {
+                    if (window.termdockDesktop?.readClipboardFiles || window.termdockDesktop?.readClipboardImage) {
                       event.preventDefault();
                       void readClipboardIntoTerminal(event.currentTarget);
                       return;

@@ -1,3 +1,4 @@
+import { readClipboardFiles } from './clipboardFiles.js';
 import { CollaborationFederation, sessionAddress } from './collaborationFederation.js';
 import { prepareServiceFrontend, selectServiceFrontend } from './bundledFrontend.js';
 import { serviceConnection, serviceConnectionKeys, importServiceConnection, saveServiceConnection, invitationForService } from './serviceConnections.js';
@@ -1980,6 +1981,13 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
 }
 
 function installIpcHandlers(): void {
+  ipcMain.handle('desktop:read-clipboard-files', (event) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    const origin = sourceWindow ? windowServiceOrigins.get(sourceWindow) : undefined;
+    if (!origin || event.senderFrame !== event.sender.mainFrame
+      || new URL(event.sender.getURL()).origin !== origin) throw new Error('未授权的服务窗口');
+    return readClipboardFiles();
+  });
   ipcMain.handle('desktop:read-clipboard-image', (event) => {
     const sourceWindow = BrowserWindow.fromWebContents(event.sender);
     if (!sourceWindow || !windowServiceOrigins.has(sourceWindow)) return null;

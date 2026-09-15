@@ -434,7 +434,12 @@ export function LeftSidebar(
       const row = hits.map((element) => element.closest<HTMLElement>('[data-collaboration-member]'))
         .find(Boolean);
       const targetId = row?.dataset.collaborationMember ?? nestedSplit?.dataset.splitAnchor;
-      if (targetId && (groupId !== sourceCollaborationGroupIdRef.current || (!row && nestedSplit))) {
+      // Sorting displaces rows and exposes their split container. Its anchor
+      // must not turn a reorder of existing panes into a no-op combine.
+      const sortingWithinSplit = groupId === sourceCollaborationGroupIdRef.current
+        && splitWorkspaces.some((workspace) => workspace.sessionIds.includes(targetId ?? '')
+          && workspace.sessionIds.includes(draggedSessionIdRef.current ?? ''));
+      if (targetId && !sortingWithinSplit && (groupId !== sourceCollaborationGroupIdRef.current || (!row && nestedSplit))) {
         collaborationTarget.dataset.dropActive = 'true';
         const splitTarget = row ?? nestedSplit;
         if (splitTarget) splitTarget.dataset.dropActive = 'true';
@@ -1626,12 +1631,8 @@ export function LeftSidebar(
           <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{remote.serviceLabel ?? remote.serviceOrigin}</span>
           {remote.serviceConnected === false && <span className="shrink-0 text-[9px]">不可达</span>}
         </button>)}
-        {/* Keep the drop target without adding extra space below the last row. */}
-        <div data-collaboration-background className="absolute inset-x-0 bottom-0 h-1.5" title={`工作组：${collaboration.name}`}>
-          <span className="absolute inset-x-0 bottom-0 z-20 hidden rounded-sm bg-surface-elevated px-2 py-1 text-[10px] text-muted-foreground group-data-[sidebar-dragging=true]/collaboration:block">
-            拖入工作组 · 在此移出分屏
-          </span>
-        </div>
+        {/* Keep the workgroup drop area below the rows, never over a sortable member. */}
+        <div data-collaboration-background className="h-1.5" />
       </section>
     );
   };
