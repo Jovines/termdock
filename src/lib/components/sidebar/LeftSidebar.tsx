@@ -37,6 +37,8 @@ import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import {
+  getSettings,
+  updateSettings,
   listAgentResumeHistory,
   listCollaborationGroups,
   subscribeCollaborationGroups,
@@ -271,12 +273,39 @@ export function LeftSidebar(
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
   const [agentOperationsOpen, setAgentOperationsOpen] = useState(false);
   const [agentOperationsGroupId, setAgentOperationsGroupId] = useState<string | null>(null);
+  const [agentOperationsFloating, setAgentOperationsFloating] = useState(false);
+  const panelIntent = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    void getSettings().then(settings => {
+      if (cancelled || panelIntent.current || !settings.collaborationFloatingGroupId) return;
+      setAgentOperationsGroupId(settings.collaborationFloatingGroupId);
+      setAgentOperationsFloating(true);
+      setAgentOperationsOpen(true);
+    }).catch(() => { /* A failed preference read must not block the sidebar. */ });
+    return () => { cancelled = true; };
+  }, []);
+  const persistFloatingPanel = async (groupId: string | null) => {
+    panelIntent.current = true;
+    await updateSettings({ collaborationFloatingGroupId: groupId });
+    setAgentOperationsFloating(groupId !== null);
+  };
   const [agentResumeHistory, setAgentResumeHistory] = useState<AgentResumeHistoryEntry[]>([]);
   const [agentResumeHistoryLoading, setAgentResumeHistoryLoading] = useState(false);
   const [agentResumeHistoryPendingId, setAgentResumeHistoryPendingId] = useState<string | null>(null);
   const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
   const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
   const [collaborationActionError, setCollaborationActionError] = useState<string | null>(null);
+  const openAgentOperations = async (groupId: string | null) => {
+    panelIntent.current = true;
+    try {
+      if (agentOperationsFloating) await persistFloatingPanel(groupId);
+      setAgentOperationsGroupId(groupId);
+      setAgentOperationsOpen(true);
+    } catch {
+      setCollaborationActionError('常驻浮窗状态保存失败，请重试');
+    }
+  };
   const rawCollaborationGroups = useSessionOrderStore((state) => state.collaborationGroups);
   const setRawCollaborationGroups = useSessionOrderStore((state) => state.setCollaborationGroups);
   const [newSessionOptions, setNewSessionOptions] = useState<{
@@ -1544,8 +1573,7 @@ export function LeftSidebar(
           aria-label={`打开 Agent 工作组消息：${collaboration.name}`}
           onClick={(event) => {
             event.stopPropagation();
-            setAgentOperationsGroupId(collaboration.id);
-            setAgentOperationsOpen(true);
+            void openAgentOperations(collaboration.id);
           }}
         >
           <RiWorkflowLine size={9} />
@@ -1623,7 +1651,7 @@ export function LeftSidebar(
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
           onClick={() => {
             void openRemoteSession(remote.sessionId).catch(() => {
-              setAgentOperationsGroupId(collaboration.id); setAgentOperationsOpen(true);
+              void openAgentOperations(collaboration.id);
             });
           }}>
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${remote.serviceConnected === false ? 'bg-muted-foreground' : 'bg-primary'}`} />
@@ -1824,7 +1852,7 @@ export function LeftSidebar(
                       <span>{t('sidebar.subscriptionQuota')}</span>
                     </button>
                   )}
-                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); setAgentOperationsGroupId(null); setAgentOperationsOpen(true); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
+                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); void openAgentOperations(null); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
                     <RiWorkflowLine size={14} className="text-muted-foreground" />
                     <span>Agent 工作台</span>
                   </button>
@@ -2112,10 +2140,13 @@ export function LeftSidebar(
 
       {agentOperationsOpen && (
         <AgentOperationsPanel
+          key={agentOperationsGroupId ?? 'workbench'}
           activeSessionId={activeSessionId}
           initialCollaborationGroupId={agentOperationsGroupId}
+          initialFloating={agentOperationsFloating}
+          onFloatingChange={persistFloatingPanel}
           defaultSessionMode={defaultSessionMode}
-          onClose={() => { setAgentOperationsOpen(false); setAgentOperationsGroupId(null); }}
+          onClose={() => { panelIntent.current = true; setAgentOperationsOpen(false); setAgentOperationsGroupId(null); }}
           onNewSession={(options) => onNewSession(options)}
         />
       )}

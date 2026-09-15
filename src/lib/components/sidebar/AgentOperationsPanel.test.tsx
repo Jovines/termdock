@@ -446,6 +446,55 @@ describe('persistent collaboration composer', () => {
     window.removeEventListener('termdock-insert-reference-ack', ack);
   });
 
+  it('hides outside the selected group and restores its draft and input target on return', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+    const props = { initialCollaborationGroupId: 'floating', onClose: () => undefined, onNewSession: () => undefined };
+    const view = render(<AgentOperationsPanel {...props} activeSessionId="one" />);
+    await userEvent.click(await screen.findByRole('button', { name: '常驻浮窗' }));
+    act(() => { routeCollaborationInput('保留草稿'); });
+    for (const sessionId of ['outside', null, 'two']) {
+      view.rerender(<AgentOperationsPanel {...props} activeSessionId={sessionId} />);
+      if (sessionId !== 'two') {
+        expect(screen.queryByRole('region', { name: '工作组消息浮窗' })).toBeNull();
+        expect(routeCollaborationInput('不应进入草稿')).toBe(false);
+      } else {
+        expect(screen.getByRole('region', { name: '工作组消息浮窗' })).toBeTruthy();
+        expect((screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toBe('保留草稿');
+        act(() => { expect(routeCollaborationInput('恢复引用')).toBe(true); });
+      }
+    }
+  });
+
+  it('persists explicit floating open and close, but not temporary hiding outside the group', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+    const save = vi.fn().mockResolvedValue(undefined);
+    const close = vi.fn();
+    const props = { initialCollaborationGroupId: 'floating', onFloatingChange: save, onClose: close, onNewSession: () => undefined };
+    const view = render(<AgentOperationsPanel {...props} activeSessionId="one" />);
+    await userEvent.click(await screen.findByRole('button', { name: '常驻浮窗' }));
+    expect(save).toHaveBeenCalledExactlyOnceWith('floating');
+    view.rerender(<AgentOperationsPanel {...props} activeSessionId="outside" />);
+    expect(save).toHaveBeenCalledTimes(1);
+    view.rerender(<AgentOperationsPanel {...props} activeSessionId="one" />);
+    save.mockRejectedValueOnce(new Error('离线'));
+    await userEvent.click(screen.getByRole('button', { name: '关闭' }));
+    expect(await screen.findByText(/状态保存失败/)).toBeTruthy();
+    expect(close).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: '关闭' }));
+    expect(save).toHaveBeenLastCalledWith(null);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('restores directly into floating mode from the server preference', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+    render(<AgentOperationsPanel initialFloating initialCollaborationGroupId="floating" activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+    expect(await screen.findByRole('region', { name: '工作组消息浮窗' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '常驻浮窗' })).toBeNull();
+  });
+
   it('broadcasts once and retains references appended during a pending send', async () => {
     const input = await openFloating();
     let finish!: (value: unknown) => void;
@@ -462,12 +511,13 @@ describe('persistent collaboration composer', () => {
     const input = await openFloating();
     fireEvent.drop(input, { dataTransfer: { files: [], getData: (type: string) => type === 'text/plain' ? '/repo/notes.md' : '' } });
     expect(input.value).toBe('/repo/notes.md');
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: '接收人' }), 'two');
+    await userEvent.click(screen.getByRole('button', { name: 'two（离线）' }));
+    await userEvent.click(screen.getByRole('button', { name: '需要执行的任务' }));
     apiMocks.sendCollaborationMessage.mockRejectedValueOnce(new Error('连接已断开'));
     await userEvent.click(screen.getByRole('button', { name: '发送' }));
     expect(await screen.findByText('连接已断开')).toBeTruthy();
     expect(input.value).toBe('/repo/notes.md');
-    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledWith('floating', expect.objectContaining({ toSessionIds: ['two'] }));
+    expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledWith('floating', expect.objectContaining({ toSessionIds: ['two'], kind: 'task' }));
   });
 });
 

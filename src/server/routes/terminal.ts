@@ -44,6 +44,10 @@ import {
   getNewSessionAgentSlugSetting,
   setNewSessionAgentSlugSetting,
   getRunningSessionButtonEnabledSetting,
+  getCollaborationFloatingGroupIdSetting,
+  setCollaborationFloatingGroupIdSetting,
+  getServiceSwitcherExpandedSetting,
+  setServiceSwitcherExpandedSetting,
   setRunningSessionButtonEnabledSetting,
   getFileSortModesSetting,
   setFileSortModesSetting,
@@ -6982,6 +6986,8 @@ async function getSettingsPayload() {
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
+    collaborationFloatingGroupId: getCollaborationFloatingGroupIdSetting(),
+    serviceSwitcherExpanded: getServiceSwitcherExpandedSetting(),
     fileSortModes: getFileSortModesSetting(),
     nestedGitScanRoots: getNestedGitScanRootsSetting(),
     pinnedExplorerRoots: getPinnedExplorerRootsSetting(),
@@ -7112,6 +7118,13 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setNewSessionAgentSlugSetting(slug);
+  }
+
+  if (body.collaborationFloatingGroupId === null || (typeof body.collaborationFloatingGroupId === 'string' && body.collaborationFloatingGroupId.trim())) {
+    setCollaborationFloatingGroupIdSetting(body.collaborationFloatingGroupId?.trim() ?? null);
+  }
+  if (typeof body.serviceSwitcherExpanded === 'boolean') {
+    setServiceSwitcherExpandedSetting(body.serviceSwitcherExpanded);
   }
 
   if (typeof body.runningSessionButtonEnabled === 'boolean') {

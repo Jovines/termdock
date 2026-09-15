@@ -48,6 +48,8 @@ export interface SettingsDoc {
   newSessionAgentSlug: string | null;
   /** Show the floating shortcut used to cycle through running agent sessions. */
   runningSessionButtonEnabled: boolean;
+  collaborationFloatingGroupId: string | null;
+  serviceSwitcherExpanded: boolean;
   /** Explorer folders whose direct children are sorted by modification time. */
   fileSortModes: Record<string, 'modified'>;
   /**
@@ -214,6 +216,8 @@ function normalizeSettings(value: unknown): SettingsDoc {
       : 12_000,
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
+    collaborationFloatingGroupId: typeof raw.collaborationFloatingGroupId === 'string' && raw.collaborationFloatingGroupId.trim() ? raw.collaborationFloatingGroupId.trim() : null,
+    serviceSwitcherExpanded: raw.serviceSwitcherExpanded === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
     nestedGitScanRoots: normalizeNestedGitScanRoots(raw.nestedGitScanRoots),
     pinnedExplorerRoots: normalizePinnedExplorerRoots(raw.pinnedExplorerRoots),
@@ -554,6 +558,24 @@ export function getNewSessionAgentSlugSetting(): string | null {
 export function setNewSessionAgentSlugSetting(slug: string | null): SettingsDoc {
   return updateSettings((settings) => {
     settings.newSessionAgentSlug = normalizeNewSessionAgentSlug(slug);
+  });
+}
+
+export function getCollaborationFloatingGroupIdSetting(): string | null {
+  return loadSettings().collaborationFloatingGroupId;
+}
+
+export function setCollaborationFloatingGroupIdSetting(groupId: string | null): SettingsDoc {
+  return updateSettings(settings => { settings.collaborationFloatingGroupId = groupId; });
+}
+
+export function getServiceSwitcherExpandedSetting(): boolean {
+  return loadSettings().serviceSwitcherExpanded;
+}
+
+export function setServiceSwitcherExpandedSetting(expanded: boolean): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.serviceSwitcherExpanded = expanded;
   });
 }
 

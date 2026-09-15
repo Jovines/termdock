@@ -25,6 +25,18 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
+it('persists the floating collaboration group and an explicit closed state', () => {
+  const file = tempSettingsPath();
+  const settings = loadSettingsFile(file);
+  expect(settings.collaborationFloatingGroupId).toBeNull();
+  settings.collaborationFloatingGroupId = 'release-group';
+  saveSettingsFile(settings, file);
+  expect(loadSettingsFile(file).collaborationFloatingGroupId).toBe('release-group');
+  settings.collaborationFloatingGroupId = null;
+  saveSettingsFile(settings, file);
+  expect(loadSettingsFile(file).collaborationFloatingGroupId).toBeNull();
+});
+
 describe('normalizeNewSessionAgentSlug', () => {
   it('normalizes a valid persisted agent slug', () => {
     expect(normalizeNewSessionAgentSlug('  Claude-Code  ')).toBe('claude-code');
