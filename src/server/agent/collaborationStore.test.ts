@@ -88,39 +88,19 @@ describe('CollaborationStore', () => {
     expect(store.listMessages(trio.id)[0]?.toSessionId).toBe('c');
   });
 
-  it('aggregates task_state only from what the session reported, never from dispatch', () => {
+  it('keeps explicit task reports without inventing whole-session or read state', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
-    store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'task', content: 'do it' });
-    expect(store.sessionFacts('a', true).task_state).toBe('idle');
-    expect(store.sessionFacts('b', true).task_state).toBe('idle');
-    const [dispatch] = store.inbox('b');
-    store.send({
-      groupId: group.id, fromSessionId: 'b', toSessionIds: ['a'], kind: 'reply', content: 'on it', threadId: dispatch!.threadId, replyTo: dispatch!.id,
-      task: { task_id: 't1', status: 'working' },
-    });
-    expect(store.sessionFacts('b', true).task_state).toBe('active');
-  });
-
-  it('treats a held-open blocked task as active and failed as its own state', () => {
-    const store = new CollaborationStore(filePath);
-    const group = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
-    const report = (from: string, task_id: string, status: 'working' | 'blocked' | 'failed' | 'complete') =>
-      store.send({ groupId: group.id, fromSessionId: from, toSessionIds: ['b'], kind: 'reply', content: status, task: { task_id, status } })[0];
-    report('a', 't1', 'blocked');
-    expect(store.sessionFacts('a', true).task_state).toBe('active');
-    // A failed task does not override another task still in flight.
-    report('a', 't2', 'failed');
-    expect(store.sessionFacts('a', true).task_state).toBe('active');
-    // Once nothing is in flight, the failed terminal state surfaces.
-    report('a', 't1', 'complete');
-    expect(store.sessionFacts('a', true).task_state).toBe('failed');
-    report('a', 't3', 'complete');
-    expect(store.sessionFacts('a', true).task_state).toBe('failed');
-    // A session whose every reported task completed is idle again.
-    const fresh = store.save({ name: 'Fresh', sessionIds: ['a2', 'b'] });
-    store.send({ groupId: fresh.id, fromSessionId: 'a2', toSessionIds: ['b'], kind: 'reply', content: 'done', task: { task_id: 't9', status: 'complete' } });
-    expect(store.sessionFacts('a2', true).task_state).toBe('idle');
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'reply', content: 'working', task: { task_id: 't1', status: 'working' } });
+    const facts = store.sessionFacts('a', true, 'done');
+    expect(facts.tasks).toEqual([{ task_id: 't1', status: 'working', reported_at: message.createdAt, message_id: message.id }]);
+    for (const key of ['task_state', 'turn_state', 'last_tool_activity_at', 'last_heartbeat']) expect(facts).not.toHaveProperty(key);
+    store.markDelivered([message.id]);
+    store.markRead([message.id]); // Legacy persisted data remains readable without exposing a read claim.
+    const receipt = store.receipt(message.id);
+    expect(receipt.status).toBe('delivered');
+    expect(receipt).not.toHaveProperty('read_at');
+    expect(receipt).not.toHaveProperty('read_semantics');
   });
 
   it('lists a task timeline from the first reply carrying its id', () => {
@@ -284,6 +264,32 @@ describe('new ids are minted short and coexist with stored UUIDs', () => {
     expect(fresh!.threadId).toBe('free000002');
     expect(store.resolveThreadId(peerThread)).toEqual({ status: 'ok', id: peerThread });
   });
+  it('versions group rules, retains dispatch-time guidance and rejects stale edits', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Rules', sessionIds: ['a', 'b'] });
+    const initial = store.setRules(group.id, '不接急单', 'a');
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], content: 'Review', kind: 'task' });
+    const changed = store.setRules(group.id, '先确认验收范围', 'b', initial.version);
+    expect(changed.version).not.toBe(initial.version);
+    expect(message.instructions).toEqual(initial);
+    expect(() => store.setRules(group.id, 'overwrite', 'a', initial.version)).toThrow('群规已更新');
+    expect(() => store.setRules(group.id, 'x', 'outsider')).toThrow();
+    expect(() => store.setRules(group.id, 'x'.repeat(8193), 'a')).toThrow();
+    expect(new CollaborationStore(filePath).getMessage(message.id)?.instructions).toEqual(initial);
+  });
+  it('merges independent member roles and keeps snapshots clean without changing message bodies', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Roles', sessionIds: ['a', 'b'] });
+    store.setRole({ groupId: group.id, sessionId: 'a', role: '协调者' });
+    store.mergeContext(group.id, { roles: { b: '深度评审，不接急单' }, roleVersions: { b: { version: 'remote', updatedAt: Date.now() } } });
+    expect(store.getGroup(group.id)?.roles).toEqual({ a: '协调者', b: '深度评审，不接急单' });
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], content: '\u001b[31m正文\u001b[0m', kind: 'message' });
+    store.setSnapshot(message.id, '\u001b[31m快照\u001b[0m');
+    expect(store.receipt(message.id).snapshot).toBe('快照');
+    expect(store.receipt(message.id, true).snapshot).toContain('\u001b');
+    expect(store.getMessage(message.id)?.content).toContain('\u001b');
+  });
+
 });
 
 describe('federation persistence', () => {
@@ -307,4 +313,5 @@ describe('federation persistence', () => {
       expect(restored.federationSnapshot().groups[0].deleted).toBe(true);
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
+
 });

@@ -190,7 +190,7 @@ describe('formatCollaborationDelivery', () => {
   it('provides a full-content retrieval command for oversized UTF-8 bodies', () => {
     const prompt = render([message({ content: '测'.repeat(3000), fromSessionId: 'coder-id' })]);
     expect(prompt).toContain('9000 字节');
-    expect(prompt).toContain('td collab message get message-1 --json');
+    expect(prompt).toContain('td collab message get message-1 --text');
     expect(prompt).not.toContain('测'.repeat(3000));
   });
 
@@ -269,7 +269,7 @@ describe('formatCollaborationDelivery', () => {
     });
     expect(prompt).toContain('服务不可达，消息无法送达');
     expect(prompt).toContain('仅可排队等待重连');
-    expect(prompt).toContain('转发客户端须保持运行');
+    expect(prompt).toContain('已登记节点由服务后台直接投递');
   });
 
   it('decays roster education once the session is educated but keeps the --help pointer', () => {
@@ -295,7 +295,7 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).not.toContain('td collab send');
     expect(prompt).toContain('td collab --help');
     expect(prompt).toContain('服务不可达，消息无法送达');
-    expect(prompt).toContain('转发客户端须保持运行');
+    expect(prompt).toContain('已登记节点由服务后台直接投递');
   });
 
   it('flags a fan-out dispatch as 群发 and names the sibling recipients', () => {

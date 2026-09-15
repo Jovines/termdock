@@ -37,7 +37,7 @@ describe('collaboration CLI contract', () => {
   });
   it('returns a distinct timeout while preserving the queued ID and never resending', async () => {
     const fixture_ = fixture([]);
-    const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'read', '--timeout', '10ms']), { backendSessionId: 'b' }, fixture_.io);
+    const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'delivered', '--timeout', '10ms']), { backendSessionId: 'b' }, fixture_.io);
     expect(exit).toBe(2);
     expect(JSON.parse(fixture_.output.at(-1)!)).toMatchObject({ message_id: 'm', status: 'pending', code: 'WAIT_TIMEOUT', delivery_continues: true });
     expect(fixture_.calls.filter((args) => args[0] === 'POST')).toHaveLength(1);
@@ -290,4 +290,30 @@ describe('collaboration CLI contract', () => {
     expect(await executeCollaborationCommand(parseCollaborationCommand(['drive', 'p2', 'approve']), {}, refusal.io)).toBe(1);
     expect(JSON.parse(refusal.output[0])).toMatchObject({ ok: false, code: 'NO_APPROVAL_DIALOG' });
   });
+});
+
+it('exposes server transport identity without sending a message and validates registration arguments', async () => {
+  const f = fixture([{ ok: true, node: { serviceId: 'public-peer' } }]);
+  expect(await executeCollaborationCommand(parseCollaborationCommand(['transport', 'info']), {}, f.io)).toBe(0);
+  expect(f.calls[0][0]).toBe('GET'); expect(f.calls[0][1]).toContain('/transport');
+  expect(parseCollaborationCommand(['transport', 'register', 'cross-group', '--file', 'nodes.json'])).toMatchObject({ operation: 'register', groupId: 'cross-group' });
+  expect(() => parseCollaborationCommand(['transport', 'register', 'cross-group'])).toThrow('Usage');
+  expect(() => parseCollaborationCommand(['transport', 'info', '--file', 'nodes.json'])).toThrow('Usage');
+});
+
+it('exposes historical capture, explicit consumption and distinct delivery/reply timeout outcomes', async () => {
+  const capture = fixture([{ ok: true, snapshot: 'history' }]);
+  expect(await executeCollaborationCommand(parseCollaborationCommand(['capture', 'peer', '--lines', '200', '--raw']), {}, capture.io)).toBe(0);
+  expect(capture.calls[0][2]).toMatchObject({ action: 'capture', lines: 200, raw: true });
+  expect(() => parseCollaborationCommand(['capture', 'peer', '--lines', '10001'])).toThrow();
+  const take = fixture([{ ok: true, message: { content: 'full body' }, status: 'delivered' }]);
+  expect(await executeCollaborationCommand(parseCollaborationCommand(['message', 'get', 'body', '--text']), {}, take.io)).toBe(0);
+  expect(take.calls[0][0]).toBe('GET'); expect(take.calls[0][1]).toContain('/message/body?');
+  expect(() => parseCollaborationCommand(['message', 'read', 'body'])).toThrow();
+  expect(() => parseCollaborationCommand(['message', 'watch', 'body', '--wait-until', 'read'])).toThrow();
+  const timeout = fixture([{ status: 'delivered', message_id: 'm', delivery: { status: 'delivered' }, reply: { status: 'pending' } }]);
+  await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--expect-reply', 'ack', '--timeout', '1ms']), {}, timeout.io);
+  expect(JSON.parse(timeout.output.at(-1)!)).toMatchObject({ delivery: { status: 'delivered' }, reply: { status: 'timeout', expected: 'ack' }, code: 'WAIT_TIMEOUT' });
+  expect(parseCollaborationCommand(['traits', 'set', 'group', 'peer', '不接急单'])).toMatchObject({ action: 'role', role: '不接急单' });
+  expect(parseCollaborationCommand(['rules', 'set', 'group', '--file', 'rules.md'])).toMatchObject({ action: 'rules', operation: 'set' });
 });

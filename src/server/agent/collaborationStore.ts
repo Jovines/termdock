@@ -1,9 +1,23 @@
+import { plainCollaborationSnapshot } from './collaborationText.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError, STATUS_RANK, canonicalShortId, drawCollaborationId, newCollaborationId, resolveIdPrefix, validateExtras, type IdResolution, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
 
-export interface CollaborationGroup {
+export interface CollaborationRules { text: string; version: string; updatedAt: number; updatedBy: string }
+export interface CollaborationRoleVersion { version: string; updatedAt: number }
+export interface CollaborationContext {
+  instructions?: CollaborationRules;
+  roles?: Record<string, string>;
+  roleVersions?: Record<string, CollaborationRoleVersion>;
+}
+function newerRevision(a: { updatedAt: number; version: string }, b?: { updatedAt: number; version: string }): boolean {
+  return !b || a.updatedAt > b.updatedAt || (a.updatedAt === b.updatedAt && a.version > b.version);
+}
+function validRevision(value: CollaborationRoleVersion): boolean {
+  return !!value && Number.isSafeInteger(value.updatedAt) && value.updatedAt >= 0 && typeof value.version === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(value.version);
+}
+export interface CollaborationGroup extends CollaborationContext {
   id: string;
   name: string;
   sessionIds: string[];
@@ -60,6 +74,7 @@ export type CollaborationMessageKind = 'message' | 'ask' | 'reply' | 'task' | 'h
 export type CollaborationMessageStatus = 'pending' | 'delivered' | 'read' | 'failed' | 'expired';
 
 export interface CollaborationMessage extends MessageExtras {
+  instructions?: CollaborationRules;
   sequence?: number;
   shellConfirmed?: boolean;
   failureReason?: string | null;
@@ -87,6 +102,16 @@ export interface CollaborationMessage extends MessageExtras {
   readAt: number | null;
 }
 
+/** Public collaboration facts never expose legacy read guesses. */
+export function terminalMessage(message: CollaborationMessage, raw = false) {
+  const { readAt: _readAt, readSource: _readSource, ...body } = message;
+  const legacyConsumption = message.deliverySource === 'consumer_read';
+  return { ...body, status: legacyConsumption ? 'pending' as const : message.status === 'read' ? 'delivered' as const : message.status,
+    deliveredAt: legacyConsumption ? null : message.deliveredAt,
+    deliverySource: legacyConsumption ? undefined : message.deliverySource,
+    snapshot: message.snapshot ? (raw ? message.snapshot : plainCollaborationSnapshot(message.snapshot)) : null };
+}
+
 interface CollaborationDocument {
   version: 2;
   groups: CollaborationGroup[];
@@ -103,6 +128,14 @@ const MAX_MESSAGES = 2_000;
 const MESSAGE_KINDS = new Set<CollaborationMessageKind>(['message', 'ask', 'reply', 'task', 'handoff', 'done']);
 
 export class CollaborationStore {
+  onMessageQueued?: () => void;
+  private peerActivity = new Map<string, { last_terminal_output_at: number | null; activity_observed_at: number | null; last_peer_sync_at: number; activity_source: string }>();
+  recordPeerActivity(sessionId: string, outputAt: unknown, observedAt: unknown): void {
+    if (this.peerActivity.size >= 2000 && !this.peerActivity.has(sessionId)) this.peerActivity.delete(this.peerActivity.keys().next().value!);
+    this.peerActivity.set(sessionId, { last_terminal_output_at: typeof outputAt === 'number' && Number.isFinite(outputAt) && outputAt > 0 ? outputAt : null,
+      activity_observed_at: typeof observedAt === 'number' && Number.isFinite(observedAt) ? observedAt : null,
+      last_peer_sync_at: Date.now(), activity_source: 'remote_terminal_output' });
+  }
   private document: CollaborationDocument = { version: 2, groups: [], messages: [] };
   private persistedDocument = JSON.stringify(this.document);
 
@@ -203,9 +236,11 @@ export class CollaborationStore {
     if (role) roles[input.sessionId] = role;
     else delete roles[input.sessionId];
     const updated = { ...group, roles: Object.keys(roles).length ? roles : undefined,
+      roleVersions: { ...group.roleVersions, [input.sessionId]: { version: crypto.randomUUID(), updatedAt: Math.max(Date.now(), (group.roleVersions?.[input.sessionId]?.updatedAt ?? 0) + 1) } },
       updatedAt: Math.max(Date.now(), group.updatedAt + 1) };
     this.document.groups = this.document.groups.map((candidate) => candidate.id === group.id ? updated : candidate);
     this.persist();
+    queueMicrotask(() => this.onMessageQueued?.());
     return updated;
   }
 
@@ -249,6 +284,42 @@ export class CollaborationStore {
       messages: dissolved ? this.document.messages.filter((message) => message.groupId !== source.id) : this.document.messages,
     };
     this.persist();
+  }
+
+  setRules(groupId: string, text: string, updatedBy: string, expectedVersion?: string): CollaborationRules {
+    const group = this.getGroup(groupId);
+    if (!group || group.deleted || !group.sessionIds.includes(updatedBy)) throw new CollaborationError('NOT_A_MEMBER', '只能修改当前协作组的约定', 403);
+    if (expectedVersion !== undefined && expectedVersion !== (group.instructions?.version ?? '')) throw new CollaborationError('RULES_CHANGED', '群规已更新，请重新读取后再修改', 409);
+    if (typeof text === 'string') text = text.replace(/\r\n?/g, '\n');
+    if (typeof text !== 'string' || Buffer.byteLength(text) > 8192 || /[\x00-\x08\x0b-\x1f\x7f]/.test(text)) throw new CollaborationError('INVALID_RULES', '群规最多 8192 UTF-8 字节，不允许终端控制字符');
+    const instructions = { text, updatedBy, version: crypto.randomUUID(), updatedAt: Math.max(Date.now(), (group.instructions?.updatedAt ?? 0) + 1) };
+    group.instructions = instructions; group.updatedAt = Math.max(Date.now(), group.updatedAt + 1); this.persist();
+    queueMicrotask(() => this.onMessageQueued?.());
+    return instructions;
+  }
+  context(groupId: string): CollaborationContext {
+    const group = this.getGroup(groupId);
+    return group ? { instructions: group.instructions, roles: group.roles, roleVersions: group.roleVersions } : {};
+  }
+  mergeContext(groupId: string, context: CollaborationContext): void {
+    const group = this.getGroup(groupId); if (!group || group.deleted || !context || typeof context !== 'object') return;
+    let changed = false;
+    const rules = context.instructions;
+    if (rules && validRevision(rules) && typeof rules.text === 'string' && Buffer.byteLength(rules.text) <= 8192
+      && !/[\x00-\x08\x0b-\x1f\x7f]/.test(rules.text) && typeof rules.updatedBy === 'string'
+      && group.sessionIds.includes(rules.updatedBy) && newerRevision(rules, group.instructions)) {
+      group.instructions = { ...rules }; changed = true;
+    }
+    for (const [id, revision] of Object.entries(context.roleVersions ?? {})) {
+      if (!group.sessionIds.includes(id) || !validRevision(revision) || !newerRevision(revision, group.roleVersions?.[id])) continue;
+      const role = context.roles?.[id];
+      if (role !== undefined && typeof role !== 'string') continue;
+      (group.roleVersions ??= {})[id] = revision;
+      if (role) (group.roles ??= {})[id] = sanitizeCollaborationRole(role);
+      else if (group.roles) delete group.roles[id];
+      changed = true;
+    }
+    if (changed) this.persist();
   }
 
   removeSession(sessionId: string): { updatedGroups: number; dissolvedGroups: number } {
@@ -321,12 +392,13 @@ export class CollaborationStore {
       toSessionId, kind: input.kind, content, threadId,
       fanOutIds: recipients.length > 1 ? recipients.filter((id) => id !== toSessionId) : undefined,
       replyTo: input.replyTo?.trim() || null, status: 'pending', createdAt: now,
-      deliveredAt: null, readAt: null,
+      deliveredAt: null, readAt: null, instructions: group.instructions ? { ...group.instructions } : undefined,
     }));
     if (messages.some((message) => Buffer.byteLength(JSON.stringify(message)) > COLLAB_LIMITS.wire_bytes)) throw new CollaborationError('MESSAGE_WIRE_TOO_LARGE', `Encoded message exceeds ${COLLAB_LIMITS.wire_bytes} JSON bytes`, 413);
     this.document.messages.push(...messages);
     if (key) (this.document.idempotency ??= {})[key] = { hash, ids: messages.map((message) => message.id), expiresAt: now + COLLAB_LIMITS.idempotency_retention_ms };
     this.persist();
+    queueMicrotask(() => this.onMessageQueued?.());
     return messages;
   }
 
@@ -418,7 +490,9 @@ export class CollaborationStore {
     validateFederatedGroup(group);
     const existing = this.getGroup(group.id);
     if (existing && (!existing.federated || existing.updatedAt > group.updatedAt)) return;
-    this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), group];
+    const priorContext = existing ? this.context(group.id) : undefined;
+    this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), { ...group }];
+    if (priorContext) this.mergeContext(group.id, priorContext);
     if (group.deleted) this.document.messages = this.document.messages.filter((item) => item.groupId !== group.id);
     this.persist();
   }
@@ -473,6 +547,10 @@ export class CollaborationStore {
           changed = true;
         }
       }
+      if (index >= 0 && rank[message.status] >= rank[this.document.messages[index].status]
+        && typeof message.snapshot === 'string' && message.snapshot && this.document.messages[index].snapshot !== message.snapshot) {
+        this.document.messages[index].snapshot = message.snapshot.slice(0, 16000); changed = true;
+      }
       if (index >= 0 && rank[message.status] > rank[this.document.messages[index].status]) {
         const existing = this.document.messages[index];
         // A receipt may advance status, but never rewrite an existing message.
@@ -509,20 +587,25 @@ export class CollaborationStore {
 
   diagnostic(id: string): TransportDiagnostic | null { return this.document.transport?.[id] ?? null; }
   recordTransport(id: string, diagnostic: TransportDiagnostic): void {
-    if (!this.getMessage(id)) return;
+    if (!this.getMessage(id) || (this.document.transport?.[id]?.checked_at ?? 0) > diagnostic.checked_at) return;
     (this.document.transport ??= {})[id] = diagnostic;
     this.persist();
   }
 
-  receipt(id: string) {
+  receipt(id: string, raw = false) {
     const message = this.getMessage(id);
     if (!message) throw new CollaborationError('MESSAGE_NOT_FOUND', 'Message not found or no longer retained', 404);
     const replies = this.document.messages.filter((reply) => reply.replyTo === id && reply.fromSessionId === message.toSessionId && reply.toSessionId === message.fromSessionId);
     const diagnostic = this.diagnostic(id);
-    return { message_id: id, thread_id: message.threadId, status: message.status, queued_at: message.createdAt,
-      delivered_at: message.deliveredAt, read_at: message.readAt, expires_at: message.expiresAt ?? null,
-      failure_reason: message.failureReason ?? null, delivery_semantics: message.deliverySource ?? (message.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'), read_semantics: message.readAt ? message.readSource ?? 'legacy_or_unspecified' : 'not_read',
-      snapshot: message.snapshot ?? null,
+    const facts = terminalMessage(message, raw);
+    return { message_id: id, thread_id: message.threadId, status: facts.status, queued_at: message.createdAt,
+      delivered_at: facts.deliveredAt, expires_at: message.expiresAt ?? null,
+      failure_reason: message.failureReason ?? null, delivery_semantics: facts.deliverySource ?? (facts.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'),
+      snapshot: message.snapshot ? (raw ? message.snapshot : plainCollaborationSnapshot(message.snapshot)) : null,
+      delivery: { status: facts.status,
+        stage: facts.deliveredAt !== null ? 'terminal_written' : diagnostic?.remote_received_at ? 'remote_received' : 'queued',
+        remote_received_at: diagnostic?.remote_received_at ?? null, delivered_at: facts.deliveredAt, error: message.failureReason ?? diagnostic?.last_error ?? null },
+      reply: { status: replies.length ? 'received' : 'pending', ack_at: replies.find(reply => reply.responseKind === 'ack')?.createdAt ?? null, reply_ids: replies.map(reply => reply.id) },
       idempotency_key: message.idempotencyKey ?? null,
       ack_at: replies.find((reply) => reply.responseKind === 'ack')?.createdAt ?? null,
       reply_ids: replies.map((reply) => reply.id), result_ids: replies.filter((reply) => reply.responseKind === 'result').map((reply) => reply.id),
@@ -535,24 +618,19 @@ export class CollaborationStore {
       fragments_sent: diagnostic?.fragments_sent ?? 0, fragments_total: diagnostic?.fragments_total ?? 0 };
   }
 
-  sessionFacts(sessionId: string, online: boolean, turnState?: string) {
+  sessionFacts(sessionId: string, online: boolean, _legacyTurnState?: string) {
     const reports = this.document.messages.filter((message) => message.fromSessionId === sessionId);
     const tasks = new Map<string, { task_id: string; status: string; reported_at: number; message_id: string }>();
     for (const message of reports) if (message.task) tasks.set(message.task.task_id, { task_id: message.task.task_id, status: message.task.status, reported_at: message.createdAt, message_id: message.id });
-    // Aggregated from the *latest* report of each task, never inferred: an
-    // agent handed a task that has not yet replied is simply idle here —
-    // dispatch in flight is the sender-side receipt's concern (pending), not a
-    // fact about this session. blocked counts as active: the agent holds the
-    // task open. A failed terminal state only surfaces once no task is still
-    // in flight, since another in-progress task means the agent is busy.
-    const latest = [...tasks.values()];
-    const taskState: 'idle' | 'active' | 'failed' = latest.some((task) => task.status === 'ack' || task.status === 'working' || task.status === 'blocked') ? 'active'
-      : latest.some((task) => task.status === 'failed') ? 'failed'
-      : 'idle';
-    return { session_state: online ? 'online' : 'offline', turn_state: turnState === 'done' ? 'ended' : turnState ?? 'unknown',
-      task_state: taskState, tasks: [...tasks.values()], last_heartbeat: null, last_tool_activity_at: null,
+    return { session_state: online ? 'online' : 'offline', tasks: [...tasks.values()],
       last_message_at: reports.length ? Math.max(...reports.map((message) => message.createdAt)) : null,
-      state_source: 'optional_adapter', task_source: 'explicit_message' };
+      last_terminal_output_at: this.peerActivity.get(sessionId)?.last_terminal_output_at ?? null,
+      activity_observed_at: this.peerActivity.get(sessionId)?.activity_observed_at ?? null,
+      last_peer_sync_at: this.peerActivity.get(sessionId)?.last_peer_sync_at ?? null,
+      activity_source: this.peerActivity.get(sessionId)?.activity_source ?? 'unavailable',
+      output_idle_seconds: this.peerActivity.get(sessionId)?.last_terminal_output_at && this.peerActivity.get(sessionId)?.activity_observed_at
+        ? Math.max(0, Math.floor((this.peerActivity.get(sessionId)!.activity_observed_at! - this.peerActivity.get(sessionId)!.last_terminal_output_at!) / 1000)) : null,
+      task_source: 'explicit_message' };
   }
 
   /** Timeline of one task as reported by a session, oldest first. The lineage
@@ -593,7 +671,7 @@ export class CollaborationStore {
       && (!options.thread || message.threadId === options.thread) && (!options.kind || message.kind === options.kind)
       && (!options.responseKind || message.responseKind === options.responseKind))
       .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
-    const messages = incremental || options.order === 'oldest' ? candidates.slice(0, limit) : candidates.slice().sort((a, b) => Number(a.status === 'read') - Number(b.status === 'read') || (b.sequence ?? 0) - (a.sequence ?? 0)).slice(0, limit);
+    const messages = incremental || options.order === 'oldest' ? candidates.slice(0, limit) : candidates.slice().sort((a, b) => (b.sequence ?? 0) - (a.sequence ?? 0)).slice(0, limit);
     const sequence = messages.length ? Math.max(...messages.map((message) => message.sequence ?? 0)) : after;
     const next_cursor = Buffer.from(JSON.stringify({ scope, sequence })).toString('base64url');
     return { messages, next_cursor, retention_gap: incremental && after < (this.document.prunedThrough?.[sessionId] ?? 0), has_more: incremental ? candidates.length > messages.length : false, consumer: options.consumer ?? null };

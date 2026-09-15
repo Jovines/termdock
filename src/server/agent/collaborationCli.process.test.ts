@@ -93,7 +93,7 @@ it('preserves real process timeout codes and drains large piped inbox JSON', asy
       child.stdout.on('data', (value) => { stdout += value; }); child.stderr.on('data', (value) => { stderr += value; });
       child.on('error', reject); child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
     });
-    const timeout = await run(['send', 'peer', 'task', '--wait-until', 'read', '--timeout', '100ms']);
+    const timeout = await run(['send', 'peer', 'task', '--wait-until', 'delivered', '--timeout', '100ms']);
     expect(timeout.stderr).toBe('');
     expect(timeout.code).toBe(2);
     expect(JSON.parse(timeout.stdout)).toMatchObject({ message_id: 'queued-message', code: 'WAIT_TIMEOUT' });

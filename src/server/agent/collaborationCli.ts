@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError, canonicalShortId } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'help';
+  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'rules' | 'help';
   target?: string; message?: string; groupId?: string; sessionId?: string; sessionIds?: string[]; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
@@ -26,6 +26,13 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   Scheduled self-reminders: td automation create --name 'Review progress' --every 30 --self --prompt 'Review group progress and continue'
   Scheduling help: td automation --help
   status | capabilities
+  transport info
+    Print this service's public identity and CA fingerprint (no private keys).
+  transport register <group-id> --file <nodes.json>
+    One-time server peer registration; nodes.json is an array of public
+    {serviceId, origin, caFingerprint256?} entries, including this service.
+    Obtain pins from each administrator's transport info over a trusted channel.
+    Registered servers deliver without an open browser or Desktop client.
   rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
   send <session-id> <message> | reply <message-id> <message> | handoff <session-id> <message>
     (send fan-out: comma-separated same-group ids, e.g. send a,b "任务"; every
@@ -33,23 +40,27 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     single-recipient sends only)
     --group <id> --thread <id> --idempotency-key <key>
     --file <path> | --stdin (instead of inline body; -- ends option parsing)
-    --wait-until queued|delivered|read --timeout 30s
+    --wait-until queued|delivered --timeout 30s
     --expect-reply ack|result|any
     --response-kind ack|progress|result --metadata '<JSON object>'
     --expires-at <ISO timestamp or epoch milliseconds>
     reply: --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
       (status reporting happens only via reply; send/handoff dispatch carries no task state)
-  message get <message-id> [--receipt-only]
+  message get <message-id> [--receipt-only] [--raw]
   message confirm-shell <message-id> (sender confirms delivery into a shell; continues the same message)
-  message read <message-id> (explicit consumption; not application ACK)
-  message watch <message-id> [--wait-until delivered|read] [--timeout 30s]
-  inbox [--unread] [--since <ISO or epoch-ms>] [--after-id <id>]
+  message watch <message-id> [--wait-until delivered] [--timeout 30s]
+  inbox [--since <ISO or epoch-ms>] [--after-id <id>]
     [--cursor <token>] [--consumer <name>] [--limit 1..200]
     [--from <id>] [--group <id>] [--thread <id>] [--kind <kind>]
     [--response-kind ack|progress|result] [--follow] [--timeout 30s]
   cursor commit <token> --consumer <name> (commit after processing the page)
   add|remove <group-id> <session-id>
   spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]
+  rules get <group-id> [--text]
+  rules set <group-id> <text> | --file <path> | --stdin [--if-version <version>]
+  rules clear <group-id> [--if-version <version>]
+    Shared group guidance, up to 8192 UTF-8 bytes; message envelopes retain its version.
+  traits list|set|unset (alias of role; long-lived capabilities/preferences)
   role list <group-id>
   role set <group-id> <session-id> <role…> (trailing words join as the role)
   role unset <group-id> <session-id>
@@ -57,7 +68,7 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     rides the delivery shell header)
   rename <session-id> <name…> (rename a member of any shared group;
     trailing words join as the new name; roster and shells show it at once)
-  capture <session-id> [--text]
+  capture <session-id> [--lines 1..10000] [--raw] [--text]
     (查看伙伴正在做什么：读取同组、本机 tmux 成员的当前屏幕，不发送按键、不打断对方。
     需要了解进展、排查卡住或决定是否跟进时先 capture；不是完整聊天历史或完成凭证。
     用 status --text 查成员 ID；不支持远端成员，远端请 send 询问进展。)
@@ -82,9 +93,9 @@ Exit codes: 0 requested condition met; 1 invalid request/network error;
 cleanup without --confirm prints the plan and refuses (also 1);
 2 wait timeout (message may still deliver); 3 failed/expired.
 Message limit: ${COLLAB_LIMITS.message_bytes} UTF-8 bytes; metadata: ${COLLAB_LIMITS.metadata_bytes} bytes.
-Idempotency retention: 7 days. read/ACK/result never imply each other.
-Inbox defaults to unread first, newest 50; cursor/consumer mode reads oldest unseen first.
-Reading never advances a consumer or marks messages read automatically.`;
+Idempotency retention: 7 days. Terminal delivery, ACK and result never imply each other.
+Inbox defaults to newest 50; cursor/consumer mode reads oldest unseen first.
+Reading never advances a consumer. Read receipts are not supported.`;
 
 /** One roster row: prefer the member's human name, keep the full session id
  * reachable for role set/unset targeting, mark unset members explicitly. */
@@ -99,8 +110,8 @@ interface RoleGroupView {
   members?: Array<{ sessionId: string; name?: string | null }>;
 }
 
-const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'unread', 'follow', 'stdin', 'receipt-only', 'confirm', 'help']);
-const VALUE_OPTIONS = new Set(['session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane']);
+const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help']);
+const VALUE_OPTIONS = new Set(['session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -121,15 +132,15 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   const requestedAction = options.help ? 'help' : positional.shift() ?? 'status';
   // A discoverable read-only entry point, sharing capture's existing scope and transport.
   if (requestedAction === 'capture') {
-    if (positional.length !== 1) throw new Error('Usage: td collab capture <session-id> [--text]');
+    if (positional.length !== 1) throw new Error('Usage: td collab capture <session-id> [--lines 1..10000] [--raw] [--text]');
     positional.push('capture');
   }
-  const action = (requestedAction === 'capture' ? 'drive' : requestedAction) as CollaborationCommand['action'];
-  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  const action = (requestedAction === 'capture' ? 'drive' : requestedAction === 'traits' ? 'role' : requestedAction) as CollaborationCommand['action'];
+  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (typeof options.session === 'string' && !options.session.trim()) throw new Error('--session requires a non-empty full Termdock session id');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
-  if (options['wait-until'] && !['queued', 'delivered', 'read'].includes(String(options['wait-until']))) throw new Error('wait-until must be queued, delivered or read');
+  if (options['wait-until'] && !['queued', 'delivered'].includes(String(options['wait-until']))) throw new Error('wait-until must be queued or delivered');
   if (options['expect-reply'] && !['ack', 'result', 'any'].includes(String(options['expect-reply']))) throw new Error('expect-reply must be ack, result or any');
   if (options.timeout) duration(String(options.timeout));
   const command: CollaborationCommand = { action, json: !options.text, options };
@@ -137,9 +148,20 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     command.target = positional.shift(); command.message = positional.join(' ');
     if (!command.target || (!command.message && !options.file && !options.stdin)) throw new Error(`${action} requires a target and message`);
     if ([Boolean(command.message), Boolean(options.file), Boolean(options.stdin)].filter(Boolean).length !== 1) throw new Error('Choose inline body, --file, or --stdin');
+  } else if (action === 'rules') {
+    command.operation = positional.shift(); command.groupId = positional.shift(); command.message = positional.join(' ');
+    if (!command.groupId || !['get', 'set', 'clear'].includes(command.operation ?? '')) throw new Error('Usage: td collab rules get|set|clear <group-id>');
+    if (command.operation === 'set' ? [Boolean(command.message), Boolean(options.file), Boolean(options.stdin)].filter(Boolean).length !== 1
+      : Boolean(command.message || options.file || options.stdin)) throw new Error('rules set requires inline text, --file or --stdin');
+  } else if (action === 'transport') {
+    command.operation = positional.shift(); command.groupId = positional.shift();
+    if (positional.length || !['info', 'register'].includes(command.operation ?? '')
+      || (command.operation === 'info' ? command.groupId || options.file : !command.groupId || !options.file)) {
+      throw new Error('Usage: td collab transport info | transport register <group-id> --file <nodes.json>');
+    }
   } else if (action === 'message') {
     command.operation = positional.shift(); command.target = positional.shift();
-    if (!['get', 'watch', 'read', 'confirm-shell'].includes(command.operation ?? '') || !command.target || positional.length) throw new Error('Usage: td collab message get|watch|read|confirm-shell <id>');
+    if (!['get', 'watch', 'confirm-shell'].includes(command.operation ?? '') || !command.target || positional.length) throw new Error('Usage: td collab message get|watch|confirm-shell <id>');
   } else if (action === 'cursor') {
     command.operation = positional.shift(); command.target = positional.shift();
     if (command.operation !== 'commit' || !command.target || !options.consumer || positional.length) throw new Error('Usage: td collab cursor commit <token> --consumer <name>');
@@ -181,17 +203,18 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session']);
   const byAction: Record<string, string[]> = {
-    status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
+    rules: ['file', 'stdin', 'if-version'], transport: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
-    inbox: ['unread', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
-    message: ['receipt-only', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
-    add: [], remove: [], spawn: ['name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: [],
+    inbox: ['raw', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
+    message: ['raw', 'receipt-only', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
+    add: [], remove: [], spawn: ['name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: ['lines', 'raw'],
   };
   for (const option of byAction[action]) allowed.add(option);
   for (const option of Object.keys(options)) if (!allowed.has(option)) throw new Error(`--${option} is not supported by ${action}`);
-  if (action === 'message' && command.operation === 'read' && Object.keys(options).some((option) => !['json', 'jsonl', 'text', 'help', 'session'].includes(option))) throw new Error('message read does not accept wait or filtering options');
+  if (options.lines && (!/^\d+$/.test(String(options.lines)) || Number(options.lines) < 1 || Number(options.lines) > 10000)) throw new Error('--lines must be 1..10000 history rows');
+  if (action === 'drive' && command.operation !== 'capture' && (options.lines || options.raw)) throw new Error('--lines/--raw only apply to capture');
   return command;
 }
 export function duration(value: string): number {
@@ -209,7 +232,7 @@ export interface CollaborationCliIO {
   stdin?: () => Promise<string>;
 }
 export function waitSatisfied(receipt: Json, stage: string, reply?: string): boolean {
-  const reached = stage === 'queued' || (stage === 'delivered' && ['delivered', 'read'].includes(receipt.status)) || (stage === 'read' && receipt.status === 'read');
+  const reached = stage === 'queued' || (stage === 'delivered' && ['delivered', 'read'].includes(receipt.status));
   return reached && (!reply || (reply === 'ack' ? receipt.ack_at != null : reply === 'result' ? receipt.result_ids?.length > 0 : receipt.reply_ids?.length > 0));
 }
 export async function executeCollaborationCommand(command: CollaborationCommand, context: Record<string, string>, io: CollaborationCliIO): Promise<number> {
@@ -236,11 +259,14 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         if (fanIds.length) io.write(`同时发给了:${fanIds.map((id) => names[id] ?? id).join('、')}`);
         io.write(message.content);
       }
-      else if (value.message) io.write(`[${value.status}] ${canonicalShortId(String(value.message_id ?? ''))}\n${value.message.content}`);
+      else if (value.message) {
+        if (value.message.instructions?.text) io.write(`协作约定（版本 ${value.message.instructions.version}）：\n${value.message.instructions.text}`);
+        io.write(`[${value.status}] ${canonicalShortId(String(value.message_id ?? ''))}\n${value.message.content}`);
+      }
       else if (value.message_id) {
         io.write(`${value.status} ${canonicalShortId(String(value.message_id))}${value.thread_id ? ` thread=${canonicalShortId(String(value.thread_id))}` : ''}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
         // A timeout after the wait stage itself was reached means delivery
-        // (or reading) completed — only the expected reply/result is late.
+        // completed — only the expected reply/result is late.
         if (value.code === 'WAIT_TIMEOUT' && value.stage_reached && value.expect_reply) {
           io.write(`\n投递已完成；等待${value.expect_reply === 'result' ? '结果' : '回复'}超时（expect-reply=${value.expect_reply}）`);
         }
@@ -257,6 +283,28 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
   let receipt: Json | undefined;
   let idempotencyKey: string | undefined;
   try {
+    if (command.action === 'rules') {
+      let body: Json;
+      if (command.operation === 'get') body = await request('GET', `/rules?group=${encodeURIComponent(command.groupId!)}`);
+      else {
+        if (o.stdin && !io.stdin) throw new Error('stdin is unavailable');
+        if (o.file && fs.statSync(String(o.file)).size > 8192) throw new Error('群规最多 8192 UTF-8 字节');
+        const text = command.operation === 'clear' ? '' : o.file ? fs.readFileSync(String(o.file), 'utf8') : o.stdin ? await io.stdin!() : command.message!;
+        body = await request('POST', '/rules', { group_id: command.groupId, text, expected_version: o['if-version'] });
+      }
+      if (o.text) io.write(`群规版本：${body.instructions?.version ?? '未设置'}\n${body.instructions?.text ?? ''}`); else output(body);
+      return 0;
+    }
+    if (command.action === 'transport') {
+      if (command.operation === 'info') output(await request('GET', '/transport'));
+      else {
+        if (fs.statSync(String(o.file)).size > 64 * 1024) throw new Error('Peer registration is too large');
+        const raw = fs.readFileSync(String(o.file), 'utf8');
+        if (Buffer.byteLength(raw) > 64 * 1024) throw new Error('Peer registration is too large');
+        output(await request('POST', '/transport', { groupId: command.groupId, nodes: JSON.parse(raw) }));
+      }
+      return 0;
+    }
     if (command.action === 'help') {
       io.write(COLLAB_HELP);
       // Append the caller's own groups with every member role — help doubles
@@ -280,6 +328,18 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     if (command.action === 'capabilities' || command.action === 'status') {
       const result = await request('GET', command.action === 'status' ? '/peers' : '/capabilities');
       output(result);
+      if (command.action === 'status' && o.text) {
+        for (const group of result.groups ?? []) {
+          io.write(`组「${group.name}」成员定位：`);
+          for (const id of group.sessionIds ?? []) {
+            const member = [...(result.peers ?? []), result.source].find(item => item?.sessionId === id);
+            io.write(roleLine({ sessionId: id, name: member?.name }, group.roles?.[id]));
+          }
+        }
+        for (const peer of result.peers ?? []) if (peer.last_terminal_output_at && peer.activity_observed_at) {
+          io.write(`${peer.name || peer.sessionId}：观测时距终端输出 ${peer.output_idle_seconds ?? Math.max(0, Math.floor((peer.activity_observed_at - peer.last_terminal_output_at) / 1000))} 秒（不代表任务进度）`);
+        }
+      }
       if (command.action === 'status' && o.text && Array.isArray(result.peers) && result.peers.length) {
         io.write('查看伙伴当前屏幕（只读，仅本机 tmux）：');
         for (const peer of result.peers) {
@@ -297,7 +357,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       let cursor = o.cursor as string | undefined;
       do {
         const params = new URLSearchParams();
-        for (const key of ['unread', 'since', 'after-id', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind']) if (o[key]) params.set(key.replaceAll('-', '_'), String(o[key]));
+        for (const key of ['raw', 'since', 'after-id', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind']) if (o[key]) params.set(key.replaceAll('-', '_'), String(o[key]));
         if (cursor) { params.set('cursor', cursor); params.delete('after_id'); }
         const page = await request('GET', `/inbox?${params}`);
         if (!o.follow || page.messages?.length || page.retention_gap) output(page);
@@ -310,8 +370,8 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     if (command.action === 'cursor') { output(await request('POST', '/cursor/commit', { cursor: command.target, consumer: o.consumer })); return 0; }
     if (command.action === 'message') {
       const route = `/message/${encodeURIComponent(command.target!)}`;
-      if (command.operation === 'read' || command.operation === 'confirm-shell') { output(await request('POST', `${route}/${command.operation}`)); return 0; }
-      receipt = await request('GET', `${route}${o['receipt-only'] || command.operation === 'watch' ? '?receipt_only=true' : ''}`);
+      if (command.operation === 'confirm-shell') { output(await request('POST', `${route}/${command.operation}`)); return 0; }
+      receipt = await request('GET', `${route}?receipt_only=${Boolean(o['receipt-only'] || command.operation === 'watch')}&raw=${Boolean(o.raw)}`);
       if (command.operation === 'get' && !o.follow && !o['wait-until'] && !o['expect-reply']) { output(receipt); return 0; }
     } else if (['send', 'reply', 'handoff'].includes(command.action)) {
       let content = command.message ?? '';
@@ -365,7 +425,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       else output(body);
       return 0;
     } else if (command.action === 'drive') {
-      const body = await request('POST', '/drive', { session: command.sessionId, action: command.operation, text: command.message });
+      const body = await request('POST', '/drive', { session: command.sessionId, action: command.operation, text: command.message, ...(o.lines ? { lines: Number(o.lines) } : {}), ...(o.raw ? { raw: true } : {}) });
       const result = body as { ok?: boolean; approved?: boolean; snapshot?: string; error?: string };
       if (o.text) {
         if (command.operation === 'run') {
@@ -409,7 +469,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         : { groupId: command.groupId, targetSessionId: command.sessionId, action: command.action };
       output(await request('POST', command.action === 'spawn' ? '/spawn' : '/members', body)); return 0;
     }
-    const stage = String(o['wait-until'] ?? (command.action === 'message' ? 'read' : 'queued'));
+    const stage = String(o['wait-until'] ?? (command.action === 'message' ? 'delivered' : 'queued'));
     let previous = '';
     for (;;) {
       if (['failed', 'expired'].includes(receipt!.status)) { output(receipt!); return 3; }
@@ -420,7 +480,9 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       }
       if (now() >= deadline) {
         output({ ...receipt, ok: false, code: 'WAIT_TIMEOUT', wait_until: stage, stage_reached: waitSatisfied(receipt!, stage, undefined),
-          expect_reply: o['expect-reply'] ?? null, delivery_continues: true });
+          expect_reply: o['expect-reply'] ?? null, delivery_continues: true,
+          delivery: receipt!.delivery ?? { status: receipt!.status },
+          reply: { ...receipt!.reply, status: o['expect-reply'] ? 'timeout' : receipt!.reply?.status ?? 'pending', expected: o['expect-reply'] ?? null } });
         return 2;
       }
       await sleep(Math.min(500, deadline - now()));

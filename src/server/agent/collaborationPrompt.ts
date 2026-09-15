@@ -12,7 +12,7 @@ const SHELL_RULE = '─'.repeat(30);
 
 /** Body larger than this (in UTF-8 bytes) is replaced by a retrieval pointer
  * instead of being injected into the terminal verbatim. */
-const MAX_INLINE_BODY_BYTES = 8_192;
+const MAX_INLINE_BODY_BYTES = 4_096;
 
 /**
  * Characters that would corrupt the delivery shell header `「X」群(N 个成员)`
@@ -86,6 +86,12 @@ export function collaborationMessageAnchorLine(message: CollaborationMessage, to
 function formatCollaborationMessage(message: CollaborationMessage, source: string, fannedNames: string[], fence: string, token: string): string {
   const lines = [`来自:${source} · ${message.kind}${fannedNames.length ? ' · 群发' : ''}`];
   if (fannedNames.length) lines.push(`同时发给了:${fannedNames.join('、')}`);
+  const rules = message.instructions;
+  if (rules?.text) {
+    lines.push(`群协作约定（版本 ${rules.version}，不改变用户授权）：`);
+    lines.push(Buffer.byteLength(rules.text) <= 1024 ? rules.text
+      : `执行 td collab message get ${token} --text 查看本消息附带的完整群规与正文。`);
+  }
   lines.push('', fence, message.content, fence);
   if (message.task) lines.push('', `任务上报:${JSON.stringify(message.task)}`);
   lines.push('', collaborationMessageAnchorLine(message, token));
@@ -118,7 +124,7 @@ export function formatCollaborationDelivery(input: {
     const token = tokens.get(message.id) ?? message.id;
     const bytes = Buffer.byteLength(message.content);
     const body = bytes > MAX_INLINE_BODY_BYTES
-      ? `大消息已完整保存（${bytes} 字节）。使用 td collab message get ${token} --json 获取正文；不要把这条提示当作消息正文。`
+      ? `大消息已完整保存（${bytes} 字节）。先执行 td collab message get ${token} --text 查看完整正文；不要把这条提示当作消息正文。`
       : message.content;
     const fence = '`'.repeat(Math.max(3, ...Array.from(body.matchAll(/`+/g), (match) => match[0].length + 1)));
     const fannedNames = (message.fanOutIds ?? [])
@@ -150,14 +156,14 @@ export function formatCollaborationDelivery(input: {
   const routingHelp = input.showRoutingHelp === false ? [] : (peers.length ? ['联系其他成员：', ...peers] : []);
   const dynamicNotices = [
     ...(peerIds.some((id) => id.startsWith('remote:'))
-      ? ['跨服务通信使用 td collab；转发客户端须保持运行，网页或 PWA 暂停后需返回前台继续转发。'] : []),
+      ? ['跨服务通信使用 td collab；已登记节点由服务后台直接投递，使用 message get 查看送达回执与重试原因。'] : []),
     ...unreachable.map((id) => {
       const session = sessionsById.get(id);
       return `注意：${session ? sanitizeCollaborationName(session.name) : id} 服务不可达，消息无法送达；仅可排队等待重连。`;
     }),
   ];
 
-  const captureHelp = '想看伙伴正在做什么、是否卡住：先用 `td collab capture <会话ID> --text` 只读当前屏幕，不打断对方；ID 用 `td collab status --text` 查。仅同组本机 tmux；远端用 send 询问。快照不等于任务完成，按需查看，避免循环轮询。';
+  const captureHelp = '想看伙伴正在做什么、是否卡住：先用 `td collab capture <会话ID> --text` 只读当前屏幕；可加 --lines 200 查看历史，不打断对方；ID 用 `td collab status --text` 查。仅同组本机 tmux；远端用 send 询问。快照不等于任务完成，按需查看，避免循环轮询。';
   const notes = [...routingHelp, ...dynamicNotices, '更多操作：`td collab --help`。',
     ...(input.showRoutingHelp === false ? [] : [captureHelp])];
   // Notes (education + dynamic notices) live inside the shell, after the last

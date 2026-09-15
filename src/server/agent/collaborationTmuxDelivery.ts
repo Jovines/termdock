@@ -1,3 +1,4 @@
+import { plainCollaborationSnapshot } from './collaborationText.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
 import { normalizePromptForPaste } from './promptDelivery.js';
 
@@ -152,10 +153,11 @@ export async function sendTmuxPaneKey(
 export async function captureTmuxPaneText(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
+  rawOutput = false,
 ): Promise<string> {
   await assertSamePane(run, pane);
-  const raw = await run(['capture-pane', '-p', '-J', '-t', pane.paneId]);
-  return raw.replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const raw = await run(['capture-pane', '-p', '-J', ...(rawOutput ? ['-e'] : []), '-t', pane.paneId]);
+  return rawOutput ? raw : plainCollaborationSnapshot(raw);
 }
 
 /** Dismiss an interactive approval dialog on the member pane by pressing
@@ -197,8 +199,10 @@ export async function captureTmuxPaneHistory(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
   lines = 800,
+  rawOutput = false,
 ): Promise<string> {
   await assertSamePane(run, pane);
-  const raw = await run(['capture-pane', '-p', '-J', '-S', `-${lines}`, '-t', pane.paneId]);
-  return raw.replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  if (!Number.isInteger(lines) || lines < 1 || lines > 10000) throw new Error('INVALID_HISTORY_LINES');
+  const raw = await run(['capture-pane', '-p', '-J', ...(rawOutput ? ['-e'] : []), '-S', `-${lines}`, '-t', pane.paneId]);
+  return rawOutput ? raw : plainCollaborationSnapshot(raw);
 }

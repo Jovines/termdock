@@ -171,3 +171,25 @@ describe('cross-service collaboration transport', () => {
     expect(records[1].groups[0].deleted).toBe(true);
   });
 });
+
+it('provisions public server identities once and leaves upgraded peer message delivery to the servers', async () => {
+  const f = fixture();
+  const registrations: unknown[] = [];
+  for (const [index, service] of f.services.entries()) {
+    const original = service.request;
+    service.request = async (route, method, body) => {
+      if (route === '/collaboration-peers') { registrations.push(body); return { ok: true }; }
+      return { ...await original(route, method, body) as object, serverTransport: { serviceId: `node-${index}` } };
+    };
+  }
+  await f.bridge.save(f.records[0].origin, { name: 'Pair', sessionIds: ['same-id', qualifySession(f.records[1].origin, 'same-id')] });
+  await f.bridge.refresh();
+  expect(registrations).toHaveLength(2);
+  const registrationCount = registrations.length;
+  f.records[0].messages.push({ id: 'server-owned', groupId: f.records[0].groups[0].id, fromSessionId: 'same-id',
+    toSessionId: qualifySession(f.records[1].origin, 'same-id'), status: 'pending', content: 'server sends this' });
+  await f.bridge.refresh();
+  expect(registrations).toHaveLength(registrationCount);
+  expect(f.records[1].messages).toHaveLength(0);
+  expect(registrations[0]).toMatchObject({ nodes: [{ serviceId: 'node-0', origin: f.records[0].origin }, { serviceId: 'node-1', origin: f.records[1].origin }] });
+});

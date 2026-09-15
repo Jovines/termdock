@@ -48,7 +48,7 @@ describe('collaboration API with arbitrary pull consumers', () => {
     // the terminal must resolve back to the same message.
     const read = await (await fetch(`${url}/message/${short}?session=b`)).json();
     expect(read.message.id).toBe(sent.message_id);
-    expect((await post(`/message/${short}/read`, { session: 'b' })).status).toBe(200);
+    expect((await post(`/message/${short}/read`, { session: 'b' })).status).toBe(410);
     // Resolution runs before the send, so the idempotency payload hash still
     // sees the full id: a retry of the same reply, keyed the same way, must
     // return the original message instead of IDEMPOTENCY_CONFLICT.
@@ -136,12 +136,12 @@ describe('collaboration API with arbitrary pull consumers', () => {
     expect(sent).toMatchObject({ ok: true, status: 'pending', message_id: expect.any(String) });
     expect((await fetch(`${url}/message/${sent.message_id}?session=outsider`)).status).toBe(404);
     expect((await post(`/message/${sent.message_id}/read`, { session: 'a' })).status).toBe(404);
-    const inbox = await (await fetch(`${url}/inbox?session=b&unread=true&consumer=pull`)).json();
+    const inbox = await (await fetch(`${url}/inbox?session=b&consumer=pull`)).json();
     expect(inbox.messages).toHaveLength(1);
     expect(store.getMessage(sent.message_id)?.status).toBe('pending');
     await post(`/message/${sent.message_id}/read`, { session: 'b' });
     const read = await (await fetch(`${url}/message/${sent.message_id}?session=a&receipt_only=true`)).json();
-    expect(read).toMatchObject({ status: 'read', ack_at: null, result_ids: [] });
+    expect(read).toMatchObject({ status: 'pending', ack_at: null, result_ids: [] });
     const ack = await post('/reply', { session: 'b', messageId: sent.message_id, content: 'Received', response_kind: 'ack', idempotency_key: 'ack' });
     expect(ack.body.thread_id).toBe(sent.thread_id);
     const result = await post('/reply', { session: 'b', messageId: sent.message_id, content: 'Complete', task: { task_id: 'verify', status: 'complete', evidence: ['test passes'] } });
@@ -151,7 +151,7 @@ describe('collaboration API with arbitrary pull consumers', () => {
     const results = await (await fetch(`${url}/inbox?session=a&response_kind=result`)).json();
     expect(results.messages.map((message: { id: string }) => message.id)).toEqual([result.body.message_id]);
     await post('/cursor/commit', { session: 'b', cursor: inbox.next_cursor, consumer: 'pull' });
-    expect((await (await fetch(`${url}/inbox?session=b&unread=true&consumer=pull`)).json()).messages).toEqual([]);
+    expect((await (await fetch(`${url}/inbox?session=b&consumer=pull`)).json()).messages).toEqual([]);
   });
   it('does not mark the original read when reply validation fails', async () => {
     const { body: sent } = await post('/send', { session: 'a', targetSessionId: 'b', message: 'Verify' });
@@ -193,7 +193,7 @@ describe('collaboration API with arbitrary pull consumers', () => {
   });
 
   it('renames a member of a shared group, cleaning control characters from the name', async () => {
-    const ok = await post('/name', { session: 'a', session_id: 'b', name: '  二号 \nAgent  ' });
+    const ok = await post('/name', { session: 'a', session_id: 'b', name: '  二号\u0000\nAgent  ' });
     expect(ok).toMatchObject({ status: 200, body: { ok: true, sessionId: 'b', name: '二号 Agent' } });
     expect(renamed).toEqual([['b', '二号 Agent']]);
     expect(await post('/name', { session: 'outsider', session_id: 'b', name: 'x' })).toMatchObject({ status: 403, body: { code: 'NOT_A_MEMBER' } });
@@ -238,4 +238,31 @@ describe('collaboration API with arbitrary pull consumers', () => {
     expect(await post('/send', { session: 'a', toSessionIds: ['b', 'outsider'], message: 'x' })).toMatchObject({ status: 400, body: { code: 'GROUP_NOT_FOUND' } });
     expect(await post('/send', { session: 'a', message: 'x' })).toMatchObject({ status: 400, body: { code: 'NO_TARGET' } });
   });
+  it('retrieves a long body without read claims or changes to delivery', async () => {
+    const { body: sent } = await post('/send', { session: 'a', targetSessionId: 'b', message: '长任务'.repeat(2300) });
+    store.setSnapshot(sent.message_id, '\u001b[31m干净快照\u001b[0m');
+    const viewed = await (await fetch(`${url}/message/${sent.message_id}?session=b`)).json();
+    expect(viewed).not.toHaveProperty('read_at'); expect(viewed.message).not.toHaveProperty('readAt'); expect(viewed.snapshot).toBe('干净快照');
+    expect(viewed.message.snapshot).toBe('干净快照');
+    expect(viewed.message.content).toBe('长任务'.repeat(2300));
+    expect((await post(`/message/${sent.message_id}/read`, { session: 'b' })).status).toBe(410);
+    const full = await (await fetch(`${url}/message/${sent.message_id}?session=a`)).json();
+    const receipt = await (await fetch(`${url}/message/${sent.message_id}?session=a&receipt_only=true`)).json();
+    expect(full.delivered_at).toBe(full.message.deliveredAt); expect(receipt.delivered_at).toBe(full.delivered_at);
+    expect((await (await fetch(`${url}/message/${sent.message_id}?session=b&raw=true`)).json()).snapshot).toContain('\u001b');
+  });
+  it('resolves remote sender suffixes in inbox and persists group rules with conflict checks', async () => {
+    const remote = 'remote:https%3A%2F%2Fremote.test:remote1234';
+    const group = store.save({ name: 'Remote', sessionIds: ['a', 'b', remote] });
+    store.send({ groupId: group.id, fromSessionId: remote, toSessionIds: ['b'], kind: 'message', content: 'hello' });
+    const page = await (await fetch(`${url}/inbox?session=b&from=remote1234`)).json();
+    expect(page.messages).toHaveLength(1);
+    const rules = await post('/rules', { session: 'a', group_id: group.id, text: '验收后交付' });
+    expect(rules.body.instructions.text).toBe('验收后交付');
+    expect((await post('/rules', { session: 'a', group_id: group.id, text: 'overwrite', expected_version: 'stale' })).status).toBe(409);
+    expect((await post('/rules', { session: 'outsider', group_id: group.id, text: 'overwrite' })).status).toBe(403);
+    const role = await post('/role', { session: 'a', group_id: group.id, session_id: 'remote1234', role: '不接急单' });
+    expect(role.body.group.roles[remote]).toBe('不接急单');
+  });
+
 });

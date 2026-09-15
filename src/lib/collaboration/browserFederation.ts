@@ -64,7 +64,7 @@ export function installBrowserCollaboration(): BrowserCollaboration | undefined 
       label: service.label,
       request: async (path, method = 'GET', body) => {
         // The shared protocol can access only collaboration operations.
-        if (!/^\/collaboration-(?:federation|groups)(?:\/[^?#]*)?$/.test(path)) throw new Error('无效的协作请求');
+        if (!/^\/collaboration-(?:federation|groups|peers)(?:\/[^?#]*)?$/.test(path)) throw new Error('无效的协作请求');
         const signal = AbortSignal.timeout(18_000);
         const client = await waitForClient(clientFor(service), signal);
         const headers = new Headers({ 'Content-Type': 'application/json' });

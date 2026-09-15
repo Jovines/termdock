@@ -53,7 +53,7 @@ describe('background collaboration delivery', () => {
     worker = makeWorker();
     worker.start();
     await vi.advanceTimersByTimeAsync(0);
-    expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, delivery_semantics: 'pty_written', read_at: null, ack_at: null });
+    expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, delivery_semantics: 'pty_written', ack_at: null });
     expect(write).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(6_000);
     expect(write).toHaveBeenCalledTimes(1);

@@ -111,9 +111,9 @@ describe('real stores over the desktop collaboration bridge', () => {
     expect(nodes[1].store.getMessage(message.id)?.content).toBe(content);
     expect(nodes[2].store.list()).toEqual([]);
     expect(nodes[2].store.inbox('generic')).toEqual([]);
-    nodes[1].store.markRead([message.id]);
+    nodes[1].store.markDelivered([message.id]);
     await restoredBridge.refresh();
-    expect(nodes[0].store.receipt(message.id)).toMatchObject({ status: 'read', read_semantics: 'explicit' });
+    expect(nodes[0].store.receipt(message.id)).toMatchObject({ status: 'delivered' });
   });
   it('reports old-peer incompatibility explicitly, while keeping an offline peer retryable', async () => {
     const { nodes, bridge } = setup();

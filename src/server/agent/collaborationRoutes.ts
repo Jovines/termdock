@@ -1,3 +1,5 @@
+import { terminalMessage } from './collaborationStore.js';
+import { assertPeerRegistrationAuthority } from './collaborationPeerTransport.js';
 import { Router, type Request, type Response } from 'express';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from './collaborationStore.js';
 import { COLLAB_LIMITS, CollaborationError, MIN_ID_PREFIX_LENGTH, ambiguousIdMessage, extrasFromBody } from './collaborationProtocol.js';
@@ -46,6 +48,22 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
         code: error instanceof CollaborationError ? error.code : 'COLLABORATION_ERROR', error: error instanceof Error ? error.message : String(error) });
     }
   };
+  router.get('/transport', run((req, res) => {
+    if (!req.app.locals.collaborationNode) throw new Error('COLLABORATION_UNAVAILABLE');
+    res.json({ ok: true, node: req.app.locals.collaborationNode });
+  }));
+  router.post('/transport', run((req, res, sessionId) => {
+    assertPeerRegistrationAuthority(req);
+    const resolved = store.resolveGroupId(String(req.body.groupId ?? ''));
+    if (resolved.status !== 'ok') throw new Error('GROUP_NOT_FOUND_OR_AMBIGUOUS');
+    if (!store.groupsForSession(sessionId).some(group => group.id === resolved.id)) throw new Error('GROUP_NOT_FOUND');
+    const node = req.app.locals.collaborationNode;
+    if (!node || !req.app.locals.collaborationTransport || !Array.isArray(req.body.nodes)) throw new Error('COLLABORATION_UNAVAILABLE');
+    const local = req.body.nodes.find((item: { serviceId?: string }) => item?.serviceId === node.serviceId);
+    if (!local) throw new Error('LOCAL_NODE_MISMATCH');
+    req.app.locals.collaborationTransport.configure(resolved.id, local.origin, req.body.nodes);
+    res.json({ ok: true, group_id: resolved.id, transport: 'server' });
+  }));
   router.post('/route/rebind', run(async (req, res, sessionId) => {
     if (!rebind) throw new CollaborationError('ROUTE_REBIND_UNAVAILABLE', 'Route rebinding is not available');
     const pane = req.body.pane;
@@ -106,10 +124,10 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
   };
   router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, limits: COLLAB_LIMITS,
     routing: { background_recovery: true, explicit_rebind: Boolean(rebind), fixed_tmux_pane: true },
-    statuses: ['pending', 'delivered', 'read', 'failed', 'expired'], queued_status: 'pending',
-    semantics: { delivered: 'written to terminal; no application acknowledgement implied', read: 'explicit consumer acknowledgement',
+    statuses: ['pending', 'delivered', 'failed', 'expired'], queued_status: 'pending',
+    semantics: { delivered: 'written to terminal; no application acknowledgement implied',
       ack: 'explicit response_kind=ack', result: 'explicit response_kind=result; inspect task.status and evidence',
-      done: 'adapter reports turn ended, never proof of task completion', heartbeat: 'null unless explicitly observed',
+      snapshot: 'terminal observation, never proof of reading or task completion',
       timeout: 'stops waiting, does not cancel delivery',
       retry: 'same message id may be submitted again after a crash or uncertain transport result; consumers deduplicate by message id' } }); }));
   router.post('/send', run(async (req, res, sessionId) => {
@@ -153,14 +171,13 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     const messages = store.send({ ...extrasFromBody(req.body), groupId: original.groupId, fromSessionId: sessionId,
       toSessionIds: [original.fromSessionId], kind: 'reply', content: typeof req.body.content === 'string' ? req.body.content : '',
       replyTo: original.id, threadId: original.threadId });
-    // Reply is explicit consumption; only mark after successful validation/persistence.
-    store.markRead([original.id]);
     await awaitDelivery(messages[0]!.id, (await deliver(original.fromSessionId)) ?? null);
     sent(res, messages.map((message) => message.id));
   }));
   router.get('/message/:id', run((req, res, sessionId) => {
     const message = ownMessage(String(req.params.id), sessionId);
-    res.json({ ok: true, ...store.receipt(message.id), ...(req.query.receipt_only === 'true' ? {} : { message }) });
+    const raw = req.query.raw === 'true';
+    res.json({ ok: true, ...store.receipt(message.id, raw), ...(req.query.receipt_only === 'true' ? {} : { message: terminalMessage(message, raw) }) });
   }));
   router.post('/message/:id/confirm-shell', run(async (req, res, sessionId) => {
     const message = ownMessage(String(req.params.id), sessionId);
@@ -170,10 +187,10 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     await awaitDelivery(message.id, outcome);
     sent(res, [message.id]);
   }));
-  router.post('/message/:id/read', run((req, res, sessionId) => {
-    const message = ownMessage(String(req.params.id), sessionId, true);
-    store.markRead([message.id]);
-    res.json({ ok: true, ...store.receipt(message.id) });
+  // Old clients receive an explicit error instead of a fabricated read receipt.
+  router.post('/message/:id/read', run((req, _res, sessionId) => {
+    ownMessage(String(req.params.id), sessionId, true);
+    throw new CollaborationError('READ_RECEIPTS_UNSUPPORTED', 'Terminal delivery cannot observe reading; use message get for the snapshot or reply for an explicit response', 410);
   }));
   router.get('/inbox', run((req, res, sessionId) => {
     const string = (key: string) => typeof req.query[key] === 'string' ? req.query[key] as string : undefined;
@@ -193,15 +210,27 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       const resolved = store.resolveThreadId(threadFilter);
       if (resolved.status === 'ok') threadFilter = resolved.id;
     }
-    const page = store.page(sessionId, { unread: string('unread') === 'true', since, afterId: string('after_id'), cursor: string('cursor'),
+    let fromFilter = string('from');
+    if (fromFilter) {
+      const allowedIds = [...new Set(store.groupsForSession(sessionId).flatMap(group => group.sessionIds))];
+      if (!allowedIds.includes(fromFilter)) {
+        const matches = fromFilter.length < 4 ? [] : allowedIds.filter(id => id.startsWith(fromFilter!)
+          || (id.startsWith('remote:') && decodeURIComponent(id.slice(id.lastIndexOf(':') + 1)).startsWith(fromFilter!)));
+        if (matches.length > 1) throw new CollaborationError('SESSION_ID_AMBIGUOUS', '发送者短 ID 匹配多个成员，请使用完整 ID');
+        if (matches.length === 1) fromFilter = matches[0];
+      }
+    }
+    if (string('unread') === 'true') throw new CollaborationError('READ_RECEIPTS_UNSUPPORTED', 'Use a consumer cursor to track retrieved messages');
+    const page = store.page(sessionId, { since, afterId: string('after_id'), cursor: string('cursor'),
       consumer: string('consumer'), limit: string('limit') ? Number(string('limit')) : undefined,
-      from: string('from'), group: groupFilter, thread: threadFilter, kind: string('kind'), responseKind: string('response_kind'), order: string('order') });
+      from: fromFilter, group: groupFilter, thread: threadFilter, kind: string('kind'), responseKind: string('response_kind'), order: string('order') });
+    const messages = page.messages.map(message => terminalMessage(message, string('raw') === 'true'));
     // Fan-out edges carry sibling recipients; the names map lets the CLI text
     // renderer show 同时发给了:… as people instead of bare session ids. The
     // fallback to the raw id stays server-side agnostic (federated/offline).
     const nameIds = [...new Set(page.messages.flatMap((message) =>
       [message.fromSessionId, ...(message.fanOutIds ?? [])].filter((id): id is string => typeof id === 'string' && id.length > 0)))];
-    res.json({ ok: true, ...page, ...(nameIds.length ? { names: resolveNames?.(nameIds) ?? {} } : {}) });
+    res.json({ ok: true, ...page, messages, ...(nameIds.length ? { names: resolveNames?.(nameIds) ?? {} } : {}) });
   }));
   router.post('/cursor/commit', run((req, res, sessionId) => {
     store.commitCursor(sessionId, String(req.body.cursor ?? ''), String(req.body.consumer ?? ''));
@@ -218,6 +247,13 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
   // Member names ride along so role lists read as people, not bare ids; the
   // caller falls back to the session id when a name is unknown (federated or
   // offline members have no local record).
+  const memberOf = (ids: string[], input: string): string | null => {
+    if (ids.includes(input)) return input;
+    if (input.length < 4) return null;
+    const matches = ids.filter(id => id.startsWith(input) || (id.startsWith('remote:') && decodeURIComponent(id.slice(id.lastIndexOf(':') + 1)).startsWith(input)));
+    if (matches.length > 1) throw new CollaborationError('SESSION_ID_AMBIGUOUS', '成员短 ID 匹配多个会话，请使用完整 ID');
+    return matches[0] ?? null;
+  };
   const groupView = (group: CollaborationGroup) => {
     const names = resolveNames?.(group.sessionIds) ?? {};
     return {
@@ -226,6 +262,17 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       roles: group.roles ?? {},
     };
   };
+  router.get('/rules', run((req, res, sessionId) => {
+    const group = groupOf(String(req.query.group ?? ''), sessionId);
+    res.json({ ok: true, group_id: group.id, instructions: group.instructions ?? null });
+  }));
+  router.post('/rules', run((req, res, sessionId) => {
+    const group = groupOf(String(req.body.group_id ?? ''), sessionId);
+    const expected = req.body.expected_version;
+    if (expected !== undefined && typeof expected !== 'string') throw new Error('INVALID_VERSION');
+    const instructions = store.setRules(group.id, req.body.text, sessionId, expected);
+    res.json({ ok: true, group_id: group.id, instructions });
+  }));
   router.get('/role', run((req, res, sessionId) => {
     const groupId = String(req.query.group ?? '');
     if (groupId) {
@@ -242,13 +289,14 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
   router.post('/role', run((req, res, sessionId) => {
     const group = groupOf(String(req.body.group_id ?? ''), sessionId);
     const role = req.body.role;
-    if (typeof req.body.session_id !== 'string' || !group.sessionIds.includes(req.body.session_id)) {
+    const member = typeof req.body.session_id === 'string' ? memberOf(group.sessionIds, req.body.session_id) : null;
+    if (!member) {
       throw new CollaborationError('NOT_A_MEMBER', 'Role target must be a member of this group', 400);
     }
     if (role === undefined || (role !== null && typeof role !== 'string')) {
       throw new CollaborationError('INVALID_ROLE', 'role must be text or null', 400);
     }
-    const updated = store.setRole({ groupId: group.id, sessionId: req.body.session_id, role: role as string | null });
+    const updated = store.setRole({ groupId: group.id, sessionId: member, role: role as string | null });
     res.json({ ok: true, group: { ...updated, roles: updated.roles ?? {} } });
   }));
   router.post('/name', run(async (req, res, sessionId) => {

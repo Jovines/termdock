@@ -1,3 +1,6 @@
+import { X509Certificate } from 'node:crypto';
+import { CollaborationPeerTransport, connectCollaborationRpc } from './agent/collaborationPeerTransport.js';
+import { collaborationStore, deliverPeerCollaboration, collaborationLocalActivity } from './routes/terminal.js';
 import { setPushTargetPeerId } from './notifications/pushService.js';
 import { desktopDirectTargets } from './federation/desktopTargets.js';
 import { createOpenAccessRouter } from './federation/openAccess.js';
@@ -472,12 +475,13 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     runtimeMonitor,
   });
   const { server, scheme } = createServerForApp(app, options);
+  let collaborationTransport: CollaborationPeerTransport | undefined;
   let entrySubjectAllowed = (_subjectId: string) => false;
   let routeInvitations: RouteInvitationStore | undefined;
   let federationServiceId = '';
   const desktopTargets = () => desktopDirectTargets(path.join(homedir(), '.termdock', 'desktop.json'), federationServiceId);
   const routeAccess = new RouteAccess(path.join(homedir(), '.termdock', 'federation', 'routes.json'), Date.now,
-    (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true, desktopTargets);
+    (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true || collaborationTransport?.canRoute(subjectId, targetServiceId) === true, desktopTargets);
   const relayRouter = new RelayRouter<RoutePrincipal>({
     authenticate: context => context as RoutePrincipal,
     allowRegister: (principal, serviceId) => routeAccess.allowRegister(principal, serviceId),
@@ -505,6 +509,10 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket,
   }, {
+    collaborationExchange: (subjectId, packet) => {
+      if (!collaborationTransport) throw new Error('COLLABORATION_UNAVAILABLE');
+      return collaborationTransport.receive(subjectId, packet);
+    },
     listRouteTargets: () => { refreshDirectTargets(); return routeAccess.configuredTargets().map(target => ({ ...target, available: relayRouter.hasRoute(target.serviceId) })); },
     listRouteAccess: () => routeInvitations?.list() || [],
     grantRouteAccess: async (issuerId, targetServiceId, subjectId, url) => {
@@ -522,7 +530,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     },
     revokeRouteAccess: id => routeInvitations?.revoke(id) || false,
     issueRouteTicket: (subjectId: string, serviceId: string) => routeAccess.issueRouteTicket(subjectId, serviceId),
-    hasRouteGrant: (subjectId: string, serviceId: string) => routeInvitations?.allows(subjectId, serviceId) === true,
+    hasRouteGrant: (subjectId: string, serviceId: string) => routeInvitations?.allows(subjectId, serviceId) === true || collaborationTransport?.canRoute(subjectId, serviceId) === true,
     createRouteInvitation: (issuerId: string, serviceId: string) => {
       if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
       return routeInvitations.create(issuerId, serviceId);
@@ -535,6 +543,28 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   void federation.then(runtime => {
     federationServiceId = runtime.serviceId; setPushTargetPeerId(runtime.serviceId); refreshDirectTargets();
     app.locals.passwordRuntime = runtime;
+    collaborationTransport = new CollaborationPeerTransport({
+      file: path.join(homedir(), '.termdock', 'federation', 'collaboration-peers.json'), serviceId: runtime.serviceId,
+      store: collaborationStore, deliver: deliverPeerCollaboration, activity: collaborationLocalActivity,
+      connect: async (peer, via) => {
+        if (!via) return connectCollaborationRpc(runtime.identity, peer);
+        const entry = await connectCollaborationRpc(runtime.identity, via);
+        try {
+          const ticket = await entry.request({ type: 'route-ticket', serviceId: peer.serviceId });
+          if (typeof ticket.routeToken !== 'string') throw new Error('ROUTE_UNAVAILABLE');
+          const url = new URL('/api/federation/relay', via.origin.replace(/^https:/, 'wss:'));
+          url.searchParams.set('routeToken', ticket.routeToken);
+          // TLS authenticates the entry; Noise pins the final destination.
+          return await connectCollaborationRpc(runtime.identity, { ...via, serviceId: peer.serviceId }, url.href);
+        } finally { entry.close(); }
+      },
+    });
+    app.locals.collaborationTransport = collaborationTransport;
+    let caFingerprint256: string | undefined;
+    if (options.httpsCaPath) try { caFingerprint256 = new X509Certificate(fs.readFileSync(options.httpsCaPath)).fingerprint256; } catch { /* System TLS trust remains required. */ }
+    app.locals.collaborationNode = { serviceId: runtime.serviceId, ...(caFingerprint256 ? { caFingerprint256 } : {}) };
+    collaborationTransport.start();
+    server.once('close', () => collaborationTransport?.close());
     entrySubjectAllowed = subjectId => runtime.store.authorize({ subjectId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed;
     routeInvitations = new RouteInvitationStore({
       filePath: path.join(homedir(), '.termdock', 'federation', 'route-invitations.json'), serviceId: runtime.serviceId,

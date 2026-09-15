@@ -45,6 +45,7 @@ class LogicalSocket extends EventEmitter {
 }
 interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: number; abort: AbortController; state: 'uploading' | 'running'; updatedAt: number; uploadSlot: boolean; ack?: () => void }
 export interface FederationRuntimeOptions {
+  collaborationExchange?: (subjectId: string, packet: Packet) => Record<string, unknown>;
   listRouteTargets?: () => Array<{ serviceId: string; label?: string; url?: string; available: boolean }>;
   listRouteAccess?: () => Array<{ id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }>;
   grantRouteAccess?: (issuerId: string, targetServiceId: string, subjectId: string, url?: string) => unknown;
@@ -191,7 +192,10 @@ export async function createFederationRuntime(app: express.Express, directory: s
       for await (const packet of channel.read()) {
         try {
           if (packet.id.length > 128) throw new Error('INVALID_ID');
-          if (packet.type === 'password-parameters') {
+          if (packet.type === 'collaboration-exchange') {
+            if (!options.collaborationExchange) throw new Error('COLLABORATION_UNAVAILABLE');
+            send({ type: 'result', id: packet.id, ...options.collaborationExchange(subjectId, packet) });
+          } else if (packet.type === 'password-parameters') {
             send({ type: 'result', id: packet.id, ...passwordBootstrap.parameters() });
           } else if (packet.type === 'password-start') {
             const now = Date.now(), loginKey = `secure:${subjectId}`;
@@ -361,6 +365,6 @@ export async function createFederationRuntime(app: express.Express, directory: s
       if (channel) { channels.delete(channel); channel.close(); }
     }
   }
-  return { serviceId, store, accept, close() { for (const channel of channels) channel.close(); internal.close(); } };
+  return { serviceId, identity, store, accept, close() { for (const channel of channels) channel.close(); internal.close(); } };
 }
 export type FederationRuntime = Awaited<ReturnType<typeof createFederationRuntime>>;

@@ -12,7 +12,7 @@ td collab send <session-id> '请检查证据包' \
   --wait-until delivered --timeout 30s
 
 td collab message get <message-id> --receipt-only
-td collab message watch <message-id> --wait-until read --timeout 2m
+td collab message watch <message-id> --wait-until delivered --timeout 2m
 
 td collab reply <message-id> '收到，开始检查' --response-kind ack
 td collab reply <message-id> '检查完成' \
@@ -21,17 +21,16 @@ td collab reply <message-id> '检查完成' \
 
 `send`、`reply`、`handoff` 默认输出 JSON。`--text` 用于人工阅读，`--jsonl` 用于逐行处理；标准输出不混入 ANSI 装饰或日志。文本输出也显示消息 ID、线程和状态。`--file <path>`、`--stdin` 支持较大的正文；`--` 后的参数全部作为正文，避免正文里的 `--json` 等文本被解释为选项。
 
-多个共享工作组之间发送时必须指定 `--group`。`send --thread` 可延续线程，`reply` 自动使用原线程。查询单条消息只允许发送方、接收方；标记读取和回复只允许接收方。
+多个共享工作组之间发送时必须指定 `--group`。`send --thread` 可延续线程，`reply` 自动使用原线程。查询单条消息只允许发送方、接收方；回复只允许接收方。
 
 ## 回执和退出码
 
-返回字段包括 `message_id`、`thread_id`、`status`、`queued_at`、`delivered_at`、`read_at`、`failure_reason`、`ack_at`、`reply_ids`、`result_ids`、`idempotency_key` 和转发诊断。时间均为 Unix 毫秒，未观测到的时间是 `null`。消息正文对象延续旧接口的 camelCase 字段；回执与 CLI 选项使用 snake_case。
+返回字段包括 `message_id`、`thread_id`、`status`、`queued_at`、`delivered_at`、`failure_reason`、`ack_at`、`reply_ids`、`result_ids`、`idempotency_key` 和转发诊断。时间均为 Unix 毫秒，未观测到的时间是 `null`。消息正文对象延续旧接口的 camelCase 字段；回执与 CLI 选项使用 snake_case。
 
 | 状态/事件 | 含义 |
 | --- | --- |
 | `pending` | 本地已持久化排队，尚未确认写入接收端终端或被主动读取。对应 `--wait-until queued`。 |
-| `delivered` | Termdock 已写入接收端 PTY。大消息写入的是通知与读取命令。不能据此判断 Agent 接手。主动读取确认会跨过这一阶段，回执标注 `delivery_semantics=consumer_read`，不会冒充 PTY 写入。 |
-| `read` | 接收方显式调用 `message read` 或成功回复。旧版服务产生的已读回执标注 `read_semantics=legacy_or_unspecified`。 |
+| `delivered` | Termdock 已写入接收端 PTY。大消息写入的是通知与读取命令。不能据此判断 Agent 接手。读取正文不改变投递状态。 |
 | `failed` | 明确不能继续投递，例如接收服务版本不支持该消息；查看 `failure_reason`。 |
 | `expired` | 指定的 `--expires-at` 已到且消息仍未提交；不再投递。没有指定期限时不会自动过期。 |
 | `ack` | 接收方显式报告已收到/接手。不会自动产生任务结果。 |
@@ -40,19 +39,19 @@ td collab reply <message-id> '检查完成' \
 
 退出码：`0` 达到请求的等待条件；`1` 参数、网络或 API 错误；`2` 等待超时；`3` 投递失败或过期。单纯 `message get` 是查询，即便查到失败消息也正常返回 `0`，等待操作才使用 `3`。
 
-查不到消息与无权查询分开报：`MESSAGE_NOT_FOUND` 表示 id 不存在、前缀无匹配或历史已过期/被清理（不足 4 位的前缀不做前缀搜索，正文会说明）；`MESSAGE_NOT_YOURS` 表示消息确实存在，但当前会话既不是发送方也不是接收方（`message read`、`reply` 只允许接收方，发送方查自己的消息用 `message get`）。两者 HTTP 状态都是 `404`，正文都不回显消息内容。
+查不到消息与无权查询分开报：`MESSAGE_NOT_FOUND` 表示 id 不存在、前缀无匹配或历史已过期/被清理（不足 4 位的前缀不做前缀搜索，正文会说明）；`MESSAGE_NOT_YOURS` 表示消息确实存在，但当前会话既不是发送方也不是接收方（`reply` 只允许接收方，发送方查自己的消息用 `message get`）。两者 HTTP 状态都是 `404`，正文都不回显消息内容。
 
 ## 消息、线程与协作组 id
 
 消息 id、线程 id、协作组 id 生成时就是 **10 位小写 base36**（如 `u3fn1vfhr2`），终端里显示什么就存什么，不再有「存长 id、显示时截断」两层。升级前创建的长 id 不迁移、不重写，仍按其前 10 位显示（如 `83384cd8-1`），照抄可用。
 
-所有接受 id 的命令（`message get`、`message read`、`reply`、`--group`、`--thread`、`role`、`spawn` 等）都接受完整 id，或至少 4 位的唯一前缀；前缀匹配到多个对象时返回 `MESSAGE_ID_AMBIGUOUS`/`GROUP_ID_AMBIGUOUS`（正文只报匹配条数，不回显匹配到的 id），要求写更长或写全。生成时会避开在用 id 及其显示形态，因此新旧 id 不会互相遮蔽。
+所有接受 id 的命令（`message get`、`reply`、`--group`、`--thread`、`role`、`spawn` 等）都接受完整 id，或至少 4 位的唯一前缀；前缀匹配到多个对象时返回 `MESSAGE_ID_AMBIGUOUS`/`GROUP_ID_AMBIGUOUS`（正文只报匹配条数，不回显匹配到的 id），要求写更长或写全。生成时会避开在用 id 及其显示形态，因此新旧 id 不会互相遮蔽。
 
 为什么是 10 位而不是更短的 8 位：uuid 的第 9 位必是连字符，而 base36 不含连字符，所以 10 位下「新生成的 id 恰好等于某个老 uuid 的显示形态」在构造上就不可能发生——本地生成会避开在用 id，跨机则会撞上一类更严重的故障。id 在多机之间合并时按 id 相等归并（联邦不能改写 id），一旦两台机器各自生成了同一个 id，两条消息会被并成一条，且**回执会被更高状态覆盖**：一条从未投递的消息可以被标成「已读」，发送方看到假回执，待投递队列同时丢弃它。10 位把这种情况的概率压到约 36¹⁰ 分之一（两端各满 2000 条时约 9 亿分之一），比 8 位低 1296 倍。
 
 例外：跨服务工作组 id 形如 `cross-<uuid>`，保持完整。它靠 `cross-` 前缀做结构判定，且该 id 是多机之间「这是同一个组」的唯一凭据，合并冲突代价高、而组数量远少于消息；远端会话地址 `remote:<origin>:<id>` 同理保持原样。存储、JSON/jsonl 输出、回执与联邦线格式始终是完整 id——缩短只影响显示与生成，不影响线格式。
 
-`--expect-reply ack|result|any` 在投递等待条件之外，再等待接收方直接回复当前消息的对应类型。`message watch` 按变化输出回执，默认等到已读；`--timeout` 接受 `30s`、`2m`、`500ms` 或毫秒整数。
+`--expect-reply ack|result|any` 在投递等待条件之外，再等待接收方直接回复当前消息的对应类型。`message watch` 按变化输出回执，默认等到写入终端；`--timeout` 接受 `30s`、`2m`、`500ms` 或毫秒整数。
 
 超时只停止本次等待，不撤销消息，不代表远端任务失败。已取得回执时仍返回原 ID 和最后已知状态。网络中断导致发送结果不确定时，使用返回的幂等键和同一正文重试；不要自行换 key 重新触发任务。
 
@@ -73,7 +72,7 @@ td collab rebind --pane %3  # 明确指定当前 tmux 会话内的 Agent pane
 
 `td collab status` 中的 `route_state` / `route_error` / `route_checked_at` 描述路由观测：`recovering`（等待或正在检查）、`detached`（tmux 后端尚未挂接成功）、`ready`（可投递）、`shell`（目标处于 shell，发送需确认；未知程序不会被认定为 Agent 退出）、`offline`（会话或后端已不存在）、`ambiguous`（多个候选）、`identity-mismatch`（目标身份变化）、`unavailable`（检查或恢复出错）。路由 ready 不表示 Agent 空闲；不能将其他活动 pane 的 turn 状态归给当前 peer。
 
-**投递保证的边界：**提交结果仍是“已写入终端”，不等于应用 ACK。成功回执已保存的消息不会被后台重放；同一进程内，即使写入后的回执保存失败，也避免再次写入。但终端输入和本地文件不能组成原子事务：进程恰在写入之后、保存回执之前崩溃时，重启可能重复提交同一消息 ID。因此这是允许重复的重试传输，接收方应按消息 ID 去重；需要应用确认时使用 `read`、显式 ACK 和消费游标。TTL 在提交前检查；已开始但结果尚不确定的提交不会被中途标为 expired。
+**投递保证的边界：**提交结果仍是“已写入终端”，不等于应用 ACK。成功回执已保存的消息不会被后台重放；同一进程内，即使写入后的回执保存失败，也避免再次写入。但终端输入和本地文件不能组成原子事务：进程恰在写入之后、保存回执之前崩溃时，重启可能重复提交同一消息 ID。因此这是允许重复的重试传输，接收方应按消息 ID 去重；需要应用确认时使用显式 ACK 和消费游标。TTL 在提交前检查；已开始但结果尚不确定的提交不会被中途标为 expired。
 
 ## 增量收件箱与消费游标
 
@@ -82,16 +81,14 @@ td collab inbox --consumer coordinator --limit 20 --json
 # 处理成功后，使用这一页返回的 next_cursor：
 td collab cursor commit <next_cursor> --consumer coordinator
 
-# 显式确认某条消息已读取，和消费游标独立：
-td collab message read <message-id>
 
-td collab inbox --unread --from <session-id> --group <group-id> \
+td collab inbox --from <session-id> --group <group-id> \
   --thread <thread-id> --response-kind result --limit 20 --jsonl
 
 td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 ```
 
-支持 `--since`（ISO 时间或 Unix 毫秒）、`--after-id`、`--cursor`、`--limit`、`--from`、`--group`、`--thread`、`--kind`、`--response-kind`。默认未读优先、最新优先，最多 50 条。游标/consumer 模式按本服务接收顺序取最早未消费的一页，因此远端时钟回拨或晚到消息不会使消费游标漏读。
+支持 `--since`（ISO 时间或 Unix 毫秒）、`--after-id`、`--cursor`、`--limit`、`--from`、`--group`、`--thread`、`--kind`、`--response-kind`。默认最新优先，最多 50 条。游标/consumer 模式按本服务接收顺序取最早未消费的一页，因此远端时钟回拨或晚到消息不会使消费游标漏读。
 
 `next_cursor` 与会话、过滤条件绑定；`--consumer` 命名独立的持久化消费位置。读取和 follow 都不会自动推进持久化消费位置，也不会标记消息已读。JSONL 输出 `type=message` 行和包含 `next_cursor`、`has_more` 的 `type=cursor` 行。follow 在当前调用内使用临时游标，不重复输出同一页；处理成功后仍需显式提交。
 
@@ -109,13 +106,35 @@ td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 
 `relay_online`、`peer_reachable` 是最近一次转发观测，超过 15 秒变成 `null`（未知），不从 Agent turn 状态猜测。另有 `attempt_count`、`next_retry_at`、`last_error`、`transport_checked_at`、`fragments_sent`、`fragments_total`。断线保持 pending，失败退避重试最多间隔 30 秒；接收服务本身不可达时跟随每 2 秒的连接轮询。瞬时链路错误与明确不可投递分开表示。
 
-跨服务转发可由 Mac 客户端或浏览器/PWA 运行，二者复用相同的同步、去重与分片协议。浏览器按已保存的服务身份分别建立加密连接，共用同源顶层页面的转发器；无需打开每个服务的工作区。所有写入都由页面的加密客户端完成，不回退到普通 HTTP。手机后台或网页关闭时转发会暂停，消息保存在服务端，恢复前台后继续同步。新分片和扩展消息需要桥接客户端及两端服务均支持 v2；普通短消息可以继续与旧服务通信。不支持扩展消息的旧服务会得到明确的 `PEER_UPGRADE_REQUIRED`，不能声称已投递。服务端单独升级不能替换正在运行的旧桌面桥。
+旧版兼容转发可由 Mac 客户端或浏览器/PWA 运行，二者复用相同的同步、去重与分片协议。浏览器按已保存的服务身份分别建立加密连接，共用同源顶层页面的转发器；无需打开每个服务的工作区。所有写入都由页面的加密客户端完成，不回退到普通 HTTP。手机后台或网页关闭时转发会暂停，消息保存在服务端，恢复前台后继续同步。新分片和扩展消息需要桥接客户端及两端服务均支持 v2；普通短消息可以继续与旧服务通信。不支持扩展消息的旧服务会得到明确的 `PEER_UPGRADE_REQUIRED`，不能声称已投递。服务端单独升级不能替换正在运行的旧桌面桥。
+
+## 服务后台跨节点投递
+
+新版两端服务使用自己的 Ed25519 身份建立 Noise 加密 RPC。消息入队立即唤醒后台工作器，已建立连接可复用；CLI 退出后由服务继续投递、退避重试和同步回执，不依赖网页或桌面客户端保持运行。接收端按消息 ID 去重；收到正文后后续查询只传回执，避免重复发送大正文。快照与终端送达时间同步，迟到快照也可补齐。
+
+授权限定在已存在的协作组及登记服务的成员之间；登记不授予远端服务完整业务 API 权限。删群或移除该服务全部成员后，旧连接的组内请求立即失效。TLS 校验及 Noise 服务身份固定均保留，不回退到直接 HTTP 业务请求。可经同组已登记入口使用管理员已配置的服务路由，入口只转发密文。
+
+### 首次登记与旧群迁移
+
+两端均升级后，新版已授权网页可以自动交换服务公开身份并完成一次登记；它只承担配置，不承担登记后的消息投递。旧客户端保留旧同步行为，但不能代替首次登记。完全通过 CLI 配置时，在双方受管会话分别运行：
+
+```sh
+td collab transport info
+```
+
+通过可信方式收集输出中的 `node`（仅服务公钥身份及 CA 指纹），为每项添加与该协作组使用地址一致的 `origin`，组成 `nodes.json` 数组，在两端执行：
+
+```sh
+td collab transport register <group-id> --file nodes.json
+```
+
+数组必须包含本服务。登记持久化在本机 `~/.termdock/federation/collaboration-peers.json`，重启后保留；不能用未经核实的远端公钥替换固定身份。未登记时回执明确显示 `PEER_REGISTRATION_REQUIRED`；连接失败显示错误及下次重试时间。
+
+`fragments_sent=0` 不能用于判断是否发送：服务 RPC 的完整消息和旧桥接的非分片消息都不增加此计数。以 `status`、送达时间及回执为准。`--wait-until delivered` 等待终端投递，`--expect-reply ack` 另外等待对方确认；CLI 超时不取消队列。
 
 ## 会话状态与结构化任务
 
-状态输出拆为 `session_state`（会话连接事实）、`turn_state`（可选适配器报告）、`task_state` 和 `tasks`（显式消息上报）。`done` 映射为 `turn_state=ended`；`idle` 表示适配器报告空闲；`working` 只表示适配器报告当前活跃；`offline` 表示本服务没有附着会话或远端连接不可达，不意味着远端后台任务已经结束。
-
-一个会话可能同时处理多个任务，因此不从某条消息推断整个会话任务已完成；会话级 `task_state` 保持 `unknown`，每个任务的显式状态在 `tasks` 中携带报告时间与消息 ID。`last_heartbeat`、`last_tool_activity_at` 无通用可靠来源时返回 `null`，不拿终端输出时间冒充；`last_message_at` 来自消息记录。
+状态输出只提供终端和传输事实，不提供已读、Agent 内部 turn/task_state、工具活动或心跳占位字段。终端输出时间不代表任务进度；明确回复及任务报告保留原始消息和时间，不推断会话忙闲。旧版 `message read` 返回 `READ_RECEIPTS_UNSUPPORTED`；使用 `message get` 查看正文和快照，用显式回复确认。消费游标仅记录调用者明确提交的位置。
 
 `--task-envelope` 接受 `task_id`、`status=ack|working|blocked|complete|failed`、可选 `progress`（0–100）、`evidence` 和 `blocker`；自动映射 response_kind。显式指定的 response_kind 与任务状态冲突时拒绝。`--metadata` 接受任意 JSON 对象，正文仍然自由。字段中的路径和链接只是证据引用，不会触发 Termdock 读取另一台机器的文件或凭据。
 
@@ -153,3 +172,22 @@ td collab inbox --consumer coordinator --follow --timeout 2m --jsonl
 投递按绑定终端定位，不再要求程序名匹配已知 Agent，也不因 Agent 类型或原生会话 ID 变化而拦截同一 pane。投递后的终端快照用于发送方判断结果。
 
 仅在明确检测到目标处于 shell 时暂停该消息，回执返回 `SHELL_CONFIRMATION_REQUIRED` 和确认命令。发送方确认内容可以写入 shell 后执行 `td collab message confirm-shell <message-id>`，继续原消息，不创建副本；确认持久化并通过协作同步传递。跨机双方及运行同步的客户端需更新到支持此确认的新版本。
+
+## 长消息、群规与观察能力
+
+- 超过 4096 UTF-8 字节的正文不再直接灌入终端；信封携带 `td collab message get <id> --text`。完整正文及该消息当时的群规版本一并返回，读取和回复都不产生已读回执。
+- `td collab rules get <group> --text` 查看群规；`rules set <group> --file rules.md` 保存（最多 8192 UTF-8 字节）；`rules clear <group>` 清空。可用 `--if-version <version>` 防止覆盖已更新版本。每次修改产生新版本，跨节点独立同步；短规则自动注入信封，长规则随 message get 获取。
+- `td collab traits set <group> <member> "深度评审，不接急单"` 是 role 的别名，成员定位在 status/role list 可见。不推断实时排队长度，不自动拦截派单。
+- `td collab capture <member> --lines 200 --text` 读取最多指定数量的 tmux 历史行加当前屏幕，范围 1..10000；仍限定同组本机 tmux。它不提供精确时间索引，也不保证重绘式 TUI 的完整历史。
+- capture、inbox、message get 的快照默认清理终端控制序列；`--raw` 请求未清理的捕获或已存快照。正文原样保留。
+- status 提供最后终端输出时间、观测时间和来源。跨节点由服务后台同步；最后输出不是最后工具调用，长时间无输出不是卡死证据。
+- 回执新增 `delivery` 与 `reply` 对象。等待 ACK 超时时 reply 标记 timeout，已送达的 delivery 仍保持 delivered；旧的顶层字段及退出码保留兼容。
+- inbox 的 `--from` 支持同组远端会话的唯一短 ID；有歧义时要求完整 ID。
+
+## 1.4.232 发布范围与验证记录
+
+服务之间持久化群级公开身份绑定，通过 TLS + Noise 加密通道投递、重试和同步终端回执；CLI 提交后无需客户端持续转发。首次绑定可由 `transport register` 或新版已授权页面完成。未绑定明确返回 `PEER_REGISTRATION_REQUIRED`。双方服务升级后生效，旧客户端/旧服务仍保留原有兼容路径。
+
+本次不加入历史画面归档、临时 resize 或固定终端尺寸；保留当前屏快照、纯文本清理及显式历史行读取。
+
+按用户 2026-09-16 明确指示，最终收尾后不再运行回归测试，发布执行生产构建。此前测试曾发现仓库既有的 9 个失败测试文件与 lint 错误；本次最终版本不能声称回归全通过。跨电脑升级后双向收发、真实 macOS/iOS 及完整加密入口实机矩阵尚未验收。

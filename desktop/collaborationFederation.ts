@@ -20,6 +20,8 @@ export interface FederationGroup {
   sessionIds: string[];
   /** Per-member roles keyed by sessionId. Keys must ride the same id remapping
    * as sessionIds at every bridge boundary (canonicalization, groupForService). */
+  instructions?: { text: string; version: string; updatedAt: number; updatedBy: string };
+  roleVersions?: Record<string, { version: string; updatedAt: number }>;
   roles?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
@@ -43,6 +45,7 @@ interface Diagnostic {
 const STATUS_RANK = { pending: 0, failed: 1, expired: 1, delivered: 2, read: 3 } as const;
 const FRAGMENT_BYTES = 32_768;
 interface Snapshot {
+  serverTransport?: { serviceId: string; caFingerprint256?: string };
   protocolVersion?: number;
   transportDiagnostics?: Record<string, Diagnostic>;
   fragmentReceipts?: Array<{ message_id: string; received: number; total: number; complete: boolean }>;
@@ -72,7 +75,7 @@ function localId(origin: string, id: string): string {
 function mapMessage(message: Message, map: (id: string) => string): Message {
   return { ...message, fromSessionId: message.fromSessionId ? map(message.fromSessionId) : null, toSessionId: map(message.toSessionId) };
 }
-function mapRoles(roles: Record<string, string> | undefined, map: (id: string) => string): Record<string, string> | undefined {
+function mapRoles<T>(roles: Record<string, T> | undefined, map: (id: string) => string): Record<string, T> | undefined {
   if (!roles) return undefined;
   const mapped = Object.fromEntries(Object.entries(roles).map(([id, role]) => [map(id), role]));
   return Object.keys(mapped).length ? mapped : undefined;
@@ -80,6 +83,8 @@ function mapRoles(roles: Record<string, string> | undefined, map: (id: string) =
 
 /** Shared desktop/web protocol. Server replicas are durable; callers supply encrypted transport. */
 export class CollaborationFederation {
+  private serverPairs = new Set<string>();
+  private registeredPeers = new Map<string, string>();
   private snapshots = new Map<string, Snapshot>();
   private reachable = new Set<string>();
   private groups = new Map<string, FederationGroup>();
@@ -137,7 +142,9 @@ export class CollaborationFederation {
       this.snapshots.set(service.origin, data);
       for (const group of data.groups) {
         const canonical = { ...group, sessionIds: group.sessionIds.map((id) => qualifySession(service.origin, id)),
-          roles: mapRoles(group.roles, (id) => qualifySession(service.origin, id)) };
+          roles: mapRoles(group.roles, (id) => qualifySession(service.origin, id)),
+          roleVersions: mapRoles(group.roleVersions, id => qualifySession(service.origin, id)),
+          instructions: group.instructions ? { ...group.instructions, updatedBy: qualifySession(service.origin, group.instructions.updatedBy) } : undefined };
         const existing = this.groups.get(group.id);
         if (!existing || canonical.updatedAt > existing.updatedAt) this.groups.set(group.id, canonical);
       }
@@ -162,9 +169,34 @@ export class CollaborationFederation {
   private async synchronize(): Promise<void> {
     await this.refreshCatalog();
     const services = this.services();
+    // An authorized group editor provisions public service identities once.
+    // After this migration the servers own delivery, even if every UI closes.
+    const serverPairs = new Set<string>();
+    for (const group of this.groups.values()) {
+      if (group.deleted) continue;
+      const participants = services.filter(service => group.sessionIds.some(id => sessionAddress(id)?.origin === service.origin));
+      const nodes = participants.flatMap(service => {
+        const node = this.snapshots.get(service.origin)?.serverTransport;
+        return node ? [{ ...node, origin: service.origin }] : [];
+      });
+      if (nodes.length < 2) continue;
+      await Promise.all(participants.filter(service => nodes.some(node => node.origin === service.origin)).map(async service => {
+        const key = `${group.id}:${service.origin}`, signature = JSON.stringify([group.updatedAt, nodes]);
+        try {
+          if (this.registeredPeers.get(key) !== signature) {
+            // Ensure the group exists before installing its scoped peer bindings.
+            await service.request('/collaboration-federation', 'POST', { group: this.groupForService(group, service.origin), messages: [] });
+            await service.request('/collaboration-peers', 'POST', { groupId: group.id, localOrigin: service.origin, nodes });
+            this.registeredPeers.set(key, signature);
+          }
+          serverPairs.add(key);
+        } catch { /* Old/unauthorized services retain the encrypted legacy path. */ }
+      }));
+    }
+    this.serverPairs = serverPairs;
     for (const message of this.messages.values()) {
       const target = sessionAddress(message.toSessionId)?.origin;
-      if (message.status === 'pending' && target && !this.reachable.has(target)) {
+      if (message.status === 'pending' && target && !this.serverPairs.has(`${message.groupId}:${target}`) && !this.reachable.has(target)) {
         const previous = this.diagnostics.get(message.id);
         this.diagnostics.set(message.id, { ...previous, relay_online: true, peer_reachable: false,
           attempt_count: previous?.attempt_count ?? 0, next_retry_at: Date.now() + 2_000, last_error: 'PEER_UNREACHABLE', checked_at: Date.now() });
@@ -180,7 +212,7 @@ export class CollaborationFederation {
     await Promise.all(services.filter((service) => this.reachable.has(service.origin)).map(async (service) => {
       if ((this.snapshots.get(service.origin)?.protocolVersion ?? 1) < 2) return;
       for (const group of this.groups.values()) {
-        if (group.deleted || !group.sessionIds.some((id) => sessionAddress(id)?.origin === service.origin)) continue;
+        if (group.deleted || this.serverPairs.has(`${group.id}:${service.origin}`) || !group.sessionIds.some((id) => sessionAddress(id)?.origin === service.origin)) continue;
         const transport = [...this.diagnostics].filter(([id]) => this.messages.get(id)?.groupId === group.id)
           .map(([message_id, diagnostic]) => ({ message_id, diagnostic,
             ...(this.messages.get(message_id)?.status === 'failed' ? { failure_reason: this.messages.get(message_id)?.failureReason } : {}) }));
@@ -214,13 +246,17 @@ export class CollaborationFederation {
         serviceConnected: this.reachable.has(address.origin), serviceCheckedAt: Date.now() };
     });
     return { ...group, sessionIds: group.sessionIds.map((id) => localId(origin, id)), remoteSessions,
-      roles: mapRoles(group.roles, (id) => localId(origin, id)) };
+      roles: mapRoles(group.roles, (id) => localId(origin, id)),
+      roleVersions: mapRoles(group.roleVersions, id => localId(origin, id)),
+      instructions: group.instructions ? { ...group.instructions, updatedBy: localId(origin, group.instructions.updatedBy) } : undefined };
   }
 
   private async push(service: FederationService, group: FederationGroup): Promise<void> {
     const rank = STATUS_RANK;
     const known = new Map((this.snapshots.get(service.origin)?.messages ?? []).map((message) => [message.id, message]));
     const messages = [...this.messages.values()].filter((message) => message.groupId === group.id
+      && !(this.serverPairs.has(`${group.id}:${sessionAddress(message.fromSessionId ?? '')?.origin}`)
+        && this.serverPairs.has(`${group.id}:${sessionAddress(message.toSessionId)?.origin}`))
       && (!known.has(message.id) || rank[message.status] > rank[known.get(message.id)!.status]
         || (message.shellConfirmed === true && known.get(message.id)?.shellConfirmed !== true)))
       .map((message) => mapMessage(message, (id) => localId(service.origin, id)));
@@ -340,6 +376,8 @@ export class CollaborationFederation {
     const retainedRoles = mapRoles(original?.roles, (id) => qualifySession(origin, id));
     const group: FederationGroup = { id: existing?.id ?? `cross-${crypto.randomUUID()}`, name: input.name.trim(),
       sessionIds: ids,
+      instructions: original?.instructions ? { ...original.instructions, updatedBy: qualifySession(origin, original.instructions.updatedBy) } : undefined,
+      roleVersions: mapRoles(original?.roleVersions, id => qualifySession(origin, id)),
       ...(retainedRoles ? { roles: Object.fromEntries(Object.entries(retainedRoles).filter(([id]) => ids.includes(id))) } : {}),
       createdAt: existing?.createdAt ?? Date.now(), updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1), federated: true };
     if (original && !original.federated) {

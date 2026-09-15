@@ -1,3 +1,4 @@
+import { assertPeerRegistrationAuthority } from '../agent/collaborationPeerTransport.js';
 import { progressRoutes } from '../notifications/progressRoutes.js';
 import { ensureNodePty } from '../utils/ensureNodePty.js';
 import { PtySpawnBackoff, PtySpawnDeferredError } from '../utils/ptySpawnBackoff.js';
@@ -187,7 +188,7 @@ const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
 const TERMDOCK_DIR = `${os.homedir()}/.termdock`;
 const automationStore = new AutomationStore(`${TERMDOCK_DIR}/automations.json`);
-const collaborationStore = new CollaborationStore(`${TERMDOCK_DIR}/collaboration-groups.json`);
+export const collaborationStore = new CollaborationStore(`${TERMDOCK_DIR}/collaboration-groups.json`);
 const collaborationRouting = new CollaborationRoutingStore(`${TERMDOCK_DIR}/collaboration-routing.json`);
 const collaborationDeliveryWorker = new CollaborationDeliveryWorker({
   store: collaborationStore,
@@ -1856,7 +1857,6 @@ interface OrchestrationSessionSnapshot extends ReturnType<CollaborationStore['se
   agent: { slug: string; displayName: string } | null;
   status: AgentSessionStatus | 'shell' | CollaborationRouteState;
   capability: string;
-  currentTask: string;
   updatedAt: number;
 }
 
@@ -1885,12 +1885,12 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
   const route = collaborationDeliveryWorker.state(record.sessionId);
   const slug = binding?.pane?.agentSlug ?? binding?.agentSlug ?? record.agentResume?.slug;
   const agent = slug ? agentBySlug(slug) : backend?.agent;
-  const sameNativeSession = !binding?.pane || Boolean(binding.pane.nativeSessionId
-    && binding.pane.nativeSessionId === backend?.agentSession?.sessionId && binding.pane.agentSlug === backend?.agent?.slug);
-  const turnState = sameNativeSession ? backend?.agentSession?.status : undefined;
-  const latestPrompt = sameNativeSession ? backend?.autoTitlePromptPayloads.at(-1)?.trim() ?? '' : '';
   return {
-    ...collaborationStore.sessionFacts(record.sessionId, route.state === 'ready', turnState),
+    ...collaborationStore.sessionFacts(record.sessionId, route.state === 'ready'),
+    last_terminal_output_at: backend?.lastOutputAt || null,
+    activity_observed_at: backend ? Date.now() : null,
+    activity_source: backend ? 'terminal_output' : 'unavailable',
+    output_idle_seconds: backend?.lastOutputAt ? Math.max(0, Math.floor((Date.now() - backend.lastOutputAt) / 1000)) : null,
     route_state: route.state,
     route_error: route.reason,
     route_checked_at: route.checkedAt,
@@ -1900,11 +1900,10 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
     name: record.name,
     cwd: backend?.cwd ?? record.cwd ?? '',
     agent: agent ? { slug: agent.slug, displayName: agent.displayName } : null,
-    status: route.state === 'ready' ? turnState ?? 'ready' : route.state,
+    status: route.state,
     capability: agent
       ? [agent.displayName, ...(agent.capabilities ?? []), backend?.activeProgram?.command || record.activeProgram || 'Agent 会话'].join(' · ')
       : (backend?.activeProgram?.command || record.activeProgram || 'Shell 终端'),
-    currentTask: latestPrompt || record.name,
     updatedAt: backend?.lastActivity ?? record.lastActivity,
   };
 }
@@ -1980,17 +1979,21 @@ function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId
 
 function collaborationRemoteSessions() {
   return Array.from(new Map(collaborationStore.list().flatMap((group) => group.remoteSessions ?? [])
-    .map((session) => [session.sessionId, { ...session, ...collaborationStore.sessionFacts(session.sessionId, session.serviceConnected === true && Date.now() - (session.serviceCheckedAt ?? 0) <= 15_000, session.status), status: session.serviceConnected !== true || Date.now() - (session.serviceCheckedAt ?? 0) > 15_000 ? 'service-unreachable' : session.status, name: `${session.name} · ${session.serviceLabel}` }])).values());
+    .map((session) => {
+      const facts = collaborationStore.sessionFacts(session.sessionId, false);
+      const { currentTask: _currentTask, ...terminalSession } = session;
+      const checkedAt = Math.max(session.serviceCheckedAt ?? 0, facts.last_peer_sync_at ?? 0);
+      const online = Date.now() - checkedAt <= 15_000 && (session.serviceConnected === true || !!facts.last_peer_sync_at && Date.now() - facts.last_peer_sync_at <= 15_000);
+      return [session.sessionId, { ...terminalSession, ...facts, session_state: online ? 'online' : 'offline',
+        serviceConnected: online, serviceCheckedAt: checkedAt, status: online ? 'service-reachable' : 'service-unreachable', name: `${session.name} · ${session.serviceLabel}` }] as const;
+    })).values());
 }
 
 function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number; serviceUnavailable?: boolean; waitable?: boolean; reason?: string } {
   const remote = collaborationRemoteSessions().find((session) => session.sessionId === frontendSessionId);
   if (remote) {
-    const unavailable = remote.serviceConnected !== true || Date.now() - (remote.serviceCheckedAt ?? 0) > 15_000;
-    return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId),
-      serviceUnavailable: unavailable, reason: unavailable
-        ? `服务 ${remote.serviceLabel} 不可达：消息尚未送达，仅保存在待发送队列；请勿等待对方已收到的回复，服务重连且转发客户端恢复运行后重试投递。`
-        : '跨服务消息尚未确认送达，正在等待在线客户端转发。' };
+    return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId), waitable: true,
+      reason: '跨服务消息已入队，服务后台正在投递；使用 message get 查看送达回执或注册、重试原因。' };
   }
   collaborationDeliveryWorker.wake(frontendSessionId);
   const route = collaborationDeliveryWorker.state(frontendSessionId);
@@ -2138,7 +2141,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
       backend = resolveOrchestrationBackend(record);
     }
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
-    return { state: 'ready', isShell: pane.isShell, capture: async () => (await captureTmuxPane(pinned.paneId)).content, write: async (messages) => {
+    return { state: 'ready', isShell: pane.isShell, capture: async () => captureTmuxPaneText(runTmux, pinned), write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
       await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin);
       backend!.lastActivity = Date.now();
@@ -5669,7 +5672,7 @@ async function spawnTerminalSessionUnlocked(req: express.Request, input: SpawnTe
     cols,
     rows,
     lastActivity: Date.now(),
-    lastOutputAt: Date.now(),
+    lastOutputAt: 0,
     clients: new Map(),
     createdAt: Date.now(),
     hasWrittenData: false,
@@ -5760,7 +5763,7 @@ async function adoptPtyHostSessions(): Promise<void> {
       cols: meta.cols,
       rows: meta.rows,
       lastActivity: Date.now(),
-      lastOutputAt: Date.now(),
+      lastOutputAt: 0,
       clients: new Map(),
       createdAt: meta.startedAt,
       hasWrittenData: true,
@@ -6363,10 +6366,28 @@ router.delete('/operations/automations/:automationId', (req, res) => {
 
 // Authenticated desktop connections exchange only collaboration data; no peer credentials
 // or arbitrary remote URLs are accepted by the server.
-router.get('/operations/collaboration-federation', (_req, res) => {
-  res.json({ protocolVersion: 2, limits: COLLAB_LIMITS, ...collaborationStore.federationSnapshot(),
+router.get('/operations/collaboration-federation', (req, res) => {
+  res.json({ protocolVersion: 2, serverTransport: req.app.locals.collaborationNode, limits: COLLAB_LIMITS, ...collaborationStore.federationSnapshot(),
     sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot) });
 });
+
+router.post('/operations/collaboration-peers', (req, res) => {
+  try {
+    assertPeerRegistrationAuthority(req);
+    if (!req.app.locals.collaborationTransport) return res.status(503).json({ error: 'COLLABORATION_UNAVAILABLE' });
+    req.app.locals.collaborationTransport.configure(req.body.groupId, req.body.localOrigin, req.body.nodes);
+    res.json({ ok: true });
+  } catch (error) { res.status(400).json({ error: getErrorMessage(error) }); }
+});
+
+export function collaborationLocalActivity() {
+  return globalSessionState.sessions.map(record => {
+    const backendId = collaborationRouting.get(record.sessionId)?.backendSessionId ?? record.backendSessionId;
+    const backend = backendId ? terminalSessions.get(backendId) : undefined;
+    return { sessionId: record.sessionId, last_terminal_output_at: backend?.lastOutputAt || null, activity_observed_at: backend ? Date.now() : null };
+  });
+}
+export function deliverPeerCollaboration(sessionId: string): void { void tryDeliverCollaborationInbox(sessionId); }
 
 router.post('/operations/collaboration-federation', (req, res) => {
   try {
@@ -6682,7 +6703,10 @@ router.post('/operations/orchestration/drive', async (req, res) => {
       return res.json({ ok: true, action, sessionId: target, approved: true });
     }
     if (action === 'capture') {
-      const snapshot = await captureTmuxPaneText(runTmux, pane);
+      const lines = req.body.lines;
+      if (lines !== undefined && (!Number.isInteger(lines) || lines < 1 || lines > 10000)) return res.status(400).json({ error: 'lines 必须为 1..10000 的历史行数' });
+      const snapshot = lines === undefined ? await captureTmuxPaneText(runTmux, pane, req.body.raw === true)
+        : await captureTmuxPaneHistory(runTmux, pane, lines, req.body.raw === true);
       return res.json({ ok: true, action, sessionId: target, snapshot });
     }
     if (action === 'run') {

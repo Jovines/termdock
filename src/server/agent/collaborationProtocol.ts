@@ -138,6 +138,7 @@ export function extrasFromBody(body: Record<string, unknown>): MessageExtras {
     task: body.task as TaskEnvelope | undefined, expiresAt: body.expires_at as number | undefined });
 }
 export interface TransportDiagnostic {
+  remote_received_at?: number;
   relay_online: boolean | null;
   peer_reachable: boolean | null;
   attempt_count: number;

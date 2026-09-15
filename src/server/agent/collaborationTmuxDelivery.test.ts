@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { detectApprovalDialog, extractPasteMarkerNumbers, hasNewPasteMarker, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
+import { captureTmuxPaneHistory, captureTmuxPaneText, detectApprovalDialog, extractPasteMarkerNumbers, hasNewPasteMarker, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
 
 const PANE = { serverPid: 1, sessionId: '$0', paneId: '%0', panePid: 2, agentSlug: '', nativeSessionId: null };
 const IDENTITY = '1:$0:%0:2';
@@ -166,4 +166,13 @@ describe('named keys vs pane modes', () => {
     await expect(sendTmuxPaneKey(run, PANE, 'enter')).rejects.toThrow('TMUX_PANE_IN_MODE');
     expect(calls.some((args) => args[0] === 'send-keys')).toBe(false);
   });
+});
+
+it('captures bounded history, preserves viewport defaults and strips OSC/CSI only in plain mode', async () => {
+  const run = vi.fn(async (args: string[]) => args[0] === 'display-message' ? IDENTITY : '\u001b]8;;https://example.test\u0007链接\u001b]8;;\u0007\u001b[31m正文\u001b[0m');
+  expect(await captureTmuxPaneHistory(run, PANE, 200)).toBe('链接正文');
+  expect(run).toHaveBeenCalledWith(['capture-pane', '-p', '-J', '-S', '-200', '-t', '%0']);
+  expect(await captureTmuxPaneText(run, PANE, true)).toContain('\u001b');
+  expect(run).toHaveBeenCalledWith(['capture-pane', '-p', '-J', '-e', '-t', '%0']);
+  await expect(captureTmuxPaneHistory(run, PANE, 10001)).rejects.toThrow();
 });
