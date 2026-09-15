@@ -5,8 +5,7 @@ import type { ChangeAuditRecord, GitDiffOptions } from '../../terminal/api';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
 import { DiffReviewWorkspace, type DiffReviewAiControls, type DiffReviewMode } from './DiffReviewWorkspace';
 import { DiffStreamItem, type DiffStreamFile } from './DiffStreamItem';
-import { invalidateFileDiffCached, preloadPreparedFileDiff, type DiffHunkActionRequest, type DiffInlineMode, type DiffViewType } from './DiffViewer';
-import { useSidebarStore } from '../../stores/useSidebarStore';
+import { invalidateFileDiffCached, type DiffHunkActionRequest, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 
 // --- ChangeBadge (shared) ---
 
@@ -14,8 +13,6 @@ import { useSidebarStore } from '../../stores/useSidebarStore';
 // visible at once (small files can stack several to a viewport) plus lookahead,
 // otherwise a resting viewport can hold a skeleton that never gets a slot.
 const MAX_RETAINED_DIFF_ITEMS = 8;
-const DIFF_PRELOAD_RADIUS = 3;
-const DIFF_PRELOAD_CONCURRENCY = 2;
 // Skeleton slots are cheap (a header plus an estimated-height body), so the
 // rendered window is generous: the viewport must never scroll past painted
 // slots into bare canvas, even when a fling outruns a React commit.
@@ -238,7 +235,6 @@ export function DiffReview({
   onMobileSlideChange,
   slideToDetailOnMobile,
 }: DiffReviewProps) {
-  const sidebarRootPath = useSidebarStore((state) => state.rootPath);
   const matchesSelectedKey = useMemo(() => {
     return (file: DiffReviewFile) => selectedKey === file.key
       || selectedKey === file.path
@@ -278,7 +274,7 @@ export function DiffReview({
   // scrollTop: native touch/trackpad momentum stays entirely user-owned while
   // skeleton slots and cached heights keep the virtual canvas continuous.
   const detailScrollerRef = useRef<HTMLDivElement | null>(null);
-  const handledScrollRequestNonceRef = useRef<number | null>(null);
+  const handledScrollRequestNonceRef = useRef<{ key: string; nonce: number } | null>(null);
   const appliedInitialDetailScrollKeyRef = useRef<string | null>(null);
   const invalidatedReloadKeyRef = useRef(reloadKey);
   const lastDetailScrollTopRef = useRef(0);
@@ -355,44 +351,6 @@ export function DiffReview({
     return Math.min(count - 1, Math.max(0, low - 1));
   }, [canvasLayout.tops, canvasViewport.top]);
 
-  // Warm the prepared-diff cache around the anchor so mounts complete fast.
-  // Symmetric by design: loading expands outward from the current position.
-  useEffect(() => {
-    if (!activePane || visibleAnchorIndex < 0) return;
-    const indices = [visibleAnchorIndex];
-    for (let distance = 1; distance <= DIFF_PRELOAD_RADIUS; distance += 1) {
-      indices.push(visibleAnchorIndex + distance);
-      indices.push(visibleAnchorIndex - distance);
-    }
-    const queue = indices
-      .filter((index, position) => (
-        index >= 0
-        && index < allOrderedFiles.length
-        && indices.indexOf(index) === position
-      ))
-      .map((index) => allOrderedFiles[index])
-      .filter((file) => file.diffOverride === undefined && Boolean(file.repoRoot ?? sidebarRootPath));
-    let cancelled = false;
-    void (async () => {
-      for (let index = 0; index < queue.length && !cancelled; index += DIFF_PRELOAD_CONCURRENCY) {
-        const batch = queue.slice(index, index + DIFF_PRELOAD_CONCURRENCY);
-        await Promise.all(batch.map((file) => {
-          const cwd = file.repoRoot ?? sidebarRootPath;
-          const requestPath = toDiffRequestPath(file.path, cwd);
-          return preloadPreparedFileDiff(
-            requestPath,
-            cwd ?? undefined,
-            inlineMode ?? 'words',
-            diffOptions,
-          ).catch(() => undefined);
-        }));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activePane, allOrderedFiles, diffOptions, inlineMode, sidebarRootPath, visibleAnchorIndex]);
-
   const replaceMountedKeys = useCallback((next: Set<string>) => {
     mountedKeysRef.current = next;
     setMountedKeys(next);
@@ -424,8 +382,14 @@ export function DiffReview({
     for (let index = visibleAnchorIndex - 1; index <= visibleAnchorIndex + 1; index += 1) {
       if (index >= 0 && index < canvasLayout.tops.length) indexSet.add(index);
     }
+    // A prioritized card must actually mount even before the scroll viewport
+    // catches up (including a hidden mobile detail pane).
+    for (const key of mountedKeys) {
+      const index = orderedFileIndexRef.current.get(key);
+      if (index !== undefined) indexSet.add(index);
+    }
     return Array.from(indexSet).sort((left, right) => left - right);
-  }, [canvasLayout, canvasViewport, visibleAnchorIndex]);
+  }, [canvasLayout, canvasViewport, mountedKeys, visibleAnchorIndex]);
 
   // Mount cards strictly outward from the anchor card, one at a time:
   // anchor±1, anchor±2, ... (the card below wins ties). The candidate ring is
@@ -435,7 +399,7 @@ export function DiffReview({
   // mounted, the farthest one is recycled — but only for a strictly closer
   // candidate, so the mounted set converges to the anchor's neighbourhood.
   const pumpLoadQueue = useCallback(() => {
-    if (loadingKeyRef.current) return;
+    if (!activePane || loadingKeyRef.current) return;
     const keys = orderedFileKeysRef.current;
     if (keys.length === 0) return;
     const anchorKey = scrollAnchorRef.current.key;
@@ -467,7 +431,7 @@ export function DiffReview({
     }
     loadingKeyRef.current = nextKey;
     replaceMountedKeys(new Set(mountedKeysRef.current).add(nextKey));
-  }, [replaceMountedKeys, visibleAnchorIndex]);
+  }, [activePane, replaceMountedKeys, visibleAnchorIndex]);
   pumpLoadQueueRef.current = pumpLoadQueue;
 
   const prioritizeLoad = useCallback((key: string) => {
@@ -531,8 +495,8 @@ export function DiffReview({
   }, [mobile]);
 
   useEffect(() => {
-    if (selectedTargetKey) prioritizeLoad(selectedTargetKey);
-  }, [prioritizeLoad, selectedTargetKey]);
+    if (activePane && selectedTargetKey) prioritizeLoad(selectedTargetKey);
+  }, [activePane, prioritizeLoad, selectedTargetKey]);
 
   // Keep the mount pipeline fed whenever the rendered window moves.
   useEffect(() => {
@@ -680,7 +644,8 @@ export function DiffReview({
   // Explicit scroll-to-file requests land the target top-aligned.
   useLayoutEffect(() => {
     if (!scrollTargetKey) return;
-    if (handledScrollRequestNonceRef.current === scrollToKeyNonce) return;
+    const handled = handledScrollRequestNonceRef.current;
+    if (handled?.key === scrollTargetKey && handled.nonce === scrollToKeyNonce) return;
     const targetIndex = orderedFileIndexRef.current.get(scrollTargetKey);
     if (targetIndex === undefined) return;
     // Mount the clicked card first, even if the scroller is not in the DOM
@@ -688,19 +653,17 @@ export function DiffReview({
     prioritizeLoad(scrollTargetKey);
     scrollAnchorRef.current = { key: scrollTargetKey, top: canvasLayout.tops[targetIndex] ?? 0 };
     const container = detailScrollerRef.current;
-    if (!container) return;
+    if (!container || container.clientHeight === 0 || canvasViewport.height !== container.clientHeight) return;
     // Consume the nonce only once the scroll is actually applied; an early
     // commit without the scroller must not swallow the request.
-    handledScrollRequestNonceRef.current = scrollToKeyNonce;
+    handledScrollRequestNonceRef.current = { key: scrollTargetKey, nonce: scrollToKeyNonce };
     const top = canvasLayout.tops[targetIndex] ?? 0;
     if (typeof container.scrollTo === 'function') {
       container.scrollTo({ top, behavior: 'instant' });
     } else {
       container.scrollTop = top;
     }
-    // Read back the applied position: near the list end the browser clamps
-    // the requested top, and the scroll bookkeeping must track where the
-    // viewport ACTUALLY landed.
+    // Keep bookkeeping in sync with the native scroll position.
     const appliedTop = container.scrollTop;
     lastDetailScrollTopRef.current = appliedTop;
     setCanvasViewport({ top: appliedTop, height: container.clientHeight });
@@ -770,7 +733,12 @@ export function DiffReview({
       data-diff-stream-content
       data-diff-stream-canvas
       className="termdock-diff-stream relative overflow-clip bg-surface will-change-transform"
-      style={{ height: Math.max(canvasViewport.height, canvasLayout.bottom) }}
+      // Leave enough tail room to top-align even the last short file. Without
+      // it native scroll clamping lands on an earlier file and steals priority.
+      style={{ height: Math.max(
+        canvasLayout.bottom,
+        (canvasLayout.tops.at(-1) ?? 0) + canvasViewport.height,
+      ) }}
     >
       {renderedIndices.map((index) => {
         const item = allOrderedFiles[index];

@@ -25,6 +25,12 @@ vi.mock('./DiffStreamItem', () => ({
   },
 }));
 
+const preload = vi.hoisted(() => vi.fn());
+vi.mock('./DiffViewer', () => ({
+  preloadPreparedFileDiff: preload,
+  invalidateFileDiffCached: vi.fn(),
+}));
+
 const repoRoot = '/repo';
 const files: DiffReviewFile[] = ['a.ts', 'b.ts', 'c.ts'].map((name) => ({
   key: `${repoRoot}/${name}`,
@@ -57,6 +63,8 @@ describe('DiffReview click anchoring', () => {
 
   beforeEach(() => {
     streamItems.clear();
+    preload.mockClear();
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
     intersectionCallbacks.length = 0;
     animationFrames.clear();
     animationFrameId = 0;
@@ -304,6 +312,71 @@ describe('DiffReview click anchoring', () => {
     // File C remains pinned: the 170px growth above it is added once, instead
     // of leaving the stale File A anchor to make the viewport visibly jump.
     expect(scroller.scrollTop).toBe(378);
+  });
+
+  it('top-aligns the last short file before loading neighbours, including repeated clicks', () => {
+    const localFiles = files.map((file) => ({ ...file, key: `/tail/${file.path}` }));
+    const localGroups = [{ ...groups[0], files: localFiles }];
+    const target = localFiles[2].key;
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: function (this: HTMLElement, { top }: ScrollToOptions) {
+        const canvas = this.querySelector('[data-diff-stream-canvas]') as HTMLElement;
+        // Model actual browser clamping, which jsdom does not implement.
+        this.scrollTop = Math.max(0, Math.min(Number(top), Number.parseFloat(canvas.style.height) - this.clientHeight));
+      },
+    });
+    const props = {
+      files: localFiles, groups: localGroups, selectedKey: target,
+      scrollToKey: target, scrollToKeyNonce: 1,
+      onSelectFile: () => undefined, mode: 'list' as const,
+      onModeChange: () => undefined, collapsedDirectoryKeys: new Set<string>(),
+      onToggleDirectory: () => undefined, renderLeading: () => null,
+      renderStreamBadge: () => null, mobile: true, backLabel: 'Back', wrap: true, activePane: true,
+    };
+    const { container, rerender } = render(<DiffReview {...props} />);
+    const scroller = container.querySelector('.termdock-diff-stream-scroller') as HTMLElement;
+    const targetTop = () => Number.parseFloat((container.querySelector(`[data-diff-canvas-slot="${target}"]`) as HTMLElement).style.top);
+    expect(scroller.scrollTop).toBe(targetTop());
+    expect(localFiles.map((file) => streamItems.get(file.key)?.visible)).toEqual([false, false, true]);
+    expect(preload).not.toHaveBeenCalled();
+    act(flushAnimationFrames);
+    expect(localFiles.map((file) => streamItems.get(file.key)?.visible)).toEqual([false, false, true]);
+
+    act(() => streamItems.get(target)?.onHeightChange?.(target, 104, 180));
+    expect(scroller.scrollTop).toBe(targetTop());
+    act(() => streamItems.get(target)?.onContentReady?.(target));
+    act(flushAnimationFrames);
+    expect(streamItems.get(localFiles[1].key)?.visible).toBe(true);
+    act(() => streamItems.get(localFiles[1].key)?.onHeightChange?.(localFiles[1].key, 104, 900));
+    expect(scroller.scrollTop).toBe(targetTop());
+
+    scroller.scrollTop = 0;
+    rerender(<DiffReview {...props} scrollToKeyNonce={2} />);
+    expect(scroller.scrollTop).toBe(targetTop());
+  });
+
+  it('mounts a distant clicked file even while the mobile scroller is hidden', () => {
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(0);
+    const manyFiles = Array.from({ length: 80 }, (_, index) => ({
+      ...files[0], key: `/distant/${index}.ts`, path: `${index}.ts`,
+    }));
+    const target = manyFiles[79].key;
+    const props = {
+      files: manyFiles, groups: [], selectedKey: target, scrollToKey: target, scrollToKeyNonce: 1,
+      onSelectFile: () => undefined, mode: 'list' as const,
+      onModeChange: () => undefined, collapsedDirectoryKeys: new Set<string>(),
+      onToggleDirectory: () => undefined, renderLeading: () => null,
+      renderStreamBadge: () => null, mobile: true, backLabel: 'Back', wrap: true, activePane: true,
+    };
+    const { container, rerender } = render(<DiffReview {...props} />);
+    expect(streamItems.get(target)?.visible).toBe(true);
+    expect(streamItems.get(manyFiles[0].key)?.visible).toBe(false);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
+    // Switching layout triggers viewport measurement, as ResizeObserver does.
+    rerender(<DiffReview {...props} mobile={false} />);
+    const scroller = container.querySelector('.termdock-diff-stream-scroller') as HTMLElement;
+    expect(scroller.scrollTop).toBe(79 * 104);
   });
 
   it('creates a fresh positioning request for every file tap, including repeated mobile taps', () => {
