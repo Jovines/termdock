@@ -226,6 +226,9 @@ function writeCollapsedGroups(keys: Set<string>): void {
   }
 }
 
+type SharedSidebarData = Pick<ProjectSidebarState,
+  'directoryCache' | 'changedFiles' | 'gitBundleError' | 'gitBundleLastLoadedAt' | 'gitBundleCacheInfo'>;
+
 interface ProjectSidebarState {
   rightTab: RightSidebarTab;
   explorerRoot: string | null;
@@ -550,6 +553,7 @@ interface SidebarState {
   gitBundleLastLoadedAt: number | null;
   gitBundleCacheInfo: { cached?: boolean; stale?: boolean; cacheAgeMs?: number; nestedDeferred?: boolean; untrackedDeferred?: boolean } | null;
   projectStateCache: Map<string, ProjectSidebarState>;
+  rootDataCache: Map<string, SharedSidebarData>;
 
   // Actions
   openLeft: () => void;
@@ -646,6 +650,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   gitBundleLastLoadedAt: null,
   gitBundleCacheInfo: null,
   projectStateCache: new Map(),
+  rootDataCache: new Map(),
 
   openLeft: () => set({ leftOpen: true }),
   closeLeft: () => set({ leftOpen: false }),
@@ -718,6 +723,18 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       s.contextKey === contextKey
       && s.rightSidebarWidthContextKey === rightSidebarWidthContextKey
     ) return path === s.rootPath ? s : { rootPath: path };
+    // Data belongs to the directory; selection/layout belongs to the session.
+    const rootDataCache = new Map(s.rootDataCache);
+    if (s.rootPath) rootDataCache.set(s.rootPath, {
+      directoryCache: s.directoryCache,
+      changedFiles: s.changedFiles,
+      gitBundleError: s.gitBundleError,
+      gitBundleLastLoadedAt: s.gitBundleLastLoadedAt,
+      gitBundleCacheInfo: s.gitBundleCacheInfo,
+    });
+    trimCache(rootDataCache, 12, new Set(path ? [path] : []));
+    const sharedData = path ? rootDataCache.get(path) : undefined;
+    const sameRoot = path === s.rootPath;
     const projectStateCache = new Map(s.projectStateCache);
     if (s.contextKey) {
       projectStateCache.set(s.contextKey, {
@@ -826,14 +843,15 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
       selectedFilePath: cached?.selectedFilePath ?? persistedSelectedFilePath ?? null,
       explorerRootCache,
-      directoryCache: cached ? new Map(cached.directoryCache) : new Map(),
-      changedFiles: cached ? new Map(cached.changedFiles) : new Map(),
-      gitBundleLoading: false,
-      gitBundleSlow: false,
-      gitBundleLoadingOwner: null,
-      gitBundleError: cached?.gitBundleError ?? null,
-      gitBundleLastLoadedAt: cached?.gitBundleLastLoadedAt ?? null,
-      gitBundleCacheInfo: cached?.gitBundleCacheInfo ?? null,
+      directoryCache: sharedData?.directoryCache ?? new Map(),
+      changedFiles: sharedData?.changedFiles ?? new Map(),
+      gitBundleLoading: sameRoot ? s.gitBundleLoading : false,
+      gitBundleSlow: sameRoot ? s.gitBundleSlow : false,
+      gitBundleLoadingOwner: sameRoot ? s.gitBundleLoadingOwner : null,
+      gitBundleError: sharedData?.gitBundleError ?? null,
+      gitBundleLastLoadedAt: sharedData?.gitBundleLastLoadedAt ?? null,
+      gitBundleCacheInfo: sharedData?.gitBundleCacheInfo ?? null,
+      rootDataCache,
       projectStateCache,
     };
   }),

@@ -158,6 +158,7 @@ function invalidateParsedDiffCached(filePath: string | undefined, cwd: string | 
 }
 
 function rememberDiffResult(key: string, result: DiffLoadResult): DiffLoadResult {
+  if (result.error) return result;
   if (diffResultCache.has(key)) diffResultCache.delete(key);
   diffResultCache.set(key, result);
   while (diffResultCache.size > MAX_DIFF_CACHE_ENTRIES) {
@@ -267,25 +268,29 @@ export function loadVisibleFileDiff(filePath: string | undefined, cwd: string | 
   const version = diffCacheVersions.get(key) ?? 0;
   const pending = diffPromiseCache.get(key);
   if (pending && !force) {
-    // Visibility upgrades the priority of a preload, but it must not cancel
-    // and restart identical work. The preload owns its independent abort
-    // controller, so recycling this viewer cannot kill the shared request.
-    logDiffViewerEvent(diffPreloadControllers.has(key) ? 'visible_reuse_preload' : 'visible_reuse_pending', { traceId, key, filePath, cwd });
+    // Both preloads and visible loads belong to the cache, so recycling a
+    // viewer cannot cancel identical work reused by another viewer.
+    logDiffViewerEvent('visible_reuse_pending', { traceId, key, filePath, cwd });
     return pending;
   }
   cancelPreloadDiff(key);
   logDiffViewerEvent('visible_start', { interactionId, requestSlotId, traceId, key, filePath, cwd, force, version, replacedPreload: Boolean(pending), pendingExists: Boolean(pending), cacheSize: diffResultCache.size, promiseSize: diffPromiseCache.size });
-  const promise = getFileDiff(filePath, undefined, cwd, signal, 'view_diff', traceId, interactionId ?? undefined, requestSlotId ?? undefined, options)
+  // The cache owns the request. A viewer leaving must not abort work that
+  // another viewer/session is reusing, including through its server IO slot.
+  const controller = new AbortController();
+  diffPreloadControllers.set(key, controller);
+  const promise = getFileDiff(filePath, undefined, cwd, controller.signal, 'view_diff', traceId, interactionId ?? undefined, undefined, options)
     .then((result) => {
       logDiffViewerEvent('visible_result', { interactionId, requestSlotId, traceId, key, filePath, cwd, bytes: result.diff?.length ?? 0, error: result.error ?? null, tooLarge: Boolean(result.tooLarge), truncated: Boolean(result.truncated) });
       return (diffCacheVersions.get(key) ?? 0) === version ? rememberDiffResult(key, result) : result;
     })
     .catch((error) => {
-      logDiffViewerEvent('visible_error', { interactionId, requestSlotId, traceId, key, filePath, cwd, error: error instanceof Error ? error.message : String(error), aborted: signal.aborted, abortReason: signal.aborted ? String(signal.reason ?? '') : undefined });
+      logDiffViewerEvent('visible_error', { interactionId, requestSlotId, traceId, key, filePath, cwd, error: error instanceof Error ? error.message : String(error), aborted: controller.signal.aborted, abortReason: controller.signal.aborted ? String(controller.signal.reason ?? '') : undefined, viewerAborted: signal.aborted });
       throw error;
     })
     .finally(() => {
       if (diffPromiseCache.get(key) === promise) diffPromiseCache.delete(key);
+      if (diffPreloadControllers.get(key) === controller) diffPreloadControllers.delete(key);
     });
   diffPromiseCache.set(key, promise);
   return promise;
