@@ -83,26 +83,9 @@ export function SessionNoticeCenter() {
 function SessionNoticeCard({ notice, remaining, chinese, onDismiss }: {
   notice: Notice; remaining: number; chinese: boolean; onDismiss: (key: string) => void;
 }) {
-  const [hovered, setHovered] = useState(false);
-  const [focused, setFocused] = useState(false);
-  const [hidden, setHidden] = useState(document.hidden);
   const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    const update = () => setHidden(document.hidden);
-    document.addEventListener('visibilitychange', update);
-    return () => document.removeEventListener('visibilitychange', update);
-  }, []);
-  useEffect(() => {
-    if (hovered || focused || hidden || failed) return;
-    const timer = setTimeout(() => onDismiss(notice.key), 8000);
-    return () => clearTimeout(timer);
-  }, [notice.key, hovered, focused, hidden, failed, onDismiss]);
   return (
     <section aria-label={chinese ? '关键进展提醒' : 'Progress reminder'}
-      onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
-      onFocusCapture={() => setFocused(true)} onBlurCapture={event => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
-      }}
       className="fixed left-3 right-3 top-[calc(var(--safe-top-inset,0px)+0.75rem)] z-toast overflow-hidden rounded-xl bg-surface text-foreground shadow-lg ring-1 ring-inset ring-border/15 animate-fade-in md:left-auto md:right-4 md:w-[360px]">
       <button type="button" aria-label={chinese ? '查看 Session' : 'Open session'}
         className="group flex w-full items-start gap-2.5 p-3.5 pr-11 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"

@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 
-it('runs the actual CLI with detected and explicit identity and preserves failure receipts', async () => {
+it.each(['notify', 'n'])('runs td %s with detected and explicit identity and preserves failure receipts', async (command) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'td-notify-cli-'));
   fs.mkdirSync(path.join(directory, '.termdock'));
   const requests: Array<{ url: string; token: string; body: unknown }> = [];
@@ -23,7 +23,7 @@ it('runs the actual CLI with detected and explicit identity and preserves failur
     const preload = path.join(directory, 'preload.mjs');
     fs.writeFileSync(preload, "import os from 'node:os'; import { syncBuiltinESMExports } from 'node:module'; os.homedir = () => process.env.TERMDOCK_NOTIFY_TEST_DIRECTORY; syncBuiltinESMExports();");
     const run = (args: string[]) => new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
-      const child = spawn(process.execPath, ['--import', preload, '--import', 'tsx', fileURLToPath(new URL('../cli.ts', import.meta.url)), 'notify', ...args], {
+      const child = spawn(process.execPath, ['--import', preload, '--import', 'tsx', fileURLToPath(new URL('../cli.ts', import.meta.url)), command, ...args], {
         env: { ...process.env, TERMDOCK_NOTIFY_TEST_DIRECTORY: directory, TERMDOCK_BACKEND_SESSION_ID: 'backend', TERMDOCK_COLLAB_SESSION_ID: '', TMUX_PANE: '' }, stdio: ['ignore', 'pipe', 'pipe'],
       });
       let stdout = ''; const timer = setTimeout(() => child.kill(), 10000);
@@ -40,6 +40,10 @@ it('runs the actual CLI with detected and explicit identity and preserves failur
     fs.unlinkSync(path.join(directory, '.termdock/server.json'));
     const help = await run(['--help']);
     expect(help.code).toBe(0); expect(help.stdout).toContain('Usage: td notify');
+    const bare = await run([]);
+    expect(bare.code).toBe(0); expect(bare.stdout).toContain('Usage: td notify');
+    const prompt = await run(['--prompt']);
+    expect(prompt.code).toBe(0); expect(prompt.stdout).toContain('在本任务中使用 TD 提醒我');
     expect(requests).toHaveLength(2);
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));

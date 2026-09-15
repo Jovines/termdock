@@ -329,7 +329,6 @@ Short commands:
   la                 Same as --tls --all
   a [name]           Same as --attach-tmux [name]
   at [name]          Same as --attach-tmux [name]
-  n [name]           Same as --new-tmux [name]
   nt [name]          Same as --new-tmux [name]
   nd [name]          Same as --new-tmux-detached [name]
   audit [file]       Same as --inject-change-audit [file]
@@ -721,7 +720,7 @@ function parseArgs(argv: string[]): CliOptions {
       } else {
         argv = argv.slice(1);
       }
-    } else if (command === 'n' || command === 'nt') {
+    } else if (command === 'nt') {
       newTmux = true;
       newTmuxAttach = true;
       if (next && !next.startsWith('-')) {
