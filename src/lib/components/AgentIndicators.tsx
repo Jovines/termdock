@@ -27,6 +27,7 @@ import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { useViewportKeyboardState } from '../hooks/useViewportKeyboardState';
+import { useAgentIconSource } from '../hooks/useAgentIconSource';
 import { getNextAttentionSessionId } from '../utils/agentAttention';
 import {
   MOBILE_ATTENTION_EDGE_GAP_PX,
@@ -220,7 +221,8 @@ export function AgentBrandAvatar({
   size?: number;
 }): React.ReactElement {
   const inner = size - 4;
-  if (!agent.icon) {
+  const iconUrl = useAgentIconSource(agent);
+  if (!iconUrl) {
     return (
       <span
         className="flex shrink-0 items-center justify-center rounded-[3px]"
@@ -230,15 +232,6 @@ export function AgentBrandAvatar({
         <RiBot size={inner} className="text-white" />
       </span>
     );
-  }
-  let iconUrl: string;
-  if (agent.isPlugin) {
-    iconUrl = `/api/terminal/agent-plugin-icon/${agent.slug}`;
-    if (agent.iconVersion) {
-      iconUrl += `?v=${Math.floor(agent.iconVersion)}`;
-    }
-  } else {
-    iconUrl = `/icons/agents/${agent.icon}.svg`;
   }
   if (agent.iconMode === 'native') {
     return (

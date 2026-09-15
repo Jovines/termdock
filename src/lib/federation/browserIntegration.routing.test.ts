@@ -177,6 +177,30 @@ describe('browser federation entry routing', () => {
     } finally { api.resetCollaborationDirectory(); }
   });
 
+  it.each(['direct', 'relay'] as const)('loads plugin icons over the encrypted %s path without worker control', async mode => {
+    vi.stubGlobal('navigator', { serviceWorker: { controller: null } });
+    const base = mocks.connect.getMockImplementation()!;
+    if (mode === 'relay') mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('direct target unavailable');
+      return base(args);
+    });
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://b.example', targetPeerId: 'B', serviceOrigin: 'https://b.example',
+      ...(mode === 'relay' ? { routes: [{ url: 'https://a.example', targetPeerId: 'A' }] } : {}) };
+    mocks.saved.mockReturnValue(target);
+    const client = await integration.connectDevice(target);
+    const business = vi.fn(async () => new Response('<svg/>', { headers: { 'Content-Type': 'image/svg+xml' } }));
+    Object.assign(client, { fetch: business });
+    integration.installEncryptedFetch();
+    const path = '/api/terminal/agent-plugin-icon/custom?v=123';
+    expect(await (await window.fetch(path)).text()).toBe('<svg/>');
+    expect(business).toHaveBeenCalledWith(path, undefined);
+    business.mockRejectedValueOnce(new Error('connection lost'));
+    await expect(window.fetch(path)).rejects.toThrow('connection lost');
+    expect(integration.currentConnectionPath()).toBe(mode);
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
   it('discovers a pinned entry through its alternate address without switching the active service', async () => {
     const base = mocks.connect.getMockImplementation()!;
     mocks.connect.mockRejectedValueOnce(new Error('old network'));
