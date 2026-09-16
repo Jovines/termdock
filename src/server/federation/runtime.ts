@@ -1,3 +1,4 @@
+import { CollaborationRpc } from '../agent/collaborationPeerTransport.js';
 import { PasswordBootstrapServer } from './passwordBootstrap.js';
 import { DeviceProfiles } from './deviceProfiles.js';
 import { DeviceNames } from './deviceNames.js';
@@ -45,6 +46,7 @@ class LogicalSocket extends EventEmitter {
 }
 interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: number; abort: AbortController; state: 'uploading' | 'running'; updatedAt: number; uploadSlot: boolean; ack?: () => void }
 export interface FederationRuntimeOptions {
+  collaborationConnected?: (subjectId: string, rpc: CollaborationRpc) => () => void;
   collaborationDescriptor?: () => Record<string, unknown>;
   collaborationService?: (subjectId: string, packet: Packet) => Record<string, unknown>;
   collaborationExchange?: (subjectId: string, packet: Packet) => Record<string, unknown>;
@@ -108,6 +110,8 @@ export async function createFederationRuntime(app: express.Express, directory: s
   }
 
   async function accept(socket: WebSocket, context: { allowOpenAccess?: boolean } = {}): Promise<void> {
+    let collaborationRpc: CollaborationRpc | undefined;
+    let unregisterCollaboration: (() => void) | undefined;
     const open = (action?: string) => openAccessAllowed(context.allowOpenAccess === true, isAuthEnabled(), action);
     const allowed = (subjectId: string, action: string, sessionId?: string) => open(action) || store.authorize({ subjectId, serviceId, action, sessionId }).allowed;
     const full = (subjectId: string) => open() || store.hasFullServiceAccess({ subjectId, serviceId });
@@ -194,7 +198,16 @@ export async function createFederationRuntime(app: express.Express, directory: s
       for await (const packet of channel.read()) {
         try {
           if (packet.id.length > 128) throw new Error('INVALID_ID');
-          if (packet.type === 'collaboration-descriptor') {
+          if (collaborationRpc?.accept(packet)) continue;
+          if (packet.type === 'collaboration-connect') {
+            if (!options.collaborationService || !options.collaborationConnected) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
+            options.collaborationService(subjectId, { type: 'collaboration-service', id: packet.id, action: 'duplex' });
+            if (!collaborationRpc) {
+              collaborationRpc = new CollaborationRpc(channel, undefined, true);
+              unregisterCollaboration = options.collaborationConnected(subjectId, collaborationRpc);
+            }
+            send({ type: 'result', id: packet.id, ok: true });
+          } else if (packet.type === 'collaboration-descriptor') {
             if (!options.collaborationDescriptor) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
             send({ type: 'result', id: packet.id, node: options.collaborationDescriptor() });
           } else if (packet.type === 'collaboration-service') {
@@ -367,6 +380,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
       }
     } catch { socket.close(4003, 'Secure channel closed'); }
     finally {
+      unregisterCollaboration?.(); collaborationRpc?.close();
       clearInterval(revokeTimer);
       for (const operation of operations.values()) cancelHttp(operation);
       for (const { socket: logical } of sockets.values()) { try { logical.close(); } catch { logical.emit('close'); } }

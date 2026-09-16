@@ -31,6 +31,7 @@ export class CollaborationService {
   private stopped = false;
   constructor(private options: { file: string; store: CollaborationStore; transport: CollaborationPeerTransport;
     node: () => Omit<CollaborationNode, 'origin'>; sessions: () => Session[];
+    reverse?: (serviceId: string) => CollaborationRpc | undefined;
     connect: (node: CollaborationNode) => Promise<CollaborationRpc> }) {
     try { const data = JSON.parse(readFileSync(options.file, 'utf8')) as Document;
       if (data.version !== 1 || !Array.isArray(data.peers) || data.peers.length > 64 || !Array.isArray(data.offers)) throw new Error('INVALID_DIRECTORY');
@@ -96,6 +97,7 @@ export class CollaborationService {
     }
     const peer = this.document.peers.find(node => node.serviceId === subject);
     if (!peer) throw new Error('COLLABORATION_PAIRING_REQUIRED');
+    if (packet.action === 'duplex') return { ok: true };
     if (packet.action === 'directory') return this.snapshot(peer.origin);
     if (packet.action === 'group') {
       const canonical = packet.group as CollaborationGroup;
@@ -148,7 +150,7 @@ export class CollaborationService {
   }
   start() { this.timer = setInterval(() => { void this.refresh(); }, 2000); this.timer.unref(); void this.refresh(); }
   close() { this.stopped = true; clearInterval(this.timer); for (const rpc of this.clients.values()) void rpc.then(client => client.close()).catch(() => {}); this.clients.clear(); }
-  private async client(peer: CollaborationNode) { let pending = this.clients.get(peer.serviceId); if (pending && (await pending).closed) { this.clients.delete(peer.serviceId); pending = undefined; }
+  private async client(peer: CollaborationNode) { const reverse = this.options.reverse?.(peer.serviceId); if (reverse && !reverse.closed) return reverse; let pending = this.clients.get(peer.serviceId); if (pending && (await pending).closed) { this.clients.delete(peer.serviceId); pending = undefined; }
     if (!pending) { pending = this.options.connect(peer); this.clients.set(peer.serviceId, pending); }
     try { return await pending; } catch (error) { this.clients.delete(peer.serviceId); throw error; }
   }

@@ -47,15 +47,24 @@ function mapContext(context: CollaborationContext, map: (id: string) => string):
 export class CollaborationRpc {
   private pending = new Map<string, { resolve: (packet: Packet) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   closed = false;
-  constructor(private channel: PacketChannel) {
-    void this.read();
+  constructor(private channel: PacketChannel, private receive?: (packet: Packet) => Record<string, unknown>, externalReader = false) {
+    if (!externalReader) void this.read();
     void channel.done.catch(error => this.close(error));
+  }
+  accept(packet: Packet): boolean {
+    if (packet.type !== 'result' && packet.type !== 'error') return false;
+    const request = this.pending.get(packet.id); if (!request) return false;
+    clearTimeout(request.timer); this.pending.delete(packet.id);
+    if (packet.type === 'error') request.reject(new Error(String(packet.error))); else request.resolve(packet);
+    return true;
   }
   private async read() {
     try { for await (const packet of this.channel.read()) {
-      const request = this.pending.get(packet.id); if (!request) continue;
-      clearTimeout(request.timer); this.pending.delete(packet.id);
-      if (packet.type === 'error') request.reject(new Error(String(packet.error))); else request.resolve(packet);
+      if (this.accept(packet) || packet.type === 'result' || packet.type === 'error') continue;
+      try {
+        if (!this.receive || !['collaboration-service', 'collaboration-exchange'].includes(packet.type)) throw new Error('COLLABORATION_OPERATION_UNSUPPORTED');
+        this.channel.send({ ...this.receive(packet), type: 'result', id: packet.id });
+      } catch (error) { this.channel.send({ type: 'error', id: packet.id, error: error instanceof Error ? error.message : 'REQUEST_FAILED' }); }
     } } catch (error) { this.close(error instanceof Error ? error : new Error('PEER_DISCONNECTED')); }
     finally { this.close(); }
   }
@@ -75,7 +84,7 @@ export class CollaborationRpc {
     this.pending.clear();
   }
 }
-export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string): Promise<CollaborationRpc> {
+export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string, receive?: (packet: Packet) => Record<string, unknown>): Promise<CollaborationRpc> {
   validateCollaborationNode(peer);
   const ca = peer.caFingerprint256 ? await readPinnedCertificateAuthority(peer.origin, peer.caFingerprint256) : undefined;
   const url = endpoint ?? `${peer.origin.replace(/^https:/, 'wss:')}/api/federation/secure`;
@@ -88,7 +97,16 @@ export async function connectCollaborationRpc(identity: Identity, peer: Collabor
     });
     if (relay) await relay.ready;
     const secured = await secureConnection({ identity, duplex, initiator: true, targetPinnedPeerId: peer.serviceId, signal: AbortSignal.timeout(5000) });
-    return new CollaborationRpc(new PacketChannel(secured.duplex));
+    const rpc = new CollaborationRpc(new PacketChannel(secured.duplex), receive);
+    if (receive) {
+      try { await rpc.request({ type: 'collaboration-connect' }); }
+      catch (error) {
+        // Initial CLI invitation pairing precedes directory authorization. Older
+        // servers may also lack duplex support; ordinary requests remain gated.
+        if (!(error instanceof Error) || !['COLLABORATION_PAIRING_REQUIRED', 'UNKNOWN_PACKET', 'COLLABORATION_UPGRADE_REQUIRED'].includes(error.message)) { rpc.close(); throw error; }
+      }
+    }
+    return rpc;
   } catch (error) { socket.terminate(); throw error; }
 }
 
@@ -141,6 +159,7 @@ export class CollaborationPeerTransport {
   private stopped = false;
   constructor(private options: { file: string; serviceId: string; store: CollaborationStore;
     connect: (peer: CollaborationNode, via?: CollaborationNode) => Promise<Rpc>;
+    reverse?: (serviceId: string) => CollaborationRpc | undefined;
     deliver: (sessionId: string) => void;
     activity?: () => Array<{ sessionId: string; last_terminal_output_at: number | null; activity_observed_at: number | null }> }) {
     try {
@@ -150,10 +169,10 @@ export class CollaborationPeerTransport {
       });
     } catch { /* First run has no server authorizations. */ }
   }
-  notify() {
+  notify(serviceId?: string) {
     for (const b of this.bindings) {
       const key = `${b.groupId}:${b.peer.serviceId}`;
-      if (!this.options.store.federationSnapshot().messages.some(m => m.groupId === b.groupId && m.status === 'pending'
+      if (b.peer.serviceId === serviceId || !this.options.store.federationSnapshot().messages.some(m => m.groupId === b.groupId && m.status === 'pending'
         && this.options.store.diagnostic(m.id)?.last_error)) this.nextAttempt.delete(key);
     }
     // A queued message may arrive while an empty scan is finishing.
@@ -257,6 +276,8 @@ export class CollaborationPeerTransport {
     }
   }
   private async client(b: Binding): Promise<Rpc> {
+    const reverse = this.options.reverse?.(b.peer.serviceId);
+    if (reverse && !reverse.closed) return reverse;
     const key = b.peer.serviceId;
     let pending = this.clients.get(key);
     if (pending) { const client = await pending; if (!client.closed) return client; this.clients.delete(key); }
