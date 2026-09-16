@@ -1,10 +1,7 @@
 import { EventEmitter } from 'events';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { getMissingCertificateNames } from './utils/certificateNames.js';
 import { getLocalAccessSetting } from './utils/settings.js';
 import { getLanIPv4Addresses } from './utils/localAccess.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface CertificateWatcherOptions {
   certPath?: string;
@@ -24,31 +21,6 @@ const RETRY_INTERVAL_MS = 60_000;
 
 function fileExists(filePath: string | undefined): filePath is string {
   return typeof filePath === 'string' && filePath.length > 0;
-}
-
-async function readCertificateSans(certPath: string): Promise<string[]> {
-  try {
-    const { stdout } = await execFileAsync('openssl', ['x509', '-in', certPath, '-noout', '-ext', 'subjectAltName'], {
-      timeout: 5000,
-      maxBuffer: 256 * 1024,
-    });
-    return stdout
-      .split(/[\n,]/)
-      .map((part) => part.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function sanMatches(required: string, sans: string[]): boolean {
-  if (required === '::1') {
-    return sans.some((san) => san === 'IP Address:::1' || san === 'IP Address:0:0:0:0:0:0:0:1' || san === 'IP:::1');
-  }
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(required) || required.includes(':')) {
-    return sans.some((san) => san === `IP Address:${required}` || san === `IP:${required}`);
-  }
-  return sans.some((san) => san === `DNS:${required}`);
 }
 
 function requiredNames(): string[] {
@@ -103,8 +75,7 @@ export class CertificateWatcher extends EventEmitter {
     if (this.checking || !this.options.enabled || !fileExists(this.options.certPath) || !fileExists(this.options.keyPath)) return;
     this.checking = true;
     try {
-      const sans = await readCertificateSans(this.options.certPath);
-      const missing = requiredNames().filter((name) => !sanMatches(name, sans));
+      const missing = await getMissingCertificateNames(this.options.certPath, requiredNames());
       if (missing.length === 0) {
         this.refreshInFlight = false;
         this.pendingKey = null;
@@ -121,6 +92,10 @@ export class CertificateWatcher extends EventEmitter {
       this.pendingKey = key;
       console.log(`[cert-watch] certificate missing SANs (${missing.join(', ')}); regenerating and reloading TLS context`);
       this.emit('refresh-needed', missing);
+    } catch (error) {
+      // An unreadable certificate is not evidence of missing SANs. Keep the
+      // active TLS context instead of repeatedly regenerating the certificate.
+      console.warn('[cert-watch] could not inspect certificate; keeping current TLS context:', error);
     } finally {
       this.checking = false;
     }

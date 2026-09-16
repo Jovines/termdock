@@ -25,6 +25,7 @@ import { detectLocalSessionContext, resolveLocalCollaborationContext } from './a
 import { parseAutomationCommand, executeAutomationCommand, AUTOMATION_HELP, type AutomationCommand } from './agent/automationCli.js';
 import { parseCollaborationCommand, executeCollaborationCommand, COLLAB_HELP, type CollaborationCommand } from './agent/collaborationCli.js';
 import fs from 'fs';
+import { getMissingCertificateNames } from './utils/certificateNames.js';
 import http from 'http';
 import https from 'https';
 import path from 'path';
@@ -529,49 +530,9 @@ function getRequiredLocalHttpsNames(): string[] {
   ];
 }
 
-async function readCertificateSans(certPath: string): Promise<string[]> {
-  try {
-    const { stdout } = await execFileAsync('openssl', ['x509', '-in', certPath, '-noout', '-ext', 'subjectAltName'], {
-      timeout: 5000,
-      maxBuffer: 256 * 1024,
-    });
-    return stdout
-      .split(/[\n,]/)
-      .map((part) => part.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function sanMatches(required: string, sans: string[]): boolean {
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(required)) {
-    return sans.some((san) => san === `IP Address:${required}` || san === `IP:${required}`);
-  }
-  if (required.includes(':')) {
-    const normalizeIpv6 = (value: string): string => {
-      const [left = '', right = ''] = value.toLowerCase().split('::');
-      const leftGroups = left ? left.split(':') : [];
-      const rightGroups = right ? right.split(':') : [];
-      const missing = Math.max(0, 8 - leftGroups.length - rightGroups.length);
-      return [...leftGroups, ...Array<string>(missing).fill('0'), ...rightGroups]
-        .map((group) => Number.parseInt(group || '0', 16).toString(16))
-        .join(':');
-    };
-    const normalizedRequired = normalizeIpv6(required);
-    return sans.some((san) => {
-      const match = /^(?:IP Address|IP):(.+)$/.exec(san);
-      return match ? normalizeIpv6(match[1]) === normalizedRequired : false;
-    });
-  }
-  return sans.some((san) => san === `DNS:${required}`);
-}
-
 async function defaultCertificateNeedsRefresh(): Promise<boolean> {
   if (!fileExists(defaultHttpsCertPath) || !fileExists(defaultHttpsKeyPath)) return true;
-  const sans = await readCertificateSans(defaultHttpsCertPath);
-  if (sans.length === 0) return true;
-  return getRequiredLocalHttpsNames().some((name) => !sanMatches(name, sans));
+  return (await getMissingCertificateNames(defaultHttpsCertPath, getRequiredLocalHttpsNames())).length > 0;
 }
 
 async function ensureDefaultHttpsCertificateFresh(): Promise<boolean> {
