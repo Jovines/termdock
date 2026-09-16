@@ -511,6 +511,10 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket,
   }, {
+    collaborationDescriptor: () => {
+      if (!collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+      return collaborationService.descriptor();
+    },
     collaborationService: (subjectId, packet) => {
       if (!collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
       return collaborationService.receive(subjectId, packet);

@@ -191,6 +191,17 @@ async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal
   rememberConnectionPath(intent.targetPeerId, result.key);
   return result.value;
 }
+/** Read public bootstrap metadata through the saved, pinned Noise identity.
+ * This does not require borrowing that service window's device authorization. */
+export async function readPinnedCollaborationDescriptor(intent: ConnectionIntent, signal: AbortSignal): Promise<{ serviceId: string; origin?: string; caFingerprint256?: string }> {
+  const client = await openTargetForAuthentication(intent, signal);
+  try {
+    const result = await client.request({ type: 'collaboration-descriptor' }, { timeoutMs: 5000 });
+    const node = result.node as { serviceId?: unknown; origin?: string; caFingerprint256?: string } | undefined;
+    if (node?.serviceId !== intent.targetPeerId) throw new Error('PEER_IDENTITY_MISMATCH');
+    return { ...node, serviceId: intent.targetPeerId };
+  } finally { client.close(); }
+}
 /** Open another saved service without replacing this page's active target or stores. */
 export async function openAuthorizedServiceClient(intent: ConnectionIntent, signal: AbortSignal): Promise<SecureClient> {
   const client = await openTargetForAuthentication(intent, signal);

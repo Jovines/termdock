@@ -1,4 +1,5 @@
 import './lib/federation/scopeBootstrap';
+import { installCollaborationEnrollment } from './lib/collaboration/connectionEnrollment';
 import React, { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
 import { installEncryptedFetch } from './lib/federation/browserIntegration';
@@ -21,6 +22,7 @@ import { savedConnection } from './lib/federation/browserIntegration';
 
 syncInitialViewportCssVars();
 installEncryptedFetch();
+installCollaborationEnrollment();
 if (window.parent === window) setupPwaUpdateReload();
 const initialService = savedConnection();
 // Fetch the renderer while an existing device establishes its encrypted channel.

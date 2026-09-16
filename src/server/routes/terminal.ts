@@ -1,3 +1,4 @@
+import { assertPeerRegistrationAuthority } from '../agent/collaborationPeerTransport.js';
 import { progressRoutes } from '../notifications/progressRoutes.js';
 import { ensureNodePty } from '../utils/ensureNodePty.js';
 import { PtySpawnBackoff, PtySpawnDeferredError } from '../utils/ptySpawnBackoff.js';
@@ -6367,6 +6368,14 @@ router.delete('/operations/automations/:automationId', (req, res) => {
 // receives a fast, explicit refusal and cannot duplicate the server worker.
 router.all(['/operations/collaboration-federation', '/operations/collaboration-peers'], (_req, res) => {
   res.status(410).json({ code: 'CLIENT_RELAY_REMOVED', error: '协作由服务端处理，请重新加载服务页面' });
+});
+router.post('/operations/collaboration-connections', (req, res) => {
+  try {
+    assertPeerRegistrationAuthority(req);
+    const service = req.app.locals.collaborationService;
+    if (!service) return res.status(503).json({ error: '协作服务正在启动' });
+    res.json(service.connectKnown(req.body?.origin, req.body?.nodes));
+  } catch (error) { res.status(getErrorMessage(error) === 'AUTHORIZATION_DENIED' ? 403 : 400).json({ error: getErrorMessage(error) }); }
 });
 router.get('/operations/collaboration-directory', (req, res) => {
   const service = req.app.locals.collaborationService;

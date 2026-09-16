@@ -45,6 +45,7 @@ class LogicalSocket extends EventEmitter {
 }
 interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: number; abort: AbortController; state: 'uploading' | 'running'; updatedAt: number; uploadSlot: boolean; ack?: () => void }
 export interface FederationRuntimeOptions {
+  collaborationDescriptor?: () => Record<string, unknown>;
   collaborationService?: (subjectId: string, packet: Packet) => Record<string, unknown>;
   collaborationExchange?: (subjectId: string, packet: Packet) => Record<string, unknown>;
   listRouteTargets?: () => Array<{ serviceId: string; label?: string; url?: string; available: boolean }>;
@@ -193,7 +194,10 @@ export async function createFederationRuntime(app: express.Express, directory: s
       for await (const packet of channel.read()) {
         try {
           if (packet.id.length > 128) throw new Error('INVALID_ID');
-          if (packet.type === 'collaboration-service') {
+          if (packet.type === 'collaboration-descriptor') {
+            if (!options.collaborationDescriptor) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
+            send({ type: 'result', id: packet.id, node: options.collaborationDescriptor() });
+          } else if (packet.type === 'collaboration-service') {
             if (!options.collaborationService) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
             send({ type: 'result', id: packet.id, ...options.collaborationService(subjectId, packet) });
           } else if (packet.type === 'collaboration-exchange') {

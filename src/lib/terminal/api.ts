@@ -3811,6 +3811,7 @@ export function subscribeCollaborationGroups(listener: (data: CollaborationGroup
 }
 
 export function retryCollaborationPeers(): void {
+  window.dispatchEvent(new Event('termdock:collaboration-enroll'));
   currentCollaborationDirectory().refreshPeers(true);
 }
 

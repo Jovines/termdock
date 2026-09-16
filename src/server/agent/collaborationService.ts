@@ -50,6 +50,27 @@ export class CollaborationService {
     if (!old) { if (this.document.peers.length >= 63) throw new Error('PEER_LIMIT'); this.document.peers.push(node); }
     this.persist();
   }
+  descriptor() { return { ...this.options.node(), ...(this.document.origin ? { origin: this.document.origin } : {}) }; }
+  /** Called through the existing authenticated administrator connection. No
+   * client key is copied; only pinned public service descriptors are persisted. */
+  connectKnown(origin: string, nodes: CollaborationNode[]) {
+    if (!Array.isArray(nodes) || nodes.length > 64) throw new Error('INVALID_SERVICE_DIRECTORY');
+    const self = this.node(origin);
+    const own = nodes.find(node => node?.serviceId === self.serviceId);
+    if (!own || own.origin !== origin || own.caFingerprint256 !== self.caFingerprint256) throw new Error('LOCAL_NODE_MISMATCH');
+    const ids = new Set<string>(), origins = new Set<string>();
+    for (const node of nodes) {
+      validateCollaborationNode(node);
+      if (ids.has(node.serviceId) || origins.has(node.origin)) throw new Error('DUPLICATE_SERVICE_DIRECTORY');
+      ids.add(node.serviceId); origins.add(node.origin);
+      const old = this.document.peers.find(peer => peer.serviceId === node.serviceId || peer.origin === node.origin);
+      if (old && (old.serviceId !== node.serviceId || old.origin !== node.origin || old.caFingerprint256 !== node.caFingerprint256)) throw new Error('PEER_IDENTITY_CHANGED');
+    }
+    if (new Set([...this.document.peers.map(peer => peer.serviceId), ...nodes.filter(node => node.serviceId !== self.serviceId).map(node => node.serviceId)]).size > 63) throw new Error('PEER_LIMIT');
+    this.setOrigin(origin);
+    this.document.peers = [...new Map([...this.document.peers, ...nodes.filter(node => node.serviceId !== self.serviceId)].map(node => [node.serviceId, node])).values()];
+    this.persist(); void this.refresh(); return { ok: true, registered: this.document.peers.map(peer => peer.serviceId) };
+  }
   invite(origin: string) { this.setOrigin(origin); const code = randomBytes(32).toString('base64url'), expiresAt = Date.now() + 10 * 60_000;
     this.document.offers = this.document.offers.filter(offer => offer.expiresAt > Date.now()).slice(-15);
     this.document.offers.push({ hash: hash(code), expiresAt }); this.persist();
@@ -156,7 +177,7 @@ export class CollaborationService {
     return { protocolVersion: 2, sessions: this.document.peers.flatMap(peer => (this.observations.get(peer.serviceId)?.sessions ?? []).map(session => ({ ...session,
       sessionId: remoteSession(peer.origin, session.sessionId), backendSessionId: null, agentNativeSessionId: null, serviceOrigin: peer.origin, serviceLabel: peer.origin,
       serviceConnected: services.find(s => s.origin === peer.origin)!.connected, serviceCheckedAt: this.observations.get(peer.serviceId)?.checkedAt }))),
-      services: [...services, ...missing.map(origin => ({ origin, label: origin, connected: false, error: '两端服务尚未配对；请使用 td collab transport invite / accept 完成一次授权'  }))] };
+      services: [...services, ...missing.map(origin => ({ origin, label: origin, connected: false, error: '服务连接授权尚未同步；在已授权服务页面连接后会自动完成'  }))] };
   }
   async save(input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number }) {
     const existing = input.id ? this.options.store.getGroup(input.id) : null;
