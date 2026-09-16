@@ -158,7 +158,19 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
     : null;
 
   const selectedGroup = selectedGroupId ? groups.find(group => group.id === selectedGroupId) ?? null : groups[0] ?? null;
-  const floatingVisible = !!activeSessionId && !!selectedGroup?.sessionIds.includes(activeSessionId);
+  const unavailableGroup = !!initialCollaborationGroupId && sessionsState === 'loaded' && !directCollaborationGroup;
+  const floatingVisible = !!activeSessionId && (!!selectedGroup?.sessionIds.includes(activeSessionId) || !!initialCollaborationGroupId && (!directCollaborationGroup || !!preferenceError));
+  // A saved dock can outlive its group. Release the split without discarding
+  // drafts or saved preferences: a temporary missing replica may return.
+  useEffect(() => {
+    const key = initialCollaborationGroupId ?? 'workbench';
+    const state = useCollaborationPanelDock.getState();
+    if (unavailableGroup) {
+      if (state.docks[key]) state.setDock(key, null);
+    } else if (directCollaborationGroup && floating && panelMode === 'docked' && panelState?.dock && !state.docks[key]) {
+      state.setDock(key, panelState.dock);
+    }
+  }, [unavailableGroup, directCollaborationGroup, floating, panelMode, panelState, initialCollaborationGroupId, dock]);
 
   const changeFloating = async (next: boolean, close = false) => {
     if (savingFloating || (next && !selectedGroup)) return;
@@ -251,7 +263,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
           }} onPointerCancel={() => { drag.current = null; }}>
           <Bot size={docked ? 13 : 17} className="shrink-0 text-primary" />
           <div className="min-w-0 flex-1">
-            <h2 className={`${floating ? 'truncate text-[12px]' : 'text-[14px]'} font-semibold text-foreground`} title={docked ? '拖动标题移动面板；放在边缘拆分，中央交换' : directCollaborationGroup?.name}>{directCollaborationGroup ? `${directCollaborationGroup.name} · 协作消息` : 'Agent 工作台'}</h2>
+            <h2 className={`${floating ? 'truncate text-[12px]' : 'text-[14px]'} font-semibold text-foreground`} title={docked ? '拖动标题移动面板；放在边缘拆分，中央交换' : directCollaborationGroup?.name}>{directCollaborationGroup ? `${directCollaborationGroup.name} · 协作消息` : initialCollaborationGroupId ? '协作消息' : 'Agent 工作台'}</h2>
             {!docked && <p className="text-[10px] text-muted-foreground">{floating ? '引用、文件路径和粘贴优先加入此处' : directCollaborationGroup ? '选择成员，发送协作消息' : '自动任务、会话协作与全文恢复'}</p>}
           </div>
           {!docked && tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '完整面板' : '常驻浮窗'}</button>}
@@ -263,7 +275,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         </header>
         {floating && !docked && <div className="flex flex-wrap items-center gap-1 border-b border-border/15 px-3 py-1.5">
           <button type="button" disabled={savingFloating} aria-pressed={panelMode === 'floating'} className={`${choiceClass} ${panelMode === 'floating' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('floating')}>浮窗</button>
-          <button type="button" disabled={savingFloating || !activeSessionId} aria-pressed={panelMode === 'docked'} className={`${choiceClass} ${panelMode === 'docked' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('docked')}>占用分屏</button>
+          <button type="button" disabled={savingFloating || !activeSessionId || unavailableGroup} aria-pressed={panelMode === 'docked'} className={`${choiceClass} ${panelMode === 'docked' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('docked')}>占用分屏</button>
 
         </div>}
         {!floating && <nav className="flex gap-1 border-b border-border/15 px-3 py-2">
@@ -292,8 +304,13 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         {notice && !floating && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className={`min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain ${floating ? 'p-3' : 'p-4'}`}>
           {tab === 'automation' && <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />}
+          {tab === 'collaboration' && !panelState && !preferenceError && <p role="status" className="text-[11px] text-muted-foreground">正在恢复消息面板…</p>}
+          {tab === 'collaboration' && initialCollaborationGroupId && !directCollaborationGroup && <div role="status" className="space-y-2 text-[11px] text-muted-foreground">
+            <p>{sessionsState === 'loading' ? '正在加载协作组…' : sessionsState === 'error' ? '协作组加载失败，恢复连接后可重试。' : '此协作组暂不可用，已释放分屏位置。草稿和布局偏好仍保留。'}</p>
+            {sessionsState !== 'loading' && <button className={buttonClass} onClick={() => void refresh()}>重新加载</button>}
+          </div>}
           {preferenceError && <p role="alert" className="text-[11px] text-destructive">{preferenceError}</p>}
-          {tab === 'collaboration' && panelState && <CollaborationTab notice={notice} initialDrafts={latestDrafts.current} onDraftChange={(groupId, draft) => { latestDrafts.current = { ...latestDrafts.current, [groupId]: draft }; }} selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && panelState && (!initialCollaborationGroupId || directCollaborationGroup) && <CollaborationTab notice={notice} initialDrafts={latestDrafts.current} onDraftChange={(groupId, draft) => { latestDrafts.current = { ...latestDrafts.current, [groupId]: draft }; }} selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
         {floating && !docked && <button type="button" aria-label="调整协作浮窗大小" className="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize touch-none text-muted-foreground hover:text-primary"
@@ -819,7 +836,7 @@ function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupI
             event.preventDefault(); void send();
           }
         }} onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); void insertFiles(files); } }} className={`${inputClass} min-h-16 max-h-48 resize-y`} value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入消息，可粘贴引用或文件…" /></label>
-        <div className="mt-2 flex items-center justify-between gap-3"><p role="status" aria-live="polite" title={floating && notice ? notice : undefined} className={`min-w-0 flex-1 text-[9px] leading-relaxed ${floating ? 'truncate' : ''} ${floating && notice ? 'text-primary' : 'text-muted-foreground'}`}>{uploadingFiles > 0 ? '正在准备文件路径…' : floating && notice ? notice : selectedGroup.federated ? '跨服务消息由当前客户端转发，请保持窗口或网页运行；手机后台可能暂停，返回后继续同步。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || uploadingFiles > 0 || !content.trim() || !recipients.length} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} title="发送（⌘ / Ctrl + Enter）" onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
+        <div className="mt-2 flex items-center justify-between gap-3"><p role="status" aria-live="polite" title={floating && notice ? notice : undefined} className={`min-w-0 flex-1 text-[9px] leading-relaxed ${floating ? 'truncate' : ''} ${floating && notice ? 'text-primary' : 'text-muted-foreground'}`}>{uploadingFiles > 0 ? '正在准备文件路径…' : floating && notice ? notice : selectedGroup.federated ? '跨服务消息提交后可查看送达结果；若提示未完成连接登记，请先完成两端登记。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || uploadingFiles > 0 || !content.trim() || !recipients.length} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} title="发送（⌘ / Ctrl + Enter）" onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
       </section>
     </>}
   </div>;
