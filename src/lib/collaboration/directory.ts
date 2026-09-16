@@ -1,6 +1,7 @@
 import type { CollaborationGroup, OrchestrationSession } from '../terminal/api';
 
 export interface CollaborationPeerService {
+  serviceId?: string;
   origin: string;
   label: string;
   connected: boolean;
@@ -80,7 +81,7 @@ export class CollaborationDirectory {
     }
     for (const session of this.remote) sessions.set(session.sessionId, session);
     for (const session of this.local.sessions) sessions.set(session.sessionId, session);
-    return { groups: this.local.groups, sessions: [...sessions.values()], peers: this.peers, capabilities: this.local.capabilities };
+    return { groups: this.local.groups.map(group => ({ ...group, remoteSessions: group.remoteSessions?.map(session => sessions.get(session.sessionId) ?? session) })), sessions: [...sessions.values()], peers: this.peers, capabilities: this.local.capabilities };
   }
 
   private emit(): void {

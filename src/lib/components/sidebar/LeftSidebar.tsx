@@ -1,3 +1,4 @@
+import { collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { SessionNoticeUnreadBadge } from '../SessionNoticeUnreadBadge';
@@ -1653,7 +1654,7 @@ export function LeftSidebar(
           )}
         </Droppable>
         {collaboration.remoteSessions?.map((remote) => <button
-          key={remote.sessionId} type="button" title={`${remote.serviceLabel ?? remote.serviceOrigin} · ${remote.serviceConnected === false ? '服务不可达，消息尚未送达' : remote.status}`}
+          key={remote.sessionId} type="button" title={`${collaborationServiceLabel(remote)} · ${remote.serviceConnected === false ? '服务不可达，消息尚未送达' : remote.status}`}
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
           onClick={() => {
             void openRemoteSession(remote.sessionId).catch(() => {
@@ -1662,7 +1663,7 @@ export function LeftSidebar(
           }}>
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${remote.serviceConnected === false ? 'bg-muted-foreground' : 'bg-primary'}`} />
           <span className="min-w-0 flex-1 truncate">{remote.name}</span>
-          <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{remote.serviceLabel ?? remote.serviceOrigin}</span>
+          <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{collaborationServiceLabel(remote)}</span>
           {remote.serviceConnected === false && <span className="shrink-0 text-[9px]">不可达</span>}
         </button>)}
         {/* Keep the workgroup drop area below the rows, never over a sortable member. */}

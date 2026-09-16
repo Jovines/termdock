@@ -1,3 +1,4 @@
+import { collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { collaborationGroupPreferences, collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { focusCollaborationInput, registerCollaborationInput } from '../../collaboration/inputTarget';
@@ -296,7 +297,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
             : peerState.state === 'partial' ? '部分服务的协作会话暂不可用；已有成员会保留，恢复后继续同步。'
               : '其他服务的会话暂时加载失败；当前服务内仍可组队。'}
           {peerState.error && <span className="mt-1 block break-words text-[10px]">{peerState.error}</span>}
-          {peerState.services?.filter(service => !service.connected && service.error).map(service => <span key={service.origin} className="mt-1 block break-words text-[10px]">{service.label}：{service.error}</span>)}
+          {peerState.services?.filter(service => !service.connected && service.error).map(service => <span key={service.origin} className="mt-1 block break-words text-[10px]">{collaborationServiceLabel({ serviceLabel: service.label, serviceOrigin: service.origin })}：{service.error}</span>)}
           {['partial', 'error'].includes(peerState.state) && <button className={`${buttonClass} ml-2`} onClick={retryCollaborationPeers}>重试跨服务连接</button>}
         </div>}
         {launcherError && <div className="mx-4 mt-3 text-[11px] text-muted-foreground">{launcherError}</div>}
@@ -825,7 +826,7 @@ function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupI
         else { const text = event.dataTransfer.getData("text/plain") || event.dataTransfer.getData("text/uri-list"); if (text) setContent(current => current + (current ? "\n" : "") + text); }
       }} ref={messageComposerRef} className={floating ? '' : 'border-t border-primary/20 bg-primary/5 px-3 py-3'}>{!floating && <h4 className="text-[11px] font-medium text-foreground">发送给成员</h4>}<div className={floating ? 'space-y-2' : 'mt-2 space-y-2'}>
           <fieldset className="min-w-0"><legend className="mb-1 text-[10px] text-muted-foreground">接收人（可多选）</legend><div className="flex flex-wrap gap-1">
-            {[{ id: '*', label: '全组成员' }, ...selectedGroup.sessionIds.map(id => ({ id, label: collaborationSessionName(sessions.find(session => session.sessionId === id)) ?? `${id.slice(0, 8)}（离线）` }))].map(({ id, label }) => {
+            {[{ id: '*', label: '全组成员' }, ...selectedGroup.sessionIds.map(id => ({ id, label: collaborationSessionName(sessions.find(session => session.sessionId === id), sessions.filter(session => selectedGroup.sessionIds.includes(session.sessionId))) ?? `${id.slice(0, 8)}（离线）` }))].map(({ id, label }) => {
               const selected = id === '*' ? targetSessionIds === null : targetSessionIds?.includes(id) ?? false;
               return <button key={id} type="button" aria-pressed={selected} onClick={() => setTargetSessionIds(current => id === '*' ? null : current?.includes(id) ? current.filter(target => target !== id) : [...(current ?? []), id])} className={`${choiceClass} max-w-full gap-1 ${selected ? 'border-primary/40 bg-primary/15 text-primary' : 'border-border/20 bg-surface-2 text-muted-foreground hover:text-foreground'}`}>{selected && <Check size={12} aria-hidden="true" className="shrink-0" />}<span className="break-words text-left">{label}</span></button>;
             })}
@@ -862,8 +863,8 @@ export function collaborationMemberOptions(group: CollaborationGroup | null, ses
 
 function ServiceBadge({ session }: { session: OrchestrationSession }) {
   if (!session.serviceOrigin || session.serviceOrigin === window.location.origin) return null;
-  return <span title={session.serviceOrigin} className="inline-flex max-w-28 shrink-0 items-center gap-1 rounded border border-border/20 px-1 py-0.5 text-[9px] text-muted-foreground">
-    <ExternalLink size={9} /><span className="truncate">{session.serviceLabel ?? session.serviceOrigin}</span>
+  return <span className="inline-flex max-w-28 shrink-0 items-center gap-1 rounded border border-border/20 px-1 py-0.5 text-[9px] text-muted-foreground">
+    <ExternalLink size={9} /><span className="truncate">{collaborationServiceLabel(session)}</span>
   </span>;
 }
 
@@ -871,8 +872,11 @@ function collaborationSessionStatus(session: OrchestrationSession): string {
   return session.serviceConnected === false ? '服务不可达' : humanSessionStatus(session.status);
 }
 
-function collaborationSessionName(session?: OrchestrationSession): string | undefined {
-  return session ? `${session.name}${session.serviceOrigin && session.serviceOrigin !== window.location.origin ? ` · ${session.serviceLabel ?? session.serviceOrigin}` : ''}` : undefined;
+function collaborationSessionName(session?: OrchestrationSession, peers: OrchestrationSession[] = []): string | undefined {
+  if (!session) return undefined;
+  const duplicate = peers.some(peer => peer.sessionId !== session.sessionId && peer.name.trim() === session.name.trim());
+  const alias = session.sessionId.startsWith('remote:') ? collaborationServiceLabel(session) : '本机服务';
+  return duplicate ? `${session.name} · ${alias}` : session.name;
 }
 
 async function openCollaborationSession(session: OrchestrationSession): Promise<void> {
@@ -902,7 +906,7 @@ function messageKindLabel(kind: CollaborationMessageKind): string {
 }
 
 function collapseCollaborationMessages(messages: CollaborationMessage[], sessions: OrchestrationSession[]) {
-  const sessionsById = new Map(sessions.map((session) => [session.sessionId, collaborationSessionName(session)!]));
+  const sessionsById = new Map(sessions.map((session) => [session.sessionId, collaborationSessionName(session, sessions)!]));
   const grouped = new Map<string, {
     key: string; kind: CollaborationMessageKind; content: string; createdAt: number;
     fromName: string; toNames: string[]; status: CollaborationMessage['status']; responseKind?: CollaborationMessage['responseKind']; task?: CollaborationMessage['task']; failureReason?: string | null;

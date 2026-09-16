@@ -1,3 +1,5 @@
+import { collaborationServiceLabel } from '../collaboration/display';
+import { listServiceConnections, observeServiceConnections } from '../services/serviceDirectory';
 import { CollaborationDirectory, remoteSessionAddress, type CollaborationDirectoryData } from '../collaboration/directory';
 import { selectedTarget } from '../federation/clientScope';
 import { prepareEncryptedDownload } from './secureDownload';
@@ -3780,6 +3782,7 @@ export interface CollaborationGroupInput {
 let collaborationDirectory: CollaborationDirectory | null = null;
 let collaborationScope = '';
 const collaborationListeners = new Set<(data: CollaborationGroupsResponse) => void>();
+observeServiceConnections(() => collaborationDirectory?.refreshPeers(true));
 
 function readCurrentCollaborationGroups(): Promise<CollaborationGroupsResponse> {
   return operationsRequest('/collaboration-groups', { signal: AbortSignal.timeout(10_000) });
@@ -3793,7 +3796,21 @@ function currentCollaborationDirectory(): CollaborationDirectory {
     collaborationDirectory?.dispose();
     collaborationScope = scope;
     collaborationDirectory = new CollaborationDirectory({ origin, readLocal: readCurrentCollaborationGroups,
-      readPeers: async () => ({ ...await operationsRequest<import('../collaboration/directory').CollaborationPeers>('/collaboration-directory', { signal: AbortSignal.timeout(10_000) }), origin }),
+      readPeers: async () => {
+        const data = await operationsRequest<import('../collaboration/directory').CollaborationPeers>('/collaboration-directory', { signal: AbortSignal.timeout(10_000) });
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const saved = await Promise.race([listServiceConnections().catch(() => []), new Promise<Awaited<ReturnType<typeof listServiceConnections>>>(resolve => { timeout = setTimeout(() => resolve([]), 1000); })]).finally(() => clearTimeout(timeout));
+        const labels = new Map((data.services ?? []).map(service => {
+          // Aliases belong to this user's service directory, not to the remote
+          // node. Prefer identity: localhost and entry URLs are not global IDs.
+          const match = saved.find(item => service.serviceId && item.targetPeerId === service.serviceId)
+            ?? saved.find(item => !service.serviceId && (item.serviceOrigin || item.url) === service.origin);
+          const label = collaborationServiceLabel({ serviceLabel: match?.label || service.label, serviceOrigin: service.origin });
+          return [service.origin, label] as const;
+        }));
+        return { ...data, origin, services: data.services?.map(service => ({ ...service, label: labels.get(service.origin) ?? service.label })),
+          sessions: data.sessions.map(session => ({ ...session, serviceLabel: labels.get(session.serviceOrigin ?? '') ?? session.serviceLabel })) };
+      },
       peerProtocol: 'v2' });
     collaborationDirectory.subscribe((data) => { for (const listener of collaborationListeners) listener(data); });
   }
