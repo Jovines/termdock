@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError, canonicalShortId } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'rules' | 'help';
+  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
   target?: string; message?: string; groupId?: string; sessionId?: string; sessionIds?: string[]; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
@@ -26,6 +26,14 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   Scheduled self-reminders: td automation create --name 'Review progress' --every 30 --self --prompt 'Review group progress and continue'
   Scheduling help: td automation --help
   status | capabilities
+  transport list (server-owned remote session directory)
+  transport invite --origin https://this-service:9834
+    Create a 10-minute invitation granting collaboration directory/group access.
+    Transfer its JSON privately to the other machine; no browser is required.
+  transport accept --origin https://this-service:9834 --file invitation.json
+    Pair both services once; subsequent discovery, groups and delivery are automatic.
+  group save --file group.json
+    JSON: {name, sessionIds, id?, expectedUpdatedAt?}; same service API as the UI.
   transport info
     Print this service's public identity and CA fingerprint (no private keys).
   transport register <group-id> --file <nodes.json>
@@ -111,7 +119,7 @@ interface RoleGroupView {
 }
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help']);
-const VALUE_OPTIONS = new Set(['session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version']);
+const VALUE_OPTIONS = new Set(['session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -136,7 +144,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     positional.push('capture');
   }
   const action = (requestedAction === 'capture' ? 'drive' : requestedAction === 'traits' ? 'role' : requestedAction) as CollaborationCommand['action'];
-  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (typeof options.session === 'string' && !options.session.trim()) throw new Error('--session requires a non-empty full Termdock session id');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
@@ -153,12 +161,16 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     if (!command.groupId || !['get', 'set', 'clear'].includes(command.operation ?? '')) throw new Error('Usage: td collab rules get|set|clear <group-id>');
     if (command.operation === 'set' ? [Boolean(command.message), Boolean(options.file), Boolean(options.stdin)].filter(Boolean).length !== 1
       : Boolean(command.message || options.file || options.stdin)) throw new Error('rules set requires inline text, --file or --stdin');
+  } else if (action === 'group') {
+    command.operation = positional.shift();
+    if (command.operation !== 'save' || positional.length || !options.file) throw new Error('Usage: td collab group save --file group.json');
   } else if (action === 'transport') {
     command.operation = positional.shift(); command.groupId = positional.shift();
-    if (positional.length || !['info', 'register'].includes(command.operation ?? '')
-      || (command.operation === 'info' ? command.groupId || options.file : !command.groupId || !options.file)) {
-      throw new Error('Usage: td collab transport info | transport register <group-id> --file <nodes.json>');
-    }
+    if (positional.length || !['info', 'list', 'invite', 'accept', 'register'].includes(command.operation ?? '')) throw new Error('Usage: td collab transport info|list|invite|accept|register');
+    if (command.operation === 'register') {
+      if (!command.groupId || !options.file || options.origin) throw new Error('transport register requires <group-id> --file nodes.json');
+    } else if (command.groupId || (['info', 'list'].includes(command.operation!) ? options.file || options.origin
+      : !options.origin || (command.operation === 'accept' ? !options.file : options.file))) throw new Error('transport invite needs --origin; accept needs --origin and --file');
   } else if (action === 'message') {
     command.operation = positional.shift(); command.target = positional.shift();
     if (!['get', 'watch', 'confirm-shell'].includes(command.operation ?? '') || !command.target || positional.length) throw new Error('Usage: td collab message get|watch|confirm-shell <id>');
@@ -203,7 +215,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session']);
   const byAction: Record<string, string[]> = {
-    rules: ['file', 'stdin', 'if-version'], transport: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
+    rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
@@ -295,13 +307,20 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       if (o.text) io.write(`群规版本：${body.instructions?.version ?? '未设置'}\n${body.instructions?.text ?? ''}`); else output(body);
       return 0;
     }
+    if (command.action === 'group') {
+      if (fs.statSync(String(o.file)).size > 64 * 1024) throw new Error('Group input exceeds 64 KiB');
+      output(await request('POST', '/group', { input: JSON.parse(fs.readFileSync(String(o.file), 'utf8')) })); return 0;
+    }
     if (command.action === 'transport') {
       if (command.operation === 'info') output(await request('GET', '/transport'));
+      else if (command.operation === 'list') output(await request('GET', '/directory'));
+      else if (command.operation === 'invite') output(await request('POST', '/transport/invite', { origin: o.origin }));
       else {
         if (fs.statSync(String(o.file)).size > 64 * 1024) throw new Error('Peer registration is too large');
         const raw = fs.readFileSync(String(o.file), 'utf8');
         if (Buffer.byteLength(raw) > 64 * 1024) throw new Error('Peer registration is too large');
-        output(await request('POST', '/transport', { groupId: command.groupId, nodes: JSON.parse(raw) }));
+        output(await request('POST', command.operation === 'accept' ? '/transport/accept' : '/transport', command.operation === 'accept'
+          ? { origin: o.origin, invitation: JSON.parse(raw) } : { groupId: command.groupId, nodes: JSON.parse(raw) }));
       }
       return 0;
     }

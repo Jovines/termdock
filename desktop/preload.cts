@@ -44,11 +44,6 @@ function clearNativeDropState(target: HTMLElement): void {
 contextBridge.exposeInMainWorld('termdockDesktop', {
   platform: process.platform,
   deviceInfo: (): Promise<Record<string, string>> => ipcRenderer.invoke('desktop:device-info'),
-  collaboration: { protocolVersion: 2, peers: true, save: true },
-  collaborationPeers: () => ipcRenderer.invoke('desktop:collaboration-peers'),
-  collaborationList: () => ipcRenderer.invoke('desktop:collaboration-list'),
-  collaborationSave: (input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number; expectedOrigin?: string }) => ipcRenderer.invoke('desktop:collaboration-save', input),
-  collaborationRemove: (id: string) => ipcRenderer.invoke('desktop:collaboration-remove', id),
   collaborationFocus: (id: string) => ipcRenderer.invoke('desktop:collaboration-focus', id),
   notificationDeliveryConfirmation: true,
   snapshot: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:snapshot'),

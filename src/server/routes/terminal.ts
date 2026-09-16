@@ -1,4 +1,3 @@
-import { assertPeerRegistrationAuthority } from '../agent/collaborationPeerTransport.js';
 import { progressRoutes } from '../notifications/progressRoutes.js';
 import { ensureNodePty } from '../utils/ensureNodePty.js';
 import { PtySpawnBackoff, PtySpawnDeferredError } from '../utils/ptySpawnBackoff.js';
@@ -111,7 +110,7 @@ import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { collaborationRoutes } from '../agent/collaborationRoutes.js';
-import { COLLAB_LIMITS, extrasFromBody, type MessageFragment, type TransportDiagnostic } from '../agent/collaborationProtocol.js';
+import { extrasFromBody } from '../agent/collaborationProtocol.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind, type CollaborationMessage } from '../agent/collaborationStore.js';
 import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { ambiguousIdMessage } from '../agent/collaborationProtocol.js';
@@ -6364,21 +6363,18 @@ router.delete('/operations/automations/:automationId', (req, res) => {
   res.status(204).send();
 });
 
-// Authenticated desktop connections exchange only collaboration data; no peer credentials
-// or arbitrary remote URLs are accepted by the server.
-router.get('/operations/collaboration-federation', (req, res) => {
-  res.json({ protocolVersion: 2, serverTransport: req.app.locals.collaborationNode, limits: COLLAB_LIMITS, ...collaborationStore.federationSnapshot(),
-    sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot) });
+// The old native/browser relay may still poll after a CLI-only upgrade. It
+// receives a fast, explicit refusal and cannot duplicate the server worker.
+router.all(['/operations/collaboration-federation', '/operations/collaboration-peers'], (_req, res) => {
+  res.status(410).json({ code: 'CLIENT_RELAY_REMOVED', error: '协作由服务端处理，请重新加载服务页面' });
 });
-
-router.post('/operations/collaboration-peers', (req, res) => {
-  try {
-    assertPeerRegistrationAuthority(req);
-    if (!req.app.locals.collaborationTransport) return res.status(503).json({ error: 'COLLABORATION_UNAVAILABLE' });
-    req.app.locals.collaborationTransport.configure(req.body.groupId, req.body.localOrigin, req.body.nodes);
-    res.json({ ok: true });
-  } catch (error) { res.status(400).json({ error: getErrorMessage(error) }); }
+router.get('/operations/collaboration-directory', (req, res) => {
+  const service = req.app.locals.collaborationService;
+  if (!service) return res.status(503).json({ error: '协作服务正在启动，请稍后重试' });
+  void service.refresh();
+  res.json(service.directory());
 });
+export function collaborationDirectorySessions() { return globalSessionState.sessions.map(orchestrationSessionSnapshot); }
 
 export function collaborationLocalActivity() {
   return globalSessionState.sessions.map(record => {
@@ -6389,37 +6385,12 @@ export function collaborationLocalActivity() {
 }
 export function deliverPeerCollaboration(sessionId: string): void { void tryDeliverCollaborationInbox(sessionId); }
 
-router.post('/operations/collaboration-federation', (req, res) => {
-  try {
-    const group = req.body?.group;
-    if (!group || !Array.isArray(group.remoteSessions)) throw new Error('跨服务工作组无效');
-    const remoteIds = new Set(group.remoteSessions.map((session: { sessionId: string }) => session.sessionId));
-    const localIds = new Set(globalSessionState.sessions.map((session) => session.sessionId));
-    const existing = collaborationStore.getGroup(group.id);
-    if (req.body.expectedUpdatedAt !== undefined && req.body.expectedUpdatedAt !== existing?.updatedAt) {
-      return res.status(409).json({ code: 'GROUP_CHANGED', error: '协作组已被修改，请重新打开成员管理后再保存' });
-    }
-    const retainedIds = new Set(existing?.sessionIds ?? []);
-    if (!group.deleted && group.sessionIds.some((id: string) => !localIds.has(id) && !remoteIds.has(id) && !retainedIds.has(id))) {
-      throw new Error('工作组包含不存在的本服务会话，请刷新成员列表');
-    }
-    collaborationStore.mergeFederatedGroup(group);
-    collaborationStore.mergeFederatedMessages(Array.isArray(req.body.messages) ? req.body.messages : []);
-    const fragments = Array.isArray(req.body.fragments) ? req.body.fragments as MessageFragment[] : [];
-    if (fragments.length > 25 || fragments.some((fragment) => fragment.group_id !== group.id)) throw new Error('无效消息分片');
-    const fragmentReceipts = fragments.map((fragment) => collaborationStore.acceptFragment(fragment));
-    for (const entry of Array.isArray(req.body.transport) ? req.body.transport as Array<{ message_id: string; diagnostic: TransportDiagnostic; failure_reason?: string }> : []) {
-      if (collaborationStore.getMessage(entry.message_id)?.groupId !== group.id || !entry.diagnostic || !Number.isFinite(entry.diagnostic.checked_at) || !Number.isInteger(entry.diagnostic.attempt_count) || entry.diagnostic.attempt_count < 0) continue;
-      collaborationStore.recordTransport(entry.message_id, entry.diagnostic);
-      if (entry.failure_reason) collaborationStore.fail(entry.message_id, entry.failure_reason);
-    }
-    for (const id of group.sessionIds) if (localIds.has(id)) tryDeliverCollaborationInbox(id);
-    res.json({ protocolVersion: 2, ...collaborationStore.federationSnapshot(), fragmentReceipts });
-  } catch (error) { res.status(400).json({ error: getErrorMessage(error) }); }
-});
-
 router.use('/operations', collaborationGroupRoutes({ store: collaborationStore,
-  sessions: () => globalSessionState.sessions.map(orchestrationSessionSnapshot) }));
+  sessions: () => globalSessionState.sessions.map(orchestrationSessionSnapshot),
+  save: (req, input) => {
+    if (!req.app.locals.collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+    return req.app.locals.collaborationService.save(input);
+  } }));
 
 /** Group id from a URL param: the short id a terminal shows resolves to
  *  its full id, an ambiguous prefix is refused with 409, and anything else is

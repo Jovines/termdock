@@ -172,8 +172,10 @@ export class CollaborationPeerTransport {
     const local = nodes.find(n => n.serviceId === this.options.serviceId);
     if (!local || local.origin !== localOrigin) throw new Error('LOCAL_NODE_MISMATCH');
     for (const node of nodes) validateCollaborationNode(node);
-    const peers = nodes.filter(n => n.serviceId !== this.options.serviceId && group.sessionIds.some(id => id.startsWith(`remote:${encodeURIComponent(n.origin)}:`)));
-    const next = [...this.bindings.filter(b => b.groupId !== groupId), ...peers.map(peer => ({ groupId, localOrigin, peer }))];
+    const peers = nodes.filter(n => n.serviceId !== this.options.serviceId && group.sessionIds.some(id => id.startsWith(`remote:${encodeURIComponent(n.origin)}:`)))
+      .map(n => ({ serviceId: n.serviceId, origin: n.origin, ...(n.caFingerprint256 ? { caFingerprint256: n.caFingerprint256 } : {}) }));
+    const next = [...this.bindings.filter(b => b.groupId !== groupId), ...peers.map(peer => ({ groupId, localOrigin, peer }))]
+      .sort((a, b) => a.groupId.localeCompare(b.groupId) || a.peer.serviceId.localeCompare(b.peer.serviceId));
     if (JSON.stringify(next) !== JSON.stringify(this.bindings)) {
       mkdirSync(dirname(this.options.file), { recursive: true, mode: 0o700 });
       const temp = `${this.options.file}.${process.pid}.tmp`;
@@ -184,6 +186,7 @@ export class CollaborationPeerTransport {
     }
     this.notify();
   }
+  registeredNodes(): CollaborationNode[] { return [...new Map(this.bindings.map(binding => [binding.peer.serviceId, binding.peer])).values()]; }
   canRoute(subjectId: string, targetId: string): boolean {
     return this.bindings.some(b => b.peer.serviceId === subjectId && this.live(b)
       && this.bindings.some(target => target.groupId === b.groupId && target.peer.serviceId === targetId && this.live(target)));

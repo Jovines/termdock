@@ -52,6 +52,29 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     if (!req.app.locals.collaborationNode) throw new Error('COLLABORATION_UNAVAILABLE');
     res.json({ ok: true, node: req.app.locals.collaborationNode });
   }));
+  router.get('/directory', run((req, res) => {
+    const service = req.app.locals.collaborationService;
+    if (!service) throw new Error('COLLABORATION_UNAVAILABLE');
+    void service.refresh(); res.json({ ok: true, ...service.directory() });
+  }));
+  router.post('/group', run(async (req, res, sessionId) => {
+    assertPeerRegistrationAuthority(req);
+    const input = req.body.input;
+    if (!input || !Array.isArray(input.sessionIds) || !input.sessionIds.includes(sessionId)) throw new Error('GROUP_MUST_INCLUDE_CALLER');
+    if (input.id && !store.groupsForSession(sessionId).some(group => group.id === input.id)) throw new Error('GROUP_NOT_FOUND');
+    if (!req.app.locals.collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+    res.json({ ok: true, ...await req.app.locals.collaborationService.save(input) });
+  }));
+  router.post('/transport/invite', run((req, res) => {
+    assertPeerRegistrationAuthority(req);
+    if (!req.app.locals.collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+    res.json(req.app.locals.collaborationService.invite(String(req.body.origin ?? '')));
+  }));
+  router.post('/transport/accept', run(async (req, res) => {
+    assertPeerRegistrationAuthority(req);
+    if (!req.app.locals.collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+    res.json(await req.app.locals.collaborationService.accept(String(req.body.origin ?? ''), req.body.invitation));
+  }));
   router.post('/transport', run((req, res, sessionId) => {
     assertPeerRegistrationAuthority(req);
     const resolved = store.resolveGroupId(String(req.body.groupId ?? ''));

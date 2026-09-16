@@ -1,6 +1,7 @@
+import { CollaborationService } from './agent/collaborationService.js';
 import { X509Certificate } from 'node:crypto';
 import { CollaborationPeerTransport, connectCollaborationRpc } from './agent/collaborationPeerTransport.js';
-import { collaborationStore, deliverPeerCollaboration, collaborationLocalActivity } from './routes/terminal.js';
+import { collaborationStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions } from './routes/terminal.js';
 import { setPushTargetPeerId } from './notifications/pushService.js';
 import { desktopDirectTargets } from './federation/desktopTargets.js';
 import { createOpenAccessRouter } from './federation/openAccess.js';
@@ -475,6 +476,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     runtimeMonitor,
   });
   const { server, scheme } = createServerForApp(app, options);
+  let collaborationService: CollaborationService | undefined;
   let collaborationTransport: CollaborationPeerTransport | undefined;
   let entrySubjectAllowed = (_subjectId: string) => false;
   let routeInvitations: RouteInvitationStore | undefined;
@@ -509,6 +511,10 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket,
   }, {
+    collaborationService: (subjectId, packet) => {
+      if (!collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+      return collaborationService.receive(subjectId, packet);
+    },
     collaborationExchange: (subjectId, packet) => {
       if (!collaborationTransport) throw new Error('COLLABORATION_UNAVAILABLE');
       return collaborationTransport.receive(subjectId, packet);
@@ -563,6 +569,12 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     let caFingerprint256: string | undefined;
     if (options.httpsCaPath) try { caFingerprint256 = new X509Certificate(fs.readFileSync(options.httpsCaPath)).fingerprint256; } catch { /* System TLS trust remains required. */ }
     app.locals.collaborationNode = { serviceId: runtime.serviceId, ...(caFingerprint256 ? { caFingerprint256 } : {}) };
+    collaborationService = new CollaborationService({ file: path.join(homedir(), '.termdock', 'federation', 'collaboration-services.json'),
+      store: collaborationStore, transport: collaborationTransport, node: () => app.locals.collaborationNode,
+      sessions: collaborationDirectorySessions, connect: peer => connectCollaborationRpc(runtime.identity, peer) });
+    app.locals.collaborationService = collaborationService;
+    collaborationService.start();
+    server.once('close', () => collaborationService?.close());
     collaborationTransport.start();
     server.once('close', () => collaborationTransport?.close());
     entrySubjectAllowed = subjectId => runtime.store.authorize({ subjectId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed;

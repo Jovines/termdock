@@ -1,4 +1,3 @@
-import { browserCollaboration } from '../collaboration/browserFederation';
 import { CollaborationDirectory, remoteSessionAddress, type CollaborationDirectoryData } from '../collaboration/directory';
 import { selectedTarget } from '../federation/clientScope';
 import { prepareEncryptedDownload } from './secureDownload';
@@ -3780,7 +3779,6 @@ export interface CollaborationGroupInput {
 }
 let collaborationDirectory: CollaborationDirectory | null = null;
 let collaborationScope = '';
-let collaborationBridge: typeof window.termdockDesktop;
 const collaborationListeners = new Set<(data: CollaborationGroupsResponse) => void>();
 
 function readCurrentCollaborationGroups(): Promise<CollaborationGroupsResponse> {
@@ -3791,18 +3789,12 @@ function currentCollaborationDirectory(): CollaborationDirectory {
   const target = selectedTarget();
   const origin = target?.serviceOrigin ?? window.location?.origin ?? '';
   const scope = `${target?.targetPeerId ?? ''}:${origin}`;
-  const bridge = window.termdockDesktop;
-  if (!collaborationDirectory || scope !== collaborationScope || bridge !== collaborationBridge) {
+  if (!collaborationDirectory || scope !== collaborationScope) {
     collaborationDirectory?.dispose();
     collaborationScope = scope;
-    collaborationBridge = bridge;
-    const compatible = !bridge?.collaboration || bridge.collaboration.protocolVersion === 2;
-    const browser = bridge ? undefined : browserCollaboration();
-    const readPeers = bridge?.collaboration
-      ? compatible && bridge.collaboration.peers && bridge.collaborationPeers ? () => bridge.collaborationPeers!() : undefined
-      : bridge?.collaborationList ? () => bridge.collaborationList!() : browser ? () => browser.peers(origin) : undefined;
-    collaborationDirectory = new CollaborationDirectory({ origin, peerOrigin: bridge ? window.location.origin : undefined, readLocal: readCurrentCollaborationGroups, readPeers,
-      peerProtocol: !compatible || (bridge?.collaboration?.peers && !bridge.collaborationPeers) ? 'unsupported' : bridge?.collaboration?.peers || browser ? 'v2' : 'legacy' });
+    collaborationDirectory = new CollaborationDirectory({ origin, readLocal: readCurrentCollaborationGroups,
+      readPeers: async () => ({ ...await operationsRequest<import('../collaboration/directory').CollaborationPeers>('/collaboration-directory', { signal: AbortSignal.timeout(10_000) }), origin }),
+      peerProtocol: 'v2' });
     collaborationDirectory.subscribe((data) => { for (const listener of collaborationListeners) listener(data); });
   }
   return collaborationDirectory;
@@ -3842,32 +3834,7 @@ export async function saveCollaborationGroup(input: CollaborationGroupInput): Pr
     throw new TerminalApiError('所选会话已变化，请刷新后重新选择；尚未保存任何修改', 409);
   }
   const payload = { ...input, sessionIds, ...(existing ? { expectedUpdatedAt: input.expectedUpdatedAt ?? existing.updatedAt } : {}) };
-  let result: { group: CollaborationGroup };
-  if (additions.length) {
-    const bridge = window.termdockDesktop;
-    if (!bridge) {
-      const browser = browserCollaboration();
-      if (!browser) throw new TerminalApiError('跨服务连接尚未就绪，请重新打开页面', 409);
-      result = await browser.save(selectedTarget()?.serviceOrigin ?? window.location.origin, payload);
-    } else {
-      if (!bridge.collaborationSave || (bridge.collaboration && (bridge.collaboration.protocolVersion !== 2 || !bridge.collaboration.save))) {
-        throw new TerminalApiError('当前 Mac 客户端需要更新后才能添加跨服务成员；当前服务内仍可组队', 409);
-      }
-      if (existing && !existing.federated && bridge.collaboration?.protocolVersion !== 2) {
-        throw new TerminalApiError('将已有组转换为跨服务组需要更新 Mac 客户端；原组和记录均未修改', 409);
-      }
-      // v2 native IPC routes by its owning window, including localhost and entry
-      // aliases. The target service's display origin need not equal that address.
-      // Writes never fall back or retry: the first write may have succeeded.
-      const expectedOrigin = window.location.origin;
-      if (!bridge.collaboration && selectedTarget()?.serviceOrigin && selectedTarget()!.serviceOrigin !== expectedOrigin) {
-        throw new TerminalApiError('旧版客户端无法在入口页面中添加跨服务成员，请更新客户端后重试', 409);
-      }
-      result = await bridge.collaborationSave({ ...payload, expectedOrigin });
-    }
-  } else {
-    result = await operationsRequest('/collaboration-groups', { method: 'POST', body: JSON.stringify(payload) });
-  }
+  const result = await operationsRequest<{ group: CollaborationGroup }>('/collaboration-groups', { method: 'POST', body: JSON.stringify(payload) });
   currentCollaborationDirectory().invalidate();
   return result;
 }

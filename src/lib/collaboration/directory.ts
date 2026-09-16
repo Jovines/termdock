@@ -22,7 +22,7 @@ export interface CollaborationDirectoryData {
   groups: CollaborationGroup[];
   sessions: OrchestrationSession[];
   peers?: CollaborationPeerState;
-  capabilities?: { groupRevision?: number; groupPromotion?: number; groupMove?: number };
+  capabilities?: { groupRevision?: number; groupPromotion?: number; groupMove?: number; serverCollaboration?: number };
 }
 export interface CollaborationDirectorySource {
   origin: string;
@@ -127,7 +127,7 @@ export class CollaborationDirectory {
     this.peerInFlight = Promise.race([
       Promise.resolve().then(() => read()),
       new Promise<never>((_resolve, reject) => {
-        this.peerTimer = setTimeout(() => reject(new Error('跨服务会话加载超时，请检查客户端协作连接')), 20_000);
+        this.peerTimer = setTimeout(() => reject(new Error('服务端协作目录加载超时，请检查服务连接')), 20_000);
       }),
     ]).then((data) => {
       if (this.disposed) return;
@@ -135,7 +135,7 @@ export class CollaborationDirectory {
       if (!Array.isArray(data.sessions) || (this.source.peerProtocol === 'v2' && (data.protocolVersion !== 2 || !matchesOrigin))
         || (data.origin && !matchesOrigin)
         || (data.protocolVersion !== undefined && data.protocolVersion !== 2)) {
-        throw new Error('客户端协作响应与当前服务不匹配，请更新客户端后重试');
+        throw new Error('协作目录响应与当前服务不匹配，请升级服务后重试');
       }
       this.remote = data.sessions.filter((session) => {
         const address = remoteSessionAddress(session.sessionId);

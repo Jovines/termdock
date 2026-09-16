@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import type { CollaborationStore } from './collaborationStore.js';
 import { CollaborationError } from './collaborationProtocol.js';
 import { COLLAB_NAME_FORBIDDEN } from './collaborationPrompt.js';
@@ -7,13 +7,14 @@ import { COLLAB_NAME_FORBIDDEN } from './collaborationPrompt.js';
 export function collaborationGroupRoutes(options: {
   store: CollaborationStore;
   sessions(): Array<{ sessionId: string }>;
+  save?: (req: Request, input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number }) => Promise<unknown>;
 }): Router {
   const router = Router();
   router.get('/collaboration-groups', (_req, res) => {
-    res.json({ federationVersion: 1, capabilities: { groupRevision: 1, groupPromotion: 1, groupMove: 1 },
+    res.json({ federationVersion: 1, capabilities: { groupRevision: 1, groupPromotion: 1, groupMove: 1, serverCollaboration: options.save ? 1 : undefined },
       groups: options.store.list(), sessions: options.sessions() });
   });
-  router.post('/collaboration-groups', (req, res) => {
+  router.post('/collaboration-groups', async (req, res) => {
     try {
       const { id, name, sessionIds, expectedUpdatedAt } = req.body ?? {};
       if ((id !== undefined && (typeof id !== 'string' || !id))
@@ -31,6 +32,7 @@ export function collaborationGroupRoutes(options: {
       }
       const ids = [...new Set<string>(sessionIds)];
       if (ids.length < 2) throw new CollaborationError('INVALID_GROUP', '协作组至少需要两个有效会话', 400);
+      if (options.save) { res.json(await options.save(req, { id, name, sessionIds: ids, expectedUpdatedAt })); return; }
       const known = new Set([...options.sessions().map((session) => session.sessionId), ...(existing?.sessionIds ?? [])]);
       if (ids.some((value) => !known.has(value))) {
         throw new CollaborationError('MEMBERS_CHANGED', '所选会话已变化，请刷新后重新选择；尚未保存任何修改', 409);

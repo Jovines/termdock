@@ -191,3 +191,27 @@ td collab transport register <group-id> --file nodes.json
 本次不加入历史画面归档、临时 resize 或固定终端尺寸；保留当前屏快照、纯文本清理及显式历史行读取。
 
 按用户 2026-09-16 明确指示，最终收尾后不再运行回归测试，发布执行生产构建。此前测试曾发现仓库既有的 9 个失败测试文件与 lint 错误；本次最终版本不能声称回归全通过。跨电脑升级后双向收发、真实 macOS/iOS 及完整加密入口实机矩阵尚未验收。
+
+## 统一服务端协作（1.4.234）
+
+macOS 页面、浏览器和 CLI 共用服务端协作目录、建组、投递及回执。页面不再调用 preload 的 collaborationPeers/collaborationSave；新桌面端和浏览器不再启动客户端协作轮询。旧客户端后台调用的转发接口返回 410，不再处理数据。旧 macOS 安装包可继续承载新页面：升级其实际连接的 CLI 服务并重启、重新加载页面即可，不要求更新客户端安装包；这一兼容路径尚未做 macOS 实机验证。
+
+服务端持续查询已配对服务的会话目录、复制群成员关系并配置群级加密投递。UI 通过 `/operations/collaboration-directory` 读目录、`/operations/collaboration-groups` 建组；CLI 的 `transport list` 和 `group save --file group.json` 使用相同服务。远端失败不会阻塞本机会话列表，目录展示实际错误。群保存返回后台同步状态，不冒充已在每个远端保存成功。
+
+### 没有可迁移服务授权的旧群
+
+旧版只在服务端保存客户端授权，不能据此冒用客户端身份。双方服务升级后，用 CLI 做一次服务配对：
+
+```sh
+# A：origin 必须是 B 可以访问、且与旧群地址一致的 HTTPS 根地址。
+umask 077
+td collab transport invite --origin https://A:9834 > invitation.json
+# 私下把 invitation.json 交给 B；邀请 10 分钟有效，只能绑定一个服务身份。
+# B：保存邀请文件后执行。
+td collab transport accept --origin https://B:9834 --file invitation.json
+td collab transport list
+```
+
+邀请授予协作目录和群管理权限，不授予任意 HTTP、文件访问或客户端私钥。双方通过 TLS 验证和 Noise 身份固定建立通信，授权持久保存在服务端；已有共同群自动同步并补齐投递绑定，无需逐群重新登记。更改服务地址/证书/身份不会静默覆盖已有信任。
+
+本次按用户要求不运行回归测试，仅进行发布构建、部署与健康检查；旧 macOS 客户端、跨电脑双向收发及完整加密入口矩阵仍待实机验收。

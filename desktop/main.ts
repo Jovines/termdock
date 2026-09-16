@@ -1,5 +1,5 @@
 import { readClipboardFiles } from './clipboardFiles.js';
-import { CollaborationFederation, sessionAddress } from './collaborationFederation.js';
+import { sessionAddress } from './collaborationFederation.js';
 import { prepareServiceFrontend, selectServiceFrontend } from './bundledFrontend.js';
 import { serviceConnection, serviceConnectionKeys, importServiceConnection, saveServiceConnection, invitationForService } from './serviceConnections.js';
 const pendingServiceInvitations = new WeakMap<BrowserWindow, string>();
@@ -163,29 +163,6 @@ let isQuitting = false;
 const FLOATING_WIDGET_WIDTHS = [64, 108, 152] as const;
 const FLOATING_WIDGET_HEIGHT = 40;
 
-const collaborationFederation = new CollaborationFederation(() => [...serviceWindows.entries()]
-  .filter(([, window]) => !window.isDestroyed())
-  .map(([origin, window]) => ({ origin, label: serviceLabel(origin),
-    request: async (route: string, method = 'GET', body?: unknown) => {
-      if (new URL(window.webContents.getURL()).origin !== origin) throw new Error('服务窗口尚未就绪');
-      const args = JSON.stringify({ route, method, body });
-      return window.webContents.executeJavaScript(`(async () => {
-        const { route, method, body } = ${args};
-        const headers = { 'Content-Type': 'application/json' };
-        if (method !== 'GET') {
-          const token = await fetch('/api/csrf-token', { signal: AbortSignal.timeout(5000) }).then(r => r.json());
-          headers['X-XSRF-TOKEN'] = token.csrfToken;
-        }
-        const response = await fetch('/api/terminal/operations' + route, {
-          method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000)
-        });
-        const payload = response.status === 204 ? null : await response.json();
-        if (!response.ok) throw new Error(payload?.error || '服务不可达或需要升级 Termdock');
-        return payload;
-      })()`, true);
-    },
-  })));
-let collaborationPollTimer: ReturnType<typeof setInterval> | null = null;
 
 function focusedWorkspaceWindow(): BrowserWindow | null {
   const focused = BrowserWindow.getFocusedWindow();
@@ -2003,16 +1980,6 @@ function installIpcHandlers(): void {
       || new URL(event.sender.getURL()).origin !== origin) throw new Error('未授权的服务窗口');
     return origin;
   };
-  ipcMain.handle('desktop:collaboration-peers', (event) => collaborationFederation.peers(collaborationOrigin(event)));
-  ipcMain.handle('desktop:collaboration-list', (event) => collaborationFederation.list(collaborationOrigin(event)));
-  ipcMain.handle('desktop:collaboration-save', (event, input) => {
-    const origin = collaborationOrigin(event);
-    if (input?.expectedOrigin !== undefined && input.expectedOrigin !== origin) {
-      throw new Error('当前服务与客户端窗口不一致，请在目标服务窗口中添加跨服务成员');
-    }
-    return collaborationFederation.save(origin, input);
-  });
-  ipcMain.handle('desktop:collaboration-remove', (event, id: string) => collaborationFederation.remove(collaborationOrigin(event), id));
   ipcMain.handle('desktop:collaboration-focus', (event, id: string) => {
     collaborationOrigin(event);
     const address = sessionAddress(id);
@@ -2022,8 +1989,6 @@ function installIpcHandlers(): void {
     target.webContents.send('desktop:focus-session', address!.id);
     return true;
   });
-  collaborationPollTimer = setInterval(() => void collaborationFederation.refresh().catch(() => {}), 2000);
-  collaborationPollTimer.unref();
   let deviceInfo: Promise<Record<string, string>> | undefined;
   ipcMain.handle('desktop:device-info', event => {
     collaborationOrigin(event);
@@ -2594,7 +2559,6 @@ app.on('before-quit', () => {
   federationRelayProcess = null;
   desktopRuntimeOwnerServer?.close();
   desktopRuntimeOwnerServer = null;
-  if (collaborationPollTimer) clearInterval(collaborationPollTimer);
   if (connectedServiceRuntimePollTimer) clearInterval(connectedServiceRuntimePollTimer);
   connectedServiceRuntimePollTimer = null;
   connectedServiceRuntimePollInFlight = false;

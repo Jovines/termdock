@@ -486,6 +486,16 @@ export class CollaborationStore {
     return { groups, messages, transportDiagnostics: Object.fromEntries(messages.flatMap((message) => this.document.transport?.[message.id] ? [[message.id, this.document.transport[message.id]]] : [])) };
   }
 
+  /** Drop only this replica after its last local member leaves; never broadcast
+   * a global deletion of the group that still exists on other services. */
+  dropFederatedReplica(id: string, updatedAt: number): void {
+    const group = this.getGroup(id);
+    if (!group?.federated || group.updatedAt > updatedAt) return;
+    this.document.groups = this.document.groups.filter(item => item.id !== id);
+    this.document.messages = this.document.messages.filter(item => item.groupId !== id);
+    this.persist();
+  }
+
   mergeFederatedGroup(group: CollaborationGroup): void {
     validateFederatedGroup(group);
     const existing = this.getGroup(group.id);
