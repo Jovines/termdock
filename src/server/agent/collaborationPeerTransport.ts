@@ -101,9 +101,9 @@ export async function connectCollaborationRpc(identity: Identity, peer: Collabor
     if (receive) {
       try { await rpc.request({ type: 'collaboration-connect' }); }
       catch (error) {
-        // Initial CLI invitation pairing precedes directory authorization. Older
-        // servers may also lack duplex support; ordinary requests remain gated.
-        if (!(error instanceof Error) || !['COLLABORATION_PAIRING_REQUIRED', 'UNKNOWN_PACKET', 'COLLABORATION_UPGRADE_REQUIRED'].includes(error.message)) { rpc.close(); throw error; }
+        // Older servers may lack duplex support; ordinary requests remain gated.
+        // Missing peer authorization must reconnect after enrollment completes.
+        if (!(error instanceof Error) || !['UNKNOWN_PACKET', 'COLLABORATION_UPGRADE_REQUIRED'].includes(error.message)) { rpc.close(); throw error; }
       }
     }
     return rpc;

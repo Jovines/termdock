@@ -594,7 +594,8 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     app.locals.collaborationNode = { serviceId: runtime.serviceId, ...(caFingerprint256 ? { caFingerprint256 } : {}) };
     collaborationService = new CollaborationService({ file: path.join(homedir(), '.termdock', 'federation', 'collaboration-services.json'),
       store: collaborationStore, transport: collaborationTransport, node: () => app.locals.collaborationNode,
-      sessions: collaborationDirectorySessions, reverse: reverseCollaboration, connect: connectPeer });
+      sessions: collaborationDirectorySessions, reverse: reverseCollaboration, connect: connectPeer,
+      pairConnect: peer => connectCollaborationRpc(runtime.identity, peer) });
     app.locals.collaborationService = collaborationService;
     collaborationService.start();
     server.once('close', () => collaborationService?.close());

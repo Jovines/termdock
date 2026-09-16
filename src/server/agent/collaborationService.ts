@@ -31,6 +31,7 @@ export class CollaborationService {
   private stopped = false;
   constructor(private options: { file: string; store: CollaborationStore; transport: CollaborationPeerTransport;
     node: () => Omit<CollaborationNode, 'origin'>; sessions: () => Session[];
+    pairConnect?: (node: CollaborationNode) => Promise<CollaborationRpc>;
     reverse?: (serviceId: string) => CollaborationRpc | undefined;
     connect: (node: CollaborationNode) => Promise<CollaborationRpc> }) {
     try { const data = JSON.parse(readFileSync(options.file, 'utf8')) as Document;
@@ -80,7 +81,7 @@ export class CollaborationService {
   async accept(origin: string, invitation: { version: number; node: CollaborationNode; code: string; expiresAt: number }) {
     if (invitation?.version !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(invitation.code) || !Number.isFinite(invitation.expiresAt) || invitation.expiresAt <= Date.now()) throw new Error('PAIRING_EXPIRED_OR_INVALID');
     validateCollaborationNode(invitation.node); this.setOrigin(origin);
-    const rpc = await this.options.connect(invitation.node);
+    const rpc = await (this.options.pairConnect ?? this.options.connect)(invitation.node);
     try { await rpc.request({ type: 'collaboration-service', action: 'pair', code: invitation.code, node: this.node() });
       this.remember(invitation.node); void this.refresh(); return { ok: true, peer: invitation.node }; }
     finally { rpc.close(); }
