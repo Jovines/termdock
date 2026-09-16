@@ -14,8 +14,17 @@ const SHELL_RULE = '─'.repeat(30);
  * instead of being injected into the terminal verbatim. */
 const MAX_INLINE_BODY_BYTES = 4_096;
 
+/** Relative age is captured when the terminal prompt is rendered. */
+export function collaborationRulesAge(updatedAt: number, now = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((now - updatedAt) / 1000));
+  if (seconds < 60) return `${seconds}秒前`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`;
+  return `${Math.floor(seconds / 86400)}天前`;
+}
+
 /**
- * Characters that would corrupt the delivery shell header `「X」群(N 个成员)`
+ * Characters that would corrupt the delivery shell header `「X」群 · N 人`
  * and the per-message `来自:X · kind` line: the quote brackets and the middle
  * dot, which the render layer uses as structure, plus control sequences
  * (C0 controls + DEL) that could inject terminal output. Legacy and federated
@@ -74,7 +83,7 @@ export function collaborationMessageAnchorTokens(messages: CollaborationMessage[
  *  collaborationPrompt.test.ts. */
 export function collaborationMessageAnchorLine(message: CollaborationMessage, token: string = canonicalShortId(message.id)): string {
   return message.fromSessionId
-    ? `回复:td collab reply ${token} "回复内容" --text`
+    ? `回复:td collab reply ${token} "内容" --text`
     : `详情:td collab message get ${token} --json`;
 }
 
@@ -83,14 +92,16 @@ export function collaborationMessageAnchorLine(message: CollaborationMessage, to
  * dispatch (message.fanOutIds present) is flagged `· 群发` and names the
  * sibling recipients on their own line, so a broadcast is never mistaken for
  * a one-to-one assignment — raw ids fall back to the sanitized id itself. */
-function formatCollaborationMessage(message: CollaborationMessage, source: string, fannedNames: string[], fence: string, token: string): string {
-  const lines = [`来自:${source} · ${message.kind}${fannedNames.length ? ' · 群发' : ''}`];
+function formatCollaborationMessage(message: CollaborationMessage, source: string, fannedNames: string[], fence: string, token: string, now: number): string {
+  const lines = [`来自:${source}${message.kind === 'message' ? '' : ` · ${message.kind}`}${fannedNames.length ? ' · 群发' : ''}`];
   if (fannedNames.length) lines.push(`同时发给了:${fannedNames.join('、')}`);
   const rules = message.instructions;
   if (rules?.text) {
-    lines.push(`群协作约定（版本 ${rules.version}，不改变用户授权）：`);
-    lines.push(Buffer.byteLength(rules.text) <= 1024 ? rules.text
-      : `执行 td collab message get ${token} --text 查看本消息附带的完整群规与正文。`);
+    const age = collaborationRulesAge(rules.updatedAt, now);
+    const inline = Array.from(rules.text).length <= 200 && rules.text.split(/\r\n?|\n/).length <= 4;
+    lines.push(inline
+      ? `群规[${age}]:${rules.text}`
+      : `查看群规[${age}]:td collab rules get ${message.groupId} --text`);
   }
   lines.push('', fence, message.content, fence);
   if (message.task) lines.push('', `任务上报:${JSON.stringify(message.task)}`);
@@ -104,16 +115,17 @@ export function formatCollaborationDelivery(input: {
   groups: CollaborationGroup[];
   sessions: CollaborationPromptSession[];
   /**
-   * false: omit the static routing help (peer roster + `td collab --help`
-   * pointer). Dynamic notices (unreachable peers, cross-service keep-alive)
+   * false: omit introductory routing examples; the help command stays visible. Dynamic notices (unreachable peers, cross-service keep-alive)
    * are always included — they report current conditions, not education.
    * Callers gate this on a per-session education state keyed by roster.
    */
   showRoutingHelp?: boolean;
+  now?: number;
 }): string {
   const groupsById = new Map(input.groups.map((group) => [group.id, group]));
   const sessionsById = new Map(input.sessions.map((session) => [session.sessionId, session]));
 
+  const now = input.now ?? Date.now();
   const tokens = collaborationMessageAnchorTokens(input.messages);
   const blocks: string[] = [];
   for (const message of input.messages) {
@@ -129,7 +141,10 @@ export function formatCollaborationDelivery(input: {
     const fence = '`'.repeat(Math.max(3, ...Array.from(body.matchAll(/`+/g), (match) => match[0].length + 1)));
     const fannedNames = (message.fanOutIds ?? [])
       .map((sessionId) => sanitizeCollaborationName(sessionsById.get(sessionId)?.name ?? sessionId));
-    blocks.push(formatCollaborationMessage({ ...message, content: body }, source, fannedNames, fence, token));
+    // Show current guidance alongside the command that retrieves current rules.
+    // The stored message snapshot remains available through message get.
+    const instructions = groupsById.get(message.groupId)?.instructions ?? message.instructions;
+    blocks.push(formatCollaborationMessage({ ...message, content: body, instructions }, source, fannedNames, fence, token, now));
   }
 
   // The shell header names the group only when every block belongs to one;
@@ -138,7 +153,7 @@ export function formatCollaborationDelivery(input: {
   const groupIds = [...new Set(input.messages.map((message) => message.groupId))];
   const singleGroup = groupIds.length === 1 ? groupsById.get(groupIds[0]!) : null;
   const shellHeader = singleGroup
-    ? `「${sanitizeCollaborationName(singleGroup.name ?? '协作组')}」群(${singleGroup.sessionIds.length} 个成员)`
+    ? `「${sanitizeCollaborationName(singleGroup.name ?? '协作组')}」群 · ${singleGroup.sessionIds.length} 人`
     : '';
 
   const peerIds = Array.from(new Set(input.groups.flatMap((group) => group.sessionIds)))
@@ -150,9 +165,7 @@ export function formatCollaborationDelivery(input: {
     return `- ${session ? sanitizeCollaborationName(session.name) : '离线会话'}：\`td collab send ${sessionId} "消息内容" --text\``;
   });
   const unreachable = peerIds.filter((id) => sessionsById.get(id)?.status === 'service-unreachable');
-  // Education (peer roster examples) decays once the session knows the group;
-  // the `--help` pointer stays permanently as the one-line entrance to the
-  // full command surface — everything else can be looked up from there.
+  // Static command help is shown once per roster; delivery conditions remain visible.
   const routingHelp = input.showRoutingHelp === false ? [] : (peers.length ? ['联系其他成员：', ...peers] : []);
   const dynamicNotices = [
     ...(peerIds.some((id) => id.startsWith('remote:'))
@@ -163,9 +176,9 @@ export function formatCollaborationDelivery(input: {
     }),
   ];
 
-  const captureHelp = '想看伙伴正在做什么、是否卡住：先用 `td collab capture <会话ID> --text` 只读当前屏幕；可加 --lines 200 查看历史，不打断对方；ID 用 `td collab status --text` 查。仅同组本机 tmux；远端用 send 询问。快照不等于任务完成，按需查看，避免循环轮询。';
-  const notes = [...routingHelp, ...dynamicNotices, '更多操作：`td collab --help`。',
-    ...(input.showRoutingHelp === false ? [] : [captureHelp])];
+  const captureHelp = '查看屏幕：`td collab capture <会话ID> --text`（只读，不打断对方；仅同组本机 tmux，远端用 send 询问）。ID：`td collab status --text`。快照不代表完成，勿循环轮询。';
+  const notes = [...routingHelp, ...dynamicNotices,
+    ...(input.showRoutingHelp === false ? [] : [captureHelp]), '帮助:td collab --help'];
   // Notes (education + dynamic notices) live inside the shell, after the last
   // message, so the closing rule still marks the end of the delivered block.
   if (!blocks.length) return notes.join('\n');
@@ -180,7 +193,7 @@ export function formatCollaborationDelivery(input: {
     : '';
   const lines = [SHELL_RULE];
   if (shellHeader) lines.push(shellHeader);
-  if (ownName) lines.push(`你的名字:${ownName}`);
+  if (ownName) lines.push(`你:${ownName}`);
   if (ownRole) lines.push(`你的定位:${ownRole}`);
   // No blank line between the identity block and the first message, nor
   // between the last message and the notes: the shell reads as one compact

@@ -9,7 +9,7 @@ import { openRemoteSession } from '../../federation/remoteSession';
 import { shortId } from '../../utils/shortId';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, GripVertical, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Bot, GripVertical, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, Maximize2, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   getSettings,
   type CollaborationPanelState,
@@ -60,7 +60,34 @@ const inputClass = 'w-full rounded-lg border border-border/20 bg-surface-2 px-3 
 const choiceClass = 'inline-flex min-h-7 items-center justify-center rounded-md border px-2 py-1 text-[11px] leading-4 font-medium transition';
 const buttonClass = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40';
 
-export function AgentOperationsPanel({ activeSessionId, initialCollaborationGroupId = null, initialFloating = false, onFloatingChange, defaultSessionMode = 'shell', onClose, onNewSession }: AgentOperationsPanelProps) {
+type PanelDrafts = NonNullable<CollaborationPanelState['drafts']>;
+
+export function AgentOperationsPanel(props: AgentOperationsPanelProps) {
+  const [overlay, setOverlay] = useState<'floating' | 'full' | null>(null);
+  const [residentClosed, setResidentClosed] = useState(false);
+  const [drafts, setDrafts] = useState<PanelDrafts>({});
+  const loadDrafts = useCallback((saved: PanelDrafts) => setDrafts(current => ({ ...saved, ...current })), []);
+  const updateDraft = useCallback((id: string, draft: PanelDrafts[string]) => setDrafts(current =>
+    JSON.stringify(current[id]) === JSON.stringify(draft) ? current : { ...current, [id]: draft }), []);
+  const shared = { drafts, loadDrafts, updateDraft };
+  return <>
+    {!residentClosed && <AgentOperationsPanelView {...props} {...shared} onOpenOverlay={setOverlay}
+      onClose={() => { if (overlay) setResidentClosed(true); else props.onClose(); }} />}
+    {overlay && <AgentOperationsPanelView {...props} {...shared} overlayOnly initialFloating={overlay === 'floating'}
+      onFloatingChange={undefined} onOpenOverlay={setOverlay}
+      onClose={() => { setOverlay(null); if (residentClosed) props.onClose(); }} />}
+  </>;
+}
+
+function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId = null, initialFloating = false, onFloatingChange, defaultSessionMode = 'shell', onClose, onNewSession,
+  overlayOnly = false, onOpenOverlay, drafts, loadDrafts, updateDraft,
+}: AgentOperationsPanelProps & {
+  overlayOnly?: boolean;
+  onOpenOverlay: (mode: 'floating' | 'full') => void;
+  drafts: PanelDrafts;
+  loadDrafts: (drafts: PanelDrafts) => void;
+  updateDraft: (id: string, draft: PanelDrafts[string]) => void;
+}) {
   const [floating, setFloating] = useState(initialFloating);
   useEffect(() => { setFloating(initialFloating); }, [initialFloating]);
   const [savingFloating, setSavingFloating] = useState(false);
@@ -69,7 +96,6 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
   const dockHost = useCollaborationPanelDock(state => state.hosts[initialCollaborationGroupId ?? 'workbench']);
   const [panelMode, setPanelMode] = useState<'floating' | 'docked'>('floating');
   const [panelSize, setPanelSize] = useState<{ width: number; height: number } | null>(null);
-  const latestDrafts = useRef<CollaborationPanelState['drafts']>({});
   const [position, setPosition] = useState({ x: 16, y: 80 });
   const panelRef = useRef<HTMLElement>(null);
   const relativePosition = useRef({ x: 0.5, y: 0.5 });
@@ -82,9 +108,8 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
       const saved = collaborationGroupPreferences(settings.collaborationPanels?.[collaborationPanelClientId()], initialCollaborationGroupId);
       if (saved.position) relativePosition.current = saved.position;
       if (saved.size) setPanelSize(saved.size);
-      latestDrafts.current = saved.drafts ?? {};
-      setPanelMode(saved.mode ?? 'floating');
-      if (saved.mode === 'docked' && saved.dock) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', saved.dock);
+      loadDrafts(saved.drafts ?? {});
+      if (!overlayOnly) setPanelMode(saved.mode ?? 'floating');
       setPanelState(saved);
     }).catch(() => {
       if (!cancelled) setPreferenceError('面板草稿加载失败，请重新打开面板重试');
@@ -95,14 +120,14 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
   useEffect(() => {
     const onError = (event: Event) => setPreferenceError(String((event as CustomEvent).detail));
     window.addEventListener('termdock-panel-save-error', onError);
-    return () => { window.removeEventListener('termdock-panel-save-error', onError); useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null); };
+    return () => { window.removeEventListener('termdock-panel-save-error', onError); if (!overlayOnly) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null); };
   }, []);
-  const docked = floating && panelMode === 'docked' && !!dockHost;
+  const docked = !overlayOnly && floating && panelMode === 'docked' && !!dockHost;
   useEffect(() => {
-    if (!floating) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null);
+    if (!overlayOnly && !floating) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null);
   }, [floating]);
   const changePanelMode = async (mode: 'floating' | 'docked') => {
-    if (savingFloating || (mode === 'docked' && !activeSessionId)) return;
+    if (overlayOnly || savingFloating || (mode === 'docked' && !activeSessionId)) return;
     const nextDock = { sessionId: activeSessionId!, side: 'right' as const };
     setSavingFloating(true);
     try {
@@ -161,9 +186,11 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
   const selectedGroup = selectedGroupId ? groups.find(group => group.id === selectedGroupId) ?? null : groups[0] ?? null;
   const unavailableGroup = !!initialCollaborationGroupId && sessionsState === 'loaded' && !directCollaborationGroup;
   const floatingVisible = !!activeSessionId && (!!selectedGroup?.sessionIds.includes(activeSessionId) || !!initialCollaborationGroupId && (!directCollaborationGroup || !!preferenceError));
+  // Restore docks only for resident panels, never while loading a full panel.
   // A saved dock can outlive its group. Release the split without discarding
   // drafts or saved preferences: a temporary missing replica may return.
   useEffect(() => {
+    if (overlayOnly) return;
     const key = initialCollaborationGroupId ?? 'workbench';
     const state = useCollaborationPanelDock.getState();
     if (unavailableGroup) {
@@ -175,6 +202,12 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
 
   const changeFloating = async (next: boolean, close = false) => {
     if (savingFloating || (next && !selectedGroup)) return;
+    if (!overlayOnly && !next && !close && dock) { onOpenOverlay('full'); return; }
+    if (overlayOnly) {
+      if (close) onClose();
+      else { setFloating(next); onOpenOverlay(next ? 'floating' : 'full'); }
+      return;
+    }
     setSavingFloating(true);
     try {
       await onFloatingChange?.(next ? selectedGroup!.id : null);
@@ -270,11 +303,12 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
           {!docked && tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '完整面板' : '常驻浮窗'}</button>}
           {docked && <>
             <GripVertical size={14} aria-hidden="true" className="shrink-0 text-muted-foreground" />
-            <button type="button" aria-label="切换为浮窗" title="切换为浮窗" disabled={savingFloating} className="rounded p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => void changePanelMode('floating')}><ExternalLink size={14} /></button>
+            <button type="button" aria-label="打开完整弹窗" title="打开完整弹窗" disabled={savingFloating} className="rounded p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => onOpenOverlay('full')}><Maximize2 size={14} /></button>
+            <button type="button" aria-label="切换为小浮窗" title="切换为小浮窗" disabled={savingFloating} className="rounded p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => void changePanelMode('floating')}><ExternalLink size={14} /></button>
           </>}
           <button className={`${docked ? 'rounded p-1' : 'rounded-lg p-2'} text-muted-foreground hover:bg-surface-2 hover:text-foreground`} disabled={savingFloating} onClick={() => { if (floating) void changeFloating(false, true); else onClose(); }} aria-label="关闭"><X size={16} /></button>
         </header>
-        {floating && !docked && <div className="flex flex-wrap items-center gap-1 border-b border-border/15 px-3 py-1.5">
+        {floating && !docked && !overlayOnly && <div className="flex flex-wrap items-center gap-1 border-b border-border/15 px-3 py-1.5">
           <button type="button" disabled={savingFloating} aria-pressed={panelMode === 'floating'} className={`${choiceClass} ${panelMode === 'floating' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('floating')}>浮窗</button>
           <button type="button" disabled={savingFloating || !activeSessionId || unavailableGroup} aria-pressed={panelMode === 'docked'} className={`${choiceClass} ${panelMode === 'docked' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('docked')}>占用分屏</button>
 
@@ -311,7 +345,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
             {sessionsState !== 'loading' && <button className={buttonClass} onClick={() => void refresh()}>重新加载</button>}
           </div>}
           {preferenceError && <p role="alert" className="text-[11px] text-destructive">{preferenceError}</p>}
-          {tab === 'collaboration' && panelState && (!initialCollaborationGroupId || directCollaborationGroup) && <CollaborationTab notice={notice} initialDrafts={latestDrafts.current} onDraftChange={(groupId, draft) => { latestDrafts.current = { ...latestDrafts.current, [groupId]: draft }; }} selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && panelState && (!initialCollaborationGroupId || directCollaborationGroup) && <CollaborationTab notice={notice} initialDrafts={drafts} onDraftChange={updateDraft} docked={docked} inputKeySuffix={overlayOnly ? ':overlay' : ''} selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
         {floating && !docked && <button type="button" aria-label="调整协作浮窗大小" className="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize touch-none text-muted-foreground hover:text-primary"
@@ -497,7 +531,7 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+function CollaborationTab({ notice, initialDrafts, onDraftChange, docked, inputKeySuffix, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
   notice: string | null;
   selectedGroupId: string | null;
   setSelectedGroupId: (id: string | null) => void;
@@ -505,6 +539,8 @@ function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupI
   floating: boolean;
   sessionsState: 'loading' | 'loaded' | 'error';
   initialDrafts?: CollaborationPanelState['drafts'];
+  docked: boolean;
+  inputKeySuffix: string;
   onDraftChange: (groupId: string, draft: { content: string; targets: string[] | null }) => void;
   groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; defaultSessionMode: 'shell' | 'tmux'; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
@@ -531,7 +567,8 @@ function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupI
   const [spawnCwd, setSpawnCwd] = useState('');
   const [spawnTask, setSpawnTask] = useState('');
   const messageComposerRef = useRef<HTMLElement | null>(null);
-  const requiresPaneFocus = useCollaborationPanelDock(state => !!state.docks[selectedGroupId ?? '']);
+  const requiresPaneFocus = docked;
+  const inputKey = (selectedGroupId ?? groups[0]?.id ?? '') + inputKeySuffix;
   const positionedInitialGroupRef = useRef(false);
   const selectedGroup = selectedGroupId === 'new'
     ? null
@@ -557,6 +594,18 @@ function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupI
     setContent(saved?.content ?? ''); setTargetSessionIds(saved?.targets ?? null);
   }, [selectedGroup?.id]);
   const pendingDraft = useRef<CollaborationPanelState | null>(null);
+  const appliedDrafts = useRef(initialDrafts);
+  useLayoutEffect(() => {
+    if (appliedDrafts.current === initialDrafts) return;
+    appliedDrafts.current = initialDrafts;
+    for (const [id, draft] of Object.entries(initialDrafts ?? {})) drafts.current.set(id, draft);
+    const incoming = initialDrafts?.[selectedGroup?.id ?? ''];
+    if (!incoming || (incoming.content === contentRef.current && JSON.stringify(incoming.targets) === JSON.stringify(targetsRef.current))) return;
+    restoringDraft.current = true;
+    pendingDraft.current = null;
+    setContent(incoming.content);
+    setTargetSessionIds(incoming.targets);
+  }, [initialDrafts, selectedGroup?.id]);
   const persistDraft = useCallback((patch: CollaborationPanelState) => {
     void saveCollaborationPanel(patch).catch(() => setError('草稿保存失败，请保持面板打开，修改内容后重试'));
   }, [setError]);
@@ -582,8 +631,8 @@ function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupI
     if (!floating || !floatingVisible || !selectedGroup) return;
     return registerCollaborationInput(text => {
       setContent(current => current + (current && !/\s$/.test(current) ? '\n' : '') + text.replace(/\r\n?/g, '\n'));
-    }, selectedGroup.id, requiresPaneFocus);
-  }, [floating, floatingVisible, selectedGroup?.id, requiresPaneFocus]);
+    }, inputKey, requiresPaneFocus);
+  }, [floating, floatingVisible, selectedGroup?.id, requiresPaneFocus, inputKey]);
   useEffect(() => {
     const composer = messageComposerRef.current;
     if (!floating || !composer) return;
@@ -817,7 +866,7 @@ function CollaborationTab({ notice, initialDrafts, onDraftChange, selectedGroupI
       </div></section>
 
       </div>
-      <section onFocusCapture={() => focusCollaborationInput(selectedGroup.id)} onPointerDownCapture={() => focusCollaborationInput(selectedGroup.id)} data-termdock-terminal-dropzone={floating ? activeSessionId ?? "collaboration-composer" : undefined} onDragOver={event => { if (floating) event.preventDefault(); }} onDrop={event => {
+      <section onFocusCapture={() => focusCollaborationInput(inputKey)} onPointerDownCapture={() => focusCollaborationInput(inputKey)} data-termdock-terminal-dropzone={floating ? activeSessionId ?? "collaboration-composer" : undefined} onDragOver={event => { if (floating) event.preventDefault(); }} onDrop={event => {
         if (!floating) return;
         const files = Array.from(event.dataTransfer.files);
         if (files.length && getTermdockDesktopBridge()) return;

@@ -82,17 +82,26 @@ describe('server collaboration delivery', () => {
     f.stores[1].getGroup('cross-test')!.deleted = true;
     expect(() => f.transports[1].receive(f.nodes[0].serviceId, request)).toThrow('NOT_AUTHORIZED');
   });
-  it('syncs versioned rules and member traits even with an empty inbox, without a client relay', async () => {
+  it('delivers rule update notices to remote members once and syncs member traits without a client relay', async () => {
     const f = await setup();
     const rules = f.stores[0].setRules('cross-test', '评审只接非紧急任务', 'agent');
     f.stores[0].setRole({ groupId: 'cross-test', sessionId: remoteSession(f.nodes[1].origin, 'agent'), role: '深度评审，不接急单' });
     f.configure();
     await vi.waitFor(() => expect(f.stores[1].getGroup('cross-test')?.instructions).toMatchObject({ text: rules.text, version: rules.version }));
     expect(f.stores[1].getGroup('cross-test')?.roles?.agent).toBe('深度评审，不接急单');
-    expect(f.stores[1].inbox('agent')).toHaveLength(0);
+    await vi.waitFor(() => expect(f.stores[1].inbox('agent')).toHaveLength(1));
+    expect(f.stores[1].inbox('agent')[0].content).toContain('群规已更新');
+    expect(f.stores[1].inbox('agent')[0].instructions?.version).toBe(rules.version);
     const changed = f.stores[1].setRules('cross-test', '更新验收要求', 'agent', rules.version);
     await new Promise(resolve => setTimeout(resolve, 1100)); f.transports.forEach(t => t.wake());
     await vi.waitFor(() => expect(f.stores[0].getGroup('cross-test')?.instructions?.version).toBe(changed.version));
+    await vi.waitFor(() => expect(f.stores[0].inbox('agent')).toHaveLength(1));
+    await vi.waitFor(() => expect(f.stores[2].inbox('agent')).toHaveLength(2));
+    await new Promise(resolve => setTimeout(resolve, 1100)); f.transports.forEach(t => t.wake());
+    await vi.waitFor(() => expect(f.deliveries[2]).toHaveBeenCalledTimes(2));
+    expect(f.stores[0].inbox('agent')).toHaveLength(1);
+    expect(f.stores[1].inbox('agent')).toHaveLength(1);
+    expect(f.stores[2].inbox('agent')).toHaveLength(2);
   });
 
 });

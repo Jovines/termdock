@@ -270,6 +270,8 @@ describe('new ids are minted short and coexist with stored UUIDs', () => {
     const initial = store.setRules(group.id, '不接急单', 'a');
     const [message] = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], content: 'Review', kind: 'task' });
     const changed = store.setRules(group.id, '先确认验收范围', 'b', initial.version);
+    expect(initial.version).toMatch(/^[a-z0-9]{10}$/);
+    expect(changed.version).toMatch(/^[a-z0-9]{10}$/);
     expect(changed.version).not.toBe(initial.version);
     expect(message.instructions).toEqual(initial);
     expect(() => store.setRules(group.id, 'overwrite', 'a', initial.version)).toThrow('群规已更新');
@@ -277,6 +279,33 @@ describe('new ids are minted short and coexist with stored UUIDs', () => {
     expect(() => store.setRules(group.id, 'x'.repeat(8193), 'a')).toThrow();
     expect(new CollaborationStore(filePath).getMessage(message.id)?.instructions).toEqual(initial);
   });
+  it('persists one rule update notice per other member, including clear, without echoing replication', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Rules', sessionIds: ['a', 'b', 'remote:peer'] });
+    const first = store.setRules(group.id, '先测试', 'a');
+    expect(store.inbox('a')).toHaveLength(0);
+    for (const id of ['b', 'remote:peer']) {
+      expect(store.inbox(id)).toHaveLength(1);
+      expect(store.inbox(id)[0]).toMatchObject({ fromSessionId: 'a', status: 'pending', instructions: first });
+      expect(store.inbox(id)[0].content).toContain('群规已更新');
+      expect(store.inbox(id)[0].content).toContain(`td collab rules get ${group.id} --text`);
+      expect(store.inbox(id)[0].content).toContain('无需回复');
+    }
+    const restored = new CollaborationStore(filePath);
+    expect(restored.inbox('b')).toHaveLength(1);
+    restored.mergeContext(group.id, { instructions: first });
+    expect(restored.inbox('b')).toHaveLength(1);
+    expect(() => restored.setRules(group.id, '冲突', 'a', 'stale')).toThrow('群规已更新');
+    expect(restored.inbox('b')).toHaveLength(1);
+    const cleared = restored.setRules(group.id, '', 'a', first.version);
+    expect(restored.inbox('b')).toHaveLength(2);
+    expect(restored.inbox('b')[1]).toMatchObject({ instructions: cleared });
+    expect(restored.inbox('b')[1].content).toContain('群规已清空');
+    expect(restored.inbox('b')[0].instructions).toEqual(first);
+    restored.mergeContext(group.id, { instructions: { ...cleared, version: 'remote-new', updatedAt: cleared.updatedAt + 1 } });
+    expect(restored.inbox('b')).toHaveLength(2);
+  });
+
   it('merges independent member roles and keeps snapshots clean without changing message bodies', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Roles', sessionIds: ['a', 'b'] });

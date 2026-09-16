@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CollaborationGroup, CollaborationMessage } from './collaborationStore.js';
-import { COLLAB_NAME_FORBIDDEN, collaborationMessageAnchorTokens, formatCollaborationDelivery, sanitizeCollaborationName } from './collaborationPrompt.js';
+import { COLLAB_NAME_FORBIDDEN, collaborationRulesAge, collaborationMessageAnchorTokens, formatCollaborationDelivery, sanitizeCollaborationName } from './collaborationPrompt.js';
 
 const group: CollaborationGroup = {
   id: 'group-1',
@@ -34,7 +34,7 @@ const sessions = [
 ];
 
 const render = (messages: CollaborationMessage[], overrides = {}) => formatCollaborationDelivery({
-  targetSessionId: 'reviewer-id', messages, groups: [group], sessions, ...overrides,
+  targetSessionId: 'reviewer-id', messages, groups: [group], sessions, now: 12001, ...overrides,
 });
 
 const RULE = '─'.repeat(30);
@@ -68,7 +68,7 @@ describe('COLLAB_NAME_FORBIDDEN / sanitizeCollaborationName', () => {
     });
     const lines = evil.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('「协作 v2 组 改行」群(2 个成员)');
+    expect(lines[1]).toBe('「协作 v2 组 改行」群 · 2 人');
     const source = lines.find((line) => line.startsWith('来自:'));
     expect(source).toBe('来自:名字 带 引号 换行 · task');
     // The shell's own 「」 and · are structural, so only the sanitized name
@@ -84,7 +84,7 @@ describe('formatCollaborationDelivery', () => {
     const prompt = render([message({})]);
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('「发布组」群(2 个成员)');
+    expect(lines[1]).toBe('「发布组」群 · 2 人');
     expect(prompt).toContain('来自:用户 · task');
     expect(prompt).toContain('```\n检查构建\n```');
     // A user message has no agent to reply to (the reply route refuses it), so
@@ -97,6 +97,54 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('td collab --help');
     expect(lines.at(-1)).toBe(RULE);
     expect(prompt.length).toBeLessThan(500);
+  });
+
+  it('compacts ordinary messages and legacy rule versions while retaining the retrieval command', () => {
+    const prompt = render([message({ fromSessionId: 'coder-id', kind: 'message', instructions: {
+      version: '63a047b4-7d6e-4c88-94b1-ea3d03bb0551', text: '规'.repeat(400), updatedAt: 1, updatedBy: 'coder-id',
+    } })], { showRoutingHelp: false });
+    expect(prompt).toContain('来自:开发 Agent\n查看群规[12秒前]:td collab rules get group-1 --text');
+    expect(prompt).not.toContain(' · message');
+    expect(prompt).not.toContain('63a047b4-7d6e');
+    expect(prompt).toContain('td collab --help');
+    expect(prompt).toContain('td collab reply message-1');
+  });
+
+  it('keeps short rules inline with their relative update time', () => {
+    const prompt = render([message({ instructions: {
+      version: 'abc123def4', text: '先确认验收范围', updatedAt: 1, updatedBy: 'coder-id',
+    } })]);
+    expect(prompt).toContain('群规[12秒前]:先确认验收范围');
+  });
+
+  it.each([
+    [0, '0秒前'], [59000, '59秒前'], [60000, '1分钟前'],
+    [3599000, '59分钟前'], [3600000, '1小时前'],
+    [86400000, '1天前'], [-1000, '0秒前'],
+  ])('formats rule age at %i milliseconds', (elapsed, expected) => {
+    expect(collaborationRulesAge(10000, 10000 + elapsed)).toBe(expected);
+  });
+
+  it.each([
+    ['规'.repeat(200), true], ['规'.repeat(201), false],
+    ['😀'.repeat(200), true], ['一\n二\n三\n四', true], ['一\n二\n三\n四\n五', false],
+  ])('applies the character and line limits for inline rules', (text, inline) => {
+    const prompt = render([message({ instructions: { text, version: 'v1', updatedAt: 1, updatedBy: 'coder-id' } })]);
+    expect(prompt.includes('群规[12秒前]:' + text)).toBe(inline);
+    expect(prompt.includes('td collab rules get group-1 --text')).toBe(!inline);
+  });
+
+  it('shows current rules while retaining the old message snapshot, including cleared rules', () => {
+    const old = { text: '旧规则', version: 'v1', updatedAt: 1, updatedBy: 'coder-id' };
+    const item = message({ instructions: old });
+    const current = { ...old, text: '新规则', version: 'v2', updatedAt: 11001 };
+    const prompt = render([item], { groups: [{ ...group, instructions: current }] });
+    expect(prompt).toContain('群规[1秒前]:新规则');
+    expect(prompt).not.toContain('旧规则');
+    expect(item.instructions).toEqual(old);
+    const cleared = render([item], { groups: [{ ...group, instructions: { ...current, text: '' } }] });
+    expect(cleared).not.toContain('群规[');
+    expect(cleared).not.toContain('旧规则');
   });
 
   it('carries its id in every delivered block, whatever the source or body size', () => {
@@ -150,7 +198,7 @@ describe('formatCollaborationDelivery', () => {
     const prompt = render([message({ fromSessionId: 'coder-id', kind: 'ask', content: '测试通过了吗？\n请附上失败项。' })]);
     expect(prompt).toContain('来自:开发 Agent · ask');
     expect(prompt).toContain('```\n测试通过了吗？\n请附上失败项。\n```');
-    expect(prompt).toContain('回复:td collab reply message-1 "回复内容" --text');
+    expect(prompt).toContain('回复:td collab reply message-1 "内容" --text');
     expect(prompt).not.toContain('td collab send coder-id');
     expect(prompt).not.toContain('native-coder');
     expect(prompt).not.toContain('td collab spawn');
@@ -163,7 +211,7 @@ describe('formatCollaborationDelivery', () => {
     const prompt = render([message({ kind: 'reply', fromSessionId: 'coder-id', content: '建议把回复放到正文下面。' })]);
     expect(prompt).toContain('来自:开发 Agent · reply');
     expect(prompt).toContain('```\n建议把回复放到正文下面。\n```');
-    expect(prompt).toContain('\n回复:td collab reply message-1 "回复内容" --text');
+    expect(prompt).toContain('\n回复:td collab reply message-1 "内容" --text');
     expect(prompt).not.toContain('来自:开发 Agent · reply\n建议把回复放到正文下面。');
   });
 
@@ -218,14 +266,15 @@ describe('formatCollaborationDelivery', () => {
     });
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('「发布组」群(2 个成员)');
-    expect(lines[2]).toBe('你的名字:测试 Agent');
+    expect(lines[1]).toBe('「发布组」群 · 2 人');
+    expect(lines[2]).toBe('你:测试 Agent');
     expect(lines[3]).toBe('你的定位:最终验收');
     // The identity block flows straight into the message — no blank line
     // between the role line and the first `来自:` line.
     expect(lines[4]).toBe('来自:开发 Agent · task');
     // The reply route runs directly into the notes; no blank separator.
-    expect(prompt).toContain('回复:td collab reply message-1 "回复内容" --text\n更多操作：`td collab --help`。');
+    expect(prompt).toContain('回复:td collab reply message-1 "内容" --text');
+    expect(lines.at(-2)).toBe('帮助:td collab --help');
     expect(prompt).not.toContain('开发与自测');
     expect(prompt).not.toContain('coder-id:');
   });
@@ -235,14 +284,14 @@ describe('formatCollaborationDelivery', () => {
       sessions: [{ ...sessions[0]!, name: '名字·带「引号」\n换行' }],
     });
     const lines = prompt.split('\n');
-    expect(lines[2]).toBe('你的名字:名字 带 引号 换行');
+    expect(lines[2]).toBe('你:名字 带 引号 换行');
     for (const line of lines) expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
     const ghost = render([message({})], { targetSessionId: 'ghost-id' });
-    expect(ghost).not.toContain('你的名字:');
+    expect(ghost).not.toContain('你:');
   });
 
   it('never injects a role line when unset or the batch spans groups, but still names the recipient', () => {
-    expect(render([message({})])).toContain('你的名字:测试 Agent');
+    expect(render([message({})])).toContain('你:测试 Agent');
     expect(render([message({})])).not.toContain('你的定位:');
     const cross = render([message({ groupId: 'one' }), message({ id: 'two', groupId: 'two' })], {
       groups: [
@@ -250,7 +299,7 @@ describe('formatCollaborationDelivery', () => {
         { ...group, id: 'two' },
       ],
     });
-    expect(cross).toContain('你的名字:测试 Agent');
+    expect(cross).toContain('你:测试 Agent');
     expect(cross).not.toContain('你的定位:');
     expect(cross.split(RULE).length).toBe(3);
   });
@@ -272,14 +321,13 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('已登记节点由服务后台直接投递');
   });
 
-  it('decays roster education once the session is educated but keeps the --help pointer', () => {
+  it('omits static help once the session is educated', () => {
     const prompt = render([message({})], { showRoutingHelp: false });
     expect(prompt).toContain('「发布组」群');
     expect(prompt).toContain('来自:用户 · task');
     expect(prompt).toContain('```\n检查构建\n```');
     expect(prompt).not.toContain('td collab send');
     expect(prompt).not.toContain('联系其他成员');
-    // The one-line entrance to the full command surface rides every shell.
     expect(prompt).toContain('td collab --help');
     expect(prompt).not.toContain('td collab capture');
     expect(prompt).not.toContain('想看伙伴');

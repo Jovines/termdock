@@ -434,6 +434,32 @@ describe('persistent collaboration composer', () => {
   }
   afterEach(() => vi.unstubAllGlobals());
 
+  it.each([false, true])('keeps terminal splits unchanged when full-panel preferences arrive (initialFloating=%s)', async (initialFloating) => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+    render(<FreeSplitLayout layoutId="full-panel-regression" preset="horizontal" panes={[
+      { id: 'one', content: <div>Terminal one</div> },
+      { id: 'two', content: <div>Terminal two</div> },
+    ]} />);
+    await act(async () => {});
+    const geometry = () => Array.from(document.querySelectorAll<HTMLElement>('[data-layout-pane]'))
+      .map(pane => [pane.dataset.layoutPane, pane.style.cssText]);
+    const before = geometry();
+    let resolveSettings!: (value: unknown) => void;
+    apiMocks.getSettings.mockImplementationOnce(() => new Promise(resolve => { resolveSettings = resolve; }));
+    const panel = render(<AgentOperationsPanel initialCollaborationGroupId="floating" initialFloating={initialFloating}
+      activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+    if (initialFloating) await userEvent.click(await screen.findByRole('button', { name: '完整面板' }));
+    await act(async () => resolveSettings({ collaborationPanels: { [collaborationPanelClientId()]: {
+      groups: { floating: { mode: 'docked', dock: { sessionId: 'one', side: 'right' } } },
+    } } }));
+    expect(screen.getByRole('region', { name: 'Agent 工作台' })).toBeTruthy();
+    expect(useCollaborationPanelDock.getState().docks.floating).toBeUndefined();
+    expect(geometry()).toEqual(before);
+    panel.unmount();
+    expect(geometry()).toEqual(before);
+  });
+
   it('clears a restart-time sync error after polling recovers without losing the draft or hiding send failures', async () => {
     const timers = vi.spyOn(window, 'setInterval');
     try {
@@ -574,7 +600,7 @@ describe('persistent collaboration composer', () => {
     expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('docks beside a terminal, resizes independently, and keeps the draft when returning to floating', async () => {
+  it('keeps a moved and resized dock for full dialogs and releases it only when explicitly switching to a small float', async () => {
     const input = await openFloating();
     render(<FreeSplitLayout layoutId="one" panes={[{ id: "one", content: <div>终端区域</div> }]} />);
     fireEvent.change(input, { target: { value: '布局切换保留' } });
@@ -600,14 +626,60 @@ describe('persistent collaboration composer', () => {
     expect(pane.style.transform).toBe('');
     expect(pane.style.left).toBe('0%');
     // Header controls remain clickable and never start a layout drag.
-    fireEvent.pointerDown(screen.getByRole('button', { name: '切换为浮窗' }), { button: 0, clientX: 20, clientY: 20 });
+    fireEvent.pointerDown(screen.getByRole('button', { name: '切换为小浮窗' }), { button: 0, clientX: 20, clientY: 20 });
     fireEvent.pointerMove(container, { clientX: 200, clientY: 200 });
     expect(pane.style.transform).toBe('');
     fireEvent.pointerUp(container);
-    await userEvent.click(screen.getByRole('button', { name: '切换为浮窗' }));
-    expect(await screen.findByRole('region', { name: '工作组消息浮窗' })).toBeTruthy();
+    const geometry = pane.style.cssText;
+    await userEvent.click(within(panel).getByRole('button', { name: '打开完整弹窗' }));
+    const full = await screen.findByRole('region', { name: 'Agent 工作台' });
+    expect(screen.getByRole('region', { name: '工作组消息分屏' })).toBe(panel);
+    expect(pane.style.cssText).toBe(geometry);
+    fireEvent.change(within(full).getByRole('textbox', { name: '内容' }), { target: { value: '弹窗编辑同步' } });
+    expect((within(panel).getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toBe('弹窗编辑同步');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('region', { name: 'Agent 工作台' })).toBeNull();
+    expect(pane.style.cssText).toBe(geometry);
+    await userEvent.click(within(panel).getByRole('button', { name: '打开完整弹窗' }));
+    await userEvent.click(screen.getByRole('button', { name: '关闭 Agent 工作台' }));
+    expect(pane.style.cssText).toBe(geometry);
+    await userEvent.click(within(panel).getByRole('button', { name: '切换为小浮窗' }));
+    const floating = await screen.findByRole('region', { name: '工作组消息浮窗' });
+    expect(screen.queryByRole('region', { name: '工作组消息分屏' })).toBeNull();
     expect(screen.queryByRole('separator')).toBeNull();
-    expect((screen.getByRole('textbox', { name: '内容' }) as HTMLTextAreaElement).value).toBe('布局切换保留');
+    expect(useCollaborationPanelDock.getState().docks.floating).toBeUndefined();
+    expect(within(floating).getByRole('textbox', { name: '内容' })).toHaveProperty('value', '弹窗编辑同步');
+  });
+
+  it('releases only a manually closed dock and keeps its open overlay usable', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+    apiMocks.getSettings.mockResolvedValue({ collaborationPanels: { [collaborationPanelClientId()]: {
+      groups: { floating: { floatingGroupId: 'floating', mode: 'docked', dock: { sessionId: 'one', side: 'right' } } },
+    } } });
+    const onClose = vi.fn();
+    const onFloatingChange = vi.fn().mockResolvedValue(undefined);
+    render(<><FreeSplitLayout layoutId="explicit-close" panes={[{ id: 'one', content: <div>terminal</div> }]} />
+      <AgentOperationsPanel initialFloating initialCollaborationGroupId="floating" activeSessionId="one"
+        onClose={onClose} onFloatingChange={onFloatingChange} onNewSession={() => {}} /></>);
+    const dock = await screen.findByRole('region', { name: '工作组消息分屏' });
+    await userEvent.click(within(dock).getByRole('button', { name: '打开完整弹窗' }));
+    await userEvent.click(within(screen.getByRole('region', { name: 'Agent 工作台' })).getByRole('button', { name: '常驻浮窗' }));
+    const overlay = screen.getByRole('region', { name: '工作组消息浮窗' });
+    fireEvent.change(within(overlay).getByRole('textbox', { name: '内容' }), { target: { value: '保留草稿' } });
+    expect(onFloatingChange).not.toHaveBeenCalled();
+    await userEvent.click(within(dock).getByRole('button', { name: '关闭' }));
+    expect(screen.queryByRole('region', { name: '工作组消息分屏' })).toBeNull();
+    expect(screen.queryByRole('separator')).toBeNull();
+    expect(useCollaborationPanelDock.getState().docks.floating).toBeUndefined();
+    expect(onFloatingChange).toHaveBeenCalledWith(null);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(within(overlay).getByRole('textbox', { name: '内容' })).toHaveProperty('value', '保留草稿');
+    apiMocks.sendCollaborationMessage.mockResolvedValue({ messages: [] });
+    await userEvent.click(within(overlay).getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(within(overlay).getByRole('textbox', { name: '内容' })).toHaveProperty('value', ''));
+    await userEvent.click(within(overlay).getByRole('button', { name: '关闭' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('sends to multiple recipients, allows deselection, and restores broadcast', async () => {

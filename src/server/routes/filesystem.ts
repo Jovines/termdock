@@ -11,7 +11,7 @@ import busboy from 'busboy';
 import { validatePreview } from '../utils/previewValidation.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { isAuthEnabled, isRequestAuthenticated } from '../utils/authProtection.js';
-import { isEncryptedRequest } from '../federation/requestContext.js';
+import { encryptedRequestSubject, isEncryptedRequest } from '../federation/requestContext.js';
 import { getImageDimensions, parseImageDimensions } from '../utils/imageDimensions.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
 import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
@@ -3910,7 +3910,7 @@ router.get('/video', async (req: Request, res: Response) => {
 // The frontend renders this in a sandboxed iframe (no allow-same-origin), so
 // previewed scripts never gain the termdock origin.
 const PREVIEW_TOKEN_TTL_MS = 30 * 60 * 1000;
-const previewTokens = new Map<string, { root: string; expiresAt: number; ownerSession?: string }>();
+const previewTokens = new Map<string, { root: string; expiresAt: number; ownerSession?: string; ownerSubject?: string }>();
 
 export function isPreviewToken(value: string): boolean {
   return /^[0-9a-f]{32}$/.test(value);
@@ -3923,26 +3923,28 @@ export function isPathWithinPreviewRoot(root: string, targetPath: string): boole
   return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(prefix);
 }
 
-// Absolute expiration and owner-session validation prevent indefinite bearer access.
-export function validatePreviewToken(token: string, targetPath: string): boolean {
+// Device tokens require the verified channel on every read; its runtime rechecks
+// current authorization. Legacy cookie tokens retain their session validation.
+export function validatePreviewToken(token: string, targetPath: string, subjectId?: string): boolean {
   const entry = previewTokens.get(token);
   if (!entry) return false;
-  if (entry.expiresAt <= Date.now() || (entry.ownerSession ? !isSessionValid(entry.ownerSession) : isAuthEnabled())) {
+  if (entry.expiresAt <= Date.now() || (!entry.ownerSubject && (entry.ownerSession ? !isSessionValid(entry.ownerSession) : isAuthEnabled()))) {
     previewTokens.delete(token);
     return false;
   }
+  if (entry.ownerSubject && entry.ownerSubject !== subjectId) return false;
   if (!isPathWithinPreviewRoot(entry.root, targetPath)) return false;
   return true;
 }
 
-export function mintPreviewToken(root: string, ownerSession?: string): string {
+export function mintPreviewToken(root: string, ownerSession?: string, ownerSubject?: string): string {
   const now = Date.now();
   for (const [token, entry] of previewTokens) {
     if (entry.expiresAt < now) previewTokens.delete(token);
   }
   if (previewTokens.size >= 128) previewTokens.delete(previewTokens.keys().next().value!);
   const token = crypto.randomBytes(16).toString('hex');
-  previewTokens.set(token, { root: path.resolve(root), expiresAt: now + PREVIEW_TOKEN_TTL_MS, ownerSession });
+  previewTokens.set(token, { root: path.resolve(root), expiresAt: now + PREVIEW_TOKEN_TTL_MS, ownerSession, ownerSubject });
   return token;
 }
 
@@ -4007,6 +4009,7 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
     // injected <base> so it always equals the document URL.
     const previewBaseUrl = req.originalUrl.split('?', 1)[0];
     const authEnabled = isAuthEnabled();
+    const subjectId = encryptedRequestSubject(req);
 
     // Token requests carry their own credential in the URL. Document requests
     // must present the session cookie before we mint a token for them.
@@ -4017,13 +4020,13 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
 
     if (maybeToken) {
       const entry = previewTokens.get(maybeToken);
-      if (!entry || !validatePreviewToken(maybeToken, entry.root)) {
+      if (!entry || !validatePreviewToken(maybeToken, entry.root, subjectId)) {
         res.status(403).json({ error: 'Preview token invalid or expired', code: 'PREVIEW_TOKEN_INVALID' });
         return;
       }
     }
     const validatedPath = await pathValidator.validatePathAsync(requestedPath);
-    if (maybeToken && !validatePreviewToken(maybeToken, validatedPath)) {
+    if (maybeToken && !validatePreviewToken(maybeToken, validatedPath, subjectId)) {
       res.status(403).json({ error: 'Preview path outside token scope', code: 'PREVIEW_TOKEN_INVALID' });
       return;
     }
@@ -4054,11 +4057,11 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
     // relative reference the document makes.
     if ((authEnabled || isEncryptedRequest(req)) && !maybeToken) {
       const root = stat.isDirectory() ? validatedPath : path.dirname(validatedPath);
-      const tokenized = tokenizePreviewUrl(previewBaseUrl, mintPreviewToken(root, req.cookies?.[AUTH_COOKIE]));
+      const tokenized = tokenizePreviewUrl(previewBaseUrl, mintPreviewToken(root, req.cookies?.[AUTH_COOKIE], subjectId));
       redirectUrl = stat.isDirectory() && !previewBaseUrl.endsWith('/') ? `${tokenized}/` : tokenized;
     }
 
-    if (maybeToken && !validatePreviewToken(maybeToken, targetPath)) {
+    if (maybeToken && !validatePreviewToken(maybeToken, targetPath, subjectId)) {
       res.status(403).json({ error: 'Preview token invalid or expired', code: 'PREVIEW_TOKEN_INVALID' });
       return;
     }
@@ -4072,7 +4075,7 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
       return;
     }
 
-    if (maybeToken && !validatePreviewToken(maybeToken, targetPath)) {
+    if (maybeToken && !validatePreviewToken(maybeToken, targetPath, subjectId)) {
       res.status(403).json({ error: 'Preview token invalid or expired', code: 'PREVIEW_TOKEN_INVALID' });
       return;
     }

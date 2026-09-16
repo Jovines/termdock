@@ -292,9 +292,21 @@ export class CollaborationStore {
     if (expectedVersion !== undefined && expectedVersion !== (group.instructions?.version ?? '')) throw new CollaborationError('RULES_CHANGED', '群规已更新，请重新读取后再修改', 409);
     if (typeof text === 'string') text = text.replace(/\r\n?/g, '\n');
     if (typeof text !== 'string' || Buffer.byteLength(text) > 8192 || /[\x00-\x08\x0b-\x1f\x7f]/.test(text)) throw new CollaborationError('INVALID_RULES', '群规最多 8192 UTF-8 字节，不允许终端控制字符');
-    const instructions = { text, updatedBy, version: crypto.randomUUID(), updatedAt: Math.max(Date.now(), (group.instructions?.updatedAt ?? 0) + 1) };
-    group.instructions = instructions; group.updatedAt = Math.max(Date.now(), group.updatedAt + 1); this.persist();
-    queueMicrotask(() => this.onMessageQueued?.());
+    const versions = new Set(this.document.groups.flatMap((item) => item.instructions ? [item.instructions.version] : []));
+    for (const message of this.document.messages) if (message.instructions) versions.add(message.instructions.version);
+    const instructions = { text, updatedBy, version: newCollaborationId(versions), updatedAt: Math.max(Date.now(), (group.instructions?.updatedAt ?? 0) + 1) };
+    group.instructions = instructions; group.updatedAt = Math.max(Date.now(), group.updatedAt + 1);
+    // Only the editing node creates notifications. Context replication must not
+    // fan them out again; normal message delivery provides persistence and retries.
+    const recipients = group.sessionIds.filter(id => id !== updatedBy);
+    if (recipients.length) {
+      this.send({ groupId, fromSessionId: updatedBy, toSessionIds: recipients, kind: 'message',
+        content: `群规已${text.trim() ? '更新' : '清空'}（${instructions.version}），无需回复。\n查看群规:td collab rules get ${group.id} --text`,
+      }); // Persists the revision and its notifications together.
+    } else {
+      this.persist();
+      queueMicrotask(() => this.onMessageQueued?.());
+    }
     return instructions;
   }
   context(groupId: string): CollaborationContext {

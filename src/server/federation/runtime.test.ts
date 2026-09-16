@@ -2,7 +2,7 @@ import { startPasswordBootstrap, finishPasswordBootstrap, type PasswordBootstrap
 import * as authProtection from '../utils/authProtection.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -89,10 +89,35 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
     }
     return { identity, channel, take, pair, http, wire };
   }
-  return { connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, terminal: () => terminal };
+  return { app, directory, connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, terminal: () => terminal };
 }
 
 describe('federation runtime over real encrypted WebSocket', () => {
+  it('loads password-protected HTML and assets without cookies and binds preview tokens to the encrypted device', async () => {
+    const spy = vi.spyOn(authProtection, 'isAuthEnabled').mockReturnValue(true);
+    cleanup.push(() => spy.mockRestore());
+    const f = await fixture();
+    const { default: filesystem } = await import('../routes/filesystem.js');
+    f.app.use('/api/terminal/fs', filesystem);
+    writeFileSync(join(f.directory, 'index.html'), '<html><body>encrypted-preview-document<img src="image.svg"></body></html>');
+    writeFileSync(join(f.directory, 'image.svg'), '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    const owner = await f.connect(), other = await f.connect();
+    await owner.pair(); await other.pair();
+    const initial = await owner.http('preview-initial', 'GET', `/api/terminal/fs/preview${f.directory}/index.html`);
+    expect(initial[0]).toMatchObject({ type: 'head', status: 302 });
+    const target = (initial[0].headers as Record<string, string>).location;
+    const document = await owner.http('preview-document', 'GET', target);
+    expect(document[0]).toMatchObject({ type: 'head', status: 200 });
+    expect(document.filter(p => p.type === 'chunk').map(p => new TextDecoder().decode(fromBase64(String(p.data)))).join('')).toContain('encrypted-preview-document');
+    expect((await owner.http('preview-image', 'GET', target.replace(/index.html$/, 'image.svg')))[0]).toMatchObject({ status: 200 });
+    expect((await other.http('preview-other-device', 'GET', target))[0]).toMatchObject({ status: 403 });
+    expect((await owner.http('preview-owner-again', 'GET', target))[0]).toMatchObject({ status: 200 });
+    owner.channel.send({ type: 'logout', id: 'preview-logout' });
+    await owner.take('preview-logout');
+    expect((await owner.http('preview-revoked', 'GET', target))[0]).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    expect(owner.wire.every(chunk => !new TextDecoder().decode(chunk).includes('encrypted-preview-document'))).toBe(true);
+  });
+
   it('keeps device names separate from permissions and protects other devices from renaming', async () => {
     const f = await fixture(), owner = await f.connect(), other = await f.connect();
     await owner.pair();

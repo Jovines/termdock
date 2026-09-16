@@ -123,6 +123,25 @@ describe('HTML preview auth tokens', () => {
 
 
 describe('preview capability revocation', () => {
+  it('requires the verified device for encrypted tokens, including when passwords are disabled', () => {
+    for (const enabled of [true, false]) {
+      previewAuth.enabled = enabled;
+      const token = mintPreviewToken('/tmp/site', undefined, 'owner-device');
+      expect(validatePreviewToken(token, '/tmp/site/index.html')).toBe(false);
+      expect(validatePreviewToken(token, '/tmp/site/index.html', 'other-device')).toBe(false);
+      expect(validatePreviewToken(token, '/tmp/site/index.html', 'owner-device')).toBe(true);
+      expect(validatePreviewToken(token, '/tmp/private.html', 'owner-device')).toBe(false);
+    }
+  });
+
+  it('expires encrypted tokens even while their device is still authorized', () => {
+    previewAuth.enabled = true;
+    const now = Date.now();
+    const token = mintPreviewToken('/tmp/site', undefined, 'owner-device');
+    vi.spyOn(Date, 'now').mockReturnValue(now + 31 * 60_000);
+    expect(validatePreviewToken(token, '/tmp/site/index.html', 'owner-device')).toBe(false);
+  });
+
   it('expires absolutely even while subresources keep loading', () => {
     const now = Date.now();
     const token = mintPreviewToken('/tmp');

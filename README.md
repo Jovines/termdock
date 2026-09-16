@@ -1,5 +1,7 @@
 # Termdock
 
+> 命名备注：项目新名称暂定为 **Termcove**。目前仅记录改名意向，程序名称、CLI 命令和 npm 包名仍沿用 Termdock / `termdock`；待未来正式决定全面改名时统一迁移。
+
 一个面向移动端与桌面端的 Web 终端，由 tmux 持久托管会话，xterm.js + WebGL 负责渲染，Express + WebSocket 提供后端通信。
 
 ![License](https://img.shields.io/badge/license-MIT-green)
