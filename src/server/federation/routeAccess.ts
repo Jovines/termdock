@@ -2,14 +2,19 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { DirectTargetConfig } from './directRoutes.js';
-export type RoutePrincipal = { kind: 'relay'; id: string; tokenHash: string } | { kind: 'client'; subjectId: string; serviceId: string };
+export type RoutePrincipal =
+  | { kind: 'relay'; id: string; tokenHash: string }
+  | { kind: 'self-relay'; serviceId: string }
+  | { kind: 'client'; subjectId: string; serviceId: string };
 interface RelayRecord { id: string; token: string; targets: string[] }
 const validId = (x: unknown): x is string => typeof x === 'string' && /^[a-zA-Z0-9_.:-]{1,160}$/.test(x);
 const digest = (s: string) => createHash('sha256').update(s).digest();
 /** Target directory is re-read on every permission check; invalid config denies all. */
 export class RouteAccess {
   private tickets = new Map<string, { subjectId: string; serviceId: string; expiresAt: number }>();
-  constructor(private filePath: string, private now: () => number = Date.now, private canRouteSubject: (subjectId: string, serviceId: string) => boolean = () => false, private additionalTargets: () => DirectTargetConfig[] = () => []) {}
+  private selfRelayTickets = new Map<string, { serviceId: string; expiresAt: number }>();
+  constructor(private filePath: string, private now: () => number = Date.now, private canRouteSubject: (subjectId: string, serviceId: string) => boolean = () => false,
+    private additionalTargets: () => DirectTargetConfig[] = () => [], private additionalTargetIds: () => string[] = () => []) {}
   private registry(): { relays: RelayRecord[]; directTargets: DirectTargetConfig[] } {
     const empty = { relays: [], directTargets: [] };
     try {
@@ -43,6 +48,27 @@ export class RouteAccess {
     this.tickets.set(digest(routeToken).toString('hex'), { subjectId, serviceId, expiresAt });
     return { routeToken, expiresAt };
   }
+  /** A Noise-authenticated service can advertise only its own identity. The
+   * short-lived token merely transfers that identity onto the relay socket; it
+   * grants neither route use nor target-service access. */
+  issueSelfRelayTicket(serviceId: string): { selfRelayToken: string; expiresAt: number } {
+    if (!validId(serviceId)) throw new Error('INVALID_SELF_RELAY_IDENTITY');
+    for (const [key, value] of this.selfRelayTickets) if (value.expiresAt <= this.now()) this.selfRelayTickets.delete(key);
+    if (this.selfRelayTickets.size >= 1024) throw new Error('SELF_RELAY_TICKET_LIMIT');
+    const selfRelayToken = randomBytes(32).toString('base64url');
+    const expiresAt = this.now() + 30_000;
+    this.selfRelayTickets.set(digest(selfRelayToken).toString('hex'), { serviceId, expiresAt });
+    return { selfRelayToken, expiresAt };
+  }
+  /** Single-use, fail-closed transfer from the authenticated Noise channel to
+   * the opaque relay transport. */
+  authenticateSelfRelay(selfRelayToken?: string | null): RoutePrincipal | null {
+    if (!selfRelayToken || selfRelayToken.length > 512) return null;
+    const key = digest(selfRelayToken).toString('hex');
+    const ticket = this.selfRelayTickets.get(key); this.selfRelayTickets.delete(key);
+    if (!ticket || ticket.expiresAt <= this.now()) return null;
+    return { kind: 'self-relay', serviceId: ticket.serviceId };
+  }
   /** Called once before upgrading. A route ticket is consumed even if expired. */
   authenticate(authorization?: string, routeToken?: string | null): RoutePrincipal | null {
     if (authorization && routeToken) return null;
@@ -58,6 +84,7 @@ export class RouteAccess {
     return { kind: 'client', subjectId: ticket.subjectId, serviceId: ticket.serviceId };
   }
   allowRegister(principal: RoutePrincipal, serviceId: string): boolean {
+    if (principal.kind === 'self-relay') return principal.serviceId === serviceId;
     return principal.kind === 'relay' && this.relays().some(r => r.id === principal.id && digest(r.token).toString('hex') === principal.tokenHash && r.targets.includes(serviceId));
   }
   allowRoute(principal: RoutePrincipal, serviceId: string): boolean {
@@ -66,7 +93,8 @@ export class RouteAccess {
   hasConfiguredTarget(serviceId: string): boolean {
     if (!validId(serviceId)) return false;
     const registry = this.registry();
-    return registry.relays.some(relay => relay.targets.includes(serviceId)) || registry.directTargets.some(target => target.serviceId === serviceId) || this.additionalTargets().some(target => target.serviceId === serviceId);
+    return registry.relays.some(relay => relay.targets.includes(serviceId)) || registry.directTargets.some(target => target.serviceId === serviceId)
+      || this.additionalTargets().some(target => target.serviceId === serviceId) || this.additionalTargetIds().includes(serviceId);
   }
   addDirectTarget(target: DirectTargetConfig): void {
     const url = new URL(target.url);
@@ -98,6 +126,7 @@ export class RouteAccess {
       const url = new URL(target.url); url.protocol = 'https:';
       targets.set(target.serviceId, { serviceId: target.serviceId, url: url.origin, ...(target.label ? { label: target.label } : {}) });
     }
+    for (const serviceId of this.additionalTargetIds()) if (validId(serviceId) && !targets.has(serviceId)) targets.set(serviceId, { serviceId });
     return [...targets.values()];
   }
 }

@@ -15,12 +15,25 @@ export function RelayServices({ service, onBusyChange, onConnect, onConnectWithP
   const [revision, setRevision] = useState(0);
   const [pending, setPending] = useState<ConnectionIntent>(), [password, setPassword] = useState('');
   useEffect(() => {
-    let disposed = false;
+    let disposed = false, hasResult = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     setLoading(true); setError(''); setDirectory(undefined);
-    void listRelayTargets(service).then(result => { if (!disposed) setDirectory(result); })
-      .catch(failure => { if (!disposed) setError(failure instanceof Error ? failure.message : '暂时无法读取中转列表，请重试。'); })
-      .finally(() => { if (!disposed) setLoading(false); });
-    return () => { disposed = true; };
+    const load = async (initial: boolean) => {
+      try {
+        const result = await listRelayTargets(service);
+        if (disposed) return;
+        hasResult = true; setDirectory(result); setError('');
+      } catch (failure) {
+        if (!disposed && (!hasResult || initial)) setError(failure instanceof Error ? failure.message : '暂时无法读取中转列表，请重试。');
+      } finally {
+        if (!disposed) {
+          setLoading(false);
+          timer = setTimeout(() => void load(false), 2_000);
+        }
+      }
+    };
+    void load(true);
+    return () => { disposed = true; clearTimeout(timer); };
   }, [service.id, service.url, revision]);
   const run = async (task: () => Promise<void>) => {
     if (busy) return;

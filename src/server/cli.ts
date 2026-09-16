@@ -423,27 +423,6 @@ function getOrCreateLocalApiToken(): string {
   return token;
 }
 
-function buildServerState(params: {
-  pid: number;
-  host: string;
-  port: number;
-  scheme: 'http' | 'https';
-  localApiToken?: string;
-  localAccessReason?: string | null;
-}): ServerState {
-  return {
-    pid: params.pid,
-    host: params.host,
-    port: params.port,
-    scheme: params.scheme,
-    localUrl: `${params.scheme}://${params.host === '0.0.0.0' ? 'localhost' : params.host}:${params.port}`,
-    localAccessReason: params.localAccessReason,
-    logFile: logFilePath,
-    startedAt: new Date().toISOString(),
-    localApiToken: params.localApiToken,
-  };
-}
-
 function fileExists(filePath: string | undefined): filePath is string {
   return typeof filePath === 'string' && filePath.length > 0 && fs.existsSync(filePath);
 }
@@ -1541,12 +1520,24 @@ const STOP_GRACE_MS = 5000;
 const DAEMON_START_TIMEOUT_MS = 10000;
 
 /** Poll the health endpoint until it responds or timeout expires. */
-async function waitForHealth(healthUrl: string, caPath: string | undefined | null, timeoutMs: number): Promise<boolean> {
+async function waitForHealth(
+  healthUrl: string,
+  caPath: string | undefined | null,
+  timeoutMs: number,
+  isReady: () => boolean,
+  isAlive: () => boolean,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (!isAlive()) return false;
+    if (!isReady()) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
     try {
       const ok = await new Promise<boolean>((resolve) => {
-        const req = https.get(healthUrl, {
+        const transport = healthUrl.startsWith('https:') ? https : http;
+        const req = transport.get(healthUrl, {
           ca: caPath ? fs.readFileSync(caPath) : undefined,
           rejectUnauthorized: Boolean(caPath),
           timeout: 2000,
@@ -1558,7 +1549,7 @@ async function waitForHealth(healthUrl: string, caPath: string | undefined | nul
         req.on('error', () => resolve(false));
         req.on('timeout', () => { req.destroy(); resolve(false); });
       });
-      if (ok) return true;
+      if (ok && isAlive()) return true;
     } catch {
       // Retry on any error.
     }
@@ -3686,11 +3677,6 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const localApiToken = getOrCreateLocalApiToken();
-  await refreshDefaultHttpsCertificateSafely();
-  const https = resolveHttpsOptions(options);
-  const isManagedDefaultHttps = Boolean(https.cert === defaultHttpsCertPath && https.key === defaultHttpsKeyPath);
-
   if (options.status) {
     const runningState = getRunningState();
     if (!runningState) {
@@ -3732,6 +3718,11 @@ async function main(): Promise<void> {
     }
     process.exit(0);
   }
+
+  const localApiToken = getOrCreateLocalApiToken();
+  await refreshDefaultHttpsCertificateSafely();
+  const https = resolveHttpsOptions(options);
+  const isManagedDefaultHttps = Boolean(https.cert === defaultHttpsCertPath && https.key === defaultHttpsKeyPath);
 
   if (options.foreground) {
     // Boot check (marker prevents re-run if parent already completed)
@@ -3801,6 +3792,17 @@ async function main(): Promise<void> {
       startedAt: new Date().toISOString(),
       localApiToken,
     });
+    // Only this child can acknowledge startup; an existing listener on the
+    // same port must not make the parent report a successful launch.
+    const acknowledgeStartup = () => {
+      if (process.connected) {
+        process.send?.({ type: 'termdock-ready' }, () => {
+          if (process.connected) process.disconnect();
+        });
+      }
+    };
+    if (result.server.listening) acknowledgeStartup();
+    else result.server.once('listening', acknowledgeStartup);
     return;
   }
 
@@ -3852,26 +3854,40 @@ async function main(): Promise<void> {
   }
 
   const scheme = activeHttps.cert && activeHttps.key ? 'https' : 'http';
-  const localAccessReason = activeHttps.source === 'default'
-    ? 'Using local HTTPS certificates from ~/.termdock/certs.'
-    : null;
-
   const logFileFd = fs.openSync(logFilePath, 'a');
   const child = spawn(process.execPath, childArgs, {
     detached: true,
-    stdio: ['ignore', logFileFd, logFileFd],
+    stdio: ['ignore', logFileFd, logFileFd, 'ipc'],
   });
   fs.closeSync(logFileFd);
+  let ready = false;
+  let startupError: Error | undefined;
+  child.on('error', (error) => { startupError = error; });
+  child.on('message', (message: unknown) => {
+    if (message && typeof message === 'object' && 'type' in message
+      && message.type === 'termdock-ready') ready = true;
+  });
+  const isAlive = () => !startupError && child.pid !== undefined
+    && child.exitCode === null && child.signalCode === null && isProcessRunning(child.pid);
+  const displayHost = childHost === '0.0.0.0' ? 'localhost' : childHost;
+  const healthOk = await waitForHealth(
+    `${scheme}://${displayHost}:${childPort}/health`, activeHttps.ca,
+    DAEMON_START_TIMEOUT_MS, () => ready, isAlive,
+  );
+  if (child.connected) child.disconnect();
   child.unref();
-
-  writeState(buildServerState({
-    pid: child.pid!,
-    host: childHost,
-    port: childPort,
-    scheme,
-    localAccessReason,
-    localApiToken,
-  }));
+  if (!healthOk) {
+    const alive = isAlive();
+    if (!alive && child.pid !== undefined && readState()?.pid === child.pid) removeStateFile();
+    const detail = startupError?.message ?? (alive
+      ? 'Startup timed out; the process is still running but readiness could not be confirmed.'
+      : `Background process exited (code: ${child.exitCode ?? 'unknown'}, signal: ${child.signalCode ?? 'none'}).`);
+    console.error(`${ICON.err} ${c.red('Termdock startup could not be confirmed.')} ${detail}`);
+    console.error(`  ${c.dim('Log:')} ${logFilePath}`);
+    console.error(`  Read the startup error with: tail -n 80 ${shellQuote(logFilePath)}`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(`${ICON.ok} ${c.green('Termdock started in background.')}`);
   console.log(`  ${c.dim('URL:')} ${c.cyan(`${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`)}`);
@@ -3883,17 +3899,6 @@ async function main(): Promise<void> {
   console.log(`  ${c.dim('PID:')} ${child.pid}`);
   console.log(`  ${c.dim('Log:')} ${logFilePath}`);
   warnIfAuthDisabled(childHost);
-
-  // Wait for the daemon child to become healthy before returning — a
-  // subsequent deploy step that curls the server won't race startup.
-  {
-    const displayHost = childHost === '0.0.0.0' ? 'localhost' : childHost;
-    const healthUrl = `${scheme}://${displayHost}:${childPort}/health`;
-    const healthOk = await waitForHealth(healthUrl, activeHttps.ca, DAEMON_START_TIMEOUT_MS);
-    if (!healthOk) {
-      console.log(`${ICON.warn} ${c.yellow('Server started but health check did not respond in time — it may still be initializing.')}`);
-    }
-  }
 
   process.exit(0);
 }

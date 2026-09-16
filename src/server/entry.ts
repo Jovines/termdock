@@ -14,6 +14,7 @@ import { RouteInvitationStore } from './federation/routeInvitations.js';
 import { attachRegisteredDirectTargets, verifyDirectTarget } from './federation/directRoutes.js';
 import { secureChannelOriginAllowed } from './federation/originPolicy.js';
 import { RelayRouter } from './federation/relay.js';
+import { DesktopSelfRelay } from './federation/selfRelay.js';
 import { assertPublicSecurity, securityHeaders } from './utils/publicSecurity.js';
 import { apiCachePolicy } from './utils/apiCachePolicy.js';
 import 'dotenv/config';
@@ -483,14 +484,17 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   let entrySubjectAllowed = (_subjectId: string) => false;
   let routeInvitations: RouteInvitationStore | undefined;
   let federationServiceId = '';
+  let activeRouteIds = (): string[] => [];
   const desktopTargets = () => desktopDirectTargets(path.join(homedir(), '.termdock', 'desktop.json'), federationServiceId);
   const routeAccess = new RouteAccess(path.join(homedir(), '.termdock', 'federation', 'routes.json'), Date.now,
-    (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true || collaborationTransport?.canRoute(subjectId, targetServiceId) === true, desktopTargets);
+    (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true || collaborationTransport?.canRoute(subjectId, targetServiceId) === true,
+    desktopTargets, () => activeRouteIds());
   const relayRouter = new RelayRouter<RoutePrincipal>({
     authenticate: context => context as RoutePrincipal,
     allowRegister: (principal, serviceId) => routeAccess.allowRegister(principal, serviceId),
     allowRoute: (principal, serviceId) => routeAccess.allowRoute(principal, serviceId),
   });
+  activeRouteIds = () => relayRouter.activeRouteIds();
   const dynamicDirectTargets = new Map<string, { signature: string; close: () => void }>();
   const refreshDirectTargets = () => {
     const desired = new Map(routeAccess.configuredDirectTargets().filter(target => target.serviceId !== federationServiceId).map(target => [target.serviceId, target]));
@@ -549,6 +553,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     },
     revokeRouteAccess: id => routeInvitations?.revoke(id) || false,
     issueRouteTicket: (subjectId: string, serviceId: string) => routeAccess.issueRouteTicket(subjectId, serviceId),
+    issueSelfRelayTicket: (serviceId: string) => routeAccess.issueSelfRelayTicket(serviceId),
     hasRouteGrant: (subjectId: string, serviceId: string) => routeInvitations?.allows(subjectId, serviceId) === true || collaborationTransport?.canRoute(subjectId, serviceId) === true,
     createRouteInvitation: (issuerId: string, serviceId: string) => {
       if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
@@ -607,6 +612,16 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       issuerAllowed: subjectId => entrySubjectAllowed(subjectId),
       targetAvailable: serviceId => routeAccess.hasConfiguredTarget(serviceId) && relayRouter.hasRoute(serviceId),
     });
+    let localCa: Buffer | undefined;
+    if (scheme === 'https' && options.httpsCaPath) try { localCa = fs.readFileSync(options.httpsCaPath); } catch { /* System trust may still validate the local certificate. */ }
+    const localHostname = ['0.0.0.0', '::'].includes(host) ? 'localhost' : host;
+    const localAuthority = localHostname.includes(':') && !localHostname.startsWith('[') ? `[${localHostname}]` : localHostname;
+    const selfRelay = new DesktopSelfRelay({
+      desktopFile: path.join(homedir(), '.termdock', 'desktop.json'), identity: runtime.identity, serviceId: runtime.serviceId,
+      localOrigin: `${scheme}://${localAuthority}:${port}`, ...(localCa ? { localCa } : {}),
+    });
+    selfRelay.start();
+    server.once('close', () => selfRelay.close());
   }).catch(() => console.error('Route invitations unavailable; uninitialized route grants remain denied.'));
   void federation.catch(() => console.error('Encrypted access initialization failed; business access remains closed.'));
   server.once('close', () => { void federation.then(runtime => runtime.close()).catch(() => {}); });
@@ -704,7 +719,11 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       if (scheme !== 'https' || !secureChannelOriginAllowed(request.headers.origin, () => isUpgradeOriginAllowed(request.headers.origin, request.headers.host))) {
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
       }
-      const principal = routeAccess.authenticate(request.headers.authorization, url.searchParams.get('routeToken'));
+      const routeToken = url.searchParams.get('routeToken');
+      const selfRelayToken = url.searchParams.get('selfRelayToken');
+      const principal = selfRelayToken && !request.headers.authorization && !routeToken
+        ? routeAccess.authenticateSelfRelay(selfRelayToken)
+        : !selfRelayToken ? routeAccess.authenticate(request.headers.authorization, routeToken) : null;
       if (!principal) { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return; }
       wss.handleUpgrade(request, socket, head, ws => {
         void relayRouter.attach(ws, principal).then(attached => { if (attached) ws.send(JSON.stringify({ type: 'ready' })); });

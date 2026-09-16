@@ -58,6 +58,7 @@ export interface FederationRuntimeOptions {
   consumeRouteInvitation?: (code: string, subjectId: string) => { serviceId: string };
   hasRouteGrant?: (subjectId: string, targetServiceId: string) => boolean;
   issueRouteTicket?: (subjectId: string, targetServiceId: string) => { routeToken: string; expiresAt: number };
+  issueSelfRelayTicket?: (serviceId: string) => { selfRelayToken: string; expiresAt: number };
 }
 
 /** The internal HTTP listener is private and carries only already-authorized requests.
@@ -268,6 +269,9 @@ export async function createFederationRuntime(app: express.Express, directory: s
                 canWrite: allowed(subjectId, 'session.input', sessionId), canResize: allowed(subjectId, 'session.resize', sessionId) }];
             });
             send({ type: 'result', id: packet.id, items });
+          } else if (packet.type === 'self-relay-ticket') {
+            if (!options.issueSelfRelayTicket) throw new Error('SELF_RELAY_UNAVAILABLE');
+            send({ type: 'result', id: packet.id, serviceId: subjectId, ...options.issueSelfRelayTicket(subjectId) });
           } else if (packet.type === 'route-invite-create') {
             check('authorization.manage');
             if (!options.createRouteInvitation || typeof packet.serviceId !== 'string' || !packet.serviceId || packet.serviceId.length > 512) throw new Error('ROUTE_NOT_AVAILABLE');

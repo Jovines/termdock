@@ -108,6 +108,9 @@ export class RelayRouter<P = string> {
     const route = this.routes.get(serviceId);
     return !this.stopped && !!route && route.expires > Date.now() && route.peer.ws.readyState === 1 && this.canRegister(route.peer, serviceId);
   }
+  activeRouteIds(): string[] {
+    return [...this.routes.keys()].filter(serviceId => this.hasRoute(serviceId));
+  }
   /** Trusted local configuration only. Clients never supply a target URL or factory. */
   registerDirect(serviceId: string, connect: () => Promise<WebSocket>): () => void {
     if (this.stopped || !identifier(serviceId) || typeof connect !== 'function' || this.hasRoute(serviceId)) throw new Error('Invalid or already registered direct target');
