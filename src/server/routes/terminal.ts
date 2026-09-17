@@ -2008,9 +2008,15 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
 const collaborationScaffoldState = new Map<string, { rosterSignature: string }>();
 
 function collaborationRosterSignature(frontendSessionId: string): string {
-  const peerIds = new Set(collaborationStore.groupsForSession(frontendSessionId)
+  const groups = collaborationStore.groupsForSession(frontendSessionId);
+  const peerIds = new Set(groups
     .flatMap((group) => group.sessionIds ?? []).filter((id) => id !== frontendSessionId));
-  return [...peerIds].sort().join('|');
+  // The rules version rides the signature so a rules change re-educates on the
+  // next delivery: the recipient sees the update exactly once, then silence
+  // until something actually changes. Losing the in-memory state (restart)
+  // re-educates once — the harmless direction.
+  const rules = groups.map((group) => `${group.id}:${group.instructions?.version ?? ''}`).sort().join('|');
+  return `${[...peerIds].sort().join('|')}#${rules}`;
 }
 
 function formatLocalCollaborationMessages(frontendSessionId: string, messages: CollaborationMessage[]): string {

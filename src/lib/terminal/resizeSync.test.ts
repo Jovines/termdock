@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   acknowledgeResize,
+  createResizePushGate,
   createResizeSyncState,
   forceResize,
+  markResizePushSent,
   observeServerSize,
+  planResizePush,
   requestResize,
   retryResize,
 } from './resizeSync';
@@ -73,5 +76,34 @@ describe('terminal resize synchronization', () => {
   it('tracks authoritative sizes broadcast after another client resizes the PTY', () => {
     const state = observeServerSize(createResizeSyncState(), { cols: 88.9, rows: 27.4 });
     expect(state.confirmed).toEqual({ cols: 88, rows: 27 });
+  });
+});
+
+describe('planResizePush', () => {
+  it('sends immediately when the previous push has settled', () => {
+    const gate = createResizePushGate(1000);
+    const decision = planResizePush(gate, 1000 + 150);
+    expect(decision).toEqual({ action: 'send' });
+    expect(gate.lastPushAt).toBe(1000 + 150);
+  });
+
+  it('holds pushes that arrive while the previous one is still settling', () => {
+    const gate = createResizePushGate(1000);
+    const decision = planResizePush(gate, 1000 + 40);
+    expect(decision).toEqual({ action: 'hold', readyAt: 1150 });
+    expect(gate.lastPushAt).toBe(1000);
+  });
+
+  it('allows the next send once the held window closes', () => {
+    const gate = createResizePushGate(1000);
+    expect(planResizePush(gate, 1000 + 40).action).toBe('hold');
+    const decision = planResizePush(gate, 1000 + 150);
+    expect(decision).toEqual({ action: 'send' });
+  });
+
+  it('marks the gate when a held push is finally sent', () => {
+    const gate = markResizePushSent(1150);
+    expect(planResizePush(gate, 1150 + 149).action).toBe('hold');
+    expect(planResizePush(gate, 1150 + 150).action).toBe('send');
   });
 });

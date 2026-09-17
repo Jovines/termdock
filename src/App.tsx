@@ -36,6 +36,7 @@ import {
   AppWindow as RiDesktopLine,
   FolderOpen as RiFolderOpenLine,
   Cable as RiLinkLine,
+  Type as RiFontSize,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DragStart, type DragUpdate, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
@@ -46,6 +47,7 @@ import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
 import { markStartupMilestone } from './lib/utils/startupPerformance';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { requiresSessionCloseConfirmation } from './lib/terminal/sessionClose';
+import { getSessionFontSize, setSessionFontSize } from './lib/terminal/sessionFontSize';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, getTermdockUpdateState, checkTermdockUpdate, confirmTermdockUpdateRestart } from './lib/terminal/api';
@@ -828,6 +830,8 @@ function App() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [tabMenuSessionId, setTabMenuSessionId] = useState<string | null>(null);
   const [tabMenuAnchor, setTabMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  // Bumped after per-session font writes so the menu re-reads the override map.
+  const [, setTabMenuFontTick] = useState(0);
   const [renamePopupAnchor, setRenamePopupAnchor] = useState<{ x: number; y: number } | null>(null);
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const [mobileDraggedSessionId, setMobileDraggedSessionId] = useState<string | null>(null);
@@ -4266,6 +4270,58 @@ function App() {
                     <span className="ml-auto text-[11px] text-primary">{t('tab.copied')}</span>
                   )}
                 </button>
+                {(() => {
+                  const menuFontOverride = getSessionFontSize(menuSession.id);
+                  const menuFontSize = menuFontOverride ?? fontSize;
+                  return (
+                    <div className={`${menuItemClassName} text-foreground`}>
+                      <span className={`${menuIconClassName} bg-surface-2 text-muted-foreground`}>
+                        <RiFontSize size={14} />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-medium">{t('tab.fontSize')}</span>
+                        <span className="block text-[11px] text-muted-foreground">{t('tab.fontSizeHint')}</span>
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSessionFontSize(menuSession.id, menuFontSize - 1);
+                            setTabMenuFontTick((tick) => tick + 1);
+                          }}
+                          className="h-7 w-7 shrink-0 rounded-md bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                          aria-label={`${t('tab.fontSize')} -1`}
+                        >
+                          −
+                        </button>
+                        <span className="w-8 text-center text-[11px] tabular-nums text-muted-foreground">{menuFontSize}px</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSessionFontSize(menuSession.id, menuFontSize + 1);
+                            setTabMenuFontTick((tick) => tick + 1);
+                          }}
+                          className="h-7 w-7 shrink-0 rounded-md bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                          aria-label={`${t('tab.fontSize')} +1`}
+                        >
+                          +
+                        </button>
+                        {menuFontOverride !== null && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSessionFontSize(menuSession.id, null);
+                              setTabMenuFontTick((tick) => tick + 1);
+                            }}
+                            className="ml-1 shrink-0 rounded-md px-1.5 py-1 text-[11px] text-primary transition hover:bg-primary/10"
+                          >
+                            {t('tab.fontSizeReset')}
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })()}
                 {ts?.agentNativeSessionId && ts.agentStatus !== 'working' && ts.agentStatus !== 'waiting' && ts.terminalSessionId && (
                   <button
                     type="button"

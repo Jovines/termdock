@@ -44,11 +44,22 @@ describe('authoritative collaboration membership HTTP API', () => {
   it('does not overwrite a concurrent member edit or recreate a deleted group', async () => {
     const original = store.save({ name: 'Original', sessionIds: ['custom', 'shell'] });
     const newer = store.save({ id: original.id, name: 'Renamed', sessionIds: ['custom', 'shell'] });
-    expect(await save({ ...original, expectedUpdatedAt: original.updatedAt })).toMatchObject({ status: 409, body: { code: 'GROUP_CHANGED' } });
+    // Only whitelisted fields: unknown fields (e.g. members) are rejected outright.
+    expect(await save({ id: original.id, name: original.name, sessionIds: original.sessionIds, expectedUpdatedAt: original.updatedAt }))
+      .toMatchObject({ status: 409, body: { code: 'GROUP_CHANGED' } });
     expect(store.getGroup(original.id)?.name).toBe('Renamed');
     store.remove(newer.id);
-    expect(await save(newer)).toMatchObject({ status: 404 });
+    expect(await save({ id: newer.id, name: newer.name, sessionIds: newer.sessionIds })).toMatchObject({ status: 404 });
     expect(store.list()).toEqual([]);
+  });
+  it('rejects unknown fields instead of silently dropping them', async () => {
+    const original = store.save({ name: 'Original', sessionIds: ['custom', 'shell'] });
+    const renamed = await save({ id: original.id, name: 'New', sessionIds: original.sessionIds,
+      members: [{ sessionId: 'custom', name: '新名字' }], expectedUpdatedAt: original.updatedAt });
+    expect(renamed).toMatchObject({ status: 400, body: { code: 'INVALID_GROUP' } });
+    expect((renamed as { body: { error: string } }).body.error).toContain('td collab rename');
+    expect(store.getGroup(original.id)?.name).toBe('Original');
+    store.remove(original.id);
   });
   it('does not dissolve a two-member group when another member was added during a drag', async () => {
     const original = store.save({ name: 'Source', sessionIds: ['custom', 'offline'] });

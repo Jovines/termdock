@@ -3,7 +3,7 @@ import { RelayServices } from './services/RelayServices';
 import { DeviceAuthorizationRequired } from '../lib/federation/deviceAuthorization';
 import { ServiceRoutes } from './services/ServiceRoutes';
 import { ServiceManager, type ServiceNavigation } from './services/ServiceManager';
-import { saveServiceConnection, type ServiceConnection } from '../lib/services/serviceDirectory';
+import { normalizeServiceAddress, saveServiceConnection, type ServiceConnection } from '../lib/services/serviceDirectory';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { toDataURL } from 'qrcode';
@@ -20,6 +20,7 @@ export interface FederationGrantInput {
 export interface FederationGrant extends FederationGrantInput { id: string; revokedAt?: number; label?: string; deviceProfile?: DeviceProfile; routeTargetServiceId?: string; routeTargetName?: string }
 export interface FederationInviteInput {
   includeBackup?: boolean;
+  entryAddress?: string;
   scope: FederationGrantInput['scope'];
   actions: string[];
   label?: string;
@@ -40,6 +41,7 @@ export interface FederationAccessProps {
   onRetry?: () => void;
   paired?: boolean;
   hasBackup?: boolean;
+  inviteAddresses?: { url: string; label: string }[];
   initialInvite?: FederationConnection;
   sessions?: { sessionId: string; name: string }[];
   grants?: FederationGrant[];
@@ -74,13 +76,14 @@ function qrColors() {
   return brightness(background) < brightness(foreground) ? { dark: background, light: foreground } : { dark: foreground, light: background };
 }
 /** Pairing codes remain in component memory only and are cleared after successful use. */
-export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, paired = false, initialInvite, sessions = [], grants = [], onCreateInvite, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
+export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, sessions = [], grants = [], onCreateInvite, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
   const [initialNeedsPassword, setInitialNeedsPassword] = useState(false);
   const [initialPassword, setInitialPassword] = useState('');
   const [serviceNavigation, setServiceNavigation] = useState<ServiceNavigation>({});
   const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false);
   const [inviting, setInviting] = useState(false); const [adding, setAdding] = useState(!paired);
   const [includeBackup, setIncludeBackup] = useState(true);
+  const [entryAddress, setEntryAddress] = useState(''); const [customAddress, setCustomAddress] = useState('');
   const [preset, setPreset] = useState<'read' | 'write' | 'full'>('read');
   const [resource, setResource] = useState<'all' | 'selected'>('all'); const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false);
@@ -100,7 +103,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     return { subjectId, grants: own, name: subjectId === currentIdentity ? '此设备' : own.find(grant => grant.label)?.label || '未命名设备' };
   }).sort((a, b) => Number(b.subjectId === currentIdentity) - Number(a.subjectId === currentIdentity));
   const overview = !editingDevice && !showDetails && paired && !adding && !inviting && !initialInvite;
-  const back = () => { setEditingDevice(undefined); setShowDetails(false); setAdding(false); setInviting(false); setInvitation(undefined); setAdvanced(false); setError(''); setNotice(''); setPendingRevoke(undefined); };
+  const back = () => { setEditingDevice(undefined); setShowDetails(false); setAdding(false); setInviting(false); setInvitation(undefined); setAdvanced(false); setError(''); setNotice(''); setPendingRevoke(undefined); setEntryAddress(''); setCustomAddress(''); };
   const beginInvite = () => { setInviting(true); setAdding(false); setAdvanced(false); setError(''); setNotice(''); };
   const deviceName = (grant: FederationGrant) => grant.subjectId === currentIdentity ? '此设备' : grant.label || '未命名设备';
   const dismiss = () => { if (selectingSessions) setSelectingSessions(false); else onClose(); };
@@ -132,10 +135,15 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     if (preset !== 'full' && resource === 'selected' && !selected.length) { setError('请选择至少一个 Session。'); return; }
     const expiresAt = grantExpiry ? new Date(grantExpiry).getTime() : undefined;
     if (expiresAt !== undefined && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) { setError('授权到期时间必须晚于现在。'); return; }
+    let address: string | undefined;
+    if (entryAddress === 'custom') {
+      try { address = normalizeServiceAddress(customAddress); } catch { setError('请输入有效的接入地址，例如 https://192.168.1.23:9834。'); return; }
+    } else if (entryAddress) address = entryAddress;
     setBusy(true);
     try {
       const result = await onCreateInvite({
         ...(hasBackup ? { includeBackup } : {}),
+        ...(address ? { entryAddress: address } : {}),
         scope: preset === 'full' || resource === 'all' ? { kind: 'service' } : { kind: 'sessions', sessionIds: selected },
         actions: preset === 'full' ? ['service:*'] : preset === 'write' ? ['session.view', 'session.input', 'session.resize'] : ['session.view'],
         ...(label.trim() ? { label: label.trim() } : {}), ...(expiresAt === undefined ? {} : { expiresAt }),
@@ -229,6 +237,22 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             {preset === 'write' && <p className="text-xs leading-relaxed text-muted-foreground">终端命令可读写该系统用户有权访问的文件。</p>}
             {preset === 'full' && <p className="text-xs leading-relaxed text-muted-foreground">拥有此服务的全部当前及未来权限。仅授予你完全信任的设备。</p>}
             {hasBackup && <label className="flex items-start gap-3 text-sm"><input type="checkbox" className="mt-0.5 h-4 w-4 accent-primary" checked={includeBackup} onChange={event => setIncludeBackup(event.target.checked)} /><span>让新设备也能使用备用连接<span className="mt-1 block text-xs leading-relaxed text-muted-foreground">需要入口管理员授权；关闭后生成直接连接邀请。</span></span></label>}
+            {inviteAddresses.length > 0 && <details className="rounded-xl border border-border px-3 py-2 text-left">
+              <summary className="cursor-pointer text-sm font-medium text-foreground">接入地址<span className="ml-2 text-xs font-normal text-muted-foreground">默认当前地址，可换用 IP 或域名</span></summary>
+              <fieldset className="mt-2 space-y-2"><legend className="sr-only">受邀设备打开的地址</legend>
+                <p className="text-xs leading-relaxed text-muted-foreground">受邀设备将打开这个地址。当前地址无法访问时，可改用其他可访问的 IP 或域名。</p>
+                <div className="space-y-2">{([
+                  ['', '当前地址', new URL(currentServiceOrigin || location.origin).host],
+                  ...inviteAddresses.map(item => [item.url, item.label, new URL(item.url).host] as [string, string, string]),
+                  ['custom', '自定义地址', ''],
+                ] as [string, string, string][]).map(([value, name, host]) => <label key={value || 'current'} className={`flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-ring ${entryAddress === value ? 'border-primary bg-primary/10' : 'border-border hover:bg-surface-2'}`}>
+                  <input type="radio" name="federation-entry-address" value={value} checked={entryAddress === value} onChange={() => setEntryAddress(value)} className="sr-only" />
+                  <span aria-hidden="true" className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${entryAddress === value ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background'}`}>{entryAddress === value && <Check size={13} strokeWidth={3} />}</span>
+                  <span className="min-w-0"><span className="block text-sm font-medium text-foreground">{name}</span>{host && <span className="block break-all text-xs leading-relaxed text-muted-foreground">{host}</span>}</span>
+                </label>)}</div>
+                {entryAddress === 'custom' && <input type="text" className={field} inputMode="url" placeholder="例如：https://192.168.1.23:9834" value={customAddress} onChange={event => setCustomAddress(event.target.value)} />}
+              </fieldset>
+            </details>}
             <div><button className={`${primaryButton} inline-flex w-full items-center justify-center gap-2 text-sm`} type="submit" disabled={busy || loading}>{busy && <Loader2 size={16} className="animate-spin" />}{busy ? '正在生成…' : '生成邀请'}</button><p className="mt-2 text-center text-xs leading-relaxed text-muted-foreground">链接 10 分钟内有效 · 访问权限{grantExpiry ? '按设定时间到期' : '保留至撤销'}</p></div>
           </form>}
         </section>}

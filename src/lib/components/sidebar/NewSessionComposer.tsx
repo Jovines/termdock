@@ -1,4 +1,4 @@
-import { ChevronDown, Folder, History, LoaderCircle, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
+import { ChevronDown, Folder, History, LoaderCircle, Plus, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { AgentLauncherInfo, AgentResumeHistoryEntry } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
@@ -123,6 +123,15 @@ export function NewSessionComposer({
   };
 
   const uniqueDirectories = useMemo(() => [...new Set(directories.filter(Boolean))].slice(0, 5), [directories]);
+  const selectedOption = customCommandSelected ? (selectedSavedCommand ? SAVED_COMMAND_PREFIX + selectedSavedCommand : '__custom__') : launchAgent?.slug ?? '__terminal__';
+  const selectStartupOption = (slug: string) => {
+    setSaveStatus('idle');
+    const saved = slug.startsWith(SAVED_COMMAND_PREFIX) ? slug.slice(SAVED_COMMAND_PREFIX.length) : null;
+    setSelectedSavedCommand(saved);
+    setCustomCommandSelected(slug === '__custom__' || saved !== null);
+    if (saved !== null || slug === '__custom__') setLaunchCommands((current) => ({ ...current, __custom__: saved ?? '' }));
+    setLaunchAgent(agents.find((agent) => agent.slug === slug) ?? null);
+  };
   const launchName = customCommandSelected ? selectedSavedCommand ?? t('sidebar.customStartupCommand') : launchAgent?.displayName ?? 'Terminal';
   const defaultName = selectedAgent?.displayName ?? 'Terminal';
   const launchIsDefault = !customCommandSelected && (launchAgent === null ? selectedAgent === null : selectedAgent?.slug === launchAgent.slug);
@@ -187,31 +196,40 @@ export function NewSessionComposer({
             <RefreshCw size={12} className={detecting ? 'animate-spin' : ''} />
           </button>
         </div>
-        <label className="relative flex min-h-11 cursor-pointer items-center gap-2.5 rounded-lg border border-transparent bg-surface px-3 text-foreground transition hover:bg-surface-2 focus-within:border-primary">
-          {launchAgent ? <AgentBrandAvatar agent={launchAgent} size={16} /> : <Terminal size={14} className="shrink-0" />}
-          <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">{launchName}</span>
-          {launchIsDefault && <span className="shrink-0 text-[9.5px] text-muted-foreground">{t('sidebar.defaultAgent')}</span>}
-          {detecting ? <LoaderCircle size={12} className="shrink-0 animate-spin text-muted-foreground" /> : <ChevronDown size={13} className="shrink-0 text-muted-foreground" />}
-          <select
-            aria-label={t('sidebar.startupCommand')}
-            value={customCommandSelected ? selectedSavedCommand ? SAVED_COMMAND_PREFIX + selectedSavedCommand : '__custom__' : launchAgent?.slug ?? '__terminal__'}
-            onChange={(event) => {
-              const slug = event.target.value;
-              setSaveStatus('idle');
-              const saved = slug.startsWith(SAVED_COMMAND_PREFIX) ? slug.slice(SAVED_COMMAND_PREFIX.length) : null;
-              setSelectedSavedCommand(saved);
-              setCustomCommandSelected(slug === '__custom__' || saved !== null);
-              if (saved !== null || slug === '__custom__') setLaunchCommands((current) => ({ ...current, __custom__: saved ?? '' }));
-              setLaunchAgent(agents.find((agent) => agent.slug === slug) ?? null);
-            }}
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-          >
-            <option value="__terminal__">Terminal</option>
-            <option value="__custom__">{t('sidebar.addStartupCommand')}</option>
-            {savedCommands.map((command) => <option key={command} value={SAVED_COMMAND_PREFIX + command}>{command}</option>)}
-            {agents.map((agent) => <option key={agent.slug} value={agent.slug}>{agent.displayName}</option>)}
-          </select>
-        </label>
+        <div role="radiogroup" aria-label={t('sidebar.startupCommand')} className="flex flex-wrap gap-1">
+          {agents.map((agent) => {
+            const selected = !customCommandSelected && launchAgent?.slug === agent.slug;
+            return (
+              <button key={agent.slug} type="button" role="radio" aria-checked={selected} onClick={() => selectStartupOption(agent.slug)}
+                className={`inline-flex min-h-7 items-center gap-1 rounded-md px-2 text-[10.5px] font-medium transition ${selected ? 'bg-surface-2 text-foreground ring-1 ring-inset ring-primary/50' : 'bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}>
+                <AgentBrandAvatar agent={agent} size={12} />
+                <span className="max-w-[9rem] truncate">{agent.displayName}</span>
+                {selectedAgent?.slug === agent.slug && <span className="ml-0.5 text-[9px] text-muted-foreground">{t('sidebar.defaultAgent')}</span>}
+              </button>
+            );
+          })}
+          {savedCommands.map((command) => {
+            const selected = customCommandSelected && selectedSavedCommand === command;
+            return (
+              <button key={command} type="button" role="radio" aria-checked={selected} onClick={() => selectStartupOption(SAVED_COMMAND_PREFIX + command)} title={command}
+                className={`inline-flex min-h-7 items-center gap-1 rounded-md px-2 transition ${selected ? 'bg-surface-2 text-foreground ring-1 ring-inset ring-primary/50' : 'bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}>
+                <History size={10} className="shrink-0" />
+                <span className="max-w-[9rem] truncate font-mono text-[10px]">{command}</span>
+              </button>
+            );
+          })}
+          <button type="button" role="radio" aria-checked={selectedOption === '__terminal__'} onClick={() => selectStartupOption('__terminal__')}
+            className={`inline-flex min-h-7 items-center gap-1 rounded-md px-2 text-[10.5px] font-medium transition ${selectedOption === '__terminal__' ? 'bg-surface-2 text-foreground ring-1 ring-inset ring-primary/50' : 'bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}>
+            <Terminal size={11} className="shrink-0" />
+            <span>Terminal</span>
+            {selectedAgent === null && <span className="ml-0.5 text-[9px] font-normal text-muted-foreground">{t('sidebar.defaultAgent')}</span>}
+          </button>
+          <button type="button" role="radio" aria-checked={selectedOption === '__custom__'} onClick={() => selectStartupOption('__custom__')}
+            className={`inline-flex min-h-7 items-center gap-0.5 rounded-md px-2 text-[10.5px] font-medium transition ${selectedOption === '__custom__' ? 'bg-surface-2 text-foreground ring-1 ring-inset ring-primary/50' : 'bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}>
+            <Plus size={10} className="shrink-0" />
+            <span>{t('sidebar.addStartupCommand')}</span>
+          </button>
+        </div>
         {!launchIsDefault && !customCommandSelected && (
           <div className="mt-1 flex min-h-8 items-center justify-between gap-2 px-0.5 text-[10px]">
             <span className="truncate text-muted-foreground">{t('sidebar.currentDefaultAgent', { name: defaultName })}</span>

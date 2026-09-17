@@ -13,6 +13,7 @@ import {
 } from '../terminal';
 import { subscribeClientState } from '../utils/clientStateSync';
 import { pickSessionAfterClose } from '../utils/sessionSelection';
+import { removeSessionFontSize } from '../terminal/sessionFontSize';
 
 const LEGACY_STORAGE_KEY = 'termdock-sessions';
 const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
@@ -283,6 +284,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const removeSession = useCallback(async (sessionId: string, preferredActiveSessionId?: string | null) => {
     ++localMutationRevisionRef.current;
     removedSessionIdsRef.current.add(sessionId);
+    removeSessionFontSize(sessionId);
     setSessions(prev => {
       const updated = prev.filter(s => s.sessionId !== sessionId);
       const preferredSessionStillExists = preferredActiveSessionId != null

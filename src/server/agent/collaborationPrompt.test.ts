@@ -37,7 +37,7 @@ const render = (messages: CollaborationMessage[], overrides = {}) => formatColla
   targetSessionId: 'reviewer-id', messages, groups: [group], sessions, now: 12001, ...overrides,
 });
 
-const RULE = '─'.repeat(30);
+const RULE = '─'.repeat(3);
 
 describe('COLLAB_NAME_FORBIDDEN / sanitizeCollaborationName', () => {
   it('flags characters that would corrupt the delivery shell', () => {
@@ -68,9 +68,9 @@ describe('COLLAB_NAME_FORBIDDEN / sanitizeCollaborationName', () => {
     });
     const lines = evil.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('「协作 v2 组 改行」群 · 2 人');
+    expect(lines[1]).toBe('「协作 v2 组 改行」td群 · 2 人');
     const source = lines.find((line) => line.startsWith('来自:'));
-    expect(source).toBe('来自:名字 带 引号 换行 · task');
+    expect(source).toBe('来自:名字 带 引号 换行 · task · message-1');
     // The shell's own 「」 and · are structural, so only the sanitized name
     // regions are asserted above; nothing may smuggle control characters in.
     for (const line of lines) expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
@@ -84,30 +84,44 @@ describe('formatCollaborationDelivery', () => {
     const prompt = render([message({})]);
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('「发布组」群 · 2 人');
-    expect(prompt).toContain('来自:用户 · task');
+    expect(lines[1]).toBe('「发布组」td群 · 2 人');
+    // The message id rides the source line — the one place every block names
+    // its message, without a per-message command template.
+    expect(prompt).toContain('来自:用户 · task · message-1');
     expect(prompt).toContain('```\n检查构建\n```');
-    // A user message has no agent to reply to (the reply route refuses it), so
-    // its anchor line is the read-back command instead.
+    // A user message has no agent to reply to (the reply route refuses it);
+    // usage lives behind the always-present help line.
     expect(prompt).not.toContain('td collab reply');
-    expect(prompt).toContain('详情:td collab message get message-1 --json');
     expect(prompt).toContain('td collab send coder-id "消息内容" --text');
     expect(prompt).not.toContain('native-coder');
     expect(prompt).not.toContain('group-1');
-    expect(prompt).toContain('td collab --help');
+    expect(prompt).toContain('帮助:td collab --help');
     expect(lines.at(-1)).toBe(RULE);
     expect(prompt.length).toBeLessThan(500);
   });
 
-  it('compacts ordinary messages and legacy rule versions while retaining the retrieval command', () => {
+  it('separates the context block from the message stream with one blank line', () => {
+    const prompt = render([message({})], { showRoutingHelp: false });
+    const lines = prompt.split('\n');
+    expect(lines[0]).toBe(RULE);
+    expect(lines[1]).toBe('「发布组」td群 · 2 人');
+    expect(lines[2]).toBe('收件人:测试 Agent');
+    expect(lines[3]).toBe('');
+    expect(lines[4]).toBe('来自:用户 · task · message-1');
+  });
+
+  it('compacts ordinary messages once the session is educated', () => {
     const prompt = render([message({ fromSessionId: 'coder-id', kind: 'message', instructions: {
       version: '63a047b4-7d6e-4c88-94b1-ea3d03bb0551', text: '规'.repeat(400), updatedAt: 1, updatedBy: 'coder-id',
     } })], { showRoutingHelp: false });
-    expect(prompt).toContain('来自:开发 Agent\n查看群规[12秒前]:td collab rules get group-1 --text');
-    expect(prompt).not.toContain(' · message');
+    // No kind suffix for ordinary messages, and no rules line: the rules ride
+    // the education block only, so a change re-educates instead of repeating.
+    expect(prompt).toContain('来自:开发 Agent · message-1');
+    expect(prompt).not.toMatch(/ · message(?!-)/);
+    expect(prompt).not.toContain('查看群规');
     expect(prompt).not.toContain('63a047b4-7d6e');
-    expect(prompt).toContain('td collab --help');
-    expect(prompt).toContain('td collab reply message-1');
+    expect(prompt).toContain('帮助:td collab --help');
+    expect(prompt).not.toContain('td collab reply');
   });
 
   it('keeps short rules inline with their relative update time', () => {
@@ -196,9 +210,9 @@ describe('formatCollaborationDelivery', () => {
 
   it('labels the sender and kind above an agent message fenced in full', () => {
     const prompt = render([message({ fromSessionId: 'coder-id', kind: 'ask', content: '测试通过了吗？\n请附上失败项。' })]);
-    expect(prompt).toContain('来自:开发 Agent · ask');
+    expect(prompt).toContain('来自:开发 Agent · ask · message-1');
     expect(prompt).toContain('```\n测试通过了吗？\n请附上失败项。\n```');
-    expect(prompt).toContain('回复:td collab reply message-1 "内容" --text');
+    expect(prompt).not.toContain('td collab reply');
     expect(prompt).not.toContain('td collab send coder-id');
     expect(prompt).not.toContain('native-coder');
     expect(prompt).not.toContain('td collab spawn');
@@ -209,30 +223,30 @@ describe('formatCollaborationDelivery', () => {
 
   it('fences even a short single reply so its body cannot be mistaken for prose', () => {
     const prompt = render([message({ kind: 'reply', fromSessionId: 'coder-id', content: '建议把回复放到正文下面。' })]);
-    expect(prompt).toContain('来自:开发 Agent · reply');
+    expect(prompt).toContain('来自:开发 Agent · reply · message-1');
     expect(prompt).toContain('```\n建议把回复放到正文下面。\n```');
-    expect(prompt).toContain('\n回复:td collab reply message-1 "内容" --text');
-    expect(prompt).not.toContain('来自:开发 Agent · reply\n建议把回复放到正文下面。');
+    expect(prompt).not.toContain('td collab reply');
+    expect(prompt).not.toContain('来自:开发 Agent · reply · message-1\n建议把回复放到正文下面。');
   });
 
-  it('keeps each source reply address distinct inside one shell', () => {
+  it('keeps each source block distinct inside one shell', () => {
     const prompt = render([
       message({ id: 'one', fromSessionId: 'coder-id', content: '第一条' }),
       message({ id: 'two', fromSessionId: 'another-id', content: '第二条' }),
     ]);
     expect(prompt.split(RULE).length).toBe(3);
     expect(prompt).not.toContain('[Termdock 协作');
-    expect(prompt).toContain('来自:开发 Agent · task\n\n```\n第一条\n```\n\n回复:td collab reply one');
-    expect(prompt).toContain('来自:another-id · task\n\n```\n第二条\n```\n\n回复:td collab reply two');
+    expect(prompt).toContain('来自:开发 Agent · task · one\n\n```\n第一条\n```');
+    expect(prompt).toContain('来自:another-id · task · two\n\n```\n第二条\n```');
   });
 
   it('keeps mixed messages and embedded code unambiguous', () => {
     const body = '代码：\n```ts\nconst x = 1;\n```\n--- 正文结束 ---';
     const prompt = render([message({ content: body }), message({ id: 'message-2', fromSessionId: 'coder-id' })]);
     expect(prompt).toContain('````\n' + body + '\n````');
-    expect(prompt.match(/td collab reply /g)).toHaveLength(1);
-    expect(prompt).toContain('td collab reply message-2');
-    expect(prompt).not.toContain('td collab reply message-1');
+    expect(prompt).not.toContain('td collab reply');
+    expect(prompt).toContain('来自:开发 Agent · task · message-2');
+    expect(prompt).not.toContain('td collab message get message-1');
   });
 
   it('provides a full-content retrieval command for oversized UTF-8 bodies', () => {
@@ -240,6 +254,25 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('9000 字节');
     expect(prompt).toContain('td collab message get message-1 --text');
     expect(prompt).not.toContain('测'.repeat(3000));
+    // A cross-service recipient cannot copy the bare command: its CLI cannot
+    // detect identity, so the retrieval command carries --session verbatim.
+    const remote = render([message({ content: '测'.repeat(3000) })], { targetSessionId: 'remote:https%3A%2F%2Fpeer.test:one' });
+    expect(remote).toContain('td collab --session remote:https%3A%2F%2Fpeer.test:one message get message-1 --text');
+  });
+
+  it('tells cross-service members about --session once in the education block', () => {
+    const prompt = render([], {
+      targetSessionId: 'local',
+      groups: [{ ...group, sessionIds: ['local', 'remote:peer'] }],
+      sessions: [{ sessionId: 'remote:peer', name: 'Peer', status: 'service-reachable' }],
+    });
+    expect(prompt).toContain('SESSION_NOT_FOUND');
+    const educated = render([], {
+      targetSessionId: 'local', showRoutingHelp: false,
+      groups: [{ ...group, sessionIds: ['local', 'remote:peer'] }],
+      sessions: [{ sessionId: 'remote:peer', name: 'Peer', status: 'service-reachable' }],
+    });
+    expect(educated).not.toContain('SESSION_NOT_FOUND');
   });
 
   it.each(['ack', 'progress', 'result'] as const)('omits protocol metadata from ordinary %s replies', (responseKind) => {
@@ -248,7 +281,7 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).not.toContain('ACK');
     expect(prompt).not.toContain('pending');
     expect(prompt).not.toContain('--response-kind');
-    expect(prompt).toContain('td collab reply message-1');
+    expect(prompt).not.toContain('td collab reply');
     expect(prompt).toContain('td collab capture <会话ID> --text');
     expect(prompt).toContain('不打断对方');
     expect(prompt).toContain('远端用 send 询问');
@@ -266,14 +299,13 @@ describe('formatCollaborationDelivery', () => {
     });
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(RULE);
-    expect(lines[1]).toBe('「发布组」群 · 2 人');
-    expect(lines[2]).toBe('你:测试 Agent');
-    expect(lines[3]).toBe('你的定位:最终验收');
-    // The identity block flows straight into the message — no blank line
-    // between the role line and the first `来自:` line.
-    expect(lines[4]).toBe('来自:开发 Agent · task');
-    // The reply route runs directly into the notes; no blank separator.
-    expect(prompt).toContain('回复:td collab reply message-1 "内容" --text');
+    expect(lines[1]).toBe('「发布组」td群 · 2 人');
+    // Recipient identity is one line, framed as a transport attribute (like
+    // 来自:) so it can never be read as the sender's name or role.
+    expect(lines[2]).toBe('收件人:测试 Agent · 定位:最终验收');
+    expect(lines[3]).toBe('');
+    expect(lines[4]).toBe('来自:开发 Agent · task · message-1');
+    expect(prompt).toContain('帮助:td collab --help');
     expect(lines.at(-2)).toBe('帮助:td collab --help');
     expect(prompt).not.toContain('开发与自测');
     expect(prompt).not.toContain('coder-id:');
@@ -284,29 +316,29 @@ describe('formatCollaborationDelivery', () => {
       sessions: [{ ...sessions[0]!, name: '名字·带「引号」\n换行' }],
     });
     const lines = prompt.split('\n');
-    expect(lines[2]).toBe('你:名字 带 引号 换行');
+    expect(lines[2]).toBe('收件人:名字 带 引号 换行');
     for (const line of lines) expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
     const ghost = render([message({})], { targetSessionId: 'ghost-id' });
-    expect(ghost).not.toContain('你:');
+    expect(ghost).not.toContain('收件人:');
   });
 
   it('never injects a role line when unset or the batch spans groups, but still names the recipient', () => {
-    expect(render([message({})])).toContain('你:测试 Agent');
-    expect(render([message({})])).not.toContain('你的定位:');
+    expect(render([message({})])).toContain('收件人:测试 Agent');
+    expect(render([message({})])).not.toContain('定位:');
     const cross = render([message({ groupId: 'one' }), message({ id: 'two', groupId: 'two' })], {
       groups: [
         { ...group, id: 'one', roles: { 'reviewer-id': '验收' } },
         { ...group, id: 'two' },
       ],
     });
-    expect(cross).toContain('你:测试 Agent');
-    expect(cross).not.toContain('你的定位:');
+    expect(cross).toContain('收件人:测试 Agent');
+    expect(cross).not.toContain('定位:');
     expect(cross.split(RULE).length).toBe(3);
   });
 
   it('defensively sanitizes hostile role text that slipped into storage', () => {
     const prompt = render([message({})], { groups: [{ ...group, roles: { 'reviewer-id': '第一行\n第二行\x1b[31m 尾部' } }] });
-    expect(prompt).toContain('你的定位:第一行 第二行 [31m 尾部');
+    expect(prompt).toContain('定位:第一行 第二行 [31m 尾部');
     for (const line of prompt.split('\n')) expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
   });
 
@@ -323,12 +355,12 @@ describe('formatCollaborationDelivery', () => {
 
   it('omits static help once the session is educated', () => {
     const prompt = render([message({})], { showRoutingHelp: false });
-    expect(prompt).toContain('「发布组」群');
-    expect(prompt).toContain('来自:用户 · task');
+    expect(prompt).toContain('「发布组」td群');
+    expect(prompt).toContain('来自:用户 · task · message-1');
     expect(prompt).toContain('```\n检查构建\n```');
     expect(prompt).not.toContain('td collab send');
     expect(prompt).not.toContain('联系其他成员');
-    expect(prompt).toContain('td collab --help');
+    expect(prompt).toContain('帮助:td collab --help');
     expect(prompt).not.toContain('td collab capture');
     expect(prompt).not.toContain('想看伙伴');
     expect(prompt.length).toBeLessThan(400);
@@ -341,29 +373,31 @@ describe('formatCollaborationDelivery', () => {
       sessions: [{ sessionId: 'remote:peer', name: 'Reviewer · Mac', status: 'service-unreachable' }],
     });
     expect(prompt).not.toContain('td collab send');
-    expect(prompt).toContain('td collab --help');
+    expect(prompt).toContain('帮助:td collab --help');
     expect(prompt).toContain('服务不可达，消息无法送达');
-    expect(prompt).toContain('已登记节点由服务后台直接投递');
+    // Cross-service education is static guidance, so it rides the education
+    // block and stays suppressed once delivered.
+    expect(prompt).not.toContain('已登记节点由服务后台直接投递');
   });
 
   it('flags a fan-out dispatch as 群发 and names the sibling recipients', () => {
     const prompt = render([message({ fanOutIds: ['coder-id'] })]);
-    expect(prompt).toContain('来自:用户 · task · 群发');
+    expect(prompt).toContain('来自:用户 · task · 群发 · message-1');
     expect(prompt).toContain('同时发给了:开发 Agent');
     expect(prompt).toContain('```\n检查构建\n```');
-    expect(prompt).not.toContain('回复:td collab reply');
+    expect(prompt).not.toContain('td collab reply');
     const agentPrompt = render([message({ fromSessionId: 'coder-id', fanOutIds: ['another-id'] })], {
       sessions: [...sessions, { sessionId: 'another-id', agentNativeSessionId: null, name: '第三位', status: 'idle' }],
     });
-    expect(agentPrompt).toContain('来自:开发 Agent · task · 群发');
+    expect(agentPrompt).toContain('来自:开发 Agent · task · 群发 · message-1');
     expect(agentPrompt).toContain('同时发给了:第三位');
-    expect(agentPrompt).toContain('回复:td collab reply message-1');
+    expect(agentPrompt).not.toContain('td collab reply');
   });
 
   it('falls back to raw ids for unknown co-recipients and stays shell-safe', () => {
     const prompt = render([message({ fanOutIds: ['ghost-id', '第一\x1b[31m'] })]);
     const lines = prompt.split('\n');
-    expect(lines).toContain('来自:用户 · task · 群发');
+    expect(lines).toContain('来自:用户 · task · 群发 · message-1');
     expect(lines).toContain('同时发给了:ghost-id、第一 [31m');
     for (const line of lines) expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
   });
@@ -372,6 +406,6 @@ describe('formatCollaborationDelivery', () => {
     const prompt = render([message({ fromSessionId: 'coder-id' })]);
     expect(prompt).not.toContain('群发');
     expect(prompt).not.toContain('同时发给了');
-    expect(prompt).toContain('来自:开发 Agent · task');
+    expect(prompt).toContain('来自:开发 Agent · task · message-1');
   });
 });

@@ -112,3 +112,43 @@ export function observeServerSize(
 export function clearPendingResize(state: ResizeSyncState): ResizeSyncState {
   return { ...state, pending: null };
 }
+
+/**
+ * Coalescing policy for fit-driven resize pushes. Layout transitions (split
+ * panes attaching, saved trees settling, keyboard animations) produce a burst
+ * of fits within a few hundred milliseconds; each push triggers a tmux window
+ * resize and a full redraw on every attached viewer, so pushing every step
+ * makes the whole workspace visibly jump for seconds. The first push goes out
+ * immediately (first-fit, single resizes keep zero added latency); pushes that
+ * arrive while the previous one is still settling are held and only the newest
+ * size is sent when the window closes.
+ */
+export const RESIZE_PUSH_COALESCE_MS = 150;
+
+export interface ResizePushGate {
+  lastPushAt: number;
+}
+
+export function createResizePushGate(now = 0): ResizePushGate {
+  return { lastPushAt: now };
+}
+
+export type ResizePushDecision =
+  | { action: 'send' }
+  | { action: 'hold'; readyAt: number };
+
+export function planResizePush(
+  gate: ResizePushGate,
+  now: number,
+  coalesceMs = RESIZE_PUSH_COALESCE_MS,
+): ResizePushDecision {
+  if (now - gate.lastPushAt >= coalesceMs) {
+    gate.lastPushAt = now;
+    return { action: 'send' };
+  }
+  return { action: 'hold', readyAt: gate.lastPushAt + coalesceMs };
+}
+
+export function markResizePushSent(now: number): ResizePushGate {
+  return { lastPushAt: now };
+}

@@ -335,7 +335,7 @@ interface WsConnection {
   ws: WebSocket;
   onEvent: (event: TerminalStreamEvent) => void;
   onError?: (error: Error, fatal?: boolean) => void;
-  reconnectNow: () => void;
+  reconnectNow: (options?: { silent?: boolean }) => void;
   suspendReconnect: () => void;
   retryState: {
     maxRetries: number;
@@ -627,7 +627,7 @@ export function connectTerminalStream(
       ws,
       onEvent,
       onError,
-      reconnectNow: () => {
+      reconnectNow: (options?: { silent?: boolean }) => {
         if (retryState.isClosed) return;
         retryState.isSuspended = false;
         if (manualReconnectTimer) return;
@@ -637,11 +637,16 @@ export function connectTerminalStream(
           stopHeartbeat(conn);
           try { conn.ws.close(); } catch { /* ignore */ }
         }
-        onEvent({
-          type: 'reconnecting',
-          attempt: Math.min(retryState.retryCount + 1, maxRetries),
-          maxAttempts: maxRetries,
-        });
+        // A transport renewal (1012) is a planned hand-over to an already
+        // authenticated channel, not a failure — reconnect without flashing
+        // the Reconnecting banner across every pane.
+        if (!options?.silent) {
+          onEvent({
+            type: 'reconnecting',
+            attempt: Math.min(retryState.retryCount + 1, maxRetries),
+            maxAttempts: maxRetries,
+          });
+        }
         // Wake-from-background should not wait for a stale exponential-backoff
         // timer that may have been scheduled/throttled while the PWA was hidden.
         retryState.retryCount = Math.min(retryState.retryCount + 1, maxRetries);
@@ -888,7 +893,7 @@ export function connectTerminalStream(
       // when the browser subsequently delivers close for the same failure.
       if (retryState.isClosed || ignoredSockets.has(ws) || handlingError) return;
       if (ev.code === TRANSPORT_RENEWED_CODE && ev.reason === TRANSPORT_RENEWED_REASON) {
-        newConn.reconnectNow();
+        newConn.reconnectNow({ silent: true });
         return;
       }
       clearTimeouts();

@@ -196,6 +196,36 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     window.addEventListener(OPEN_SERVICE_ACCESS_EVENT, show);
     return () => window.removeEventListener(OPEN_SERVICE_ACCESS_EVENT, show);
   }, [ready, canManage]);
+  const [inviteAddresses, setInviteAddresses] = useState<{ url: string; label: string }[]>([]);
+  useEffect(() => {
+    if (!open || !canManage || inviteAddresses.length) return;
+    let canceled = false;
+    void (async () => {
+      const client = await getActiveClient();
+      const response = await client.fetch('/api/terminal/settings');
+      const settings = await response.json();
+      if (canceled) return;
+      const local = (settings.localAccess ?? {}) as { url?: unknown; interfaces?: unknown };
+      const items: { url: string; label: string }[] = [];
+      const push = (url: string, label: string) => {
+        try {
+          const origin = new URL(url);
+          if (origin.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) return;
+          const key = origin.origin;
+          if (key === location.origin || items.some(item => item.url === key)) return;
+          items.push({ url: key, label });
+        } catch { /* Ignore unusable address entries. */ }
+      };
+      if (typeof local.url === 'string') push(local.url, '服务域名');
+      if (Array.isArray(local.interfaces)) for (const entry of local.interfaces) {
+        const item = entry as { url?: unknown; label?: unknown; name?: unknown };
+        if (typeof item.url !== 'string') continue;
+        push(item.url, (typeof item.label === 'string' && item.label) || (typeof item.name === 'string' && item.name) || 'IP 地址');
+      }
+      setInviteAddresses(items);
+    })().catch(() => { /* The address list only feeds invite options; keep defaults on failure. */ });
+    return () => { canceled = true; };
+  }, [open, canManage, inviteAddresses.length]);
   const connect = async (intent: ConnectionIntent) => {
     if (!intent.pairingCode && !intent.routeCode && savedConnection()?.targetPeerId !== intent.targetPeerId && getWorkspaceHost()) {
       const service = { ...intent, id: intent.targetPeerId, label: intent.serviceName || new URL(intent.serviceOrigin || intent.url).host };
@@ -248,7 +278,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   };
   const invite = async (input: FederationInviteInput) => {
     const client = await getActiveClient();
-    const { includeBackup = true, ...grantInput } = input;
+    const { includeBackup = true, entryAddress, ...grantInput } = input;
     const selected = savedConnection();
     const backups = selected ? connectionRoutes(selected) : [];
     let backup: { url: string; targetPeerId: string; routeCode: string } | undefined;
@@ -260,7 +290,9 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       if (!backup) throw new Error('无法分享备用连接：需要入口管理员授权。也可以关闭此选项，生成直接连接邀请。');
     }
     let targetUrl = selected?.serviceOrigin || location.origin;
-    if (['localhost', '127.0.0.1', '[::1]'].includes(new URL(targetUrl).hostname)) {
+    if (entryAddress) {
+      try { targetUrl = new URL(entryAddress).origin; } catch { throw new Error('邀请接入地址无效。'); }
+    } else if (['localhost', '127.0.0.1', '[::1]'].includes(new URL(targetUrl).hostname)) {
       const response = await client.fetch('/api/terminal/settings');
       const settings = await response.json();
       if (typeof settings.localAccess?.url === 'string') targetUrl = settings.localAccess.url;
@@ -286,7 +318,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     </div> : <><div className="fixed left-0 right-0 top-[var(--safe-top-inset)] z-chrome sm:right-auto sm:w-72"><ServiceSwitcher /></div><LoginScreen onLoginSuccess={() => { void readPermissions().catch(() => setError(true)); }} /></>}
     {open && <FederationAccess onConnect={connect} onClose={() => setOpen(false)} onAddService={addService} onOpenService={openService} onConnectWithPassword={async (connection, password) => { await authenticateKnownConnection(connection, password); await readPermissions(); setOpen(false); }} paired={ready || !!savedConnection()} initialInvite={incomingInvitation} currentServiceName={serviceName} currentServiceId={currentSecureClient()?.targetPeerId || savedConnection()?.targetPeerId} currentServiceOrigin={savedConnection()?.serviceOrigin} currentIdentity={deviceIdentity} grants={grants} sessions={sessions} loading={loadingAccess} loadError={accessError} onRetry={() => void refresh()}
       onRename={async (subjectId, name) => { await (await getActiveClient()).request({ type: 'device-name', subjectId, name }); await refresh(); }}
-      hasBackup={!!savedConnection() && connectionRoutes(savedConnection()!).length > 0} onCreateInvite={canManage ? invite : undefined}
+      hasBackup={!!savedConnection() && connectionRoutes(savedConnection()!).length > 0} inviteAddresses={inviteAddresses} onCreateInvite={canManage ? invite : undefined}
       onRevoke={canManage ? async grantId => { await (await getActiveClient()).request(grantId.startsWith('route:') ? { type: 'route-revoke', grantId: grantId.slice(6) } : { type: 'revoke', grantId }); await refresh(); } : undefined} />}
   </>;
 }

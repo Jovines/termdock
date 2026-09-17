@@ -44,9 +44,12 @@ import { createResizePresentation } from '../../terminal/resizePresentation';
 import {
   acknowledgeResize,
   clearPendingResize,
+  createResizePushGate,
   createResizeSyncState,
   forceResize as forceResizeSync,
+  markResizePushSent,
   observeServerSize,
+  planResizePush,
   requestResize as requestResizeSync,
   retryResize,
   type ResizeRequest,
@@ -77,6 +80,7 @@ import {
 } from './joystickRepeat';
 import { createTerminalPathLinkProvider } from '../../terminal/pathLinks';
 import { repairXtermBufferInvariants } from '../../terminal/xtermBufferInvariant';
+import { setSessionFontSize } from '../../terminal/sessionFontSize';
 import { estimateTerminalCellHeight } from '../../terminal/initialDimensions';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
@@ -360,6 +364,8 @@ export type TerminalViewportInputOptions = {
 
 interface TerminalViewportProps {
   sessionKey: string;
+  /** Frontend session id — used to persist per-session font size overrides. */
+  sessionId: string;
   isLayoutVisible?: boolean;
   chunks: TerminalChunk[];
   onInput: (data: string, options?: TerminalViewportInputOptions) => void;
@@ -785,6 +791,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
   (
     {
       sessionKey,
+      sessionId,
       isLayoutVisible = true,
       chunks,
       onInput,
@@ -3316,6 +3323,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 才会真正发出去。否则 reload 后 ResizeObserver 在 ensureSession 跑完之前
     // 就会用 OLD session id 推 resize，server 直接 404。
     const sessionReadyRef = React.useRef(false);
+    // fit 驱动的 resize 推送合并：分屏挂载 / 保存布局回放 / 键盘动画这类过渡期
+    // 会连续触发多轮 fit，每推一次服务端就 resize tmux window 并让所有挂着的
+    // viewer 整屏重绘一次——连续推就表现为“进入分屏头几秒一跳一跳”。首个推
+    // 送立即发出（first-fit / 单次 resize 零延迟），过渡窗口内的后续推送只保留
+    // 最新值，等窗口关闭再发。ensureSizeMatches（用户交互路径）不走这里。
+    const resizePushGateRef = React.useRef(createResizePushGate());
+    const resizePushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const resizePushPendingRef = React.useRef<{ cols: number; rows: number } | null>(null);
+    const clearResizePushTimer = React.useCallback(() => {
+      if (resizePushTimerRef.current !== null) {
+        clearTimeout(resizePushTimerRef.current);
+        resizePushTimerRef.current = null;
+      }
+      resizePushPendingRef.current = null;
+    }, []);
 
     const cancelAllPendingReasonRafs = React.useCallback(() => {
       const map = pendingReasonRafRef.current;
@@ -3379,6 +3401,28 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
       },
       [sendResizeRequest]
+    );
+
+    const scheduleResizePush = React.useCallback(
+      (cols: number, rows: number) => {
+        const decision = planResizePush(resizePushGateRef.current, Date.now());
+        if (decision.action === 'send') {
+          resizePushPendingRef.current = null;
+          pushResizeToServer(cols, rows);
+          return;
+        }
+        resizePushPendingRef.current = { cols, rows };
+        if (resizePushTimerRef.current !== null) return;
+        resizePushTimerRef.current = setTimeout(() => {
+          resizePushTimerRef.current = null;
+          const pending = resizePushPendingRef.current;
+          resizePushPendingRef.current = null;
+          if (!pending) return;
+          resizePushGateRef.current = markResizePushSent(Date.now());
+          pushResizeToServer(pending.cols, pending.rows);
+        }, Math.max(0, decision.readyAt - Date.now()));
+      },
+      [pushResizeToServer]
     );
 
     // ── 多端同步 / 防拉扯支持 ──
@@ -3540,7 +3584,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             lastServerSize: resizeSyncStateRef.current.confirmed,
             reconcileServerSize: options.reconcileServerSize,
           })) {
-            pushResizeToServer(after.cols, after.rows);
+            scheduleResizePush(after.cols, after.rows);
           }
         }
 
@@ -3570,7 +3614,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         enableWebglRenderer,
         refreshTextureAtlasNow,
         fitTerminal,
-        pushResizeToServer,
+        scheduleResizePush,
       ]
     );
 
@@ -3588,6 +3632,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (reason === 'session-key-change') {
           resizeSyncStateRef.current = createResizeSyncState();
           clearResizeAckTimer();
+          clearResizePushTimer();
+          resizePushGateRef.current = createResizePushGate();
           lastDedupeKeyRef.current.clear();
           cancelAllPendingReasonRafs();
         }
@@ -3623,6 +3669,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         debugTerminal,
         cancelAllPendingReasonRafs,
         clearResizeAckTimer,
+        clearResizePushTimer,
         runRefreshSequence,
       ]
     );
@@ -3909,21 +3956,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           setIsInitializing(false);
           bumpTerminalReady();
 
-          // Setup pinch-to-zoom gesture for font size adjustment (mobile only)
-          if (enableTouchScroll) {
-            const handleWheel = (event: WheelEvent) => {
-              if (event.ctrlKey || event.metaKey) {
-                event.preventDefault();
-                const delta = event.deltaY > 0 ? -1 : 1;
-                const newSize = Math.max(8, Math.min(32, fontSize + delta));
-                if (newSize !== fontSize) {
-                  container.dispatchEvent(new CustomEvent('termfontchange', { detail: newSize }));
-                }
-              }
-            };
-            wheelHandlerRef.current = handleWheel;
-            container.addEventListener('wheel', handleWheel, { passive: false });
-          }
+          // Setup ctrl/⌘+wheel font size adjustment (trackpad pinch sends
+          // ctrl-modified wheel events too). Applies to THIS session only:
+          // persisted as a per-session override that survives refresh; cleared
+          // via the tab menu. The desktop tmux SGR wheel handler deliberately
+          // skips ctrl/meta-modified events so they land here.
+          const handleWheel = (event: WheelEvent) => {
+            if (event.ctrlKey || event.metaKey) {
+              event.preventDefault();
+              const delta = event.deltaY > 0 ? -1 : 1;
+              setSessionFontSize(sessionId, fontSize + delta);
+            }
+          };
+          wheelHandlerRef.current = handleWheel;
+          container.addEventListener('wheel', handleWheel, { passive: false });
 
           // 桌面 tmux 模式：拦截 xterm 默认的 wheel → SGR mouse 上报，
           // 改成「按真实行高累积，凑满 1 行立即发 1 行」的模型，跟原生
@@ -4237,6 +4283,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         viewportRef.current = null;
         resetWriteState({ notifyFlowResume: true });
         clearResizeAckTimer();
+        clearResizePushTimer();
       };
     }, [
       fitTerminal,
@@ -4262,6 +4309,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       disposeWebglRenderer,
       debugTerminal,
       clearResizeAckTimer,
+      clearResizePushTimer,
     ]);
 
     React.useEffect(() => {

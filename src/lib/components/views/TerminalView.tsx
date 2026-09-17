@@ -50,6 +50,7 @@ import { buildReferenceInputText } from '../sidebar/referencePaths';
 import { uploadTemporaryFileAndInsertReference } from '../sidebar/temporaryImageUpload';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { resolveTerminalPath, TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
+import { getSessionFontSize, type SessionFontSizeChangeDetail } from '../../terminal/sessionFontSize';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -140,25 +141,30 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onStatusChange,
 }) => {
   const { t } = useI18n();
-  // Use external fontSize from props, with local override support for pinch-to-zoom
-  const [fontSize, setFontSize] = React.useState(terminalSettings.fontSize);
+  const [sessionId] = React.useState(initialSessionId || uuidv4());
+  // Per-session font size: an override (tab menu / ctrl+wheel pinch) takes
+  // precedence; without one the view follows the global setting.
+  const [fontSize, setFontSize] = React.useState(
+    () => (initialSessionId ? getSessionFontSize(initialSessionId) : null) ?? terminalSettings.fontSize,
+  );
   const terminal = React.useMemo(() => createTermdockAPI(), []);
   const debugSession = React.useMemo(() => createDebugLogger('session'), []);
   const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
   const lastResumeRequestRef = React.useRef<{ token: number; visible: boolean } | null>(null);
   const resumeAttemptRef = React.useRef<{ startedAt: number; strategy: 'reconnect' | 'probe'; reason: string } | null>(null);
 
-  // Sync with external fontSize changes while allowing local pinch-to-zoom overrides
+  // Sync with the global fontSize while this session has no per-session override
   React.useEffect(() => {
-    setFontSize(terminalSettings.fontSize);
-  }, [terminalSettings.fontSize]);
+    if (getSessionFontSize(sessionId) === null) {
+      setFontSize(terminalSettings.fontSize);
+    }
+  }, [terminalSettings.fontSize, sessionId]);
 
   const effectiveTerminalSettings = React.useMemo(() => ({
     ...terminalSettings,
     fontSize,
   }), [terminalSettings, fontSize]);
 
-  const [sessionId] = React.useState(initialSessionId || uuidv4());
   // Must be correct on the first render. A false desktop default briefly sends
   // autoFocus=true to TerminalViewport when split panes are reparented, which
   // opens the soft keyboard before the mobile-detection effect can run.
@@ -811,19 +817,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   useTerminalOutputSubscription(terminalSessionId, isDocumentVisible, isStreamReady);
 
-  // Listen for font size changes from TerminalViewport (pinch-to-zoom)
+  // Listen for per-session font size changes (tab menu / ctrl+wheel pinch)
   React.useEffect(() => {
     const handleFontChange = (event: Event) => {
-      const customEvent = event as CustomEvent<number>;
-      const newSize = customEvent.detail;
-      if (typeof newSize === 'number' && newSize >= 8 && newSize <= 32) {
-        setFontSize(newSize);
-      }
+      const detail = (event as CustomEvent<SessionFontSizeChangeDetail>).detail;
+      if (!detail || detail.sessionId !== sessionId) return;
+      setFontSize(detail.fontSize ?? terminalSettings.fontSize);
     };
 
-    document.addEventListener('termfontchange', handleFontChange);
-    return () => document.removeEventListener('termfontchange', handleFontChange);
-  }, []);
+    window.addEventListener('termfontchange', handleFontChange);
+    return () => window.removeEventListener('termfontchange', handleFontChange);
+  }, [sessionId, terminalSettings.fontSize]);
 
   // 页面可见性 / 窗口焦点只维护本组件的 focus 状态。真正的恢复刷新和 WS
   // 探测统一由下面的 resumeRequestToken 广播处理，所有 session 走同一条路径。
@@ -2514,6 +2518,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               key={terminalSessionKey}
               ref={handleTerminalControllerRef}
               sessionKey={terminalSessionKey}
+              sessionId={sessionId}
               isLayoutVisible={isLayoutVisible}
               chunks={bufferChunks}
               onInput={handleViewportInput}

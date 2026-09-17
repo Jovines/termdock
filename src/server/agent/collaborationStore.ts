@@ -266,7 +266,8 @@ export class CollaborationStore {
     if (!source || source.deleted || !target || target.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
     if (source.id === target.id || !source.sessionIds.includes(input.sessionId)
       || source.updatedAt !== input.expectedSourceUpdatedAt || target.updatedAt !== input.expectedTargetUpdatedAt) {
-      throw new CollaborationError('GROUP_CHANGED', '协作组已变化，请刷新后重新移动成员', 409);
+      throw new CollaborationError('GROUP_CHANGED', `协作组已变化（当前 updatedAt：源组=${source.updatedAt}，目标组=${target.updatedAt}），请刷新后重新移动成员`, 409,
+        { currentSourceUpdatedAt: source.updatedAt, currentTargetUpdatedAt: target.updatedAt });
     }
     const sourceIds = source.sessionIds.filter((id) => id !== input.sessionId);
     const dissolved = sourceIds.length < 2;
@@ -525,7 +526,8 @@ export class CollaborationStore {
     const existing = this.getGroup(id);
     if (!existing || existing.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
     if (existing.federated || existing.updatedAt !== expectedUpdatedAt || this.getGroup(group.id)) {
-      throw new CollaborationError('GROUP_CHANGED', '协作组已被修改，请重新打开成员管理后再保存', 409);
+      throw new CollaborationError('GROUP_CHANGED', `协作组已被修改（当前 updatedAt=${existing.updatedAt}），请刷新后再保存`, 409,
+        { currentUpdatedAt: existing.updatedAt });
     }
     const promoted = { ...group, createdAt: existing.createdAt, updatedAt: Math.max(Date.now(), existing.updatedAt + 1, group.updatedAt) };
     const idempotency = { ...this.document.idempotency };

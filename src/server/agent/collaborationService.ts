@@ -185,7 +185,7 @@ export class CollaborationService {
   async save(input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number }) {
     const existing = input.id ? this.options.store.getGroup(input.id) : null;
     if (input.id && (!existing || existing.deleted)) throw new Error('GROUP_NOT_FOUND');
-    if (existing && input.expectedUpdatedAt !== existing.updatedAt) throw new CollaborationError('GROUP_CHANGED', '协作组已变化，请刷新后重试', 409);
+    if (existing && input.expectedUpdatedAt !== existing.updatedAt) throw new CollaborationError('GROUP_CHANGED', `协作组已变化（当前 updatedAt=${existing.updatedAt}），请刷新后重试`, 409, { currentUpdatedAt: existing.updatedAt });
     if (typeof input.name !== 'string' || !input.name.trim() || COLLAB_NAME_FORBIDDEN.test(input.name) || !Array.isArray(input.sessionIds) || input.sessionIds.some(id => typeof id !== 'string') || new Set(input.sessionIds).size < 2) throw new Error('INVALID_GROUP');
     if (!input.sessionIds.some(id => address(id)) && !existing?.federated) {
       if (input.sessionIds.some(id => !this.options.sessions().some(s => s.sessionId === id) && !existing?.sessionIds.includes(id))) throw new Error('GROUP_MEMBER_UNAVAILABLE');

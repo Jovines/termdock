@@ -16,7 +16,17 @@ export function collaborationGroupRoutes(options: {
   });
   router.post('/collaboration-groups', async (req, res) => {
     try {
-      const { id, name, sessionIds, expectedUpdatedAt } = req.body ?? {};
+      const body = req.body ?? {};
+      const { id, name, sessionIds, expectedUpdatedAt } = body;
+      // Unknown fields used to be dropped silently while the save still
+      // returned ok — a caller submitting `members` to rename someone got a
+      // success and no rename. Reject them and route the common case (member
+      // renames) to the command that actually does it.
+      const unknownKeys = Object.keys(body).filter((key) => !['id', 'name', 'sessionIds', 'expectedUpdatedAt'].includes(key));
+      if (unknownKeys.length) {
+        const hint = unknownKeys.includes('members') ? '；要改成员显示名请用 td collab rename <session-id> <新名字>' : '';
+        throw new CollaborationError('INVALID_GROUP', `含未知字段 ${unknownKeys.join('、')}（合法字段：name, sessionIds, id, expectedUpdatedAt）${hint}`, 400);
+      }
       if ((id !== undefined && (typeof id !== 'string' || !id))
         || typeof name !== 'string' || !name.trim() || !Array.isArray(sessionIds)
         || sessionIds.some((value) => typeof value !== 'string' || !value.trim())) {
@@ -28,7 +38,9 @@ export function collaborationGroupRoutes(options: {
       const existing = id ? options.store.getGroup(id) : null;
       if (id && (!existing || existing.deleted)) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
       if (expectedUpdatedAt !== undefined && (!Number.isFinite(expectedUpdatedAt) || expectedUpdatedAt !== existing?.updatedAt)) {
-        throw new CollaborationError('GROUP_CHANGED', '协作组已被修改，请重新打开成员管理后再保存', 409);
+        throw new CollaborationError('GROUP_CHANGED',
+          `协作组已被修改（当前 updatedAt=${existing?.updatedAt}）。请先确认最新成员列表，再以 expectedUpdatedAt=${existing?.updatedAt} 重新提交`, 409,
+          { currentUpdatedAt: existing?.updatedAt });
       }
       const ids = [...new Set<string>(sessionIds)];
       if (ids.length < 2) throw new CollaborationError('INVALID_GROUP', '协作组至少需要两个有效会话', 400);
@@ -41,6 +53,7 @@ export function collaborationGroupRoutes(options: {
     } catch (error) {
       res.status(error instanceof CollaborationError ? error.httpStatus : 500)
         .json({ code: error instanceof CollaborationError ? error.code : 'GROUP_SAVE_FAILED',
+          ...(error instanceof CollaborationError && error.details ? error.details : {}),
           error: error instanceof Error ? error.message : '协作组保存失败' });
     }
   });
@@ -56,6 +69,7 @@ export function collaborationGroupRoutes(options: {
     } catch (error) {
       res.status(error instanceof CollaborationError ? error.httpStatus : 500)
         .json({ code: error instanceof CollaborationError ? error.code : 'GROUP_MOVE_FAILED',
+          ...(error instanceof CollaborationError && error.details ? error.details : {}),
           error: error instanceof Error ? error.message : '成员移动失败' });
     }
   });
@@ -92,13 +106,15 @@ export function collaborationGroupRoutes(options: {
     } catch (error) {
       res.status(error instanceof CollaborationError ? error.httpStatus : 400)
         .json({ code: error instanceof CollaborationError ? error.code : 'GROUP_PROMOTION_FAILED',
+          ...(error instanceof CollaborationError && error.details ? error.details : {}),
           error: error instanceof Error ? error.message : '跨服务组转换失败' });
     }
   });
   router.delete('/collaboration-groups/:groupId', (req, res) => {
     const existing = options.store.getGroup(req.params.groupId);
     if (req.query.expectedUpdatedAt !== undefined && Number(req.query.expectedUpdatedAt) !== existing?.updatedAt) {
-      return res.status(409).json({ code: 'GROUP_CHANGED', error: '协作组已变化，请刷新后重新操作' });
+      return res.status(409).json({ code: 'GROUP_CHANGED', currentUpdatedAt: existing?.updatedAt,
+        error: `协作组已变化（当前 updatedAt=${existing?.updatedAt}），请刷新后重新操作` });
     }
     if (!options.store.remove(req.params.groupId)) return res.status(404).json({ error: '协作组不存在' });
     res.status(204).send();

@@ -127,4 +127,28 @@ describe('FederationAccess invitation flow', () => {
     fireEvent.click(screen.getByText('邀请设备')); fireEvent.click(screen.getByRole('radio', { name: /完整访问/ })); fireEvent.click(screen.getByText('生成邀请'));
     await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ scope: { kind: 'service' }, actions: ['service:*'] }));
   });
+  it('lets the inviter pick an accessible IP entry address for the invitation', async () => {
+    const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
+    render(<FederationAccess paired currentServiceOrigin="https://dv4d.termdock.local:9834" onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} inviteAddresses={[{ url: 'https://192.168.1.23:9834', label: 'Wi-Fi' }]} />);
+    fireEvent.click(screen.getByText('邀请设备'));
+    fireEvent.click(screen.getByText('接入地址'));
+    expect(screen.getByRole('radio', { name: /当前地址/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole('radio', { name: /Wi-Fi/ }));
+    fireEvent.click(screen.getByText('生成邀请'));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ entryAddress: 'https://192.168.1.23:9834' })));
+  });
+  it('validates a manually entered entry address before generating the invitation', async () => {
+    const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
+    render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} inviteAddresses={[{ url: 'https://192.168.1.23:9834', label: 'Wi-Fi' }]} />);
+    fireEvent.click(screen.getByText('邀请设备'));
+    fireEvent.click(screen.getByText('接入地址'));
+    fireEvent.click(screen.getByRole('radio', { name: /自定义地址/ }));
+    fireEvent.change(screen.getByPlaceholderText('例如：https://192.168.1.23:9834'), { target: { value: 'ftp://192.168.1.23' } });
+    fireEvent.click(screen.getByText('生成邀请'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('接入地址'));
+    expect(onCreateInvite).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByPlaceholderText('例如：https://192.168.1.23:9834'), { target: { value: 'https://10.0.0.8:9834' } });
+    fireEvent.click(screen.getByText('生成邀请'));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ entryAddress: 'https://10.0.0.8:9834' })));
+  });
 });

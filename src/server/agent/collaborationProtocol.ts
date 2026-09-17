@@ -27,7 +27,11 @@ export interface MessageExtras {
   expiresAt?: number | null;
 }
 export class CollaborationError extends Error {
-  constructor(public readonly code: string, message: string, public readonly httpStatus = 400) { super(message); }
+  /** Structured fields merged into the JSON error body (e.g. the group's
+   *  current updatedAt on GROUP_CHANGED) so callers can retry programmatically
+   *  without scraping the sentence. */
+  constructor(public readonly code: string, message: string, public readonly httpStatus = 400,
+    public readonly details?: Record<string, unknown>) { super(message); }
 }
 
 /** A delivered terminal shows a short id, because a 36-character one wraps in

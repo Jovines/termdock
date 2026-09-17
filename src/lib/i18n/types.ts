@@ -864,6 +864,9 @@ export type TranslationDictionary = {
     renamePlaceholder: string;
     copyCwd: string;
     copyCwdHint: string;
+    fontSize: string;
+    fontSizeHint: string;
+    fontSizeReset: string;
     resumeAgent: string;
     resumeAgentHint: string;
     resumeAgentAvailable: string;

@@ -10,76 +10,88 @@ export interface CollaborationCommand {
   operation?: string;
 }
 export const COLLAB_HELP = `td collab — durable messages; no agent-specific hooks required
-  (except --session, wherever an id is taken, the short id shown in deliveries and --text
-   output works too; a shorter unique prefix down to 4 characters also resolves —
-   an ambiguous prefix is refused, so use more characters or the full id)
+  我想…
+    回复刚收到的消息 → 用投递「来自」行里的 id: td collab reply <id> "内容" --text
+    看有谁、我在哪些组 → td collab status --text
+    主动找人 → td collab send <成员id> "消息内容" --text
+    看对方在干什么 → td collab capture <成员id> --text（只读巡屏，不发送按键）
+    取大消息全文 → td collab message get <id> --text
+    改我的显示名 → td collab rename <我的id> <新名字>
+    设角色定位 → td collab role set <组id> <成员id> <定位>
+    查/改群规 → td collab rules get|set <组id>
+    消息发出去没动静 → td collab message get <id>（投递状态与重试原因）
+  Output: --json (default) | --jsonl | --text (human-readable lines; prefer it
+    when reading results yourself. Commands without a dedicated --text form
+    still print JSON)
   Source identity (all collab commands): --session <full-Termdock-session-id>
     or TERMDOCK_COLLAB_SESSION_ID. CLI option wins; explicit identity bypasses
     environment/tmux detection. Use your own full member ID from status output,
     not a tmux name, backend ID or Claude session ID. Unknown IDs are refused.
-    This selects a source in the trusted local-user context; it is not proof
-    of identity or isolation between processes running as the same OS user.
     Example: td collab --session <your-full-session-id> status
-    Rebind identity and location separately:
-      td collab --session <your-full-session-id> rebind --pane %3
-    Without explicit identity, the backend environment / tmux pane is detected.
+  Ids: wherever an id is taken, the short id shown in deliveries and --text
+    output works too; a shorter unique prefix down to 4 characters also
+    resolves — an ambiguous prefix is refused, so use more characters.
   Scheduled self-reminders: td automation create --name 'Review progress' --every 30 --self --prompt 'Review group progress and continue'
   Scheduling help: td automation --help
-  status | capabilities
-  transport list (server-owned remote session directory)
-  transport invite --origin https://this-service:9834
-    Create a 10-minute invitation granting collaboration directory/group access.
-    Transfer its JSON privately to the other machine; no browser is required.
-  transport accept --origin https://this-service:9834 --file invitation.json
-    Pair both services once; subsequent discovery, groups and delivery are automatic.
-  group save --file group.json
-    JSON: {name, sessionIds, id?, expectedUpdatedAt?}; same service API as the UI.
-  transport info
-    Print this service's public identity and CA fingerprint (no private keys).
-  transport register <group-id> --file <nodes.json>
-    One-time server peer registration; nodes.json is an array of public
-    {serviceId, origin, caFingerprint256?} entries, including this service.
-    Obtain pins from each administrator's transport info over a trusted channel.
-    Registered servers deliver without an open browser or Desktop client.
-  rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
-  send <session-id> <message> | reply <message-id> <message> | handoff <session-id> <message>
-    (send fan-out: comma-separated same-group ids, e.g. send a,b "任务"; every
-    recipient sees it as 群发 with the sibling list; waiting options apply to
-    single-recipient sends only)
-    --group <id> --thread <id> --idempotency-key <key>
-    --file <path> | --stdin (instead of inline body; -- ends option parsing)
-    --wait-until queued|delivered --timeout 30s
-    --expect-reply ack|result|any
-    --response-kind ack|progress|result --metadata '<JSON object>'
-    --expires-at <ISO timestamp or epoch milliseconds>
-    reply: --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
+
+── 常用 ──
+  status (who is in my groups, their names, roles, observed activity.
+    Status values: service-reachable/service-unreachable mark remote node
+    connectivity; local members show their own session state instead.
+    观测时距终端输出 N 秒 is an observation, never task progress)
+  send <session-id> <message> (deliver to one member; comma-separated same-group
+    ids fan out, e.g. send a,b "任务" — recipients see it as 群发)
+  reply <message-id> <message> (answer a message you received; one-to-one)
+  handoff <session-id> <message> (like send, framed as a task hand-off)
+    shared options: --group <id> --thread <id> --idempotency-key <key>
+      --file <path> | --stdin (instead of inline body; -- ends option parsing)
+      --wait-until queued|delivered --timeout 30s --expect-reply ack|result|any
+      --response-kind ack|progress|result --metadata '<JSON object>'
+      --expires-at <ISO timestamp or epoch milliseconds>
+    reply also: --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
       (status reporting happens only via reply; send/handoff dispatch carries no task state)
-  message get <message-id> [--receipt-only] [--raw]
+  message get <id> [--receipt-only] [--raw] [--no-rules] [--text]
+    (delivery status, retries and the full body of large messages)
   message confirm-shell <message-id> (sender confirms delivery into a shell; continues the same message)
   message watch <message-id> [--wait-until delivered] [--timeout 30s]
-  inbox [--since <ISO or epoch-ms>] [--after-id <id>]
-    [--cursor <token>] [--consumer <name>] [--limit 1..200]
-    [--from <id>] [--group <id>] [--thread <id>] [--kind <kind>]
-    [--response-kind ack|progress|result] [--follow] [--timeout 30s]
-  cursor commit <token> --consumer <name> (commit after processing the page)
-  add|remove <group-id> <session-id>
-  spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]
-  rules get <group-id> [--text]
-  rules set <group-id> <text> | --file <path> | --stdin [--if-version <version>]
-  rules clear <group-id> [--if-version <version>]
-    Shared group guidance, up to 8192 UTF-8 bytes; message envelopes retain its version.
-  traits list|set|unset (alias of role; long-lived capabilities/preferences)
-  role list <group-id>
-  role set <group-id> <session-id> <role…> (trailing words join as the role)
-  role unset <group-id> <session-id>
-    (roles are shared within the group; members set each other's, your own
-    rides the delivery shell header)
-  rename <session-id> <name…> (rename a member of any shared group;
-    trailing words join as the new name; roster and shells show it at once)
   capture <session-id> [--lines 1..10000] [--raw] [--text]
     (查看伙伴正在做什么：读取同组、本机 tmux 成员的当前屏幕，不发送按键、不打断对方。
-    需要了解进展、排查卡住或决定是否跟进时先 capture；不是完整聊天历史或完成凭证。
-    用 status --text 查成员 ID；不支持远端成员，远端请 send 询问进展。)
+    不是完整聊天历史或完成凭证；用 status --text 查成员 ID；不支持远端成员，远端请 send 询问进展。)
+── 群与规则 ──
+  group save --file group.json
+    JSON: {name, sessionIds, id?, expectedUpdatedAt?}; same service API as the UI.
+  add|remove <group-id> <session-id>
+  spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]
+  rules get <group-id> [--text] | rules set <group-id> <text> | --file <path> | --stdin [--if-version <version>]
+    | rules clear <group-id> [--if-version <version>]
+    (shared group guidance, up to 8192 UTF-8 bytes; message envelopes retain
+    its version. if-version rejects concurrent overwrites with GROUP_CHANGED)
+  rename <session-id> <name…> (rename a member of any shared group;
+    trailing words join as the new name; roster and shells show it at once)
+  role list <group-id> | role set <group-id> <session-id> <role…> | role unset <group-id> <session-id>
+    (roles are shared within the group; members set each other's, your own
+    rides the delivery shell header. traits is an alias of role)
+── 收件箱与游标 ──
+  inbox [--since <ISO or epoch-ms>] [--after-id <id>] [--cursor <token>]
+    [--consumer <name>] [--limit 1..200] [--from <id>] [--group <id>]
+    [--thread <id>] [--kind <kind>] [--response-kind ack|progress|result]
+    [--follow] [--timeout 30s]
+    (defaults to newest 50; cursor/consumer mode reads oldest unseen first.
+    Reading never advances a consumer. Read receipts are not supported)
+  cursor commit <token> --consumer <name> (commit after processing the page)
+── 传输与运维 ──
+  transport list (server-owned remote session directory) | transport info (this service's public identity and CA fingerprint, no private keys)
+  transport invite --origin https://this-service:9834
+    (create a 10-minute invitation granting collaboration directory/group
+    access; transfer its JSON privately — no browser required)
+  transport accept --origin https://this-service:9834 --file invitation.json
+    (pair both services once; discovery, groups and delivery become automatic)
+  transport register <group-id> --file <nodes.json>
+    (one-time server peer registration; nodes.json is an array of public
+    {serviceId, origin, caFingerprint256?} entries, including this service.
+    Obtain pins from each administrator's transport info over a trusted
+    channel. Registered servers deliver without an open browser or Desktop client)
+  rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
   drive <session-id> approve|enter|escape|space|left|right|up|down|capture
   drive <session-id> run <command…>
     (drive the terminal of a member session you share a group with — terminal
@@ -87,23 +99,23 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     dialog and refuses unless one is actually showing; named keys inject one
     key; capture reads the current screen back; run submits one line and
     returns the screen. Works on plain shell members too (no agent needed) for
-    run/capture; key actions (approve/enter/…) require an agent pane, and are
-    refused while the user has the pane scrolled into copy-mode. Cannot target
-    your own session. Treat every drive as strong control: the member's shell
-    executes what you send.)
+    run/capture; key actions require an agent pane and are refused while the
+    user has the pane scrolled into copy-mode. Cannot target your own session.
+    Treat every drive as strong control: the member's shell executes what you send)
   cleanup <session-id>… 移除协作会话并终止其 tmux/进程（仅限与你同组的会话；
     不能清理当前会话自身，也不能通过清理解散你所在的组）
     风险操作：默认只打印清理计划并拒绝执行（exit 1）——这是不可恢复的删除。
     必须先向用户（人类）说明将清理的会话与影响并获得其明确同意，
     才能以 --confirm 重跑执行；每次执行都需要当场的人类授权。
-  --json (default) | --jsonl | --text
+  help (this text; when a managed session is available it also lists the
+    groups you are in with every member's id, name and role)
 Exit codes: 0 requested condition met; 1 invalid request/network error;
 cleanup without --confirm prints the plan and refuses (also 1);
 2 wait timeout (message may still deliver); 3 failed/expired.
 Message limit: ${COLLAB_LIMITS.message_bytes} UTF-8 bytes; metadata: ${COLLAB_LIMITS.metadata_bytes} bytes.
 Idempotency retention: 7 days. Terminal delivery, ACK and result never imply each other.
-Inbox defaults to newest 50; cursor/consumer mode reads oldest unseen first.
-Reading never advances a consumer. Read receipts are not supported.`;
+Delivery semantics: delivered = written to the terminal — never proof of
+reading or task completion; a timeout stops waiting, it does not cancel delivery.`;
 
 /** One roster row: prefer the member's human name, keep the full session id
  * reachable for role set/unset targeting, mark unset members explicitly. */
@@ -118,7 +130,7 @@ interface RoleGroupView {
   members?: Array<{ sessionId: string; name?: string | null }>;
 }
 
-const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help']);
+const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules']);
 const VALUE_OPTIONS = new Set(['session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
@@ -220,7 +232,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     inbox: ['raw', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
-    message: ['raw', 'receipt-only', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
+    message: ['raw', 'receipt-only', 'no-rules', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
     add: [], remove: [], spawn: ['name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: ['lines', 'raw'],
   };
   for (const option of byAction[action]) allowed.add(option);
@@ -272,7 +284,9 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         io.write(message.content);
       }
       else if (value.message) {
-        if (value.message.instructions?.text) io.write(`协作约定（版本 ${value.message.instructions.version}）：\n${value.message.instructions.text}`);
+        // One line instead of the full rules text — the CLI is stateless so it
+        // cannot diff versions across calls; --no-rules silences it entirely.
+        if (!o['no-rules'] && value.message.instructions?.text) io.write(`消息附群规版本 ${value.message.instructions.version}；td collab rules get <组id> --text 查看全文`);
         io.write(`[${value.status}] ${canonicalShortId(String(value.message_id ?? ''))}\n${value.message.content}`);
       }
       else if (value.message_id) {
@@ -282,7 +296,11 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         if (value.code === 'WAIT_TIMEOUT' && value.stage_reached && value.expect_reply) {
           io.write(`\n投递已完成；等待${value.expect_reply === 'result' ? '结果' : '回复'}超时（expect-reply=${value.expect_reply}）`);
         }
-        if (value.snapshot) io.write(`\n${value.snapshot}`);
+        // The screen rides the receipt as the delivery credential: the service
+        // observes terminal writes, never reading, so this capture is the only
+        // evidence the message actually landed. Kept visible in --text, but
+        // fenced and labelled so it cannot be mistaken for delivery state.
+        if (value.snapshot) io.write(`\n对方终端当前屏幕（凭证：确认你的消息已写入；不代表已读或任务完成）：\n───\n${value.snapshot}\n───`);
       }
       else io.write(JSON.stringify(value, null, 2));
       if (value.last_error) io.write(String(value.last_error));
@@ -309,7 +327,11 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     }
     if (command.action === 'group') {
       if (fs.statSync(String(o.file)).size > 64 * 1024) throw new Error('Group input exceeds 64 KiB');
-      output(await request('POST', '/group', { input: JSON.parse(fs.readFileSync(String(o.file), 'utf8')) })); return 0;
+      const saved = await request('POST', '/group', { input: JSON.parse(fs.readFileSync(String(o.file), 'utf8')) }) as { group?: { id?: string; name?: string; sessionIds?: string[]; updatedAt?: number } };
+      if (o.text && saved.group) {
+        io.write(`已保存协作组「${saved.group.name ?? saved.group.id ?? ''}」（${saved.group.sessionIds?.length ?? 0} 个成员，updatedAt=${saved.group.updatedAt ?? '未知'}）`);
+      } else output(saved);
+      return 0;
     }
     if (command.action === 'transport') {
       if (command.operation === 'info') output(await request('GET', '/transport'));
@@ -340,35 +362,46 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
             const members = new Map((group.members ?? []).map((member) => [member.sessionId, member.name ?? null]));
             for (const id of group.sessionIds) io.write(roleLine({ sessionId: id, name: members.get(id) ?? null }, group.roles?.[id]));
           }
+          io.write('给成员发消息: td collab send <成员id> "消息内容" --text（成员 id 见上表）');
         }
       } catch { /* help stays available without a server or session */ }
       return 0;
     }
     if (command.action === 'capabilities' || command.action === 'status') {
-      const result = await request('GET', command.action === 'status' ? '/peers' : '/capabilities');
-      output(result);
+      const result = await request('GET', command.action === 'status' ? '/peers' : '/capabilities') as Json & { source?: { sessionId?: string; name?: string }; peers?: Array<Json & { sessionId?: string; name?: string }>; groups?: Array<Json> };
       if (command.action === 'status' && o.text) {
-        for (const group of result.groups ?? []) {
-          io.write(`组「${group.name}」成员定位：`);
-          for (const id of group.sessionIds ?? []) {
-            const member = [...(result.peers ?? []), result.source].find(item => item?.sessionId === id);
-            io.write(roleLine({ sessionId: id, name: member?.name }, group.roles?.[id]));
+        // Human-readable status: no JSON dump, one line per fact.
+        const source = result.source as { sessionId?: string; name?: string } | undefined;
+        if (source?.sessionId) io.write(`我:${source.name ?? ''}（${source.sessionId}）`);
+        for (const peer of result.peers ?? []) {
+          const facts = peer as { sessionId?: string; name?: string; status?: string; output_idle_seconds?: number; last_terminal_output_at?: number; activity_observed_at?: number };
+          const line = `- ${facts.name || facts.sessionId}（${facts.sessionId}）${facts.status ? ` · ${facts.status}` : ''}`;
+          io.write(line);
+          if (facts.last_terminal_output_at && facts.activity_observed_at) {
+            io.write(`  观测时距终端输出 ${facts.output_idle_seconds ?? Math.max(0, Math.floor((facts.activity_observed_at - facts.last_terminal_output_at) / 1000))} 秒（不代表任务进度）`);
           }
         }
-        for (const peer of result.peers ?? []) if (peer.last_terminal_output_at && peer.activity_observed_at) {
-          io.write(`${peer.name || peer.sessionId}：观测时距终端输出 ${peer.output_idle_seconds ?? Math.max(0, Math.floor((peer.activity_observed_at - peer.last_terminal_output_at) / 1000))} 秒（不代表任务进度）`);
+        for (const group of result.groups ?? []) {
+          const view = group as unknown as RoleGroupView;
+          io.write(`组「${view.name}」成员定位：`);
+          const peersAndSource = [...(result.peers ?? []), result.source] as Array<{ sessionId?: string; name?: string } | undefined>;
+          for (const id of view.sessionIds ?? []) {
+            const member = peersAndSource.find(item => item?.sessionId === id);
+            io.write(roleLine({ sessionId: id, name: member?.name }, view.roles?.[id]));
+          }
         }
-      }
-      if (command.action === 'status' && o.text && Array.isArray(result.peers) && result.peers.length) {
         io.write('查看伙伴当前屏幕（只读，仅本机 tmux）：');
-        for (const peer of result.peers) {
-          const id = peer.sessionId;
-          if (typeof id !== 'string' || id === result.source?.sessionId) continue;
-          io.write(`- ${peer.name || id}：${id.startsWith('remote:')
+        for (const peer of result.peers ?? []) {
+          const id = (peer as { sessionId?: string }).sessionId;
+          const name = (peer as { name?: string }).name;
+          if (typeof id !== 'string' || id === source?.sessionId) continue;
+          io.write(`- ${name || id}：${id.startsWith('remote:')
             ? `远端成员，请用 td collab send ${id} "当前进展？" --text`
             : `td collab capture ${id} --text`}`);
         }
+        return 0;
       }
+      output(result);
       return 0;
     }
     if (command.action === 'rebind') { output(await request('POST', '/route/rebind', { pane: o.pane ?? null })); return 0; }
@@ -434,7 +467,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         role: command.operation === 'unset' ? null : command.role });
       if (o.text) {
         io.write(command.operation === 'set'
-          ? `定位已设置：${command.sessionId} = ${(body.group as { roles?: Record<string, string> }).roles?.[command.sessionId!] ?? ''}`
+          ? `定位已设置：${command.sessionId} = ${(body.group as { roles?: Record<string, string> }).roles?.[command.sessionId!] ?? ''}\n（改成员显示名: td collab rename ${command.sessionId} <新名字>）`
           : `定位已清除：${command.sessionId}`);
       } else output(body);
       return 0;
@@ -510,8 +543,16 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     }
   } catch (error) {
     if (receipt && now() >= deadline) { output({ ...receipt, ok: false, code: 'WAIT_TIMEOUT', delivery_continues: true, last_error: error instanceof Error ? error.message : String(error) }); return 2; }
-    output({ ...(receipt ?? {}), ok: false, code: error instanceof CollaborationError ? error.code : 'COLLABORATION_ERROR',
-      error: error instanceof Error ? error.message : String(error), ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}), ...(receipt ? { delivery_continues: true } : {}) });
+    const code = error instanceof CollaborationError ? error.code : 'COLLABORATION_ERROR';
+    const message = error instanceof Error ? error.message : String(error);
+    if (o.text) {
+      // Single-line errors in text mode; the enqueued-message hint keeps a
+      // mid-wait failure from reading as a lost message.
+      io.write(`${code}: ${message}${receipt?.message_id ? `（消息 ${canonicalShortId(String(receipt.message_id))} 已入队，投递继续）` : ''}`);
+      return 1;
+    }
+    output({ ...(receipt ?? {}), ok: false, code,
+      error: message, ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}), ...(receipt ? { delivery_continues: true } : {}) });
     return 1;
   }
 }

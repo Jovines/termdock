@@ -85,7 +85,7 @@ describe('collaboration CLI contract', () => {
     const setter = fixture([{ ok: true, group: { id: 'g1', sessionIds: ['p1', 'p2'], roles: { p2: '排版' } } }]);
     expect(await executeCollaborationCommand(parseCollaborationCommand(['role', 'set', 'g1', 'p2', '负责', '排版', '--text']), { backendSessionId: 'p1' }, setter.io)).toBe(0);
     expect(setter.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/role'), expect.objectContaining({ group_id: 'g1', session_id: 'p2', role: '负责 排版', backendSessionId: 'p1' })]));
-    expect(setter.output).toEqual(['定位已设置：p2 = 排版']);
+    expect(setter.output).toEqual(['定位已设置：p2 = 排版\n（改成员显示名: td collab rename p2 <新名字>）']);
     const unseter = fixture([{ ok: true, group: { id: 'g1', sessionIds: ['p1', 'p2'], roles: {} } }]);
     expect(await executeCollaborationCommand(parseCollaborationCommand(['role', 'unset', 'g1', 'p2']), {}, unseter.io)).toBe(0);
     expect(unseter.calls[0][2]).toMatchObject({ group_id: 'g1', session_id: 'p2', role: null });
@@ -111,10 +111,12 @@ describe('collaboration CLI contract', () => {
     expect(await executeCollaborationCommand(parseCollaborationCommand(['--help']), { backendSessionId: 'p1' }, helper.io)).toBe(0);
     expect(helper.calls[0][0]).toBe('GET');
     expect(helper.calls[0][1]).toContain('/role');
-    expect(helper.output.at(-4)).toBe('\n本会话所在协作组的成员定位：');
-    expect(helper.output.at(-3)).toBe('组「发布组」(2 个成员)');
-    expect(helper.output.at(-2)).toBe('- 开发 (p1)：组长');
-    expect(helper.output.at(-1)).toBe('- p2：排版');
+    // The roster is followed by one copy-paste send template for the group.
+    expect(helper.output.at(-5)).toBe('\n本会话所在协作组的成员定位：');
+    expect(helper.output.at(-4)).toBe('组「发布组」(2 个成员)');
+    expect(helper.output.at(-3)).toBe('- 开发 (p1)：组长');
+    expect(helper.output.at(-2)).toBe('- p2：排版');
+    expect(helper.output.at(-1)).toBe('给成员发消息: td collab send <成员id> "消息内容" --text（成员 id 见上表）');
   });
 
   it('parses rename with trailing words joining as the new name and rejects empties', () => {
@@ -297,8 +299,8 @@ it('exposes server transport identity without sending a message and validates re
   expect(await executeCollaborationCommand(parseCollaborationCommand(['transport', 'info']), {}, f.io)).toBe(0);
   expect(f.calls[0][0]).toBe('GET'); expect(f.calls[0][1]).toContain('/transport');
   expect(parseCollaborationCommand(['transport', 'register', 'cross-group', '--file', 'nodes.json'])).toMatchObject({ operation: 'register', groupId: 'cross-group' });
-  expect(() => parseCollaborationCommand(['transport', 'register', 'cross-group'])).toThrow('Usage');
-  expect(() => parseCollaborationCommand(['transport', 'info', '--file', 'nodes.json'])).toThrow('Usage');
+  expect(() => parseCollaborationCommand(['transport', 'register', 'cross-group'])).toThrow('transport register requires');
+  expect(() => parseCollaborationCommand(['transport', 'info', '--file', 'nodes.json'])).toThrow('transport invite needs --origin');
 });
 
 it('exposes historical capture, explicit consumption and distinct delivery/reply timeout outcomes', async () => {
