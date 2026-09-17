@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { Maximize as RiMaximize, Minimize as RiMinimize, Pause as RiPause, Play as RiPlay, RotateCw as RiRotateCw } from 'lucide-react';
+import { Maximize as RiMaximize, Minimize as RiMinimize, Pause as RiPause, Play as RiPlay, RotateCw as RiRotateCw, Volume2 as RiVolume2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useEncryptedMediaSource } from '../../federation/mediaSource';
 import { SIDEBAR_GESTURE_IGNORE_ATTR, SWIPER_NO_SWIPING_CLASS } from './gestureArbiter';
@@ -19,6 +19,20 @@ export function computeScrubTime(clientX: number, rect: { left: number; width: n
   if (!Number.isFinite(duration) || duration <= 0 || !rect.width) return 0;
   const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
   return ratio * duration;
+}
+
+const HOLD_BASE_RATE = 2;
+const HOLD_MAX_RATE = 8;
+// 长按激活后每向右拖动这么多像素，提速一档（2× → 3× → …）。
+const HOLD_RATE_STEP_PX = 60;
+const SEEK_STEP_SECONDS = 5;
+const VOLUME_STEP = 0.05;
+const VOLUME_NOTICE_MS = 900;
+
+// 长按拖动距离 → 播放倍速：向右为正，回到 2× 起步，最高 8×。
+export function computeHoldRate(deltaX: number): number {
+  if (!Number.isFinite(deltaX) || deltaX <= 0) return HOLD_BASE_RATE;
+  return Math.min(HOLD_MAX_RATE, HOLD_BASE_RATE + Math.floor(deltaX / HOLD_RATE_STEP_PX));
 }
 
 interface VideoPreviewPlayerProps {
@@ -69,6 +83,11 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
   const [rotation, setRotation] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [holdRate, setHoldRate] = useState(HOLD_BASE_RATE);
+  const [volume, setVolume] = useState(1);
+  const [volumeNotice, setVolumeNotice] = useState<number | null>(null);
+  const holdRateRef = useRef(HOLD_BASE_RATE);
+  const volumeNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearLongPressTimer = useCallback(() => {
     if (longPressTimerRef.current !== null) {
@@ -79,11 +98,18 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
 
   const restorePlaybackRate = useCallback(() => {
     clearLongPressTimer();
+    const pointer = longPressPointerRef.current;
     longPressPointerRef.current = null;
     if (!longPressActiveRef.current) return false;
     const video = videoRef.current;
-    if (video) video.playbackRate = playbackRateBeforeLongPressRef.current;
+    if (video) {
+      video.playbackRate = playbackRateBeforeLongPressRef.current;
+      if (pointer) {
+        try { video.releasePointerCapture?.(pointer.id); } catch { /* capture may already be gone */ }
+      }
+    }
     longPressActiveRef.current = false;
+    holdRateRef.current = HOLD_BASE_RATE;
     setLongPressActive(false);
     return true;
   }, [clearLongPressTimer]);
@@ -91,6 +117,7 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
   useEffect(() => () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     if (scrubSettleRef.current !== null) clearTimeout(scrubSettleRef.current);
+    if (volumeNoticeTimerRef.current !== null) clearTimeout(volumeNoticeTimerRef.current);
     clearLongPressTimer();
     const video = videoRef.current;
     if (video && longPressActiveRef.current) video.playbackRate = playbackRateBeforeLongPressRef.current;
@@ -210,6 +237,44 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
     else video.pause();
   }, []);
 
+  const changeVolume = useCallback((delta: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const next = Math.min(1, Math.max(0, Math.round((video.volume + delta) * 100) / 100));
+    video.volume = next;
+    if (next > 0) video.muted = false;
+    setVolume(next);
+    setVolumeNotice(next);
+    if (volumeNoticeTimerRef.current !== null) clearTimeout(volumeNoticeTimerRef.current);
+    volumeNoticeTimerRef.current = setTimeout(() => {
+      volumeNoticeTimerRef.current = null;
+      setVolumeNotice(null);
+    }, VOLUME_NOTICE_MS);
+  }, []);
+
+  // 视频画面获得焦点后的键盘控制：左右调进度、上下调音量、空格播放/暂停。
+  const handleVideoKeyDown = useCallback((event: React.KeyboardEvent<HTMLVideoElement>) => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      seekTo(video.currentTime - (event.shiftKey ? SEEK_STEP_SECONDS * 2 : SEEK_STEP_SECONDS));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      seekTo(video.currentTime + (event.shiftKey ? SEEK_STEP_SECONDS * 2 : SEEK_STEP_SECONDS));
+      return;
+    }
+    if (event.key === 'ArrowUp') { event.preventDefault(); changeVolume(VOLUME_STEP); return; }
+    if (event.key === 'ArrowDown') { event.preventDefault(); changeVolume(-VOLUME_STEP); return; }
+    if (event.key === ' ' || event.key === 'Spacebar' || event.key === 'k' || event.key === 'K') {
+      event.preventDefault();
+      if (video.paused) void video.play().catch(() => undefined);
+      else video.pause();
+    }
+  }, [seekTo, changeVolume]);
+
   const startLongPress = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
     const video = videoRef.current;
     if (!video || video.paused || event.button !== 0) return;
@@ -217,20 +282,37 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
     longPressPointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
     longPressTimerRef.current = setTimeout(() => {
       longPressTimerRef.current = null;
+      const pointer = longPressPointerRef.current;
       playbackRateBeforeLongPressRef.current = video.playbackRate;
-      video.playbackRate = 2;
+      video.playbackRate = HOLD_BASE_RATE;
+      holdRateRef.current = HOLD_BASE_RATE;
+      setHoldRate(HOLD_BASE_RATE);
       longPressActiveRef.current = true;
       setLongPressActive(true);
+      // 长按后手指可能移出画面，捕获指针才能持续收到前拖提速事件。
+      if (pointer) {
+        try { video.setPointerCapture?.(pointer.id); } catch { /* capture unsupported */ }
+      }
     }, LONG_PRESS_DELAY_MS);
   }, [clearLongPressTimer]);
 
   const moveLongPress = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
     const start = longPressPointerRef.current;
-    if (!start || start.id !== event.pointerId || longPressActiveRef.current) return;
-    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > LONG_PRESS_MOVE_TOLERANCE_PX) {
-      clearLongPressTimer();
-      longPressPointerRef.current = null;
+    if (!start || start.id !== event.pointerId) return;
+    if (!longPressActiveRef.current) {
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > LONG_PRESS_MOVE_TOLERANCE_PX) {
+        clearLongPressTimer();
+        longPressPointerRef.current = null;
+      }
+      return;
     }
+    // 已进入长按：向右前拖逐步提速，往左拖回落，最低 2×。
+    const rate = computeHoldRate(event.clientX - start.x);
+    if (rate === holdRateRef.current) return;
+    holdRateRef.current = rate;
+    setHoldRate(rate);
+    const video = videoRef.current;
+    if (video) video.playbackRate = rate;
   }, [clearLongPressTimer]);
 
   const endLongPress = useCallback(() => {
@@ -296,12 +378,15 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
         <video
           ref={videoRef}
           data-testid="file-preview-video"
-          className="absolute left-1/2 top-1/2 max-w-none object-contain transition-transform duration-200"
+          className="absolute left-1/2 top-1/2 max-w-none object-contain outline-none transition-transform duration-200 focus-visible:ring-2 focus-visible:ring-primary/60"
           style={{ ...measuredRotatedStyle, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
           src={mediaUrl}
           preload="auto"
           playsInline
+          tabIndex={0}
           onClick={togglePlay}
+          onKeyDown={handleVideoKeyDown}
+          onVolumeChange={(event) => setVolume(event.currentTarget.volume)}
           onPointerDown={startLongPress}
           onPointerMove={moveLongPress}
           onPointerUp={endLongPress}
@@ -340,7 +425,16 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
         </video>
         {longPressActive && (
           <div className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full bg-surface-elevated px-3 py-1 text-xs font-semibold tabular-nums text-foreground shadow-md">
-            {t('rightSidebar.videoLongPressSpeed')}
+            {t('rightSidebar.videoLongPressSpeed', { rate: String(holdRate) })}
+          </div>
+        )}
+        {volumeNotice !== null && (
+          <div
+            className="pointer-events-none absolute right-3 top-3 z-10 inline-flex items-center gap-1 rounded-full bg-surface-elevated px-3 py-1 text-xs font-semibold tabular-nums text-foreground shadow-md"
+            data-testid="file-preview-video-volume"
+          >
+            <RiVolume2 size={13} />
+            {t('rightSidebar.videoVolume', { percent: Math.round(volume * 100) })}
           </div>
         )}
         {dragging && scrubTime !== null && (

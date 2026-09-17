@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SIDEBAR_GESTURE_IGNORE_ATTR, SWIPER_NO_SWIPING_CLASS } from './gestureArbiter';
-import { VideoPreviewPlayer, computeScrubTime, formatVideoTime } from './VideoPreviewPlayer';
+import { VideoPreviewPlayer, computeHoldRate, computeScrubTime, formatVideoTime } from './VideoPreviewPlayer';
 
 // jsdom 尚未实现 PointerEvent，testing-library 的 fireEvent.pointerDown 会退化成
 // 不带坐标的普通事件；补一个最小实现让拖动测试能带上 clientX/pointerId。
@@ -68,6 +68,7 @@ describe('VideoPreviewPlayer rendering', () => {
     expect(screen.getByRole('button', { name: 'Enter fullscreen' })).toBeTruthy();
     expect(screen.getByTestId('file-preview-video-time').textContent).toBe('00:00 / 00:00');
     expect(video.getAttribute('preload')).toBe('auto');
+    expect(video.getAttribute('tabindex')).toBe('0');
     // 控制条同时排除 Swiper 与侧边栏抽屉，避免手机上拖进度条串成切页/收抽屉；
     // 视频画面本身不在这两个标记内，仍可侧滑切页。
     const controls = screen.getByTestId('file-preview-video-controls');
@@ -209,5 +210,73 @@ describe('VideoPreviewPlayer long press speed', () => {
     expect(video.playbackRate).toBe(1);
     expect(screen.queryByText('Playing at 2×')).toBeNull();
     vi.useRealTimers();
+  });
+
+  it('raises the multiplier as the hold gesture drags forward, then restores the rate', () => {
+    vi.useFakeTimers();
+    renderPlayer();
+    const video = screen.getByTestId('file-preview-video') as HTMLVideoElement;
+    Object.defineProperty(video, 'paused', { configurable: true, value: false });
+    video.playbackRate = 1;
+
+    fireEvent.pointerDown(video, { button: 0, clientX: 10, clientY: 20, pointerId: 1 });
+    act(() => vi.advanceTimersByTime(350));
+    expect(video.playbackRate).toBe(2);
+
+    // 向右前拖 120px → 每 60px 一档，2× 提升到 4×。
+    fireEvent.pointerMove(video, { clientX: 130, clientY: 20, pointerId: 1 });
+    expect(video.playbackRate).toBe(4);
+    expect(screen.getByText('Playing at 4×')).toBeTruthy();
+
+    // 拖回起点 → 回落到 2×。
+    fireEvent.pointerMove(video, { clientX: 10, clientY: 20, pointerId: 1 });
+    expect(video.playbackRate).toBe(2);
+
+    fireEvent.pointerUp(video, { clientX: 10, clientY: 20, pointerId: 1 });
+    expect(video.playbackRate).toBe(1);
+    vi.useRealTimers();
+  });
+});
+
+describe('hold rate math', () => {
+  it('maps forward drag distance to a capped multiplier', () => {
+    expect(computeHoldRate(0)).toBe(2);
+    expect(computeHoldRate(-50)).toBe(2);
+    expect(computeHoldRate(59)).toBe(2);
+    expect(computeHoldRate(60)).toBe(3);
+    expect(computeHoldRate(240)).toBe(6);
+    expect(computeHoldRate(10000)).toBe(8);
+  });
+});
+
+describe('VideoPreviewPlayer keyboard controls', () => {
+  it('seeks with left/right arrows, changes volume, and toggles playback with space', () => {
+    renderPlayer();
+    const video = screen.getByTestId('file-preview-video') as HTMLVideoElement;
+    Object.defineProperty(video, 'duration', { configurable: true, value: 100 });
+    video.currentTime = 50;
+
+    fireEvent.keyDown(video, { key: 'ArrowRight' });
+    expect(video.currentTime).toBe(55);
+    fireEvent.keyDown(video, { key: 'ArrowLeft' });
+    expect(video.currentTime).toBe(50);
+    fireEvent.keyDown(video, { key: 'ArrowRight', shiftKey: true });
+    expect(video.currentTime).toBe(60);
+
+    video.volume = 0.5;
+    fireEvent.keyDown(video, { key: 'ArrowUp' });
+    expect(video.volume).toBeCloseTo(0.55, 5);
+    fireEvent.keyDown(video, { key: 'ArrowDown' });
+    expect(video.volume).toBeCloseTo(0.5, 5);
+    expect(screen.getByTestId('file-preview-video-volume')).toBeTruthy();
+
+    const playSpy = vi.spyOn(video, 'play').mockResolvedValue(undefined);
+    const pauseSpy = vi.spyOn(video, 'pause').mockImplementation(() => {});
+    Object.defineProperty(video, 'paused', { configurable: true, value: false });
+    fireEvent.keyDown(video, { key: ' ' });
+    expect(pauseSpy).toHaveBeenCalledOnce();
+    Object.defineProperty(video, 'paused', { configurable: true, value: true });
+    fireEvent.keyDown(video, { key: ' ' });
+    expect(playSpy).toHaveBeenCalledOnce();
   });
 });

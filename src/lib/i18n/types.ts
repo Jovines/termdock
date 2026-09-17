@@ -338,7 +338,8 @@ export type TranslationDictionary = {
     videoUnsupported: string;
     videoPlay: string;
     videoPause: string;
-    videoLongPressSpeed: string;
+    videoLongPressSpeed: (params: { rate: string }) => string;
+    videoVolume: (params: { percent: number }) => string;
     videoRotate: string;
     videoFullscreenEnter: string;
     videoFullscreenExit: string;
