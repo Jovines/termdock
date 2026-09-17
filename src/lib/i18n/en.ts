@@ -34,6 +34,7 @@ export const en: TranslationDictionary = {
     splitOpen: 'Open in split view',
     splitClose: 'Exit split view',
     splitDockedHint: 'Mirroring is shown in the split area.',
+    splitDrag: 'Drag to reposition',
     quality: 'Quality',
     qualityLow: 'Smooth',
     qualityMedium: 'Standard',

@@ -4,7 +4,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowLeft, Bell, ChevronDown, Circle, Home, Keyboard, Layers, Loader2, Maximize2,
+  ArrowLeft, Bell, ChevronDown, Circle, GripVertical, Home, Keyboard, Layers, Loader2, Maximize2,
   MonitorSmartphone, PanelRight, Plug, Power, RefreshCw, RotateCw, Send, Smartphone, Unplug, Volume1, Volume2,
 } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../i18n';
@@ -404,6 +404,17 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
       tabIndex={-1}
     >
       <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-2 py-2">
+        {docked && (
+          <span
+            data-panel-drag-title="true"
+            role="button"
+            aria-label={t('android.splitDrag')}
+            title={t('android.splitDrag')}
+            className="flex h-8 w-5 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground hover:bg-surface-2 active:cursor-grabbing"
+          >
+            <GripVertical size={14} />
+          </span>
+        )}
         <Smartphone size={14} className="shrink-0 text-muted-foreground" />
         <select
           value={selectedSerial}

@@ -51,6 +51,7 @@ export type TranslationDictionary = {
     splitOpen: string;
     splitClose: string;
     splitDockedHint: string;
+    splitDrag: string;
     quality: string;
     qualityLow: string;
     qualityMedium: string;

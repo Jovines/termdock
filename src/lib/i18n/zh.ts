@@ -34,6 +34,7 @@ export const zh: TranslationDictionary = {
     splitOpen: '在分屏中打开',
     splitClose: '退出分屏',
     splitDockedHint: '投屏已在分屏区域显示。',
+    splitDrag: '按住拖动调整位置',
     quality: '画质',
     qualityLow: '流畅',
     qualityMedium: '标准',
