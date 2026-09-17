@@ -55,6 +55,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
   const [presets, setPresets] = useState<AndroidSavedPresetState[]>([]);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [presetName, setPresetName] = useState('');
+  const [qualityPanelExpanded, setQualityPanelExpanded] = useState(true);
   const [custom, setCustom] = useState({
     maxSize: initialQuality.maxSize,
     bitRate: initialQuality.bitRate,
@@ -193,6 +194,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
       setQualityId('custom');
       setActivePresetId(preset.id);
       setCustom({ maxSize: preset.maxSize, bitRate: preset.bitRate, maxFps: preset.maxFps });
+      setQualityPanelExpanded(true);
       writeStoredQuality(next);
       persistAndroidPanel({ quality: next, activePresetId: preset.id });
       if (selectedSerial) connect(selectedSerial);
@@ -204,6 +206,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
       setQualityId('custom');
       setActivePresetId(null);
       setCustom({ maxSize: base.maxSize, bitRate: base.bitRate, maxFps: base.maxFps });
+      setQualityPanelExpanded(true);
       return;
     }
     const preset = ANDROID_QUALITY_PRESETS.find(item => item.id === id) ?? DEFAULT_ANDROID_QUALITY;
@@ -491,7 +494,21 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
       </div>
 
       {(qualityId === 'custom' || activePresetId) && (
-        <div className="grid gap-2 border-b border-border bg-surface-2/40 px-2 py-2 text-[11px]">
+        <div className="border-b border-border bg-surface-2/40 px-2 py-2 text-[11px]">
+          <button
+            type="button"
+            onClick={() => setQualityPanelExpanded(value => !value)}
+            aria-expanded={qualityPanelExpanded}
+            className="flex w-full items-center gap-1 rounded text-muted-foreground hover:text-foreground"
+          >
+            <ChevronDown size={12} className={`transition-transform ${qualityPanelExpanded ? '' : '-rotate-90'}`} />
+            <span>
+              {t('android.quality')}
+              {activePresetId ? ` · ${presets.find(item => item.id === activePresetId)?.name ?? ''}` : ''}
+            </span>
+          </button>
+          {qualityPanelExpanded && (
+          <div className="mt-2 grid gap-2">
           <QualitySlider
             label={t('android.qualityResolution')}
             display={`${custom.maxSize}p`}
@@ -557,6 +574,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
               </button>
             )}
           </div>
+          </div>
+          )}
         </div>
       )}
 
