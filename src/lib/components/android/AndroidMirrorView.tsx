@@ -36,7 +36,7 @@ const writeStoredQuality = (quality: AndroidQuality) => {
   try { localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality)); } catch { /* storage unavailable */ }
 };
 
-export function AndroidMirrorView() {
+export function AndroidMirrorView({ sessionId }: { sessionId?: string | null }) {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<AndroidMirrorController | null>(null);
@@ -78,7 +78,9 @@ export function AndroidMirrorView() {
   const [textMode, setTextMode] = useState(false);
   const [textDraft, setTextDraft] = useState('');
 
-  const activeSessionId = useMultiSessionStore(state => state.activeSessionId ?? (state.sessions.keys().next().value as string | undefined) ?? null);
+  // 优先用 App 传入的当前会话 id；遗留 store 仅作兜底。
+  const storeSessionId = useMultiSessionStore(state => state.activeSessionId ?? (state.sessions.keys().next().value as string | undefined) ?? null);
+  const activeSessionId = sessionId ?? storeSessionId;
   const docked = useCollaborationPanelDock(state => Boolean(state.docks[DOCK_GROUP]));
   const dockHost = useCollaborationPanelDock(state => state.hosts[DOCK_GROUP]);
   const setDock = useCollaborationPanelDock(state => state.setDock);

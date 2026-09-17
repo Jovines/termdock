@@ -107,6 +107,8 @@ export function mountRightSidebarRepoPickerOverlay(
 
 interface RightSidebarProps {
   isOpen: boolean;
+  /** 当前活动会话 id，用于把设备投屏 dock 到终端分屏。 */
+  sessionId?: string | null;
   drawerWidthPx: number;
   onClose: () => void;
   onOpen?: () => void;
@@ -6376,6 +6378,7 @@ export function FilePreview({
 export function RightSidebar(
   {
     isOpen,
+    sessionId,
     drawerWidthPx,
     onClose,
     onOpen,
@@ -12026,7 +12029,7 @@ export function RightSidebar(
         </Pane>
 
         <Pane active={androidPaneActive} mounted={hasMountedAndroidPane && androidTabEnabled}>
-          <AndroidMirrorView />
+          <AndroidMirrorView sessionId={sessionId ?? null} />
         </Pane>
       </div>
       {isOpen && contextDraftEnabled && (

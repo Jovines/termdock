@@ -5165,6 +5165,7 @@ function App() {
       />)}
       {!showPinnedRight && <RightSidebar
         isOpen={sidebarRightOpen}
+        sessionId={activeSessionId}
         drawerWidthPx={rightDrawerWidthPx}
         onClose={() => requestCloseHistoryOverlay('right-sidebar')}
         onOpen={handleOpenRightSidebar}
@@ -5335,6 +5336,7 @@ function App() {
               <div style={{ width: effectiveRightSidebarWidth, flexShrink: 0, height: '100%' }}>
                 <RightSidebar
                   isOpen
+                  sessionId={activeSessionId}
                   drawerWidthPx={effectiveRightSidebarWidth}
                   onClose={handleClosePinnedRight}
                   onOpen={handleOpenRightSidebar}
