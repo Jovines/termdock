@@ -43,7 +43,7 @@ export interface FederationAccessProps {
   hasBackup?: boolean;
   inviteAddresses?: { url: string; label: string }[];
   initialInvite?: FederationConnection;
-  sessions?: { sessionId: string; name: string }[];
+  sessions?: { sessionId: string; name: string; sourceSessionId?: string }[];
   grants?: FederationGrant[];
   /** Legacy integration compatibility; invitations are the normal authorization flow. */
   onGrant?: (grant: FederationGrantInput) => void | Promise<void>;
@@ -133,6 +133,9 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     event.preventDefault(); if (!onCreateInvite) return; setError(''); setNotice('');
     const selected = selectedIds.filter(id => sessions.some(s => s.sessionId === id));
     if (preset !== 'full' && resource === 'selected' && !selected.length) { setError('请选择至少一个 Session。'); return; }
+    // Grant the stable client session id so replacing the backend PTY (restart,
+    // tmux recovery, re-attach) never invalidates the invitation.
+    const stableSelected = selected.map(id => sessions.find(s => s.sessionId === id)?.sourceSessionId || id);
     const expiresAt = grantExpiry ? new Date(grantExpiry).getTime() : undefined;
     if (expiresAt !== undefined && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) { setError('授权到期时间必须晚于现在。'); return; }
     let address: string | undefined;
@@ -144,7 +147,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
       const result = await onCreateInvite({
         ...(hasBackup ? { includeBackup } : {}),
         ...(address ? { entryAddress: address } : {}),
-        scope: preset === 'full' || resource === 'all' ? { kind: 'service' } : { kind: 'sessions', sessionIds: selected },
+        scope: preset === 'full' || resource === 'all' ? { kind: 'service' } : { kind: 'sessions', sessionIds: stableSelected },
         actions: preset === 'full' ? ['service:*'] : preset === 'write' ? ['session.view', 'session.input', 'session.resize'] : ['session.view'],
         ...(label.trim() ? { label: label.trim() } : {}), ...(expiresAt === undefined ? {} : { expiresAt }),
       });

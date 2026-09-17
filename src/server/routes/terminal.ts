@@ -1977,6 +1977,15 @@ function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId
   return resolveCollaborationSessionId(input, globalSessionState.sessions, collaborationRouting);
 }
 
+/** Stable-id resolver for encrypted client authorization: accepts either the
+ * stable client session id or a transient backend PTY id and returns the stable
+ * one, so session-scoped grants survive backend replacement. */
+export function resolveStableFederationSessionId(id: string): string | null {
+  if (!id) return null;
+  try { return resolveFrontendSessionId({ sessionId: id, backendSessionId: id }); }
+  catch { return null; }
+}
+
 function collaborationRemoteSessions() {
   return Array.from(new Map(collaborationStore.list().flatMap((group) => group.remoteSessions ?? [])
     .map((session) => {

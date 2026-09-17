@@ -127,6 +127,17 @@ describe('FederationAccess invitation flow', () => {
     fireEvent.click(screen.getByText('邀请设备')); fireEvent.click(screen.getByRole('radio', { name: /完整访问/ })); fireEvent.click(screen.getByText('生成邀请'));
     await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ scope: { kind: 'service' }, actions: ['service:*'] }));
   });
+  it('grants the stable client session id for a selected session so a backend replacement keeps it valid', async () => {
+    const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
+    render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} sessions={[{ sessionId: 'backend-1', sourceSessionId: 'stable-1', name: '构建任务' }]} />);
+    fireEvent.click(screen.getByText('邀请设备'));
+    fireEvent.click(screen.getByRole('radio', { name: /可操作/ }));
+    fireEvent.click(screen.getByRole('button', { name: '选择终端' }));
+    fireEvent.click(screen.getByLabelText('构建任务'));
+    fireEvent.click(screen.getByRole('button', { name: '使用所选终端（1）' }));
+    fireEvent.click(screen.getByText('生成邀请'));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ scope: { kind: 'sessions', sessionIds: ['stable-1'] } })));
+  });
   it('lets the inviter pick an accessible IP entry address for the invitation', async () => {
     const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
     render(<FederationAccess paired currentServiceOrigin="https://dv4d.termdock.local:9834" onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} inviteAddresses={[{ url: 'https://192.168.1.23:9834', label: 'Wi-Fi' }]} />);

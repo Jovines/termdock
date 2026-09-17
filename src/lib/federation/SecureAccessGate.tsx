@@ -40,7 +40,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [error, setError] = useState(false);
   const [connectionMessage, setConnectionMessage] = useState('正在连接服务…');
   const [grants, setGrants] = useState<FederationGrant[]>([]);
-  const [sessions, setSessions] = useState<{ sessionId: string; name: string }[]>([]);
+  const [sessions, setSessions] = useState<{ sessionId: string; name: string; sourceSessionId?: string }[]>([]);
   const [fullService, setFullService] = useState(false);
   const [canManage, setCanManage] = useState(false);
   const [deviceIdentity, setDeviceIdentity] = useState('');
@@ -174,7 +174,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     const client = currentSecureClient(); if (!client) return;
     setLoadingAccess(true); setAccessError('');
     try {
-      const result = await client.request({ type: 'session-list' }); setSessions(result.items as {sessionId: string; name: string}[]);
+      const result = await client.request({ type: 'session-list' }); setSessions(result.items as {sessionId: string; name: string; sourceSessionId?: string}[]);
     } catch { setAccessError('暂时无法读取终端列表，请重试。'); }
     try {
       if (canManage) {

@@ -115,7 +115,12 @@ cleanup without --confirm prints the plan and refuses (also 1);
 Message limit: ${COLLAB_LIMITS.message_bytes} UTF-8 bytes; metadata: ${COLLAB_LIMITS.metadata_bytes} bytes.
 Idempotency retention: 7 days. Terminal delivery, ACK and result never imply each other.
 Delivery semantics: delivered = written to the terminal — never proof of
-reading or task completion; a timeout stops waiting, it does not cancel delivery.`;
+reading or task completion; a timeout stops waiting, it does not cancel delivery.
+The service cannot see whether the recipient's agent consumed a message. To
+judge for yourself, use --wait-until delivered and read the recipient-screen
+snapshot in the receipt: if your message is not visible on that screen, send it
+again (a fresh send is a new message and will be written again); if it is
+visible but unanswered, the recipient may simply not have started yet.`;
 
 /** One roster row: prefer the member's human name, keep the full session id
  * reachable for role set/unset targeting, mark unset members explicitly. */
@@ -259,6 +264,25 @@ export function waitSatisfied(receipt: Json, stage: string, reply?: string): boo
   const reached = stage === 'queued' || (stage === 'delivered' && ['delivered', 'read'].includes(receipt.status));
   return reached && (!reply || (reply === 'ack' ? receipt.ack_at != null : reply === 'result' ? receipt.result_ids?.length > 0 : receipt.reply_ids?.length > 0));
 }
+
+/** Delivery diagnoses a sender can act on. `delivered` means the bytes reached
+ *  the recipient's pty — never that anything consumed them; these map the
+ *  machine reasons onto what the sender should do next, so a settled-but-
+ *  unconsumed message is not mistaken for a lost one (or a good one). */
+const DELIVERY_DIAGNOSTICS: Record<string, string> = {
+  AGENT_CONSUME_UNCONFIRMED: '消息已写入对方终端，但未确认被对方消费；它可能尚未开始处理，可用 capture 查看当前屏幕或重发',
+  SHELL_CONFIRMATION_REQUIRED: '目标当前是 shell，消息可能被当命令执行；确认请运行 message confirm-shell <id>',
+  DELIVERY_IN_PROGRESS: '投递进行中（写入前的中间标记，正常会在数秒内推进为 delivered 或带原因的重试）',
+  TERMINAL_WRITE_FAILED: '写入对方终端失败，会按重试间隔继续尝试',
+  TMUX_PANE_CHANGED: '目标面板已变化，投递已跳过，等待重新绑定',
+  TMUX_PANE_IN_MODE: '目标面板处于 tmux 模式（如滚动查看），按键已跳过',
+};
+export function deliveryDiagnosticText(lastError: unknown): string {
+  if (typeof lastError !== 'string' || !lastError) return '';
+  const code = lastError.split(':', 1)[0]!.trim();
+  const known = DELIVERY_DIAGNOSTICS[code];
+  return known ? `${code}：${known}` : lastError;
+}
 export async function executeCollaborationCommand(command: CollaborationCommand, context: Record<string, string>, io: CollaborationCliIO): Promise<number> {
   const o = command.options;
   const now = io.now ?? Date.now;
@@ -274,6 +298,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
   };
   const output = (value: Json) => {
     if (o.text) {
+      let diagnosed = false;
       if (Array.isArray(value.messages)) for (const message of value.messages) {
         const fanIds = Array.isArray(message.fanOutIds) ? (message.fanOutIds as string[]) : [];
         const names = (value.names as Record<string, string | null> | undefined) ?? {};
@@ -288,6 +313,14 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         // cannot diff versions across calls; --no-rules silences it entirely.
         if (!o['no-rules'] && value.message.instructions?.text) io.write(`消息附群规版本 ${value.message.instructions.version}；td collab rules get <组id> --text 查看全文`);
         io.write(`[${value.status}] ${canonicalShortId(String(value.message_id ?? ''))}\n${value.message.content}`);
+        // A pending message keeps retrying by design (the alternative is
+        // dropping it); surface why and when the next attempt is so the sender
+        // can decide to wait or resend instead of guessing.
+        if (value.status === 'pending' && (value.attempt_count || value.last_error)) {
+          const retryIn = value.next_retry_at ? Math.max(0, Math.ceil((Number(value.next_retry_at) - now()) / 1000)) : null;
+          io.write(`投递中：第 ${value.attempt_count ?? 0} 次尝试${retryIn !== null ? `，下次重试约 ${retryIn} 秒后` : ''}${value.last_error ? `，最近原因 ${deliveryDiagnosticText(value.last_error)}` : ''}`);
+          diagnosed = true;
+        }
       }
       else if (value.message_id) {
         io.write(`${value.status} ${canonicalShortId(String(value.message_id))}${value.thread_id ? ` thread=${canonicalShortId(String(value.thread_id))}` : ''}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
@@ -303,7 +336,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         if (value.snapshot) io.write(`\n对方终端当前屏幕（凭证：确认你的消息已写入；不代表已读或任务完成）：\n───\n${value.snapshot}\n───`);
       }
       else io.write(JSON.stringify(value, null, 2));
-      if (value.last_error) io.write(String(value.last_error));
+      if (value.last_error && !diagnosed) io.write(`诊断：${deliveryDiagnosticText(value.last_error)}`);
       if (value.next_cursor) io.write(`next_cursor=${value.next_cursor} has_more=${value.has_more}`);
     } else if (o.jsonl && Array.isArray(value.messages) && command.action === 'inbox') {
       for (const message of value.messages) io.write(JSON.stringify({ type: 'message', ...message }));

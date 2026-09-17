@@ -59,6 +59,10 @@ export interface FederationRuntimeOptions {
   hasRouteGrant?: (subjectId: string, targetServiceId: string) => boolean;
   issueRouteTicket?: (subjectId: string, targetServiceId: string) => { routeToken: string; expiresAt: number };
   issueSelfRelayTicket?: (serviceId: string) => { selfRelayToken: string; expiresAt: number };
+  /** Maps any session id on the wire (client session id or transient backend
+   * PTY id) to the stable client session id. Session-scoped grants are bound to
+   * the stable id so a backend replacement never invalidates them. */
+  resolveSessionId?: (id: string) => string | null;
 }
 
 /** The internal HTTP listener is private and carries only already-authorized requests.
@@ -114,7 +118,20 @@ export async function createFederationRuntime(app: express.Express, directory: s
     let collaborationRpc: CollaborationRpc | undefined;
     let unregisterCollaboration: (() => void) | undefined;
     const open = (action?: string) => openAccessAllowed(context.allowOpenAccess === true, isAuthEnabled(), action);
-    const allowed = (subjectId: string, action: string, sessionId?: string) => open(action) || store.authorize({ subjectId, serviceId, action, sessionId }).allowed;
+    const stableSessionId = (id: string): string | undefined => {
+      try {
+        const resolved = options.resolveSessionId?.(id);
+        return typeof resolved === 'string' && resolved && resolved !== id ? resolved : undefined;
+      } catch { return undefined; }
+    };
+    const allowed = (subjectId: string, action: string, sessionId?: string) => {
+      if (open(action) || store.authorize({ subjectId, serviceId, action, sessionId }).allowed) return true;
+      // The wire may still carry the transient backend PTY id while the grant
+      // is bound to the stable client session id (or an older backend id).
+      if (sessionId === undefined) return false;
+      const stable = stableSessionId(sessionId);
+      return stable !== undefined && store.authorize({ subjectId, serviceId, action, sessionId: stable }).allowed;
+    };
     const full = (subjectId: string) => open() || store.hasFullServiceAccess({ subjectId, serviceId });
     let channel: PacketChannel | undefined;
     const operations = new Map<string, HttpOperation>();
@@ -308,8 +325,20 @@ export async function createFederationRuntime(app: express.Express, directory: s
               ...(packet.expiresAt === undefined ? {} : { expiresAt: packet.expiresAt }) };
             validateInvitation(invitation);
             if (invitation.scope.kind === 'sessions') {
-              const known = new Set((await sessionInventory()).filter(session => session.live === true).map(session => session.backendSessionId));
-              if (!invitation.scope.sessionIds.every(id => known.has(id))) throw new Error('UNKNOWN_SESSION');
+              // Bind to the stable client session id, never the transient backend
+              // PTY id: backends are replaced on restart, tmux recovery or
+              // re-attach, which would otherwise invalidate the whole grant.
+              const stable = new Map<string, string>();
+              for (const session of await sessionInventory()) {
+                if (session.live !== true) continue;
+                const frontendSessionId = typeof session.sessionId === 'string' ? session.sessionId : '';
+                if (!frontendSessionId) continue;
+                stable.set(frontendSessionId, frontendSessionId);
+                if (typeof session.backendSessionId === 'string' && session.backendSessionId) stable.set(session.backendSessionId, frontendSessionId);
+              }
+              const sessionIds = invitation.scope.sessionIds.map(id => stable.get(id)).filter((id): id is string => typeof id === 'string');
+              if (sessionIds.length !== invitation.scope.sessionIds.length || new Set(sessionIds).size !== sessionIds.length) throw new Error('UNKNOWN_SESSION');
+              invitation.scope = { kind: 'sessions', sessionIds };
             }
             check('authorization.manage');
             send({ type: 'result', id: packet.id, serviceId, ...invitations.create(subjectId, invitation as InvitationInput) });

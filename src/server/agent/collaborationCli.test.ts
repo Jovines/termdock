@@ -263,6 +263,21 @@ describe('collaboration CLI contract', () => {
     expect(capture.output[0]).toBe('just this screen');
   });
 
+  it('explains a settled-but-unconsumed delivery instead of leaving a bare code', async () => {
+    const f = fixture([{ ok: true, message: { content: 'body' }, status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['message', 'get', 'm', '--text']), {}, f.io)).toBe(0);
+    expect(f.output.join('\n')).toContain('AGENT_CONSUME_UNCONFIRMED：消息已写入对方终端，但未确认被对方消费');
+  });
+
+  it('surfaces pending retry diagnostics once, without repeating the reason', async () => {
+    const f = fixture([{ ok: true, message: { content: 'body' }, status: 'pending', attempt_count: 3, next_retry_at: 5000, last_error: 'DELIVERY_IN_PROGRESS' }]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['message', 'get', 'm', '--text']), {}, f.io)).toBe(0);
+    const joined = f.output.join('\n');
+    expect(joined).toContain('投递中：第 3 次尝试');
+    expect(joined).toContain('下次重试约 5 秒后');
+    expect(joined.match(/DELIVERY_IN_PROGRESS/g)).toHaveLength(1);
+  });
+
   it('prints the short id in text mode while JSON keeps the full one', async () => {
     const short = '765c8819-a';
     const full = '765c8819-ae14-46ae-b615-186eb5fd8b1f';

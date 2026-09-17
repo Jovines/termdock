@@ -31,7 +31,7 @@ import cookieParser from 'cookie-parser';
 import { type SecureContextOptions } from 'tls';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
-import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket } from './routes/terminal.js';
+import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket, resolveStableFederationSessionId } from './routes/terminal.js';
 import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
 import notificationRoutes from './routes/notifications.js';
@@ -517,6 +517,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket,
   }, {
+    resolveSessionId: resolveStableFederationSessionId,
     collaborationConnected: (subjectId, rpc) => {
       const channels = collaborationChannels.get(subjectId) ?? new Set<CollaborationRpc>();
       channels.add(rpc); collaborationChannels.set(subjectId, channels);

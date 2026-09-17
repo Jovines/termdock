@@ -27,7 +27,7 @@ describe('background collaboration delivery', () => {
   afterEach(() => { worker.stop(); vi.restoreAllMocks(); vi.useRealTimers(); fs.rmSync(directory, { recursive: true, force: true }); });
   function makeWorker() {
     return new CollaborationDeliveryWorker({ store, peers: () => ['a', 'b', 'c'], isLocal: (id) => !id.startsWith('remote:'),
-      resolve, onError: () => undefined });
+      resolve, onError: () => undefined, snapshotDelayMs: 0 });
   }
   function send(target = 'b', expiresAt?: number) {
     return store.send({ groupId, fromSessionId: 'a', toSessionIds: [target], kind: 'message', content: 'Please verify', expiresAt })[0]!;
@@ -185,8 +185,23 @@ describe('background collaboration delivery', () => {
   describe('first-delivery confirm gate', () => {
     function makeWorkerWith(overrides?: Partial<ConstructorParameters<typeof CollaborationDeliveryWorker>[0]>) {
       return new CollaborationDeliveryWorker({ store, peers: () => ['a', 'b', 'c'], isLocal: (id) => !id.startsWith('remote:'),
-        resolve, onError: () => undefined, ...overrides });
+        resolve, onError: () => undefined, snapshotDelayMs: 0, ...overrides });
     }
+
+    it('delays the delivery snapshot so it shows the rendered paste, not the input box mid-write', async () => {
+      const message = send();
+      const capture = vi.fn(async () => 'rendered screen');
+      resolve.mockResolvedValue({ state: 'ready', write, capture });
+      worker = makeWorkerWith({ snapshotDelayMs: 200 });
+      const pending = worker.run('b');
+      // The write has happened but the capture waits for the render window.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(capture).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(150);
+      await pending;
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect(store.receipt(message.id).snapshot).toBe('rendered screen');
+    });
 
     it('holds the first delivery until the message id appears in terminal history, then completes once', async () => {
       const message = send();

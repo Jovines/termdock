@@ -56,6 +56,11 @@ export class CollaborationDeliveryWorker {
      *  assumption that the agent is consuming; after it lapses the gate
      *  re-engages for the next delivery. */
     confirmCooldownMs?: number;
+    /** Delay between the write and the delivery snapshot. An immediate capture
+     *  catches the input box mid-paste (`[Pasted text #N …]`), which says
+     *  nothing about what landed; a short delay lets the recipient's TUI
+     *  render first so the sender's receipt reflects the post-write screen. */
+    snapshotDelayMs?: number;
   }) {}
 
   start(): void {
@@ -195,7 +200,11 @@ export class CollaborationDeliveryWorker {
       // Capture the recipient terminal before marking delivered, so a sender
       // waiting on delivered always finds the snapshot present. The capture is
       // strictly best-effort: a failure must never block delivery completion.
+      // Delayed briefly so the pane shows the rendered paste rather than the
+      // input box mid-write.
       if (route.capture) {
+        const snapshotDelay = this.options.snapshotDelayMs ?? 200;
+        if (snapshotDelay > 0) await new Promise((resolve) => setTimeout(resolve, snapshotDelay));
         try {
           const snapshot = await route.capture();
           if (snapshot) store.setSnapshot(message.id, snapshot);

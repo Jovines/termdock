@@ -17,6 +17,11 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
   const directory = mkdtempSync(join(tmpdir(), 'termdock-e2ee-test-'));
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   const app = express(); app.use(express.json());
+  const inventory = { clientSessions: [
+    { backendSessionId: 'one', sessionId: 'source-one', name: 'Allowed', live: true, cwd: '/private', frontendSessionId: 'frontend-secret' },
+    { backendSessionId: 'two', name: 'Hidden', live: true },
+    { backendSessionId: null, name: 'Detached' },
+  ], tmuxSessions: [{ name: 'unbound-secret' }], tmuxRecovery: { secret: true } };
   const input = vi.fn(), received = vi.fn();
   const uploads = { started: 0, finished: 0, aborted: 0, bytes: 0 };
   app.post('/api/terminal/fs/upload', async (req, res) => {
@@ -29,13 +34,7 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
       uploads.finished++; res.json({ bytes });
     } catch { /* A cancelled streaming upload intentionally aborts this reader. */ }
   });
-  app.get('/api/terminal/session-inventory', (_req, res) => res.json({
-    clientSessions: [
-      { backendSessionId: 'one', sessionId: 'source-one', name: 'Allowed', live: true, cwd: '/private', frontendSessionId: 'frontend-secret' },
-      { backendSessionId: 'two', name: 'Hidden', live: true },
-      { backendSessionId: null, name: 'Detached' },
-    ], tmuxSessions: [{ name: 'unbound-secret' }], tmuxRecovery: { secret: true },
-  }));
+  app.get('/api/terminal/session-inventory', (_req, res) => res.json(inventory));
   app.get('/api/terminal/:session/health', (req, res) => res.json({ output: 'private-terminal-output', session: req.params.session }));
   app.post('/api/terminal/:session/input', (req, res) => { input(req.body); res.json({ success: true }); });
   let terminal: WebSocket | undefined;
@@ -44,7 +43,7 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
   const runtime = await createFederationRuntime(app, directory, {
     terminal(socket, _session, _client, options, dimensions) { terminal = socket; terminalOptions(options, dimensions); socket.on('message', data => received(JSON.parse(String(data)))); socket.send(JSON.stringify({ type: 'output', data: 'private-terminal-output' })); },
     control(socket) { socket.on('message', data => received(JSON.parse(String(data)))); },
-  }, { issueRouteTicket, ...runtimeOptions });
+  }, { resolveSessionId: id => id === 'one' || id === 'one-new' ? 'source-one' : id, issueRouteTicket, ...runtimeOptions });
   cleanup.push(() => runtime.close());
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise<void>(resolve => server.once('listening', resolve));
@@ -89,7 +88,7 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
     }
     return { identity, channel, take, pair, http, wire };
   }
-  return { app, directory, connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, terminal: () => terminal };
+  return { app, directory, connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, terminal: () => terminal, inventory };
 }
 
 describe('federation runtime over real encrypted WebSocket', () => {
@@ -205,6 +204,35 @@ describe('federation runtime over real encrypted WebSocket', () => {
     expect(await client.take('terminal')).toMatchObject({ type: 'ws-close', code: 4003 });
     client.channel.send({ type: 'http', id: 'revoked', method: 'GET', path: '/api/terminal/one/health' });
     expect(await client.take('revoked')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  });
+  it('keeps a session-scoped grant valid after the backend session id is replaced', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    // An older client still selects the transient backend id; the invitation
+    // stores the stable client session id instead.
+    owner.channel.send({ type: 'invite-create', id: 'invite', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'] });
+    const invitation = await owner.take('invite'); expect(invitation.type).toBe('result');
+    const phone = await f.connect();
+    phone.channel.send({ type: 'pair', id: 'accept', code: invitation.code });
+    await phone.take('accept');
+    // Restart, tmux recovery or re-attach replaces the backend PTY id.
+    f.inventory.clientSessions[0].backendSessionId = 'one-new';
+    phone.channel.send({ type: 'session-list', id: 'sessions' });
+    expect(await phone.take('sessions')).toMatchObject({ items: [{ sessionId: 'one-new', sourceSessionId: 'source-one', canWrite: false }] });
+    phone.channel.send({ type: 'ws-open', id: 'terminal', path: '/api/terminal/one-new/ws' });
+    expect(await phone.take('terminal')).toMatchObject({ type: 'ws-ready' });
+    expect((await phone.http('read', 'GET', '/api/terminal/one-new/health')).at(-1)?.type).toBe('end');
+    phone.channel.send({ type: 'invite-create', id: 'escalate', scope: { kind: 'sessions', sessionIds: ['one-new'] }, actions: ['session.view'] });
+    expect(await phone.take('escalate')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  });
+  it('accepts the stable client session id when creating a session-scoped invitation', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    owner.channel.send({ type: 'invite-create', id: 'invite', scope: { kind: 'sessions', sessionIds: ['source-one'] }, actions: ['session.view'] });
+    const invitation = await owner.take('invite'); expect(invitation.type).toBe('result');
+    const phone = await f.connect();
+    phone.channel.send({ type: 'pair', id: 'accept', code: invitation.code });
+    await phone.take('accept');
+    phone.channel.send({ type: 'session-list', id: 'sessions' });
+    expect(await phone.take('sessions')).toMatchObject({ items: [{ sessionId: 'one', sourceSessionId: 'source-one' }] });
   });
   it('dispatches a mutating HTTP upload only once when upload-end is repeated', async () => {
     const f = await fixture(), client = await f.connect(); await client.pair();
