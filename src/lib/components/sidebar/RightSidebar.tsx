@@ -6506,7 +6506,7 @@ export function RightSidebar(
   const [hasMountedAndroidPane, setHasMountedAndroidPane] = useState(
     () => useSidebarStore.getState().rightTab === 'android',
   );
-  const [androidTabEnabled, setAndroidTabEnabled] = useState(true);
+  const [androidTabEnabled, setAndroidTabEnabled] = useState(false);
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
   const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
@@ -7582,14 +7582,15 @@ export function RightSidebar(
   useEffect(() => {
     let cancelled = false;
     void getSettings().then(settings => {
-      if (!cancelled && settings.androidPanel) setAndroidTabEnabled(settings.androidPanel.enabled !== false);
-    }).catch(() => { /* 读取失败保持默认显示 */ });
+      if (!cancelled && settings.androidPanel) setAndroidTabEnabled(settings.androidPanel.enabled === true);
+    }).catch(() => { /* 读取失败保持默认关闭 */ });
     return () => { cancelled = true; };
   }, []);
 
   const toggleAndroidTab = useCallback((enabled: boolean) => {
     setAndroidTabEnabled(enabled);
-    if (!enabled && useSidebarStore.getState().rightTab === 'android') setRightTab('files');
+    if (enabled) setRightTab('android');
+    else if (useSidebarStore.getState().rightTab === 'android') setRightTab('files');
     void updateSettings({ androidPanel: { enabled } }).catch(() => { /* 本地状态已切换 */ });
   }, [setRightTab]);
 

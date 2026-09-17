@@ -187,7 +187,8 @@ function normalizeAndroidQuality(value: unknown): AndroidQualitySettings | null 
 
 export function normalizeAndroidPanel(value: unknown): AndroidPanelSettings {
   const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  const enabled = raw.enabled !== false;
+  // 默认关闭：设备 Tab 需用户在右侧栏「更多」菜单里显式开启。
+  const enabled = raw.enabled === true;
   const quality = normalizeAndroidQuality(raw.quality);
   const presets: AndroidSavedPreset[] = [];
   if (Array.isArray(raw.presets)) {
