@@ -1844,3 +1844,15 @@ html[data-theme='light'] .termdock-code .token.important {
   touch-action: none;
   user-select: none;
 }
+
+/* Android 投屏点击指示：一个极简的小圆点淡出，不抢画面。 */
+@keyframes termdock-tap-fade {
+  0% { transform: translate(-50%, -50%) scale(0.85); opacity: 0.5; }
+  100% { transform: translate(-50%, -50%) scale(1.2); opacity: 0; }
+}
+
+.termdock-tap-fade { animation: termdock-tap-fade 260ms ease-out forwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .termdock-tap-fade { animation-duration: 1ms; }
+}

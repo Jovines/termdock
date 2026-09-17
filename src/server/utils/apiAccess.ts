@@ -20,8 +20,10 @@ export function apiAccessGate(localToken?: string | null) {
     if (req.method === 'POST' && ['/auth/login', '/auth/logout'].includes(path)) return true;
     // Preview capabilities perform scoped, session-bound authentication themselves.
     if (['GET', 'HEAD'].includes(req.method) && /^\/terminal\/fs\/preview\//.test(path)) return true;
+    // 本机 CLI/Agent 用 0600 token 直连 /android 与 terminal 同级:都直通本机
+    // 进程，且这个 bypass 仅限 loopback 且不带 origin。
     return isTrustedLocalRequest(req, localToken) && (
-      /^\/(?:terminal|local)(?:\/|$)/.test(path) || path === '/diagnostics/runtime'
+      /^\/(?:terminal|local|android)(?:\/|$)/.test(path) || path === '/diagnostics/runtime'
     );
   } });
 }

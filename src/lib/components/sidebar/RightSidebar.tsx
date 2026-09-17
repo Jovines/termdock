@@ -18,6 +18,7 @@ import {
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
   Folder as RiFolder,
+  Smartphone as RiSmartphone,
   Home as RiHome,
   GitCompare as RiGitCompare,
   Search as RiSearch,
@@ -64,7 +65,7 @@ import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
-import { EDA_PREVIEW_REQUEST_TIMEOUT_MS, applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, listDirectory, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
+import { EDA_PREVIEW_REQUEST_TIMEOUT_MS, applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, listDirectory, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, getSettings, updateSettings, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { normalizeClientWatchRoots } from '../../terminal/fileWatchRoots';
 import { partitionFileWatchEvents } from '../../terminal/fileWatchEvents';
 import { useI18n } from '../../i18n';
@@ -80,6 +81,7 @@ import {
   resolveAbsoluteReferencePath,
 } from './referencePaths';
 import { ContextDraftDock } from './ContextDraftDock';
+import { AndroidMirrorView } from '../android/AndroidMirrorView';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
 import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
@@ -6501,6 +6503,10 @@ export function RightSidebar(
   const [hasMountedDiffPane, setHasMountedDiffPane] = useState(
     () => useSidebarStore.getState().rightTab === 'diff',
   );
+  const [hasMountedAndroidPane, setHasMountedAndroidPane] = useState(
+    () => useSidebarStore.getState().rightTab === 'android',
+  );
+  const [androidTabEnabled, setAndroidTabEnabled] = useState(true);
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
   const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
@@ -7344,6 +7350,8 @@ export function RightSidebar(
       setRightSearchOpen(false);
       setLineRange(null);
       setHasMountedGitPane(false);
+      // 投屏是持续拉流：关闭侧栏即卸载，避免后台空跑 adb/scrcpy。
+      setHasMountedAndroidPane(false);
       if (isMobile) setHasMountedDiffPane(false);
       // Keep diff view mode + wrap preference across close/open so the
       // user's chosen reading mode is preserved within a session.
@@ -7481,10 +7489,16 @@ export function RightSidebar(
   const initialGitChangesLoading = Boolean(rootPath && !gitBundleError && changedFiles.size === 0 && gitBundleLastLoadedAt === null);
   // Non-Git workspaces have no Git/Changes tabs. File preview is reached from
   // the Files pane on mobile and remains alongside the tree on desktop.
-  const effectiveRightTab = gitKnownUnavailable ? 'files' : rightTab;
+  const effectiveRightTab = (() => {
+    let tab = rightTab;
+    if (tab === 'android' && !androidTabEnabled) tab = 'files';
+    if (gitKnownUnavailable && (tab === 'git' || tab === 'diff')) tab = 'files';
+    return tab;
+  })();
   const gitPaneActive = effectiveRightTab === 'git';
   const filesPaneActive = effectiveRightTab === 'files';
   const diffPaneActive = effectiveRightTab === 'diff';
+  const androidPaneActive = effectiveRightTab === 'android';
   useEffect(() => {
     if (!isMobile) {
       setMobileSidebarSettled(true);
@@ -7558,6 +7572,26 @@ export function RightSidebar(
     if (!diffPaneActive) return;
     setHasMountedDiffPane(true);
   }, [diffPaneActive]);
+
+  useEffect(() => {
+    if (!androidPaneActive) return;
+    setHasMountedAndroidPane(true);
+  }, [androidPaneActive]);
+
+  // 「设备」Tab 的显示开关：服务端设置，跨客户端共享。
+  useEffect(() => {
+    let cancelled = false;
+    void getSettings().then(settings => {
+      if (!cancelled && settings.androidPanel) setAndroidTabEnabled(settings.androidPanel.enabled !== false);
+    }).catch(() => { /* 读取失败保持默认显示 */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleAndroidTab = useCallback((enabled: boolean) => {
+    setAndroidTabEnabled(enabled);
+    if (!enabled && useSidebarStore.getState().rightTab === 'android') setRightTab('files');
+    void updateSettings({ androidPanel: { enabled } }).catch(() => { /* 本地状态已切换 */ });
+  }, [setRightTab]);
 
   const handleFileTreeScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     if (!fileTreeRoot) return;
@@ -11147,6 +11181,23 @@ export function RightSidebar(
               <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-56 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
                 <button
                   type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={androidTabEnabled}
+                  onClick={() => toggleAndroidTab(!androidTabEnabled)}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2"
+                >
+                  <RiSmartphone size={14} className="text-muted-foreground" />
+                  <span className="flex-1">{t('rightSidebar.showAndroidTab')}</span>
+                  <span
+                    aria-hidden="true"
+                    className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition ${androidTabEnabled ? 'bg-primary' : 'bg-surface-elevated'}`}
+                  >
+                    <span className={`absolute h-3 w-3 rounded-full bg-background transition-all ${androidTabEnabled ? 'left-3.5' : 'left-0.5'}`} />
+                  </span>
+                </button>
+                <div className="my-1 h-px bg-border/15" role="separator" />
+                <button
+                  type="button"
                   role="menuitem"
                   onClick={() => { setHeaderMenuOpen(false); fileInputRef.current?.click(); }}
                   disabled={uploading}
@@ -11337,53 +11388,71 @@ export function RightSidebar(
           </div>
         )}
 
-        {/* Non-Git workspaces need no tab bar: mobile reaches preview from the
-            file list, while desktop keeps it alongside the tree. */}
-        {gitKnownUnavailable ? (
-          null
-        ) : (
-          <div className="mt-2 grid grid-cols-3 gap-0.5 rounded-md bg-surface-2 p-0.5">
+        {/* Non-Git workspaces drop the Git/Changes tabs (mobile reaches preview
+            from the file list, desktop keeps it alongside the tree) but keep Files
+            and Device so mirroring stays reachable everywhere. */}
+        <div
+          className="mt-2 grid gap-0.5 rounded-md bg-surface-2 p-0.5"
+          style={{ gridTemplateColumns: `repeat(${(gitKnownUnavailable ? 2 : 3) + (androidTabEnabled ? 1 : 0)}, minmax(0, 1fr))` }}
+        >
+          {!gitKnownUnavailable && (
+            <>
+              <button
+                type="button"
+                onClick={() => setRightTab('git')}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                  effectiveRightTab === 'git'
+                    ? 'bg-surface-elevated text-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
+                }`}
+              >
+                <RiGitBranch size={12} />
+                {t('rightSidebar.tabGit')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRightTab('diff')}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                  effectiveRightTab === 'diff'
+                    ? 'bg-surface-elevated text-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
+                }`}
+              >
+                <RiGitCompare size={12} />
+                {t('rightSidebar.tabChanges')}
+                {changedFiles.size > 0 ? (
+                  <span className="text-[10px] text-accent">{changedFiles.size}</span>
+                ) : null}
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => setRightTab('files')}
+            className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+              effectiveRightTab === 'files'
+                ? 'bg-surface-elevated text-foreground'
+                : 'text-muted-foreground hover:bg-surface-2'
+            }`}
+          >
+            <RiFolder size={12} />
+            {t('rightSidebar.tabFiles')}
+          </button>
+          {androidTabEnabled && (
             <button
               type="button"
-              onClick={() => setRightTab('git')}
+              onClick={() => setRightTab('android')}
               className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                effectiveRightTab === 'git'
+                effectiveRightTab === 'android'
                   ? 'bg-surface-elevated text-foreground'
                   : 'text-muted-foreground hover:bg-surface-2'
               }`}
             >
-              <RiGitBranch size={12} />
-              {t('rightSidebar.tabGit')}
+              <RiSmartphone size={12} />
+              {t('rightSidebar.tabAndroid')}
             </button>
-            <button
-              type="button"
-              onClick={() => setRightTab('diff')}
-              className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                effectiveRightTab === 'diff'
-                  ? 'bg-surface-elevated text-foreground'
-                  : 'text-muted-foreground hover:bg-surface-2'
-              }`}
-            >
-              <RiGitCompare size={12} />
-              {t('rightSidebar.tabChanges')}
-              {changedFiles.size > 0 ? (
-                <span className="text-[10px] text-accent">{changedFiles.size}</span>
-              ) : null}
-            </button>
-            <button
-              type="button"
-              onClick={() => setRightTab('files')}
-              className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                effectiveRightTab === 'files'
-                  ? 'bg-surface-elevated text-foreground'
-                  : 'text-muted-foreground hover:bg-surface-2'
-              }`}
-            >
-              <RiFolder size={12} />
-              {t('rightSidebar.tabFiles')}
-            </button>
-          </div>
-        )}
+          )}
+        </div>
         <div className="h-2" />
 
         {gitActionError && (
@@ -11953,6 +12022,10 @@ export function RightSidebar(
                   onDetailScroll={syncSelectionFromDiffStream}
             />
           ))}
+        </Pane>
+
+        <Pane active={androidPaneActive} mounted={hasMountedAndroidPane && androidTabEnabled}>
+          <AndroidMirrorView mobile={isMobile} />
         </Pane>
       </div>
       {isOpen && contextDraftEnabled && (

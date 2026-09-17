@@ -24,6 +24,8 @@ import { MAX_OPEN_SECURE_SOCKETS, MAX_SERVER_HTTP_REQUESTS } from './streamLimit
 interface SocketHandlers {
   terminal(socket: WebSocket, sessionId: string, clientId: string, options: {pushClientId?: string; sinceSeq?: number; streamEpoch?: string; flowControl?: boolean; independentTmux?: boolean; outputActive?: boolean}, dimensions?: {cols: number; rows: number}): void;
   control(socket: WebSocket, clientId: string): void;
+  /** 本机 Android 投屏/控制。仅限全权服务授权:它直通本机 adb,与终端同级。 */
+  android?(socket: WebSocket, serial: string, clientId: string, options?: { maxSize?: number; bitRate?: number; maxFps?: number }): void;
 }
 class LogicalSocket extends EventEmitter {
   readonly OPEN = 1;
@@ -139,7 +141,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
     const full = (subjectId: string) => open() || store.hasFullServiceAccess({ subjectId, serviceId });
     let channel: PacketChannel | undefined;
     const operations = new Map<string, HttpOperation>();
-    const sockets = new Map<string, { socket: LogicalSocket; sessionId?: string }>();
+    const sockets = new Map<string, { socket: LogicalSocket; sessionId?: string; android?: boolean }>();
     let revokeTimer: ReturnType<typeof setInterval> | undefined;
     try {
       const secured = await secureConnection({ identity, duplex: socketDuplex(socket), initiator: false, signal: AbortSignal.timeout(15000) });
@@ -206,7 +208,8 @@ export async function createFederationRuntime(app: express.Express, directory: s
         finally { cancelHttp(operation); if (operations.get(id) === operation) operations.delete(id); }
       }
       revokeTimer = setInterval(() => {
-        for (const { socket: logical, sessionId } of sockets.values()) {
+        for (const { socket: logical, sessionId, android } of sockets.values()) {
+          if (android) { if (!full(subjectId)) logical.close(4003, 'Authorization revoked'); continue; }
           if (!allowed(subjectId, sessionId ? 'session.view' : 'service.view', sessionId)) logical.close(4003, 'Authorization revoked');
         }
         for (const [id, operation] of operations) try {
@@ -402,11 +405,13 @@ export async function createFederationRuntime(app: express.Express, directory: s
             if (typeof packet.path !== 'string' || !isBusinessApiPath('GET', packet.path)) throw new Error('API_NOT_ALLOWED');
             const url = new URL(packet.path, 'http://inner');
             const match = /^\/api\/terminal\/([^/%]+)\/ws$/.exec(url.pathname);
+            const androidMatch = /^\/api\/android\/([^/%]+)\/ws$/.exec(url.pathname);
             if (match) check('session.view', match[1]);
             else if (url.pathname === '/api/control/ws') check('service.view');
+            else if (androidMatch) { if (!full(subjectId)) throw new Error('API_NOT_ALLOWED'); }
             else throw new Error('API_NOT_ALLOWED');
-            const logical = new LogicalSocket(channel, packet.id, () => allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]));
-            sockets.set(packet.id, { socket: logical, sessionId: match?.[1] });
+            const logical = new LogicalSocket(channel, packet.id, () => androidMatch ? full(subjectId) : allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]));
+            sockets.set(packet.id, { socket: logical, sessionId: match?.[1], android: Boolean(androidMatch) });
             logical.once('close', () => sockets.delete(packet.id));
             send({ type: 'ws-ready', id: packet.id });
             if (match) handlers.terminal(logical as unknown as WebSocket, match[1], randomUUID(), {
@@ -414,11 +419,23 @@ export async function createFederationRuntime(app: express.Express, directory: s
               flowControl: url.searchParams.get('flow') === '2', outputActive: url.searchParams.get('active') !== '0',
               independentTmux: full(subjectId) && url.searchParams.get('transport') === 'tmux-client',
             }, allowed(subjectId, 'session.resize', match[1]) ? readTerminalHandshakeDimensions(url.searchParams) : undefined);
+            else if (androidMatch) {
+              if (!handlers.android) throw new Error('API_NOT_ALLOWED');
+              handlers.android(logical as unknown as WebSocket, androidMatch[1], randomUUID(), {
+                maxSize: Number(url.searchParams.get('max_size')) || undefined,
+                bitRate: Number(url.searchParams.get('bit_rate')) || undefined,
+                maxFps: Number(url.searchParams.get('max_fps')) || undefined,
+              });
+            }
             else handlers.control(logical as unknown as WebSocket, randomUUID());
           } else if (packet.type === 'ws-data') {
             const item = sockets.get(packet.id); if (!item || typeof packet.data !== 'string') throw new Error('INVALID_STREAM');
             const data = JSON.parse(packet.data);
-            if (item.sessionId) { const action = terminalMessageAction(data.type); if (!action) throw new Error('ACTION_NOT_ALLOWED'); check(action, action.startsWith('session.') ? item.sessionId : undefined); }
+            if (item.android) {
+              if (!full(subjectId)) throw new Error('AUTHORIZATION_DENIED');
+              if (!['control', 'ack', 'ping'].includes(data?.type)) throw new Error('ACTION_NOT_ALLOWED');
+            }
+            else if (item.sessionId) { const action = terminalMessageAction(data.type); if (!action) throw new Error('ACTION_NOT_ALLOWED'); check(action, action.startsWith('session.') ? item.sessionId : undefined); }
             else { check('service.view'); if (data?.type !== 'pong') throw new Error('ACTION_NOT_ALLOWED'); }
             item.socket.emit('message', Buffer.from(packet.data));
           } else if (packet.type === 'ws-close') sockets.get(packet.id)?.socket.close();

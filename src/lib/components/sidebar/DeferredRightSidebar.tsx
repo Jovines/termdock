@@ -1,7 +1,7 @@
 import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
 import { GitLoadingSkeleton } from './GitLoadingSkeleton';
 import { lazy, Suspense, useEffect, useRef, type ComponentProps } from 'react';
-import { X, Search, PencilLine, MoreHorizontal, GitBranch, GitCompare, Folder } from 'lucide-react';
+import { X, Search, PencilLine, MoreHorizontal, GitBranch, GitCompare, Folder, Smartphone } from 'lucide-react';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { scheduleInteractionIdle } from '../../utils/interactionIdle';
 import { Sidebar } from './Sidebar';
@@ -36,23 +36,41 @@ export function DeferredRightSidebar(props: Props) {
                 <span className="truncate text-[13px] font-semibold text-foreground">{rootName}</span>
               </div>
             </div>
-            <div aria-hidden="true" className="flex items-center gap-1.5">
-              {[Search, PencilLine, MoreHorizontal].map((Icon, index) => (
-                <span key={index} className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
-                  <Icon size={14} />
-                </span>
-              ))}
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={rightTab === 'android'}
+                onClick={() => setRightTab(rightTab === 'android' ? 'files' : 'android')}
+                className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition active:scale-95 ${
+                  rightTab === 'android'
+                    ? 'bg-primary/15 text-primary'
+                    : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+                }`}
+                aria-label={t('rightSidebar.tabAndroid')}
+                title={t('rightSidebar.tabAndroid')}
+              >
+                <Smartphone size={14} />
+              </button>
+              <div aria-hidden="true" className="flex items-center gap-1.5">
+                {[Search, PencilLine, MoreHorizontal].map((Icon, index) => (
+                  <span key={index} className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                    <Icon size={14} />
+                  </span>
+                ))}
+              </div>
             </div>
             <button type="button" onClick={props.onClose} aria-label={t('common.close')}
               className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95">
               <X size={14} />
             </button>
           </div>
-          <div className="mt-2 grid grid-cols-3 gap-0.5 rounded-md bg-surface-2 p-0.5">
+          <div className="mt-2 grid grid-cols-4 gap-0.5 rounded-md bg-surface-2 p-0.5">
             {([
               ['git', GitBranch, 'rightSidebar.tabGit'],
               ['diff', GitCompare, 'rightSidebar.tabChanges'],
               ['files', Folder, 'rightSidebar.tabFiles'],
+              ['android', Smartphone, 'rightSidebar.tabAndroid'],
             ] as const).map(([tab, Icon, label]) => (
               <button key={tab} type="button" onClick={() => setRightTab(tab)}
                 className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium ${rightTab === tab ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground'}`}>

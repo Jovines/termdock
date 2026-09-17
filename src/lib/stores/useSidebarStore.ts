@@ -3,7 +3,7 @@ import { create } from 'zustand';
 import { getSettings, updateSettings, type FileEntry, type FileSortMode, type FileWatchEvent, type GitChangedFile } from '../terminal/api';
 import { clearCache, readCache, writeCache } from '../utils/localStorageCache';
 
-export type RightSidebarTab = 'git' | 'files' | 'diff';
+export type RightSidebarTab = 'git' | 'files' | 'diff' | 'android';
 export type RightSidebarLayoutPreference = 'auto' | 'narrow' | 'wide';
 
 export const RIGHT_SIDEBAR_NARROW_THRESHOLD_PX = 600;
@@ -242,7 +242,7 @@ interface ProjectSidebarState {
 }
 
 function isRightSidebarTab(value: unknown): value is RightSidebarTab {
-  return value === 'git' || value === 'files' || value === 'diff';
+  return value === 'git' || value === 'files' || value === 'diff' || value === 'android';
 }
 
 function isRightSidebarTabCache(value: unknown): value is Record<string, RightSidebarTab> {

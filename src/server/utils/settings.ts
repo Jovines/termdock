@@ -33,8 +33,26 @@ export interface CollaborationPanelState {
   drafts?: Record<string, { content: string; targets: string[] | null }>;
 }
 
+export interface AndroidQualitySettings { id: 'low' | 'medium' | 'high' | 'custom'; maxSize: number; bitRate: number; maxFps: number }
+
+export interface AndroidSavedPreset { id: string; name: string; maxSize: number; bitRate: number; maxFps: number }
+
+/** 投屏面板偏好，存服务端后所有客户端/浏览器共享同一选择。 */
+export interface AndroidPanelSettings {
+  /** 是否在右侧栏显示「设备」Tab。 */
+  enabled: boolean;
+  /** 当前生效的画质（预设或自定义）。 */
+  quality: AndroidQualitySettings | null;
+  /** 当前选中的用户保存预设（无则为 null）。 */
+  activePresetId: string | null;
+  /** 用户保存的画质预设。 */
+  presets: AndroidSavedPreset[];
+  deviceSerial: string | null;
+}
+
 export interface SettingsDoc {
   collaborationPanels: Record<string, CollaborationPanelState>;
+  androidPanel: AndroidPanelSettings;
   [key: string]: unknown;
   version: 1;
   preventSleep: boolean;
@@ -157,6 +175,42 @@ export function normalizeNestedGitScanRoots(value: unknown): Record<string, true
     .slice(-500)) as Record<string, true>;
 }
 
+function normalizeAndroidQuality(value: unknown): AndroidQualitySettings | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (item.id !== 'low' && item.id !== 'medium' && item.id !== 'high' && item.id !== 'custom') return null;
+  const maxSize = typeof item.maxSize === 'number' ? Math.max(360, Math.min(2160, Math.round(item.maxSize))) : 1080;
+  const bitRate = typeof item.bitRate === 'number' ? Math.max(300_000, Math.min(30_000_000, Math.round(item.bitRate))) : 4_000_000;
+  const maxFps = typeof item.maxFps === 'number' ? Math.max(0, Math.min(60, Math.round(item.maxFps))) : 30;
+  return { id: item.id, maxSize, bitRate, maxFps };
+}
+
+export function normalizeAndroidPanel(value: unknown): AndroidPanelSettings {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const enabled = raw.enabled !== false;
+  const quality = normalizeAndroidQuality(raw.quality);
+  const presets: AndroidSavedPreset[] = [];
+  if (Array.isArray(raw.presets)) {
+    const seen = new Set<string>();
+    for (const entry of raw.presets.slice(0, 12)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const item = entry as Record<string, unknown>;
+      if (typeof item.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(item.id) || seen.has(item.id)) continue;
+      const name = typeof item.name === 'string' ? item.name.trim().slice(0, 40) : '';
+      if (!name) continue;
+      const values = normalizeAndroidQuality({ ...item, id: 'custom' });
+      if (!values) continue;
+      seen.add(item.id);
+      presets.push({ id: item.id, name, maxSize: values.maxSize, bitRate: values.bitRate, maxFps: values.maxFps });
+    }
+  }
+  const activePresetId = typeof raw.activePresetId === 'string' && presets.some(preset => preset.id === raw.activePresetId)
+    ? raw.activePresetId
+    : null;
+  const deviceSerial = typeof raw.deviceSerial === 'string' && /^[0-9a-zA-Z_.:\-]{1,128}$/.test(raw.deviceSerial) ? raw.deviceSerial : null;
+  return { enabled, quality, activePresetId, presets, deviceSerial };
+}
+
 export function normalizePinnedExplorerRoots(value: unknown): PinnedExplorerRoots {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const normalized: PinnedExplorerRoots = {};
@@ -229,6 +283,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
     collaborationPanels: normalizeCollaborationPanels(raw.collaborationPanels),
+    androidPanel: normalizeAndroidPanel(raw.androidPanel),
     collaborationFloatingGroupId: typeof raw.collaborationFloatingGroupId === 'string' && raw.collaborationFloatingGroupId.trim() ? raw.collaborationFloatingGroupId.trim() : null,
     serviceSwitcherExpanded: raw.serviceSwitcherExpanded === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
@@ -745,6 +800,14 @@ export function normalizeCollaborationPanels(value: unknown, depth = 0): Record<
     result[id] = state;
   }
   return result;
+}
+
+export function getAndroidPanelSetting(): AndroidPanelSettings { return loadSettings().androidPanel; }
+
+export function setAndroidPanelSetting(patch: Partial<AndroidPanelSettings>): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.androidPanel = normalizeAndroidPanel({ ...settings.androidPanel, ...patch });
+  });
 }
 
 export function getCollaborationPanelsSetting() { return loadSettings().collaborationPanels; }

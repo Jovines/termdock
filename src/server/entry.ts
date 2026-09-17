@@ -32,6 +32,8 @@ import { type SecureContextOptions } from 'tls';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket, resolveStableFederationSessionId } from './routes/terminal.js';
+import androidRoutes, { handleAndroidWebSocket } from './routes/android.js';
+import { stopAllScrcpySessions } from './android/scrcpy.js';
 import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
 import notificationRoutes from './routes/notifications.js';
@@ -402,6 +404,12 @@ export function createApp(options: AppOptions = {}): express.Express {
   // 文件系统路由（继承 /api/terminal 上的 auth + CSRF 保护）
   app.use('/api/terminal/fs', filesystemRoutes);
 
+  // 本机 Android 设备桥接（adb/scrcpy）。经加密隧道时按业务 API 处理，
+  // 仅全权服务授权可达；投屏 WS 在 federation runtime 中按 full-service 校验。
+  app.use('/api/android', requireAuth({ bypass: isTrustedLocalCliRequest }));
+  app.use('/api/android', csrfProtection.verifyMiddleware({ bypass: isTrustedLocalCliRequest }));
+  app.use('/api/android', androidRoutes);
+
   if (fs.existsSync(bundledClientIndexPath)) {
     const selectedClientPath = resolveRuntimeClientDist(bundledClientDistPath);
     const clientPath = selectedClientPath === bundledClientDistPath
@@ -514,8 +522,9 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const desktopRoutesTimer = setInterval(refreshDirectTargets, 2000); desktopRoutesTimer.unref();
   server.once('close', () => { clearInterval(desktopRoutesTimer); for (const target of dynamicDirectTargets.values()) target.close(); });
   server.once('close', () => relayRouter.close());
+  server.once('close', () => { void stopAllScrcpySessions(); });
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
-    terminal: handleTerminalWebSocket, control: handleControlWebSocket,
+    terminal: handleTerminalWebSocket, control: handleControlWebSocket, android: handleAndroidWebSocket,
   }, {
     resolveSessionId: resolveStableFederationSessionId,
     collaborationConnected: (subjectId, rpc) => {

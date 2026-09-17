@@ -1644,8 +1644,19 @@ export interface CollaborationPanelState {
   drafts?: Record<string, { content: string; targets: string[] | null }>;
 }
 
+export interface AndroidQualityState { id: 'low' | 'medium' | 'high' | 'custom'; maxSize: number; bitRate: number; maxFps: number }
+export interface AndroidSavedPresetState { id: string; name: string; maxSize: number; bitRate: number; maxFps: number }
+export interface AndroidPanelSettingsState {
+  enabled: boolean;
+  quality: AndroidQualityState | null;
+  activePresetId: string | null;
+  presets: AndroidSavedPresetState[];
+  deviceSerial: string | null;
+}
+
 export interface SettingsState {
   collaborationPanels?: Record<string, CollaborationPanelState>;
+  androidPanel?: AndroidPanelSettingsState;
   locale: 'en' | 'zh';
   preventSleep: boolean;
   caffeinateActive: boolean;
@@ -1692,7 +1703,7 @@ export function getSettings(): Promise<SettingsState> {
   return settingsRequest;
 }
 
-export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
+export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',

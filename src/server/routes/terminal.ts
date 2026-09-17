@@ -48,6 +48,9 @@ import {
   getRunningSessionButtonEnabledSetting,
   getCollaborationPanelsSetting,
   setCollaborationPanelSetting,
+  getAndroidPanelSetting,
+  setAndroidPanelSetting,
+  normalizeAndroidPanel,
   getCollaborationFloatingGroupIdSetting,
   setCollaborationFloatingGroupIdSetting,
   getServiceSwitcherExpandedSetting,
@@ -7023,6 +7026,7 @@ async function getSettingsPayload() {
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
     collaborationPanels: getCollaborationPanelsSetting(),
+    androidPanel: getAndroidPanelSetting(),
     collaborationFloatingGroupId: getCollaborationFloatingGroupIdSetting(),
     serviceSwitcherExpanded: getServiceSwitcherExpandedSetting(),
     fileSortModes: getFileSortModesSetting(),
@@ -7157,6 +7161,17 @@ router.put('/settings', async (req, res) => {
     setNewSessionAgentSlugSetting(slug);
   }
 
+  if (body.androidPanel && typeof body.androidPanel === 'object') {
+    // 与现有设置合并后再校验：允许只更新部分字段（如仅切开关）。
+    const merged = normalizeAndroidPanel({ ...getAndroidPanelSetting(), ...(body.androidPanel as Record<string, unknown>) });
+    setAndroidPanelSetting({
+      enabled: merged.enabled,
+      quality: merged.quality,
+      activePresetId: merged.activePresetId,
+      presets: merged.presets,
+      deviceSerial: merged.deviceSerial,
+    });
+  }
   if (body.collaborationPanel && typeof body.collaborationPanel.clientId === 'string') {
     setCollaborationPanelSetting(body.collaborationPanel.clientId, body.collaborationPanel.state);
   }
