@@ -138,7 +138,10 @@ export class ScrcpySession {
   private controlSocket: net.Socket | null = null;
   private videoBuffer = Buffer.alloc(0);
   private controlBuffer = Buffer.alloc(0);
-  private videoStage: 'meta' | 'codec' | 'frames' = 'meta';
+  private videoStage: 'meta' | 'codec' | 'session' | 'frames' = 'meta';
+  /** scrcpy 4.0 起：视频头只有 4 字节 codec id，宽高改为独立的 session 包；frame flags 也下移一位。 */
+  private protocol: 'legacy' | 'session' = 'legacy';
+  private videoCodec: ScrcpyVideoCodec | null = null;
   private port = 0;
   private stopped = false;
   private started = false;
@@ -172,6 +175,7 @@ export class ScrcpySession {
     this.started = true;
     try {
       const { serverJar, version } = await resolveScrcpyBinaries();
+      this.protocol = Number.parseInt(version.split('.')[0] ?? '0', 10) >= 4 ? 'session' : 'legacy';
       const remoteJar = remoteJarPath(version);
       await runAdbCapture(['-s', this.serial, 'push', serverJar, remoteJar], 60_000);
 
@@ -254,25 +258,55 @@ export class ScrcpySession {
       this.videoStage = 'codec';
     }
     if (this.videoStage === 'codec') {
-      if (this.videoBuffer.length < VIDEO_HEADER_LENGTH) return;
-      const codec = CODEC_IDS[this.videoBuffer.readUInt32BE(0)];
+      if (this.protocol === 'session') {
+        if (this.videoBuffer.length < 4) return;
+        this.videoCodec = CODEC_IDS[this.videoBuffer.readUInt32BE(0)] ?? null;
+        this.videoBuffer = this.videoBuffer.subarray(4);
+        if (!this.videoCodec) { this.fail(new Error('SCRCPY_UNSUPPORTED_CODEC')); return; }
+        // scrcpy 4.x：宽高在随后的 session 包里。
+        this.videoStage = 'session';
+      } else {
+        if (this.videoBuffer.length < VIDEO_HEADER_LENGTH) return;
+        const codec = CODEC_IDS[this.videoBuffer.readUInt32BE(0)];
+        const width = this.videoBuffer.readUInt32BE(4);
+        const height = this.videoBuffer.readUInt32BE(8);
+        this.videoBuffer = this.videoBuffer.subarray(VIDEO_HEADER_LENGTH);
+        this.videoStage = 'frames';
+        if (!codec) { this.fail(new Error('SCRCPY_UNSUPPORTED_CODEC')); return; }
+        this.videoCodec = codec;
+        this.events.onHeader({ codec, width, height, deviceName: this.deviceName || this.serial });
+        this.resolveHeader?.();
+      }
+    }
+    while (this.videoStage === 'session' && this.videoBuffer.length >= FRAME_HEADER_LENGTH) {
+      // session 包固定 12 字节：flags(u32, bit31=1) + width(u32) + height(u32)。
+      if ((this.videoBuffer[0]! & 0x80) === 0) { this.videoStage = 'frames'; break; }
       const width = this.videoBuffer.readUInt32BE(4);
       const height = this.videoBuffer.readUInt32BE(8);
-      this.videoBuffer = this.videoBuffer.subarray(VIDEO_HEADER_LENGTH);
+      this.videoBuffer = this.videoBuffer.subarray(FRAME_HEADER_LENGTH);
       this.videoStage = 'frames';
-      if (!codec) { this.fail(new Error('SCRCPY_UNSUPPORTED_CODEC')); return; }
-      this.events.onHeader({ codec, width, height, deviceName: this.deviceName || this.serial });
+      this.events.onHeader({ codec: this.videoCodec!, width, height, deviceName: this.deviceName || this.serial });
       this.resolveHeader?.();
     }
     while (this.videoStage === 'frames' && this.videoBuffer.length >= FRAME_HEADER_LENGTH) {
+      if (this.protocol === 'session' && (this.videoBuffer[0]! & 0x80) !== 0) {
+        // 运行中分辨率变化时的 session 包。
+        const width = this.videoBuffer.readUInt32BE(4);
+        const height = this.videoBuffer.readUInt32BE(8);
+        this.videoBuffer = this.videoBuffer.subarray(FRAME_HEADER_LENGTH);
+        this.events.onHeader({ codec: this.videoCodec!, width, height, deviceName: this.deviceName || this.serial });
+        continue;
+      }
       const ptsFlags = this.videoBuffer.readBigUInt64BE(0);
       const size = this.videoBuffer.readUInt32BE(8);
       if (this.videoBuffer.length < FRAME_HEADER_LENGTH + size) break;
       const payload = Buffer.from(this.videoBuffer.subarray(FRAME_HEADER_LENGTH, FRAME_HEADER_LENGTH + size));
       this.videoBuffer = this.videoBuffer.subarray(FRAME_HEADER_LENGTH + size);
-      const config = ((ptsFlags >> 63n) & 1n) === 1n;
-      const keyFrame = ((ptsFlags >> 62n) & 1n) === 1n;
-      this.events.onFrame({ config, keyFrame, pts: ptsFlags & ((1n << 62n) - 1n), data: payload });
+      const session = this.protocol === 'session';
+      const config = session ? ((ptsFlags >> 62n) & 1n) === 1n : ((ptsFlags >> 63n) & 1n) === 1n;
+      const keyFrame = session ? ((ptsFlags >> 61n) & 1n) === 1n : ((ptsFlags >> 62n) & 1n) === 1n;
+      const ptsMask = session ? (1n << 61n) - 1n : (1n << 62n) - 1n;
+      this.events.onFrame({ config, keyFrame, pts: ptsFlags & ptsMask, data: payload });
     }
   }
 

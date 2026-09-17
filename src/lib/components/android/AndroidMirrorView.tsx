@@ -36,9 +36,7 @@ const writeStoredQuality = (quality: AndroidQuality) => {
   try { localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality)); } catch { /* storage unavailable */ }
 };
 
-interface AndroidMirrorViewProps { mobile?: boolean }
-
-export function AndroidMirrorView({ mobile = false }: AndroidMirrorViewProps) {
+export function AndroidMirrorView() {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<AndroidMirrorController | null>(null);
@@ -80,12 +78,10 @@ export function AndroidMirrorView({ mobile = false }: AndroidMirrorViewProps) {
   const [textMode, setTextMode] = useState(false);
   const [textDraft, setTextDraft] = useState('');
 
-  const activeSessionId = useMultiSessionStore(state => state.activeSessionId);
+  const activeSessionId = useMultiSessionStore(state => state.activeSessionId ?? (state.sessions.keys().next().value as string | undefined) ?? null);
   const docked = useCollaborationPanelDock(state => Boolean(state.docks[DOCK_GROUP]));
   const dockHost = useCollaborationPanelDock(state => state.hosts[DOCK_GROUP]);
   const setDock = useCollaborationPanelDock(state => state.setDock);
-  const isDesktop = useMemo(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches, []);
-  const canSplit = isDesktop && !mobile && Boolean(activeSessionId);
 
   const refreshDevices = useCallback(async () => {
     setLoadingList(true);
@@ -454,16 +450,15 @@ export function AndroidMirrorView({ mobile = false }: AndroidMirrorViewProps) {
         <button type="button" onClick={() => setShowAddress(value => !value)} className="rounded p-1.5 text-muted-foreground hover:bg-surface-2" title={t('android.addDevice')}>
           <ChevronDown size={13} />
         </button>
-        {canSplit && (
-          <button
-            type="button"
-            onClick={() => setDock(DOCK_GROUP, docked ? null : { sessionId: activeSessionId!, side: 'right' })}
-            className={`rounded p-1.5 hover:bg-surface-2 ${docked ? 'text-primary' : 'text-muted-foreground'}`}
-            title={docked ? t('android.splitClose') : t('android.splitOpen')}
-          >
-            <PanelRight size={13} />
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => { if (activeSessionId) setDock(DOCK_GROUP, docked ? null : { sessionId: activeSessionId, side: 'right' }); }}
+          disabled={!activeSessionId}
+          className={`rounded p-1.5 hover:bg-surface-2 disabled:opacity-40 ${docked ? 'text-primary' : 'text-muted-foreground'}`}
+          title={docked ? t('android.splitClose') : t('android.splitOpen')}
+        >
+          <PanelRight size={13} />
+        </button>
       </div>
 
       {(qualityId === 'custom' || activePresetId) && (

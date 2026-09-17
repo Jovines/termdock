@@ -12025,7 +12025,7 @@ export function RightSidebar(
         </Pane>
 
         <Pane active={androidPaneActive} mounted={hasMountedAndroidPane && androidTabEnabled}>
-          <AndroidMirrorView mobile={isMobile} />
+          <AndroidMirrorView />
         </Pane>
       </div>
       {isOpen && contextDraftEnabled && (
