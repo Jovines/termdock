@@ -4,9 +4,10 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowLeft, Bell, ChevronDown, Circle, Columns2, GripVertical, Home, Keyboard, Layers, Loader2, Maximize2,
-  MonitorSmartphone, Plug, Power, RefreshCw, RotateCw, Send, Smartphone, Unplug, Volume1, Volume2, X,
+  ArrowLeft, Bell, ChevronDown, Circle, Columns2, GripVertical, Home, Keyboard, Layers, Loader2, Maximize,
+  Minimize, MonitorSmartphone, PanelRightClose, PanelRightOpen, Plug, Power, RefreshCw, RotateCw, Send, Smartphone, Unplug, Volume1, Volume2, X,
 } from 'lucide-react';
+import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';
 import { useI18n, type TranslationKey } from '../../i18n';
 import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
@@ -37,8 +38,12 @@ const writeStoredQuality = (quality: AndroidQuality) => {
   try { localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality)); } catch { /* storage unavailable */ }
 };
 
-export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?: string | null; dockOnly?: boolean }) {
+export function AndroidMirrorView({ sessionId, dockOnly = false }: {
+  sessionId?: string | null; dockOnly?: boolean;
+}) {
   const { t } = useI18n();
+  const overlay = useAndroidMirrorStore(state => state.overlay);
+  const setOverlay = useAndroidMirrorStore(state => state.setOverlay);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<AndroidMirrorController | null>(null);
   const initialQuality = useMemo<AndroidQuality>(readStoredQuality, []);
@@ -259,6 +264,14 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
     for (const timer of rippleTimers.current) window.clearTimeout(timer);
     rippleTimers.current = [];
   }, []);
+
+  // 覆盖层时按 ESC 退出。
+  useEffect(() => {
+    if (overlay === 'off') return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOverlay('off'); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [overlay, setOverlay]);
 
   // 首次发现唯一一台已授权设备时自动投屏。
   useEffect(() => {
@@ -502,6 +515,26 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
         >
           {docked ? <X size={compact ? 12 : 13} /> : <Columns2 size={compact ? 12 : 13} />}
         </button>
+        <button
+          type="button"
+          onClick={() => setOverlay(overlay === 'window' ? 'off' : 'window')}
+          className={`${iconButtonClass} ${overlay === 'window' ? 'text-primary' : 'text-muted-foreground'}`}
+          title={overlay === 'window' ? t('android.exitFullscreen') : t('android.fullscreen')}
+          aria-label={overlay === 'window' ? t('android.exitFullscreen') : t('android.fullscreen')}
+        >
+          {overlay === 'window' ? <Minimize size={compact ? 12 : 13} /> : <Maximize size={compact ? 12 : 13} />}
+        </button>
+        {!dockOnly && (
+          <button
+            type="button"
+            onClick={() => setOverlay(overlay === 'sidebar' ? 'off' : 'sidebar')}
+            className={`${iconButtonClass} ${overlay === 'sidebar' ? 'text-primary' : 'text-muted-foreground'}`}
+            title={overlay === 'sidebar' ? t('android.exitFullscreen') : t('android.fillSidebar')}
+            aria-label={overlay === 'sidebar' ? t('android.exitFullscreen') : t('android.fillSidebar')}
+          >
+            {overlay === 'sidebar' ? <PanelRightClose size={compact ? 12 : 13} /> : <PanelRightOpen size={compact ? 12 : 13} />}
+          </button>
+        )}
       </div>
 
       {(qualityId === 'custom' || activePresetId) && (
@@ -725,13 +758,27 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
     </div>
   );
 
+  // 全屏：同一实例 portal 到视口，不重挂也不重连。
+  if (overlay === 'window') {
+    return createPortal(
+      <div className="fixed inset-0 z-modal-panel flex flex-col bg-[var(--chrome-bg)]"
+        style={{
+          paddingTop: 'var(--safe-top-inset, env(safe-area-inset-top, 0px))',
+          paddingBottom: 'var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px))',
+        }}>
+        {body}
+      </div>,
+      document.body,
+    );
+  }
+  // 'sidebar' 模式：侧栏自身隐藏头部让面板铺满，这里照常内联渲染。
   if (dockOnly) return docked && dockHost ? createPortal(body, dockHost) : null;
   if (docked && dockHost) {
     return (
       <>
         {createPortal(body, dockHost)}
         <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-[11px] text-muted-foreground">
-          <Maximize2 size={18} className="opacity-60" />
+          <Columns2 size={18} className="opacity-60" />
           <span>{t('android.splitDockedHint')}</span>
           <button
             type="button"

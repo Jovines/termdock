@@ -45,7 +45,10 @@ interface VideoWithWebkitFullscreen extends HTMLVideoElement {
 }
 
 const LONG_PRESS_DELAY_MS = 350;
-const LONG_PRESS_MOVE_TOLERANCE_PX = 12;
+// Keep this below the sidebar drawer's 8px axis-lock threshold: a hold that
+// drifts further is a deliberate swipe, so the drawer/Swiper should own it and
+// the pending long press must be cancelled before it can claim the gesture.
+const LONG_PRESS_MOVE_TOLERANCE_PX = 6;
 const SCRUB_EXACT_SETTLE_MS = 90;
 
 /**
@@ -378,12 +381,15 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
         <video
           ref={videoRef}
           data-testid="file-preview-video"
-          className="absolute left-1/2 top-1/2 max-w-none object-contain outline-none transition-transform duration-200 focus-visible:ring-2 focus-visible:ring-primary/60"
+          className={`absolute left-1/2 top-1/2 max-w-none object-contain outline-none transition-transform duration-200 focus-visible:ring-2 focus-visible:ring-primary/60${longPressActive ? ` ${SWIPER_NO_SWIPING_CLASS}` : ''}`}
           style={{ ...measuredRotatedStyle, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
           src={mediaUrl}
           preload="auto"
           playsInline
           tabIndex={0}
+          // 长按进入提速手势后，横向拖动属于播放器：标记为手势盲区，
+          // 避免被侧边栏抽屉/文件预览 Swiper 抢走而误关抽屉或翻页。
+          {...(longPressActive ? { [SIDEBAR_GESTURE_IGNORE_ATTR]: '' } : {})}
           onClick={togglePlay}
           onKeyDown={handleVideoKeyDown}
           onVolumeChange={(event) => setVolume(event.currentTarget.volume)}

@@ -83,6 +83,7 @@ import {
 import { ContextDraftDock } from './ContextDraftDock';
 import { AndroidMirrorView, ANDROID_DOCK_GROUP } from '../android/AndroidMirrorView';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
+import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
 import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
@@ -160,6 +161,8 @@ const FILE_PREVIEW_READING_STATE_WRITE_MS = 250;
 const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
+/** 投屏静置多久后停流（离开侧栏或设备 Tab）；期间返回则复用。 */
+const ANDROID_STREAM_IDLE_MS = 60_000;
 
 /**
  * Whether this workspace root opted into nested sub-repo discovery. Off means
@@ -7356,8 +7359,8 @@ export function RightSidebar(
       setRightSearchOpen(false);
       setLineRange(null);
       setHasMountedGitPane(false);
-      // 投屏是持续拉流：关闭侧栏即卸载，避免后台空跑 adb/scrcpy。
-      setHasMountedAndroidPane(false);
+      // 投屏保持常驻：切 Tab / 关侧栏都不卸载，复用同一条流，避免每次重新推 server 重连。
+      // 需要停止时用户点“停止投屏”，或关闭「设备」Tab 开关。
       if (isMobile) setHasMountedDiffPane(false);
       // Keep diff view mode + wrap preference across close/open so the
       // user's chosen reading mode is preserved within a session.
@@ -7505,6 +7508,8 @@ export function RightSidebar(
   const filesPaneActive = effectiveRightTab === 'files';
   const diffPaneActive = effectiveRightTab === 'diff';
   const androidPaneActive = effectiveRightTab === 'android';
+  // 铺满侧栏：隐藏侧栏头部与 Tab 行，让投屏面板占满整块侧栏。
+  const androidFill = useAndroidMirrorStore(state => state.overlay === 'sidebar') && androidPaneActive;
   useEffect(() => {
     if (!isMobile) {
       setMobileSidebarSettled(true);
@@ -7580,10 +7585,24 @@ export function RightSidebar(
   }, [diffPaneActive]);
 
   useEffect(() => {
-    // 关闭侧栏会卸载投屏面板；重新打开时如果还停在设备 Tab，要重新挂载。
+    // 打开侧栏且停在设备 Tab 时挂载（首次或空闲回收后重新连）。
     if (!isOpen || !androidPaneActive) return;
     setHasMountedAndroidPane(true);
   }, [androidPaneActive, isOpen]);
+
+  // 空闲回收：离开侧栏或设备 Tab 超过阈值就停流，避免后台长期空跑；
+  // 期间快速返回则复用同一条流（不重新推 server）。
+  useEffect(() => {
+    if (isOpen && androidPaneActive) return;
+    if (!hasMountedAndroidPane) return;
+    const timer = window.setTimeout(() => setHasMountedAndroidPane(false), ANDROID_STREAM_IDLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [isOpen, androidPaneActive, hasMountedAndroidPane]);
+
+  // 切换会话时立即卸载投屏，不跨会话保留。
+  useEffect(() => {
+    setHasMountedAndroidPane(false);
+  }, [sessionId]);
 
   // 「设备」Tab 的显示开关：服务端设置，跨客户端共享。
   useEffect(() => {
@@ -11078,7 +11097,7 @@ export function RightSidebar(
           recent refs) reserves a minimum slot so opening/closing them never
           reflows the content below. The toast is absolutely positioned
           inside the header so its appearance doesn't push siblings. */}
-      <div className="relative shrink-0 border-b border-border/15 bg-surface px-2 pt-2">
+      <div className={`relative shrink-0 border-b border-border/15 bg-surface px-2 pt-2 ${androidFill ? 'hidden' : ''}`}>
         <div className="flex items-center gap-1.5">
           <div className="min-w-0 flex-1 px-1">
             <div className="flex min-h-[1.25rem] items-baseline gap-1.5">

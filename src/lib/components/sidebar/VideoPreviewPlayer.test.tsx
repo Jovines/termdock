@@ -190,10 +190,14 @@ describe('VideoPreviewPlayer long press speed', () => {
     act(() => vi.advanceTimersByTime(350));
     expect(video.playbackRate).toBe(2);
     expect(screen.getByText('Playing at 2×')).toBeTruthy();
+    // 长按期间视频成为手势盲区，横向拖动留给播放器而不是抽屉/Swiper。
+    expect(video.classList.contains(SWIPER_NO_SWIPING_CLASS)).toBe(true);
+    expect(video.hasAttribute(SIDEBAR_GESTURE_IGNORE_ATTR)).toBe(true);
 
     fireEvent.pointerUp(video, { button: 0, clientX: 20, clientY: 20, pointerId: 1 });
     fireEvent.click(video);
     expect(video.playbackRate).toBe(1.25);
+    expect(video.hasAttribute(SIDEBAR_GESTURE_IGNORE_ATTR)).toBe(false);
     expect(pauseSpy).not.toHaveBeenCalled();
     vi.useRealTimers();
   });
