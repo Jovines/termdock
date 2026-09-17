@@ -7580,9 +7580,10 @@ export function RightSidebar(
   }, [diffPaneActive]);
 
   useEffect(() => {
-    if (!androidPaneActive) return;
+    // 关闭侧栏会卸载投屏面板；重新打开时如果还停在设备 Tab，要重新挂载。
+    if (!isOpen || !androidPaneActive) return;
     setHasMountedAndroidPane(true);
-  }, [androidPaneActive]);
+  }, [androidPaneActive, isOpen]);
 
   // 「设备」Tab 的显示开关：服务端设置，跨客户端共享。
   useEffect(() => {
