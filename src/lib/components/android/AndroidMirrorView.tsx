@@ -137,12 +137,14 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
     quality?: AndroidQuality;
     activePresetId?: string | null;
     presets?: AndroidSavedPresetState[];
+    docked?: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
     deviceSerial?: string | null;
   }) => {
     const payload = {
       ...(patch.quality ? { quality: { id: patch.quality.id, maxSize: patch.quality.maxSize, bitRate: patch.quality.bitRate, maxFps: patch.quality.maxFps } } : {}),
       ...(patch.activePresetId !== undefined ? { activePresetId: patch.activePresetId } : {}),
       ...(patch.presets !== undefined ? { presets: patch.presets } : {}),
+      ...(patch.docked !== undefined ? { docked: patch.docked } : {}),
       ...(patch.deviceSerial !== undefined ? { deviceSerial: patch.deviceSerial } : {}),
     };
     void updateSettings({ androidPanel: payload }).catch(() => { /* keep local choice */ });
@@ -403,7 +405,10 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
       onKeyDown={handleKeyDown}
       tabIndex={-1}
     >
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-2 py-2">
+      <div
+        data-panel-drag-title={docked ? 'true' : undefined}
+        className={`flex flex-wrap items-center gap-1.5 border-b border-border px-2 py-2 ${docked ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      >
         {docked && (
           <span
             data-panel-drag-title="true"
@@ -466,8 +471,18 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
         </button>
         <button
           type="button"
-          onClick={() => { if (activeSessionId) setDock(DOCK_GROUP, docked ? null : { sessionId: activeSessionId, side: 'right' }); }}
-          disabled={!activeSessionId}
+          onClick={() => {
+            if (docked) {
+              setDock(DOCK_GROUP, null);
+              persistAndroidPanel({ docked: null });
+              return;
+            }
+            if (!activeSessionId) return;
+            const next = { sessionId: activeSessionId, side: 'right' as const };
+            setDock(DOCK_GROUP, next);
+            persistAndroidPanel({ docked: next });
+          }}
+          disabled={!docked && !activeSessionId}
           className={`rounded p-1.5 hover:bg-surface-2 disabled:opacity-40 ${docked ? 'text-primary' : 'text-muted-foreground'}`}
           title={docked ? t('android.splitClose') : t('android.splitOpen')}
         >
@@ -680,16 +695,21 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
     </div>
   );
 
+  if (dockOnly) return docked && dockHost ? createPortal(body, dockHost) : null;
   if (docked && dockHost) {
-    // dockOnly 由 App 顶层持有，只负责把内容投进分屏宿主。
-    if (dockOnly) return createPortal(body, dockHost);
     return (
       <>
         {createPortal(body, dockHost)}
         <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-[11px] text-muted-foreground">
           <Maximize2 size={18} className="opacity-60" />
           <span>{t('android.splitDockedHint')}</span>
-          <button type="button" onClick={() => setDock(DOCK_GROUP, null)} className="rounded bg-surface-2 px-2 py-1 text-foreground">{t('android.splitClose')}</button>
+          <button
+            type="button"
+            onClick={() => { setDock(DOCK_GROUP, null); persistAndroidPanel({ docked: null }); }}
+            className="rounded bg-surface-2 px-2 py-1 text-foreground"
+          >
+            {t('android.splitClose')}
+          </button>
         </div>
       </>
     );
@@ -700,7 +720,21 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
 /** 分屏模式下由 App 顶层持有投屏实例，关闭侧栏不会中断分屏。 */
 export function AndroidMirrorDock({ sessionId }: { sessionId?: string | null }) {
   const docked = useCollaborationPanelDock(state => Boolean(state.docks[ANDROID_DOCK_GROUP]));
-  if (!docked) return null;
+  const hostReady = useCollaborationPanelDock(state => Boolean(state.hosts[ANDROID_DOCK_GROUP]));
+  const restored = useRef(false);
+  // 刷新后从服务端恢复上次的 dock 位置，效果与 agent 面板一致。
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+    void getSettings().then(settings => {
+      const saved = settings.androidPanel?.docked;
+      if (!saved) return;
+      if (!useCollaborationPanelDock.getState().docks[ANDROID_DOCK_GROUP]) {
+        useCollaborationPanelDock.getState().setDock(ANDROID_DOCK_GROUP, saved);
+      }
+    }).catch(() => { /* 读取失败则不恢复分屏 */ });
+  }, []);
+  if (!docked || !hostReady) return null;
   return <AndroidMirrorView sessionId={sessionId} dockOnly />;
 }
 

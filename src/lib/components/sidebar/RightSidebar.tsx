@@ -12037,7 +12037,10 @@ export function RightSidebar(
               <span>{t('android.splitDockedHint')}</span>
               <button
                 type="button"
-                onClick={() => useCollaborationPanelDock.getState().setDock(ANDROID_DOCK_GROUP, null)}
+                onClick={() => {
+                  useCollaborationPanelDock.getState().setDock(ANDROID_DOCK_GROUP, null);
+                  void updateSettings({ androidPanel: { docked: null } }).catch(() => { /* ignore */ });
+                }}
                 className="rounded bg-surface-2 px-2 py-1 text-foreground"
               >
                 {t('android.splitClose')}

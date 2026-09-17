@@ -7169,6 +7169,7 @@ router.put('/settings', async (req, res) => {
       quality: merged.quality,
       activePresetId: merged.activePresetId,
       presets: merged.presets,
+      docked: merged.docked,
       deviceSerial: merged.deviceSerial,
     });
   }

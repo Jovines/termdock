@@ -47,6 +47,8 @@ export interface AndroidPanelSettings {
   activePresetId: string | null;
   /** 用户保存的画质预设。 */
   presets: AndroidSavedPreset[];
+  /** 上次 dock 到终端分屏的位置，刷新后据此恢复。 */
+  docked: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
   deviceSerial: string | null;
 }
 
@@ -208,8 +210,18 @@ export function normalizeAndroidPanel(value: unknown): AndroidPanelSettings {
   const activePresetId = typeof raw.activePresetId === 'string' && presets.some(preset => preset.id === raw.activePresetId)
     ? raw.activePresetId
     : null;
+  let docked: AndroidPanelSettings['docked'] = null;
+  const dockCandidate = raw.docked;
+  if (dockCandidate && typeof dockCandidate === 'object' && !Array.isArray(dockCandidate)) {
+    const item = dockCandidate as Record<string, unknown>;
+    const side = item.side;
+    if (typeof item.sessionId === 'string' && /^[0-9a-zA-Z_.:\-]{1,128}$/.test(item.sessionId)
+      && (side === 'left' || side === 'right' || side === 'top' || side === 'bottom')) {
+      docked = { sessionId: item.sessionId, side };
+    }
+  }
   const deviceSerial = typeof raw.deviceSerial === 'string' && /^[0-9a-zA-Z_.:\-]{1,128}$/.test(raw.deviceSerial) ? raw.deviceSerial : null;
-  return { enabled, quality, activePresetId, presets, deviceSerial };
+  return { enabled, quality, activePresetId, presets, docked, deviceSerial };
 }
 
 export function normalizePinnedExplorerRoots(value: unknown): PinnedExplorerRoots {

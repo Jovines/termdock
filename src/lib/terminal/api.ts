@@ -1651,6 +1651,7 @@ export interface AndroidPanelSettingsState {
   quality: AndroidQualityState | null;
   activePresetId: string | null;
   presets: AndroidSavedPresetState[];
+  docked: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
   deviceSerial: string | null;
 }
 
