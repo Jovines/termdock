@@ -96,6 +96,8 @@ export const zh: TranslationDictionary = {
     unpinSidebar: '取消常驻',
     runningSessionButton: '运行中会话按钮',
     runningSessionButtonHint: '轻点循环，横向滑动选择，长按拖动',
+    attentionButton: '待处理提醒按钮',
+    attentionButtonHint: '显示未读、等待处理的黄色悬浮铃铛',
     updateAvailable: ({ version }) => `Termdock ${version} 可用`,
     updateInstalling: '正在后台安装，不会中断当前服务。',
     updateReady: '更新已安装，确认后将重启服务。',

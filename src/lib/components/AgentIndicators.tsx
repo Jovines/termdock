@@ -586,6 +586,7 @@ export function AgentFloatingSessionButtons({
   runningSessions,
   activeSessionId,
   runningButtonEnabled,
+  attentionButtonEnabled = true,
   isDesktopLayout,
   containerElement,
   occlusionInsets,
@@ -594,6 +595,7 @@ export function AgentFloatingSessionButtons({
   runningSessions: readonly RunningSessionShortcut[];
   activeSessionId: string | null;
   runningButtonEnabled: boolean;
+  attentionButtonEnabled?: boolean;
   isDesktopLayout: boolean;
   containerElement: HTMLElement | null;
   /** Persistent UI occupying an edge of the terminal's otherwise full-size container. */
@@ -610,7 +612,9 @@ export function AgentFloatingSessionButtons({
   React.useEffect(() => {
     if (!serviceAttention.active || !floatingChromeVisible) setAttentionOpen(false);
   }, [serviceAttention.active, floatingChromeVisible]);
-  const attentionVisible = serviceAttention.total > 0 && floatingChromeVisible;
+  const attentionVisible = attentionButtonEnabled
+    && serviceAttention.total > 0
+    && floatingChromeVisible;
   const canJumpToRunningSession = runningSessions.length > 1
     || (runningSessions.length === 1 && runningSessions[0]?.id !== activeSessionId);
   const runningVisible = runningButtonEnabled

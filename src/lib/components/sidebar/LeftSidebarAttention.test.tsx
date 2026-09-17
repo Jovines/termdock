@@ -13,6 +13,7 @@ afterEach(() => {
 describe('LeftSidebar attention state', () => {
   it('marks the session in place without rendering a duplicate attention queue', () => {
     const onRunningSessionButtonEnabledChange = vi.fn();
+    const onAttentionButtonEnabledChange = vi.fn();
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       json: async () => ({ locale: 'en' }),
@@ -57,6 +58,8 @@ describe('LeftSidebar attention state', () => {
           onOpenSettings={vi.fn()}
           runningSessionButtonEnabled={false}
           onRunningSessionButtonEnabledChange={onRunningSessionButtonEnabledChange}
+          attentionButtonEnabled={false}
+          onAttentionButtonEnabledChange={onAttentionButtonEnabledChange}
         />
       </I18nProvider>,
     );
@@ -75,5 +78,9 @@ describe('LeftSidebar attention state', () => {
     expect(runningButtonToggle.getAttribute('aria-checked')).toBe('false');
     fireEvent.click(runningButtonToggle);
     expect(onRunningSessionButtonEnabledChange).toHaveBeenCalledWith(true);
+    const attentionButtonToggle = screen.getByRole('menuitemcheckbox', { name: /Attention button/ });
+    expect(attentionButtonToggle.getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(attentionButtonToggle);
+    expect(onAttentionButtonEnabledChange).toHaveBeenCalledWith(true);
   });
 });

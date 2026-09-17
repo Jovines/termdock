@@ -95,6 +95,17 @@ describe('settings persistence', () => {
     expect(loadSettingsFile(settingsFile).runningSessionButtonEnabled).toBe(true);
   });
 
+  it('defaults the attention button to enabled and preserves a disabled preference', () => {
+    const settingsFile = tempSettingsPath();
+
+    const defaults = loadSettingsFile(settingsFile);
+    expect(defaults.attentionButtonEnabled).toBe(true);
+
+    defaults.attentionButtonEnabled = false;
+    saveSettingsFile(defaults, settingsFile);
+    expect(loadSettingsFile(settingsFile).attentionButtonEnabled).toBe(false);
+  });
+
   it('persists per-directory explorer sort preferences', () => {
     const settingsFile = tempSettingsPath();
     const settings = loadSettingsFile(settingsFile);

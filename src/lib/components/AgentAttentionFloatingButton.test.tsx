@@ -85,6 +85,22 @@ describe('AgentFloatingSessionButtons', () => {
     expect(button.className).not.toContain('max-lg:inline-flex');
   });
 
+  it('hides the attention button when the preference is disabled', () => {
+    render(
+      <AgentFloatingSessionButtons
+        reviewCount={2}
+        runningSessions={[]}
+        activeSessionId={null}
+        runningButtonEnabled={false}
+        attentionButtonEnabled={false}
+        isDesktopLayout
+        containerElement={createTerminalArea()}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: /needing attention/ })).toBeNull();
+  });
+
   it('keeps both floating controls left of a pinned right sidebar inset', () => {
     const terminalArea = createTerminalArea({ right: window.innerWidth });
     const rightInset = 240;

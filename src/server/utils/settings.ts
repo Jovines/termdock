@@ -80,6 +80,8 @@ export interface SettingsDoc {
   newSessionAgentSlug: string | null;
   /** Show the floating shortcut used to cycle through running agent sessions. */
   runningSessionButtonEnabled: boolean;
+  /** Show the yellow floating shortcut for sessions awaiting attention. */
+  attentionButtonEnabled: boolean;
   collaborationFloatingGroupId: string | null;
   serviceSwitcherExpanded: boolean;
   /** Explorer folders whose direct children are sorted by modification time. */
@@ -295,6 +297,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
       : 12_000,
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
+    attentionButtonEnabled: raw.attentionButtonEnabled !== false,
     collaborationPanels: normalizeCollaborationPanels(raw.collaborationPanels),
     androidPanel: normalizeAndroidPanel(raw.androidPanel),
     collaborationFloatingGroupId: typeof raw.collaborationFloatingGroupId === 'string' && raw.collaborationFloatingGroupId.trim() ? raw.collaborationFloatingGroupId.trim() : null,
@@ -667,6 +670,16 @@ export function getRunningSessionButtonEnabledSetting(): boolean {
 export function setRunningSessionButtonEnabledSetting(enabled: boolean): SettingsDoc {
   return updateSettings((settings) => {
     settings.runningSessionButtonEnabled = enabled;
+  });
+}
+
+export function getAttentionButtonEnabledSetting(): boolean {
+  return loadSettings().attentionButtonEnabled;
+}
+
+export function setAttentionButtonEnabledSetting(enabled: boolean): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.attentionButtonEnabled = enabled;
   });
 }
 

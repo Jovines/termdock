@@ -113,6 +113,8 @@ export type TranslationDictionary = {
     unpinSidebar: string;
     runningSessionButton: string;
     runningSessionButtonHint: string;
+    attentionButton: string;
+    attentionButtonHint: string;
     updateAvailable: (params: TranslatorParams) => string;
     updateInstalling: string;
     updateReady: string;

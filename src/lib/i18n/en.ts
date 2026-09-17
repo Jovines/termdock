@@ -96,6 +96,8 @@ export const en: TranslationDictionary = {
     unpinSidebar: 'Stop keeping sidebar open',
     runningSessionButton: 'Running sessions button',
     runningSessionButtonHint: 'Tap to cycle, swipe sideways to select, hold to drag',
+    attentionButton: 'Attention button',
+    attentionButtonHint: 'Show the yellow floating bell for unread or pending sessions',
     updateAvailable: ({ version }) => `Termdock ${version} is available`,
     updateInstalling: 'Installing in the background without interrupting this service.',
     updateReady: 'The update is installed and ready for a confirmed restart.',

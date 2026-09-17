@@ -46,6 +46,7 @@ import {
   getNewSessionAgentSlugSetting,
   setNewSessionAgentSlugSetting,
   getRunningSessionButtonEnabledSetting,
+  getAttentionButtonEnabledSetting,
   getCollaborationPanelsSetting,
   setCollaborationPanelSetting,
   getAndroidPanelSetting,
@@ -56,6 +57,7 @@ import {
   getServiceSwitcherExpandedSetting,
   setServiceSwitcherExpandedSetting,
   setRunningSessionButtonEnabledSetting,
+  setAttentionButtonEnabledSetting,
   getFileSortModesSetting,
   setFileSortModesSetting,
   setFileSortModeSetting,
@@ -7025,6 +7027,7 @@ async function getSettingsPayload() {
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
+    attentionButtonEnabled: getAttentionButtonEnabledSetting(),
     collaborationPanels: getCollaborationPanelsSetting(),
     androidPanel: getAndroidPanelSetting(),
     collaborationFloatingGroupId: getCollaborationFloatingGroupIdSetting(),
@@ -7185,6 +7188,10 @@ router.put('/settings', async (req, res) => {
 
   if (typeof body.runningSessionButtonEnabled === 'boolean') {
     setRunningSessionButtonEnabledSetting(body.runningSessionButtonEnabled);
+  }
+
+  if (typeof body.attentionButtonEnabled === 'boolean') {
+    setAttentionButtonEnabledSetting(body.attentionButtonEnabled);
   }
 
   if (body.fileSortModes && typeof body.fileSortModes === 'object' && !Array.isArray(body.fileSortModes)) {

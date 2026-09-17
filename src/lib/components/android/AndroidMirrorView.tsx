@@ -4,8 +4,8 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowLeft, Bell, ChevronDown, Circle, GripVertical, Home, Keyboard, Layers, Loader2, Maximize2,
-  MonitorSmartphone, PanelRight, Plug, Power, RefreshCw, RotateCw, Send, Smartphone, Unplug, Volume1, Volume2,
+  ArrowLeft, Bell, ChevronDown, Circle, Columns2, GripVertical, Home, Keyboard, Layers, Loader2, Maximize2,
+  MonitorSmartphone, Plug, Power, RefreshCw, RotateCw, Send, Smartphone, Unplug, Volume1, Volume2, X,
 } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../i18n';
 import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
@@ -400,6 +400,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
   };
 
   const streaming = mirrorState === 'streaming';
+  // 分屏时收成与 agent 面板一致的紧凑标题栏（h-6）。
+  const compact = docked;
+  const iconButtonClass = compact
+    ? 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-surface-2 disabled:opacity-40'
+    : 'rounded p-1.5 hover:bg-surface-2 disabled:opacity-40';
 
   const body = (
     <div
@@ -410,7 +415,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
     >
       <div
         data-panel-drag-title={docked ? 'true' : undefined}
-        className={`flex flex-wrap items-center gap-1.5 border-b border-border px-2 py-2 ${docked ? 'cursor-grab active:cursor-grabbing' : ''}`}
+        className={compact
+          ? 'flex h-6 min-h-6 shrink-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-border/15 bg-[var(--chrome-bg)] px-1.5 cursor-grab select-none active:cursor-grabbing'
+          : 'flex flex-wrap items-center gap-1.5 border-b border-border px-2 py-2'}
       >
         {docked && (
           <span
@@ -418,12 +425,12 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
             role="button"
             aria-label={t('android.splitDrag')}
             title={t('android.splitDrag')}
-            className="flex h-8 w-5 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground hover:bg-surface-2 active:cursor-grabbing"
+            className="flex h-4 w-4 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground hover:text-foreground active:cursor-grabbing"
           >
-            <GripVertical size={14} />
+            <GripVertical size={12} />
           </span>
         )}
-        <Smartphone size={14} className="shrink-0 text-muted-foreground" />
+        <Smartphone size={compact ? 12 : 14} className="shrink-0 text-muted-foreground" />
         <select
           value={selectedSerial}
           onChange={event => {
@@ -432,7 +439,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
             autoConnected.current = serial;
             if (serial) persistAndroidPanel({ deviceSerial: serial });
           }}
-          className="min-w-0 flex-1 rounded bg-surface-2 px-2 py-1 text-[11px] text-foreground outline-none"
+          className={compact
+            ? 'h-5 min-w-0 flex-1 rounded bg-surface-2 px-1 text-[10px] leading-none text-foreground outline-none'
+            : 'min-w-0 flex-1 rounded bg-surface-2 px-2 py-1 text-[11px] text-foreground outline-none'}
           aria-label={t('android.device')}
         >
           <option value="">{devices.length ? t('android.selectDevice') : t('android.noDevices')}</option>
@@ -445,7 +454,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
         <select
           value={activePresetId ? `user:${activePresetId}` : qualityId}
           onChange={event => changeQuality(event.target.value)}
-          className="shrink-0 rounded bg-surface-2 px-1.5 py-1 text-[11px] text-foreground outline-none"
+          className={compact
+            ? 'h-5 shrink-0 rounded bg-surface-2 px-1 text-[10px] leading-none text-foreground outline-none'
+            : 'shrink-0 rounded bg-surface-2 px-1.5 py-1 text-[11px] text-foreground outline-none'}
           title={t('android.quality')}
           aria-label={t('android.quality')}
         >
@@ -457,19 +468,19 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
           ))}
           <option value="custom">{t(QUALITY_LABEL.custom)}</option>
         </select>
-        <button type="button" onClick={() => void refreshDevices()} className="rounded p-1.5 text-muted-foreground hover:bg-surface-2" title={t('android.refresh')}>
+        <button type="button" onClick={() => void refreshDevices()} className={`${iconButtonClass} text-muted-foreground`} title={t('android.refresh')}>
           {loadingList ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
         </button>
         {streaming ? (
-          <button type="button" onClick={disconnect} className="rounded p-1.5 text-destructive hover:bg-surface-2" title={t('android.disconnect')}>
+          <button type="button" onClick={disconnect} className={`${iconButtonClass} text-destructive`} title={t('android.disconnect')}>
             <Unplug size={13} />
           </button>
         ) : (
-          <button type="button" onClick={() => selectedSerial && connect(selectedSerial)} disabled={!selectedSerial} className="rounded p-1.5 text-primary hover:bg-surface-2 disabled:opacity-40" title={t('android.connect')}>
+          <button type="button" onClick={() => selectedSerial && connect(selectedSerial)} disabled={!selectedSerial} className={`${iconButtonClass} text-primary`} title={t('android.connect')}>
             <Plug size={13} />
           </button>
         )}
-        <button type="button" onClick={() => setShowAddress(value => !value)} className="rounded p-1.5 text-muted-foreground hover:bg-surface-2" title={t('android.addDevice')}>
+        <button type="button" onClick={() => setShowAddress(value => !value)} className={`${iconButtonClass} text-muted-foreground`} title={t('android.addDevice')}>
           <ChevronDown size={13} />
         </button>
         <button
@@ -486,10 +497,10 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
             persistAndroidPanel({ docked: next });
           }}
           disabled={!docked && !activeSessionId}
-          className={`rounded p-1.5 hover:bg-surface-2 disabled:opacity-40 ${docked ? 'text-primary' : 'text-muted-foreground'}`}
+          className={`${iconButtonClass} ${docked ? 'text-primary' : 'text-muted-foreground'}`}
           title={docked ? t('android.splitClose') : t('android.splitOpen')}
         >
-          <PanelRight size={13} />
+          {docked ? <X size={compact ? 12 : 13} /> : <Columns2 size={compact ? 12 : 13} />}
         </button>
       </div>
 
@@ -681,16 +692,16 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?:
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1 border-t border-border px-2 py-1.5">
-        <ToolButton label={t('android.back')} onClick={() => controllerRef.current?.back()} disabled={!streaming}><ArrowLeft size={14} /></ToolButton>
-        <ToolButton label={t('android.home')} onClick={() => controllerRef.current?.home()} disabled={!streaming}><Home size={14} /></ToolButton>
-        <ToolButton label={t('android.recents')} onClick={() => controllerRef.current?.recents()} disabled={!streaming}><Layers size={14} /></ToolButton>
-        <ToolButton label={t('android.notifications')} onClick={() => controllerRef.current?.expandNotifications()} disabled={!streaming}><Bell size={14} /></ToolButton>
-        <ToolButton label={t('android.rotate')} onClick={() => controllerRef.current?.rotate()} disabled={!streaming}><RotateCw size={14} /></ToolButton>
-        <ToolButton label={t('android.volumeDown')} onClick={() => controllerRef.current?.volumeDown()} disabled={!streaming}><Volume1 size={14} /></ToolButton>
-        <ToolButton label={t('android.volumeUp')} onClick={() => controllerRef.current?.volumeUp()} disabled={!streaming}><Volume2 size={14} /></ToolButton>
-        <ToolButton label={t('android.power')} onClick={() => controllerRef.current?.power()} disabled={!streaming}><Power size={14} /></ToolButton>
-        <ToolButton label={t('android.inputText')} active={textMode} onClick={() => setTextMode(value => !value)} disabled={!streaming}><Keyboard size={14} /></ToolButton>
+      <div className={`flex flex-wrap items-center gap-1 border-t border-border ${compact ? 'px-1.5 py-0.5' : 'px-2 py-1.5'}`}>
+        <ToolButton compact={compact} label={t('android.back')} onClick={() => controllerRef.current?.back()} disabled={!streaming}><ArrowLeft size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.home')} onClick={() => controllerRef.current?.home()} disabled={!streaming}><Home size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.recents')} onClick={() => controllerRef.current?.recents()} disabled={!streaming}><Layers size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.notifications')} onClick={() => controllerRef.current?.expandNotifications()} disabled={!streaming}><Bell size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.rotate')} onClick={() => controllerRef.current?.rotate()} disabled={!streaming}><RotateCw size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.volumeDown')} onClick={() => controllerRef.current?.volumeDown()} disabled={!streaming}><Volume1 size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.volumeUp')} onClick={() => controllerRef.current?.volumeUp()} disabled={!streaming}><Volume2 size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.power')} onClick={() => controllerRef.current?.power()} disabled={!streaming}><Power size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.inputText')} active={textMode} onClick={() => setTextMode(value => !value)} disabled={!streaming}><Keyboard size={14} /></ToolButton>
         <span className="ml-auto whitespace-nowrap text-[10px] tabular-nums text-muted-foreground">
           {header ? `${stats.fps} fps · ${stats.kbps} kbps · ${stats.width}×${stats.height}` : ''}
         </span>
@@ -779,8 +790,8 @@ function QualitySlider({ label, display, min, max, step, value, onChange }: {
   );
 }
 
-function ToolButton({ label, onClick, disabled, active, children }: {
-  label: string; onClick: () => void; disabled?: boolean; active?: boolean; children: ReactNode;
+function ToolButton({ label, onClick, disabled, active, compact, children }: {
+  label: string; onClick: () => void; disabled?: boolean; active?: boolean; compact?: boolean; children: ReactNode;
 }) {
   return (
     <button
@@ -789,7 +800,7 @@ function ToolButton({ label, onClick, disabled, active, children }: {
       disabled={disabled}
       title={label}
       aria-label={label}
-      className={`rounded p-1.5 transition active:scale-95 disabled:opacity-30 ${active ? 'bg-surface-elevated text-primary' : 'text-muted-foreground hover:bg-surface-2'}`}
+      className={`${compact ? 'inline-flex h-5 w-5 items-center justify-center' : 'p-1.5'} rounded transition active:scale-95 disabled:opacity-30 ${active ? 'bg-surface-elevated text-primary' : 'text-muted-foreground hover:bg-surface-2'}`}
     >
       {children}
     </button>

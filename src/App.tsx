@@ -109,6 +109,7 @@ const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
 const COLOR_THEME_CACHE_KEY = 'termdock-color-theme';
 const RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_SESSION_CACHE_KEY = 'termdock:right-sidebar:file-preview-open-by-session:v2';
 const RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY = 'termdock:running-session-button-enabled:v1';
+const ATTENTION_BUTTON_ENABLED_CACHE_KEY = 'termdock:attention-button-enabled:v1';
 const MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS = 60;
 const DESKTOP_TAB_MENU_WIDTH = 320;
 const DESKTOP_TAB_MENU_MAX_HEIGHT = 420;
@@ -856,6 +857,25 @@ function App() {
       writeCache(RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY, previous);
     }
   }, [runningSessionButtonEnabled]);
+  const [attentionButtonEnabled, setAttentionButtonEnabled] = useState(() => (
+    readCache(
+      ATTENTION_BUTTON_ENABLED_CACHE_KEY,
+      (value): value is boolean => typeof value === 'boolean',
+    ) ?? true
+  ));
+  const handleAttentionButtonEnabledChange = useCallback(async (enabled: boolean) => {
+    const previous = attentionButtonEnabled;
+    setAttentionButtonEnabled(enabled);
+    writeCache(ATTENTION_BUTTON_ENABLED_CACHE_KEY, enabled);
+    try {
+      const result = await updateSettings({ attentionButtonEnabled: enabled });
+      setAttentionButtonEnabled(result.attentionButtonEnabled);
+      writeCache(ATTENTION_BUTTON_ENABLED_CACHE_KEY, result.attentionButtonEnabled);
+    } catch {
+      setAttentionButtonEnabled(previous);
+      writeCache(ATTENTION_BUTTON_ENABLED_CACHE_KEY, previous);
+    }
+  }, [attentionButtonEnabled]);
   const [terminalAreaElement, setTerminalAreaElement] = useState<HTMLDivElement | null>(null);
   const terminalAreaRef = useCallback((element: HTMLDivElement | null) => {
     setTerminalAreaElement(element);
@@ -1983,6 +2003,8 @@ function App() {
         setLocalAccessNameInput(s.localAccess.name);
         setRunningSessionButtonEnabled(s.runningSessionButtonEnabled);
         writeCache(RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY, s.runningSessionButtonEnabled);
+        setAttentionButtonEnabled(s.attentionButtonEnabled);
+        writeCache(ATTENTION_BUTTON_ENABLED_CACHE_KEY, s.attentionButtonEnabled);
         writeCache(SETTINGS_CACHE_KEY, {
           preventSleep: s.preventSleep,
           networkAvailable: s.networkAvailable,
@@ -3397,6 +3419,7 @@ function App() {
         runningSessions={runningSessionShortcuts}
         activeSessionId={activeSessionId}
         runningButtonEnabled={runningSessionButtonEnabled}
+        attentionButtonEnabled={attentionButtonEnabled}
         isDesktopLayout={isDesktopViewport}
         containerElement={terminalAreaElement}
         occlusionInsets={{ right: pinnedRightSidebarInset }}
@@ -5162,6 +5185,8 @@ function App() {
         defaultSessionMode={newSessionMode}
         runningSessionButtonEnabled={runningSessionButtonEnabled}
         onRunningSessionButtonEnabledChange={handleRunningSessionButtonEnabledChange}
+        attentionButtonEnabled={attentionButtonEnabled}
+        onAttentionButtonEnabledChange={handleAttentionButtonEnabledChange}
         onTogglePinned={isDesktopViewport ? handleToggleLeftPinned : undefined}
       />)}
       {!showPinnedRight && <RightSidebar
@@ -5310,6 +5335,8 @@ function App() {
             defaultSessionMode={newSessionMode}
             runningSessionButtonEnabled={runningSessionButtonEnabled}
             onRunningSessionButtonEnabledChange={handleRunningSessionButtonEnabledChange}
+            attentionButtonEnabled={attentionButtonEnabled}
+            onAttentionButtonEnabledChange={handleAttentionButtonEnabledChange}
             pinned={true}
             onTogglePinned={handleToggleLeftPinned}
           />
