@@ -161,6 +161,9 @@ export class CollaborationPeerTransport {
     connect: (peer: CollaborationNode, via?: CollaborationNode) => Promise<Rpc>;
     reverse?: (serviceId: string) => CollaborationRpc | undefined;
     deliver: (sessionId: string) => void;
+    /** Live allowed local sessions for a peer. `undefined` = unrestricted
+     * directory peer; an array (possibly empty) = a session-scoped peer. */
+    scopeFor?: (serviceId: string) => string[] | undefined;
     activity?: () => Array<{ sessionId: string; last_terminal_output_at: number | null; activity_observed_at: number | null }> }) {
     try {
       const data = JSON.parse(readFileSync(options.file, 'utf8'));
@@ -226,8 +229,12 @@ export class CollaborationPeerTransport {
       if (message.groupId !== b.groupId || typeof message.fromSessionId !== 'string' || message.fromSessionId.startsWith('remote:')
         || typeof message.toSessionId !== 'string' || !message.toSessionId.startsWith(`remote:${encodeURIComponent(b.localOrigin)}:`)
         || Buffer.byteLength(JSON.stringify(message)) > COLLAB_LIMITS.wire_bytes) throw new Error('INVALID_PEER_MESSAGE');
+      const localTarget = localSession(b.localOrigin, message.toSessionId);
+      // A session-scoped peer may only ever reach the sessions its inviter granted.
+      const scope = this.options.scopeFor?.(subjectId);
+      if (scope !== undefined && !scope.includes(localTarget)) throw new Error('SESSION_SCOPE_DENIED');
       const incoming: CollaborationMessage = { ...message, fromSessionId: remoteSession(b.peer.origin, message.fromSessionId),
-        toSessionId: localSession(b.localOrigin, message.toSessionId), status: 'pending', deliveredAt: null, readAt: null,
+        toSessionId: localTarget, status: 'pending', deliveredAt: null, readAt: null,
         snapshot: null, deliverySource: undefined, readSource: undefined, shellConfirmed: message.shellConfirmed === true };
       const existing = store.getMessage(message.id);
       if (existing && (existing.groupId !== incoming.groupId || existing.fromSessionId !== incoming.fromSessionId
@@ -294,7 +301,9 @@ export class CollaborationPeerTransport {
   }
   private async sync(b: Binding) {
     const store = this.options.store, key = `${b.groupId}:${b.peer.serviceId}`;
+    const scope = this.options.scopeFor?.(b.peer.serviceId);
     const messages = store.federationSnapshot().messages.filter(m => m.groupId === b.groupId).filter(m => !m.fromSessionId?.startsWith('remote:') && m.fromSessionId !== null
+      && (scope === undefined || scope.includes(m.fromSessionId))
       && m.toSessionId.startsWith(`remote:${encodeURIComponent(b.peer.origin)}:`) && !['failed', 'expired'].includes(m.status)
       && (m.status === 'pending' || !m.snapshot)).sort((a, b) => Number(b.status === 'pending') - Number(a.status === 'pending'));
     const pending = messages.filter(m => m.status === 'pending');

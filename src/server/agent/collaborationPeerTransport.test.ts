@@ -16,6 +16,7 @@ async function setup() {
   const nodes: CollaborationNode[] = ids.map((identity, index) => ({ serviceId: identity.peerId, origin: `https://node${index}.test` }));
   const stores = nodes.map((_, index) => new CollaborationStore(join(dir, `${index}.json`)));
   const deliveries = nodes.map(() => vi.fn());
+  const scopes: Array<((serviceId: string) => string[] | undefined) | undefined> = [];
   const transports: CollaborationPeerTransport[] = [];
   let offline = false, loseReceipt = false;
   for (let index = 0; index < 3; index++) {
@@ -24,6 +25,7 @@ async function setup() {
       remoteSessions: nodes.flatMap((node, n) => n === index ? [] : [{ sessionId: remoteSession(node.origin, 'agent'), serviceOrigin: node.origin,
         serviceLabel: node.origin, name: 'Agent', cwd: '', status: 'shell', capability: '', currentTask: '', updatedAt: 1, backendSessionId: null, agentNativeSessionId: null, agent: null }]) });
     const transport = new CollaborationPeerTransport({ file: join(dir, `peers${index}.json`), serviceId: nodes[index].serviceId, store: stores[index],
+      scopeFor: serviceId => scopes[index]?.(serviceId),
       connect: async peer => {
         if (offline) throw new Error('OFFLINE');
         const target = nodes.findIndex(node => node.serviceId === peer.serviceId);
@@ -40,6 +42,7 @@ async function setup() {
     transports.push(transport); cleanup.push(() => transport.close());
   }
   return { dir, nodes, stores, transports, deliveries, configure: () => transports.forEach((t, i) => t.configure('cross-test', nodes[i].origin, nodes)),
+    setScope: (index: number, fn: ((serviceId: string) => string[] | undefined) | undefined) => { scopes[index] = fn; },
     setOffline: (value: boolean) => { offline = value; }, loseReceipt: () => { loseReceipt = true; } };
 }
 describe('server collaboration delivery', () => {
@@ -81,6 +84,17 @@ describe('server collaboration delivery', () => {
     expect(() => f.transports[1].receive(f.nodes[0].serviceId, { ...request, message: { groupId: 'cross-test', fromSessionId: remoteSession(f.nodes[2].origin, 'agent'), toSessionId: 'agent' } })).toThrow('INVALID_PEER_MESSAGE');
     f.stores[1].getGroup('cross-test')!.deleted = true;
     expect(() => f.transports[1].receive(f.nodes[0].serviceId, request)).toThrow('NOT_AUTHORIZED');
+  });
+  it('refuses a session-scoped peer any local session outside its grant', async () => {
+    const f = await setup(); f.configure();
+    f.setScope(1, serviceId => serviceId === f.nodes[0].serviceId ? ['agent'] : undefined);
+    const exchange = (to: string, content: string, id: string) => ({ type: 'collaboration-exchange', id: 'rpc', groupId: 'cross-test', ids: [],
+      message: { id, threadId: id, groupId: 'cross-test', fromSessionId: 'agent', toSessionId: to, kind: 'message', content, createdAt: 1, status: 'pending' } });
+    expect(() => f.transports[1].receive(f.nodes[0].serviceId, exchange(remoteSession(f.nodes[1].origin, 'other'), 'blocked', 'scoped-blocked'))).toThrow('SESSION_SCOPE_DENIED');
+    const [queued] = f.stores[0].send({ groupId: 'cross-test', fromSessionId: 'agent', toSessionIds: [remoteSession(f.nodes[1].origin, 'agent')], kind: 'message', content: 'allowed' });
+    expect(() => f.transports[1].receive(f.nodes[0].serviceId, { type: 'collaboration-exchange', id: 'rpc', groupId: 'cross-test', ids: [], message: queued })).not.toThrow();
+    f.setScope(1, () => []);
+    expect(() => f.transports[1].receive(f.nodes[0].serviceId, exchange(remoteSession(f.nodes[1].origin, 'agent'), 'revoked', 'scoped-revoked'))).toThrow('SESSION_SCOPE_DENIED');
   });
   it('delivers rule update notices to remote members once and syncs member traits without a client relay', async () => {
     const f = await setup();

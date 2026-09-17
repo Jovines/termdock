@@ -224,6 +224,21 @@ describe('federation runtime over real encrypted WebSocket', () => {
     phone.channel.send({ type: 'invite-create', id: 'escalate', scope: { kind: 'sessions', sessionIds: ['one-new'] }, actions: ['session.view'] });
     expect(await phone.take('escalate')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
   });
+  it('derives a scoped collaboration peer from the device write grant, never from the request', async () => {
+    const registerScopedCollaborationPeer = vi.fn((_device: string, _origin: string, node: { serviceId: string; origin: string }, sessions: string[]) => ({ ok: true, peer: node.serviceId, sessions }));
+    const f = await fixture({ registerScopedCollaborationPeer });
+    const device = await f.connect(); await device.pair();
+    const node = { serviceId: '12D3KooW' + '2'.repeat(44), origin: 'https://peer.example' };
+    device.channel.send({ type: 'collaboration-scoped-peer', id: 'owner-denied', origin: 'https://self.example', node });
+    expect(await device.take('owner-denied')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    f.runtime.store.grant({ subjectId: device.identity.peerId, scope: { kind: 'sessions', sessionIds: ['source-one'] }, actions: ['session.view'] });
+    device.channel.send({ type: 'collaboration-scoped-peer', id: 'view-only', origin: 'https://self.example', node });
+    expect(await device.take('view-only')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    f.runtime.store.grant({ subjectId: device.identity.peerId, scope: { kind: 'sessions', sessionIds: ['source-one'] }, actions: ['session.input'] });
+    device.channel.send({ type: 'collaboration-scoped-peer', id: 'scoped', origin: 'https://self.example', node });
+    expect(await device.take('scoped')).toMatchObject({ type: 'result', ok: true, sessions: ['source-one'] });
+    expect(registerScopedCollaborationPeer).toHaveBeenCalledWith(device.identity.peerId, 'https://self.example', node, ['source-one']);
+  });
   it('accepts the stable client session id when creating a session-scoped invitation', async () => {
     const f = await fixture(), owner = await f.connect(); await owner.pair();
     owner.channel.send({ type: 'invite-create', id: 'invite', scope: { kind: 'sessions', sessionIds: ['source-one'] }, actions: ['session.view'] });

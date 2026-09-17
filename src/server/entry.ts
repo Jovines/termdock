@@ -533,6 +533,10 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       if (!collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
       return collaborationService.receive(subjectId, packet);
     },
+    registerScopedCollaborationPeer: (deviceSubject, origin, node, sessions) => {
+      if (!collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+      return collaborationService.registerScopedPeer(origin, deviceSubject, node, sessions);
+    },
     collaborationExchange: (subjectId, packet) => {
       if (!collaborationTransport) throw new Error('COLLABORATION_UNAVAILABLE');
       return collaborationTransport.receive(subjectId, packet);
@@ -581,6 +585,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       reverse: reverseCollaboration,
       file: path.join(homedir(), '.termdock', 'federation', 'collaboration-peers.json'), serviceId: runtime.serviceId,
       store: collaborationStore, deliver: deliverPeerCollaboration, activity: collaborationLocalActivity,
+      scopeFor: serviceId => collaborationService?.effectiveScope(serviceId),
       connect: async (peer, via) => {
         if (!via) return connectPeer(peer);
         const entry = await connectCollaborationRpc(runtime.identity, via);
@@ -601,6 +606,9 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     collaborationService = new CollaborationService({ file: path.join(homedir(), '.termdock', 'federation', 'collaboration-services.json'),
       store: collaborationStore, transport: collaborationTransport, node: () => app.locals.collaborationNode,
       sessions: collaborationDirectorySessions, reverse: reverseCollaboration, connect: connectPeer,
+      deviceScope: device => runtime.store.listEffective({ subjectId: device, serviceId: runtime.serviceId })
+        .filter(grant => grant.scope.kind === 'sessions' && grant.actions.includes('session.input'))
+        .flatMap(grant => grant.scope.kind === 'sessions' ? grant.scope.sessionIds : []),
       pairConnect: peer => connectCollaborationRpc(runtime.identity, peer) });
     app.locals.collaborationService = collaborationService;
     collaborationService.start();

@@ -1,4 +1,4 @@
-import { CollaborationRpc } from '../agent/collaborationPeerTransport.js';
+import { CollaborationRpc, type CollaborationNode } from '../agent/collaborationPeerTransport.js';
 import { PasswordBootstrapServer } from './passwordBootstrap.js';
 import { DeviceProfiles } from './deviceProfiles.js';
 import { DeviceNames } from './deviceNames.js';
@@ -50,6 +50,10 @@ export interface FederationRuntimeOptions {
   collaborationDescriptor?: () => Record<string, unknown>;
   collaborationService?: (subjectId: string, packet: Packet) => Record<string, unknown>;
   collaborationExchange?: (subjectId: string, packet: Packet) => Record<string, unknown>;
+  /** Registers another service as a peer limited to the sessions the calling
+   * device may write to. The scope is derived from its effective grants here,
+   * never from the request body. */
+  registerScopedCollaborationPeer?: (deviceSubject: string, origin: string, node: CollaborationNode, sessions: string[]) => Record<string, unknown>;
   listRouteTargets?: () => Array<{ serviceId: string; label?: string; url?: string; available: boolean }>;
   listRouteAccess?: () => Array<{ id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }>;
   grantRouteAccess?: (issuerId: string, targetServiceId: string, subjectId: string, url?: string) => unknown;
@@ -231,6 +235,16 @@ export async function createFederationRuntime(app: express.Express, directory: s
           } else if (packet.type === 'collaboration-service') {
             if (!options.collaborationService) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
             send({ type: 'result', id: packet.id, ...options.collaborationService(subjectId, packet) });
+          } else if (packet.type === 'collaboration-scoped-peer') {
+            if (!options.registerScopedCollaborationPeer) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
+            const origin = typeof packet.origin === 'string' ? packet.origin : '';
+            if (!origin || !packet.node || typeof packet.node !== 'object') throw new Error('INVALID_COLLABORATION_PEER');
+            // The peer may only touch sessions this device can write to right now.
+            const sessions = [...new Set(store.listEffective({ subjectId, serviceId })
+              .filter(grant => grant.scope.kind === 'sessions' && grant.actions.includes('session.input'))
+              .flatMap(grant => grant.scope.kind === 'sessions' ? grant.scope.sessionIds : []))];
+            if (!sessions.length) throw new Error('AUTHORIZATION_DENIED');
+            send({ type: 'result', id: packet.id, ...options.registerScopedCollaborationPeer(subjectId, origin, packet.node as CollaborationNode, sessions) });
           } else if (packet.type === 'collaboration-exchange') {
             if (!options.collaborationExchange) throw new Error('COLLABORATION_UNAVAILABLE');
             send({ type: 'result', id: packet.id, ...options.collaborationExchange(subjectId, packet) });

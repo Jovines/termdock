@@ -9,7 +9,10 @@ import { remoteSession, validateCollaborationNode, type CollaborationNode, type 
 
 type Session = { sessionId: string; name: string; cwd: string; status: string; capability: string; updatedAt: number; agent: { slug: string; displayName: string } | null };
 type Offer = { hash: string; expiresAt: number; acceptedBy?: string };
-type Document = { version: 1; origin?: string; peers: CollaborationNode[]; offers: Offer[]; replicas?: Record<string, string[]>; departed?: Record<string, number> };
+/** A peer registered from a device's session-scoped write invitation. It may
+ * only ever reference the local sessions that device is still authorized for. */
+type ScopedPeer = { device: string };
+type Document = { version: 1; origin?: string; peers: CollaborationNode[]; offers: Offer[]; replicas?: Record<string, string[]>; departed?: Record<string, number>; scoped?: Record<string, ScopedPeer> };
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const address = (id: string) => { if (!id.startsWith('remote:')) return null; const parts = id.slice(7).split(':'); if (parts.length !== 2) throw new Error('INVALID_SESSION'); return { origin: decodeURIComponent(parts[0]), id: decodeURIComponent(parts[1]) }; };
 const local = (origin: string, id: string) => { const a = address(id); return a?.origin === origin ? a.id : id; };
@@ -33,10 +36,20 @@ export class CollaborationService {
     node: () => Omit<CollaborationNode, 'origin'>; sessions: () => Session[];
     pairConnect?: (node: CollaborationNode) => Promise<CollaborationRpc>;
     reverse?: (serviceId: string) => CollaborationRpc | undefined;
+    /** Live capability of a device: the stable local session ids it may write
+     * to right now. Scoped peers derive their whole surface from this. */
+    deviceScope?: (deviceSubject: string) => string[];
     connect: (node: CollaborationNode) => Promise<CollaborationRpc> }) {
     try { const data = JSON.parse(readFileSync(options.file, 'utf8')) as Document;
       if (data.version !== 1 || !Array.isArray(data.peers) || data.peers.length > 64 || !Array.isArray(data.offers)) throw new Error('INVALID_DIRECTORY');
       for (const peer of data.peers) validateCollaborationNode(peer);
+      if (data.scoped !== undefined) {
+        if (!data.scoped || typeof data.scoped !== 'object' || Array.isArray(data.scoped)) throw new Error('INVALID_DIRECTORY');
+        for (const [serviceId, scope] of Object.entries(data.scoped)) {
+          if (!data.peers.some(peer => peer.serviceId === serviceId) || !scope || typeof scope !== 'object'
+            || typeof (scope as ScopedPeer).device !== 'string' || !/^12D3KooW[a-zA-Z0-9]{30,60}$/.test((scope as ScopedPeer).device)) throw new Error('INVALID_DIRECTORY');
+        }
+      }
       if (data.origin) validateCollaborationNode({ ...options.node(), origin: data.origin });
       this.document = data;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -73,6 +86,33 @@ export class CollaborationService {
     this.document.peers = [...new Map([...this.document.peers, ...nodes.filter(node => node.serviceId !== self.serviceId)].map(node => [node.serviceId, node])).values()];
     this.persist(); void this.refresh(); return { ok: true, registered: this.document.peers.map(peer => peer.serviceId) };
   }
+  /** Effective local sessions a peer may touch. `undefined` means a fully
+   * authorized directory peer; an array (possibly empty) means a peer that
+   * exists only because a device shared a write invitation for those sessions. */
+  effectiveScope(serviceId: string): string[] | undefined {
+    const scoped = this.document.scoped?.[serviceId];
+    if (!scoped) return undefined;
+    try { return [...new Set(this.options.deviceScope?.(scoped.device) ?? [])]; } catch { return []; }
+  }
+  /** Register a peer that a device's session-scoped write grant vouches for.
+   * The peer never gains directory or group authority beyond those sessions,
+   * and the surface follows the grant: revoking or expiring it empties the scope. */
+  registerScopedPeer(origin: string, deviceSubject: string, node: CollaborationNode, sessions: string[]) {
+    if (!/^12D3KooW[a-zA-Z0-9]{30,60}$/.test(deviceSubject) || !Array.isArray(sessions) || !sessions.length || sessions.length > 64
+      || sessions.some(session => typeof session !== 'string' || !session) || new Set(sessions).size !== sessions.length) throw new Error('INVALID_SCOPE');
+    this.setOrigin(origin);
+    validateCollaborationNode(node);
+    const existing = this.document.peers.find(peer => peer.serviceId === node.serviceId || peer.origin === node.origin);
+    if (existing) {
+      if (existing.serviceId !== node.serviceId || existing.origin !== node.origin || existing.caFingerprint256 !== node.caFingerprint256) throw new Error('PEER_IDENTITY_CHANGED');
+      // An already fully authorized directory peer must not be downgraded by a device.
+      if (!this.document.scoped?.[existing.serviceId]) return { ok: true, peer: existing.serviceId, sessions: [] };
+    }
+    this.remember(node);
+    this.document.scoped = { ...this.document.scoped, [node.serviceId]: { device: deviceSubject } };
+    this.persist(); void this.refresh();
+    return { ok: true, peer: node.serviceId, sessions: this.effectiveScope(node.serviceId) ?? [] };
+  }
   invite(origin: string) { this.setOrigin(origin); const code = randomBytes(32).toString('base64url'), expiresAt = Date.now() + 10 * 60_000;
     this.document.offers = this.document.offers.filter(offer => offer.expiresAt > Date.now()).slice(-15);
     this.document.offers.push({ hash: hash(code), expiresAt }); this.persist();
@@ -99,22 +139,29 @@ export class CollaborationService {
     const peer = this.document.peers.find(node => node.serviceId === subject);
     if (!peer) throw new Error('COLLABORATION_PAIRING_REQUIRED');
     if (packet.action === 'duplex') return { ok: true };
-    if (packet.action === 'directory') return this.snapshot(peer.origin);
+    if (packet.action === 'directory') return this.snapshot(peer);
     if (packet.action === 'group') {
       const canonical = packet.group as CollaborationGroup;
       if (!canonical?.sessionIds?.some(id => address(id)?.origin === peer.origin) && !this.document.replicas?.[canonical?.id]?.includes(peer.origin)) throw new Error('GROUP_SENDER_NOT_MEMBER');
-      this.merge(canonical, packet.nodes as CollaborationNode[]); return { ok: true };
+      this.merge(canonical, packet.nodes as CollaborationNode[], peer); return { ok: true };
     }
     throw new Error('COLLABORATION_OPERATION_UNSUPPORTED');
   }
   private nodes() { return [...new Map([...this.options.transport.registeredNodes(), ...this.document.peers, this.node()].map(node => [node.origin, node])).values()]; }
-  private snapshot(peerOrigin: string) {
+  /** A scoped peer sees exactly its authorized sessions and the groups those
+   * sessions belong to. Other peers' identities are not exposed to it. */
+  private snapshot(peer: CollaborationNode) {
     const origin = this.node().origin;
-    return { sessions: this.options.sessions(), groups: this.options.store.federationSnapshot().groups
-      .filter(group => group.federated && (group.sessionIds.some(id => address(id)?.origin === peerOrigin) || this.document.replicas?.[group.id]?.includes(peerOrigin)))
-      .map(group => mapGroup(group, id => address(id) ? id : remoteSession(origin, id))), nodes: this.nodes() };
+    const scope = this.effectiveScope(peer.serviceId);
+    const sessions = this.options.sessions();
+    const groups = this.options.store.federationSnapshot().groups
+      .filter(group => group.federated && (group.sessionIds.some(id => address(id)?.origin === peer.origin) || this.document.replicas?.[group.id]?.includes(peer.origin)))
+      .filter(group => scope === undefined || group.sessionIds.every(id => address(id) ? true : scope.includes(id)))
+      .map(group => mapGroup(group, id => address(id) ? id : remoteSession(origin, id)));
+    return { sessions: scope === undefined ? sessions : sessions.filter(session => scope.includes(session.sessionId)),
+      groups, nodes: scope === undefined ? this.nodes() : [this.node(), peer] };
   }
-  private merge(canonical: CollaborationGroup, nodes: CollaborationNode[]) {
+  private merge(canonical: CollaborationGroup, nodes: CollaborationNode[], source?: CollaborationNode) {
     if (!canonical || typeof canonical.id !== 'string' || !canonical.id.startsWith('cross-') || !Array.isArray(canonical.sessionIds)
       || canonical.sessionIds.length < 2 || canonical.sessionIds.length > 500 || typeof canonical.name !== 'string' || !canonical.name.trim() || COLLAB_NAME_FORBIDDEN.test(canonical.name)
       || !Number.isFinite(canonical.updatedAt) || canonical.updatedAt > Date.now() + 60_000 || !Array.isArray(nodes) || nodes.length > 65) throw new Error('INVALID_GROUP');
@@ -136,10 +183,14 @@ export class CollaborationService {
       (this.document.replicas ??= {})[canonical.id] = origins; this.persist();
     }
     const localIds = new Set(this.options.sessions().map(s => s.sessionId));
+    const scope = source ? this.effectiveScope(source.serviceId) : undefined;
     const incoming = { ...mapGroup(canonical, id => local(self.origin, id)), federated: true };
     for (const id of incoming.sessionIds) {
       const remote = address(id);
-      if (remote ? !nodes.some(node => node.origin === remote.origin) : !localIds.has(id) && !existing?.sessionIds.includes(id)) throw new Error('GROUP_MEMBER_UNAVAILABLE');
+      if (remote) { if (!nodes.some(node => node.origin === remote.origin)) throw new Error('GROUP_MEMBER_UNAVAILABLE'); continue; }
+      // A scoped peer can never pull another local session into a group.
+      if (scope !== undefined && !scope.includes(id)) throw new Error('SESSION_SCOPE_DENIED');
+      if (!localIds.has(id) && !existing?.sessionIds.includes(id)) throw new Error('GROUP_MEMBER_UNAVAILABLE');
     }
     incoming.remoteSessions = incoming.sessionIds.filter(id => address(id)).map(id => { const a = address(id)!;
       const observed = this.observations.get(nodes.find(node => node.origin === a.origin)!.serviceId)?.sessions.find(s => s.sessionId === a.id);
@@ -161,10 +212,13 @@ export class CollaborationService {
         if (!Array.isArray(data.sessions) || data.sessions.length > 5000 || !Array.isArray(data.groups)) throw new Error('INVALID_DIRECTORY');
         const sessions = data.sessions.filter((s: Session) => s && typeof s.sessionId === 'string' && !s.sessionId.startsWith('remote:')) as Session[];
         this.observations.set(peer.serviceId, { sessions, checkedAt: Date.now() });
-        for (const group of data.groups as CollaborationGroup[]) this.merge(group, data.nodes as CollaborationNode[]);
+        for (const group of data.groups as CollaborationGroup[]) this.merge(group, data.nodes as CollaborationNode[], peer);
         for (const group of this.options.store.federationSnapshot().groups.filter(g => g.federated && (g.sessionIds.some(id => address(id)?.origin === peer.origin) || this.document.replicas?.[g.id]?.includes(peer.origin)))) {
+          const scope = this.effectiveScope(peer.serviceId);
+          // Never push a group to a scoped peer if it involves other local sessions.
+          if (scope !== undefined && !group.sessionIds.every(id => address(id) ? true : scope.includes(id))) continue;
           const canonical = mapGroup(group, id => address(id) ? id : remoteSession(this.node().origin, id));
-          const nodes = this.nodes();
+          const nodes = scope === undefined ? this.nodes() : [this.node(), peer];
           if (canonical.sessionIds.some(id => !nodes.some(node => node.origin === address(id)?.origin))) continue;
           this.merge(canonical, nodes);
           await client.request({ type: 'collaboration-service', action: 'group', group: canonical, nodes });
@@ -177,7 +231,7 @@ export class CollaborationService {
     const missing = [...new Set(this.options.store.list().flatMap(group => group.sessionIds.map(id => address(id)?.origin).filter((origin): origin is string => !!origin && !known.has(origin))))];
     const services = this.document.peers.map(peer => { const observed = this.observations.get(peer.serviceId); return { origin: peer.origin, serviceId: peer.serviceId, label: peer.origin,
       connected: !!observed && !observed.error && Date.now() - observed.checkedAt < 15_000, error: observed?.error ?? (!observed ? 'CONNECTING' : undefined) }; });
-    return { protocolVersion: 2, sessions: this.document.peers.flatMap(peer => (this.observations.get(peer.serviceId)?.sessions ?? []).map(session => ({ ...session,
+    return { protocolVersion: 2, sessions: this.document.peers.flatMap(peer => this.document.scoped?.[peer.serviceId] ? [] : (this.observations.get(peer.serviceId)?.sessions ?? []).map(session => ({ ...session,
       sessionId: remoteSession(peer.origin, session.sessionId), backendSessionId: null, agentNativeSessionId: null, serviceOrigin: peer.origin, serviceLabel: peer.origin,
       serviceConnected: services.find(s => s.origin === peer.origin)!.connected, serviceCheckedAt: this.observations.get(peer.serviceId)?.checkedAt }))),
       services: [...services, ...missing.map(origin => ({ origin, label: origin, connected: false, error: '服务连接授权尚未同步；在已授权服务页面连接后会自动完成'  }))] };

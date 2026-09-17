@@ -10,6 +10,7 @@ export function installCollaborationEnrollment(): void {
   let running = false, stopped = false, dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const completed = new Map<string, string>();
+  const scopedPeers = new Set<string>();
   const descriptors = new Map<string, Node>();
   const enroll = async (client: SecureClient, node: Node, nodes: Node[]) => {
     const signature = JSON.stringify(nodes);
@@ -66,7 +67,19 @@ export function installCollaborationEnrollment(): void {
         if (item === own || completed.get(item.node.serviceId) === JSON.stringify(nodes)) continue;
         let client: SecureClient | undefined;
         try { client = await openAuthorizedServiceClient({ ...item.service, targetPeerId: item.node.serviceId }, AbortSignal.timeout(8000)); await enroll(client, item.node, nodes); }
-        catch { pending = true; /* Per-origin macOS identities: the peer's own authorized page enrolls it. */ }
+        catch {
+          // This page cannot administer that service. If this device instead holds
+          // a session write grant there, open the limited collaboration channel for
+          // exactly those sessions; the peer derives the scope from the grant itself.
+          let scoped = scopedPeers.has(item.node.serviceId);
+          if (!scoped && client) {
+            try {
+              const result = await client.request({ type: 'collaboration-scoped-peer', origin: item.node.origin, node: own.node }, { timeoutMs: 8000 });
+              if (result.type === 'result') { scopedPeers.add(item.node.serviceId); scoped = true; }
+            } catch { /* Older peers stay session view/operate only. */ }
+          }
+          if (!scoped) pending = true; /* Per-origin macOS identities: the peer's own authorized page enrolls it. */
+        }
         finally { client?.close(); }
       }
       window.dispatchEvent(new CustomEvent('termdock:collaboration-enrollment', { detail: { ok: true } }));
