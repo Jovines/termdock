@@ -87,6 +87,7 @@ import { shouldClearSessionFilePreview } from './lib/utils/rightSidebarSessionSt
 import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { DeferredRightSidebar as RightSidebar } from './lib/components/sidebar/DeferredRightSidebar';
+import { AndroidMirrorDock } from './lib/components/android/AndroidMirrorView';
 import { QuotaView } from './lib/components/sidebar/QuotaView';
 import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloatingSessionButtons } from './lib/components/AgentIndicators';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
@@ -5363,6 +5364,7 @@ function App() {
             </div>
           )}
         </div>
+        <AndroidMirrorDock sessionId={activeSessionId} />
         {initialSessionRestoreOverlay}
       </div>
     );
@@ -5371,6 +5373,7 @@ function App() {
   return (
     <>
       {body}
+      <AndroidMirrorDock sessionId={activeSessionId} />
       {initialSessionRestoreOverlay}
     </>
   );

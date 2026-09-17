@@ -81,7 +81,8 @@ import {
   resolveAbsoluteReferencePath,
 } from './referencePaths';
 import { ContextDraftDock } from './ContextDraftDock';
-import { AndroidMirrorView } from '../android/AndroidMirrorView';
+import { AndroidMirrorView, ANDROID_DOCK_GROUP } from '../android/AndroidMirrorView';
+import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
 import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
@@ -6510,6 +6511,8 @@ export function RightSidebar(
     () => useSidebarStore.getState().rightTab === 'android',
   );
   const [androidTabEnabled, setAndroidTabEnabled] = useState(false);
+  // dock 到分屏时由 App 顶层持有投屏实例，侧栏这里不再挂第二个流。
+  const androidDocked = useCollaborationPanelDock(state => Boolean(state.docks[ANDROID_DOCK_GROUP]));
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
   const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
@@ -12029,7 +12032,20 @@ export function RightSidebar(
         </Pane>
 
         <Pane active={androidPaneActive} mounted={hasMountedAndroidPane && androidTabEnabled}>
-          <AndroidMirrorView sessionId={sessionId ?? null} />
+          {androidDocked ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-[11px] text-muted-foreground">
+              <span>{t('android.splitDockedHint')}</span>
+              <button
+                type="button"
+                onClick={() => useCollaborationPanelDock.getState().setDock(ANDROID_DOCK_GROUP, null)}
+                className="rounded bg-surface-2 px-2 py-1 text-foreground"
+              >
+                {t('android.splitClose')}
+              </button>
+            </div>
+          ) : (
+            <AndroidMirrorView sessionId={sessionId ?? null} />
+          )}
         </Pane>
       </div>
       {isOpen && contextDraftEnabled && (

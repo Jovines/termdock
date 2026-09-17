@@ -18,7 +18,8 @@ import {
 } from '../../android/api';
 import type { AndroidSavedPresetState } from '../../terminal/api';
 
-const DOCK_GROUP = 'android-mirror';
+export const ANDROID_DOCK_GROUP = 'android-mirror';
+const DOCK_GROUP = ANDROID_DOCK_GROUP;
 const QUALITY_STORAGE_KEY = 'termdock:android:quality:v1';
 const QUALITY_LABEL: Record<AndroidQualityId, TranslationKey> = {
   low: 'android.qualityLow',
@@ -36,7 +37,7 @@ const writeStoredQuality = (quality: AndroidQuality) => {
   try { localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality)); } catch { /* storage unavailable */ }
 };
 
-export function AndroidMirrorView({ sessionId }: { sessionId?: string | null }) {
+export function AndroidMirrorView({ sessionId, dockOnly = false }: { sessionId?: string | null; dockOnly?: boolean }) {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<AndroidMirrorController | null>(null);
@@ -669,6 +670,8 @@ export function AndroidMirrorView({ sessionId }: { sessionId?: string | null }) 
   );
 
   if (docked && dockHost) {
+    // dockOnly 由 App 顶层持有，只负责把内容投进分屏宿主。
+    if (dockOnly) return createPortal(body, dockHost);
     return (
       <>
         {createPortal(body, dockHost)}
@@ -681,6 +684,13 @@ export function AndroidMirrorView({ sessionId }: { sessionId?: string | null }) 
     );
   }
   return body;
+}
+
+/** 分屏模式下由 App 顶层持有投屏实例，关闭侧栏不会中断分屏。 */
+export function AndroidMirrorDock({ sessionId }: { sessionId?: string | null }) {
+  const docked = useCollaborationPanelDock(state => Boolean(state.docks[ANDROID_DOCK_GROUP]));
+  if (!docked) return null;
+  return <AndroidMirrorView sessionId={sessionId} dockOnly />;
 }
 
 function QualitySlider({ label, display, min, max, step, value, onChange }: {
