@@ -855,6 +855,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const pendingWriteLastChunkIdRef = React.useRef<number | null>(null);
+    // 已经交给解析器的最大 chunk id。整段回写（terminal 重建后从 store 重灌
+    // buffer、replaceBuffer 回退）会把这些字节再解析一遍，其中的终端查询
+    // （tmux 客户端的 profile 探针、程序启动时的 DA 查询）在第一次就已经被
+    // xterm 应答过；第二次应答是多余回包，tmux 会把它当键盘输入灌进 pane。
+    const highestEnqueuedChunkIdRef = React.useRef<number | null>(null);
+    // 当前待写批次是否属于这种"重放"。
+    const pendingWriteReplayRef = React.useRef(false);
+    // 正在解析重放写入的深度：解析期间解析器产生的回包一律丢弃。xterm 在
+    // write() 回调之前同步解析并同步触发 onData，所以回调收尾是精确边界。
+    // 计数挂在 token 上而不是裸数字：terminal 重建时换 token，被丢弃的旧
+    // 写入即使回调迟到，也只会减到孤儿对象上，不会提前放开新一代的抑制。
+    const replayParseTokenRef = React.useRef<{ depth: number } | null>(null);
     const flushWritesRef = React.useRef<() => void>(() => {});
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
@@ -3072,6 +3084,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       pendingWriteRef.current = '';
       pendingWriteLastChunkIdRef.current = null;
       pendingBytesRef.current = 0;
+      // 被丢弃的写入不再计数，抑制必须在这里失效，否则后续输入会被永久吞掉。
+      pendingWriteReplayRef.current = false;
+      replayParseTokenRef.current = null;
       if (flowPausedRef.current) {
         flowPausedRef.current = false;
         if (options.notifyFlowResume === true) {
@@ -3727,13 +3742,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const chunk = pendingWriteRef.current;
       const chunkBytes = chunk.length;
       const writtenThroughChunkId = pendingWriteLastChunkIdRef.current;
+      const replayBatch = pendingWriteReplayRef.current;
       pendingWriteRef.current = '';
       pendingWriteLastChunkIdRef.current = null;
+      pendingWriteReplayRef.current = false;
 
       isWritingRef.current = true;
+      let replayToken: { depth: number } | null = null;
+      if (replayBatch) {
+        replayToken = replayParseTokenRef.current ?? { depth: 0 };
+        replayParseTokenRef.current = replayToken;
+        replayToken.depth += 1;
+      }
       const presentation = resizePresentationRef.current;
       const resizeGeneration = presentation?.generation;
       term.write(chunk, () => {
+        if (replayToken) replayToken.depth -= 1;
         if (resizeGeneration !== undefined) presentation?.written(resizeGeneration);
         isWritingRef.current = false;
         pendingBytesRef.current -= chunkBytes;
@@ -3797,14 +3821,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [flushWrites]);
 
     const enqueueWrite = React.useCallback(
-      (data: string, throughChunkId: number) => {
+      (data: string, throughChunkId: number, replay = false) => {
         if (!data) {
           return;
         }
         writeSettleGenerationRef.current += 1;
         pendingWriteRef.current += data;
         pendingWriteLastChunkIdRef.current = throughChunkId;
+        pendingWriteReplayRef.current = pendingWriteReplayRef.current || replay;
         pendingBytesRef.current += data.length;
+        const highest = highestEnqueuedChunkIdRef.current;
+        if (highest === null || throughChunkId > highest) {
+          highestEnqueuedChunkIdRef.current = throughChunkId;
+        }
 
         // Flow control: pause PTY if above high watermark
         if (!flowPausedRef.current && pendingBytesRef.current >= FLOW_CONTROL_HIGH_WATERMARK) {
@@ -4153,6 +4182,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // DSR 响应、bracketed-paste 包裹等，这些都是必须送到 PTY 的。
           localDisposables.push(
             terminal.onData((data: string) => {
+              // 重放写入期间解析出的回包：这些查询第一次解析时已经应答过，
+              // 再答一次 tmux 会当成键盘输入灌进 pane。
+              const replayToken = replayParseTokenRef.current;
+              if (replayToken !== null && replayToken.depth > 0) { return; }
               inputHandlerRef.current(data);
             })
           );
@@ -4489,12 +4522,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       const lastProcessedId = lastProcessedChunkIdRef.current;
       let pending: TerminalChunk[];
+      // buffer 被整体替换（replaceBuffer 全量重写并换了一批新 id）：上一批
+      // 的 id 在新数组里找不到，只能从头部重新解析，已经解析过的字节会再
+      // 走一遍解析器。
+      let bufferReplaced = false;
 
       if (lastProcessedId === null) {
         pending = chunks;
       } else {
         const lastProcessedIndex = chunks.findIndex((chunk) => chunk.id === lastProcessedId);
-        pending = lastProcessedIndex >= 0 ? chunks.slice(lastProcessedIndex + 1) : chunks;
+        if (lastProcessedIndex >= 0) {
+          pending = chunks.slice(lastProcessedIndex + 1);
+        } else {
+          pending = chunks;
+          bufferReplaced = true;
+        }
       }
 
       if (pending.length > 0) {
@@ -4502,8 +4544,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const merged = osc52RemainderRef.current + rawChunk;
         const { cleaned, remainder } = processOsc52Clipboard(merged);
         osc52RemainderRef.current = remainder;
+        // 这批字节此前已经解析过：id 没超过已写水位（同一批字节整段重写，
+        // 例如 terminal 重建后从 store 重灌 buffer），或 buffer 被换掉后从
+        // 头部重来。两种情况解析出的回包都不能再发一次。已经解析过才有
+        // 水位，所以首次解析不受影响。
+        const highestEnqueued = highestEnqueuedChunkIdRef.current;
+        const isReplayBatch = highestEnqueued !== null
+          && (pending[0].id <= highestEnqueued || bufferReplaced);
         if (cleaned) {
-          enqueueWrite(cleaned, pending[pending.length - 1].id);
+          enqueueWrite(cleaned, pending[pending.length - 1].id, isReplayBatch);
         } else {
           // Control-only chunks (for example OSC 52) are fully consumed by
           // the parser without entering xterm's write queue. They still cross
