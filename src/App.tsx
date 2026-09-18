@@ -588,6 +588,7 @@ function App() {
     customName: session.customName,
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
+    providerName: session.providerName ?? null,
   })));
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(initialSessionChrome.activeSessionId);
   // Cached chrome makes the tab/sidebar shell available immediately, but the
@@ -2631,7 +2632,7 @@ function App() {
     }
   }, [activeSessionId, connectionPrioritySessionId, sessions, terminalSessions]);
 
-  const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => {
+  const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string; agentSlug?: string; providerId?: string }) => {
     const mode = overrides?.mode ?? newSessionMode;
     const tmuxSessionName = mode === 'tmux'
       ? (overrides?.tmuxSessionName?.trim() || newSessionTmuxName.trim() || undefined)
@@ -2646,6 +2647,8 @@ function App() {
         tmuxSessionName,
         cwd: activeCwd,
         command: overrides?.command,
+        agentSlug: overrides?.agentSlug,
+        providerId: overrides?.providerId,
       },
     }));
   }, [newSessionMode, newSessionTmuxName, activeSessionId]);
@@ -2890,7 +2893,7 @@ function App() {
       ? (displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null))
       : null;
     const git = ts?.gitStatus;
-    const tooltip = `${ts?.cwd || session.name}${git ? `\n⎇ ${git.branch}  +${git.added} −${git.removed}` : ''}`;
+    const tooltip = `${ts?.cwd || session.name}${git ? `\n⎇ ${git.branch}  +${git.added} −${git.removed}` : ''}${session.providerName ? `\n${t('sidebar.provider')}: ${session.providerName}` : ''}`;
     const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
     const accentColor = ts?.agentStatus === 'working' || tuiProgressActive
       ? 'var(--success)'
@@ -2996,6 +2999,14 @@ function App() {
               </span>
             ) : (
               <span className={`whitespace-nowrap text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>{displayName}</span>
+            )}
+            {session.providerName && (
+              <span
+                className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8.5px] font-medium leading-tight text-primary/90"
+                title={`${t('sidebar.provider')}: ${session.providerName}`}
+              >
+                {session.providerName}
+              </span>
             )}
           </span>
         </button>

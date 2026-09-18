@@ -45,6 +45,8 @@ import {
   setAutoRenamePromptPayloadCharsSetting,
   getNewSessionAgentSlugSetting,
   setNewSessionAgentSlugSetting,
+  getCcSwitchProvidersSetting,
+  setCcSwitchProviderSetting,
   getRunningSessionButtonEnabledSetting,
   getAttentionButtonEnabledSetting,
   getCollaborationPanelsSetting,
@@ -133,6 +135,13 @@ import {
   installHooksForSlug,
   uninstallHooksForSlug,
 } from '../agent/installers.js';
+import {
+  cleanupCcSwitchArtifacts,
+  isSafeProviderId,
+  listCcSwitchProviders,
+  prepareCcSwitchLaunch,
+  sweepCcSwitchArtifacts,
+} from '../agent/ccSwitchProviders.js';
 import {
   loadPlugins,
   savePlugin,
@@ -430,6 +439,8 @@ interface PersistedClientSession {
   createdAt: number;
   lastActivity: number;
   cwd?: string | null;
+  /** cc-switch provider this instance was launched with; absent = global config. */
+  providerName?: string | null;
   // 最后检测到的前台程序名（last-known）：live 检测只写非空值、不用 null 覆盖,
   // 这样 server 重启 / backend 掉线后 tab 标题仍能回退到最近一次识别结果。
   activeProgram?: string | null;
@@ -1318,6 +1329,9 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
       : Date.now(),
     cwd: typeof candidate.cwd === 'string' && candidate.cwd.trim().length > 0
       ? candidate.cwd
+      : null,
+    providerName: typeof candidate.providerName === 'string' && candidate.providerName.trim().length > 0
+      ? candidate.providerName.trim().slice(0, 200)
       : null,
     activeProgram: typeof candidate.activeProgram === 'string' && candidate.activeProgram.trim().length > 0
       ? candidate.activeProgram
@@ -5140,6 +5154,9 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   }
 
   terminalSessions.delete(sessionId);
+  // Drop any per-instance cc-switch provider override artifacts. Fire-and-
+  // forget: cleanup is idempotent and must not block session teardown.
+  void cleanupCcSwitchArtifacts(sessionId).catch(() => undefined);
 
   if (options.clearHistoryBuffer !== false) {
     clearHistory(sessionId);
@@ -6888,6 +6905,11 @@ router.patch('/session-inventory/sessions/:frontendSessionId', async (req, res) 
       : null;
     if (next.tmuxSessionName) next.mode = 'tmux';
   }
+  if (Object.prototype.hasOwnProperty.call(body, 'providerName')) {
+    next.providerName = typeof body.providerName === 'string' && body.providerName.trim().length > 0
+      ? body.providerName.trim().slice(0, 200)
+      : null;
+  }
 
   if (next.mode === 'tmux' && next.tmuxSessionName) {
     if (next.customName === true && next.name.trim().length > 0) {
@@ -7026,6 +7048,7 @@ async function getSettingsPayload() {
     autoRenamePromptPreference: getAutoRenamePromptPreferenceSetting(),
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
+    ccSwitchProviders: getCcSwitchProvidersSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
     attentionButtonEnabled: getAttentionButtonEnabledSetting(),
     collaborationPanels: getCollaborationPanelsSetting(),
@@ -7184,6 +7207,26 @@ router.put('/settings', async (req, res) => {
   }
   if (typeof body.serviceSwitcherExpanded === 'boolean') {
     setServiceSwitcherExpandedSetting(body.serviceSwitcherExpanded);
+  }
+  // Per-agent cc-switch provider memory: {slug, providerId|null} — null (or
+  // '') returns that agent to "follow the global config".
+  if (body.ccSwitchProvider && typeof body.ccSwitchProvider === 'object') {
+    const preference = body.ccSwitchProvider as { slug?: unknown; providerId?: unknown };
+    const slug = typeof preference.slug === 'string' ? preference.slug.trim().toLowerCase() : '';
+    if (slug !== 'claude' && slug !== 'codex') {
+      res.status(400).json({ error: 'Unsupported cc-switch agent', code: 'CC_SWITCH_AGENT_INVALID' });
+      return;
+    }
+    if (preference.providerId !== null
+      && preference.providerId !== ''
+      && (typeof preference.providerId !== 'string' || !isSafeProviderId(preference.providerId))) {
+      res.status(400).json({ error: 'Invalid cc-switch provider id', code: 'CC_SWITCH_PROVIDER_INVALID' });
+      return;
+    }
+    setCcSwitchProviderSetting(
+      slug,
+      typeof preference.providerId === 'string' && preference.providerId !== '' ? preference.providerId : null,
+    );
   }
 
   if (typeof body.runningSessionButtonEnabled === 'boolean') {
@@ -7361,6 +7404,53 @@ async function listDetectedAgentLaunchers(): Promise<DetectedAgentLauncher[]> {
 
 router.get('/agent-launchers', async (_req, res) => {
   res.json({ agents: await listDetectedAgentLaunchers() });
+});
+
+// ── cc-switch per-instance provider overrides ─────────────────────────
+// Read-only access to the local cc-switch database: list provider names for
+// the new-session composer, or materialize a per-session override (claude
+// --settings file / codex CODEX_HOME) and return the launch command. Provider
+// secrets (settings_config) never leave this process.
+
+router.get('/cc-switch/providers', async (req, res) => {
+  const app = req.query.app === 'claude' || req.query.app === 'codex' ? req.query.app : null;
+  if (!app) {
+    res.status(400).json({ error: 'app must be claude or codex' });
+    return;
+  }
+  try {
+    res.json(await listCcSwitchProviders(app));
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+router.post('/cc-switch/prepare-launch', async (req, res) => {
+  const body = req.body ?? {};
+  const { sessionId, app, providerId } = body as { sessionId?: unknown; app?: unknown; providerId?: unknown };
+  // The session gate keeps artifact writes bound to a live, server-owned PTY
+  // session (session ids are unguessable random strings, never user input).
+  if (typeof sessionId !== 'string' || !terminalSessions.has(sessionId)) {
+    res.status(404).json({ error: 'Terminal session not found' });
+    return;
+  }
+  if (app !== 'claude' && app !== 'codex') {
+    res.status(400).json({ error: 'app must be claude or codex' });
+    return;
+  }
+  if (typeof providerId !== 'string' || providerId.length === 0) {
+    res.status(400).json({ error: 'providerId is required' });
+    return;
+  }
+  try {
+    // Piggyback a throttled orphan sweep on launch traffic (6h cadence inside
+    // the module); the alive set covers pty-host sessions re-attached after a
+    // server restart, so live artifacts are never swept.
+    void sweepCcSwitchArtifacts(new Set(terminalSessions.keys())).catch(() => undefined);
+    res.json(await prepareCcSwitchLaunch({ sessionId, app, providerId }));
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 router.get('/directory-suggestions', async (req, res) => {

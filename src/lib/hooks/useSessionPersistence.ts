@@ -84,6 +84,8 @@ export interface PersistedSession {
   // 不必等 WS 连上轮询 tmux，消除「先 wt-xxx 再跳成 coco termdock」的跳变。
   activeProgram?: string | null;
   cwd?: string | null;
+  /** cc-switch provider badge carried through hydrate so the tab keeps showing it. */
+  providerName?: string | null;
 }
 
 interface UseSessionPersistenceReturn {
@@ -130,6 +132,7 @@ function normalizeInventorySessionList(sessionList: SessionInventoryClientSessio
     // 不含这两个字段，这里按下标对齐补回）。
     activeProgram: sessionList[index]?.activeProgram ?? null,
     cwd: sessionList[index]?.cwd ?? null,
+    providerName: sessionList[index]?.providerName ?? null,
   }));
 }
 

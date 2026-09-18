@@ -40,6 +40,7 @@ describe('NewSessionComposer launcher choices', () => {
           resumeHistoryLoading={false}
           resumeHistoryPendingId={null}
           resumeHistoryError={null}
+          rememberedProviders={{}}
           onRefreshAgents={vi.fn()}
           onSelectAgent={onSelectAgent}
           onLaunchAgent={onLaunchAgent}
@@ -60,7 +61,7 @@ describe('NewSessionComposer launcher choices', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Start Codex' }));
     expect(onLaunchAgent).toHaveBeenCalledOnce();
-    expect(onLaunchAgent).toHaveBeenCalledWith(codex, 'codex');
+    expect(onLaunchAgent).toHaveBeenCalledWith(codex, 'codex', { providerId: undefined });
   });
 
   it('reuses the directory browser and confirms the current folder explicitly', () => {
@@ -80,6 +81,7 @@ describe('NewSessionComposer launcher choices', () => {
           resumeHistoryLoading={false}
           resumeHistoryPendingId={null}
           resumeHistoryError={null}
+          rememberedProviders={{}}
           onRefreshAgents={vi.fn()}
           onSelectAgent={vi.fn()}
           onLaunchAgent={vi.fn()}
@@ -125,6 +127,7 @@ describe('NewSessionComposer launcher choices', () => {
           resumeHistoryLoading={false}
           resumeHistoryPendingId={null}
           resumeHistoryError={null}
+          rememberedProviders={{}}
           onRefreshAgents={vi.fn()}
           onSelectAgent={vi.fn()}
           onLaunchAgent={vi.fn()}
@@ -159,6 +162,7 @@ describe('NewSessionComposer launcher choices', () => {
           resumeHistoryLoading
           resumeHistoryPendingId={null}
           resumeHistoryError={null}
+          rememberedProviders={{}}
           onRefreshAgents={vi.fn()}
           onSelectAgent={vi.fn()}
           onLaunchAgent={vi.fn()}
