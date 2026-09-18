@@ -83,8 +83,11 @@ export class AndroidMirrorController {
   private header: MirrorHeader | null = null;
   private closedByUser = false;
   private lastMessageAt = 0;
+  private lastFrameAt = 0;
+  private lastResetAt = 0;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private stallTimer: ReturnType<typeof setInterval> | null = null;
   /** 待并入下一个（关键）帧的 SPS/PPS：单独喂会被 Chrome 判为「非关键帧」而报错。 */
   private pendingConfig: Uint8Array | null = null;
   /** configure() 之后解码器必须先吃到一个真正的 IDR，否则 decode 会抛错。 */
@@ -94,7 +97,6 @@ export class AndroidMirrorController {
   private decodedFrames = 0;
   private controlsSent = 0;
   private lastSeq = 0;
-  private deferredAck = false;
   private lastType = '';
   private bytesSinceSample = 0;
   private warnedUnsupported = false;
@@ -144,7 +146,8 @@ export class AndroidMirrorController {
   private teardownTimers(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.statsTimer) clearInterval(this.statsTimer);
-    this.heartbeat = null; this.statsTimer = null;
+    if (this.stallTimer) clearInterval(this.stallTimer);
+    this.heartbeat = null; this.statsTimer = null; this.stallTimer = null;
   }
 
   private startTimers(): void {
@@ -157,6 +160,16 @@ export class AndroidMirrorController {
       }
       this.send({ type: 'ping' });
     }, 15_000);
+    // 卡顿自愈：长时间收不到帧（解码器卡住/时序错位）时请求一次关键帧重置。
+    this.stallTimer = setInterval(() => {
+      if (!this.header || this.closedByUser) return;
+      const now = Date.now();
+      if (now - this.lastFrameAt > 8000 && now - this.lastResetAt > 8000) {
+        this.lastResetAt = now;
+        console.warn('[android] no frames for 8s; requesting keyframe reset');
+        this.sendControl(serializeSimple(CONTROL_TYPE_RESET_VIDEO));
+      }
+    }, 2000);
     this.statsTimer = setInterval(() => {
       const now = Date.now();
       const elapsed = (now - this.lastSampleAt) / 1000;
@@ -216,6 +229,7 @@ export class AndroidMirrorController {
           width: message.width ?? 0,
           height: message.height ?? 0,
         };
+        this.lastFrameAt = Date.now();
         this.callbacks.onHeader(this.header);
         this.callbacks.onState('streaming');
         break;
@@ -241,20 +255,21 @@ export class AndroidMirrorController {
     const bytes = fromBase64(message.data);
     this.bytesSinceSample += message.data.length;
     this.receivedFrames++;
+    this.lastFrameAt = Date.now();
     if (this.decoder?.state === 'closed') { this.decoder = null; this.configured = false; }
     if (message.config) {
       // 配置包只用于 configure()，不能单独解码；参数集并入下一个关键帧。
       this.configData = bytes;
       this.pendingConfig = bytes;
       this.configureDecoder();
-      this.ackWhenDecoded();
+      this.ack();
       return;
     }
     if (!this.configured) this.configureDecoder();
     const keyFrame = message.key === true;
     if (this.needsKeyframe && !keyFrame) {
       // 重配后的第一个关键帧之前，delta 无法解码；跳过但照常回 ack。
-      this.ackWhenDecoded();
+      this.ack();
       return;
     }
     let payload = bytes;
@@ -266,13 +281,7 @@ export class AndroidMirrorController {
     }
     if (keyFrame) this.needsKeyframe = false;
     this.decode(payload, keyFrame, message.pts);
-    this.ackWhenDecoded();
-  }
-
-  /** 解码队列还浅就立即 ack；积压时推迟到解码追上来，从而不丢帧地限制延迟。 */
-  private ackWhenDecoded(): void {
-    if ((this.decoder?.decodeQueueSize ?? 0) < 3) this.ack();
-    else this.deferredAck = true;
+    this.ack();
   }
 
   private configureDecoder(): void {
@@ -377,10 +386,6 @@ export class AndroidMirrorController {
       context.drawImage(frame, 0, 0, canvas.width, canvas.height);
     }
     frame.close();
-    if (this.deferredAck && (this.decoder?.decodeQueueSize ?? 0) < 2) {
-      this.deferredAck = false;
-      this.ack();
-    }
   }
 
   // ---- 输入注入 ----
