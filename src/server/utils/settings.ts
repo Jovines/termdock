@@ -78,6 +78,8 @@ export interface SettingsDoc {
   autoRenamePromptPayloadChars: number;
   /** Agent launched by default from the left-sidebar new-session action. */
   newSessionAgentSlug: string | null;
+  /** Last cc-switch provider picked per agent slug; absent slug means "follow the global config". */
+  ccSwitchProviders: Record<string, string>;
   /** Show the floating shortcut used to cycle through running agent sessions. */
   runningSessionButtonEnabled: boolean;
   /** Show the yellow floating shortcut for sessions awaiting attention. */
@@ -152,6 +154,17 @@ export function normalizeNewSessionAgentSlug(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const slug = value.trim().toLowerCase();
   return /^[a-z][a-z0-9-]{0,39}$/.test(slug) ? slug : null;
+}
+
+export function normalizeCcSwitchProviders(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([slug, providerId]) => (
+      /^[a-z][a-z0-9-]{0,39}$/.test(slug)
+      && typeof providerId === 'string'
+      && /^[A-Za-z0-9_-]{1,128}$/.test(providerId)
+    ))
+    .slice(-100)) as Record<string, string>;
 }
 
 export function normalizeFileSortModes(value: unknown): Record<string, 'modified'> {
@@ -296,6 +309,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
       ? raw.autoRenamePromptPayloadChars
       : 12_000,
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
+    ccSwitchProviders: normalizeCcSwitchProviders(raw.ccSwitchProviders),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
     attentionButtonEnabled: raw.attentionButtonEnabled !== false,
     collaborationPanels: normalizeCollaborationPanels(raw.collaborationPanels),
@@ -637,6 +651,19 @@ export function setAutoRenameModelsSetting(models: Record<string, string>): Sett
 
 export function getNewSessionAgentSlugSetting(): string | null {
   return loadSettings().newSessionAgentSlug;
+}
+
+export function getCcSwitchProvidersSetting(): Record<string, string> {
+  return { ...loadSettings().ccSwitchProviders };
+}
+
+export function setCcSwitchProviderSetting(slug: string, providerId: string | null): SettingsDoc {
+  return updateSettings((settings) => {
+    const next = { ...settings.ccSwitchProviders };
+    if (providerId === null) delete next[slug];
+    else next[slug] = providerId;
+    settings.ccSwitchProviders = normalizeCcSwitchProviders(next);
+  });
 }
 
 export function setNewSessionAgentSlugSetting(slug: string | null): SettingsDoc {

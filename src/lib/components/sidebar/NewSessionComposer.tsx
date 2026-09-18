@@ -1,9 +1,11 @@
 import { ChevronDown, Folder, History, LoaderCircle, Plus, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import type { AgentLauncherInfo, AgentResumeHistoryEntry } from '../../terminal/api';
+import type { AgentLauncherInfo, AgentResumeHistoryEntry, CcSwitchProviderInfo } from '../../terminal/api';
+import { getCcSwitchProviders } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
 import { useI18n } from '../../i18n';
 import type { NewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
+import { ccSwitchAppForSlug } from '../../hooks/useCcSwitchProviderPreference';
 import { AgentBrandAvatar } from '../AgentIndicators';
 import { DirectoryPickerDialog } from './DirectoryPickerDialog';
 
@@ -37,6 +39,7 @@ export function NewSessionComposer({
   resumeHistoryLoading,
   resumeHistoryPendingId,
   resumeHistoryError,
+  rememberedProviders,
   onRefreshAgents,
   onSelectAgent,
   onLaunchAgent,
@@ -55,9 +58,10 @@ export function NewSessionComposer({
   resumeHistoryLoading: boolean;
   resumeHistoryPendingId: string | null;
   resumeHistoryError: string | null;
+  rememberedProviders: Record<string, string>;
   onRefreshAgents: () => void;
   onSelectAgent: (agent: NewSessionAgentPreference) => void;
-  onLaunchAgent: (agent: NewSessionAgentPreference, command?: string) => void;
+  onLaunchAgent: (agent: NewSessionAgentPreference, command?: string, extras?: { providerId?: string }) => void;
   onResumeHistory: (entry: AgentResumeHistoryEntry) => void;
   onRemoveResumeHistory: (entryId: string) => void;
   onClose: () => void;
@@ -119,8 +123,36 @@ export function NewSessionComposer({
     const command = launchCommand.trim() || defaultCommand;
     if (customCommandSelected && !command) return;
     saveCommand();
-    onLaunchAgent(launchAgent, command);
+    onLaunchAgent(launchAgent, command, { providerId: providerId || undefined });
   };
+
+  const [providers, setProviders] = useState<CcSwitchProviderInfo[]>([]);
+  const [providerId, setProviderId] = useState('');
+
+  const ccSwitchApp = ccSwitchAppForSlug(launchAgent?.slug);
+
+  // Load cc-switch providers whenever the picked agent supports per-instance
+  // overrides; prefill the remembered pick when it still exists in cc-switch.
+  useEffect(() => {
+    if (!ccSwitchApp) {
+      setProviders([]);
+      setProviderId('');
+      return;
+    }
+    let cancelled = false;
+    void getCcSwitchProviders(ccSwitchApp).then((result) => {
+      if (cancelled) return;
+      setProviders(result.available ? result.providers : []);
+      const remembered = rememberedProviders[ccSwitchApp];
+      setProviderId(remembered && result.providers.some((provider) => provider.id === remembered) ? remembered : '');
+    }).catch(() => {
+      if (!cancelled) {
+        setProviders([]);
+        setProviderId('');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [ccSwitchApp, rememberedProviders]);
 
   const uniqueDirectories = useMemo(() => [...new Set(directories.filter(Boolean))].slice(0, 5), [directories]);
   const selectedOption = customCommandSelected ? (selectedSavedCommand ? SAVED_COMMAND_PREFIX + selectedSavedCommand : '__custom__') : launchAgent?.slug ?? '__terminal__';
@@ -235,6 +267,35 @@ export function NewSessionComposer({
             <span className="truncate text-muted-foreground">{t('sidebar.currentDefaultAgent', { name: defaultName })}</span>
             <button type="button" onClick={() => onSelectAgent(launchAgent)} className="relative z-10 shrink-0 rounded-md px-2 py-1.5 font-medium text-primary transition hover:bg-primary/10">{t('sidebar.makeDefault')}</button>
           </div>
+        )}
+
+        {ccSwitchApp && providers.length > 0 && (
+          <>
+            <div className="mt-2.5 flex items-center justify-between">
+              <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">{t('sidebar.provider')}</span>
+              {providerId && <span className="text-[10px] text-muted-foreground">{t('sidebar.providerOverrideHint')}</span>}
+            </div>
+            <label className="relative mt-1 flex min-h-11 cursor-pointer items-center gap-2.5 rounded-lg border border-border/30 bg-surface px-3 text-foreground transition hover:bg-surface-2 focus-within:border-primary/50">
+              <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${providerId ? 'bg-primary' : 'bg-muted-foreground/40'}`} />
+              <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">
+                {providers.find((provider) => provider.id === providerId)?.name ?? t('sidebar.providerFollowGlobal')}
+              </span>
+              <ChevronDown size={13} className="shrink-0 text-muted-foreground" />
+              <select
+                aria-label={t('sidebar.provider')}
+                value={providerId}
+                onChange={(event) => setProviderId(event.target.value)}
+                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              >
+                <option value="">{t('sidebar.providerFollowGlobal')}</option>
+                {providers.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.isCurrent ? `${provider.name} · ${t('sidebar.providerCurrent')}` : provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
         )}
 
         {saveStatus === 'error' && <p role="alert" className="text-[10px] text-destructive">{t('sidebar.saveStartupCommandFailed')}</p>}

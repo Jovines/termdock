@@ -1410,6 +1410,8 @@ export interface PersistedTerminalClientSession {
   sessionId: string; name: string; customName?: boolean; backendSessionId: string | null;
   mode: 'shell' | 'tmux'; tmuxSessionName: string | null;
   createdAt: number; lastActivity: number; cwd?: string | null;
+  /** cc-switch provider this instance was launched with, if any. */
+  providerName?: string | null;
 }
 
 export interface TerminalClientState {
@@ -1485,7 +1487,7 @@ export async function openSessionInventoryEntry(
 
 export async function updateSessionInventoryEntry(
   frontendSessionId: string,
-  patch: { name?: string; customName?: boolean; backendSessionId?: string | null; tmuxSessionName?: string | null },
+  patch: { name?: string; customName?: boolean; backendSessionId?: string | null; tmuxSessionName?: string | null; providerName?: string | null },
 ): Promise<SessionInventory> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/session-inventory/sessions/${encodeURIComponent(frontendSessionId)}`, {
@@ -1671,6 +1673,8 @@ export interface SettingsState {
   autoRenamePromptPreference: string;
   autoRenamePromptPayloadChars: number;
   newSessionAgentSlug: string | null;
+  /** Last cc-switch provider picked per agent slug; absent slug = follow global. */
+  ccSwitchProviders: Record<string, string>;
   runningSessionButtonEnabled: boolean;
   attentionButtonEnabled: boolean;
   collaborationFloatingGroupId: string | null;
@@ -1705,7 +1709,7 @@ export function getSettings(): Promise<SettingsState> {
   return settingsRequest;
 }
 
-export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
+export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; ccSwitchProvider?: { slug: string; providerId: string | null }; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -1880,6 +1884,52 @@ export async function getAgentLaunchers(): Promise<AgentLauncherInfo[]> {
   if (!response.ok) throw new Error('Failed to detect agent launchers');
   const data = await response.json();
   return Array.isArray(data?.agents) ? data.agents : [];
+}
+
+// ---- cc-switch per-instance provider overrides ----
+
+export interface CcSwitchProviderInfo {
+  id: string;
+  name: string;
+  category: string | null;
+  isCurrent: boolean;
+}
+
+/** Provider names only; secrets never leave the server. Unavailable cc-switch
+ * (not installed, sqlite3 missing) resolves to available:false so callers can
+ * simply hide the picker. */
+export async function getCcSwitchProviders(
+  app: 'claude' | 'codex',
+): Promise<{ available: boolean; providers: CcSwitchProviderInfo[] }> {
+  try {
+    const response = await fetch(`/api/terminal/cc-switch/providers?app=${encodeURIComponent(app)}`);
+    if (!response.ok) return { available: false, providers: [] };
+    const data = await response.json();
+    return {
+      available: data?.available === true,
+      providers: Array.isArray(data?.providers) ? data.providers : [],
+    };
+  } catch {
+    return { available: false, providers: [] };
+  }
+}
+
+export async function prepareCcSwitchLaunch(payload: {
+  sessionId: string;
+  app: 'claude' | 'codex';
+  providerId: string;
+}): Promise<{ command: string; providerName: string }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/cc-switch/prepare-launch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to prepare provider launch' }));
+    throw new Error(error.error || 'Failed to prepare provider launch');
+  }
+  return response.json() as Promise<{ command: string; providerName: string }>;
 }
 
 export async function getDirectorySuggestions(query: string, signal?: AbortSignal): Promise<string[]> {

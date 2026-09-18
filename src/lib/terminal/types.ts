@@ -114,6 +114,8 @@ export interface SessionInventoryClientSession {
   // 用于冷启动 hydrate 时直接算出 tab 名，避免等 WS 轮询造成的「跳变」。
   activeProgram?: string | null;
   cwd?: string | null;
+  /** cc-switch provider this instance was launched with; absent = global config. */
+  providerName?: string | null;
 }
 
 export interface SessionInventoryTmuxSession extends TmuxSessionSummary {

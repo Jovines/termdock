@@ -15,9 +15,11 @@ import {
   closeTerminal,
   dismissTmuxRecovery,
   killTmuxSession,
+  prepareCcSwitchLaunch,
   restoreAllTmuxAgentSessions,
   sendTerminalInput,
   suspendTerminalConnectionReconnects,
+  updateSessionInventoryEntry,
 } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/settings';
@@ -78,6 +80,8 @@ interface TerminalSession {
   mode: TerminalMode;
   tmuxSessionName: string | null;
   history?: string[];
+  /** cc-switch provider this instance was launched with, if any. */
+  providerName?: string | null;
 }
 
 export interface TerminalSessionInfo {
@@ -86,6 +90,7 @@ export interface TerminalSessionInfo {
   customName: boolean;
   mode: TerminalMode;
   tmuxSessionName: string | null;
+  providerName?: string | null;
 }
 
 interface NewSessionEventDetail {
@@ -94,6 +99,11 @@ interface NewSessionEventDetail {
   cwd?: string;
   createIfEmpty?: boolean;
   command?: string;
+  /** Agent slug the command belongs to ('claude' | 'codex' when a per-instance
+   * cc-switch provider override may apply). */
+  agentSlug?: string;
+  /** cc-switch provider id picked in the composer; absent = follow global. */
+  providerId?: string;
 }
 
 interface CloseSessionEventDetail {
@@ -305,6 +315,7 @@ function toRuntimeSession(session: PersistedSession): TerminalSession {
     sessionId: session.backendSessionId,
     mode: session.mode === 'tmux' || session.mode === 'shell' ? session.mode : 'shell',
     tmuxSessionName: session.tmuxSessionName ?? null,
+    providerName: session.providerName ?? null,
   };
 }
 
@@ -1310,6 +1321,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         customName: s.customName,
         mode: s.mode,
         tmuxSessionName: s.tmuxSessionName,
+        providerName: s.providerName ?? null,
       })),
       activeSessionId,
       splitWorkspaces: splitWorkspaces.map(({ id, name, sessionIds, layout }) => ({
@@ -1532,6 +1544,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         sessionId: terminalSession.sessionId,
         mode: terminalSession.mode ?? canonical.mode,
         tmuxSessionName: terminalSession.tmuxSessionName ?? canonical.tmuxSessionName,
+        providerName: canonical.providerName ?? null,
       };
 
       setSessions((prev) => upsertRuntimeSession(prev, nextSession));
@@ -1559,8 +1572,31 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         tmuxSessionName: nextSession.tmuxSessionName,
       });
       const command = options?.command?.trim();
-      if (command) {
+      let providerName: string | null = null;
+      if (command && options?.providerId && (options.agentSlug === 'claude' || options.agentSlug === 'codex')) {
+        // Per-instance cc-switch provider override: the server materializes an
+        // isolated launch (claude --settings file / codex CODEX_HOME) without
+        // touching any global config, so already-running instances keep their
+        // own provider. Any failure falls back to the plain agent command.
+        try {
+          const prepared = await prepareCcSwitchLaunch({
+            sessionId: terminalSession.sessionId,
+            app: options.agentSlug,
+            providerId: options.providerId,
+          });
+          providerName = prepared.providerName;
+          await sendTerminalInput(terminalSession.sessionId, `${prepared.command}\r`);
+        } catch (error) {
+          console.warn('[cc-switch] prepare-launch failed, falling back to default command:', error);
+          await sendTerminalInput(terminalSession.sessionId, `${command}\r`);
+        }
+      } else if (command) {
         await sendTerminalInput(terminalSession.sessionId, `${command}\r`);
+      }
+      if (providerName) {
+        setSessions((prev) => upsertRuntimeSession(prev, { ...nextSession, providerName }));
+        void updateSessionInventoryEntry(nextSession.id, { providerName })
+          .catch((error) => console.warn('[cc-switch] failed to persist provider badge:', error));
       }
       return nextSession.id;
     } catch (error) {

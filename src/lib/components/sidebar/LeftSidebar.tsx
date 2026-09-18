@@ -57,6 +57,7 @@ import {
 } from '../../terminal/api';
 import { NewSessionComposer } from './NewSessionComposer';
 import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
+import { ccSwitchAppForSlug, useCcSwitchProviderPreference } from '../../hooks/useCcSwitchProviderPreference';
 import { Switch } from '../ui/Switch';
 import { AgentOperationsPanel } from './AgentOperationsPanel';
 
@@ -88,7 +89,7 @@ interface LeftSidebarProps {
     tuiProgress?: TuiProgressReport | null;
     gitStatus?: GitStatusReport | null;
   }>; 
-  onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => void;
+  onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string; agentSlug?: string; providerId?: string }) => void;
   recoverableTmuxSessions?: TmuxSessionSummary[];
   recoverableTmuxSessionsLoading?: boolean;
   onRefreshRecoverableTmuxSessions?: () => void;
@@ -331,6 +332,7 @@ export function LeftSidebar(
     refresh: refreshNewSessionAgents,
     selectAgent: selectNewSessionAgent,
   } = useNewSessionAgentPreference();
+  const { ccSwitchProviders, rememberProvider } = useCcSwitchProviderPreference();
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const headerMenuPanelRef = useRef<HTMLDivElement | null>(null);
   const splitLayoutMenuRef = useRef<HTMLDivElement | null>(null);
@@ -753,7 +755,13 @@ export function LeftSidebar(
   };
   const handleQuickLaunchDefaultAgent = () => {
     if (!newSessionAgent) return;
-    onNewSession({ mode: quickLaunchMode, command: newSessionAgent.command });
+    const slug = ccSwitchAppForSlug(newSessionAgent.slug);
+    onNewSession({
+      mode: quickLaunchMode,
+      command: newSessionAgent.command,
+      agentSlug: slug ?? undefined,
+      providerId: slug ? ccSwitchProviders[slug] ?? undefined : undefined,
+    });
     closeIfOverlay();
   };
 
@@ -770,11 +778,21 @@ export function LeftSidebar(
     }
   }, [attachingTmuxName, recoverableTmuxSessions]);
 
-  const handleQuickLaunchAgent = (agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference, command?: string) => {
+  const handleQuickLaunchAgent = (
+    agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference,
+    command?: string,
+    extras?: { providerId?: string },
+  ) => {
+    const slug = ccSwitchAppForSlug(agent?.slug);
+    // Persist the pick so the next composer open and the quick-launch button
+    // reuse it; an explicit "follow global" clears the memory for that agent.
+    if (slug) void rememberProvider(slug, extras?.providerId ?? null);
     onNewSession({
       ...newSessionOptions,
       cwd: newSessionOptions.cwd?.trim() || undefined,
       command: command ?? agent?.command,
+      agentSlug: slug ?? undefined,
+      providerId: slug ? extras?.providerId : undefined,
     });
     setNewSessionComposerOpen(false);
     closeIfOverlay();
@@ -2160,6 +2178,7 @@ export function LeftSidebar(
           resumeHistoryLoading={agentResumeHistoryLoading}
           resumeHistoryPendingId={agentResumeHistoryPendingId}
           resumeHistoryError={agentResumeHistoryError}
+          rememberedProviders={ccSwitchProviders}
           onRefreshAgents={() => { void refreshNewSessionAgents().catch(() => undefined); }}
           onSelectAgent={(agent) => { void selectNewSessionAgent(agent).catch(() => undefined); }}
           onLaunchAgent={handleQuickLaunchAgent}

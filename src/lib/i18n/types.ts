@@ -193,6 +193,10 @@ export type TranslationDictionary = {
     customCommand: string;
     commandPlaceholder: string;
     detectAgents: string;
+    provider: string;
+    providerFollowGlobal: string;
+    providerCurrent: string;
+    providerOverrideHint: string;
     savePreset: string;
     createAndRun: string;
     createSession: string;
