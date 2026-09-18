@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, RotateCw } from 'lucide-react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord, ChangeWalkthrough, ChangeWalkthroughAnchor } from '../../terminal/api';
 import { type DiffNavigatorFile } from './DiffFileNavigator';
@@ -38,6 +38,10 @@ interface UniversalDiffReviewProps {
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
   onClearAuditRecord?: (id: string) => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  refreshLabel?: string;
+  refreshTitle?: string;
   walkthroughs?: ChangeWalkthrough[];
   onWalkthroughNavigate?: (anchor: ChangeWalkthroughAnchor) => void;
   initialDetailScrollTop?: number;
@@ -251,6 +255,10 @@ export function UniversalDiffReview({
   insertedReferenceKey,
   copiedReferenceKey,
   onClearAuditRecord,
+  onRefresh,
+  refreshing,
+  refreshLabel,
+  refreshTitle,
   walkthroughs = [],
   onWalkthroughNavigate,
   initialDetailScrollTop,
@@ -304,6 +312,20 @@ export function UniversalDiffReview({
     </button>
   ) : null;
 
+  const refreshToggle = onRefresh ? (
+    <button
+      type="button"
+      onClick={onRefresh}
+      disabled={refreshing}
+      title={refreshTitle ?? refreshLabel}
+      aria-label={refreshTitle ?? refreshLabel}
+      className="inline-flex h-7 shrink-0 items-center gap-1 rounded-full bg-surface-2 px-2.5 text-[11px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      <RotateCw size={12} className={refreshing ? 'animate-spin' : ''} />
+      {refreshLabel && <span>{refreshLabel}</span>}
+    </button>
+  ) : null;
+
   const renderHeader = (modeToggle: React.ReactNode) => (
     <div className="px-0 py-0">
       <div className="flex items-center justify-between gap-2">
@@ -332,6 +354,7 @@ export function UniversalDiffReview({
       </div>
       <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
         {modeToggle}
+        {refreshToggle}
         {wrapToggle}
       </div>
     </div>
@@ -352,7 +375,7 @@ export function UniversalDiffReview({
     );
   }
 
-  const mobileDetailHeader = onToggleWrap ? ({ slideToList }: { slideToList: () => void }) => (
+  const mobileDetailHeader = (onToggleWrap || onRefresh) ? ({ slideToList }: { slideToList: () => void }) => (
     <div className="flex items-center justify-between gap-2">
       <button
         type="button"
@@ -362,20 +385,25 @@ export function UniversalDiffReview({
         <ArrowLeft size={14} />
         {backLabel}
       </button>
-      <button
-        type="button"
-        onClick={onToggleWrap}
-        aria-pressed={wrap}
-        title={wrapTitle}
-        className={`inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-medium transition active:scale-95 ${
-          wrap
-            ? 'bg-primary/15 text-primary'
-            : 'bg-surface-2 text-muted-foreground hover:text-foreground'
-        }`}
-      >
-        <span className="font-mono text-[12px] leading-none">Aa</span>
-        <span>{wrap ? wrapOnLabel : wrapOffLabel}</span>
-      </button>
+      <div className="flex shrink-0 items-center gap-2">
+        {refreshToggle}
+        {onToggleWrap && (
+          <button
+            type="button"
+            onClick={onToggleWrap}
+            aria-pressed={wrap}
+            title={wrapTitle}
+            className={`inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-medium transition active:scale-95 ${
+              wrap
+                ? 'bg-primary/15 text-primary'
+                : 'bg-surface-2 text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <span className="font-mono text-[12px] leading-none">Aa</span>
+            <span>{wrap ? wrapOnLabel : wrapOffLabel}</span>
+          </button>
+        )}
+      </div>
     </div>
   ) : undefined;
 

@@ -74,6 +74,12 @@ import { subscribeClientState } from '../../utils/clientStateSync';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import {
+  getNextReferenceLineRange,
+  getReferenceFloatingButtonClass,
+  hasNativeTextSelection,
+  type LineRange,
+} from './referenceSelection';
+import {
   buildFileReference,
   buildLineReference,
   buildPromptReference,
@@ -208,7 +214,6 @@ import type { ModelFeature } from './ModelPreview';
 const MARKDOWN_TABLE_SCROLL_CLASS = `${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface`;
 
 type GitActionKey = GitActionRequest['action'];
-type LineRange = { start: number; end: number };
 type DiffChangeListMode = DiffReviewMode;
 
 export function resolveRightSidebarDiffViewType(
@@ -4172,23 +4177,6 @@ function getParentPath(path: string | null): string | null {
   return parent === normalized ? null : parent;
 }
 
-function getNextReferenceLineRange(
-  current: LineRange | null,
-  startLine: number,
-  endLine: number,
-): LineRange | null {
-  const nextStart = Math.min(startLine, endLine);
-  const nextEnd = Math.max(startLine, endLine);
-  if (current?.start === nextStart && current.end === nextEnd) return null;
-  if (current && current.start === current.end) {
-    return {
-      start: Math.min(current.start, nextStart),
-      end: Math.max(current.end, nextEnd),
-    };
-  }
-  return { start: nextStart, end: nextEnd };
-}
-
 export function getNextMarkdownPreviewLineRange(
   current: LineRange | null,
   startLine: number,
@@ -4213,17 +4201,6 @@ function getReferenceSelectionRailBarClass(selected: boolean, hover: 'group' | '
     ? 'group-hover:bg-[var(--muted-foreground)]'
     : hover === 'self' ? 'hover:bg-[var(--muted-foreground)]' : '';
   return `my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-primary' : `bg-[var(--border-strong)] ${hoverClass}`}`;
-}
-
-function getReferenceFloatingButtonClass(isMobile: boolean, completed: boolean): string {
-  const sizeClass = isMobile ? 'h-9 px-4 text-[12px]' : 'h-7 px-3 text-[11px]';
-  const toneClass = completed
-    ? 'bg-surface-elevated text-foreground ring-border-strong/40 hover:bg-surface-2'
-    : 'bg-primary text-primary-foreground ring-primary/30 hover:bg-primary/90';
-  // 局部刻度 z-30（面板内部悬浮钮铁律 < 40）：高于 sticky 表头(z-10)，
-  // 但任何全屏浮层（lightbox / modal / drawer）打开时必然盖住它。
-  // 曾经用 z-popover(200) → lightbox(110) 打开后按钮还浮在图上面。
-  return `pointer-events-auto absolute z-30 inline-flex items-center gap-1 rounded-full font-semibold shadow-lg ring-1 transition active:scale-95 ${sizeClass} ${toneClass}`;
 }
 
 function toChangedFileMap(files: GitChangedFile[]): Map<string, GitChangedFile> {
@@ -4417,12 +4394,6 @@ function isGitBundleCancellation(bundle: GitBundleResponse): boolean {
 
 function isConfirmedNonGitContext(context: GitContext | null): boolean {
   return context?.available === false && context.code === 'NOT_GIT_REPOSITORY';
-}
-
-function hasNativeTextSelection(): boolean {
-  if (typeof window === 'undefined') return false;
-  const selection = window.getSelection();
-  return Boolean(selection && !selection.isCollapsed && selection.toString().trim());
 }
 
 function isInteractiveTextTarget(target: EventTarget | null): boolean {
@@ -7882,6 +7853,13 @@ export function RightSidebar(
     }
   }, [contextDraftEnabled, insertPathReference, isMobile, onClose, t]);
 
+  /** 投屏面板的截图/录屏产物：与临时图片上传同一条链路，只是文件已经在内存里。 */
+  const handleMirrorCaptureInsert = useCallback(async (file: File) => {
+    await uploadTemporaryImageAndInsertReference(file, uploadFiles, (uploadedPath) => {
+      insertPathReference(uploadedPath, `path:${uploadedPath}`);
+    });
+  }, [insertPathReference]);
+
   const insertReferenceText = useCallback((text: string, key: string) => {
     if (!text) return;
     // 多行代码块（有 \n）插入末尾加换行，单行路径不加
@@ -9505,13 +9483,16 @@ export function RightSidebar(
     if (!push) onClose();
   }, [branchAuditPromptText, insertContextText, onClose, push, t]);
 
-  const openBranchAuditPreviewDiff = useCallback(async () => {
+  const openBranchAuditPreviewDiff = useCallback(async (options: { refresh?: boolean } = {}) => {
+    const isRefresh = options.refresh === true;
     if (!rootPath || branchAuditReadyRepos.length === 0) return;
     const expectedRootPath = rootPath;
     setBranchAuditPreviewLoading(true);
     setBranchAuditPreviewError(null);
-    setBranchAuditPreviewDiff(null);
-    setCommitDiff(null);
+    if (!isRefresh) {
+      setBranchAuditPreviewDiff(null);
+      setCommitDiff(null);
+    }
     try {
       const results = await Promise.all(branchAuditReadyRepos.map(async (repo) => {
         const base = branchAuditRepoBaseBranches[repo.root]?.trim();
@@ -9561,7 +9542,14 @@ export function RightSidebar(
         truncated: results.some((result) => result.truncated),
       } satisfies BranchDiffResponse;
       if ((merged.hunks ?? []).length === 0) {
-        setBranchAuditPreviewError(t('rightSidebar.branchAuditDiffEmpty'));
+        if (isRefresh) {
+          // 刷新后已无差异：清掉旧快照，让详情走空状态，而不是继续显示过期内容。
+          setBranchAuditPreviewDiff(merged);
+          setSelectedBranchAuditHistoryKey(null);
+          setSelectedBranchAuditFileKey(null);
+        } else {
+          setBranchAuditPreviewError(t('rightSidebar.branchAuditDiffEmpty'));
+        }
         return;
       }
       const createdAt = Date.now();
@@ -9581,11 +9569,20 @@ export function RightSidebar(
         { key: entryKey, diff: merged, repoLabel, createdAt },
         ...current.filter((entry) => entry.key !== entryKey),
       ].slice(0, 8));
-      setBranchAuditPreviewScrollTops((current) => (
-        current[entryKey] === undefined ? current : { ...current, [entryKey]: 0 }
-      ));
+      if (!isRefresh) {
+        setBranchAuditPreviewScrollTops((current) => (
+          current[entryKey] === undefined ? current : { ...current, [entryKey]: 0 }
+        ));
+      }
       setSelectedBranchAuditHistoryKey(entryKey);
-      setSelectedBranchAuditFileKey(merged.hunks?.[0] ? `${merged.hunks[0].filePath}\u0000${merged.hunks[0].hunkHeader}\u0000${merged.hunks[0].hunkIndex}` : null);
+      setSelectedBranchAuditFileKey((current) => {
+        const first = merged.hunks?.[0];
+        const fallback = first ? `${first.filePath}\u0000${first.hunkHeader}\u0000${first.hunkIndex}` : null;
+        if (isRefresh && current && (merged.hunks ?? []).some((hunk) => (
+          `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}` === current
+        ))) return current;
+        return fallback;
+      });
       setBranchAuditDetailOpen(true);
     } catch (error) {
       if (!isCurrentSidebarRoot(expectedRootPath) || isAbortError(error)) return;
@@ -11556,6 +11553,10 @@ export function RightSidebar(
                 insertedReferenceKey={insertedReferenceKey}
                 copiedReferenceKey={copiedReferenceKey}
                 onClearAuditRecord={handleClearAuditRecord}
+                onRefresh={() => void openBranchAuditPreviewDiff({ refresh: true })}
+                refreshing={branchAuditPreviewLoading}
+                refreshLabel={t('rightSidebar.branchAuditRefreshDiff')}
+                refreshTitle={t('rightSidebar.branchAuditRefreshDiff')}
                 walkthroughs={selectedBranchWalkthroughs}
                 onWalkthroughNavigate={handleBranchWalkthroughNavigate}
                 initialDetailScrollTop={branchAuditPreviewDiff && selectedBranchAuditHistoryKey ? branchAuditPreviewScrollTops[selectedBranchAuditHistoryKey] : undefined}
@@ -12070,6 +12071,7 @@ export function RightSidebar(
             <AndroidMirrorView
               sessionId={sessionId ?? null}
               onInsertPrompt={(text) => insertContextText('android-deps', text)}
+              onInsertFile={handleMirrorCaptureInsert}
             />
           )}
         </Pane>

@@ -588,6 +588,7 @@ export function DiffLab() {
   const [splitViewAvailable, setSplitViewAvailable] = useState(() => canUseSplitDiffView());
   const [inlineMode, setInlineMode] = useState<DiffInlineMode>(() => readInitialInlineMode());
   const [wrap, setWrap] = useState(() => readInitialWrap());
+  const [insertedReference, setInsertedReference] = useState<{ label: string; text: string } | null>(null);
   const fixture = DIFF_FIXTURES[fixtureKey];
   const fixtureOptions = useMemo(() => Object.entries(DIFF_FIXTURES), []);
   const effectiveViewType: DiffViewType = viewType === 'split' && !splitViewAvailable ? 'unified' : viewType;
@@ -695,6 +696,7 @@ export function DiffLab() {
         </header>
         <main className="min-h-0 flex-1 overflow-auto rounded-lg border border-border/20 bg-surface">
           <DiffViewer
+            onInsertDiffReference={(label, text) => setInsertedReference({ label, text })}
             filePath={fixture.path}
             repoRoot="/tmp/termdock-diff-lab"
             changedFile={{
@@ -720,6 +722,20 @@ export function DiffLab() {
             inlineMode={inlineMode}
           />
         </main>
+        <section className="mt-3 rounded-lg border border-border/20 bg-surface p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Inserted reference
+          </div>
+          <div className="mt-1 font-mono text-[11px] text-foreground" data-diff-lab-inserted-label>
+            {insertedReference?.label ?? ''}
+          </div>
+          <pre
+            className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-border/20 bg-surface-2 p-2 font-mono text-[11px] text-foreground"
+            data-diff-lab-inserted
+          >
+            {insertedReference?.text ?? ''}
+          </pre>
+        </section>
       </div>
     </div>
   );

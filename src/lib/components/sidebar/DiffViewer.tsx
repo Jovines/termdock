@@ -1,13 +1,27 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ChevronDown as RiChevronDown, ChevronUp as RiChevronUp, GitCompare as RiGitCompare, Loader2 as RiLoader } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { ChevronDown as RiChevronDown, ChevronUp as RiChevronUp, GitCompare as RiGitCompare, Link as RiLink, Loader2 as RiLoader } from 'lucide-react';
 import { Diff, Hunk, getChangeKey, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { cancelIoSlot, getFileDiff, getGitBlobContent, isPreviewableImagePath, readImagePreviewBlob, type ChangeAuditRecord, type DiffHunkApplyMode, type FileDiffResponse, type GitChangedFile, type GitDiffOptions } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
+import { getReferenceFloatingButtonClass, hasNativeTextSelection } from './referenceSelection';
 import { readCache, writeCache } from '../../utils/localStorageCache';
 import { findMovedLineCandidates, getChangedLineDisplayBlocks } from './inlineDiff';
+import {
+  buildDiffHunkRowModel,
+  buildDiffLineReferenceKey,
+  collectSelectedChanges,
+  formatDiffReference,
+  formatDiffReferenceChange,
+  formatDiffSelectionLabel,
+  formatLineSelectionReference,
+  isRowInDiffRange,
+  resolveDiffRowRange,
+  type DiffHunkRowModel,
+  type DiffRowRange,
+} from './diffLineReference';
 import { parseDiffInWorker, type DiffWorkerResult } from './diffWorkerClient';
 import { DiffSplitScrollArea } from './DiffSplitScrollArea';
 import { resolveLanguage } from '../../utils/syntaxHighlight';
@@ -572,67 +586,6 @@ function rewriteDiffReferencePaths(diffText: string, files: FileData[], options:
   }).join('\n');
 }
 
-interface DiffReferenceHunkMeta {
-  filePath: string;
-  hunkIndex: number;
-  hunk: HunkData;
-}
-
-interface DiffReferenceMeta {
-  filePath?: string | null;
-  hunks?: DiffReferenceHunkMeta[];
-}
-
-type DiffReferenceChange = HunkData['changes'][number];
-
-function formatLineNumberList(lineNumbers: number[]): string {
-  if (lineNumbers.length === 0) return 'none';
-  const ranges: string[] = [];
-  let rangeStart = lineNumbers[0];
-  let previous = lineNumbers[0];
-  for (const lineNumber of lineNumbers.slice(1)) {
-    if (lineNumber === previous + 1) {
-      previous = lineNumber;
-      continue;
-    }
-    ranges.push(rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`);
-    rangeStart = lineNumber;
-    previous = lineNumber;
-  }
-  ranges.push(rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`);
-  return ranges.join(', ');
-}
-
-function getChangedLineNumbers(hunk: HunkData): { oldLines: number[]; newLines: number[] } {
-  const oldLines: number[] = [];
-  const newLines: number[] = [];
-  for (const change of hunk.changes) {
-    if (change.type === 'delete') oldLines.push(change.lineNumber);
-    if (change.type === 'insert') newLines.push(change.lineNumber);
-  }
-  return { oldLines, newLines };
-}
-
-function formatHunkReferenceLine(hunkMeta: DiffReferenceHunkMeta): string {
-  const changedLines = getChangedLineNumbers(hunkMeta.hunk);
-  return `# ${hunkMeta.filePath}: hunk ${hunkMeta.hunkIndex + 1}, old lines ${formatLineNumberList(changedLines.oldLines)} -> new lines ${formatLineNumberList(changedLines.newLines)}`;
-}
-
-function formatDiffReferenceChange(change: DiffReferenceChange): string {
-  if (change.type === 'insert') return change.content.startsWith('+') ? change.content : `+${change.content}`;
-  if (change.type === 'delete') return change.content.startsWith('-') ? change.content : `-${change.content}`;
-  return change.content.startsWith(' ') ? change.content : ` ${change.content}`;
-}
-
-function formatDiffReference(diffText: string, meta?: DiffReferenceMeta): string {
-  const trimmedDiff = diffText.trimEnd();
-  if (!meta) return `\`\`\`diff\n${trimmedDiff}\n\`\`\`\n`;
-  const header = [
-    ...(meta.hunks ?? []).map(formatHunkReferenceLine),
-  ].filter((line): line is string => Boolean(line));
-  return `\`\`\`diff\n${header.length > 0 ? `${header.join('\n')}\n` : ''}${trimmedDiff}\n\`\`\`\n`;
-}
-
 interface HunkSection {
   index: number;
   changes: HunkData['changes'];
@@ -761,6 +714,22 @@ function alignAdjacentChangesForSplitView(hunk: HunkData): HunkData {
   return { ...hunk, changes };
 }
 
+
+/** Line-level reference selection: a row range inside one hunk of one file. */
+interface DiffLineSelection extends DiffRowRange {
+  fileKey: string;
+  hunkIndex: number;
+}
+
+/**
+ * Identity for "the hunk a diff cell was clicked in". Carried on the hunk
+ * wrapper as `data-diff-hunk-id` so the stable click handler can resolve the
+ * hunk from the event target without being rebuilt on every render.
+ * The `\0` separator cannot appear in a revision or a path.
+ */
+function buildDiffHunkId(fileKey: string, hunkIndex: number): string {
+  return `${fileKey}\u0000${hunkIndex}`;
+}
 
 function buildAuditLookupKey(repoRoot: string | null | undefined, filePath: string): string {
   return `${repoRoot ?? ''}\u0000${filePath}`;
@@ -1569,8 +1538,17 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       movedNewLines: Set<number>;
       importOnlyHunk: boolean;
       displayHunk: (typeof files)[number]['hunks'][number];
+      /** Rendered-row model of `displayHunk`; drives line-range selection. */
+      rowModel: DiffHunkRowModel;
     }>();
+    // The click handler resolves a hunk from the DOM (file anchor + hunk
+    // index), so the row models are also indexed the same way.
+    const byHunkId = new Map<string, { fileKey: string; hunkIndex: number; rowModel: DiffHunkRowModel }>();
     for (const file of files) {
+      const fileKey = `${file.oldRevision}-${file.newRevision}-${file.newPath}`;
+      const displayPath = file.newPath && !isDiffNullPath(file.newPath)
+        ? file.newPath
+        : file.oldPath && !isDiffNullPath(file.oldPath) ? file.oldPath : 'unknown file';
       const fileDeletedChanges = lightweight ? [] : file.hunks.flatMap((hunk) => hunk.changes
         .filter((change) => change.type === 'delete')
         .map((change) => ({ content: change.content, lineNumber: change.lineNumber })));
@@ -1578,7 +1556,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         .filter((change) => change.type === 'insert')
         .map((change) => ({ content: change.content, lineNumber: change.lineNumber })));
       const fileMovedCandidates = lightweight ? [] : findMovedLineCandidates(fileDeletedChanges, fileInsertedChanges);
-      for (const hunk of file.hunks) {
+      for (const [hunkIndex, hunk] of file.hunks.entries()) {
         const oldLines = new Set(hunk.changes
           .filter((change) => change.type === 'delete')
           .map((change) => change.lineNumber));
@@ -1588,18 +1566,23 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         const movedCandidates = fileMovedCandidates.filter((candidate) => (
           oldLines.has(candidate.oldLineNumber) || newLines.has(candidate.newLineNumber)
         ));
+        const displayHunk = viewType === 'split' ? alignAdjacentChangesForSplitView(hunk) : hunk;
+        const rowModel = buildDiffHunkRowModel(displayHunk, viewType);
         map.set(hunk, {
           hunkSections: lightweight ? [] : buildHunkSections(hunk),
           movedCandidates,
           movedOldLines: new Set(movedCandidates.map((candidate) => candidate.oldLineNumber)),
           movedNewLines: new Set(movedCandidates.map((candidate) => candidate.newLineNumber)),
           importOnlyHunk: isImportOnlyHunk(hunk),
-          displayHunk: viewType === 'split' ? alignAdjacentChangesForSplitView(hunk) : hunk,
+          displayHunk,
+          rowModel,
         });
+        byHunkId.set(buildDiffHunkId(displayPath, hunkIndex), { fileKey, hunkIndex, rowModel });
       }
     }
-    return map;
+    return { byHunk: map, byHunkId };
   }, [files, lightweight, viewType]);
+  const hunkRowModelById = hunkDerivedMap.byHunkId;
 
   const totalHunks = useMemo(() => files.reduce((sum, file) => sum + file.hunks.length, 0), [files]);
   const rawFileDiffs = useMemo(() => splitRawFileDiffs(effectiveDiffContent ?? ''), [effectiveDiffContent]);
@@ -1608,6 +1591,79 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   useEffect(() => {
     setActiveHunkIndex(null);
   }, [files]);
+
+  // Line-level reference selection inside one hunk (tap a line, tap another to
+  // extend). Mirrors the file preview's tap-to-select; only active where an
+  // insert sink exists, so read-only viewers keep the old behaviour.
+  const lineSelectionEnabled = Boolean(onInsertDiffReference);
+  const [lineSelection, setLineSelection] = useState<DiffLineSelection | null>(null);
+  const [lineSelectionPillTop, setLineSelectionPillTop] = useState<number | null>(null);
+  // Only the pill's touch sizing depends on this; re-measuring on resize is not
+  // worth a listener here.
+  const lineSelectionIsMobile = typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(max-width: 767px)').matches;
+
+  // New diff data reshuffles rows; a stale range would point at unrelated lines.
+  useEffect(() => {
+    setLineSelection(null);
+  }, [files, viewType, reloadKey, lineSelectionEnabled]);
+
+  // The pill hangs off the topmost selected row. Row and card rects move
+  // together with the panel's scrolling, so the offset stays valid without a
+  // scroll listener; a row scrolled out of the viewport hides the pill rather
+  // than leaving a button floating over unrelated lines.
+  useLayoutEffect(() => {
+    if (!lineSelection) {
+      setLineSelectionPillTop(null);
+      return;
+    }
+    const row = containerRef.current?.querySelector<HTMLElement>('.diff-line-ref-selected');
+    const card = row?.closest<HTMLElement>('[data-diff-file-anchor]');
+    if (!row || !card) {
+      setLineSelectionPillTop(null);
+      return;
+    }
+    const rowRect = row.getBoundingClientRect();
+    const viewportHeight = typeof window === 'undefined' ? 0 : window.innerHeight;
+    if (viewportHeight > 0 && (rowRect.bottom < 0 || rowRect.top > viewportHeight)) {
+      setLineSelectionPillTop(null);
+      return;
+    }
+    setLineSelectionPillTop(rowRect.top - card.getBoundingClientRect().top + rowRect.height / 2);
+  }, [lineSelection, files, viewType, wrap, expandedImportHunks]);
+
+  const handleDiffLineSelect = useCallback((
+    _args: { side?: 'old' | 'new'; change: unknown },
+    event: ReactMouseEvent<HTMLElement>,
+  ) => {
+    if (!lineSelectionEnabled || event.button !== 0) return;
+    // A live text selection means the user is selecting text, not a line.
+    if (hasNativeTextSelection()) return;
+    const cell = event.currentTarget;
+    const fileAnchor = cell.closest<HTMLElement>('[data-diff-file-anchor]')?.dataset.diffFileAnchor;
+    const hunkIndex = Number(cell.closest<HTMLElement>('[data-diff-hunk-index]')?.dataset.diffHunkIndex);
+    if (!fileAnchor || !Number.isInteger(hunkIndex)) return;
+    const hunkId = buildDiffHunkId(fileAnchor, hunkIndex);
+    const entry = hunkRowModelById.get(hunkId);
+    if (!entry) return;
+    // Split rows pair a deletion with the insertion beside it: both cells
+    // resolve to the same row, and either half of a one-sided row falls back
+    // to the cell next to it.
+    const changeKey = cell.dataset.changeKey
+      ?? cell.parentElement?.querySelector<HTMLElement>('[data-change-key]')?.dataset.changeKey;
+    const rowIndex = changeKey ? entry.rowModel.rowIndexByChangeKey.get(changeKey) : undefined;
+    if (rowIndex === undefined) return;
+    setLineSelection((current) => {
+      const next = resolveDiffRowRange(current, hunkId, rowIndex);
+      return next ? { ...next, fileKey: entry.fileKey, hunkIndex } : null;
+    });
+  }, [hunkRowModelById, lineSelectionEnabled]);
+
+  const diffLineEvents = useMemo(
+    () => (lineSelectionEnabled ? { onClick: handleDiffLineSelect } : undefined),
+    [handleDiffLineSelect, lineSelectionEnabled],
+  );
 
   const renderFileDiffs = (hideSingleFileHeader: boolean) => {
     // Flat index across all files' hunks, matching the DOM order of
@@ -1648,6 +1704,31 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         });
         const fileDiffReferenceKey = `diff:file:${displayPath}`;
         const fileDiffReferenceActive = insertedReferenceKey === fileDiffReferenceKey || copiedReferenceKey === fileDiffReferenceKey;
+        // Line-level reference for this file, if the selection lives here. Only
+        // the selected lines go into the text, in git order (deletions first).
+        const lineReference = (() => {
+          if (!lineSelection || lineSelection.fileKey !== key) return null;
+          const hunk = file.hunks[lineSelection.hunkIndex];
+          const rowModel = hunk ? hunkDerivedMap.byHunk.get(hunk)?.rowModel : undefined;
+          if (!hunk || !rowModel) return null;
+          const selectedChanges = collectSelectedChanges(hunk, rowModel, lineSelection);
+          const lineLabel = formatDiffSelectionLabel(selectedChanges);
+          if (selectedChanges.length === 0 || !lineLabel) return null;
+          const referenceKey = buildDiffLineReferenceKey(displayPath, lineSelection.hunkIndex, lineSelection);
+          return {
+            lineLabel,
+            referenceKey,
+            text: formatLineSelectionReference(
+              referenceDisplayPath,
+              lineSelection.hunkIndex,
+              hunk.content,
+              `diff --git ${formatDiffEndpoint('a', referenceOldPath)} ${formatDiffEndpoint('b', referenceNewPath)}`,
+              selectedChanges,
+            ),
+          };
+        })();
+        const lineReferenceInserted = Boolean(lineReference && insertedReferenceKey === lineReference.referenceKey);
+        const lineReferenceCopied = Boolean(lineReference && copiedReferenceKey === lineReference.referenceKey);
         const diffGutterStyle = { '--termdock-diff-gutter-width': `${getDiffGutterWidthCh(file.hunks)}ch` } as React.CSSProperties;
         return (
         // Keep a stable file anchor on each parsed diff block. It is useful for
@@ -1656,7 +1737,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         <div
           key={key}
           data-diff-file-anchor={displayPath}
-          className={embedded ? 'overflow-hidden bg-surface' : 'mt-3 border border-border/20 bg-surface'}
+          className={embedded ? 'relative overflow-hidden bg-surface' : 'relative mt-3 border border-border/20 bg-surface'}
           style={diffGutterStyle}
         >
           {showFileHeader && (
@@ -1725,7 +1806,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                       ? hunkActionError.message
                       : null;
                     const importCollapseKey = `${displayPath}\0${index}\0${hunk.content}`;
-                    const derived = hunkDerivedMap.get(hunk);
+                    const derived = hunkDerivedMap.byHunk.get(hunk);
+                    const hunkId = buildDiffHunkId(displayPath, index);
                     const hunkSections = derived?.hunkSections ?? [];
                     const movedCandidates = derived?.movedCandidates ?? [];
                     const importOnlyHunk = derived?.importOnlyHunk ?? false;
@@ -1733,6 +1815,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const movedOldLines = derived?.movedOldLines ?? new Set<number>();
                     const movedNewLines = derived?.movedNewLines ?? new Set<number>();
                     const displayHunk = derived?.displayHunk ?? hunk;
+                    const rowModel = derived?.rowModel;
                     const sectionWidgets = hunkSections.reduce<Record<string, ReactNode>>((widgets, section) => {
                       const sectionFingerprint = buildSectionFingerprint(section);
                       const sectionAudit = getSectionAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint, section.index, sectionFingerprint);
@@ -1773,7 +1856,13 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                                 ? 'border-primary/20 bg-primary/10 text-foreground'
                                 : 'border-[rgb(var(--warning-rgb)_/_0.26)] bg-[rgb(var(--warning-rgb)_/_0.12)] text-muted-foreground'
                             }`
-                            : 'mx-2 my-0.5 flex min-w-0 justify-end text-[10px] leading-none'
+                            // No audit record: the row collapses to a zero-height
+                            // anchor. It is still the scroll target for walkthrough
+                            // nodes pointing at this section (`scrollDiffAnchorIntoView`
+                            // matches on data-diff-section-*), so it stays in the DOM
+                            // — only its "insert this section" button is gone now that
+                            // line-level selection covers the same span.
+                            : 'mx-2 my-0 flex min-w-0 justify-end text-[10px] leading-none'
                           }
                         >
                           {auditRecord ? (
@@ -1798,7 +1887,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                               )}
                               <div className="termdock-diff-audit-explanation min-w-0">{auditRecord.explanation}</div>
                             </>
-                          ) : sectionButton}
+                          ) : null}
                         </div>
                       );
                       return widgets;
@@ -1812,7 +1901,14 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                           ? movedOldLines.has(lineNumber)
                           : change?.type === 'insert' && movedNewLines.has(lineNumber);
                       });
-                      return moved ? `${defaultClassName} diff-line-moved` : defaultClassName;
+                      // Both cells of a split row are one selectable unit, so the
+                      // row index is looked up from whichever change it renders.
+                      const rowChange = changes.find((change) => Boolean(change));
+                      const rowIndex = rowChange === undefined
+                        ? undefined
+                        : rowModel?.rowIndexByChangeKey.get(getChangeKey(rowChange));
+                      const selected = rowIndex !== undefined && isRowInDiffRange(lineSelection, hunkId, rowIndex);
+                      return `${defaultClassName}${moved ? ' diff-line-moved' : ''}${selected ? ' diff-line-ref-selected' : ''}`;
                     };
                     return (
                       <div
@@ -1955,6 +2051,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                             tokens={fileTokens.get(key)}
                             generateLineClassName={generateLineClassName}
                             widgets={sectionWidgets}
+                            codeEvents={diffLineEvents}
+                            gutterEvents={diffLineEvents}
                           >
                             {(hunks) => hunks.map((singleHunk) => <Hunk key={singleHunk.content} hunk={singleHunk} />)}
                           </Diff>
@@ -1969,6 +2067,25 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                 )}
               </div>
             </DiffSplitScrollArea>
+          )}
+          {/* Floating insert button — sits outside the horizontal scroller so
+              panning a wide split diff can't drag it off the selected line. */}
+          {lineReference && lineSelectionPillTop !== null && onInsertDiffReference && (
+            <button
+              type="button"
+              onClick={() => onInsertDiffReference(`${pathParts.name} ${lineReference.lineLabel}`, lineReference.text, lineReference.referenceKey)}
+              {...getReferenceLongPressHandlers(lineReference.text, lineReference.referenceKey)}
+              style={{ top: lineSelectionPillTop }}
+              className={`${getReferenceFloatingButtonClass(lineSelectionIsMobile, lineReferenceInserted || lineReferenceCopied)} right-2`}
+              title={t('diffViewer.insertLineDiff')}
+            >
+              <RiLink size={lineSelectionIsMobile ? 13 : 11} />
+              {lineReferenceCopied
+                ? t('rightSidebar.copied')
+                : lineReferenceInserted
+                  ? t('rightSidebar.inserted')
+                  : t('rightSidebar.insertLineRef', { lineLabel: lineReference.lineLabel })}
+            </button>
           )}
         </div>
         );

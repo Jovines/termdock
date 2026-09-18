@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { parseDiff } from 'react-diff-view';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DIFF_FIXTURES, DiffLab } from './DiffLab';
@@ -436,5 +436,159 @@ describe('DiffLab regression fixtures', () => {
     expect(container.querySelector('[data-diff-lab]')?.getAttribute('data-diff-lab-view')).toBe('split');
     expect(container.querySelector('[data-diff-lab]')?.getAttribute('data-diff-lab-inline')).toBe('none');
     expect(container.querySelector('[data-diff-lab]')?.getAttribute('data-diff-lab-wrap')).toBe('off');
+  });
+});
+
+// unrelatedReplacement parses to one hunk of N1, D2, I2, N3, N4 — the smallest
+// fixture that exercises both the unified rows (D2 and I2 apart) and the split
+// row (D2 + I2 paired).
+describe('DiffLab line-level insert references', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn((query: string) => ({
+        matches: query.includes('min-width'),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    window.history.replaceState(null, '', '/');
+    vi.restoreAllMocks();
+  });
+
+  const pill = (container: HTMLElement) => container.querySelector<HTMLButtonElement>('button.right-2');
+  const selectedRows = (container: HTMLElement) => container.querySelectorAll('.diff-line-ref-selected');
+  const insertedText = (container: HTMLElement) => container.querySelector('[data-diff-lab-inserted]')?.textContent ?? '';
+  const insertedLabel = (container: HTMLElement) => container.querySelector('[data-diff-lab-inserted-label]')?.textContent ?? '';
+  const codeCells = (container: HTMLElement, kind: 'delete' | 'insert') => (
+    Array.from(container.querySelectorAll<HTMLElement>(`.diff-code-${kind}`))
+  );
+
+  async function renderFixture(view: 'unified' | 'split') {
+    const rendered = renderLab(`?diff-lab=1&fixture=unrelatedReplacement&view=${view}&inline=none&wrap=on`);
+    await waitFor(() => expect(rendered.container.querySelectorAll('.diff-code-delete').length).toBeGreaterThan(0));
+    return rendered;
+  }
+
+  it('has no insert affordance until a line is tapped', async () => {
+    const { container } = await renderFixture('unified');
+
+    expect(pill(container)).toBeNull();
+    expect(selectedRows(container)).toHaveLength(0);
+  });
+
+  it('no longer offers a per-section insert button in the diff stream', async () => {
+    const { container } = await renderFixture('unified');
+
+    // Line-level selection replaced the standalone "insert this section"
+    // button; the section row survives only as a walkthrough scroll anchor.
+    expect(screen.queryByTitle('Insert this hunk section')).toBeNull();
+    expect(container.querySelectorAll('.diff-hunk-meta-row button').length).toBeGreaterThan(0);
+  });
+
+  it('selects a tapped line, then inserts it as a diff reference from the pill', async () => {
+    const { container } = await renderFixture('unified');
+
+    fireEvent.click(codeCells(container, 'delete')[0]);
+    await waitFor(() => expect(pill(container)).toBeTruthy());
+    expect(selectedRows(container)).toHaveLength(1);
+    expect(pill(container)?.textContent).toContain('L2');
+
+    fireEvent.click(pill(container) as HTMLButtonElement);
+    await waitFor(() => expect(insertedText(container)).not.toBe(''));
+    expect(insertedLabel(container)).toBe('UnrelatedReplacement.ts L2');
+    // Same shape as the hunk reference, but only the tapped line.
+    expect(insertedText(container)).toBe([
+      '```diff',
+      '# /tmp/termdock-diff-lab/UnrelatedReplacement.ts: hunk 1, old lines 2 -> new lines none',
+      'diff --git /tmp/termdock-diff-lab/UnrelatedReplacement.ts /tmp/termdock-diff-lab/UnrelatedReplacement.ts',
+      '@@ -1,5 +1,5 @@',
+      '-  const retries = calculateRetryBudget(request);',
+      '```',
+      '',
+    ].join('\n'));
+  });
+
+  it('clears the selection when the very same line is tapped again', async () => {
+    const { container } = await renderFixture('unified');
+
+    fireEvent.click(codeCells(container, 'delete')[0]);
+    await waitFor(() => expect(pill(container)).toBeTruthy());
+
+    fireEvent.click(codeCells(container, 'delete')[0]);
+    await waitFor(() => expect(pill(container)).toBeNull());
+    expect(selectedRows(container)).toHaveLength(0);
+  });
+
+  it('extends a tapped line to a range and inserts every selected line', async () => {
+    const { container } = await renderFixture('unified');
+
+    // Unified rows: N1 | D2 | I2 | N3 | N4 — two taps select two rows.
+    fireEvent.click(codeCells(container, 'delete')[0]);
+    await waitFor(() => expect(selectedRows(container)).toHaveLength(1));
+    fireEvent.click(codeCells(container, 'insert')[0]);
+
+    await waitFor(() => expect(selectedRows(container)).toHaveLength(2));
+    expect(pill(container)?.textContent).toContain('L2');
+
+    fireEvent.click(pill(container) as HTMLButtonElement);
+    await waitFor(() => expect(insertedText(container)).not.toBe(''));
+    expect(insertedText(container)).toBe([
+      '```diff',
+      '# /tmp/termdock-diff-lab/UnrelatedReplacement.ts: hunk 1, old lines 2 -> new lines 2',
+      'diff --git /tmp/termdock-diff-lab/UnrelatedReplacement.ts /tmp/termdock-diff-lab/UnrelatedReplacement.ts',
+      '@@ -1,5 +1,5 @@',
+      '-  const retries = calculateRetryBudget(request);',
+      '+  notifyObservers(session.status);',
+      '```',
+      '',
+    ].join('\n'));
+  });
+
+  it('treats the two halves of a split replacement row as one selectable line', async () => {
+    const { container } = await renderFixture('split');
+
+    fireEvent.click(codeCells(container, 'delete')[0]);
+    await waitFor(() => expect(pill(container)).toBeTruthy());
+    expect(selectedRows(container)).toHaveLength(1);
+    expect(pill(container)?.textContent).toContain('L2');
+
+    // The paired insertion is the same rendered row, so this clears instead of
+    // extending — the rule that kept "tap a line, tap its partner" from
+    // producing a phantom two-line reference.
+    fireEvent.click(codeCells(container, 'insert')[0]);
+    await waitFor(() => expect(pill(container)).toBeNull());
+    expect(selectedRows(container)).toHaveLength(0);
+  });
+
+  it('labels a context-only pick from its own line numbers', async () => {
+    const { container } = await renderFixture('unified');
+
+    fireEvent.click(container.querySelectorAll<HTMLElement>('.diff-code-normal')[0]);
+    await waitFor(() => expect(pill(container)).toBeTruthy());
+    expect(pill(container)?.textContent).toContain('L1');
+
+    fireEvent.click(pill(container) as HTMLButtonElement);
+    await waitFor(() => expect(insertedText(container)).not.toBe(''));
+    // Context rows carry no changed lines, so the header falls back to the
+    // context line numbers instead of reading "none -> none".
+    expect(insertedText(container)).toBe([
+      '```diff',
+      '# /tmp/termdock-diff-lab/UnrelatedReplacement.ts: hunk 1, old lines 1 -> new lines 1',
+      'diff --git /tmp/termdock-diff-lab/UnrelatedReplacement.ts /tmp/termdock-diff-lab/UnrelatedReplacement.ts',
+      '@@ -1,5 +1,5 @@',
+      ' export function updateSession(request: Request) {',
+      '```',
+      '',
+    ].join('\n'));
   });
 });

@@ -19,6 +19,7 @@ const apiMocks = vi.hoisted(() => ({
   listCollaborationMessages: vi.fn().mockResolvedValue({ messages: [] }),
   searchTerminalSessions: vi.fn().mockResolvedValue({ results: [] }),
   saveCollaborationGroup: vi.fn(),
+  removeCollaborationGroup: vi.fn(),
   sendCollaborationMessage: vi.fn(),
   spawnCollaborationAgent: vi.fn(),
   setAgentAutomationEnabled: vi.fn().mockResolvedValue({ automation: {} }),
@@ -42,7 +43,7 @@ vi.mock('../../terminal/api', () => ({
   listCollaborationMessages: apiMocks.listCollaborationMessages,
   prepareAgentResumeHistory: vi.fn(),
   removeAgentAutomation: vi.fn(),
-  removeCollaborationGroup: vi.fn(),
+  removeCollaborationGroup: apiMocks.removeCollaborationGroup,
   runAgentAutomation: vi.fn(),
   saveAgentAutomation: vi.fn(),
   saveCollaborationGroup: apiMocks.saveCollaborationGroup,
@@ -63,6 +64,7 @@ afterEach(() => {
   apiMocks.listCollaborationGroups.mockReset().mockResolvedValue({ groups: [], sessions: [] });
   apiMocks.searchTerminalSessions.mockReset().mockResolvedValue({ results: [] });
   apiMocks.saveCollaborationGroup.mockReset();
+  apiMocks.removeCollaborationGroup.mockReset();
   apiMocks.sendCollaborationMessage.mockReset();
   apiMocks.spawnCollaborationAgent.mockReset();
   apiMocks.setCollaborationMemberRole.mockReset();
@@ -337,6 +339,59 @@ describe('AgentOperationsPanel', () => {
     expect(await screen.findByText('定位已清除')).toBeTruthy();
     expect(screen.queryByText('定位:负责渲染')).toBeNull();
     expect(screen.getByText('定位:跑测试')).toBeTruthy();
+  });
+
+  it('removes a member straight from its roster card after a confirmation', async () => {
+    const group = { id: 'group-one', name: '发布组', sessionIds: ['one', 'two', 'three'], createdAt: 1, updatedAt: 5 };
+    const sessions = [
+      { sessionId: 'one', backendSessionId: 'backend-one', name: '开发', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'working', capability: 'agent', currentTask: '写代码', updatedAt: 1 },
+      { sessionId: 'two', backendSessionId: 'backend-two', name: '测试', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'idle', capability: 'agent', currentTask: '跑测试', updatedAt: 1 },
+      { sessionId: 'three', backendSessionId: 'backend-three', name: '文档', cwd: '/repo/docs', agent: { slug: 'codex', displayName: 'Codex' }, status: 'idle', capability: 'agent', currentTask: '写文档', updatedAt: 1 },
+    ];
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions });
+    apiMocks.saveCollaborationGroup.mockResolvedValue({ group: { ...group, sessionIds: ['one', 'two'], updatedAt: 6 } });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    await user.click(await screen.findByRole('button', { name: '把 文档 移出协作组' }));
+    expect(screen.getByRole('group', { name: '确认移除成员 文档' }).textContent).toContain('把“文档”移出“发布组”');
+    // Backing out of the confirmation leaves membership untouched.
+    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(apiMocks.saveCollaborationGroup).not.toHaveBeenCalled();
+    expect(screen.queryByRole('group', { name: /^确认移除成员/ })).toBeNull();
+    await user.click(screen.getByRole('button', { name: '把 文档 移出协作组' }));
+    await user.click(screen.getByRole('button', { name: '移出' }));
+
+    expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({ id: 'group-one', name: '发布组',
+      sessionIds: ['one', 'two'], expectedUpdatedAt: 5 });
+    expect(await screen.findByText('已把“文档”移出“发布组”')).toBeTruthy();
+  });
+
+  it('deletes the group itself when its second-to-last member is removed', async () => {
+    // Two offline members: removing either one leaves a group that cannot exist.
+    const group = { id: 'group-one', name: '发布组', sessionIds: ['61y337xa', '865otlua'], createdAt: 1, updatedAt: 9 };
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+    apiMocks.listCollaborationMessages.mockResolvedValue({ messages: [
+      { id: 'm1', kind: 'message', content: '接手 web-terminal 的收尾', threadId: 't1', createdAt: 1, fromSessionId: '865otlua', toSessionId: '61y337xa', status: 'delivered' },
+      { id: 'm2', kind: 'reply', responseKind: 'ack', content: '收到', threadId: 't1', createdAt: 2, fromSessionId: '61y337xa', toSessionId: '865otlua', status: 'read' },
+    ] });
+    apiMocks.removeCollaborationGroup.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    const remove = await screen.findByRole('button', { name: '把 865otlua 移出协作组' });
+    expect((remove as HTMLButtonElement).disabled).toBe(false);
+    await user.click(remove);
+    const confirm = screen.getByRole('group', { name: '确认移除成员 865otlua' });
+    expect(confirm.textContent).toContain('移出“865otlua”后组内不足两个成员');
+    expect(confirm.textContent).toContain('2 条协作记录会一并删除');
+    await user.click(screen.getByRole('button', { name: '删除协作组' }));
+
+    expect(apiMocks.removeCollaborationGroup).toHaveBeenCalledWith('group-one', 9);
+    expect(apiMocks.saveCollaborationGroup).not.toHaveBeenCalled();
+    expect(await screen.findByText('“发布组”已删除：移出“865otlua”后不足两个成员')).toBeTruthy();
   });
 
   it('creates an Agent Session and automatically joins it to the selected group', async () => {
