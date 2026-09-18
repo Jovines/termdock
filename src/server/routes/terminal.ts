@@ -115,6 +115,7 @@ import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
+import { buildServerHealthState, dismissServerHealth } from '../utils/serverHealth.js';
 import { collaborationRoutes } from '../agent/collaborationRoutes.js';
 import { extrasFromBody } from '../agent/collaborationProtocol.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind, type CollaborationMessage } from '../agent/collaborationStore.js';
@@ -688,10 +689,44 @@ watchPinnedExplorerRootsSetting((pinnedExplorerRoots) => {
 
 let serverRestartScheduled = false;
 
+/**
+ * supervision 通道是否真的还在。
+ *
+ * `TERMDOCK_SUPERVISED` 只说明"出生时有人管"，`process.connected` 才是"此刻还管得着"——
+ * supervisor 自己崩掉之后子进程是被故意留下来继续服务的（丢监督好过丢服务），
+ * 那种情况下如果还按受管路径走，就会变成"报告完意图就自杀，而没人接盘"，
+ * 比旧 bridge 还糟。所以两个条件必须同时成立。
+ */
+function supervisionChannelOpen(): boolean {
+  return process.env.TERMDOCK_SUPERVISED === '1' && process.connected === true;
+}
+
 function requestServerRestartAfterUpdate(): void {
   if (serverRestartScheduled) return;
   serverRestartScheduled = true;
 
+  if (supervisionChannelOpen()) {
+    // 只说"我要重启"，不说"怎么重启"：重启用哪条命令、PATH 里是谁、要验证什么，
+    // 全是 supervisor 的事，而它每次都用 realpath 后的 entry 重新读盘。
+    // 用 IPC 而不是标记文件，是因为意图会随进程死亡一起消失，不可能过期后被误读。
+    try {
+      process.send?.({ type: 'termdock-intent', intent: 'restart-after-update' });
+    } catch {
+      // 通道刚好断了：照样退，supervisor 会把这次退出当成崩溃重启，
+      // 结果同样是"服务带着新版本回来"，只是 crash.log 里的事件名不同。
+    }
+    const exitTimer = setTimeout(() => {
+      process.kill(process.pid, 'SIGTERM');
+    }, 750);
+    exitTimer.unref?.();
+    return;
+  }
+
+  // —— 以下为未受管路径（`--foreground` / Electron / 外部进程管理器）——
+  // 发射后不管：不验证新进程是否起来、不重试、失败也不回滚，
+  // 「更新后服务没起来」正是这个形状造成的。没有监督者时别无选择，
+  // 但它不再是默认路径——受管启动会走上面的分支。
+  //
   // The bridge is detached before this process exits. It waits for the old
   // PID to release the port, then resolves `termdock` from PATH again so an
   // npm-replaced global binary is used instead of the old loaded file.
@@ -7078,6 +7113,16 @@ router.post('/update/restart', async (_req, res) => {
   }
 });
 
+// 「服务最近出过什么事」：红点与设置面板的唯一数据源。
+// 只读快照，不含任何可变更操作——所以不需要 CSRF，和 GET /update 同档。
+router.get('/server-health', (_req, res) => {
+  res.json(buildServerHealthState());
+});
+
+router.post('/server-health/dismiss', (_req, res) => {
+  res.status(202).json(dismissServerHealth());
+});
+
 router.put('/settings', async (req, res) => {
   const body = req.body ?? {};
   let pinnedExplorerRootsChanged = false;
@@ -9152,6 +9197,9 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
         type: 'update-state',
         state: desktopRuntimeOwner?.getState() ?? npmAutoUpdateManager.getState(),
       }));
+      // 服务健康快照：崩溃时服务自己已经死了、推不出任何东西，所以"红点"这件事
+      // 只能靠客户端重连时的这一发。客户端断线重连的既有逻辑正好覆盖了那个时刻。
+      ws.send(JSON.stringify({ type: 'server-health', state: buildServerHealthState() }));
     } catch {
       controlClients.delete(clientId);
       return;

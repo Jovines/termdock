@@ -1,3 +1,5 @@
+import { backoffDelayMs } from './backoff.js';
+
 /** Shared across WebSockets and sessions: PTYs/FDs are process-wide resources. */
 export class PtySpawnDeferredError extends Error {
   constructor(readonly retryAfterMs: number) {
@@ -22,7 +24,7 @@ export class PtySpawnBackoff {
       return result;
     } catch (error) {
       this.failures = Math.min(this.failures + 1, 6);
-      this.retryAt = this.now() + Math.min(30_000, 1000 * 2 ** (this.failures - 1));
+      this.retryAt = this.now() + backoffDelayMs(this.failures);
       throw error; // Preserve errno and the original diagnostic in the real failure log.
     }
   }

@@ -1,8 +1,7 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
+import { TERMDOCK_DIR } from './termdockState.js';
 
-const TERMDOCK_DIR = path.join(os.homedir(), '.termdock');
 const MIB = 1024 * 1024;
 const DEFAULT_MAX_BYTES = 4 * MIB;
 const SERVER_LOG_MAX_BYTES = 2 * MIB;
@@ -11,6 +10,7 @@ const LOG_MAINTENANCE_INTERVAL_MS = 10 * 60 * 1000;
 const MANAGED_LOG_NAMES = [
   'access.log',
   'client.log',
+  'crash.log',
   'diff-trace.log',
   'errors.log',
   'fs-io.log',
@@ -157,8 +157,8 @@ function enqueueWrite(filePath: string, line: string, maxBytes: number): void {
   writeChains.set(filePath, next);
 }
 
-export function getTermdockLogPath(name: string): string {
-  return path.join(TERMDOCK_DIR, name);
+export function getTermdockLogPath(name: string, directory: string = TERMDOCK_DIR): string {
+  return path.join(directory, name);
 }
 
 export function writeJsonLog(name: string, entry: Record<string, unknown>, maxBytes = DEFAULT_MAX_BYTES): void {
@@ -169,6 +169,29 @@ export function writeJsonLog(name: string, entry: Record<string, unknown>, maxBy
     ...entry,
   }) + '\n';
   enqueueWrite(filePath, line, maxBytes);
+}
+
+/**
+ * 同步写一条 JSONL。**只给崩溃取证用**，不要拿它写常规日志：它绕过写队列与轮转，
+ * 会阻塞事件循环。
+ *
+ * 存在的理由：`writeJsonLog` 走 `fs.promises.appendFile`，而 `process.on('exit')`
+ * 里事件循环已经停了，排队的异步写永远不会落盘——崩溃现场会静默消失。
+ * 因此这里既不能 await 也不能 rotate，只能直接 append。
+ */
+export function writeJsonLogSync(name: string, entry: Record<string, unknown>): void {
+  try {
+    const filePath = getTermdockLogPath(name);
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      pid: process.pid,
+      ...entry,
+    }) + '\n';
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(filePath, line, { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // 已经在崩溃/退出路径上，写不进去也不能再抛一次。
+  }
 }
 
 export function writeTextLog(name: string, line: string, maxBytes = DEFAULT_MAX_BYTES): void {

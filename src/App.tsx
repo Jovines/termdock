@@ -50,8 +50,8 @@ import { requiresSessionCloseConfirmation } from './lib/terminal/sessionClose';
 import { getSessionFontSize, setSessionFontSize } from './lib/terminal/sessionFontSize';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, getTermdockUpdateState, checkTermdockUpdate, confirmTermdockUpdateRestart } from './lib/terminal/api';
-import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState, TermdockUpdateState } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, getTermdockUpdateState, checkTermdockUpdate, confirmTermdockUpdateRestart, getServerHealth, dismissServerHealthIncident } from './lib/terminal/api';
+import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState, TermdockUpdateState, ServerHealthState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 import {
@@ -93,6 +93,7 @@ import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloating
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
+import { ServerHealthSettings } from './lib/components/settings/ServerHealthSettings';
 import { WorkspaceRetentionSettings } from './lib/components/settings/WorkspaceRetentionSettings';
 import { useServiceWorkspaceActivity } from './lib/components/ServiceSwitcher';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
@@ -554,6 +555,7 @@ function App() {
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
   const [termdockUpdateState, setTermdockUpdateState] = React.useState<TermdockUpdateState | null>(null);
   const [updateActionPending, setUpdateActionPending] = React.useState(false);
+  const [serverHealthState, setServerHealthState] = React.useState<ServerHealthState | null>(null);
   const desktopBridge = React.useMemo(() => getTermdockDesktopBridge(), []);
   const desktopUpdateSupported = Boolean(
     desktopBridge?.desktopUpdateState &&
@@ -716,13 +718,28 @@ function App() {
     void getTermdockUpdateState()
       .then((state) => { if (!cancelled) setTermdockUpdateState(state); })
       .catch(() => undefined);
+    // 服务健康同理：首屏拉一次，之后靠控制 WS 的推送。注意推送只在连上时发一次快照，
+    // 服务自己崩掉时当然没人推——重连拿到的那份才是关键。
+    void getServerHealth()
+      .then((state) => { if (!cancelled) setServerHealthState(state); })
+      .catch(() => undefined);
     const unsubscribe = subscribeClientState((event) => {
-      if (event.type === 'update-state' && !cancelled) setTermdockUpdateState(event.state);
+      if (cancelled) return;
+      if (event.type === 'update-state') setTermdockUpdateState(event.state);
+      else if (event.type === 'server-health') setServerHealthState(event.state);
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
+  }, []);
+
+  const handleDismissServerHealth = useCallback(async () => {
+    try {
+      setServerHealthState(await dismissServerHealthIncident());
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    }
   }, []);
 
   const handleConfirmUpdateRestart = useCallback(async () => {
@@ -3745,6 +3762,11 @@ function App() {
                 onInstallDesktop={() => void handleInstallDesktopUpdate()}
               />
 
+              <ServerHealthSettings
+                state={serverHealthState}
+                onDismiss={() => void handleDismissServerHealth()}
+              />
+
               {desktopBridge && (
                 <div className="mt-3 overflow-hidden rounded-xl bg-surface-2">
                   <div className="flex items-start justify-between gap-3 border-b border-border/10 px-3 py-3">
@@ -5181,6 +5203,7 @@ function App() {
         updateActionPending={updateActionPending}
         onConfirmUpdateRestart={handleConfirmUpdateRestart}
         onRetryUpdate={handleRetryUpdate}
+        serverHealthState={serverHealthState}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
         runningSessionButtonEnabled={runningSessionButtonEnabled}
@@ -5331,6 +5354,7 @@ function App() {
             updateActionPending={updateActionPending}
             onConfirmUpdateRestart={handleConfirmUpdateRestart}
             onRetryUpdate={handleRetryUpdate}
+            serverHealthState={serverHealthState}
             tmuxAvailable={tmuxStatus.available}
             defaultSessionMode={newSessionMode}
             runningSessionButtonEnabled={runningSessionButtonEnabled}

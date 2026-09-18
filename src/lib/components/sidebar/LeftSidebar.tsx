@@ -54,6 +54,7 @@ import {
   type CollaborationGroup,
   type AgentResumeHistoryEntry,
   type TermdockUpdateState,
+  type ServerHealthState,
 } from '../../terminal/api';
 import { NewSessionComposer } from './NewSessionComposer';
 import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
@@ -111,6 +112,9 @@ interface LeftSidebarProps {
   updateActionPending?: boolean;
   onConfirmUpdateRestart?: () => void;
   onRetryUpdate?: () => void;
+  // 服务最近出过事（崩溃/卡死/重启失败）。`attention` 为真时 More 按钮点红点，
+  // 具体的经过在设置的「服务健康」里看——这里只是个提示，不展开。
+  serverHealthState?: ServerHealthState | null;
   tmuxAvailable?: boolean;
   defaultSessionMode?: 'shell' | 'tmux';
   push?: boolean;
@@ -260,6 +264,7 @@ export function LeftSidebar(
     onSetSplitLayout, onReorderSplitWorkspace, onCombineSplitSessions,
     onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
     updateState, updateActionPending = false, onConfirmUpdateRestart, onRetryUpdate,
+    serverHealthState,
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
     push,
@@ -338,6 +343,16 @@ export function LeftSidebar(
     updateState?.latestVersion
     && ['installing', 'ready', 'restarting', 'error'].includes(updateState.status),
   );
+  // 两个点各有各的指向：红的=服务出过事（点开设置看详情），琥珀的=有更新。
+  // 同时亮时并排显示，不让其中一个把另一个盖掉。
+  const serverAttention = Boolean(serverHealthState?.attention);
+  const moreButtonLabel = [
+    t('sidebar.moreActions'),
+    serverAttention ? t('sidebar.serverAttention') : null,
+    pendingUpdate && updateState?.latestVersion
+      ? t('sidebar.updateAvailable', { version: updateState.latestVersion })
+      : null,
+  ].filter(Boolean).join(': ');
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
@@ -1779,17 +1794,19 @@ export function LeftSidebar(
                 className={`relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
                 aria-expanded={headerMenuOpen}
                 aria-haspopup="menu"
-                aria-label={pendingUpdate && updateState?.latestVersion
-                  ? `${t('sidebar.moreActions')}: ${t('sidebar.updateAvailable', { version: updateState.latestVersion })}`
-                  : t('sidebar.moreActions')}
-                title={pendingUpdate && updateState?.latestVersion
-                  ? `${t('sidebar.moreActions')}: ${t('sidebar.updateAvailable', { version: updateState.latestVersion })}`
-                  : t('sidebar.moreActions')}
+                aria-label={moreButtonLabel}
+                title={moreButtonLabel}
               >
                 <RiMoreHorizontal size={15} />
+                {serverAttention && (
+                  <span
+                    className="absolute right-0.5 top-0.5 z-10 h-2 w-2 rounded-full bg-destructive ring-2 ring-[var(--chrome-bg)]"
+                    aria-hidden="true"
+                  />
+                )}
                 {pendingUpdate && (
                   <span
-                    className="absolute right-0.5 top-0.5 z-10 h-2 w-2 rounded-full bg-[var(--warning)] ring-2 ring-[var(--chrome-bg)]"
+                    className={`absolute top-0.5 z-10 h-2 w-2 rounded-full bg-[var(--warning)] ring-2 ring-[var(--chrome-bg)] ${serverAttention ? 'right-3.5' : 'right-0.5'}`}
                     aria-hidden="true"
                   />
                 )}

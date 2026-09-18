@@ -143,6 +143,55 @@ export async function confirmTermdockUpdateRestart(): Promise<TermdockUpdateStat
   return response.json() as Promise<TermdockUpdateState>;
 }
 
+/**
+ * 「服务最近出过什么事」。事件名保持机器可读（`event`），
+ * 界面文案由 i18n 的 `settings.serverHealthEvent*` 映射——服务端不该管用户说什么语言。
+ */
+export interface ServerHealthIncident {
+  at: number;
+  event: string;
+  detail: string;
+  role: string;
+  exitCode: number | null;
+  signal: string | null;
+  uptimeMs: number | null;
+  version: string | null;
+  oomSuspect: boolean;
+  restartCount: number | null;
+}
+
+export interface ServerHealthState {
+  supervised: boolean;
+  supervisor: {
+    pid: number;
+    alive: boolean;
+    phase: string;
+    restarts: number;
+    /** 连续崩溃次数（放弃时它才是"崩了几次"的准确答案，restarts 会少一） */
+    consecutiveCrashes: number;
+  } | null;
+  incident: ServerHealthIncident | null;
+  dismissedAt: number | null;
+  attention: boolean;
+  generatedAt: number;
+}
+
+export async function getServerHealth(): Promise<ServerHealthState> {
+  const response = await fetch('/api/terminal/server-health');
+  if (!response.ok) throw new TerminalApiError('Failed to load server health', response.status);
+  return response.json() as Promise<ServerHealthState>;
+}
+
+export async function dismissServerHealthIncident(): Promise<ServerHealthState> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/server-health/dismiss', {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new TerminalApiError('Failed to dismiss server health', response.status);
+  return response.json() as Promise<ServerHealthState>;
+}
+
 /** Fetch the latest quota status from the backend. */
 export async function fetchQuota(): Promise<QuotaStatus> {
   const res = await fetch('/api/terminal/quota');

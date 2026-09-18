@@ -13,7 +13,7 @@ import { secureSocket } from '../federation/browserIntegration';
 // lazily on first subscribe so SSR / non-browser contexts are safe.
 
 import type { PersistedTerminalClientSession, SessionInventory } from '../terminal';
-import type { TermdockUpdateState } from '../terminal/api';
+import type { ServerHealthState, TermdockUpdateState } from '../terminal/api';
 
 export interface ClientStateSnapshot {
   sessions: PersistedTerminalClientSession[];
@@ -54,6 +54,11 @@ export interface ControlUpdateStateEvent {
   state: TermdockUpdateState;
 }
 
+export interface ControlServerHealthEvent {
+  type: 'server-health';
+  state: ServerHealthState;
+}
+
 export interface ControlSessionNoticeEvent {
   type: 'session-notice';
   id: string;
@@ -70,7 +75,8 @@ export type ControlEvent =
   | ControlConfigUpdatedEvent
   | ControlContextDraftEvent
   | ControlPinnedExplorerRootsEvent
-  | ControlUpdateStateEvent;
+  | ControlUpdateStateEvent
+  | ControlServerHealthEvent;
 
 type Listener = (state: ControlEvent) => void;
 
@@ -193,7 +199,7 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot | TermdockUpdateState; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null; pinnedExplorerRoots?: unknown; id?: unknown; sessionId?: unknown; sessionName?: unknown; message?: unknown; title?: unknown; createdAt?: unknown } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot | TermdockUpdateState | ServerHealthState; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null; pinnedExplorerRoots?: unknown; id?: unknown; sessionId?: unknown; sessionName?: unknown; message?: unknown; title?: unknown; createdAt?: unknown } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
@@ -220,6 +226,19 @@ function connect(): void {
       };
       for (const listener of sync.listeners) {
         try { listener(updateEvent); } catch (error) {
+          console.error('[clientStateSync] listener threw:', error);
+        }
+      }
+      return;
+    }
+    if (msg.type === 'server-health') {
+      const state = msg.state as Partial<ServerHealthState> | undefined;
+      // 快照本身允许 incident 为 null（没出过事），但 attention/supervised 必须是布尔——
+      // 缺了它们，红点的显示条件就没有确定答案，宁可当作没收到。
+      if (!state || typeof state.attention !== 'boolean' || typeof state.supervised !== 'boolean') return;
+      const healthEvent: ControlServerHealthEvent = { type: 'server-health', state: state as ServerHealthState };
+      for (const listener of sync.listeners) {
+        try { listener(healthEvent); } catch (error) {
           console.error('[clientStateSync] listener threw:', error);
         }
       }

@@ -62,6 +62,7 @@ import {
   writeTextLog,
 } from './utils/serverLogger.js';
 import { pinBundledRuntimeClientDist, resolveRuntimeClientDist } from './utils/runtimeClient.js';
+import { installCrashForensics } from './utils/crashForensics.js';
 import {
   getTermdockVersion,
   TERMDOCK_CAPABILITIES,
@@ -467,6 +468,12 @@ function reloadHttpsCertificate(server: HttpServer, options: ServerOptions): boo
 export function startServer(options: ServerOptions = {}): StartServerResult {
   assertPublicSecurity();
   const stopLogMaintenance = startTermdockLogMaintenance();
+  // 装上之后，"运行中挂了"至少留得下一条能说清原因的记录（谁重启它是 supervisor 的事）。
+  const crashForensics = installCrashForensics({
+    role: 'server',
+    version: getTermdockVersion(),
+    startedAt: Date.now(),
+  });
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
   if (process.env.TERMDOCK_PUBLIC_ORIGIN && !(options.httpsCertPath && options.httpsKeyPath) && !['127.0.0.1', '::1', 'localhost'].includes(host)) {
@@ -798,6 +805,9 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
 
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {
+      // 记一条再退：不然 supervisor 只看到一个 exit code 1，分不清"端口被占"
+      // 和"代码崩了"，而这两者的处置方式完全不同（前者重启多少次都没用）。
+      crashForensics.recordIncident('port-conflict', { extra: { port, host, code: error.code } });
       console.error(`Port ${port} is already in use.`);
       console.error(`To free it, find and stop the process: lsof -tiTCP:${port} -sTCP:LISTEN | xargs kill`);
       process.exit(1);
@@ -808,6 +818,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
 
   server.on('close', () => {
     stopLogMaintenance();
+    crashForensics.dispose();
     certWatcher.stop();
     stopOnboardingServer();
     void localAccessManager.stop();

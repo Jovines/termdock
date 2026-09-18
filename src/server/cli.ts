@@ -48,6 +48,17 @@ import { runBootChecks, formatBootCheckReport } from './utils/bootCheck.js';
 import { localAccessManager, getLanIPv4Addresses } from './utils/localAccess.js';
 import type { CertificateRefreshResult, StartServerResult } from './entry.js';
 import { OFFICIAL_NPM_REGISTRY, updateTermdockFromOfficialRegistry } from './utils/npmUpdate.js';
+import { DAEMON_START_TIMEOUT_MS, waitForHealth } from './utils/healthProbe.js';
+import { isProcessRunning, STOP_GRACE_MS, type ServerState } from './utils/termdockState.js';
+import { recordSupervisorLost } from './utils/crashForensics.js';
+import { getTermdockVersion } from './utils/version.js';
+import {
+  getSupervisorStatus,
+  signalSupervisorRestart,
+  spawnSupervisor,
+  stopSupervisor,
+} from './utils/supervisorClient.js';
+import type { SupervisorStatus } from './utils/supervisorClient.js';
 import {
   clearAuthFile,
   destroyAllSessions,
@@ -78,6 +89,7 @@ const TERMDOCK_TMUX_HISTORY_LIMIT = TMUX.historyLimit;
 
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
+const supervisorStatePath = path.join(stateDir, 'supervisor.json');
 const logFilePath = path.join(stateDir, 'server.log');
 const globalSessionStateFilePath = path.join(stateDir, 'global-session-state.json');
 const localApiTokenPath = path.join(stateDir, 'local-api-token');
@@ -141,6 +153,12 @@ interface CliOptions {
   httpsCa?: string;
   setupLocalHttps: boolean;
   foreground: boolean;
+  /** 前台运行 + 受 supervisor 监督（给 setsid/systemd/docker 用） */
+  supervise: boolean;
+  /** 显式声明不受监督（`td` 后台模式默认受监督） */
+  noSupervisor: boolean;
+  /** 让正在运行的 supervisor 重启服务子进程 */
+  restart: boolean;
   status: boolean;
   stop: boolean;
   update: boolean;
@@ -178,21 +196,6 @@ interface CliOptions {
   notify?: NotifyCommand;
 }
 
-interface ServerState {
-  pid: number;
-  host: string;
-  port: number;
-  scheme?: 'http' | 'https';
-  localUrl?: string;
-  lanUrl?: string;
-  onboardingUrl?: string | null;
-  localAccessStatus?: string;
-  localAccessReason?: string | null;
-  logFile: string;
-  startedAt: string;
-  localApiToken?: string;
-}
-
 interface PersistedCliSession {
   sessionId: string;
   name: string;
@@ -223,6 +226,11 @@ Options:
   --setup-local-https
                      Generate and trust local HTTPS certs with mkcert
   --foreground       Run in the foreground
+  --supervise        Like --foreground, but under the process supervisor
+                     (auto-restarts on crash, records why). Use this for
+                     setsid/systemd/docker deployments.
+  --no-supervisor    Background start without the supervisor
+  --restart          Restart the supervised server without stopping it
   --status           Show background server status
   --stop             Stop the background server
   --update           Update the global CLI from the official npm registry
@@ -382,12 +390,12 @@ function removeStateFile() {
   }
 }
 
-function isProcessRunning(pid: number): boolean {
+/** 只在用户明确要求停止时清 supervisor 记录：它是"为什么停了"的唯一证据。 */
+function removeSupervisorStateFile() {
   try {
-    process.kill(pid, 0);
-    return true;
+    fs.rmSync(supervisorStatePath, { force: true });
   } catch {
-    return false;
+    // ignore cleanup errors
   }
 }
 
@@ -445,6 +453,50 @@ function resolveHttpsOptions(options: Pick<CliOptions, 'httpsCert' | 'httpsKey' 
     };
   }
   return { source: 'none' };
+}
+
+type HttpsOptions = ReturnType<typeof resolveHttpsOptions>;
+
+/**
+ * 自己这个 entry 的绝对路径，解析掉符号链接。
+ *
+ * 必须 realpath：全局安装时 `bin/termdock` 是指向 `dist/server/cli.js` 的软链，
+ * 而 `npm i -g` 会先 unlink 再重建它——那个窗口里按软链路径 spawn 会 ENOENT。
+ * 解析成真实路径之后，重启落到的永远是同一个安装。
+ */
+function resolveSelfEntry(): string {
+  const entry = path.resolve(process.argv[1]);
+  try {
+    return fs.realpathSync(entry);
+  } catch {
+    return entry;
+  }
+}
+
+/** supervisor 之外的子进程参数。`--foreground` 由 supervisor 自己补。 */
+function buildForegroundChildArgs(options: CliOptions, https: HttpsOptions): string[] {
+  const childArgs: string[] = [];
+  if (options.host) childArgs.push('--host', options.host);
+  if (options.port) childArgs.push('--port', String(options.port));
+  if (https.cert) childArgs.push('--https-cert', https.cert);
+  if (https.key) childArgs.push('--https-key', https.key);
+  if (https.ca) childArgs.push('--https-ca', https.ca);
+  return childArgs;
+}
+
+/**
+ * 给 supervisor 用的健康探测目标。host 为 0.0.0.0 时探 localhost——
+ * 0.0.0.0 只是"监听所有网卡"的写法，不是可连接的地址。
+ */
+function resolveHealthTarget(
+  options: Pick<CliOptions, 'host' | 'port'>,
+  https: HttpsOptions,
+): { url: string; scheme: 'http' | 'https'; host: string; port: number } {
+  const host = options.host ?? DEFAULT_HOST;
+  const port = options.port ?? PORT.backend;
+  const scheme = https.cert && https.key ? 'https' : 'http';
+  const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+  return { url: `${scheme}://${displayHost}:${port}/health`, scheme, host: displayHost, port };
 }
 
 const EXTRA_EXECUTABLE_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'];
@@ -578,6 +630,91 @@ function printRunningState(state: ServerState) {
   console.log(`  ${c.dim('Auth:')} ${authLine}`);
 }
 
+/**
+ * 退出事件 → 人话。机器可读的 event 保留在 crash.log / supervisor.json 里。
+ *
+ * 这里只翻译"发生了什么"，**不重复技术细节**——退出码/信号就在同一行的括号里
+ * （`incident.detail` 与 signal/exitCode 字段），两边各说一遍会读成
+ * "was killed (SIGKILL) (signal SIGKILL)"。
+ */
+const SUPERVISOR_EVENT_LABELS: Record<string, string> = {
+  'stop': 'stopped on request',
+  'update-restart': 'restarted to apply an update',
+  'manual-restart': 'restarted on request',
+  'startup-failure': 'failed to start',
+  'exit-zero-unexpected': 'exited with code 0 without being asked to',
+  'crash': 'crashed',
+  'crash-native': 'crashed in native code',
+  'killed': 'was killed outright',
+  'terminated-externally': 'was terminated by another process',
+  'port-conflict': 'could not start: the port is already in use',
+  'wedge': 'stopped responding and had to be killed',
+  'gave-up': 'crashed repeatedly; automatic restart stopped',
+  'supervisor-lost': 'lost its supervisor (service kept running)',
+};
+
+function describeIncident(incident: { event: string; detail: string }): string {
+  return SUPERVISOR_EVENT_LABELS[incident.event] ?? incident.event;
+}
+
+/**
+ * 我们自己发起的事件：label 已经把话说完了，`detail` 只是换个说法再说一遍
+ * （"restarted on request" / "restart requested by termdock --restart"）。
+ */
+const SELF_EXPLANATORY_EVENTS = new Set(['stop', 'update-restart', 'manual-restart']);
+
+/** 括号里的技术细节：`detail` 是主句，信号/退出码只在它没说的时候补上。 */
+function describeIncidentFacts(incident: {
+  event: string;
+  detail: string;
+  signal: string | null;
+  exitCode: number | null;
+  uptimeMs: number;
+}): string {
+  const uptime = incident.uptimeMs >= 1_000 ? `${Math.round(incident.uptimeMs / 1_000)}s` : `${incident.uptimeMs}ms`;
+  const facts: string[] = [];
+  if (!SELF_EXPLANATORY_EVENTS.has(incident.event) && incident.detail) facts.push(incident.detail);
+  if (incident.signal && !incident.detail.includes(incident.signal)) facts.push(`signal ${incident.signal}`);
+  if (incident.exitCode !== null && !incident.detail.includes(String(incident.exitCode))) facts.push(`exit ${incident.exitCode}`);
+  facts.push(`up ${uptime}`);
+  return facts.filter(Boolean).join(', ');
+}
+
+function printSupervisorState(status: SupervisorStatus | null, serverRunning: boolean) {
+  if (!status) {
+    console.log(`  ${c.dim('Supervisor:')} ${c.yellow('none — a crash will not be restarted')}`);
+    return;
+  }
+  const { state, alive } = status;
+  if (alive) {
+    const label = state.phase === 'gave-up' ? c.red(state.phase) : c.green(state.phase);
+    console.log(`  ${c.dim('Supervisor:')} pid ${state.pid} ${label}${state.restarts > 0 ? c.dim(` (restarted ${state.restarts}×)`) : ''}`);
+  } else {
+    // 进程没了，但状态文件是一份结论而非垃圾——give-up 尤其如此。
+    console.log(`  ${c.dim('Supervisor:')} pid ${state.pid} ${c.red(`not running (last phase: ${state.phase})`)}`);
+  }
+  if (state.lastIncident) {
+    const incident = state.lastIncident;
+    const when = new Date(incident.at).toISOString();
+    console.log(`  ${c.dim('Last incident:')} ${when} — ${describeIncident(incident)} ${c.dim(`(${describeIncidentFacts(incident)})`)}`);
+    if (incident.oomSuspect) console.log(`  ${c.dim('Note:')} ${c.yellow('memory was near the limit before it died')}`);
+  }
+  if (state.phase === 'gave-up') {
+    console.log(`  ${ICON.err} ${c.red('Automatic restart stopped after repeated crashes. The service is NOT running.')}`);
+    console.log(`  ${c.dim('Reset with:')} ${c.cyan('td --stop && td')}`);
+    if (state.lastIncident?.version) console.log(`  ${c.dim('Roll back with:')} ${c.cyan(`npm i -g termdock@${state.lastIncident.version}`)}`);
+  } else if (!alive) {
+    console.log(`  ${ICON.err} ${c.red(serverRunning
+      ? 'The supervisor is gone — the service is running unsupervised.'
+      : 'The supervisor is gone and the service is not running.')}`);
+    if (serverRunning) {
+      console.log(`  ${c.dim('Restore supervision with:')} ${c.cyan('td --stop && td')} ${c.dim('(this restarts the service)')}`);
+    } else {
+      console.log(`  ${c.dim('Start again with:')} ${c.cyan('td')}`);
+    }
+  }
+}
+
 function parseArgs(argv: string[]): CliOptions {
   let host: string | undefined;
   let port: number | undefined;
@@ -586,6 +723,9 @@ function parseArgs(argv: string[]): CliOptions {
   let httpsCa: string | undefined;
   let setupLocalHttps = false;
   let foreground = false;
+  let supervise = false;
+  let noSupervisor = false;
+  let restart = false;
   let status = false;
   let stop = false;
   let update = false;
@@ -828,6 +968,21 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === '--supervise') {
+      supervise = true;
+      continue;
+    }
+
+    if (arg === '--no-supervisor') {
+      noSupervisor = true;
+      continue;
+    }
+
+    if (arg === '--restart') {
+      restart = true;
+      continue;
+    }
+
     if (arg === '--status') {
       status = true;
       continue;
@@ -1060,6 +1215,9 @@ function parseArgs(argv: string[]): CliOptions {
     httpsCa,
     setupLocalHttps,
     foreground,
+    supervise,
+    noSupervisor,
+    restart,
     status,
     stop,
     update,
@@ -1513,50 +1671,6 @@ interface ChangeAuditHunksResult {
 }
 
 const CHANGE_AUDIT_SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
-/** Grace period for --stop: wait up to this long for the daemon to exit
- *  after SIGTERM before falling back to SIGKILL. */
-const STOP_GRACE_MS = 5000;
-/** Max time to wait for the daemon child to respond to /health after spawn. */
-const DAEMON_START_TIMEOUT_MS = 10000;
-
-/** Poll the health endpoint until it responds or timeout expires. */
-async function waitForHealth(
-  healthUrl: string,
-  caPath: string | undefined | null,
-  timeoutMs: number,
-  isReady: () => boolean,
-  isAlive: () => boolean,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!isAlive()) return false;
-    if (!isReady()) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
-      continue;
-    }
-    try {
-      const ok = await new Promise<boolean>((resolve) => {
-        const transport = healthUrl.startsWith('https:') ? https : http;
-        const req = transport.get(healthUrl, {
-          ca: caPath ? fs.readFileSync(caPath) : undefined,
-          rejectUnauthorized: Boolean(caPath),
-          timeout: 2000,
-        }, (res) => {
-          let data = '';
-          res.on('data', (chunk: string) => { data += chunk; });
-          res.on('end', () => resolve(data.includes('"status":"ok"')));
-        });
-        req.on('error', () => resolve(false));
-        req.on('timeout', () => { req.destroy(); resolve(false); });
-      });
-      if (ok && isAlive()) return true;
-    } catch {
-      // Retry on any error.
-    }
-    await new Promise<void>((r) => setTimeout(r, 500));
-  }
-  return false;
-}
 
 function fnv1a32(text: string): string {
   let hash = 0x811c9dc5;
@@ -3678,24 +3792,88 @@ async function main(): Promise<void> {
   }
 
   if (options.status) {
+    const supervisorStatus = getSupervisorStatus();
     const runningState = getRunningState();
-    if (!runningState) {
+    if (!runningState && !supervisorStatus) {
       console.log(`${ICON.info} ${c.dim('Termdock is not running.')}`);
       process.exit(0);
     }
 
-    printRunningState(runningState);
+    // supervisor 还活着但服务没起来（重启中 / 已放弃）也必须报出来——
+    // 只说"未运行"就把这个功能的意义抹掉了。
+    if (runningState) printRunningState(runningState);
+    else console.log(`${ICON.err} ${c.red('Termdock is not running.')}`);
+    printSupervisorState(supervisorStatus, Boolean(runningState));
+    process.exit(0);
+  }
+
+  if (options.restart) {
+    const supervisorStatus = getSupervisorStatus();
+    if (!supervisorStatus?.alive) {
+      console.error(`${ICON.err} ${c.red('Termdock is not supervised, so there is nothing to restart.')}`);
+      console.error(`  ${c.dim('Start it with:')} ${c.cyan('td')} ${c.dim('(or restart it by hand with: td --stop && td)')}`);
+      process.exit(1);
+    }
+
+    if (!signalSupervisorRestart(supervisorStatus.state.pid)) {
+      console.error(`${ICON.err} ${c.red(`Could not signal supervisor ${supervisorStatus.state.pid}.`)}`);
+      process.exit(1);
+    }
+    console.log(`${ICON.ok} ${c.green('Restart requested.')} ${c.dim('Follow along with: tail -f ' + shellQuote(logFilePath))}`);
     process.exit(0);
   }
 
   if (options.stop) {
+    const supervisorStatus = getSupervisorStatus();
     const runningState = getRunningState();
-    if (!runningState) {
+    if (!runningState && !supervisorStatus) {
       console.log(`${ICON.info} ${c.dim('Termdock is not running.')}`);
       process.exit(0);
     }
 
     const bridgeCaffeinateStarted = startRestartBridgeCaffeinate();
+
+    if (supervisorStatus) {
+      const { state: supervisorState, alive } = supervisorStatus;
+      // 只停 supervisor：子进程必须由它自己杀，否则会变成"意外死亡"被它自己拉起来。
+      // （supervisor 已经死了的情况也走这里——兜底段会把它的孤儿服务子进程收掉。）
+      if (alive) await stopSupervisor(supervisorState.pid);
+      // 兜底：supervisor 没来得及收尾就走了的话，服务子进程可能还在。
+      const serverPid = supervisorState.serverPid;
+      const orphanWasRunning = Boolean(serverPid && isProcessRunning(serverPid));
+      if (orphanWasRunning && serverPid) {
+        try { process.kill(serverPid, 'SIGTERM'); } catch { /* already gone */ }
+        const deadline = Date.now() + STOP_GRACE_MS;
+        while (isProcessRunning(serverPid) && Date.now() < deadline) {
+          await new Promise<void>((r) => setTimeout(r, 100));
+        }
+        if (isProcessRunning(serverPid)) {
+          try { process.kill(serverPid, 'SIGKILL'); } catch { /* already gone */ }
+          await new Promise<void>((r) => setTimeout(r, 200));
+        }
+      }
+      removeStateFile();
+      // supervisor 已经死掉时（例如崩溃循环后放弃），状态文件是唯一还留着那段结论的地方；
+      // `--stop` 是用户明确说"到此为止"的动作，此时才该把它清掉。
+      removeSupervisorStateFile();
+      // 说实话：到底是"停了服务"还是"只是清了一份记录"，取决于刚才谁还活着。
+      const summary = alive
+        ? `Stopped Termdock (supervisor ${supervisorState.pid}${serverPid ? `, server ${serverPid}` : ''}).`
+        : orphanWasRunning
+          ? `Stopped Termdock (server ${serverPid}). The supervisor (pid ${supervisorState.pid}) had already stopped.`
+          : `Cleared the record of the stopped supervisor (pid ${supervisorState.pid}).`;
+      console.log(`${ICON.ok} ${c.green(summary)}`);
+      if (bridgeCaffeinateStarted) {
+        console.log(`${ICON.info} ${c.dim(`Keeping macOS awake for up to ${restartBridgeCaffeinateSeconds}s while Termdock restarts.`)}`);
+      }
+      process.exit(0);
+    }
+
+    if (!runningState) {
+      console.log(`${ICON.info} ${c.dim('Termdock is not running.')}`);
+      process.exit(0);
+    }
+
     process.kill(runningState.pid, 'SIGTERM');
     removeStateFile();
 
@@ -3723,6 +3901,25 @@ async function main(): Promise<void> {
   await refreshDefaultHttpsCertificateSafely();
   const https = resolveHttpsOptions(options);
   const isManagedDefaultHttps = Boolean(https.cert === defaultHttpsCertPath && https.key === defaultHttpsKeyPath);
+
+  if (options.supervise && !options.foreground) {
+    // 前台运行 + 受监督：setsid/systemd/docker 部署走这条。这是**正式服务**的路径——
+    // `--foreground` 按设计不受管，而出问题的恰恰是正式服务。
+    const { runSupervisor } = await import('./supervisor.js');
+    const health = resolveHealthTarget(options, https);
+    runSupervisor({
+      childEntry: resolveSelfEntry(),
+      childArgs: buildForegroundChildArgs(options, https),
+      healthUrl: health.url,
+      healthCaPath: https.ca,
+      version: getTermdockVersion(),
+    });
+    console.log(`${ICON.ok} ${c.green('Termdock is under supervision.')}`);
+    console.log(`  ${c.dim('Health:')} ${health.url}`);
+    console.log(`  ${c.dim('State:')}  ${supervisorStatePath}`);
+    console.log(`  ${c.dim('Stop:')}   ${c.cyan('td --stop')} ${c.dim('(supervisor and server)')}`);
+    return;
+  }
 
   if (options.foreground) {
     // Boot check (marker prevents re-run if parent already completed)
@@ -3794,21 +3991,41 @@ async function main(): Promise<void> {
     });
     // Only this child can acknowledge startup; an existing listener on the
     // same port must not make the parent report a successful launch.
+    //
+    // 受监督时**不能**在这之后 disconnect：那条 IPC 通道同时是 supervisor 的
+    // 存活信号和重启意图通道，而它恰好在就绪这一刻断掉——最糟的时机。
+    // supervisor 通过 env 里的 TERMDOCK_SUPERVISED 告知自己存在。
+    const supervised = process.env.TERMDOCK_SUPERVISED === '1';
     const acknowledgeStartup = () => {
       if (process.connected) {
         process.send?.({ type: 'termdock-ready' }, () => {
-          if (process.connected) process.disconnect();
+          if (process.connected && !supervised) process.disconnect();
         });
       }
     };
     if (result.server.listening) acknowledgeStartup();
     else result.server.once('listening', acknowledgeStartup);
+    if (supervised) {
+      // supervisor 死了服务还能活（丢监督好过丢服务），但必须留下痕迹。
+      process.on('disconnect', () => {
+        recordSupervisorLost(`supervisor pid ${process.env.TERMDOCK_SUPERVISOR_PID ?? 'unknown'} disconnected`);
+      });
+    }
     return;
   }
 
   const runningState = getRunningState();
   if (runningState) {
     printRunningState(runningState);
+    process.exit(0);
+  }
+
+  // 服务这一瞬间没在跑，不等于没人管它：supervisor 可能正卡在重启退避里。
+  // 此时再起一个就会有两个 supervisor 抢同一个端口和同一份状态文件。
+  const existingSupervisor = getSupervisorStatus();
+  if (existingSupervisor?.alive) {
+    console.log(`${ICON.info} ${c.green('Termdock is already supervised.')} ${c.dim(`The service is not up this instant, but supervisor ${existingSupervisor.state.pid} is still working on it.`)}`);
+    printSupervisorState(existingSupervisor, false);
     process.exit(0);
   }
 
@@ -3829,74 +4046,88 @@ async function main(): Promise<void> {
   const activeHttps = refreshedHttps;
 
   ensureStateDir();
-  const childArgs = [path.resolve(process.argv[1]), '--foreground'];
+  const childEntry = resolveSelfEntry();
+  const childArgs = buildForegroundChildArgs(options, activeHttps);
   const childHost = options.host ?? DEFAULT_HOST;
   const childPort = options.port ?? PORT.backend;
+  const health = resolveHealthTarget(options, activeHttps);
+  const scheme = health.scheme;
+  const displayHost = health.host;
 
-  if (options.host) {
-    childArgs.push('--host', options.host);
-  }
-
-  if (options.port) {
-    childArgs.push('--port', String(options.port));
-  }
-
-  if (activeHttps.cert) {
-    childArgs.push('--https-cert', activeHttps.cert);
-  }
-
-  if (activeHttps.key) {
-    childArgs.push('--https-key', activeHttps.key);
-  }
-
-  if (activeHttps.ca) {
-    childArgs.push('--https-ca', activeHttps.ca);
-  }
-
-  const scheme = activeHttps.cert && activeHttps.key ? 'https' : 'http';
+  // 默认受管：受 supervisor 盯着的服务才会在崩溃/更新失败后自己回来。
+  // 退路留给"我就是要一个裸进程"的场景（调试、被外部进程管理器接管）。
+  const supervised = !options.noSupervisor && process.env.TERMDOCK_SUPERVISOR !== '0';
   const logFileFd = fs.openSync(logFilePath, 'a');
-  const child = spawn(process.execPath, childArgs, {
-    detached: true,
-    stdio: ['ignore', logFileFd, logFileFd, 'ipc'],
-  });
-  fs.closeSync(logFileFd);
-  let ready = false;
-  let startupError: Error | undefined;
-  child.on('error', (error) => { startupError = error; });
-  child.on('message', (message: unknown) => {
-    if (message && typeof message === 'object' && 'type' in message
-      && message.type === 'termdock-ready') ready = true;
-  });
-  const isAlive = () => !startupError && child.pid !== undefined
-    && child.exitCode === null && child.signalCode === null && isProcessRunning(child.pid);
-  const displayHost = childHost === '0.0.0.0' ? 'localhost' : childHost;
-  const healthOk = await waitForHealth(
-    `${scheme}://${displayHost}:${childPort}/health`, activeHttps.ca,
-    DAEMON_START_TIMEOUT_MS, () => ready, isAlive,
-  );
-  if (child.connected) child.disconnect();
-  child.unref();
-  if (!healthOk) {
-    const alive = isAlive();
-    if (!alive && child.pid !== undefined && readState()?.pid === child.pid) removeStateFile();
-    const detail = startupError?.message ?? (alive
-      ? 'Startup timed out; the process is still running but readiness could not be confirmed.'
-      : `Background process exited (code: ${child.exitCode ?? 'unknown'}, signal: ${child.signalCode ?? 'none'}).`);
-    console.error(`${ICON.err} ${c.red('Termdock startup could not be confirmed.')} ${detail}`);
-    console.error(`  ${c.dim('Log:')} ${logFilePath}`);
-    console.error(`  Read the startup error with: tail -n 80 ${shellQuote(logFilePath)}`);
-    process.exitCode = 1;
-    return;
+  let startedPid: number | undefined;
+
+  if (supervised) {
+    const launch = await spawnSupervisor({
+      childEntry,
+      childArgs,
+      healthUrl: health.url,
+      healthCaPath: activeHttps.ca,
+      version: getTermdockVersion(),
+      logFileFd,
+      // 比 CLI 自己盲等的 10s 宽裕：supervisor 会在子进程一失败就回报，
+      // 这里只是兜底上限，不该成为慢机器上的假阴性。
+      readyTimeoutMs: DAEMON_START_TIMEOUT_MS * 3,
+    });
+    fs.closeSync(logFileFd);
+    startedPid = launch.pid;
+    if (!launch.ok) {
+      const detail = launch.detail ? `${launch.reason}: ${launch.detail}` : String(launch.reason);
+      console.error(`${ICON.err} ${c.red('Termdock startup could not be confirmed.')} ${detail}`);
+      console.error(`  ${c.dim('Note:')} the supervisor keeps retrying in the background — check with: td --status`);
+      console.error(`  ${c.dim('Log:')}  ${logFilePath}`);
+      console.error(`  Read the startup error with: tail -n 80 ${shellQuote(logFilePath)}`);
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    const child = spawn(process.execPath, [childEntry, '--foreground', ...childArgs], {
+      detached: true,
+      stdio: ['ignore', logFileFd, logFileFd, 'ipc'],
+    });
+    fs.closeSync(logFileFd);
+    startedPid = child.pid;
+    let ready = false;
+    let startupError: Error | undefined;
+    child.on('error', (error) => { startupError = error; });
+    child.on('message', (message: unknown) => {
+      if (message && typeof message === 'object' && 'type' in message
+        && message.type === 'termdock-ready') ready = true;
+    });
+    const isAlive = () => !startupError && child.pid !== undefined
+      && child.exitCode === null && child.signalCode === null && isProcessRunning(child.pid);
+    const healthOk = await waitForHealth(
+      health.url, activeHttps.ca,
+      DAEMON_START_TIMEOUT_MS, () => ready, isAlive,
+    );
+    if (child.connected) child.disconnect();
+    child.unref();
+    if (!healthOk) {
+      const alive = isAlive();
+      if (!alive && child.pid !== undefined && readState()?.pid === child.pid) removeStateFile();
+      const detail = startupError?.message ?? (alive
+        ? 'Startup timed out; the process is still running but readiness could not be confirmed.'
+        : `Background process exited (code: ${child.exitCode ?? 'unknown'}, signal: ${child.signalCode ?? 'none'}).`);
+      console.error(`${ICON.err} ${c.red('Termdock startup could not be confirmed.')} ${detail}`);
+      console.error(`  ${c.dim('Log:')} ${logFilePath}`);
+      console.error(`  Read the startup error with: tail -n 80 ${shellQuote(logFilePath)}`);
+      process.exitCode = 1;
+      return;
+    }
   }
 
   console.log(`${ICON.ok} ${c.green('Termdock started in background.')}`);
-  console.log(`  ${c.dim('URL:')} ${c.cyan(`${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`)}`);
+  console.log(`  ${c.dim('URL:')} ${c.cyan(`${scheme}://${displayHost}:${childPort}`)}`);
   if (scheme === 'https') {
     console.log(`  ${c.dim('HTTPS:')} ${activeHttps.source === 'default' ? c.green('auto') : c.green('enabled')}`);
   } else {
     console.log(`  ${c.dim('HTTPS:')} ${c.dim('not configured — run td --setup-local-https')}`);
   }
-  console.log(`  ${c.dim('PID:')} ${child.pid}`);
+  console.log(`  ${c.dim('PID:')} ${startedPid}`);
+  console.log(`  ${c.dim('Supervised:')} ${supervised ? c.green('yes') : c.yellow('no — a crash will not be restarted')}`);
   console.log(`  ${c.dim('Log:')} ${logFilePath}`);
   warnIfAuthDisabled(childHost);
 

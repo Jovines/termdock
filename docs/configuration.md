@@ -181,6 +181,28 @@ export const PORT = {
 | 额外路径 | `ALLOWED_PATHS` | — | pathValidator 读 env |
 | 开发模式 | `NODE_ENV` | — | 影响多个默认值 |
 
+### 服务监督（supervisor）
+
+后台启动（`td`，不带 `--foreground`）默认经过一个常驻 supervisor：服务崩了按退避重启，
+重启原因写进 `~/.termdock/crash.log`，连续 5 次崩溃后停手并保留 `phase:'gave-up'` 的状态。
+界面在侧栏 More 按钮上点红点、设置里的「服务健康」给出最近一次异常。
+
+| 配置项 | 环境变量/参数 | 默认值 | 说明 |
+|--------|--------------|--------|------|
+| 关掉监督 | `TERMDOCK_SUPERVISOR=0` / `--no-supervisor` | 开启 | 后台启动但不带 supervisor |
+| 前台受管 | `--supervise` | — | 前台运行，supervisor 跑在本进程（给 setsid/systemd/docker 用） |
+| 不受管前台 | `--foreground` | — | 自己管生命周期，supervisor 不介入（dev / Electron） |
+| 重启受管服务 | `--restart` | — | 让 supervisor 重启子进程，但继续监督 |
+| 监督节奏 | `TERMDOCK_SUPERVISOR_TIMING` (JSON) | 见下 | 探测间隔、退避、放弃阈值等；只接受正整数 |
+
+`TERMDOCK_SUPERVISOR_TIMING` 字段：`healthIntervalMs`(15000)、`healthTimeoutMs`(5000)、
+`healthFailuresBeforeKill`(3)、`killGraceMs`(5000)、`maxConsecutiveCrashes`(5)、
+`crashResetMs`(60000)、`updateRestartDelayMs`(250)、`readyTimeoutMs`(30000)、
+`backoffBaseMs`(1000)、`backoffMaxMs`(30000)。JSON 解析失败会退回默认值并打印一行 stderr。
+
+`TERMDOCK_SUPERVISED=1` 由 supervisor 注入给子进程（内部标志，用户不要手动设置）。
+它决定三件事：服务不主动断开 IPC、装 `disconnect` 处理器记录「与监督者失联」、
+把 `supervised` 报给界面。
 
 ## 公网安全模式
 
