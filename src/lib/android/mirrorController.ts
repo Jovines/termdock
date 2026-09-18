@@ -8,6 +8,12 @@ import {
   CONTROL_TYPE_ROTATE_DEVICE, type TouchPoint,
 } from './control';
 
+/**
+ * 会话建立后补刷采集的延迟。等设备唤醒/启动过渡过去，让重建时读到的是稳定后的显示状态；
+ * 用户实测在进入面板后 5~8 秒才会去切画质，3 秒既在过渡之后、又在用户注意到发糊之前。
+ */
+const ENTRY_CAPTURE_REFRESH_MS = 3000;
+
 export type MirrorState = 'idle' | 'connecting' | 'streaming' | 'error';
 
 export interface MirrorHeader { deviceName: string; codec: 'h264' | 'h265' | 'av1'; width: number; height: number }
@@ -88,6 +94,7 @@ export class AndroidMirrorController {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private stallTimer: ReturnType<typeof setInterval> | null = null;
+  private entryRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   /** 待并入下一个（关键）帧的 SPS/PPS：单独喂会被 Chrome 判为「非关键帧」而报错。 */
   private pendingConfig: Uint8Array | null = null;
   /** configure() 之后解码器必须先吃到一个真正的 IDR，否则 decode 会抛错。 */
@@ -147,7 +154,9 @@ export class AndroidMirrorController {
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.statsTimer) clearInterval(this.statsTimer);
     if (this.stallTimer) clearInterval(this.stallTimer);
+    if (this.entryRefreshTimer) clearTimeout(this.entryRefreshTimer);
     this.heartbeat = null; this.statsTimer = null; this.stallTimer = null;
+    this.entryRefreshTimer = null;
   }
 
   private startTimers(): void {
@@ -195,10 +204,12 @@ export class AndroidMirrorController {
     try { this.socket.send(JSON.stringify(payload)); } catch { /* transport closed */ }
   }
 
-  private sendControl(bytes: Uint8Array | null): void {
-    if (!bytes) return;
+  private sendControl(bytes: Uint8Array | null): boolean {
+    if (!bytes) return false;
+    if (!this.socket || this.socket.readyState !== 1) return false;
     this.controlsSent++;
     this.send({ type: 'control', data: toBase64(bytes) });
+    return true;
   }
 
   /** 每收到一个非配置帧就回一次 ack（带 seq），让服务端窗口等于「已送达」而不是「已解码」。 */
@@ -232,6 +243,7 @@ export class AndroidMirrorController {
         this.lastFrameAt = Date.now();
         this.callbacks.onHeader(this.header);
         this.callbacks.onState('streaming');
+        this.scheduleEntryCaptureRefresh();
         break;
       case 'frame':
         this.handleFrame(message);
@@ -416,6 +428,12 @@ export class AndroidMirrorController {
     this.touch(MOTION_ACTION_UP, x, y, pointerType === 'mouse' ? POINTER_ID_MOUSE : POINTER_ID_FINGER);
   }
 
+  /** 手势被第三者打断（如另一根手指落下改做视图手势）时作废这次触摸：
+   *  照常发 UP 会被设备当成一次点击，CANCEL 才是「刚才那下不算」。 */
+  pointerCancel(x: number, y: number, pointerType: string): void {
+    this.touch(MOTION_ACTION_CANCEL, x, y, pointerType === 'mouse' ? POINTER_ID_MOUSE : POINTER_ID_FINGER);
+  }
+
   scroll(x: number, y: number, deltaX: number, deltaY: number): void {
     this.sendControl(serializeScroll(this.pointerPoint(x, y), deltaX, deltaY));
   }
@@ -445,4 +463,31 @@ export class AndroidMirrorController {
   setDisplayPower(on: boolean): void { this.sendControl(serializeDisplayPower(on)); }
   sendText(text: string): void { this.sendControl(serializeText(text)); }
   startApp(name: string): void { this.sendControl(serializeStartApp(name)); }
+
+  /**
+   * 请求设备侧重建采集（虚拟显示 + 编码器）。
+   *
+   * scrcpy 的采集在会话创建时一次性建好，之后只有显示尺寸变化或 RESET_VIDEO 才会重建；
+   * 设备在唤醒/启动过渡态下建出来的采集可能是「低分辨率放大」的糊画面，并会粘住整个会话。
+   * 用户实测的解法（切一次画质 = 重开 scrcpy 会话）本质就是重建采集，这里在同一会话内等价做到。
+   * 实测代价：约 133ms（服务端日志 "Video capture reset"，随后是新的 config 包 + IDR，画面清晰度不变）。
+   */
+  refreshCapture(reason: 'entry' | 'manual' = 'manual'): boolean {
+    if (!this.socket || this.socket.readyState !== 1) return false;
+    const sent = this.sendControl(serializeSimple(CONTROL_TYPE_RESET_VIDEO));
+    if (sent) {
+      this.lastResetAt = Date.now();
+      console.info(`[android] 请求重建采集（${reason === 'entry' ? '进入会话自动' : '手动'}）`);
+    }
+    return sent;
+  }
+
+  /** 会话建立后补刷一次采集：等设备唤醒动画/启动过渡过去，再按稳定后的显示状态重建。 */
+  private scheduleEntryCaptureRefresh(): void {
+    if (this.entryRefreshTimer) return;
+    this.entryRefreshTimer = setTimeout(() => {
+      this.entryRefreshTimer = null;
+      this.refreshCapture('entry');
+    }, ENTRY_CAPTURE_REFRESH_MS);
+  }
 }
