@@ -38,8 +38,8 @@ const writeStoredQuality = (quality: AndroidQuality) => {
   try { localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality)); } catch { /* storage unavailable */ }
 };
 
-export function AndroidMirrorView({ sessionId, dockOnly = false }: {
-  sessionId?: string | null; dockOnly?: boolean;
+export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt }: {
+  sessionId?: string | null; dockOnly?: boolean; onInsertPrompt?: (text: string) => void;
 }) {
   const { t } = useI18n();
   const overlay = useAndroidMirrorStore(state => state.overlay);
@@ -639,10 +639,16 @@ export function AndroidMirrorView({ sessionId, dockOnly = false }: {
       )}
 
       {adbMissing && (
-        <div className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-destructive">{t('android.adbUnavailable')}</div>
+        <div className="flex items-start gap-2 border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-destructive">
+          <span className="min-w-0 flex-1">{t('android.adbUnavailable')}</span>
+          <DependencyFixButton label={t('android.insertFixPrompt')} onClick={() => onInsertPrompt?.(buildAndroidFixPrompt('adb', listError ?? ''))} enabled={Boolean(onInsertPrompt)} />
+        </div>
       )}
       {!adbMissing && scrcpyMissing && (
-        <div className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-warning">{t('android.scrcpyUnavailable')}</div>
+        <div className="flex items-start gap-2 border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-warning">
+          <span className="min-w-0 flex-1">{t('android.scrcpyUnavailable')}</span>
+          <DependencyFixButton label={t('android.insertFixPrompt')} onClick={() => onInsertPrompt?.(buildAndroidFixPrompt('scrcpy', ''))} enabled={Boolean(onInsertPrompt)} />
+        </div>
       )}
       {connectedDevice && connectedDevice.state !== 'device' && (
         <div className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-warning">{deviceStateHint(connectedDevice, t)}</div>
@@ -813,6 +819,35 @@ export function AndroidMirrorDock({ sessionId }: { sessionId?: string | null }) 
   }, []);
   if (!docked || !hostReady) return null;
   return <AndroidMirrorView sessionId={sessionId} dockOnly />;
+}
+
+/** 环境不满足时：把可执行的修复步骤作为提示词插到当前会话，交给终端里的 Agent 处理。 */
+function DependencyFixButton({ label, onClick, enabled }: { label: string; onClick: () => void; enabled: boolean }) {
+  if (!enabled) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10px] text-foreground hover:bg-surface-elevated"
+    >
+      {label}
+    </button>
+  );
+}
+
+function buildAndroidFixPrompt(kind: 'adb' | 'scrcpy', detail: string): string {
+  const what = kind === 'adb' ? 'adb（Android platform-tools）' : 'scrcpy / scrcpy-server';
+  return [
+    `Termdock 的“设备投屏”在当前服务端不可用：未找到 ${what}${detail ? `（错误：${detail}）` : ''}。`,
+    '请在本机安装并让 Termdock 恢复可用：',
+    '1) 安装依赖：',
+    '   - macOS: brew install android-platform-tools scrcpy',
+    '   - Ubuntu/Debian: sudo apt install adb scrcpy',
+    '   - Windows: winget install Google.PlatformTools && winget install Genymobile.scrcpy',
+    '2) 若不在 PATH，请在 ~/.termdock/.env 指定 TERMDOCK_ADB_BIN / TERMDOCK_SCRCPY_BIN / TERMDOCK_SCRCPY_SERVER。',
+    '3) 完成后重启 Termdock 服务，并用 adb version、scrcpy --version 验证。',
+    '边界：只做本机环境安装与配置，不要改动 Termdock 仓库代码。',
+  ].join('\n');
 }
 
 function QualitySlider({ label, display, min, max, step, value, onChange }: {

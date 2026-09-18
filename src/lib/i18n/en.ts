@@ -35,6 +35,7 @@ export const en: TranslationDictionary = {
     splitClose: 'Exit split view',
     splitDockedHint: 'Mirroring is shown in the split area.',
     splitDrag: 'Drag to reposition',
+    insertFixPrompt: 'Insert fix prompt',
     fullscreen: 'Fullscreen',
     fillSidebar: 'Fill sidebar',
     exitFullscreen: 'Exit fullscreen',

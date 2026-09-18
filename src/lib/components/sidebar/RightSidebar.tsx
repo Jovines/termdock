@@ -12067,7 +12067,10 @@ export function RightSidebar(
               </button>
             </div>
           ) : (
-            <AndroidMirrorView sessionId={sessionId ?? null} />
+            <AndroidMirrorView
+              sessionId={sessionId ?? null}
+              onInsertPrompt={(text) => insertContextText('android-deps', text)}
+            />
           )}
         </Pane>
       </div>

@@ -35,6 +35,7 @@ export const zh: TranslationDictionary = {
     splitClose: '退出分屏',
     splitDockedHint: '投屏已在分屏区域显示。',
     splitDrag: '按住拖动调整位置',
+    insertFixPrompt: '插入修复提示词',
     fullscreen: '全屏',
     fillSidebar: '铺满侧栏',
     exitFullscreen: '退出全屏',

@@ -52,6 +52,7 @@ export type TranslationDictionary = {
     splitClose: string;
     splitDockedHint: string;
     splitDrag: string;
+    insertFixPrompt: string;
     fullscreen: string;
     fillSidebar: string;
     exitFullscreen: string;
