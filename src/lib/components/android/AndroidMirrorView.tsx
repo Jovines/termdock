@@ -1020,14 +1020,6 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
               onSelect={() => { setOverlay(overlay === 'sidebar' ? 'off' : 'sidebar'); setMoreOpen(false); }}
             />
           )}
-          {/* 画面发糊（设备在唤醒过渡态下把采集建成了低分辨率放大）时，
-              不必来回切画质就能重建采集；入口处其实已经自动补刷过一次。 */}
-          <MirrorMenuItem
-            icon={<RefreshCw size={13} />}
-            label={t('android.refreshCapture')}
-            disabled={mirrorState !== 'streaming'}
-            onSelect={() => { controllerRef.current?.refreshCapture(); setMoreOpen(false); }}
-          />
         </div>,
         document.body,
       )}

@@ -67,7 +67,6 @@ export type TranslationDictionary = {
     captureFailed: string;
     captureUnavailable: string;
     more: string;
-    refreshCapture: string;
     fullscreen: string;
     fillSidebar: string;
     exitFullscreen: string;

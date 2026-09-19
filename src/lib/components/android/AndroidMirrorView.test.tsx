@@ -13,9 +13,6 @@ vi.mock('../../android/mirrorController', () => {
   // 记录注入设备的触摸，用来验证视图手势期间没有触碰设备。
   const touchCalls: string[] = [];
   (globalThis as Record<string, unknown>).__mirrorTouchCalls = touchCalls;
-  // 记录「重建采集」请求，用来验证菜单项的接线。
-  const refreshCalls: string[] = [];
-  (globalThis as Record<string, unknown>).__mirrorRefreshCalls = refreshCalls;
   return {
     AndroidMirrorController: class {
       private readonly callbacks: { onState?: (state: string) => void; onHeader?: (header: unknown) => void };
@@ -27,7 +24,6 @@ vi.mock('../../android/mirrorController', () => {
         this.callbacks.onState?.('streaming');
       }
       disconnect() { /* no-op */ }
-      refreshCapture() { refreshCalls.push('refresh'); }
       back() { keyCalls.push('back'); }
       pointerDown() { touchCalls.push('down'); }
       pointerMove() { touchCalls.push('move'); }
@@ -162,26 +158,6 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
   });
 });
 
-describe('AndroidMirrorView ⋯ 菜单', () => {
-  beforeEach(() => {
-    cleanup();
-    refreshCalls().length = 0;
-    stubCanvasEnvironment();
-  });
-
-  afterEach(() => { vi.restoreAllMocks(); });
-
-  it('「刷新画面」请求设备重建采集，用于画面发糊时一键恢复', async () => {
-    await streamingView(async () => { /* no-op */ });
-
-    await userEvent.click(screen.getByLabelText('More'));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Refresh capture' }));
-
-    expect(refreshCalls()).toEqual(['refresh']);
-    expect(screen.queryByRole('menuitem')).toBeNull(); // 点完就收菜单
-  });
-});
-
 describe('AndroidMirrorView 视图缩放/平移', () => {
   beforeEach(() => {
     cleanup();
@@ -307,7 +283,6 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
 // 由 mirrorController 的 mock 工厂写入；用取值函数读，免去模块求值顺序上的担心。
 const keyCalls = () => (globalThis as Record<string, unknown>).__mirrorKeyCalls as string[];
 const touchCalls = () => (globalThis as Record<string, unknown>).__mirrorTouchCalls as string[];
-const refreshCalls = () => (globalThis as Record<string, unknown>).__mirrorRefreshCalls as string[];
 
 /** 画布容器在测试里的尺寸：画布铺满它，于是缩放后越界与否完全由数字决定。 */
 const STAGE_WIDTH = 300;

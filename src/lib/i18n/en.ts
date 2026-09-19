@@ -50,7 +50,6 @@ export const en: TranslationDictionary = {
     captureFailed: 'Insert failed',
     captureUnavailable: 'Cannot insert into the terminal right now',
     more: 'More',
-    refreshCapture: 'Refresh capture',
     fullscreen: 'Fullscreen',
     fillSidebar: 'Fill sidebar',
     exitFullscreen: 'Exit fullscreen',

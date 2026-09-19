@@ -50,7 +50,6 @@ export const zh: TranslationDictionary = {
     captureFailed: '插入失败',
     captureUnavailable: '当前无法插入到终端',
     more: '更多',
-    refreshCapture: '刷新画面',
     fullscreen: '全屏',
     fillSidebar: '铺满侧栏',
     exitFullscreen: '退出全屏',
