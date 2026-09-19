@@ -176,6 +176,22 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
 
   const canvasOf = (view: ReturnType<typeof render>) => view.container.querySelector('canvas')!;
 
+  it('静止态不挂 transform，放大后再缩回原位也不留', async () => {
+    const view = await streamingView(async () => { /* no-op */ });
+    const canvas = canvasOf(view);
+
+    // 挂着恒等变换一样会把画布提升成合成层，而合成层的栅格化比例定在建层那一刻：
+    // 进面板时画布还是默认的 300×150，首帧到达才换成帧尺寸，这层缓存不重算，
+    // 整幅画面就被按小尺寸栅格化再放大 —— 「刚进去就糊」只有 262 会出，原因在这。
+    expect(canvas.style.transform).toBe('');
+
+    await userEvent.click(screen.getByLabelText('Zoom in'));
+    expect(canvas.style.transform).toBe('translate3d(0px, 0px, 0) scale(1.25)');
+
+    for (let press = 0; press < 10; press++) await userEvent.click(screen.getByLabelText('Zoom out'));
+    expect(canvas.style.transform).toBe('');
+  });
+
   it('放大/缩小按钮按档位走阶梯，到头就禁用', async () => {
     const view = await streamingView(async () => { /* no-op */ });
     const canvas = canvasOf(view);
@@ -318,8 +334,12 @@ const firePointer = (target: Element, type: string, init: { pointerId: number; c
 /** 手势结算排在 rAF 上：等下一帧再断言，模拟浏览器把一帧的输入都派发完才绘制。 */
 const nextFrame = () => act(() => new Promise<void>(resolve => { requestAnimationFrame(() => resolve()); }));
 
-/** 从 style.transform 里读回平移/缩放，比断言字符串更耐得住浮点误差。 */
+/**
+ * 从 style.transform 里读回平移/缩放，比断言字符串更耐得住浮点误差。
+ * 没有 transform 就是静止态：1× 不挂变换（见组件里 applyViewTransform 的注释）。
+ */
 const viewTransform = (canvas: HTMLCanvasElement) => {
+  if (canvas.style.transform === '' || canvas.style.transform === 'none') return { x: 0, y: 0, zoom: 1 };
   const match = /translate3d\((-?[\d.]+)px, (-?[\d.]+)px, 0\) scale\(([\d.]+)\)/.exec(canvas.style.transform);
   if (!match) throw new Error(`unexpected transform: ${canvas.style.transform}`);
   return { x: Number(match[1]), y: Number(match[2]), zoom: Number(match[3]) };

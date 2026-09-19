@@ -423,13 +423,25 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     return { x: Math.max(-maxX, Math.min(maxX, next.x)), y: Math.max(-maxY, Math.min(maxY, next.y)) };
   }, []);
 
-  /** 变换和倍率前缀只写 DOM：手势中若走 React 状态，每一帧都要重渲染整个面板，主线程一满就掉帧。 */
+  /**
+   * 变换和倍率前缀只写 DOM：手势中若走 React 状态，每一帧都要重渲染整个面板，主线程一满就掉帧。
+   *
+   * 1× 无平移时一律不挂 transform（写空，和没有缩放这功能时一模一样）。挂上恒等变换同样是
+   * 把画布提升成合成层，而合成层的栅格化比例是建层那一刻定下的：进面板时画布还是默认的
+   * 300×150，首帧到达才换成帧尺寸，这层缓存不重算，画面就被按小尺寸栅格化再放大 —— 也就是
+   * 「刚进去就糊」。同一串反复写也没有意义，跳过它，免得画布跟着每秒刷新的统计行走一遍样式。
+   */
   const applyViewTransform = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.style.transform = `translate3d(${panRef.current.x}px, ${panRef.current.y}px, 0) scale(${zoomRef.current})`;
+    const { x, y } = panRef.current;
+    const zoomValue = zoomRef.current;
+    const next = zoomValue === ZOOM_MIN && x === 0 && y === 0
+      ? ''
+      : `translate3d(${x}px, ${y}px, 0) scale(${zoomValue})`;
+    if (canvas.style.transform !== next) canvas.style.transform = next;
     const label = zoomLabelRef.current;
-    if (label) label.textContent = zoomRef.current > ZOOM_MIN ? `${formatZoomLabel(zoomRef.current)} · ` : '';
+    if (label) label.textContent = zoomValue > ZOOM_MIN ? `${formatZoomLabel(zoomValue)} · ` : '';
   }, []);
 
   /** 以 focus（client 坐标，缺省为画面中心）为锚点缩放：锚点底下那一处画面保持不动。 */
@@ -1156,7 +1168,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           style={{
             display: streaming || header ? 'block' : 'none',
             // 缩放/平移只改这一层：布局尺寸（max-w/max-h 铺满）不变，设备坐标映射照旧。
-            // transform 不在这里给：手势中它由 applyViewTransform 直接写，逐帧渲染太重。
+            // transform 不在这里给：手势中它由 applyViewTransform 直接写，逐帧渲染太重；
+            // 静止态那串空值也由它写，别在这儿追上一条恒等变换（见那边的注释）。
             transformOrigin: 'center',
           }}
           onPointerDown={handlePointerDown}
