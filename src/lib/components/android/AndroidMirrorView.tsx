@@ -111,12 +111,13 @@ const writeStoredQuality = (quality: AndroidQuality) => {
   try { localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality)); } catch { /* storage unavailable */ }
 };
 
-export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt, onInsertFile }: {
+export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt, onInsertFile, onRecordingComplete }: {
   sessionId?: string | null;
   dockOnly?: boolean;
   onInsertPrompt?: (text: string) => void;
   /** 截图/录屏产物：上传到临时目录后插入路径引用。 */
   onInsertFile?: (file: File) => Promise<unknown> | void;
+  onRecordingComplete?: (file: File) => void;
 }) {
   const { t } = useI18n();
   const overlay = useAndroidMirrorStore(state => state.overlay);
@@ -185,9 +186,10 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const recordingTimer = useRef<number | null>(null);
   const noticeTimer = useRef<number | null>(null);
   const captureBusyRef = useRef(false);
-  // 卸载路径上要保留最新的插入回调，用 ref 避免把 effect 挂在会变的值上。
-  const onInsertFileRef = useRef(onInsertFile);
-  onInsertFileRef.current = onInsertFile;
+  const [captureBusy, setCaptureBusy] = useState(false);
+  // 录屏由父级确认处理，离开投屏面板也不能跳过确认。
+  const onRecordingCompleteRef = useRef(onRecordingComplete);
+  onRecordingCompleteRef.current = onRecordingComplete;
   // 低频操作（网络连接 / 分屏 / 全屏 / 铺满侧栏）收进 ⋯ 菜单，让手机上一行放得下。
   const [moreOpen, setMoreOpen] = useState(false);
   const [moreAnchor, setMoreAnchor] = useState<{ left: number; top: number } | null>(null);
@@ -754,6 +756,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     const canvas = canvasRef.current;
     if (!canvas || captureBusyRef.current) return;
     captureBusyRef.current = true;
+    setCaptureBusy(true);
     setCaptureError(null);
     try {
       const file = await captureMirrorScreenshot(canvas);
@@ -762,6 +765,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       setCaptureError(error instanceof Error ? error.message : String(error));
     } finally {
       captureBusyRef.current = false;
+      setCaptureBusy(false);
     }
   };
 
@@ -780,11 +784,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     }
     try {
       const file = await handle.stop();
-      await insertCapture(file, t('android.recordingInserted'));
+      onRecordingCompleteRef.current?.(file);
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : String(error));
     }
-  }, [insertCapture, showStatus, t]);
+  }, [showStatus, t]);
   const stopRecordingRef = useRef(stopRecording);
   stopRecordingRef.current = stopRecording;
 
@@ -842,7 +846,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     };
   }, [moreOpen]);
 
-  // 离开面板前收尾：录到一半的内容不丢，能插的就插进去。
+  // 离开面板前收尾：交给仍挂载的父级确认，不能自动插入。
   useEffect(() => () => {
     if (recordingTimer.current !== null) window.clearInterval(recordingTimer.current);
     if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
@@ -850,7 +854,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     recordingRef.current = null;
     if (!handle) return;
     void handle.stop()
-      .then(file => onInsertFileRef.current?.(file))
+      .then(file => onRecordingCompleteRef.current?.(file))
       .catch(() => { /* 卸载路径上失败就放弃 */ });
   }, []);
 
@@ -963,21 +967,21 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           <button
             type="button"
             onClick={() => void takeScreenshot()}
-            disabled={!onInsertFile}
+            disabled={!onInsertFile || captureBusy}
             className={`${iconButtonClass} text-muted-foreground`}
             title={onInsertFile ? t('android.screenshot') : t('android.captureUnavailable')}
             aria-label={t('android.screenshot')}
           >
-            <Camera size={compact ? 12 : 13} />
+            {captureBusy ? <Loader2 size={compact ? 12 : 13} className="animate-spin" /> : <Camera size={compact ? 12 : 13} />}
           </button>
         )}
         {(streaming || recording) && (
           <button
             type="button"
             onClick={() => { if (recording) void stopRecording('manual'); else startRecording(); }}
-            disabled={!recording && !onInsertFile}
+            disabled={!recording && !onRecordingComplete}
             className={`${iconButtonClass} ${recording ? 'text-destructive' : 'text-muted-foreground'}`}
-            title={recording ? t('android.recordingStop') : (onInsertFile ? t('android.recordingStart') : t('android.captureUnavailable'))}
+            title={recording ? t('android.recordingStop') : (onRecordingComplete ? t('android.recordingStart') : t('android.captureUnavailable'))}
             aria-label={recording ? t('android.recordingStop') : t('android.recordingStart')}
           >
             {recording ? <Square size={compact ? 10 : 11} fill="currentColor" /> : <Video size={compact ? 12 : 13} />}
@@ -1255,16 +1259,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         {/* 缩放改的是本地视图，不往设备注入任何东西。 */}
         <ToolButton compact={compact} label={t('android.zoomIn')} onClick={() => zoomByStep('in')} disabled={!streaming || zoom >= ZOOM_MAX - 0.01}><Plus size={14} /></ToolButton>
         <ToolButton compact={compact} label={t('android.zoomOut')} onClick={() => zoomByStep('out')} disabled={!streaming || zoom <= ZOOM_MIN + 0.01}><Minus size={14} /></ToolButton>
-        {/* 录屏状态就放在这条常驻行里：不新增行、不改变画布高度、也不遮挡画面。 */}
-        <CaptureStatusBadge
-          recording={recording}
-          elapsed={recordingElapsed}
-          status={captureStatus}
-          stopLabel={t('android.recordingStop')}
-          onStop={() => void stopRecording('manual')}
-        />
-        {!recording && !captureStatus && (
-          <span className="ml-auto whitespace-nowrap text-[10px] tabular-nums text-muted-foreground">
+        {/* 统计文字始终占位，状态仅覆盖内容。固定高度包含录屏停止按钮，
+            避免 flex-wrap 在状态切换时换行或改变行高，挤压上方画布。 */}
+        <div className="relative ml-auto h-5 min-w-24 max-w-full" data-mirror-capture-status>
+          <span aria-hidden={recording || Boolean(captureStatus) || captureBusy}
+            className={`block truncate text-[10px] leading-5 tabular-nums text-muted-foreground ${recording || captureStatus || captureBusy ? 'invisible' : ''}`}>
             {header ? (
               <>
                 {/* 内容由 applyViewTransform 直接写，免得捏合时为了这行字重渲染整个面板。 */}
@@ -1273,7 +1272,16 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
               </>
             ) : ''}
           </span>
-        )}
+          <div className="absolute inset-0 flex items-center justify-end overflow-hidden">
+            <CaptureStatusBadge
+              recording={recording}
+              elapsed={recordingElapsed}
+              status={captureBusy ? t('android.captureInserting') : captureStatus}
+              stopLabel={t('android.recordingStop')}
+              onStop={() => void stopRecording('manual')}
+            />
+          </div>
+        </div>
       </div>
 
       {textMode && (
@@ -1377,7 +1385,7 @@ function CaptureStatusBadge({ recording, elapsed, status, stopLabel, onStop }: {
     );
   }
   if (!status) return null;
-  return <span role="status" aria-live="polite" className="ml-auto whitespace-nowrap text-[10px] text-primary">{status}</span>;
+  return <span role="status" aria-live="polite" title={status} className="ml-auto truncate text-[10px] text-primary">{status}</span>;
 }
 
 /** 分屏模式下由 App 顶层持有投屏实例，关闭侧栏不会中断分屏。 */

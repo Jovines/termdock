@@ -14,20 +14,20 @@ vi.mock('../utils/authProtection.js', async (importOriginal) => ({
 
 import router from './filesystem.js';
 
-async function call(cwd: string, includeNested: boolean): Promise<any> {
+async function call(cwd: string, includeNested: boolean, options: { refresh?: boolean; discoverOnly?: boolean; cacheOnly?: boolean } = {}): Promise<any> {
   const app = express();
   app.use('/api/fs', router);
   const server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, r));
   const port = (server.address() as any).port;
-  const res = await fetch(`http://127.0.0.1:${port}/api/fs/git-bundle?cwd=${encodeURIComponent(cwd)}&includeNested=${includeNested}&refresh=true`);
+  const res = await fetch(`http://127.0.0.1:${port}/api/fs/git-bundle?cwd=${encodeURIComponent(cwd)}&includeNested=${includeNested}&refresh=${options.refresh ?? true}&discoverOnly=${options.discoverOnly ?? false}&cacheOnly=${options.cacheOnly ?? false}`);
   const body = await res.json();
   await new Promise<void>((r) => server.close(() => r()));
   return body;
 }
 
-function makeRepo(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-single-shape-'));
+function makeRepo(dir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-single-shape-'))): string {
+  fs.mkdirSync(dir, { recursive: true });
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
   git('init');
   git('config', 'user.email', 't@t');
@@ -41,6 +41,34 @@ function makeRepo(): string {
 }
 
 describe('single-repo git bundle repository shape', () => {
+  it('reopening discovery after a full refresh keeps the refreshed files and timestamp', async () => {
+    const dir = makeRepo();
+    try {
+      const child = makeRepo(path.join(dir, 'repos', 'child'));
+      const initial = await call(dir, true, { discoverOnly: true });
+      expect(initial.repositories.find((repo: any) => repo.root === child)?.deferred).toBe(true);
+      fs.writeFileSync(path.join(dir, 'after-refresh.txt'), 'new change\n');
+      fs.writeFileSync(path.join(child, 'child-after-refresh.txt'), 'nested change\n');
+      const refreshed = await call(dir, true);
+      expect(refreshed.cacheUpdatedAt).toBeGreaterThan(initial.cacheUpdatedAt);
+      for (const cacheOnly of [false, true]) {
+        const reopened = await call(dir, true, { refresh: false, discoverOnly: true, cacheOnly });
+        expect(reopened.cacheUpdatedAt).toBe(refreshed.cacheUpdatedAt);
+        expect(reopened.files.map((file: any) => file.path)).toContain('after-refresh.txt');
+        const childRepo = reopened.repositories.find((repo: any) => repo.root === child);
+        expect(childRepo.deferred).not.toBe(true);
+        expect(childRepo.files.map((file: any) => file.path)).toContain('child-after-refresh.txt');
+      }
+      // A newer discovery must not replace the complete snapshot for full reads.
+      const discovery = await call(dir, true, { discoverOnly: true });
+      const full = await call(dir, true, { refresh: false });
+      expect(discovery.cacheUpdatedAt).toBeGreaterThan(refreshed.cacheUpdatedAt);
+      expect(full.cacheUpdatedAt).toBe(refreshed.cacheUpdatedAt);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it('carries the per-repo untrackedDeferred flag the client reads', async () => {
     const dir = makeRepo();
     const single = await call(dir, false);

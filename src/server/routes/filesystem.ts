@@ -1674,7 +1674,7 @@ async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeN
   const cacheKey = getGitBundleCacheKey(gitRoot, includeNested, discoverOnly);
   const now = Date.now();
   if (signal) throwIfAborted(signal, 'git.bundle');
-  const cached = gitBundleCache.get(cacheKey);
+  const cached = getCompatibleGitBundleCache(gitRoot, includeNested, discoverOnly);
   if (!refresh && cached && (cached.expiresAt > now || allowStale)) {
     const cacheAgeMs = Math.max(0, now - (cached.expiresAt - GIT_BUNDLE_CACHE_TTL_MS));
     return {
@@ -1724,8 +1724,7 @@ async function refreshGitBundleCacheDetached(resolvedCwd: string, gitRoot: strin
 }
 
 function getGitBundleCache(gitRoot: string, includeNested: boolean, allowStale = false, discoverOnly = false): GitBundlePayload | null {
-  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested, discoverOnly);
-  const cached = gitBundleCache.get(cacheKey);
+  const cached = getCompatibleGitBundleCache(gitRoot, includeNested, discoverOnly);
   if (!cached) return null;
   const now = Date.now();
   if (cached.expiresAt <= now && !allowStale) return null;
@@ -2780,6 +2779,17 @@ const gitBundleBuildPromises = new Map<string, Promise<GitBundlePayload>>();
 // placeholder, or a full scan would be shadowed by it.
 function getGitBundleCacheKey(gitRoot: string, includeNested: boolean, discoverOnly = false): string {
   return `${gitRoot}\u0000${includeNested ? 'nested' : 'single'}${discoverOnly ? ' discover' : ''}`;
+}
+
+function getCompatibleGitBundleCache(gitRoot: string, includeNested: boolean, discoverOnly: boolean) {
+  const cached = gitBundleCache.get(getGitBundleCacheKey(gitRoot, includeNested, discoverOnly));
+  if (!includeNested || !discoverOnly) return cached;
+  // Reopening the sidebar requests discovery, while manual refresh builds the
+  // full snapshot. Full data satisfies discovery too: do not return an older
+  // discovery snapshot and roll back both the file list and its timestamp.
+  // The reverse is unsafe because discovery contains deferred placeholders.
+  const full = gitBundleCache.get(getGitBundleCacheKey(gitRoot, true));
+  return full && (!cached || full.updatedAt >= cached.updatedAt) ? full : cached;
 }
 
 function clearGitBundleCacheForRoot(root: string): void {

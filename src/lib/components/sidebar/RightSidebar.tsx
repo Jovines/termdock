@@ -88,6 +88,7 @@ import {
 } from './referencePaths';
 import { ContextDraftDock } from './ContextDraftDock';
 import { AndroidMirrorView, ANDROID_DOCK_GROUP } from '../android/AndroidMirrorView';
+import { RecordingSaveDialog } from '../android/RecordingSaveDialog';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
@@ -7863,6 +7864,10 @@ export function RightSidebar(
   }, [contextDraftEnabled, insertPathReference, isMobile, onClose, t]);
 
   /** 投屏面板的截图/录屏产物：与临时图片上传同一条链路，只是文件已经在内存里。 */
+  const [pendingRecordings, setPendingRecordings] = useState<File[]>([]);
+  const handleRecordingComplete = useCallback((file: File) => {
+    setPendingRecordings(previous => [...previous, file]);
+  }, []);
   const handleMirrorCaptureInsert = useCallback(async (file: File) => {
     await uploadTemporaryImageAndInsertReference(file, uploadFiles, (uploadedPath) => {
       insertPathReference(uploadedPath, `path:${uploadedPath}`);
@@ -12118,10 +12123,18 @@ export function RightSidebar(
               sessionId={sessionId ?? null}
               onInsertPrompt={(text) => insertContextText('android-deps', text)}
               onInsertFile={handleMirrorCaptureInsert}
+              onRecordingComplete={handleRecordingComplete}
             />
           )}
         </Pane>
       </div>
+      {pendingRecordings[0] && <RecordingSaveDialog
+        key={pendingRecordings[0].name}
+        file={pendingRecordings[0]}
+        initialPath={rootPath || '/'}
+        onInsert={handleMirrorCaptureInsert}
+        onDone={() => setPendingRecordings(previous => previous.slice(1))}
+      />}
       {isOpen && contextDraftEnabled && (
         <ContextDraftDock
           value={contextDraftText}

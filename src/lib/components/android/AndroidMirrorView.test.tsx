@@ -45,8 +45,8 @@ vi.mock('../../terminal/api', () => ({
   updateSettings: vi.fn(async () => ({})),
 }));
 
-const streamingView = async (onInsertFile: (file: File) => Promise<void>) => {
-  const view = render(<AndroidMirrorView sessionId="s1" onInsertFile={onInsertFile} />);
+const streamingView = async (onInsertFile: (file: File) => Promise<void>, onRecordingComplete = vi.fn()) => {
+  const view = render(<AndroidMirrorView sessionId="s1" onInsertFile={onInsertFile} onRecordingComplete={onRecordingComplete} />);
   // 唯一一台已授权设备会自动选中并连接，等标题栏出现投屏控件。
   await waitFor(() => expect(screen.getByLabelText('Screenshot and insert')).toBeTruthy());
   return view;
@@ -82,6 +82,23 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
 
     expect((await screen.findByRole('alert')).textContent).toContain('上传通道断开');
     expect(screen.queryByText('Screenshot inserted')).toBeNull();
+  });
+
+  it('截图上传时显示 loading 并阻止重复插入', async () => {
+    let finish!: () => void;
+    const insert = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+    await streamingView(insert);
+    const button = screen.getByLabelText('Screenshot and insert') as HTMLButtonElement;
+    await userEvent.click(button);
+    await waitFor(() => expect(insert).toHaveBeenCalledOnce());
+    expect(button.disabled).toBe(true);
+    expect(button.querySelector('.animate-spin')).toBeTruthy();
+    expect(screen.getByText('Inserting…')).toBeTruthy();
+    await userEvent.click(button);
+    expect(insert).toHaveBeenCalledOnce();
+    await act(async () => finish());
+    expect(button.disabled).toBe(false);
+    expect(screen.getByText('Screenshot inserted')).toBeTruthy();
   });
 
   it('低频操作收进 ⋯ 菜单，菜单项点一下就展开地址输入框', async () => {
@@ -137,9 +154,10 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     expect(keyCalls()).toEqual([]);
   });
 
-  it('录屏先出现计时与停止按钮，停止后才把视频交给插入回调', async () => {
+  it('录屏停止后只交给确认回调，不直接插入', async () => {
     const inserted: File[] = [];
-    await streamingView(async file => { inserted.push(file); });
+    const completed = vi.fn();
+    await streamingView(async file => { inserted.push(file); }, completed);
 
     await userEvent.click(screen.getByLabelText('Start recording'));
     const recorder = MediaRecorderSpy.instances.at(-1)!;
@@ -147,14 +165,28 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     const badgeStop = await screen.findByLabelText(/^Stop recording · \d\d:\d\d$/);
     expect(badgeStop).toBeTruthy();
     // 录屏中画面高度不能变：统计信息让位给计时徽章，而不是另起一行。
-    expect(screen.queryByText(/fps ·/)).toBeNull();
+    // 隐藏统计内容但保留占位，计时徽章不能改变底栏换行与行高。
+    expect(screen.getByText(/fps ·/).classList.contains('invisible')).toBe(true);
+    expect(screen.getByText(/fps ·/).getAttribute('aria-hidden')).toBe('true');
 
     // 真实时序：录制途中数据持续到达，点停止时已经攒了内容。
     recorder.emit(new Blob([new Uint8Array([1, 2, 3])], { type: 'video/mp4' }));
     await userEvent.click(badgeStop);
 
-    await waitFor(() => expect(inserted).toHaveLength(1));
-    expect(inserted[0]!.name).toMatch(/\.mp4$/);
+    await waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(completed.mock.calls[0][0].name).toMatch(/\.mp4$/);
+    expect(inserted).toHaveLength(0);
+  });
+
+  it('关闭投屏时收尾的录屏仍需确认', async () => {
+    const inserted = vi.fn();
+    const completed = vi.fn();
+    const view = await streamingView(inserted, completed);
+    await userEvent.click(screen.getByLabelText('Start recording'));
+    MediaRecorderSpy.instances.at(-1)!.emit(new Blob(['video'], { type: 'video/mp4' }));
+    view.unmount();
+    await waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(inserted).not.toHaveBeenCalled();
   });
 });
 

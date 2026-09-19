@@ -64,6 +64,13 @@ export type TranslationDictionary = {
     recordingStopped: string;
     captureInserted: string;
     recordingInserted: string;
+    recordingConfirm: string;
+    recordingInsert: string;
+    recordingSave: string;
+    recordingSaveHint: string;
+    recordingDiscard: string;
+    captureInserting: string;
+    recordingSaving: string;
     captureFailed: string;
     captureUnavailable: string;
     more: string;
