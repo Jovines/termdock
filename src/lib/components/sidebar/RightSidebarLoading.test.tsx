@@ -26,6 +26,9 @@ describe('sidebar loading after close and reopen', () => {
     useSidebarStore.setState({
       ...initialState, rootPath: '/workspace', rightTab: 'diff',
       hydrateNestedGitScanRoots: vi.fn(async () => {}),
+      // The gate awaits both preferences; the real hydration would sit on the
+      // never-resolving fetch stub below.
+      hydrateActiveGitRepos: vi.fn(async () => {}),
     });
     vi.mocked(getGitBundle).mockReset();
     vi.mocked(getGitBundle).mockImplementation(() => new Promise(() => {}));

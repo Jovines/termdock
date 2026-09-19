@@ -67,6 +67,8 @@ import {
   setPinnedExplorerRootsSetting,
   setPinnedExplorerRootSetting,
   watchPinnedExplorerRootsSetting,
+  getActiveGitReposSetting,
+  setActiveGitRepoSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -7069,6 +7071,7 @@ async function getSettingsPayload() {
     serviceSwitcherExpanded: getServiceSwitcherExpandedSetting(),
     fileSortModes: getFileSortModesSetting(),
     nestedGitScanRoots: getNestedGitScanRootsSetting(),
+    activeGitRepos: getActiveGitReposSetting(),
     pinnedExplorerRoots: getPinnedExplorerRootsSetting(),
     localAccess: {
       ...localAccess,
@@ -7094,9 +7097,17 @@ router.get('/update', (_req, res) => {
 
 router.post('/update/check', async (_req, res) => {
   try {
-    res.json(desktopRuntimeOwner
-      ? await desktopRuntimeOwner.checkForUpdates()
-      : await npmAutoUpdateManager.checkNow());
+    if (desktopRuntimeOwner) {
+      res.json(await desktopRuntimeOwner.checkForUpdates());
+      return;
+    }
+    // npm 查询加全局安装动辄二三十秒，而加密传输对 30s 内收不到任何回包就判超时，
+    // 客户端会弹「服务响应超时」——更新其实装完了。检查照常跑，进度与结果都由控制
+    // WS 的 update-state 广播推送，这里立刻回当前状态（通常是 checking）即可。
+    void npmAutoUpdateManager.checkNow().catch((error) => {
+      console.warn(`[auto-update] ${error instanceof Error ? error.message : String(error)}`);
+    });
+    res.status(202).json(npmAutoUpdateManager.getState());
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -7267,6 +7278,29 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setNestedGitScanRootSetting(preference.rootPath, preference.enabled);
+  }
+
+  if (body.activeGitRepo && typeof body.activeGitRepo === 'object') {
+    const preference = body.activeGitRepo as { contextKey?: unknown; repoRoot?: unknown };
+    const contextKey = preference.contextKey;
+    const repoRoot = preference.repoRoot;
+    // The context key is the client's layout — session id plus workspace root,
+    // or a split-workspace id — so it is validated by shape only. `null` is the
+    // explicit "every repository", which clears the entry.
+    const validContextKey = typeof contextKey === 'string'
+      && contextKey.length > 0
+      && contextKey.length <= 4300
+      && !/[\u0000-\u001f\u007f]/.test(contextKey.split('\u0000').join(''));
+    const validRepoRoot = repoRoot === null
+      || (typeof repoRoot === 'string'
+        && repoRoot.length > 0
+        && repoRoot.length <= 4096
+        && (repoRoot.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(repoRoot)));
+    if (!validContextKey || !validRepoRoot) {
+      res.status(400).json({ error: 'Invalid active git repository preference', code: 'ACTIVE_GIT_REPO_INVALID' });
+      return;
+    }
+    setActiveGitRepoSetting(contextKey as string, (repoRoot as string | null) ?? null);
   }
 
   if (body.pinnedExplorerRoots && typeof body.pinnedExplorerRoots === 'object' && !Array.isArray(body.pinnedExplorerRoots)) {

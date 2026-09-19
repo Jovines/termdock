@@ -1728,6 +1728,8 @@ export interface SettingsState {
   /** Workspace roots opted into nested sub-repo scanning. Absent = single-repo. */
   nestedGitScanRoots: Record<string, true>;
   pinnedExplorerRoots: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
+  /** Nested sub-repo shown in the Changes pane, keyed by sidebar context key. */
+  activeGitRepos?: Record<string, string>;
 }
 
 let settingsRequest: Promise<SettingsState> | null = null;
@@ -1754,7 +1756,7 @@ export function getSettings(): Promise<SettingsState> {
   return settingsRequest;
 }
 
-export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
+export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string; activeGitRepo?: { contextKey: string; repoRoot: string | null } }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',

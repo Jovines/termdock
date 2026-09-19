@@ -2,8 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { getSettingsMock, updateSettingsMock } = vi.hoisted(() => ({
-  getSettingsMock: vi.fn(async () => ({ fileSortModes: {}, pinnedExplorerRoots: {} })),
-  updateSettingsMock: vi.fn(async (settings: { fileSortModes?: Record<string, 'modified'>; fileSortMode?: { path: string; mode: 'name' | 'modified' }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean } }) => ({
+  // Every key a caller may hand to `mockResolvedValueOnce` stays optional: the
+  // store only ever reads the field it hydrated.
+  getSettingsMock: vi.fn(async (): Promise<{
+    fileSortModes?: Record<string, 'modified'>;
+    pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
+    activeGitRepos?: Record<string, string>;
+  }> => ({ fileSortModes: {}, pinnedExplorerRoots: {} })),
+  updateSettingsMock: vi.fn(async (settings: { fileSortModes?: Record<string, 'modified'>; fileSortMode?: { path: string; mode: 'name' | 'modified' }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; activeGitRepo?: { contextKey: string; repoRoot: string | null } }) => ({
     fileSortModes: settings.fileSortModes ?? (settings.fileSortMode?.mode === 'modified' ? { [settings.fileSortMode.path]: 'modified' } : {}),
     pinnedExplorerRoots: settings.pinnedExplorerRoots ?? (settings.pinnedExplorerRoot?.pinned ? {
       [settings.pinnedExplorerRoot.rootPath]: [{
@@ -49,6 +55,8 @@ function resetSidebarStore(): void {
     directoryCache: new Map(),
     fileSortModes: {},
     fileSortModesHydrated: true,
+    activeGitRepos: {},
+    activeGitReposHydrated: false,
     showHiddenFiles: false,
     changedFiles: new Map(),
     fileChangeVersions: new Map(),
@@ -629,5 +637,109 @@ describe('useSidebarStore per-directory file sorting', () => {
       fileSortModes: { '/workspace/legacy': 'modified' },
     });
     expect(useSidebarStore.getState().fileSortModes).toEqual({ '/workspace/legacy': 'modified' });
+  });
+});
+
+describe('useSidebarStore active git repository', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+    getSettingsMock.mockClear();
+    updateSettingsMock.mockClear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  it('hydrates the server selection and mirrors it', async () => {
+    getSettingsMock.mockResolvedValueOnce({ activeGitRepos: { '/workspace/one': '/workspace/one/nested' } });
+    useSidebarStore.setState({ contextKey: '/workspace/one' });
+
+    await useSidebarStore.getState().hydrateActiveGitRepos();
+
+    expect(useSidebarStore.getState().activeGitRepos).toEqual({ '/workspace/one': '/workspace/one/nested' });
+    expect(useSidebarStore.getState().activeGitReposHydrated).toBe(true);
+    expect(JSON.parse(window.localStorage.getItem('termdock:right-sidebar:active-git-repo:v2') ?? '{}'))
+      .toEqual({ '/workspace/one': '/workspace/one/nested' });
+    expect(updateSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a selection made while the settings read was in flight', async () => {
+    getSettingsMock.mockResolvedValueOnce({ activeGitRepos: { '/workspace/two': '/workspace/two/old' } });
+    useSidebarStore.setState({ contextKey: '/workspace/two' });
+    useSidebarStore.getState().setActiveGitRepo('/workspace/two/new');
+
+    await useSidebarStore.getState().hydrateActiveGitRepos();
+
+    // The snapshot was taken before the click, so the click wins.
+    expect(useSidebarStore.getState().activeGitRepos).toEqual({ '/workspace/two': '/workspace/two/new' });
+  });
+
+  it('retries a local-only key the server never acknowledged', async () => {
+    getSettingsMock.mockResolvedValueOnce({ activeGitRepos: {} });
+    useSidebarStore.setState({ contextKey: '/workspace/three' });
+    useSidebarStore.getState().setActiveGitRepo('/workspace/three/nested');
+    updateSettingsMock.mockClear();
+
+    await useSidebarStore.getState().hydrateActiveGitRepos();
+
+    expect(updateSettingsMock).toHaveBeenCalledWith({
+      activeGitRepo: { contextKey: '/workspace/three', repoRoot: '/workspace/three/nested' },
+    });
+    expect(useSidebarStore.getState().activeGitRepos).toEqual({ '/workspace/three': '/workspace/three/nested' });
+  });
+
+  it('stores a pick and deletes it again for "all repositories"', () => {
+    useSidebarStore.setState({ contextKey: '/workspace/four' });
+
+    useSidebarStore.getState().setActiveGitRepo('/workspace/four/nested');
+    expect(updateSettingsMock).toHaveBeenLastCalledWith({
+      activeGitRepo: { contextKey: '/workspace/four', repoRoot: '/workspace/four/nested' },
+    });
+    expect(useSidebarStore.getState().activeGitRepos).toEqual({ '/workspace/four': '/workspace/four/nested' });
+
+    useSidebarStore.getState().setActiveGitRepo(null);
+    expect(updateSettingsMock).toHaveBeenLastCalledWith({
+      activeGitRepo: { contextKey: '/workspace/four', repoRoot: null },
+    });
+    expect(useSidebarStore.getState().activeGitRepos).toEqual({});
+    expect(JSON.parse(window.localStorage.getItem('termdock:right-sidebar:active-git-repo:v2') ?? '{}')).toEqual({});
+  });
+
+  it('does not write when the selection is unchanged', () => {
+    useSidebarStore.setState({ contextKey: '/workspace/five' });
+    useSidebarStore.getState().setActiveGitRepo('/workspace/five/nested');
+    updateSettingsMock.mockClear();
+
+    // Every bundle apply re-asserts the selection; only real changes may write.
+    useSidebarStore.getState().setActiveGitRepo('/workspace/five/nested');
+    useSidebarStore.getState().setActiveGitRepo(null);
+    useSidebarStore.getState().setActiveGitRepo(null);
+
+    expect(updateSettingsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores picks made before the context key is known', () => {
+    useSidebarStore.setState({ contextKey: null });
+
+    useSidebarStore.getState().setActiveGitRepo('/workspace/nested');
+
+    expect(useSidebarStore.getState().activeGitRepos).toEqual({});
+    expect(updateSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the mirrored selection when the settings read fails', async () => {
+    getSettingsMock.mockRejectedValueOnce(new Error('offline'));
+    useSidebarStore.setState({
+      contextKey: '/workspace/six',
+      activeGitRepos: { '/workspace/six': '/workspace/six/nested' },
+    });
+
+    await expect(useSidebarStore.getState().hydrateActiveGitRepos()).rejects.toThrow('offline');
+
+    expect(useSidebarStore.getState().activeGitRepos).toEqual({ '/workspace/six': '/workspace/six/nested' });
+    expect(useSidebarStore.getState().activeGitReposHydrated).toBe(false);
   });
 });

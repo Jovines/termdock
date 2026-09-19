@@ -33,6 +33,10 @@ const SELECTED_FILE_PATHS_CACHE_KEY = 'termdock:right-sidebar:selected-files-by-
 const SHOW_HIDDEN_FILES_CACHE_KEY = 'termdock:right-sidebar:show-hidden-files:v1';
 const FILE_SORT_MODES_CACHE_KEY = 'termdock:right-sidebar:file-sort-modes:v1';
 const NESTED_GIT_SCAN_ROOTS_CACHE_KEY = 'termdock:right-sidebar:nested-git-scan-roots:v1';
+// v1 sharded this by workspace root; the server copy is keyed by context key,
+// so the old entries are dropped rather than migrated.
+const ACTIVE_GIT_REPOS_CACHE_KEY = 'termdock:right-sidebar:active-git-repo:v2';
+const LEGACY_ACTIVE_GIT_REPO_CACHE_KEY = 'termdock:right-sidebar:active-git-repo:v1';
 // 分组开关 / 折叠状态：复用 LeftSidebar 旧 localStorage key 以保留用户已有偏好。
 // 旧编码是裸 localStorage（'1' 与 JSON 数组），与 readCache 包装格式不兼容，
 // 因此这里用专用 reader/writer 沿用旧格式。
@@ -434,10 +438,30 @@ function getInitialNestedGitScanRoots(): Record<string, true> {
   return readCache(NESTED_GIT_SCAN_ROOTS_CACHE_KEY, isNestedGitScanRoots) ?? {};
 }
 
+function isActiveGitReposCache(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.entries(value as Record<string, unknown>).every(([contextKey, repoRoot]) => (
+    contextKey.length > 0 && typeof repoRoot === 'string' && repoRoot.length > 0
+  ));
+}
+
+function readActiveGitReposCache(): Record<string, string> {
+  return readCache(ACTIVE_GIT_REPOS_CACHE_KEY, isActiveGitReposCache) ?? {};
+}
+
+function writeActiveGitReposCache(cache: Record<string, string>): void {
+  writeCache(ACTIVE_GIT_REPOS_CACHE_KEY, cache);
+}
+
 let fileSortModesHydration: Promise<void> | null = null;
 const fileSortModeSaveSequences = new Map<string, number>();
 let nestedGitScanRootsHydration: Promise<void> | null = null;
 const nestedGitScanRootSaveSequences = new Map<string, number>();
+let activeGitReposHydration: Promise<void> | null = null;
+// Context keys this client has changed but whose write has not been confirmed.
+// Hydration lets them win over the server snapshot, which was read before the
+// change landed and would otherwise put the previous repository back.
+const activeGitRepoDirtyKeys = new Set<string>();
 let pinnedExplorerRootsHydration: Promise<void> | null = null;
 const pinnedExplorerRootsOrigin = globalThis.crypto?.randomUUID?.() ?? `pins-${Math.random().toString(36).slice(2)}`;
 
@@ -524,6 +548,12 @@ interface SidebarState {
   /** Workspace roots whose Git tab scans for nested sub-repos. Absent = single-repo. */
   nestedGitScanRoots: Record<string, true>;
   nestedGitScanRootsHydrated: boolean;
+  /**
+   * Which nested sub-repo the Changes pane shows, keyed by context key so the
+   * choice follows the session instead of the browser. Absent = all repos.
+   */
+  activeGitRepos: Record<string, string>;
+  activeGitReposHydrated: boolean;
 
   // Whether dotfiles / hidden entries are shown in the file explorer.
   showHiddenFiles: boolean;
@@ -601,6 +631,8 @@ interface SidebarState {
   setDirectorySortMode: (path: string, mode: FileSortMode) => Promise<void>;
   hydrateNestedGitScanRoots: () => Promise<void>;
   setNestedGitScanRoot: (rootPath: string, enabled: boolean) => Promise<void>;
+  hydrateActiveGitRepos: () => Promise<void>;
+  setActiveGitRepo: (repoRoot: string | null) => void;
   invalidateDirectoryCache: (path: string, recursive?: boolean) => void;
   applyFileWatchEvents: (events: FileWatchEvent[]) => void;
   bumpFileWatchEpoch: () => void;
@@ -637,6 +669,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   fileSortModesHydrated: false,
   nestedGitScanRoots: getInitialNestedGitScanRoots(),
   nestedGitScanRootsHydrated: false,
+  activeGitRepos: readActiveGitReposCache(),
+  activeGitReposHydrated: false,
   showHiddenFiles: getInitialShowHiddenFiles(),
   groupByFolder: readGroupByFolder(),
   collapsedGroups: readCollapsedGroups(),
@@ -1214,6 +1248,57 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         return { nestedGitScanRoots };
       });
     }
+  },
+
+  hydrateActiveGitRepos: async () => {
+    if (useSidebarStore.getState().activeGitReposHydrated) return;
+    if (activeGitReposHydration) return activeGitReposHydration;
+    activeGitReposHydration = (async () => {
+      const settings = await getSettings();
+      const serverRepos = settings.activeGitRepos ?? {};
+      const merged: Record<string, string> = { ...serverRepos };
+      // Picks made while this read was in flight win over a snapshot taken
+      // before they landed — including "all repositories", which is the
+      // absence of a key and would otherwise be resurrected by the snapshot.
+      for (const contextKey of activeGitRepoDirtyKeys) {
+        const local = useSidebarStore.getState().activeGitRepos[contextKey];
+        if (local) merged[contextKey] = local;
+        else delete merged[contextKey];
+      }
+      // A local key the server has never seen means an earlier write did not
+      // land; retry it so the choice is not lost on the next client. These are
+      // dirty too, for the case where this hydration is retried after a failure.
+      const missing = Object.entries(merged).filter(([contextKey]) => serverRepos[contextKey] === undefined);
+      for (const [contextKey] of missing) activeGitRepoDirtyKeys.add(contextKey);
+      if (missing.length > 0) {
+        await Promise.all(missing.map(([contextKey, repoRoot]) => (
+          updateSettings({ activeGitRepo: { contextKey, repoRoot } }).catch(() => undefined)
+        )));
+      }
+      writeActiveGitReposCache(merged);
+      // The server copy supersedes the per-workspace v1 entries, and nothing
+      // writes that key any more.
+      clearCache(LEGACY_ACTIVE_GIT_REPO_CACHE_KEY);
+      set({ activeGitRepos: merged, activeGitReposHydrated: true });
+    })().finally(() => {
+      activeGitReposHydration = null;
+    });
+    return activeGitReposHydration;
+  },
+
+  setActiveGitRepo: (repoRoot) => {
+    const { contextKey, activeGitRepos } = useSidebarStore.getState();
+    if (!contextKey) return;
+    if ((activeGitRepos[contextKey] ?? null) === repoRoot) return;
+    activeGitRepoDirtyKeys.add(contextKey);
+    const next = { ...activeGitRepos };
+    if (repoRoot) next[contextKey] = repoRoot;
+    else delete next[contextKey];
+    set({ activeGitRepos: next });
+    writeActiveGitReposCache(next);
+    // Fire and forget: the selection is already on screen, and a write that
+    // fails must not roll back the choice the user just made.
+    void updateSettings({ activeGitRepo: { contextKey, repoRoot: repoRoot ?? null } }).catch(() => {});
   },
 
   invalidateDirectoryCache: (path, recursive = false) =>

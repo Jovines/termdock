@@ -93,6 +93,12 @@ export interface SettingsDoc {
   nestedGitScanRoots: Record<string, true>;
   /** Explorer entries pinned per project root and shared by every connected client. */
   pinnedExplorerRoots: PinnedExplorerRoots;
+  /**
+   * Which nested sub-repo the Changes pane is showing, keyed by the sidebar's
+   * context key so the choice follows the session rather than the browser.
+   * Absent means every repository.
+   */
+  activeGitRepos: Record<string, string>;
   updatedAt: number;
 }
 
@@ -177,6 +183,29 @@ export function normalizeNestedGitScanRoots(value: unknown): Record<string, true
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)
     .filter(([rootPath, enabled]) => enabled === true && isAbsoluteFilePath(rootPath))
     .slice(-500)) as Record<string, true>;
+}
+
+// Context keys are opaque here — `<sessionId>\u0000<rootPath>`, a bare
+// `<rootPath>` when no session is attached, or `split-workspace\u0000<id>`.
+// The client owns the format, so the server only rejects what could not have
+// come from it: empty or oversized keys, embedded control characters, and a
+// separator-free key that is not a path. Parsing the keys would couple the
+// server to a client-side convention it does not otherwise share.
+function isActiveGitRepoContextKey(value: string): boolean {
+  if (value.length === 0 || value.length > 4300) return false;
+  if (!value.includes('\u0000')) return isAbsoluteFilePath(value);
+  return !/[\u0000-\u001f\u007f]/.test(value.split('\u0000').join(''));
+}
+
+export function normalizeActiveGitRepos(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([contextKey, repoRoot]) => (
+      typeof repoRoot === 'string'
+      && isAbsoluteFilePath(repoRoot)
+      && isActiveGitRepoContextKey(contextKey)
+    ))
+    .slice(-500)) as Record<string, string>;
 }
 
 function normalizeAndroidQuality(value: unknown): AndroidQualitySettings | null {
@@ -305,6 +334,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
     nestedGitScanRoots: normalizeNestedGitScanRoots(raw.nestedGitScanRoots),
     pinnedExplorerRoots: normalizePinnedExplorerRoots(raw.pinnedExplorerRoots),
+    activeGitRepos: normalizeActiveGitRepos(raw.activeGitRepos),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -713,6 +743,21 @@ export function setNestedGitScanRootSetting(rootPath: string, enabled: boolean):
     if (enabled) next[rootPath] = true;
     else delete next[rootPath];
     settings.nestedGitScanRoots = normalizeNestedGitScanRoots(next);
+  });
+}
+
+export function getActiveGitReposSetting(): Record<string, string> {
+  return { ...loadSettings().activeGitRepos };
+}
+
+export function setActiveGitRepoSetting(contextKey: string, repoRoot: string | null): SettingsDoc {
+  return updateSettings((settings) => {
+    const next = { ...settings.activeGitRepos };
+    // "All repositories" is the absence of a choice, not a stored null — the
+    // client resolves a missing key and an explicit null identically.
+    if (repoRoot) next[contextKey] = repoRoot;
+    else delete next[contextKey];
+    settings.activeGitRepos = normalizeActiveGitRepos(next);
   });
 }
 

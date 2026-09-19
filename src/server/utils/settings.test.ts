@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  normalizeActiveGitRepos,
   normalizeCollaborationPanels,
   loadSettingsFile,
   loadSettingsFileAsync,
@@ -83,6 +84,40 @@ describe('normalizeFileSortModes', () => {
   });
 });
 
+describe('normalizeActiveGitRepos', () => {
+  // Written out rather than escaped so the separator is unambiguous here.
+  const separator = String.fromCharCode(0);
+
+  it('keeps absolute repository roots under opaque context keys', () => {
+    expect(normalizeActiveGitRepos({
+      [`session-1${separator}/workspace/app`]: '/workspace/app/nested',
+      '/workspace/app': '/workspace/app',
+      relative: '/workspace/app/nested',
+      '/workspace/empty-value': '',
+      '/workspace/relative-value': 'nested',
+      [`/workspace/bad${separator}${String.fromCharCode(1)}`]: '/workspace/app/nested',
+    })).toEqual({
+      [`session-1${separator}/workspace/app`]: '/workspace/app/nested',
+      '/workspace/app': '/workspace/app',
+    });
+  });
+
+  it('rejects non-objects and keeps only the most recent 500 entries', () => {
+    expect(normalizeActiveGitRepos(null)).toEqual({});
+    expect(normalizeActiveGitRepos([])).toEqual({});
+    expect(normalizeActiveGitRepos('nope')).toEqual({});
+
+    const many = Object.fromEntries(Array.from({ length: 600 }, (_, index) => [
+      `/workspace/root-${index}`,
+      `/workspace/root-${index}/nested`,
+    ]));
+    const normalized = normalizeActiveGitRepos(many);
+    expect(Object.keys(normalized)).toHaveLength(500);
+    expect(normalized['/workspace/root-599']).toBe('/workspace/root-599/nested');
+    expect(normalized['/workspace/root-0']).toBeUndefined();
+  });
+});
+
 describe('settings persistence', () => {
   it('defaults the running-session button to disabled and preserves an enabled preference', () => {
     const settingsFile = tempSettingsPath();
@@ -115,6 +150,27 @@ describe('settings persistence', () => {
     saveSettingsFile(settings, settingsFile);
 
     expect(loadSettingsFile(settingsFile).fileSortModes).toEqual({ '/workspace/logs': 'modified' });
+  });
+
+  it('persists the selected nested repository per context key', () => {
+    const settingsFile = tempSettingsPath();
+    const settings = loadSettingsFile(settingsFile);
+    expect(settings.activeGitRepos).toEqual({});
+
+    const contextKey = `session-1${String.fromCharCode(0)}/workspace/app`;
+    settings.activeGitRepos = { [contextKey]: '/workspace/app/nested' };
+    saveSettingsFile(settings, settingsFile);
+
+    expect(loadSettingsFile(settingsFile).activeGitRepos).toEqual({ [contextKey]: '/workspace/app/nested' });
+  });
+
+  it('drops an unusable repository root when reading the file back', () => {
+    const settingsFile = tempSettingsPath();
+    fs.writeFileSync(settingsFile, JSON.stringify({
+      activeGitRepos: { '/workspace/app': 'nested', '/workspace/other': '/workspace/other/nested' },
+    }));
+
+    expect(loadSettingsFile(settingsFile).activeGitRepos).toEqual({ '/workspace/other': '/workspace/other/nested' });
   });
 
   it('persists explorer pins for sharing between clients', () => {

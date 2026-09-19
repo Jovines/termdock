@@ -154,7 +154,6 @@ const COLLAPSED_DIFF_DIRECTORIES_STORAGE_KEY = 'termdock:right-sidebar:collapsed
 const BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-module-open:v1';
 const BRANCH_AUDIT_MODULE_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-module:v1';
 const BRANCH_AUDIT_MODULE_CACHE_WRITE_MS = 150;
-const ACTIVE_GIT_REPO_STORAGE_KEY = 'termdock:right-sidebar:active-git-repo:v1';
 const CONTEXT_DRAFT_ENABLED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-enabled:v1';
 const CONTEXT_DRAFT_COLLAPSED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-collapsed:v1';
 const CONTEXT_DRAFT_AUTO_COLLAPSE_STORAGE_KEY = 'termdock:right-sidebar:context-draft-auto-collapse:v1';
@@ -305,31 +304,8 @@ function getRepositoriesFromGitBundle(bundle: GitBundleResponse): GitRepositoryB
   }] : []);
 }
 
-function isActiveGitRepoCache(value: unknown): value is Record<string, string | null> {
-  return Boolean(value)
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.values(value as Record<string, unknown>).every((entry) => entry === null || typeof entry === 'string');
-}
-
-function readActiveGitRepoCache(): Record<string, string | null> {
-  return readCache(ACTIVE_GIT_REPO_STORAGE_KEY, isActiveGitRepoCache) ?? {};
-}
-
-function readActiveGitRepoRoot(rootPath: string | null): string | null | undefined {
-  if (!rootPath) return undefined;
-  const cache = readActiveGitRepoCache();
-  return Object.prototype.hasOwnProperty.call(cache, rootPath) ? cache[rootPath] : undefined;
-}
-
-function writeActiveGitRepoRoot(rootPath: string | null, repoRoot: string | null): void {
-  if (!rootPath) return;
-  writeCache(ACTIVE_GIT_REPO_STORAGE_KEY, {
-    ...readActiveGitRepoCache(),
-    [rootPath]: repoRoot,
-  });
-}
-
+// The selection itself lives in the sidebar store, keyed by context key and
+// mirrored server-side; only the bundle-validity check belongs here.
 function resolveActiveGitRepoRootFromBundle(bundle: GitBundleResponse, preferred: string | null | undefined): string | null {
   if (!preferred) return null;
   const filterRoots = new Set((bundle.repoFilters ?? []).map((repo) => repo.root));
@@ -4301,6 +4277,12 @@ export function replaceGitRepositorySnapshot(
     depth: currentRepo?.depth ?? refreshedRepo?.depth ?? 0,
     nested: currentRepo?.nested ?? refreshedRepo?.nested ?? Boolean(workspaceRoot && repoRoot !== workspaceRoot),
     available: refreshedRepo?.available ?? refreshedBundle.available,
+    // A placeholder keeps its `deferred` flag through this merge because the
+    // single-repo bundle that fills it in has no such key to override it.
+    // Clearing it here is what tells the rest of the pane the repo has been
+    // read: the chip swaps its "not loaded" badge for a count, and the lazy-load
+    // path can tell a repo waiting to be fetched from one already fetched.
+    deferred: refreshedRepo?.deferred ?? false,
     files: refreshedFiles,
     context: refreshedContext ? {
       ...refreshedContext,
@@ -6396,7 +6378,12 @@ export function RightSidebar(
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [gitRepositories, setGitRepositories] = useState<GitRepositoryBundle[]>([]);
   const [gitRepoFilters, setGitRepoFilters] = useState<GitRepositoryFilter[]>([]);
-  const [activeGitRepoRoot, setActiveGitRepoRoot] = useState<string | null>(null);
+  // Held in the store rather than local state: the choice is keyed by context
+  // key, so it follows the session across clients and survives the pane being
+  // unmounted by a pin toggle. The context key is the store's own, which in a
+  // split workspace is the workspace's rather than the focused member session's.
+  const activeGitRepoRoot = useSidebarStore((s) => (s.contextKey ? s.activeGitRepos[s.contextKey] ?? null : null));
+  const setActiveGitRepo = useSidebarStore((s) => s.setActiveGitRepo);
   const [repoPickerAnchor, setRepoPickerAnchor] = useState<{ x: number; y: number } | null>(null);
   const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
   const [copiedReferenceKey, setCopiedReferenceKey] = useState<string | null>(null);
@@ -6577,6 +6564,13 @@ export function RightSidebar(
   const branchAuditModuleSkipWriteRootRef = useRef<string | null>(null);
   const diffStreamSyncedPathRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
+  // The root whose repository list we have actually seen. The self-healing
+  // effect below drops a selected repo the workspace no longer lists, but
+  // before the first bundle the list is empty for every root — validating
+  // against it then would erase the selection the pane just restored.
+  const gitBundleAppliedRootRef = useRef<string | null>(null);
+  // Nested repos this pane has asked to have read, until the read comes back.
+  const deferredRepoLoadRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (gitCacheUpdatedAt === null) return;
@@ -6949,13 +6943,21 @@ export function RightSidebar(
     setChangedFiles(toChangedFileMap(files));
     setGitRepositories(repositories);
     setGitRepoFilters(repoFilters);
+    // From here on the workspace's repository list is real, so a selected repo
+    // missing from it means the repo actually left — not that we have yet to
+    // read the list. Unlocks the self-healing effect below.
+    gitBundleAppliedRootRef.current = rootPath;
     if (options.syncActiveRepo !== false) {
-      const preferredActiveRoot = options.activeRepoRoot !== undefined
-        ? options.activeRepoRoot
-        : activeGitRepoRoot ?? readActiveGitRepoRoot(rootPath);
+      // Read at apply time rather than request time: a response that lands after
+      // the pane switched sessions must resolve against the session now on
+      // screen, and the workspace root alone cannot tell those apart.
+      const { contextKey, activeGitRepos } = useSidebarStore.getState();
+      const storedActiveRoot = contextKey ? activeGitRepos[contextKey] ?? null : null;
+      const preferredActiveRoot = options.activeRepoRoot !== undefined ? options.activeRepoRoot : storedActiveRoot;
       const nextActiveRoot = resolveActiveGitRepoRootFromBundle({ ...bundle, repositories, repoFilters }, preferredActiveRoot);
-      setActiveGitRepoRoot(nextActiveRoot);
-      writeActiveGitRepoRoot(rootPath, nextActiveRoot);
+      // A repository the bundle no longer lists drops the choice here; equal
+      // values are a no-op inside the action, so refreshes do not rewrite it.
+      setActiveGitRepo(nextActiveRoot);
     }
     if (typeof bundle.cacheUpdatedAt === 'number') setGitCacheUpdatedAt(bundle.cacheUpdatedAt);
     setGitContext((current) => {
@@ -6988,7 +6990,7 @@ export function RightSidebar(
       }
     }
     if (options.loadAudit !== false) void loadChangeAuditRecords();
-  }, [activeGitRepoRoot, isCurrentSidebarRoot, loadChangeAuditRecords, loadUntrackedFiles, rootPath, selectFile, setChangedFiles]);
+  }, [isCurrentSidebarRoot, loadChangeAuditRecords, loadUntrackedFiles, rootPath, selectFile, setActiveGitRepo, setChangedFiles]);
 
   useEffect(() => {
     // Pin/unpin moves the sidebar between overlay and inline layout, which
@@ -7001,8 +7003,6 @@ export function RightSidebar(
     branchAuditModuleSkipWriteRootRef.current = rootPath;
     const snapshotRepositories: GitRepositoryBundle[] = [];
     const snapshotRepoFilters: GitRepositoryFilter[] = [];
-    const persistedActiveGitRepoRoot = readActiveGitRepoRoot(rootPath);
-    const restoredActiveGitRepoRoot = persistedActiveGitRepoRoot;
     gitBundleRequestIdRef.current += 1;
     gitDetailsRequestIdRef.current += 1;
     untrackedRequestSeqRef.current += 1;
@@ -7075,7 +7075,8 @@ export function RightSidebar(
     setBranchAuditIncludeUncommitted(branchAuditModuleState?.includeUncommitted ?? true);
     branchAuditModuleHydratedRootRef.current = rootPath;
     setGitDetailsLoading(false);
-    setActiveGitRepoRoot(restoredActiveGitRepoRoot ?? null);
+    // The selected repository is not reset here: it is derived from the store
+    // and keyed by context key, which is what makes it follow the session.
     untrackedCompletedRootsRef.current.clear();
     untrackedRunningRootsRef.current.clear();
     setRunningGitAction(null);
@@ -7087,15 +7088,23 @@ export function RightSidebar(
     setGitRepoFilters(snapshotRepoFilters);
     setGitContext(null);
     lastAutoRefreshRootRef.current = null;
+    gitBundleAppliedRootRef.current = null;
+    deferredRepoLoadRef.current.clear();
   }, [resetGitBundleLoading, rootPath]);
 
   const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean; background?: boolean; refresh?: boolean; cacheOnly?: boolean; replaceRepoRoot?: string; discoverOnly?: boolean; replaceWorkspace?: boolean } = {}) => {
     if (!cwd) return null;
     const expectedRootPath = rootPath;
-    // The opt-in lives server-side, so a cold client must read it before deciding.
-    // Hydration is memoized, so this is a no-op on every later call.
+    // Both preferences live server-side, so a cold client must read them before
+    // deciding which repos to fetch and which one to resolve against. Hydration
+    // is memoized, so this is a no-op on every later call — and waiting for the
+    // selection here is what keeps the first bundle from being fetched against
+    // the localStorage mirror and then again against the server's answer.
     const preparationRequestId = gitBundleRequestIdRef.current;
-    await waitForGitPreferences(useSidebarStore.getState().hydrateNestedGitScanRoots);
+    await waitForGitPreferences(() => Promise.all([
+      useSidebarStore.getState().hydrateNestedGitScanRoots(),
+      useSidebarStore.getState().hydrateActiveGitRepos(),
+    ]).then(() => undefined));
     if (gitBundleRequestIdRef.current !== preparationRequestId || !isCurrentSidebarRoot(expectedRootPath)) return null;
     // `cwd === rootPath` is load-bearing: per-repo fetches pass cwd = repoRoot and
     // must not inherit a workspace-level preference.
@@ -8152,6 +8161,34 @@ export function RightSidebar(
     return counts;
   }, [gitRepositories]);
 
+  // A nested repo arrives from a discovery-only pass as a placeholder with no
+  // files; its contents are read only when someone asks for it. Picking the chip
+  // asks, and so does a selection restored from this browser's cache or the
+  // server — otherwise a restored repo shows an empty change list. `deferred`
+  // alone cannot tell "waiting to be fetched" from "already fetched", because a
+  // clean repo and an unread one both have zero files.
+  const ensureGitRepoLoaded = useCallback((repo: GitRepositoryBundle | null | undefined) => {
+    if (!repo) return;
+    if (!repo.deferred) {
+      // The read came back, so a later placeholder for this root is a fresh
+      // discovery pass rather than the one this pane already answered.
+      deferredRepoLoadRef.current.delete(repo.root);
+      return;
+    }
+    if (repoCountsByRoot.has(repo.root)) return;
+    // A passive effect can still run with the repository list from before the
+    // response that filled this repo in, and by then the pending bundle is
+    // gone — so the in-flight set, not the list, is what makes the second ask
+    // a no-op. A failed read drops out of it so the chip can be tried again.
+    if (deferredRepoLoadRef.current.has(repo.root)) return;
+    deferredRepoLoadRef.current.add(repo.root);
+    // Repos are fetched through the single-repo path (~16ms) rather than a
+    // whole-workspace rescan, and `replaceRepoRoot` keeps this from rewriting
+    // the selection that asked for it.
+    void loadGitBundle(repo.root, { includeNested: false, background: true, replaceRepoRoot: repo.root })
+      .then((bundle) => { if (!bundle) deferredRepoLoadRef.current.delete(repo.root); });
+  }, [loadGitBundle, repoCountsByRoot]);
+
   const activeGitRepoSummary = useMemo(() => (
     activeGitRepoRoot ? gitRepoFilters.find((repo) => repo.root === activeGitRepoRoot) ?? null : null
   ), [activeGitRepoRoot, gitRepoFilters]);
@@ -8387,12 +8424,28 @@ export function RightSidebar(
   );
 
   useEffect(() => {
-    if (activeGitRepoRoot && !knownGitRepoRoots.has(activeGitRepoRoot)) {
-      setActiveGitRepoRoot(null);
-      writeActiveGitRepoRoot(rootPath, null);
+    // Only a loaded list can tell "this repo left the workspace" from "the
+    // workspace has not been read yet". Both look like an empty set of known
+    // roots, and the second case is exactly what a freshly mounted pane sees
+    // while it is still restoring and fetching — clearing there would wipe the
+    // restored selection before its own bundle could confirm it.
+    if (gitBundleAppliedRootRef.current === rootPath
+      && activeGitRepoRoot
+      && !knownGitRepoRoots.has(activeGitRepoRoot)) {
+      setActiveGitRepo(null);
     }
     setChangeAuditRepoRoots((current) => current.filter((repoRoot) => gitRepoFilters.some((repo) => repo.root === repoRoot)));
-  }, [activeGitRepoRoot, gitRepoFilters, knownGitRepoRoots, rootPath]);
+  }, [activeGitRepoRoot, gitRepoFilters, knownGitRepoRoots, rootPath, setActiveGitRepo]);
+
+  // The workspace bundle opens with discovery only, so the selected repo can be
+  // a placeholder that was never read — most often right after the pane mounts
+  // and restore hands back a selection made in an earlier session. Fetch it
+  // then the same way a chip click does; `ensureGitRepoLoaded` is a no-op once
+  // the repo has been read, so this settles after one pass.
+  useEffect(() => {
+    if (!activeGitRepoRoot) return;
+    ensureGitRepoLoaded(gitRepositoryByRoot.get(activeGitRepoRoot));
+  }, [activeGitRepoRoot, ensureGitRepoLoaded, gitRepositoryByRoot]);
 
   const switchBranchOptions = useMemo<GitPickerOption[]>(() => {
     const values = new Set<string>();
@@ -9890,23 +9943,16 @@ export function RightSidebar(
   }, [runSidebarGitAction, t]);
 
   const selectGitRepoRoot = useCallback((repoRoot: string | null) => {
-    setActiveGitRepoRoot(repoRoot);
-    writeActiveGitRepoRoot(rootPath, repoRoot);
+    setActiveGitRepo(repoRoot);
     setSwitchBranch('');
     setPushRemote('');
     setPushBranch('');
     selectFile(getFirstChangedFileSelectionPathForRepo(repoRoot));
     if (!gitPaneActive) setRightTab('diff');
     // Repos arrive deferred from a discovery-only pass: their file lists are
-    // not loaded until the user picks one. Fetch just that repo through the
-    // single-repo path (~16ms) instead of rescanning the whole workspace.
-    if (repoRoot && repoRoot !== rootPath) {
-      const repo = gitRepositories.find((candidate) => candidate.root === repoRoot);
-      if (repo?.deferred) {
-        void loadGitBundle(repoRoot, { includeNested: false, background: true, replaceRepoRoot: repoRoot });
-      }
-    }
-  }, [getFirstChangedFileSelectionPathForRepo, gitPaneActive, gitRepositories, loadGitBundle, rootPath, selectFile, setRightTab]);
+    // not loaded until someone asks for them.
+    if (repoRoot) ensureGitRepoLoaded(gitRepositoryByRoot.get(repoRoot));
+  }, [ensureGitRepoLoaded, getFirstChangedFileSelectionPathForRepo, gitPaneActive, gitRepositoryByRoot, selectFile, setActiveGitRepo, setRightTab]);
 
   // Repos that fall out of the workspace when the scan switch flips off.
   // Aborting alone is not enough: a late untracked result merges into
