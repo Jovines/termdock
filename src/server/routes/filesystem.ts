@@ -2627,20 +2627,35 @@ async function getBranchDiffPayload(
   }
   const includeUncommitted = options?.includeUncommitted ?? true;
 
-  let baseRef = trimmedBase.includes('/') ? trimmedBase : `origin/${trimmedBase}`;
-  if (trimmedBase.includes('/')) {
-    await execGit(['rev-parse', '--verify', '--quiet', baseRef], repoRoot, signal);
-  } else {
+  const remotes = (await execGit(['remote'], repoRoot, signal)).split('\n').filter(Boolean);
+  const remoteBase = trimmedBase.replace(/^refs\/remotes\//, '');
+  // Match configured remotes, not arbitrary slashes in local branch names.
+  const baseRemote = remotes.sort((a, b) => b.length - a.length)
+    .find((remote) => remoteBase.startsWith(`${remote}/`))
+    ?? (!trimmedBase.includes('/') && remotes.includes('origin') ? 'origin' : null);
+  let baseRef = trimmedBase;
+  if (baseRemote) {
+    const remoteBranch = remoteBase.startsWith(`${baseRemote}/`)
+      ? remoteBase.slice(baseRemote.length + 1)
+      : trimmedBase;
+    baseRef = `${baseRemote}/${remoteBranch}`;
+    const trackingRef = `refs/remotes/${baseRef}`;
     try {
-      await execGit(['fetch', 'origin', trimmedBase, '--no-tags'], repoRoot, signal, GIT_ROUTE_TIMEOUT_MS);
+      // Explicitly update the selected tracking ref even with a narrow fetch
+      // refspec, and accept a baseline that was force-pushed on the remote.
+      await execGit(['fetch', '--no-tags', '--', baseRemote, `+refs/heads/${remoteBranch}:${trackingRef}`], repoRoot, signal, GIT_ROUTE_TIMEOUT_MS);
     } catch (error) {
-      const localRef = await execGit(['rev-parse', '--verify', '--quiet', trimmedBase], repoRoot, signal)
-        .then(() => trimmedBase)
-        .catch(() => null);
-      if (!localRef) throw error;
-      baseRef = localRef;
+      if (signal.aborted) throw error;
+      return {
+        available: false, workspaceRoot, repoRoot, baseBranch: trimmedBase, baseRef,
+        error: `Failed to refresh baseline ${baseRef}. Check remote access and retry. No comparison was generated from a stale local baseline.`,
+      };
     }
   }
+  // Keep the display/audit key stable, but use the full namespace for Git so
+  // a same-named local branch cannot shadow the refreshed tracking ref.
+  const baseGitRef = baseRemote ? `refs/remotes/${baseRef}` : baseRef;
+  await execGit(['rev-parse', '--verify', '--quiet', `${baseGitRef}^{commit}`], repoRoot, signal);
   let compareHead = 'HEAD';
   if (hasRequestedHead) {
     compareHead = requestedHead.includes('/') ? requestedHead : requestedHead;
@@ -2652,11 +2667,11 @@ async function getBranchDiffPayload(
   // instead of two overlapping per-file diffs concatenated together.
   // Falls back to the concatenated form when there is no merge base.
   const mergeBase = includeWorkingTree
-    ? await execGit(['merge-base', baseRef, compareHead], repoRoot, signal)
+    ? await execGit(['merge-base', baseGitRef, compareHead], repoRoot, signal)
       .then((result) => result.trim() || null)
       .catch(() => null)
     : null;
-  const diffBase = mergeBase ?? `${baseRef}...${compareHead}`;
+  const diffBase = mergeBase ?? `${baseGitRef}...${compareHead}`;
   const fetchSeparateWorktreeDiff = includeWorkingTree && !mergeBase;
   const [currentBranch, headRef, statResult, nameResult, workingNameResult, logResult, diffResult, workingDiffResult] = await Promise.all([
     execGit(['branch', '--show-current'], repoRoot, signal).catch(emptyOnNonAbortGitError),
@@ -2664,7 +2679,7 @@ async function getBranchDiffPayload(
     execGitLimited(['diff', diffBase, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
     execGitLimited(['diff', '--name-only', diffBase], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
     fetchSeparateWorktreeDiff ? execGitLimited(['diff', '--name-only', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
-    execGitLimited(['log', `${baseRef}..${compareHead}`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
+    execGitLimited(['log', `${baseGitRef}..${compareHead}`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
     execGitLimited(['diff', diffBase], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
     fetchSeparateWorktreeDiff ? execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
   ]);
@@ -2682,7 +2697,7 @@ async function getBranchDiffPayload(
     ...workingNameResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean),
     ...untrackedResult.files,
   ]));
-  const hunks = await annotateBranchDiffHunks(repoRoot, baseRef, parseBranchDiffHunks(diff), signal);
+  const hunks = await annotateBranchDiffHunks(repoRoot, baseGitRef, parseBranchDiffHunks(diff), signal);
   const commits = logResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
   const fingerprint = buildChangeAuditFingerprint([
     repoRoot,

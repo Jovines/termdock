@@ -149,7 +149,7 @@ export function handleAndroidWebSocket(
   socket.on('error', () => { closed = true; clearInterval(flowTimer); if (statsTimer) clearInterval(statsTimer); void session?.stop(); session = null; });
 
   session = createScrcpySession(serial, {
-    onBitrateSupport: supported => send({ type: 'bitrate-support', supported }),
+    onBitrateSupport: (supported, detail) => send({ type: 'bitrate-support', supported, detail }),
     onHeader: header => { send({ type: 'header', ...header }); },
     onFrame: frame => {
       if (closed) return;
@@ -181,7 +181,8 @@ export function handleAndroidWebSocket(
           || typeof message.bitRate !== 'number' || !Number.isInteger(message.bitRate)
           || message.bitRate < 300_000 || message.bitRate > 30_000_000) return;
         const requestId = message.requestId, bitRate = message.bitRate;
-        void session.setBitrate(bitRate).then(applied => send({ type: 'bitrate-result', requestId, bitRate, applied }));
+        const current = session;
+        void current.setBitrate(bitRate).then(applied => send({ type: 'bitrate-result', requestId, bitRate, applied, detail: current.bitrateFailure }));
         break;
       }
       case 'control': {

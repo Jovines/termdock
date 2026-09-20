@@ -10,6 +10,7 @@ import android.os.Bundle;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CaptureReset implements SurfaceCapture.CaptureListener {
@@ -41,16 +42,19 @@ public class CaptureReset implements SurfaceCapture.CaptureListener {
         }
     }
 
-    private synchronized boolean applyBitrate(int value) {
-        if (runningMediaCodec == null || value < 300000 || value > 30000000) return false;
+    private synchronized String applyBitrate(int value) {
+        if (runningMediaCodec == null) return "Encoder temporarily unavailable during reset";
+        if (value < 300000 || value > 30000000) return "Bitrate outside supported request range";
         try {
             Bundle params = new Bundle();
             params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, value);
             runningMediaCodec.setParameters(params);
             bitrate = value;
-            return true;
-        } catch (IllegalArgumentException | IllegalStateException ignored) {
-            return false;
+            return null;
+        } catch (IllegalArgumentException | IllegalStateException error) {
+            String diagnostic = error instanceof MediaCodec.CodecException
+                    ? ((MediaCodec.CodecException) error).getDiagnosticInfo() : error.getClass().getSimpleName();
+            return diagnostic + ": " + error.getMessage();
         }
     }
 
@@ -59,11 +63,17 @@ public class CaptureReset implements SurfaceCapture.CaptureListener {
             socket.connect(new LocalSocketAddress(name));
             DataInputStream input = new DataInputStream(socket.getInputStream());
             DataOutputStream output = new DataOutputStream(socket.getOutputStream());
-            output.writeInt(0x54444231); // TDB1: extension ready, codec is running
+            output.writeInt(0x54444232); // TDB2: rejection includes length-prefixed UTF-8 diagnostic
             output.flush();
             while (true) {
                 int requested = input.readInt();
-                output.writeInt(applyBitrate(requested) ? requested : 0);
+                String failure = applyBitrate(requested);
+                output.writeInt(failure == null ? requested : 0);
+                if (failure != null) {
+                    byte[] detail = failure.substring(0, Math.min(512, failure.length())).getBytes(StandardCharsets.UTF_8);
+                    output.writeInt(detail.length);
+                    output.write(detail);
+                }
                 output.flush();
             }
         } catch (IOException ignored) {

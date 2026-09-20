@@ -60,9 +60,9 @@ describe('live bitrate over the existing encrypted socket', () => {
     message({ type: 'bitrate-result', requestId: 1, bitRate: 1_800_000, applied: true });
     expect(await pending).toBe(true);
     const rejected = controller.setBitrate(8_000_000);
-    message({ type: 'bitrate-result', requestId: 2, bitRate: 8_000_000, applied: false });
+    message({ type: 'bitrate-result', requestId: 2, bitRate: 8_000_000, applied: false, detail: 'BITRATE_ENCODER_REJECTED: requested=8000000; device=test' });
     expect(await rejected).toBe(false);
-    expect(onBitrateSupport).toHaveBeenLastCalledWith(false);
+    expect(onBitrateSupport).toHaveBeenLastCalledWith(false, 'BITRATE_ENCODER_REJECTED: requested=8000000; device=test');
     expect(socket.close).not.toHaveBeenCalled();
     expect(onState).toHaveBeenCalledTimes(1);
     controller.disconnect();
@@ -79,6 +79,7 @@ describe('live bitrate over the existing encrypted socket', () => {
     const timeout = controller.setBitrate(4_000_000);
     await vi.advanceTimersByTimeAsync(4000);
     expect(await timeout).toBe(false);
+    expect(controller.lastBitrateFailure).toContain('BITRATE_CLIENT_TIMEOUT');
     expect(socket.close).not.toHaveBeenCalled();
     controller.disconnect();
   });

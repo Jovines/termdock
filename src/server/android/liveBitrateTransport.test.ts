@@ -52,14 +52,15 @@ describe('live bitrate encrypted stream', () => {
     const setBitrate = vi.fn(async () => true);
     const stop = vi.fn();
     const start = vi.fn();
-    const create = vi.spyOn(scrcpy, 'createScrcpySession').mockImplementation((_serial, events) => ({
+    let eventsRef: scrcpy.ScrcpySessionEvents | undefined;
+    const create = vi.spyOn(scrcpy, 'createScrcpySession').mockImplementation((_serial, events) => { eventsRef = events; return ({
       start: async () => {
         start();
         events.onHeader({ codec: 'h264', width: 800, height: 1600, deviceName: 'private-device' });
         events.onBitrateSupport?.(true);
       },
       setBitrate, stop, pauseVideo() {}, resumeVideo() {}, sendControl() { return true; },
-    } as unknown as scrcpy.ScrcpySession));
+    } as unknown as scrcpy.ScrcpySession); });
     const denied = client.openSocket('/api/android/test-device/ws');
     await vi.waitFor(() => expect(denied.readyState).toBe(3));
     expect(create).not.toHaveBeenCalled();
@@ -82,6 +83,11 @@ describe('live bitrate encrypted stream', () => {
     stream.send(JSON.stringify({ type: 'ping' }));
     await vi.waitFor(() => expect(messages.some(m => m.type === 'pong')).toBe(true));
     expect(setBitrate).toHaveBeenCalledTimes(2);
+    const detail = 'BITRATE_ACK_TIMEOUT: requested=4000000; no device reply';
+    eventsRef!.onBitrateSupport?.(false, detail);
+    await vi.waitFor(() => expect(messages).toContainEqual({ type: 'bitrate-support', supported: false, detail }));
+    expect(wire.every(data => !data.includes('BITRATE_ACK_TIMEOUT'))).toBe(true);
+    expect(stop).not.toHaveBeenCalled();
     stream.close(); client.close();
     expect(() => stream.send('{}')).toThrow();
 

@@ -30,7 +30,7 @@ const DOCK_GROUP = ANDROID_DOCK_GROUP;
 const QUALITY_STORAGE_KEY = 'termdock:android:quality:v1';
 // ⋯ 菜单浮层：宽度固定，高度只用来做贴底越界钳制。
 const MORE_MENU_WIDTH = 176;
-const MORE_MENU_ESTIMATED_HEIGHT = 156;
+const MORE_MENU_ESTIMATED_HEIGHT = 204;
 // 视图缩放：1 = 铺满可视区（不再缩得更小），上限 8 倍够看清状态栏那种小字。
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 8;
@@ -165,6 +165,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const [mirrorError, setMirrorError] = useState<string | null>(null);
   const [header, setHeader] = useState<MirrorHeader | null>(null);
   const [stats, setStats] = useState<MirrorStats>({ fps: 0, kbps: 0, width: 0, height: 0, received: 0, decoded: 0, controls: 0, last: '' });
+  const [bitrateWarning, setBitrateWarning] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [retryScheduled, setRetryScheduled] = useState(false);
   const [ripples, setRipples] = useState<{ id: number; left: number; top: number }[]>([]);
@@ -288,10 +289,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     if (!preserveFrame && connectedSerial.current !== serial) setHeader(null);
     connectedSerial.current = serial;
     setWarning(null);
+    setBitrateWarning(null);
     const controller = new AndroidMirrorController(canvas, {
-      onBitrateSupport: supported => {
+      onBitrateSupport: (supported, detail) => {
         if (controllerRef.current !== controller || qualityRef.current.id !== 'auto') return;
-        if (!supported) setWarning(t('android.qualityAutoUnavailable'));
+        setBitrateWarning(supported ? null : detail ?? 'BITRATE_REASON_UNAVAILABLE');
       },
       onState: (state, error) => { if (controllerRef.current !== controller) return; setMirrorState(state); setMirrorError(error ?? null); },
       onHeader: next => { if (controllerRef.current === controller) setHeader(next); },
@@ -385,8 +387,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       && current.maxSize === next.maxSize && current.maxFps === next.maxFps) {
       void controller.setBitrate(next.bitRate).then(applied => {
         if (controllerRef.current !== controller) return;
-        if (applied) streamQuality.current = next;
-        else setWarning(t('android.qualityAutoUnavailable'));
+        if (applied) { streamQuality.current = next; setBitrateWarning(null); }
+        else setBitrateWarning(controller.lastBitrateFailure ?? 'BITRATE_REASON_UNAVAILABLE');
       });
     } else connect(serial);
   }, [connect, t]);
@@ -533,7 +535,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       : `translate3d(${x}px, ${y}px, 0) scale(${zoomValue})`;
     if (canvas.style.transform !== next) canvas.style.transform = next;
     const label = zoomLabelRef.current;
-    if (label) label.textContent = zoomValue > ZOOM_MIN ? `${formatZoomLabel(zoomValue)} · ` : '';
+    if (label) label.textContent = zoomValue > ZOOM_MIN ? formatZoomLabel(zoomValue) : '';
   }, []);
 
   /** 以 focus（client 坐标，缺省为画面中心）为锚点缩放：锚点底下那一处画面保持不动。 */
@@ -1182,6 +1184,12 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
               onSelect={() => { setOverlay(overlay === 'sidebar' ? 'off' : 'sidebar'); setMoreOpen(false); }}
             />
           )}
+          {header && (
+            <div className="mt-1 border-t border-border px-3 py-2 text-[10px] leading-4 tabular-nums text-muted-foreground">
+              <div className="truncate">{`${stats.fps} fps · ${stats.kbps} kbps`}</div>
+              <div className="truncate">{`${stats.width}×${stats.height}`}</div>
+            </div>
+          )}
         </div>,
         document.body,
       )}
@@ -1303,6 +1311,21 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         <div className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-warning">{deviceStateHint(connectedDevice, t)}</div>
       )}
       {listError && !adbMissing && <div className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-destructive">{androidErrorText(listError)}</div>}
+      {bitrateWarning && (
+        <details className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-warning">
+          <summary className="cursor-pointer">
+            {t('android.qualityAutoUnavailable')} {t(
+              bitrateWarning.startsWith('SCRCPY_VERSION') ? 'android.qualityAutoVersionError'
+              : bitrateWarning.startsWith('SCRCPY_BUILD') ? 'android.qualityAutoBuildError'
+              : /EXTENSION|SERVER_READ|PUSH/.test(bitrateWarning.split(':')[0]) ? 'android.qualityAutoExtensionError'
+              : /TIMEOUT/.test(bitrateWarning.split(':')[0]) ? 'android.qualityAutoTimeoutError'
+              : /ENCODER_REJECTED/.test(bitrateWarning.split(':')[0]) ? 'android.qualityAutoEncoderError'
+              : /CHANNEL|TUNNEL|LISTEN|PROTOCOL|CONNECTION/.test(bitrateWarning.split(':')[0]) ? 'android.qualityAutoChannelError'
+              : 'android.qualityAutoUnknownError')}
+          </summary>
+          <pre className="mt-1 select-text whitespace-pre-wrap break-all text-[10px]">{bitrateWarning}</pre>
+        </details>
+      )}
       {warning && <div className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-warning">{warning}</div>}
       {captureError && (
         <div role="alert" className="border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-destructive">
@@ -1415,16 +1438,14 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         {/* 缩放改的是本地视图，不往设备注入任何东西。 */}
         <ToolButton compact={compact} label={t('android.zoomIn')} onClick={() => zoomByStep('in')} disabled={!streaming || zoom >= ZOOM_MAX - 0.01}><Plus size={14} /></ToolButton>
         <ToolButton compact={compact} label={t('android.zoomOut')} onClick={() => zoomByStep('out')} disabled={!streaming || zoom <= ZOOM_MIN + 0.01}><Minus size={14} /></ToolButton>
-        {/* 统计区固定宽高，状态仅覆盖内容。数字位数与缩放提示变化不能影响
-            flex-wrap 的换行判断，避免底栏行数变化挤压上方画布。 */}
-        <div className="relative ml-auto h-5 w-56 min-w-0 max-w-full shrink-0" data-mirror-capture-status>
+        {/* 实时统计收进更多菜单；底栏仅为缩放和录屏状态保留固定的小块空间。 */}
+        <div className="relative ml-auto h-5 w-24 min-w-0 max-w-full shrink-0" data-mirror-capture-status>
           <span aria-hidden={recording || Boolean(captureStatus) || captureBusy}
-            className={`block truncate text-[10px] leading-5 tabular-nums text-muted-foreground ${recording || captureStatus || captureBusy ? 'invisible' : ''}`}>
+            className={`block truncate text-right text-[10px] leading-5 tabular-nums text-muted-foreground ${recording || captureStatus || captureBusy ? 'invisible' : ''}`}>
             {header ? (
               <>
                 {/* 内容由 applyViewTransform 直接写，免得捏合时为了这行字重渲染整个面板。 */}
                 <span ref={zoomLabelRef} />
-                {`${stats.fps} fps · ${stats.kbps} kbps · ${stats.width}×${stats.height}`}
               </>
             ) : ''}
           </span>

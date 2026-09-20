@@ -14,7 +14,7 @@ export type MirrorState = 'idle' | 'connecting' | 'streaming' | 'error';
 export interface MirrorHeader { deviceName: string; codec: 'h264' | 'h265' | 'av1'; width: number; height: number }
 export interface MirrorStats { fps: number; kbps: number; width: number; height: number; received: number; decoded: number; controls: number; last: string; adaptation?: AutoQualitySample }
 export interface MirrorCallbacks {
-  onBitrateSupport?: (supported: boolean) => void;
+  onBitrateSupport?: (supported: boolean, detail?: string) => void;
   onState: (state: MirrorState, error?: string) => void;
   onHeader: (header: MirrorHeader) => void;
   onStats: (stats: MirrorStats) => void;
@@ -25,6 +25,7 @@ export interface MirrorCallbacks {
 interface ServerMessage {
   type?: string;
   supported?: boolean;
+  detail?: string;
   requestId?: number;
   bitRate?: number;
   applied?: boolean;
@@ -83,6 +84,8 @@ function hevcCodecString(config: Uint8Array | null): string {
 
 export class AndroidMirrorController {
   private liveBitrate = false;
+  private bitrateFailureDetail: string | undefined;
+  get lastBitrateFailure(): string | undefined { return this.bitrateFailureDetail; }
   private bitrateRequestId = 0;
   private bitratePending: { id: number; value: number; resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   get supportsLiveBitrate(): boolean { return this.liveBitrate; }
@@ -91,19 +94,20 @@ export class AndroidMirrorController {
     if (!this.canSetBitrate || !Number.isInteger(value) || value < 300_000 || value > 30_000_000) return Promise.resolve(false);
     return new Promise(resolve => {
       const id = ++this.bitrateRequestId;
-      const timer = setTimeout(() => this.finishBitrate(false), 4000);
+      const timer = setTimeout(() => this.finishBitrate(false, `BITRATE_CLIENT_TIMEOUT: requested=${value} bps; no server confirmation within 4000ms`), 4000);
       this.bitratePending = { id, value, resolve, timer };
       this.send({ type: 'bitrate', requestId: id, bitRate: value });
     });
   }
-  private finishBitrate(ok: boolean): void {
+  private finishBitrate(ok: boolean, detail?: string): void {
     const pending = this.bitratePending;
     if (!pending) return;
     this.bitratePending = null;
     clearTimeout(pending.timer);
     if (!ok) {
       this.liveBitrate = false;
-      this.callbacks.onBitrateSupport?.(false);
+      this.bitrateFailureDetail = detail ?? this.bitrateFailureDetail ?? 'BITRATE_REASON_UNAVAILABLE: server rejected adjustment without a diagnostic';
+      if (!this.closedByUser) this.callbacks.onBitrateSupport?.(false, this.bitrateFailureDetail);
     }
     pending.resolve(ok);
   }
@@ -152,6 +156,7 @@ export class AndroidMirrorController {
 
   connect(serial: string, quality?: AndroidQuality): void {
     this.liveBitrate = false;
+    this.bitrateFailureDetail = undefined;
     this.serial = serial;
     this.autoQuality = quality?.id === 'auto';
     this.closedByUser = false;
@@ -167,7 +172,7 @@ export class AndroidMirrorController {
     socket.onmessage = event => { if (!this.closedByUser) this.handleMessage(event.data); };
     socket.onerror = () => { if (!this.closedByUser) this.callbacks.onState('error', 'SCRCPY_CONNECTION_LOST'); };
     socket.onclose = () => {
-      this.finishBitrate(false);
+      this.finishBitrate(false, 'BITRATE_CONNECTION_CLOSED: preview connection closed');
       this.liveBitrate = false;
       this.teardownTimers();
       if (!this.closedByUser) this.callbacks.onState('error', 'SCRCPY_CONNECTION_CLOSED');
@@ -283,12 +288,14 @@ export class AndroidMirrorController {
     switch (message.type) {
       case 'bitrate-support':
         this.liveBitrate = message.supported === true;
-        if (!this.liveBitrate) this.finishBitrate(false);
-        this.callbacks.onBitrateSupport?.(this.liveBitrate);
+        this.bitrateFailureDetail = this.liveBitrate ? undefined
+          : (typeof message.detail === 'string' ? message.detail.slice(0, 4096) : 'BITRATE_REASON_UNAVAILABLE: server did not provide diagnostics');
+        if (!this.liveBitrate) this.finishBitrate(false, this.bitrateFailureDetail);
+        this.callbacks.onBitrateSupport?.(this.liveBitrate, this.bitrateFailureDetail);
         break;
       case 'bitrate-result':
         if (message.requestId === this.bitratePending?.id) {
-          this.finishBitrate(message.applied === true && message.bitRate === this.bitratePending?.value);
+          this.finishBitrate(message.applied === true && message.bitRate === this.bitratePending?.value, typeof message.detail === 'string' ? message.detail.slice(0, 4096) : undefined);
         }
         break;
       case 'header':

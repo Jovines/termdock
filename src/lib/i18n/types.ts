@@ -81,6 +81,13 @@ export type TranslationDictionary = {
     quality: string;
     qualityAutoHint: string;
     qualityAutoUnavailable: string;
+    qualityAutoVersionError: string;
+    qualityAutoBuildError: string;
+    qualityAutoExtensionError: string;
+    qualityAutoTimeoutError: string;
+    qualityAutoEncoderError: string;
+    qualityAutoChannelError: string;
+    qualityAutoUnknownError: string;
     qualityLow: string;
     qualityMedium: string;
     qualityHigh: string;

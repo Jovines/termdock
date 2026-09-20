@@ -5,7 +5,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { randomInt } from 'node:crypto';
 import { adbSearchPath, resolveAdbBinary } from './adb.js';
 
-import { LiveBitrateChannel, supportsLiveBitrate, bitrateOverlayPath, bitrateOverlayRemote } from './liveBitrate.js';
+import { LiveBitrateChannel, inspectLiveBitrate, resolveBundledPreviewServer, bitrateOverlayPath, bitrateOverlayRemote } from './liveBitrate.js';
 
 const DEVICE_NAME_LENGTH = 64;
 const VIDEO_HEADER_LENGTH = 12;
@@ -22,7 +22,7 @@ const CODEC_IDS: Record<number, ScrcpyVideoCodec> = {
 export interface ScrcpyVideoHeader { codec: ScrcpyVideoCodec; width: number; height: number; deviceName: string }
 export interface ScrcpyFrame { config: boolean; keyFrame: boolean; pts: bigint; data: Buffer }
 export interface ScrcpySessionEvents {
-  onBitrateSupport?: (supported: boolean) => void;
+  onBitrateSupport?: (supported: boolean, detail?: string) => void;
   onHeader: (header: ScrcpyVideoHeader) => void;
   onFrame: (frame: ScrcpyFrame) => void;
   onError: (error: Error) => void;
@@ -178,7 +178,7 @@ export class ScrcpySession {
     if (this.started) return;
     this.started = true;
     try {
-      const { serverJar, version } = await resolveScrcpyBinaries();
+      const { serverJar, version } = await resolveBundledPreviewServer() ?? await resolveScrcpyBinaries();
       this.protocol = Number.parseInt(version.split('.')[0] ?? '0', 10) >= 4 ? 'session' : 'legacy';
       const remoteJar = remoteJarPath(version);
       await runAdbCapture(['-s', this.serial, 'push', serverJar, remoteJar], 60_000);
@@ -194,19 +194,30 @@ export class ScrcpySession {
       await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:scrcpy_${scidHex(this.scid)}`, `tcp:${this.port}`], 15_000);
 
       let liveBitrate = false;
-      if (await supportsLiveBitrate(serverJar, version)) {
+      let bitrateFailure = await inspectLiveBitrate(serverJar, version);
+      let bitrateStage = 'BITRATE_LISTEN_FAILED';
+      const reportBitrate = (ready: boolean, detail?: string) => {
+        if (this.stopped) return;
+        const diagnostic = detail ? `${detail}; scrcpy=${version}; device=${this.serial}` : undefined;
+        if (diagnostic) console.warn('[android] ' + diagnostic);
+        this.events.onBitrateSupport?.(ready, diagnostic);
+      };
+      if (!bitrateFailure) {
         try {
-          this.bitrateChannel = new LiveBitrateChannel(ready => this.events.onBitrateSupport?.(ready));
+          this.bitrateChannel = new LiveBitrateChannel(reportBitrate);
           const port = await this.bitrateChannel.listen();
+          bitrateStage = 'BITRATE_PUSH_FAILED';
           await runAdbCapture(['-s', this.serial, 'push', bitrateOverlayPath, bitrateOverlayRemote]);
+          bitrateStage = 'BITRATE_TUNNEL_FAILED';
           await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:termdock_bitrate_${scidHex(this.scid)}`, `tcp:${port}`]);
           liveBitrate = true;
-        } catch {
+        } catch (error) {
+          bitrateFailure = `${bitrateStage}: ${String(error)}`;
           this.bitrateChannel?.close();
           this.bitrateChannel = null;
         }
       }
-      if (!liveBitrate) this.events.onBitrateSupport?.(false);
+      if (!liveBitrate) reportBitrate(false, bitrateFailure ?? 'BITRATE_UNAVAILABLE');
       if (this.stopped) {
         this.bitrateChannel?.close();
         this.server?.close();
@@ -377,6 +388,8 @@ export class ScrcpySession {
     try { socket.write(data); return true; }
     catch { return false; }
   }
+
+  get bitrateFailure(): string | undefined { return this.bitrateChannel?.lastFailure; }
 
   setBitrate(value: number): Promise<boolean> {
     return this.bitrateChannel?.setBitrate(value) ?? Promise.resolve(false);

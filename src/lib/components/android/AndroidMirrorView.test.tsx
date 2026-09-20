@@ -218,10 +218,11 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     // 徽章里的停止按钮带时长，避免与工具栏那个同名按钮混淆。
     const badgeStop = await screen.findByLabelText(/^Stop recording · \d\d:\d\d$/);
     expect(badgeStop).toBeTruthy();
-    // 录屏中画面高度不能变：统计信息让位给计时徽章，而不是另起一行。
-    // 隐藏统计内容但保留占位，计时徽章不能改变底栏换行与行高。
-    expect(screen.getByText(/fps ·/).classList.contains('invisible')).toBe(true);
-    expect(screen.getByText(/fps ·/).getAttribute('aria-hidden')).toBe('true');
+    // 录屏中缩放提示让位给计时徽章，实时统计只在更多菜单展示。
+    const zoomLabel = document.querySelector('[data-mirror-capture-status] > span')!;
+    expect(zoomLabel.classList.contains('invisible')).toBe(true);
+    expect(zoomLabel.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.queryByText(/fps ·/)).toBeNull();
 
     // 真实时序：录制途中数据持续到达，点停止时已经攒了内容。
 
@@ -435,6 +436,24 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     expect(viewTransform(canvas).x).toBeCloseTo(30 * (1 - z), 6);
     expect(viewTransform(canvas).y).toBeCloseTo(30 * (1 - z), 6);
     expect(touchCalls()).toEqual([]);
+  });
+
+  it('区分调码率超时与编码器拒绝，详情可展开，恢复支持后清除提示', async () => {
+    await streamingView(async () => {});
+    await userEvent.selectOptions(screen.getByLabelText('Quality'), 'auto');
+    const connection = (globalThis as Record<string, unknown>).__mirrorConnection as {
+      callbacks: { onBitrateSupport: (supported: boolean, detail?: string) => void };
+    };
+    const detail = 'BITRATE_ACK_TIMEOUT: requested=4000000 bps; scrcpy=3.3.4; device=test';
+    act(() => connection.callbacks.onBitrateSupport(false, detail));
+    const summary = screen.getByText(/Bitrate confirmation timed out/);
+    const disclosure = summary.closest('details')!;
+    expect(disclosure.open).toBe(false);
+    await userEvent.click(summary);
+    expect(disclosure.open).toBe(true);
+    expect(screen.getByText(detail)).toBeTruthy();
+    act(() => connection.callbacks.onBitrateSupport(true));
+    expect(screen.queryByText(detail)).toBeNull();
   });
 
   it('自定义仅改码率时复用连接，不重新创建视频流', async () => {
