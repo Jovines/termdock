@@ -1446,6 +1446,24 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const prev = prevPersistedRef.current;
     const curr = persistedSessions;
 
+    // Inventory metadata must reach unopened tabs too, including the first
+    // server snapshot after restoring from cache. Only apply changed hints or
+    // fill missing values so unrelated snapshots preserve live WS metadata.
+    const previousById = new Map(prev.map((session) => [session.sessionId, session]));
+    const store = useTerminalStore.getState();
+    for (const session of curr) {
+      const previous = previousById.get(session.sessionId);
+      const current = useTerminalStore.getState().sessions.get(session.sessionId);
+      if (session.activeProgram != null && session.activeProgram !== current?.activeProgram
+        && (current?.activeProgram == null || session.activeProgram !== previous?.activeProgram)) {
+        store.setSessionActiveProgram(session.sessionId, session.activeProgram);
+      }
+      if (session.cwd != null && session.cwd !== current?.cwd
+        && (current?.cwd == null || session.cwd !== previous?.cwd)) {
+        store.setSessionCwd(session.sessionId, session.cwd);
+      }
+    }
+
     // Seed the ref on first non-restoring render (before any diff logic)
     if (!seededRef.current) {
       setSessions((prevSessions) => syncRuntimeSessionsFromPersisted(prevSessions, curr));
