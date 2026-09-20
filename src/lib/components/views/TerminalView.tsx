@@ -1859,8 +1859,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream, openManagedBackendSession]);
 
   const handleViewportInput = React.useCallback(
-    (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean }) => {
-      if (!isActiveRef.current) {
+    (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean; targeted?: boolean }) => {
+      if (!isActiveRef.current && !options?.targeted) {
         return;
       }
 
@@ -1933,19 +1933,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             // copy mode. Sending the byte again would leak Escape into the
             // foreground program in the pane.
             if (shouldConsumeAfterTmuxCopyModeExit(payload)) {
-              return;
+              return true;
             }
           }
 
           await terminal.sendInput(terminalId, payload);
           // If user is on the session and agent just finished, user input = reviewed
           clearAgentNeedsReview(sessionId);
+          return true;
         } catch (error) {
           setConnectionError(error instanceof Error ? error.message : 'Failed to send input');
+          return false;
         }
       };
 
-      void sendPayload();
+      const delivery = sendPayload();
 
       if (modifierConsumed) {
         if (!lockedModifier) {
@@ -1953,20 +1955,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         }
         focusTerminalIfActive();
       }
+      return delivery;
     },
     [activeModifier, clearAgentNeedsReview, focusTerminalIfActive, isTmuxMode, lockedModifier, terminal]
   );
 
   React.useEffect(() => {
     const handleInsertReference = (event: Event) => {
-      if (!isActiveRef.current) return;
-      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean; paste?: boolean; nonce?: string }>;
+      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean; paste?: boolean; nonce?: string; sessionId?: string }>;
+      const target = customEvent.detail?.sessionId;
+      if (target ? target !== sessionId : !isActiveRef.current) return;
       const text = customEvent.detail?.text;
       if (!text) return;
       const nonce = customEvent.detail?.nonce;
       // 断联/重连中的 session 插入会丢：带 nonce 的请求回 ack 失败，
       // 让发送方（上下文草稿坞）保留内容
-      if (isConnectionTransitionRef.current) {
+      if (isConnectionTransitionRef.current || !terminalControllerRef.current) {
         if (nonce) {
           window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', {
             detail: { nonce, ok: false },
@@ -1976,11 +1980,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       // 引用插入也是带外输入：重置输入模型后发送，避免 textarea diff 拿
       // 过期基线算错
-      terminalControllerRef.current?.sendSequence(text, { paste: customEvent.detail?.paste });
+      const delivery = terminalControllerRef.current?.sendSequence(text, { paste: customEvent.detail?.paste, targeted: Boolean(target) });
       if (nonce) {
-        window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', {
-          detail: { nonce, ok: true },
-        }));
+        void Promise.resolve(delivery).then(ok => {
+          window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', {
+            detail: { nonce, ok: ok === true },
+          }));
+        }, () => {
+          window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', { detail: { nonce, ok: false } }));
+        });
       }
       if (shouldAutoFocusTerminalAfterInsert(isMobileRef.current, customEvent.detail?.focus !== false)) {
         focusTerminalIfActive();
@@ -1989,7 +1997,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     window.addEventListener('termdock-insert-reference', handleInsertReference);
     return () => window.removeEventListener('termdock-insert-reference', handleInsertReference);
-  }, [focusTerminalIfActive]);
+  }, [focusTerminalIfActive, sessionId]);
 
   // 推 resize 给服务端。本组件不再做 debounce / skip-if-same —— 编排器在
   // TerminalViewport 内部已按动画帧合并并完成 skip-if-same，调用本函数说明

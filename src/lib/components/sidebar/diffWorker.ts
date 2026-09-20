@@ -1,7 +1,7 @@
 import './diffWorkerGlobalShim';
 import { parseDiff, tokenize, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import refractor from 'refractor';
-import { markSmartEdits, type SmartInlineDiffMode } from './inlineDiff';
+import { markSmartEdits, type SmartInlineDiffMode, type InlineWhitespacePolicy } from './inlineDiff';
 import { shouldComputeInlineDiff, shouldSyntaxHighlightDiff } from './diffComputationPolicy';
 
 
@@ -11,6 +11,7 @@ interface ParseRequest {
   inlineMode: 'none' | SmartInlineDiffMode;
   oldSource?: string;
   language?: string;
+  whitespace?: InlineWhitespacePolicy;
 }
 
 interface ParseSuccess {
@@ -33,7 +34,7 @@ function fileTokenKey(file: FileData): string {
 }
 
 self.onmessage = (event: MessageEvent<ParseRequest>) => {
-  const { id, diffContent, inlineMode, oldSource, language } = event.data;
+  const { id, diffContent, inlineMode, oldSource, language, whitespace = 'default' } = event.data;
   const parseStarted = performance.now();
   try {
     const files = parseDiff(diffContent);
@@ -46,13 +47,21 @@ self.onmessage = (event: MessageEvent<ParseRequest>) => {
         if (file.hunks.length === 0) continue;
         try {
           const hunkData = file.hunks as HunkData[];
-          const enhancers = [markSmartEdits(hunkData, inlineMode)];
-          const hunkTokens = language && syntaxHighlight
-            ? tokenize(hunkData, { enhancers, oldSource, highlight: true, refractor, language })
-            : tokenize(hunkData, { enhancers, oldSource });
+          const enhancers = [markSmartEdits(hunkData, inlineMode, whitespace)];
+          let hunkTokens: HunkTokens;
+          if (language && syntaxHighlight) {
+            try {
+              hunkTokens = tokenize(hunkData, { enhancers, oldSource, highlight: true, refractor, language });
+            } catch {
+              // A syntax grammar failure must not erase the inline edits.
+              hunkTokens = tokenize(hunkData, { enhancers, oldSource });
+            }
+          } else {
+            hunkTokens = tokenize(hunkData, { enhancers, oldSource });
+          }
           tokens.push([fileTokenKey(file), hunkTokens]);
         } catch {
-          // Keep one bad hunk from breaking the whole diff.
+          // Keep one bad file from breaking the whole diff.
         }
       }
     }

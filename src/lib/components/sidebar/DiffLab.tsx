@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { InlineWhitespacePolicy } from './inlineDiff';
 import { canUseSplitDiffView, DiffViewer, SPLIT_DIFF_MEDIA_QUERY, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 
 export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string; oldSource?: string }> = {
@@ -58,6 +59,24 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
  }
 `,
   },
+  kotlinSignatureExpansion: {
+    label: 'Kotlin signature expansion + new parameter',
+    path: 'ScrollBackgroundManager.kt',
+    diff: `diff --git a/ScrollBackgroundManager.kt b/ScrollBackgroundManager.kt
+--- a/ScrollBackgroundManager.kt
++++ b/ScrollBackgroundManager.kt
+@@ -331,3 +331,8 @@
+${' '}
+-    private fun innerReset2(resetHeight: Boolean, resetPropertyManager: Boolean = true, keepVisible: Boolean = false) {
++    private fun innerReset2(
++        resetHeight: Boolean,
++        resetPropertyManager: Boolean = true,
++        keepVisible: Boolean = false,
++        keepHeaderStyle: Boolean = keepVisible
++    ) {
+         val sameConfig = false
+`,
+  },
   kotlin: {
     label: 'Kotlin function signature + callback',
     path: 'SearchHintIconHelper.kt',
@@ -65,9 +84,9 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
 --- a/SearchHintIconHelper.kt
 +++ b/SearchHintIconHelper.kt
 @@ -43,15 +43,20 @@ object SearchHintIconHelper {
- 
+
  /** _________________________ Hybrid 标 _________________________ **/
- 
+
 - fun buildNinePatchHybridIcon(alpha: Int, searchHintBeen: SearchHintBeen?, url: String, appendString: String?, tv: EditText, iconLeftMargin: Int, rootView: ViewGroup?, isSaaS: Boolean? = false) {
 + fun buildNinePatchHybridIcon(alpha: Int, searchHintBeen: SearchHintBeen?, url: String, appendString: String?, tv: EditText, iconLeftMargin: Int, rootView: ViewGroup?, isSaaS: Boolean? = false, shouldAttach: () -> Boolean = { true }) {
       val ninePatchTV = buildNinePatchTextView(
@@ -105,12 +124,12 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
 +    wrap: input.wrap ?? true,
 +  };
  }
- 
+
  export function isEnabled(value: string | null): boolean {
 -  return value === '1' || value === 'true' || value === 'yes'
 +  return value === '1' || value === 'true' || value === 'yes';
  }
- 
+
  export const DEFAULT_FILTERS = [
 -  'node_modules', 'dist', 'coverage',
 +  'node_modules',
@@ -160,14 +179,14 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
      { value: 'patience', label: 'Patience' },
 -    { value: 'histogram', label: 'Histogram' },
    ];
- 
+
    const whitespaceOptions = [
      { value: 'default', label: 'All' },
      { value: 'trim', label: 'Trim' },
      { value: 'ignore', label: 'Ignore' },
 +    { value: 'ignore-blank-lines', label: 'No blank lines' },
    ];
- 
+
 +  const inlineOptions = [
 +    { value: 'words', label: 'Words' },
 +    { value: 'chars', label: 'Characters' },
@@ -192,7 +211,7 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
 +++ b/SearchPresenter.kt
 @@ -1,10 +1,11 @@
  package com.example.search
- 
+
 -import com.example.search.model.OldWord
  import com.example.search.model.SuggestWord
 +import com.example.search.model.SearchHint
@@ -201,7 +220,7 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
  import kotlinx.coroutines.CoroutineScope
 -import kotlinx.coroutines.Job
 +import kotlinx.coroutines.SupervisorJob
- 
+
  class SearchPresenter(
    private val tracker: SearchTracker,
  )`,
@@ -218,7 +237,7 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
 -import { DiffViewer, type DiffViewType } from './DiffViewer';
 +import type { ChangeAuditRecord, GitChangedFile, GitDiffOptions } from '../../terminal/api';
 +import { DiffViewer, type DiffInlineMode, type DiffViewType } from './DiffViewer';
- 
+
  export interface DiffStreamFile {
    path: string;`,
   },
@@ -253,7 +272,7 @@ export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: 
 -        return "old"
 +        return "new"
      }
- 
+
 @@ -10,6 +10,9 @@ class CommentContext {
       * A second comment that ends before the next function.
       */
@@ -582,11 +601,18 @@ function readInitialWrap(): boolean {
   return new URLSearchParams(window.location.search).get('wrap') !== 'off';
 }
 
+function readInitialWhitespace(): InlineWhitespacePolicy {
+  if (typeof window === 'undefined') return 'default';
+  const value = new URLSearchParams(window.location.search).get('whitespace');
+  return value === 'ignore' || value === 'trim' || value === 'ignore-blank-lines' ? value : 'default';
+}
+
 export function DiffLab() {
   const [fixtureKey, setFixtureKey] = useState<keyof typeof DIFF_FIXTURES>(() => readInitialFixture());
   const [viewType, setViewType] = useState<DiffViewType>(() => readInitialViewType());
   const [splitViewAvailable, setSplitViewAvailable] = useState(() => canUseSplitDiffView());
   const [inlineMode, setInlineMode] = useState<DiffInlineMode>(() => readInitialInlineMode());
+  const [whitespace, setWhitespace] = useState<InlineWhitespacePolicy>(() => readInitialWhitespace());
   const [wrap, setWrap] = useState(() => readInitialWrap());
   const [insertedReference, setInsertedReference] = useState<{ label: string; text: string } | null>(null);
   const fixture = DIFF_FIXTURES[fixtureKey];
@@ -612,6 +638,7 @@ export function DiffLab() {
       setViewType(readInitialViewType());
       setInlineMode(readInitialInlineMode());
       setWrap(readInitialWrap());
+      setWhitespace(readInitialWhitespace());
     };
     window.addEventListener('popstate', syncFromLocation);
     window.addEventListener('pageshow', syncFromLocation);
@@ -633,6 +660,7 @@ export function DiffLab() {
       data-diff-lab-view={effectiveViewType}
       data-diff-lab-requested-view={viewType}
       data-diff-lab-inline={inlineMode}
+      data-diff-lab-whitespace={whitespace}
       data-diff-lab-wrap={wrap ? 'on' : 'off'}
     >
       <div className="mx-auto flex min-h-screen max-w-[1180px] flex-col px-4 py-4">
@@ -685,6 +713,16 @@ export function DiffLab() {
                 </button>
               ))}
             </div>
+            <select
+              aria-label="Inline whitespace"
+              value={whitespace}
+              onChange={(event) => setWhitespace(event.target.value as InlineWhitespacePolicy)}
+              className="h-8 rounded-md bg-surface-2 px-2 text-xs text-foreground"
+            >
+              <option value="default">Compare whitespace</option>
+              <option value="trim">Ignore trailing spaces</option>
+              <option value="ignore">Ignore whitespace</option>
+            </select>
             <button
               type="button"
               onClick={() => setWrap((value) => !value)}
@@ -714,6 +752,7 @@ export function DiffLab() {
               canRestoreWorktree: false,
             }}
             diffOverride={fixture.diff}
+            diffOptions={{ whitespace }}
             oldSourceOverride={fixture.oldSource}
             active
             wrap={wrap}

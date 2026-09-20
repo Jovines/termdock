@@ -9,7 +9,6 @@ import {
   getPreciseWordDiffRanges,
   getChangedLineDisplayBlocks,
   splitChangedLineBlock,
-  retainComparableInlineRanges,
   tokenizeInlineDiffLine,
 } from './inlineDiff';
 
@@ -71,8 +70,8 @@ describe('inline diff token heuristics', () => {
     const after = '  config.timeoutSec = 1500;';
     const [beforeRanges, afterRanges] = getPreciseWordDiffRanges(before, after);
 
-    expect(beforeRanges.map((range) => before.slice(range.start, range.start + range.length))).toEqual(['timeoutMs', '1000']);
-    expect(afterRanges.map((range) => after.slice(range.start, range.start + range.length))).toEqual(['timeoutSec', '1500']);
+    expect(beforeRanges.map((range) => before.slice(range.start, range.start + range.length))).toEqual(['timeoutMs = 1000']);
+    expect(afterRanges.map((range) => after.slice(range.start, range.start + range.length))).toEqual(['timeoutSec = 1500']);
   });
 
   it('creates one precise chunk for an appended argument', () => {
@@ -95,33 +94,58 @@ describe('inline diff token heuristics', () => {
     expect(afterRanges.map((range) => after.slice(range.start, range.start + range.length))).toEqual(['advanced']);
   });
 
-  it('keeps strong highlighting for a partial inline difference', () => {
-    const value = 'const mode = "advanced";';
-    const start = value.indexOf('advanced');
-
-    expect(retainComparableInlineRanges(value, [{ start, length: 'advanced'.length }])).toEqual([
-      { start, length: 'advanced'.length },
-    ]);
+  it('preserves default-policy indentation edits instead of filtering each line', () => {
+    const hunk = parseSingleHunk(`-  executeTask(input);
++    executeTask(input);`);
+    expect(computeSmartInlineRanges([hunk], 'words')).toEqual({
+      oldRanges: [], newRanges: [{ type: 'edit', lineNumber: 1, start: 0, length: 2 }],
+    });
+    expect(computeSmartInlineRanges([hunk], 'words', 'ignore')).toEqual({ oldRanges: [], newRanges: [] });
   });
 
-  it('drops strong highlighting when the whole visible line is new or removed', () => {
-    const value = '  entirelyNewCall();';
-
-    expect(retainComparableInlineRanges(value, [{ start: 0, length: value.length }])).toEqual([]);
-    expect(retainComparableInlineRanges(value, [{ start: 2, length: value.length - 2 }])).toEqual([]);
+  it('does not match delimiters across unmatched words', () => {
+    // ByWordRt.AdjustmentPunctuationMatcher compares the adjacent gaps,
+    // leaving the '=' between two replaced identifiers inside the change.
+    const before = 'config.timeoutMs = 1000;';
+    const after = 'config.timeoutSec = 1500;';
+    const [oldEdits, newEdits] = getPreciseWordDiffRanges(before, after);
+    expect(oldEdits.map((r) => before.slice(r.start, r.start + r.length))).toEqual(['timeoutMs = 1000']);
+    expect(newEdits.map((r) => after.slice(r.start, r.start + r.length))).toEqual(['timeoutSec = 1500']);
   });
 
-  it('drops strong highlighting for indentation-only changes', () => {
-    const value = '    executeTask(input);';
-
-    expect(retainComparableInlineRanges(value, [{ start: 0, length: 2 }])).toEqual([]);
-  });
-
-  it('does not manufacture inline edits for unrelated replacement lines', () => {
+  it('retains changed text even when only the closing punctuation matches', () => {
     const hunk = parseSingleHunk(`-const retries = calculateRetryBudget(request);
 +notifyObservers(session.status);`);
+    const ranges = computeSmartInlineRanges([hunk], 'words');
+    expect(ranges.oldRanges).toEqual([{ type: 'edit', lineNumber: 1, start: 0, length: 44 }]);
+    expect(ranges.newRanges).toEqual([{ type: 'edit', lineNumber: 1, start: 0, length: 30 }]);
+  });
 
-    expect(computeSmartInlineRanges([hunk], 'words')).toEqual({ oldRanges: [], newRanges: [] });
+  it('does not drop a whole visible line when the block still shares its trailing newline', () => {
+    const hunk = parseSingleHunk(`-before
++after`);
+    expect(computeSmartInlineRanges([hunk], 'words')).toEqual({
+      oldRanges: [{ type: 'edit', lineNumber: 1, start: 0, length: 6 }],
+      newRanges: [{ type: 'edit', lineNumber: 1, start: 0, length: 5 }],
+    });
+  });
+
+  it.each(['words', 'chars'] as const)('ignores whitespace without losing value edits in %s mode', (mode) => {
+    const hunk = parseSingleHunk(`-  timeout = 1000;
++    timeout = 1500;  `);
+    const ranges = computeSmartInlineRanges([hunk], mode, 'ignore');
+    expect(ranges.oldRanges.every((r) => r.start >= 12)).toBe(true);
+    expect(ranges.newRanges.every((r) => r.start >= 14)).toBe(true);
+    expect(ranges.oldRanges.length).toBeGreaterThan(0);
+    expect(ranges.newRanges.length).toBeGreaterThan(0);
+  });
+
+  it('retains indentation but ignores trailing spaces in the Git trim policy', () => {
+    const hunk = parseSingleHunk(`-  call();
++    call();  `);
+    expect(computeSmartInlineRanges([hunk], 'words', 'trim')).toEqual({
+      oldRanges: [], newRanges: [{ type: 'edit', lineNumber: 1, start: 0, length: 2 }],
+    });
   });
 
   it('uses a shared code skeleton to pair localized Unicode content changes', () => {

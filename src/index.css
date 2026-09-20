@@ -1208,11 +1208,6 @@ html[data-theme='light'] .termdock-diff {
   background-image: linear-gradient(var(--diff-line-ref-tint), var(--diff-line-ref-tint));
 }
 
-.diff-code-insert .diff-code-edit,
-.diff-code-delete .diff-code-edit {
-  font-weight: 600;
-}
-
 /*
  * Horizontal + vertical scroll on the diff rows:
  * The diff body can overflow horizontally for long lines (when wrap

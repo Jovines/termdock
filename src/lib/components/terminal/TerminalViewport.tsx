@@ -315,7 +315,7 @@ export type TerminalController = {
    * 为「未知」——否则工具栏方向键移动了 PTY 光标而模型不知情，
    * 后续 textarea diff / 退格会全部打在错误的位置上。
    */
-  sendSequence: (seq: string, options?: { consumeModifier?: boolean; paste?: boolean }) => void;
+  sendSequence: (seq: string, options?: { consumeModifier?: boolean; paste?: boolean; targeted?: boolean }) => void | Promise<boolean>;
   /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
   getDimensions: () => { cols: number; rows: number } | null;
   /**
@@ -359,6 +359,7 @@ export type TerminalController = {
 
 export type TerminalViewportInputOptions = {
   skipModifierTransform?: boolean;
+  targeted?: boolean;
   consumeModifier?: boolean;
 };
 
@@ -368,7 +369,7 @@ interface TerminalViewportProps {
   sessionId: string;
   isLayoutVisible?: boolean;
   chunks: TerminalChunk[];
-  onInput: (data: string, options?: TerminalViewportInputOptions) => void;
+  onInput: (data: string, options?: TerminalViewportInputOptions) => void | Promise<boolean>;
   onResize: (cols: number, rows: number, seq: number) => void;
   onFlowControl?: (paused: boolean) => void;
   onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
@@ -1606,7 +1607,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      * 2. clearSelection()：与 xterm 默认"输入即清选区"行为一致
      * 3. 带 skipModifierTransform 让 TerminalView 不再叠加移动端修饰符工具栏的状态
      */
-    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null, options?: { consumeModifier?: boolean; paste?: boolean; submitAfterPaste?: boolean }) => {
+    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null, options?: { consumeModifier?: boolean; paste?: boolean; submitAfterPaste?: boolean; targeted?: boolean }) => {
       if (!seq) return;
       clearPendingTextareaSync();
       const target = textarea ?? hiddenInputRef.current;
@@ -1628,11 +1629,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // 粘贴则把所有换行都留在 bracketed-paste 内，避免 TUI 连发多条消息。
         const submitAfterPaste = options.submitAfterPaste ?? seq.endsWith('\r');
         const payload = buildBracketedPastePayload(seq, submitAfterPaste);
-        inputHandlerRef.current(payload, { skipModifierTransform: true, consumeModifier: options?.consumeModifier });
-        return;
+        return inputHandlerRef.current(payload, { skipModifierTransform: true, consumeModifier: options?.consumeModifier, targeted: options?.targeted });
       }
 
-      inputHandlerRef.current(seq, { skipModifierTransform: true, consumeModifier: options?.consumeModifier });
+      return inputHandlerRef.current(seq, { skipModifierTransform: true, consumeModifier: options?.consumeModifier, targeted: options?.targeted });
     }, [clearPendingTextareaSync]);
 
     const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
@@ -4623,8 +4623,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           onMobilePasteResultRef.current?.(ok);
           return ok;
         },
-        sendSequence: (seq: string, options?: { consumeModifier?: boolean; paste?: boolean }) => {
-          sendTerminalSeq(seq, null, options);
+        sendSequence: (seq: string, options?: { consumeModifier?: boolean; paste?: boolean; targeted?: boolean }) => {
+          return sendTerminalSeq(seq, null, options);
         },
         getDimensions: () => {
           const terminal = terminalRef.current;

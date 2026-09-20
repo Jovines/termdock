@@ -149,7 +149,7 @@ function loadParsedDiffCached(
   const pending = parsedDiffPromiseCache.get(key);
   if (pending?.diffContent === diffContent && pending.oldSource === oldSource) return pending.promise;
 
-  const promise: Promise<DiffWorkerResult> = parseDiffInWorker(diffContent, inlineMode, oldSource, language)
+  const promise: Promise<DiffWorkerResult> = parseDiffInWorker(diffContent, inlineMode, oldSource, language, options?.whitespace)
     .then((result) => (
       parsedDiffPromiseCache.get(key)?.promise === promise
         ? rememberParsedDiffResult(key, { diffContent, oldSource, result })

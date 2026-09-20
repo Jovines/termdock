@@ -1,5 +1,6 @@
 import type { FileData, HunkTokens } from 'react-diff-view';
 import type { DiffInlineMode } from './DiffViewer';
+import type { InlineWhitespacePolicy } from './inlineDiff';
 
 interface WorkerSuccess {
   id: number;
@@ -67,10 +68,11 @@ export function parseDiffInWorker(
   inlineMode: DiffInlineMode,
   oldSource?: string,
   language?: string,
+  whitespace: InlineWhitespacePolicy = 'default',
 ): Promise<DiffWorkerResult> {
   const id = ++requestSeq;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    getWorker().postMessage({ id, diffContent, inlineMode, oldSource, language });
+    getWorker().postMessage({ id, diffContent, inlineMode, oldSource, language, whitespace });
   });
 }

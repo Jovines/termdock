@@ -3,6 +3,7 @@ import { pickRanges, type HunkData, type RangeTokenNode, type TokenizeEnhancer }
 type ChangeData = HunkData['changes'][number];
 
 export type SmartInlineDiffMode = 'words' | 'chars';
+export type InlineWhitespacePolicy = 'default' | 'trim' | 'ignore' | 'ignore-blank-lines';
 
 export interface MovedLineCandidate {
   oldLineNumber: number;
@@ -185,6 +186,13 @@ interface ChangedLineBlock {
   deletes: ChangeData[];
   inserts: ChangeData[];
   anchored: boolean;
+  comparison?: WordComparison;
+}
+
+interface WordComparison {
+  leftChunks: JetBrainsChunk[];
+  rightChunks: JetBrainsChunk[];
+  pairs: MatchPair[];
 }
 
 // Adapted from JetBrains LineFragmentSplitter (Copyright 2000-2021
@@ -196,8 +204,8 @@ export function splitChangedLineBlock(block: ChangeData[]): ChangedLineBlock[] {
   const deletes = block.filter(isDelete);
   const inserts = block.filter(isInsert);
   if (!deletes.length || !inserts.length) return [{ deletes, inserts, anchored: false }];
-  const oldText = deletes.map((line) => line.content).join('\n');
-  const newText = inserts.map((line) => line.content).join('\n');
+  const oldText = buildBlockText(deletes).text;
+  const newText = buildBlockText(inserts).text;
   const oldWords = getJetBrainsWordChunks(oldText, true);
   const newWords = getJetBrainsWordChunks(newText, true);
   const pairs = optimizeWordChunkPairs(oldWords, newWords, oldText, newText);
@@ -255,7 +263,26 @@ export function splitChangedLineBlock(block: ChangeData[]): ChangedLineBlock[] {
   }
   addBlock(deletes.length, inserts.length);
   if (pending) blocks.push(pending);
-  return blocks;
+  let oldOffset = 0;
+  let newOffset = 0;
+  return blocks.map((block) => {
+    const oldEnd = oldOffset + buildBlockText(block.deletes).text.length;
+    const newEnd = newOffset + buildBlockText(block.inserts).text.length;
+    const oldStartIndex = oldWords.findIndex((word) => word.start >= oldOffset);
+    const newStartIndex = newWords.findIndex((word) => word.start >= newOffset);
+    const localOld = oldWords.filter((word) => word.start >= oldOffset && word.start < oldEnd);
+    const localNew = newWords.filter((word) => word.start >= newOffset && word.start < newEnd);
+    const comparison: WordComparison = {
+      leftChunks: localOld.map((word) => ({ ...word, start: word.start - oldOffset, end: word.end - oldOffset })),
+      rightChunks: localNew.map((word) => ({ ...word, start: word.start - newOffset, end: word.end - newOffset })),
+      pairs: pairs.filter((pair) => pair.left >= oldStartIndex && pair.left < oldStartIndex + localOld.length
+        && pair.right >= newStartIndex && pair.right < newStartIndex + localNew.length)
+        .map((pair) => ({ left: pair.left - oldStartIndex, right: pair.right - newStartIndex })),
+    };
+    oldOffset = oldEnd;
+    newOffset = newEnd;
+    return { ...block, comparison };
+  });
 }
 
 // IntelliJ's default BY_WORD policy squashes adjoining word fragments back
@@ -442,6 +469,22 @@ function stableEdgePairs(left: string[], right: string[]): MatchPair[] {
 
 function lcsPairs(left: string[], right: string[]): MatchPair[] {
   if (left.length === 0 || right.length === 0) return [];
+  // Diff.buildChanges trims equal prefixes/suffixes before its LCS pass.
+  // In particular, the final newline must stay at the end of a rewrapped
+  // signature instead of matching the first newly introduced line break.
+  let prefix = 0;
+  while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < left.length - prefix && suffix < right.length - prefix
+    && left[left.length - suffix - 1] === right[right.length - suffix - 1]) suffix += 1;
+  if (prefix || suffix) {
+    const middle = lcsPairs(left.slice(prefix, left.length - suffix), right.slice(prefix, right.length - suffix));
+    return [
+      ...Array.from({ length: prefix }, (_, index) => ({ left: index, right: index })),
+      ...middle.map((pair) => ({ left: pair.left + prefix, right: pair.right + prefix })),
+      ...Array.from({ length: suffix }, (_, index) => ({ left: left.length - suffix + index, right: right.length - suffix + index })),
+    ];
+  }
   // Large blocks use patience-style unique anchors rather than allocating an
   // O(n*m) matrix. Unlike a prefix/suffix-only fallback, this retains stable
   // identifiers in the middle of generated files and long reformatted blocks.
@@ -661,20 +704,34 @@ function addPunctuationAdjustmentMatches(
   leftWords: JetBrainsChunk[],
   rightWords: JetBrainsChunk[],
 ): void {
-  let leftCursor = 0;
-  let rightCursor = 0;
+  // Port of ByWordRt.AdjustmentPunctuationMatcher. Only punctuation
+  // immediately adjacent to matched words participates. Do not match a
+  // delimiter hidden inside an unrelated inserted/deleted expression.
+  const gap = (text: string, words: JetBrainsChunk[], previous: number, next: number) => (
+    getPunctuationChunks(text, previous < 0 ? 0 : words[previous].end,
+      next >= words.length ? text.length : words[next].start)
+  );
+  let previousLeft = -1;
+  let previousRight = -1;
   for (const pair of [...wordPairs, { left: leftWords.length, right: rightWords.length }]) {
-    const leftEnd = pair.left < leftWords.length ? leftWords[pair.left].start : left.length;
-    const rightEnd = pair.right < rightWords.length ? rightWords[pair.right].start : right.length;
-    addChunkMatches(
-      matches,
-      getPunctuationChunks(left, leftCursor, leftEnd),
-      getPunctuationChunks(right, rightCursor, rightEnd),
-    );
-    if (pair.left < leftWords.length && pair.right < rightWords.length) {
-      leftCursor = leftWords[pair.left].end;
-      rightCursor = rightWords[pair.right].end;
+    const leftBefore = gap(left, leftWords, previousLeft, previousLeft + 1);
+    const rightBefore = gap(right, rightWords, previousRight, previousRight + 1);
+    const leftAfter = gap(left, leftWords, pair.left - 1, pair.left);
+    const rightAfter = gap(right, rightWords, pair.right - 1, pair.right);
+    const adjacentLeft = pair.left === previousLeft + 1;
+    const adjacentRight = pair.right === previousRight + 1;
+    if (adjacentLeft && adjacentRight) {
+      addChunkMatches(matches, leftBefore, rightBefore);
+    } else if (!adjacentLeft && !adjacentRight) {
+      addChunkMatches(matches, leftBefore, rightBefore);
+      addChunkMatches(matches, leftAfter, rightAfter);
+    } else if (adjacentLeft) {
+      addChunkMatches(matches, leftBefore, [...rightBefore, ...rightAfter]);
+    } else {
+      addChunkMatches(matches, [...leftBefore, ...leftAfter], rightBefore);
     }
+    previousLeft = pair.left;
+    previousRight = pair.right;
   }
 }
 
@@ -710,6 +767,7 @@ function addCorrectedChange(
   end2: number,
   leftRanges: InlineDiffRange[],
   rightRanges: InlineDiffRange[],
+  whitespace: InlineWhitespacePolicy,
 ): void {
   // IntelliJ DefaultCorrector pulls equal adjustment whitespace out of both
   // ends of a changed range after word and punctuation matching.
@@ -734,6 +792,24 @@ function addCorrectedChange(
     start1 += 1;
     start2 += 1;
   }
+  // The UI's trim option means Git --ignore-space-at-eol. Preserve that
+  // contract; ignore mode follows ByWordRt.IgnoreSpacesCorrector.
+  const trim = (text: string, start: number, end: number): [number, number] => {
+    if (whitespace === 'ignore') {
+      while (start < end && isJetBrainsWhitespace(text[start])) start += 1;
+      while (end > start && isJetBrainsWhitespace(text[end - 1])) end -= 1;
+    } else if (whitespace === 'trim') {
+      const lineEnd = text.indexOf('\n', end);
+      if (/^[ \t\r]*$/u.test(text.slice(end, lineEnd < 0 ? text.length : lineEnd))) {
+        while (end > start && /[ \t\r]/u.test(text[end - 1])) end -= 1;
+      }
+    }
+    return [start, end];
+  };
+  [start1, end1] = trim(left, start1, end1);
+  [start2, end2] = trim(right, start2, end2);
+  if (whitespace === 'ignore' && left.slice(start1, end1).replace(/[ \t\r\n\f]/gu, '')
+    === right.slice(start2, end2).replace(/[ \t\r\n\f]/gu, '')) return;
   pushRange(leftRanges, start1, end1);
   pushRange(rightRanges, start2, end2);
 }
@@ -746,12 +822,14 @@ export function getJetBrainsStyleDiffRanges(
   left: string,
   right: string,
   mode: SmartInlineDiffMode,
+  comparison?: WordComparison,
+  whitespace: InlineWhitespacePolicy = 'default',
 ): [InlineDiffRange[], InlineDiffRange[]] {
-  const leftChunks = mode === 'words' ? getJetBrainsWordChunks(left) : getJetBrainsCharChunks(left);
-  const rightChunks = mode === 'words' ? getJetBrainsWordChunks(right) : getJetBrainsCharChunks(right);
-  const chunkPairs = mode === 'words'
+  const leftChunks = comparison?.leftChunks ?? (mode === 'words' ? getJetBrainsWordChunks(left, true) : getJetBrainsCharChunks(left));
+  const rightChunks = comparison?.rightChunks ?? (mode === 'words' ? getJetBrainsWordChunks(right, true) : getJetBrainsCharChunks(right));
+  const chunkPairs = comparison?.pairs ?? (mode === 'words'
     ? optimizeWordChunkPairs(leftChunks, rightChunks, left, right)
-    : lcsPairs(leftChunks.map((chunk) => chunk.value), rightChunks.map((chunk) => chunk.value));
+    : lcsPairs(leftChunks.map((chunk) => chunk.value), rightChunks.map((chunk) => chunk.value)));
   const matches: MatchPair[] = [];
   for (const pair of chunkPairs) {
     const leftChunk = leftChunks[pair.left];
@@ -762,6 +840,27 @@ export function getJetBrainsStyleDiffRanges(
   }
   if (mode === 'words') {
     addPunctuationAdjustmentMatches(matches, left, right, chunkPairs, leftChunks, rightChunks);
+  } else {
+    // ByCharRt.compareTwoStep: retain the non-space anchors, then compare
+    // *all* code points in their gaps, including tabs and line breaks.
+    let leftStart = 0;
+    let rightStart = 0;
+    for (const pair of [...chunkPairs, { left: leftChunks.length, right: rightChunks.length }]) {
+      const leftEnd = leftChunks[pair.left]?.start ?? left.length;
+      const rightEnd = rightChunks[pair.right]?.start ?? right.length;
+      const allChars = (text: string, start: number, end: number) => {
+        const chunks: JetBrainsChunk[] = [];
+        for (let offset = start; offset < end;) {
+          const value = String.fromCodePoint(text.codePointAt(offset)!);
+          chunks.push({ start: offset, end: offset + value.length, value });
+          offset += value.length;
+        }
+        return chunks;
+      };
+      addChunkMatches(matches, allChars(left, leftStart, leftEnd), allChars(right, rightStart, rightEnd));
+      leftStart = leftChunks[pair.left]?.end ?? left.length;
+      rightStart = rightChunks[pair.right]?.end ?? right.length;
+    }
   }
 
   const leftRanges: InlineDiffRange[] = [];
@@ -778,6 +877,7 @@ export function getJetBrainsStyleDiffRanges(
       run.start2,
       leftRanges,
       rightRanges,
+      whitespace,
     );
     leftCursor = run.end1;
     rightCursor = run.end2;
@@ -791,6 +891,7 @@ export function getJetBrainsStyleDiffRanges(
     right.length,
     leftRanges,
     rightRanges,
+    whitespace,
   );
   return [leftRanges, rightRanges];
 }
@@ -798,39 +899,13 @@ export function getJetBrainsStyleDiffRanges(
 function buildBlockText(changes: ChangeData[]): BlockText {
   let text = '';
   const lines: BlockLine[] = [];
-  for (const [index, change] of changes.entries()) {
-    if (index > 0) text += '\n';
+  for (const change of changes) {
     const start = text.length;
     text += change.content;
     lines.push({ start, end: text.length, lineNumber: getLineNumber(change) });
+    text += '\n';
   }
   return { text, lines };
-}
-
-export function retainComparableInlineRanges(value: string, ranges: InlineDiffRange[]): InlineDiffRange[] {
-  if (ranges.length === 0) return ranges;
-  const changed = new Uint8Array(value.length);
-  for (const range of ranges) {
-    const end = Math.min(value.length, range.start + range.length);
-    for (let offset = Math.max(0, range.start); offset < end; offset += 1) changed[offset] = 1;
-  }
-  // Indentation and line-wrap changes are already communicated by the row
-  // tint and the code's new shape. A saturated inline chip on a few spaces
-  // makes an unchanged statement look substantively edited, especially when
-  // a block is merely wrapped in an `if` or reformatted across lines.
-  let changedVisibleCharacters = 0;
-  for (let offset = 0; offset < value.length; offset += 1) {
-    if (changed[offset] && /\S/u.test(value[offset])) changedVisibleCharacters += 1;
-  }
-  if (changedVisibleCharacters === 0) return [];
-  // A strong inline highlight is useful only when the same line still contains
-  // visible, unchanged content to compare against. Entirely new/removed lines
-  // already have the softer insert/delete row tint, so painting all of their
-  // text again adds emphasis without conveying any extra information.
-  for (let offset = 0; offset < value.length; offset += 1) {
-    if (!changed[offset] && /\S/u.test(value[offset])) return ranges;
-  }
-  return [];
 }
 
 function projectBlockRanges(ranges: InlineDiffRange[], block: BlockText): RangeTokenNode[] {
@@ -844,8 +919,9 @@ function projectBlockRanges(ranges: InlineDiffRange[], block: BlockText): RangeT
       if (end <= start) continue;
       lineRanges.push({ start: start - line.start, length: end - start });
     }
-    const value = block.text.slice(line.start, line.end);
-    for (const range of retainComparableInlineRanges(value, lineRanges)) {
+    // DiffDrawUtil paints the supplied inner fragments verbatim. Do not
+    // drop whitespace-only fragments or full lines inside a replacement.
+    for (const range of lineRanges) {
       nodes.push({
         type: 'edit',
         lineNumber: line.lineNumber,
@@ -867,43 +943,47 @@ function appendRefinedBlock(
   inserts: ChangeData[],
   mode: SmartInlineDiffMode,
   ranges: SmartInlineRanges,
+  comparison?: WordComparison,
+  whitespace: InlineWhitespacePolicy = 'default',
 ): void {
-  if (deletes.length === 0 || inserts.length === 0) return;
   const oldBlock = buildBlockText(deletes);
   const newBlock = buildBlockText(inserts);
-  // Use the same word boundaries as ByWordRt, including individual CJK
-  // characters. A normalized whole-line similarity threshold loses expanded
-  // prose even when much of the old text survives. Only suppress refinement
-  // when there is no shared substantive word (punctuation alone is not useful).
-  {
-    const oldWords = new Set(getJetBrainsWordChunks(oldBlock.text)
-      .map((chunk) => chunk.value).filter((word) => /[\p{L}\p{N}_$]/u.test(word)));
-    if (!getJetBrainsWordChunks(newBlock.text).some((chunk) => oldWords.has(chunk.value))) return;
-  }
-  const [oldEdits, newEdits] = getJetBrainsStyleDiffRanges(oldBlock.text, newBlock.text, mode);
+  const [oldEdits, newEdits] = getJetBrainsStyleDiffRanges(oldBlock.text, newBlock.text, mode, comparison, whitespace);
+  // LineFragmentImpl.dropWholeChangedFragments uses exact block offsets;
+  // even a shared trailing newline means the fragment is not the whole block.
+  const coversBlock = (edits: InlineDiffRange[], text: string) => edits.length === 1
+    && edits[0].start === 0 && edits[0].length === text.length;
+  if (deletes.length && inserts.length && coversBlock(oldEdits, oldBlock.text) && coversBlock(newEdits, newBlock.text)) return;
   ranges.oldRanges.push(...projectBlockRanges(oldEdits, oldBlock));
   ranges.newRanges.push(...projectBlockRanges(newEdits, newBlock));
 }
 
-function appendMappedChangeBlock(block: ChangeData[], mode: SmartInlineDiffMode, ranges: SmartInlineRanges): void {
-  for (const { deletes, inserts } of splitChangedLineBlock(block)) {
-    appendRefinedBlock(deletes, inserts, mode, ranges);
+function appendMappedChangeBlock(block: ChangeData[], mode: SmartInlineDiffMode, ranges: SmartInlineRanges, whitespace: InlineWhitespacePolicy): void {
+  if (!block.some(isDelete) || !block.some(isInsert)) return;
+  if (mode === 'chars') {
+    appendRefinedBlock(block.filter(isDelete), block.filter(isInsert), mode, ranges, undefined, whitespace);
+    return;
+  }
+  // BY_WORD squashes adjoining LineFragmentSplitter blocks. A one-sided
+  // sub-block (e.g. a new parameter) remains an inner edit of that replacement.
+  for (const { deletes, inserts, comparison } of splitChangedLineBlock(block)) {
+    appendRefinedBlock(deletes, inserts, mode, ranges, comparison, whitespace);
   }
 }
 
-export function computeSmartInlineRanges(hunks: HunkData[], mode: SmartInlineDiffMode): SmartInlineRanges {
+export function computeSmartInlineRanges(hunks: HunkData[], mode: SmartInlineDiffMode, whitespace: InlineWhitespacePolicy = 'default'): SmartInlineRanges {
   const oldRanges: RangeTokenNode[] = [];
   const newRanges: RangeTokenNode[] = [];
   const ranges = { oldRanges, newRanges };
   for (const hunk of hunks) {
     for (const block of findChangeBlocks(hunk.changes)) {
-      appendMappedChangeBlock(block, mode, ranges);
+      appendMappedChangeBlock(block, mode, ranges, whitespace);
     }
   }
   return ranges;
 }
 
-export function markSmartEdits(hunks: HunkData[], mode: SmartInlineDiffMode): TokenizeEnhancer {
-  const { oldRanges, newRanges } = computeSmartInlineRanges(hunks, mode);
+export function markSmartEdits(hunks: HunkData[], mode: SmartInlineDiffMode, whitespace: InlineWhitespacePolicy = 'default'): TokenizeEnhancer {
+  const { oldRanges, newRanges } = computeSmartInlineRanges(hunks, mode, whitespace);
   return pickRanges(oldRanges, newRanges);
 }

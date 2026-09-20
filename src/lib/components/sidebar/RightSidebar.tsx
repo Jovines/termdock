@@ -90,7 +90,7 @@ import {
 import { ContextDraftDock } from './ContextDraftDock';
 import { AndroidMirrorView, ANDROID_DOCK_GROUP } from '../android/AndroidMirrorView';
 import type { AndroidRecording } from '../../android/api';
-import { RecordingSaveDialog } from '../android/RecordingSaveDialog';
+import { insertAndroidPath, useAndroidRecordingDelivery } from '../../android/captureDelivery';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
@@ -7867,15 +7867,28 @@ export function RightSidebar(
   }, [contextDraftEnabled, insertPathReference, isMobile, onClose, t]);
 
   /** 投屏面板的截图/录屏产物：与临时图片上传同一条链路，只是文件已经在内存里。 */
-  const [pendingRecordings, setPendingRecordings] = useState<AndroidRecording[]>([]);
-  const handleRecordingComplete = useCallback((file: AndroidRecording) => {
-    setPendingRecordings(previous => previous.some(item => item.id === file.id) ? previous : [...previous, file]);
+  const mirrorDeliveryMounted = useRef(true);
+  const mirrorDeliverySession = useRef(sessionId);
+  mirrorDeliverySession.current = sessionId;
+  useEffect(() => {
+    mirrorDeliveryMounted.current = true;
+    return () => { mirrorDeliveryMounted.current = false; };
   }, []);
-  const handleMirrorCaptureInsert = useCallback(async (file: File) => {
-    await uploadTemporaryImageAndInsertReference(file, uploadFiles, (uploadedPath) => {
-      insertPathReference(uploadedPath, `path:${uploadedPath}`);
+  const handleRecordingComplete = useCallback((file: AndroidRecording) => {
+    useAndroidRecordingDelivery.getState().enqueue(file, sessionId ?? null, rootPath || '/', path => {
+      if (contextDraftEnabled && mirrorDeliveryMounted.current && mirrorDeliverySession.current === sessionId) {
+        insertPathReference(path);
+      } else return insertAndroidPath(path, sessionId);
     });
-  }, [insertPathReference]);
+  }, [sessionId, rootPath, contextDraftEnabled, insertPathReference]);
+  const handleMirrorCaptureInsert = useCallback(async (file: File) => {
+    const result = await uploadFiles('/tmp', [file]);
+    const path = result.files[0]?.path;
+    if (!path) throw new Error('截图上传未返回文件路径');
+    if (contextDraftEnabled && mirrorDeliveryMounted.current && mirrorDeliverySession.current === sessionId) {
+      insertPathReference(path);
+    } else await insertAndroidPath(path, sessionId);
+  }, [contextDraftEnabled, insertPathReference, sessionId]);
 
   const insertReferenceText = useCallback((text: string, key: string) => {
     if (!text) return;
@@ -12115,13 +12128,6 @@ export function RightSidebar(
           )}
         </Pane>
       </div>
-      {pendingRecordings[0] && <RecordingSaveDialog
-        key={pendingRecordings[0].name}
-        file={pendingRecordings[0]}
-        initialPath={rootPath || '/'}
-        onInsert={insertPathReference}
-        onDone={() => setPendingRecordings(previous => previous.slice(1))}
-      />}
       {isOpen && contextDraftEnabled && (
         <ContextDraftDock
           value={contextDraftText}

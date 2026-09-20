@@ -3,8 +3,10 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { normalizeAndroidQuality, startAndroidRecording, stopAndroidRecording, listAndroidRecordings } from '../../android/api';
-import { updateSettings } from '../../terminal/api';
-import { AndroidMirrorView } from './AndroidMirrorView';
+import { uploadFiles, updateSettings } from '../../terminal/api';
+import { AndroidMirrorView, AndroidMirrorDock, ANDROID_DOCK_GROUP } from './AndroidMirrorView';
+import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
+import { useAndroidRecordingDelivery } from '../../android/captureDelivery';
 
 // 投屏控制器会去连 WebSocket，组件测试里只关心按钮接线和插入回调。
 // 连接后立刻进入 streaming，截图/录屏按钮才可能出现。
@@ -46,6 +48,7 @@ vi.mock('../../android/api', async importOriginal => ({
     adbAvailable: true, scrcpyVersion: '4.0', devices: [{ serial: 'emulator-5554', state: 'device', model: 'Test', androidVersion: '14' }],
   })),
   connectAndroidDevice: vi.fn(),
+  saveAndroidRecording: vi.fn(async () => ({ path: '/server/recording.mp4' })),
   listAndroidRecordings: vi.fn(async () => ({ recordings: [] })),
   startAndroidRecording: vi.fn(async () => ({ id: 'rec-1', serial: 'emulator-5554', name: 'recording.mp4', size: 0, startedAt: Date.now(), status: 'recording' })),
   stopAndroidRecording: vi.fn(async () => ({ id: 'rec-1', serial: 'emulator-5554', name: 'recording.mp4', size: 123, startedAt: Date.now(), status: 'ready' })),
@@ -53,6 +56,7 @@ vi.mock('../../android/api', async importOriginal => ({
 vi.mock('../../terminal/api', () => ({
   getSettings: vi.fn(async () => ({ androidPanel: null })),
   updateSettings: vi.fn(async () => ({})),
+  uploadFiles: vi.fn(async () => ({ files: [{ name: 'shot.png', path: '/tmp/shot.png', size: 10 }] })),
 }));
 
 const streamingView = async (onInsertFile: (file: File) => Promise<void>, onRecordingComplete = vi.fn()) => {
@@ -73,6 +77,46 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
   });
 
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it('分屏不依赖侧栏：截图绑定原终端，录屏保存对话框退出分屏后仍可操作', async () => {
+    const host = document.createElement('div'); document.body.append(host);
+    useCollaborationPanelDock.setState({
+      docks: { [ANDROID_DOCK_GROUP]: { sessionId: 'bound-terminal', side: 'right' } },
+      hosts: { [ANDROID_DOCK_GROUP]: host },
+    });
+    const references: { sessionId: string; text: string }[] = [];
+    const receive = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      references.push(detail);
+      window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', { detail: { nonce: detail.nonce, ok: true } }));
+    };
+    window.addEventListener('termdock-insert-reference', receive);
+    try {
+      render(<AndroidMirrorDock sessionId="different-active-terminal" />);
+      const screenshot = await screen.findByLabelText('Screenshot and insert');
+      expect((screenshot as HTMLButtonElement).disabled).toBe(false);
+      await userEvent.click(screenshot);
+      await screen.findByText('Screenshot inserted');
+      expect(uploadFiles).toHaveBeenCalledWith('/tmp', [expect.any(File)]);
+      expect(references[0]).toMatchObject({ sessionId: 'bound-terminal' });
+      expect(references[0].text).toContain('/tmp/shot.png');
+      await userEvent.click(screen.getByLabelText('Start recording'));
+      await userEvent.click(screen.getByLabelText('Stop recording'));
+      await screen.findByRole('dialog');
+      act(() => useCollaborationPanelDock.getState().setDock(ANDROID_DOCK_GROUP, null));
+      expect(screen.getByRole('dialog')).toBeTruthy();
+      await userEvent.click(screen.getByText('Insert directly'));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(references[1]).toMatchObject({ sessionId: 'bound-terminal' });
+      expect(references[1].text).toContain('/server/recording.mp4');
+    } finally {
+      cleanup();
+      window.removeEventListener('termdock-insert-reference', receive);
+      useCollaborationPanelDock.setState({ docks: {}, hosts: {}, activePaneId: null });
+      useAndroidRecordingDelivery.setState({ pending: [] });
+      host.remove();
+    }
+  });
 
   it('录制及按住操作期间不断流调码率，分辨率和连接保持不变', async () => {
     localStorage.removeItem('termdock:android:quality:v1');

@@ -15,13 +15,14 @@ vi.mock('./diffWorkerClient', async () => {
       inlineMode: 'none' | 'words' | 'chars',
       oldSource?: string,
       language?: string,
+      whitespace?: import('./inlineDiff').InlineWhitespacePolicy,
     ) => {
       const files = parseDiff(diffContent);
       const tokens = new Map();
       if (inlineMode !== 'none') {
         for (const file of files) {
           const hunks = file.hunks;
-          const enhancers = [markSmartEdits(hunks, inlineMode)];
+          const enhancers = [markSmartEdits(hunks, inlineMode, whitespace)];
           const hunkTokens = language
             ? tokenize(hunks, { enhancers, oldSource, highlight: true, refractor, language })
             : tokenize(hunks, { enhancers, oldSource });
@@ -151,7 +152,10 @@ describe('DiffLab regression fixtures', () => {
       ['', "config.algorithm = 'histogram';"],
       ['', 'config.timeoutMs = 1500;'],
     ]);
-    expect(Array.from(container.querySelectorAll('.diff-code-edit')).map((edit) => edit.textContent)).toEqual(['1000', '1500']);
+    const highlighted = Array.from(container.querySelectorAll('.diff-code-edit')).map((edit) => edit.textContent).join('');
+    expect(highlighted).toContain('1000');
+    expect(highlighted).toContain('1500');
+    expect(highlighted).toContain('config.enableDiffLab = true;');
   });
 
   it('keeps a multi-line rewrite compact instead of alternating gaps between weak matches', async () => {
@@ -172,7 +176,7 @@ describe('DiffLab regression fixtures', () => {
     expect(sawEmptyRight).toBe(true);
   });
 
-  it('keeps low-similarity replacements side by side without fabricated inline highlights', async () => {
+  it('keeps low-similarity replacements side by side and preserves matching closing punctuation', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=unrelatedReplacement&view=split&inline=words&wrap=on');
     await waitFor(() => expect(container.querySelectorAll('.diff.diff-split .diff-line').length).toBeGreaterThan(0));
     const changedRows = Array.from(container.querySelectorAll('.diff-line')).filter((row) => (
@@ -181,7 +185,9 @@ describe('DiffLab regression fixtures', () => {
 
     expect(changedRows).toHaveLength(1);
     expect(changedRows[0].classList.contains('diff-line-compare')).toBe(true);
-    expect(changedRows.every((row) => row.querySelector('.diff-code-edit') === null)).toBe(true);
+    const edits = Array.from(changedRows[0].querySelectorAll('.diff-code-edit'));
+    expect(edits.length).toBeGreaterThan(0);
+    expect(edits.every((edit) => !edit.textContent?.includes(');'))).toBe(true);
   });
 
   it.each(['on', 'off'])('covers embedded stream rendering with three-digit gutters, wrap=%s', async (wrap) => {
@@ -226,11 +232,21 @@ describe('DiffLab regression fixtures', () => {
     expect(screen.getByText('OldConfig.ts → NewConfig.ts')).toBeTruthy();
   });
 
-  it('does not strongly highlight blank or indentation-only changes', async () => {
+  it('shows tabs and indentation differences under the default comparison policy', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=blankAndTabs&view=split&inline=words&wrap=on');
     await waitFor(() => expect(container.querySelector('.diff-hunk')).toBeTruthy());
 
+    const edits = Array.from(container.querySelectorAll('.diff-code-edit'));
+    expect(edits.length).toBeGreaterThan(0);
+    expect(edits.every((edit) => edit.textContent?.trim() === '')).toBe(true);
+  });
+
+  it('passes ignore whitespace through to inline computation', async () => {
+    const { container } = renderLab('?diff-lab=1&fixture=blankAndTabs&view=split&inline=words&whitespace=ignore');
+    await waitFor(() => expect(container.querySelector('.diff-hunk')).toBeTruthy());
     expect(container.querySelector('.diff-code-edit')).toBeNull();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Inline whitespace' }), { target: { value: 'default' } });
+    await waitFor(() => expect(container.querySelector('.diff-code-edit')).toBeTruthy());
   });
 
   it('preserves the no-final-newline fact without turning it into a strong edit', async () => {
@@ -267,14 +283,16 @@ describe('DiffLab regression fixtures', () => {
     expect(edits).toEqual(['OLD_VALUE', 'NEW_VALUE']);
   });
 
-  it('anchors duplicate scaffolding and highlights only the real save replacement', async () => {
+  it('anchors duplicate scaffolding and highlights the replacement and inserted call', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=ambiguousDuplicates&view=split&inline=words&wrap=on');
-    await waitFor(() => expect(container.querySelectorAll('.diff-code-edit')).toHaveLength(2));
+    await waitFor(() => expect(container.querySelector('.diff-code-edit')).toBeTruthy());
     const edits = Array.from(container.querySelectorAll('.diff-code-edit')).map((node) => node.textContent);
     const auditRow = Array.from(container.querySelectorAll('.diff-line'))
       .find((row) => row.textContent?.includes('audit(item)'));
 
-    expect(edits).toEqual(['saveLegacy', 'saveModern']);
+    expect(edits).toContain('saveLegacy');
+    expect(edits).toContain('saveModern');
+    expect(edits.join('')).toContain('audit(item);');
     expect(auditRow?.classList.contains('diff-line-new-only')).toBe(true);
   });
 
@@ -288,7 +306,7 @@ describe('DiffLab regression fixtures', () => {
     ]);
   });
 
-  it('keeps real edits strong and pure additions/deletions soft across multiple hunks', async () => {
+  it('distinguishes an inserted line within a replacement from a standalone deletion', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=multiHunkMixed&view=unified&inline=words&wrap=on');
     await waitFor(() => expect(container.querySelectorAll('[data-diff-hunk-anchor]')).toHaveLength(2));
     const edits = Array.from(container.querySelectorAll('.diff-code-edit')).map((node) => node.textContent);
@@ -296,9 +314,11 @@ describe('DiffLab regression fixtures', () => {
       row.textContent?.includes('logConnection') || row.textContent?.includes('reportLegacyMetrics')
     ));
 
-    expect(edits).toEqual(['1000', '1500']);
+    expect(edits).toContain('1000');
+    expect(edits).toContain('1500');
+    expect(edits.join('')).toContain('logConnection(config');
     expect(pureRows).toHaveLength(2);
-    expect(pureRows.every((row) => row.querySelector('.diff-code-edit') === null)).toBe(true);
+    expect(pureRows.find((row) => row.textContent?.includes('reportLegacyMetrics'))?.querySelector('.diff-code-edit')).toBeNull();
   });
 
   it('keeps repeated unchanged lines anchored while compacting the adjacent replacement', async () => {
@@ -314,7 +334,10 @@ describe('DiffLab regression fixtures', () => {
 
     expect(loggerRow?.classList.contains('diff-line-compare')).toBe(true);
     expect(modernRow?.classList.contains('diff-line-new-only')).toBe(true);
-    expect(Array.from(container.querySelectorAll('.diff-code-edit')).map((edit) => edit.textContent)).toEqual(['renderLegacy', 'renderModern']);
+    const edits = Array.from(container.querySelectorAll('.diff-code-edit')).map((edit) => edit.textContent);
+    expect(edits).toContain('renderLegacy');
+    expect(edits).toContain('renderModern');
+    expect(edits.join('')).toContain("logger.debug('rendering modern items');");
     expect(unchangedLegacyRow).toBeTruthy();
     expect(unchangedLegacyRow?.querySelector('.diff-code-edit')).toBeNull();
   });
@@ -352,7 +375,8 @@ describe('DiffLab regression fixtures', () => {
     expect(stableRows).toHaveLength(3);
     expect(stableRows.every((row) => row.className.includes('diff-line-compare'))).toBe(true);
     expect(stableRows.every((row) => row.cells[0]?.querySelector('.diff-code-edit') === null)).toBe(true);
-    expect(stableRows.every((row) => row.cells[1]?.querySelector('.diff-code-edit') === null)).toBe(true);
+    expect(stableRows.every((row) => Array.from(row.cells[1].querySelectorAll('.diff-code-edit'))
+      .every((edit) => edit.textContent?.trim() === ''))).toBe(true);
   });
 
   it('aligns a reordered loop with its identical inner loop instead of the nearer outer loop', async () => {
@@ -377,6 +401,19 @@ describe('DiffLab regression fixtures', () => {
       ['const rangeEnd = range.start + range.length;', 'const rangeEnd = range.start + range.length;'],
       ['for (const line of block.lines) {', ''],
     ]);
+  });
+
+  it.each(['unified', 'split'] as const)('highlights the new Kotlin parameter as a whole in %s view', async (view) => {
+    const { container } = renderLab(`?diff-lab=1&fixture=kotlinSignatureExpansion&view=${view}&inline=words&wrap=off`);
+    await waitFor(() => expect(container.querySelector('.diff-code-edit')).toBeTruthy());
+    const cells = Array.from(container.querySelectorAll('.diff-code-insert'));
+    const added = cells.find((cell) => cell.textContent?.includes('keepHeaderStyle'))!;
+    expect(added).toBeTruthy();
+    const highlighted = Array.from(added.querySelectorAll('.diff-code-edit')).map((edit) => edit.textContent).join('');
+    expect(highlighted.trim()).toBe('keepHeaderStyle: Boolean = keepVisible');
+    for (const cell of cells.filter((cell) => /resetHeight:|resetPropertyManager:|keepVisible:/.test(cell.textContent ?? ''))) {
+      expect(Array.from(cell.querySelectorAll('.diff-code-edit')).every((edit) => !/[A-Za-z]/.test(edit.textContent ?? ''))).toBe(true);
+    }
   });
 
   it('shows import-only hunks by default', async () => {
