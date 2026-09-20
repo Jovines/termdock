@@ -929,6 +929,10 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   const [diffNotice, setDiffNotice] = useState<string | null>(initialCache.diffNotice);
   const [diffLoading, setDiffLoading] = useState(initialCache.diffLoading);
   const [diffError, setDiffError] = useState<string | null>(initialCache.diffError);
+  // A hunk mutation refreshes this viewer only; HEAD and neighbouring cards
+  // have not changed and must keep their rendered content and measurements.
+  const [hunkReloadKey, setHunkReloadKey] = useState(0);
+  const previousHunkReloadKeyRef = useRef(hunkReloadKey);
   const [parsedFiles, setParsedFiles] = useState<FileData[]>(initialCache.parsedFiles);
   const [workerTokens, setWorkerTokens] = useState<Map<string, HunkTokens>>(initialCache.workerTokens);
   const [parsedDiffInput, setParsedDiffInput] = useState<ParsedDiffInput | null>(initialCache.parsedDiffInput);
@@ -1110,8 +1114,10 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
 
     const requestPath = toDiffRequestPath(path, gitRoot);
     const readablePath = path && gitRoot && !path.startsWith('/') ? `${gitRoot}/${path}` : path;
-    const forceReload = previousReloadKeyRef.current !== reloadKey;
+    const forceReload = previousReloadKeyRef.current !== reloadKey
+      || previousHunkReloadKeyRef.current !== hunkReloadKey;
     previousReloadKeyRef.current = reloadKey;
+    previousHunkReloadKeyRef.current = hunkReloadKey;
 
     if (path && !gitRoot) {
       logDiffViewerEvent('effect_wait_for_repo_root', { interactionId, requestSlotId, traceId, filePath: path, repoRoot, changedFileRepoRoot, rootPath });
@@ -1293,7 +1299,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         promiseSize: diffPromiseCache.size,
       });
     };
-  }, [active, changedFileRepoRoot, changedFileStatus, diffOptions, diffOverride, filePath, interactionId, preparedDiff, reloadKey, repoRoot, requestSlotId, rootPath]);
+  }, [active, changedFileRepoRoot, changedFileStatus, diffOptions, diffOverride, filePath, hunkReloadKey, interactionId, preparedDiff, reloadKey, repoRoot, requestSlotId, rootPath]);
 
   useEffect(() => {
     if (preparedDiff !== undefined) return;
@@ -1525,6 +1531,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       });
       // Keep stale hunks disabled until fresh diff content replaces them.
       setCompletedHunkAction({ key: actionKey, mode, diff: effectiveDiffContent });
+      if (!previewRevert) setHunkReloadKey((key) => key + 1);
     } catch (error) {
       setHunkActionError({ key: actionKey, message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -1810,7 +1817,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const stageHunkKey = `stage:${displayPath}:${index}`;
                     const revertHunkKey = `revert:${displayPath}:${index}`;
                     const awaitingFreshDiff = completedHunkAction?.diff === effectiveDiffContent;
-                    const hunkActionBusy = runningHunkActionKey !== null || awaitingFreshDiff || !parsedContentReady;
+                    const hunkActionBusy = runningHunkActionKey !== null || awaitingFreshDiff || effectiveDiffLoading;
                     const thisHunkCompleted = awaitingFreshDiff && (completedHunkAction?.key === stageHunkKey || completedHunkAction?.key === revertHunkKey);
                     const canStageHunk = canRunHunkActions && (!changedFile || changedFile.unstaged || changedFile.untracked);
                     const thisHunkActionError = hunkActionError && (hunkActionError.key === stageHunkKey || hunkActionError.key === revertHunkKey)
@@ -2094,7 +2101,11 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     );
   };
 
-  if (effectiveDiffLoading && !(diffOverride !== undefined && parsedFiles.length > 0)) {
+  // Keep the last parsed view while its replacement is being parsed. Never
+  // reuse it across file/options changes, where the cache identity differs.
+  const hasRenderedCurrentFile = parsedFiles.length > 0
+    && parsedDiffInput?.cacheKey === currentParseCacheKey;
+  if (effectiveDiffLoading && !(hasRenderedCurrentFile || (diffOverride !== undefined && parsedFiles.length > 0))) {
     return embedded ? (
       <div className="absolute inset-0 z-20 flex min-h-16 items-center justify-center gap-2 bg-surface-2 text-xs text-muted-foreground">
         <RiLoader size={18} className="animate-spin" />

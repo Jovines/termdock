@@ -35,6 +35,7 @@ interface UniversalDiffReviewProps {
   wrapOffLabel?: string;
   desktopLayout?: 'split' | 'stacked';
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  renderPathReference?: (path: string, kind: 'file' | 'directory') => React.ReactNode;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
@@ -259,6 +260,7 @@ export function UniversalDiffReview({
   desktopLayout = 'split',
   onInsertDiffReference,
   onReferenceCopied,
+  renderPathReference,
   insertedReferenceKey,
   copiedReferenceKey,
   onClearAuditRecord,
@@ -464,8 +466,14 @@ export function UniversalDiffReview({
       }}
       renderTrailing={(file) => {
         const group = groupByKey.get(file.key);
-        return group ? <span className="shrink-0 text-[10px] text-muted-foreground">+{group.additions} -{group.deletions}</span> : null;
+        return (
+          <span className="flex shrink-0 items-center gap-1">
+            {group && <span className="shrink-0 text-[10px] text-muted-foreground">+{group.additions} -{group.deletions}</span>}
+            {renderPathReference?.(file.path, 'file')}
+          </span>
+        );
       }}
+      renderDirectoryTrailing={(path) => renderPathReference?.(path, 'directory')}
       renderListHeader={renderHeader}
       aiContent={({ slideToDetail, fullscreen, toggleFullscreen }) => (
         walkthroughs.length > 0 && onWalkthroughNavigate ? (

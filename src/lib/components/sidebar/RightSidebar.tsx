@@ -6481,7 +6481,8 @@ export function RightSidebar(
   );
   const [androidTabEnabled, setAndroidTabEnabled] = useState(false);
   // dock 到分屏时由 App 顶层持有投屏实例，侧栏这里不再挂第二个流。
-  const androidDocked = useCollaborationPanelDock(state => Boolean(state.docks[ANDROID_DOCK_GROUP]));
+  const androidDock = useCollaborationPanelDock(state => state.docks[ANDROID_DOCK_GROUP]);
+  const androidDocked = Boolean(androidDock);
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
   const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
@@ -7577,8 +7578,14 @@ export function RightSidebar(
   useEffect(() => {
     // 打开侧栏且停在设备 Tab 时挂载（首次或空闲回收后重新连）。
     if (!isOpen || !androidPaneActive) return;
+    // 一个客户端只保留一处投屏。其他会话打开设备面板时收回旧分屏，
+    // 沿用已保存的设备选择；再次分屏会绑定到当前会话。
+    if (sessionId && androidDock && androidDock.sessionId !== sessionId) {
+      useCollaborationPanelDock.getState().setDock(ANDROID_DOCK_GROUP, null);
+      void updateSettings({ androidPanel: { docked: null } }).catch(() => { /* keep local choice */ });
+    }
     setHasMountedAndroidPane(true);
-  }, [androidPaneActive, isOpen]);
+  }, [androidPaneActive, isOpen, sessionId, androidDock]);
 
   // 空闲回收：离开侧栏或设备 Tab 超过阈值就停流，避免后台长期空跑；
   // 期间快速返回则复用同一条流（不重新推 server）。
@@ -7588,11 +7595,6 @@ export function RightSidebar(
     const timer = window.setTimeout(() => setHasMountedAndroidPane(false), ANDROID_STREAM_IDLE_MS);
     return () => window.clearTimeout(timer);
   }, [isOpen, androidPaneActive, hasMountedAndroidPane]);
-
-  // 切换会话时立即卸载投屏，不跨会话保留。
-  useEffect(() => {
-    setHasMountedAndroidPane(false);
-  }, [sessionId]);
 
   // 「设备」Tab 的显示开关：服务端设置，跨客户端共享。
   useEffect(() => {
@@ -9968,12 +9970,12 @@ export function RightSidebar(
   }, [applyGitBundle, isCurrentSidebarRoot, rootPath, t, waitForGitActionJob]);
 
   // A successful mutation is independent of the slower workspace scan.
-  // Reload the visible diff immediately and update the file list in background.
+  // The invoking viewer reloads its file; keep neighbouring diffs mounted.
+  // Update only the workspace file list in background.
   const runDiffHunkAction = useCallback(async (request: ApplyDiffHunkRequest) => {
     const expectedRootPath = rootPath;
     await applyDiffHunk({ ...request, includeNested: isNestedGitScanEnabled(rootPath) });
     if (!isCurrentSidebarRoot(expectedRootPath)) return;
-    setDiffRefreshKey((key) => key + 1);
     void loadGitBundle(rootPath ?? undefined, { refresh: true, background: true });
   }, [isCurrentSidebarRoot, loadGitBundle, rootPath]);
 
@@ -11654,6 +11656,10 @@ export function RightSidebar(
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               <UniversalDiffReview
                 items={commitDiffReviewItems}
+                renderPathReference={(path, kind) => renderChangeNavigatorReference(
+                  resolveAbsoluteReferencePath(path, commitDiff.repoRoot ?? rootPath),
+                  t(kind === 'file' ? 'rightSidebar.insertThisFile' : 'fileTree.insertRefTitle'),
+                )}
                 selectedKey={selectedCommitDiffFileKey}
                 onSelect={setSelectedCommitDiffFileKey}
                 emptyText={t('rightSidebar.noChanges')}
@@ -11683,6 +11689,20 @@ export function RightSidebar(
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               <UniversalDiffReview
                 items={branchAuditReviewItems}
+                renderPathReference={(path, kind) => {
+                  const repos = branchAuditPreviewDiff?.comparisonRepos;
+                  const repo = repos && repos.length > 1
+                    ? [...repos].sort((a, b) => b.label.length - a.label.length)
+                      .find((candidate) => path === candidate.label || path.startsWith(`${candidate.label}/`))
+                    : undefined;
+                  const referencePath = repo
+                    ? path === repo.label ? repo.repoRoot : resolveAbsoluteReferencePath(path.slice(repo.label.length + 1), repo.repoRoot)
+                    : resolveAbsoluteReferencePath(path, selectedBranchAuditDetailMeta?.repoRoot || rootPath);
+                  return renderChangeNavigatorReference(
+                    referencePath,
+                    t(kind === 'file' ? 'rightSidebar.insertThisFile' : 'fileTree.insertRefTitle'),
+                  );
+                }}
                 selectedKey={selectedBranchAuditFileKey}
                 onSelect={setSelectedBranchAuditFileKey}
                 emptyText={branchAuditPreviewDiff ? t('rightSidebar.branchAuditDiffEmpty') : t('rightSidebar.branchAuditEmpty')}
