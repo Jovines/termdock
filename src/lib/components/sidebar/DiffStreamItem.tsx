@@ -38,6 +38,7 @@ interface DiffStreamItemProps {
   preparedDiff?: DiffViewerPreparedDiff | null;
   renderBadge: (status: string) => React.ReactNode;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  previewReverts?: Record<string, DiffHunkActionRequest>;
   onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
@@ -70,6 +71,7 @@ export function DiffStreamItem({
   renderBadge,
   onInsertDiffReference,
   onHunkGitAction,
+  previewReverts,
   onReferenceCopied,
   insertedReferenceKey,
   copiedReferenceKey,
@@ -100,6 +102,7 @@ export function DiffStreamItem({
   }, [onContentReady, selectionPath]);
 
   useLayoutEffect(() => {
+    if (diffOverride !== undefined && visible && contentReadyRef.current) return;
     viewerReadyRef.current = false;
     contentReadyRef.current = false;
     pendingCommitHeightRef.current = null;
@@ -259,6 +262,7 @@ export function DiffStreamItem({
             }}
             onInsertDiffReference={onInsertDiffReference}
             onHunkGitAction={onHunkGitAction}
+            previewReverts={previewReverts}
             onReferenceCopied={onReferenceCopied}
             insertedReferenceKey={insertedReferenceKey}
             copiedReferenceKey={copiedReferenceKey}

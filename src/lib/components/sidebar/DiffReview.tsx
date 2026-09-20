@@ -101,6 +101,7 @@ export interface DiffReviewFile {
   /** Optional per-file override for the reference insertion callback. */
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
   /** Optional per-file override for the hunk git action callback. */
+  previewReverts?: Record<string, DiffHunkActionRequest>;
   onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
 }
 
@@ -177,6 +178,7 @@ export interface DiffReviewProps {
   onDetailScroll?: (container: HTMLDivElement) => void;
   /** Saved native scrollTop to restore for this file set. */
   initialDetailScrollTop?: number;
+  preserveScrollOnUpdate?: boolean;
   scrollToKey?: string | null;
   scrollToKeyNonce?: number;
 
@@ -229,6 +231,7 @@ export function DiffReview({
   desktopListClassName,
   onDetailScroll,
   initialDetailScrollTop,
+  preserveScrollOnUpdate = false,
   scrollToKey,
   scrollToKeyNonce = 0,
   externalSwiperRef,
@@ -674,7 +677,8 @@ export function DiffReview({
     if (initialDetailScrollTop === undefined) return;
     if (scrollTargetKey) return;
     const restoreKey = orderedFileKeysSignature;
-    if (appliedInitialDetailScrollKeyRef.current === restoreKey) return;
+    if (appliedInitialDetailScrollKeyRef.current === restoreKey
+      || (preserveScrollOnUpdate && appliedInitialDetailScrollKeyRef.current !== null)) return;
     const container = detailScrollerRef.current;
     if (!container) return;
     appliedInitialDetailScrollKeyRef.current = restoreKey;
@@ -688,7 +692,7 @@ export function DiffReview({
     const appliedTop = container.scrollTop;
     lastDetailScrollTopRef.current = appliedTop;
     setCanvasViewport({ top: appliedTop, height: container.clientHeight });
-  }, [canvasLayout.bottom, initialDetailScrollTop, orderedFileKeysSignature, scrollTargetKey]);
+  }, [canvasLayout.bottom, initialDetailScrollTop, orderedFileKeysSignature, preserveScrollOnUpdate, scrollTargetKey]);
 
   const renderStreamItem = useCallback((item: DiffReviewFile, estimatedHeight: number) => {
     const isSelected = matchesSelectedKey(item);
@@ -718,6 +722,7 @@ export function DiffReview({
         renderStreamBadge={renderStreamBadge}
         onInsertDiffReference={item.onInsertDiffReference ?? onInsertDiffReference}
         onHunkGitAction={item.onHunkGitAction ?? onHunkGitAction}
+        previewReverts={item.previewReverts}
         onReferenceCopied={onReferenceCopied}
         insertedReferenceKey={insertedReferenceKey}
         copiedReferenceKey={copiedReferenceKey}

@@ -555,6 +555,8 @@ interface UntrackedFilesPayload {
 }
 
 interface BranchDiffPayload {
+  includeUncommitted?: boolean;
+  canIncludeUncommitted?: boolean;
   available: boolean;
   repoRoot?: string;
   workspaceRoot?: string;
@@ -575,6 +577,7 @@ interface BranchDiffPayload {
 }
 
 interface BranchDiffHunk {
+  previewRevert?: { cwd: string; path: string; patch: string; comparisonBase: string; comparisonBranch?: string; mode: 'revert-worktree' };
   filePath: string;
   oldPath?: string | null;
   newPath?: string | null;
@@ -1099,9 +1102,9 @@ async function appendUntrackedDiffs(
   gitRoot: string,
   baseDiff: string,
   signal: AbortSignal,
-  options: { maxBytes: number; perFileMaxBytes: number },
+  options: { maxBytes: number; perFileMaxBytes: number; filePath?: string },
 ): Promise<{ diff: string; files: string[]; skippedFiles: DiffSkippedFile[]; truncated: boolean }> {
-  const output = await execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError);
+  const output = await execGit(['ls-files', '--others', '--exclude-standard', '-z', ...(options.filePath ? ['--', `:(literal)${options.filePath}`] : [])], gitRoot, signal).catch(emptyOnNonAbortGitError);
   const files = output.split('\0').filter(Boolean);
   const skippedFiles: DiffSkippedFile[] = [];
   let diff = baseDiff;
@@ -2609,6 +2612,30 @@ async function annotateBranchDiffHunks(
   });
 }
 
+function attachPreviewReverts(repoRoot: string, comparisonBase: string, hunks: BranchDiffHunk[], comparisonBranch: string): void {
+  // Merge mode makes every displayed hunk reversible against the comparison
+  // baseline. Committed changes become inverse edits in the working tree.
+  for (const hunk of hunks) {
+    const patch = hunk.diff.replace(/\n+$/, '') + '\n';
+    hunk.previewRevert = { cwd: repoRoot, path: path.join(repoRoot, hunk.filePath), patch, comparisonBase, comparisonBranch, mode: 'revert-worktree' };
+  }
+}
+
+async function getBranchFileDiffPayload(repoRoot: string, comparisonBase: string, requestedPath: string, signal: AbortSignal): Promise<BranchDiffPayload> {
+  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(comparisonBase)) {
+    return { available: false, error: 'Invalid comparison base' };
+  }
+  const filePath = await toGitPathspec(repoRoot, requestedPath);
+  const result = await execGitLimited(['diff', comparisonBase, '--', `:(literal)${filePath}`], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal);
+  const untracked = await appendUntrackedDiffs(repoRoot, result.stdout, signal, {
+    filePath, maxBytes: MAX_BRANCH_DIFF_BYTES, perFileMaxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
+  });
+  const hunks = parseBranchDiffHunks(untracked.diff);
+  const comparisonBranch = await execGit(['symbolic-ref', '--quiet', 'HEAD'], repoRoot, signal).then((value) => value.trim()).catch(emptyOnNonAbortGitError);
+  attachPreviewReverts(repoRoot, comparisonBase, hunks, comparisonBranch);
+  return { available: true, repoRoot, hunks, diff: untracked.diff, truncated: result.truncated || untracked.truncated };
+}
+
 async function getBranchDiffPayload(
   workspaceRoot: string,
   repoRoot: string,
@@ -2661,7 +2688,13 @@ async function getBranchDiffPayload(
     compareHead = requestedHead.includes('/') ? requestedHead : requestedHead;
     await execGit(['rev-parse', '--verify', '--quiet', compareHead], repoRoot, signal);
   }
-  const includeWorkingTree = includeUncommitted && !hasRequestedHead;
+  const checkedOutRef = await execGit(['symbolic-ref', '--quiet', 'HEAD'], repoRoot, signal)
+    .then((value) => value.trim()).catch(emptyOnNonAbortGitError);
+  const comparisonRef = hasRequestedHead
+    ? await execGit(['rev-parse', '--symbolic-full-name', requestedHead], repoRoot, signal).then((value) => value.trim())
+    : checkedOutRef;
+  const canIncludeUncommitted = Boolean(checkedOutRef && comparisonRef === checkedOutRef);
+  const includeWorkingTree = includeUncommitted && canIncludeUncommitted;
   // Diff merge-base → working tree in a single pass, so committed and
   // uncommitted changes to the same file merge into one coherent diff
   // instead of two overlapping per-file diffs concatenated together.
@@ -2698,6 +2731,9 @@ async function getBranchDiffPayload(
     ...untrackedResult.files,
   ]));
   const hunks = await annotateBranchDiffHunks(repoRoot, baseGitRef, parseBranchDiffHunks(diff), signal);
+  if (includeWorkingTree && mergeBase) {
+    attachPreviewReverts(repoRoot, mergeBase, hunks, checkedOutRef);
+  }
   const commits = logResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
   const fingerprint = buildChangeAuditFingerprint([
     repoRoot,
@@ -2718,6 +2754,8 @@ async function getBranchDiffPayload(
     currentBranch: hasRequestedHead ? requestedHead : (currentBranch.trim() || null),
     headRef: headRef.trim() || null,
     diffFingerprint: fingerprint,
+    includeUncommitted: includeWorkingTree,
+    canIncludeUncommitted,
     stat,
     files,
     skippedFiles: untrackedResult.skippedFiles.length > 0 ? untrackedResult.skippedFiles : undefined,
@@ -4891,7 +4929,9 @@ router.get('/branch-diff', async (req: Request, res: Response) => {
     }
     repoRootForLog = repoRoot;
     const payload = await withTimeout(
-      getBranchDiffPayload(workspaceGitRoot, repoRoot, baseBranch, { headRef, includeUncommitted }, controller.signal),
+      typeof req.query.filePath === 'string' && typeof req.query.comparisonBase === 'string'
+        ? getBranchFileDiffPayload(repoRoot, req.query.comparisonBase, req.query.filePath, controller.signal)
+        : getBranchDiffPayload(workspaceGitRoot, repoRoot, baseBranch, { headRef, includeUncommitted }, controller.signal),
       GIT_FILE_DIFF_ROUTE_TIMEOUT_MS,
       'Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
       'GIT_BRANCH_DIFF_TIMEOUT',
@@ -5195,7 +5235,7 @@ router.post('/apply-hunk', async (req: Request, res: Response) => {
   const requestId = ++fsIoRequestSeq;
   const startedAt = Date.now();
   const action = getRequestAction(req, 'apply_diff_hunk');
-  const body = req.body as { cwd?: unknown; path?: unknown; mode?: unknown; patch?: unknown; includeNested?: unknown; discoverOnly?: unknown };
+  const body = req.body as { cwd?: unknown; path?: unknown; mode?: unknown; patch?: unknown; includeNested?: unknown; discoverOnly?: unknown; comparisonBase?: unknown; comparisonBranch?: unknown };
   const cwd = typeof body.cwd === 'string' ? body.cwd : '';
   const requestedPath = typeof body.path === 'string' ? body.path : '';
   const mode: HunkApplyMode | undefined = typeof body.mode === 'string' && HUNK_APPLY_MODES.includes(body.mode as HunkApplyMode)
@@ -5230,11 +5270,24 @@ router.post('/apply-hunk', async (req: Request, res: Response) => {
       res.status(400).json({ error: validation.error, code: 'INVALID_PATCH' });
       return;
     }
+    if (typeof body.comparisonBase === 'string') {
+      const currentRef = await execGit(['symbolic-ref', '--quiet', 'HEAD'], gitRoot, AbortSignal.timeout(GIT_APPLY_TIMEOUT_MS)).then((value) => value.trim()).catch(emptyOnNonAbortGitError);
+      if (!currentRef || body.comparisonBranch !== currentRef) {
+        res.status(409).json({ error: 'The compared branch is no longer checked out. Refresh the comparison.', code: 'COMPARISON_BRANCH_CHANGED' });
+        return;
+      }
+      const current = await getBranchFileDiffPayload(gitRoot, body.comparisonBase, requestedPath, AbortSignal.timeout(GIT_APPLY_TIMEOUT_MS));
+      if (mode !== 'revert-worktree' || !current.available || current.truncated
+        || !current.hunks?.some((hunk) => hunk.previewRevert?.patch === patch)) {
+        res.status(409).json({ error: 'The comparison has changed. Refresh it before reverting.', code: 'STALE_COMPARISON_HUNK' });
+        return;
+      }
+    }
     await runGitApply(gitRoot, mode, patch, GIT_APPLY_TIMEOUT_MS);
     clearGitBundleCacheForRoot(gitRoot);
     // git apply has committed the mutation. A slow/failed workspace scan must
     // neither delay acknowledgement nor report that successful mutation failed.
-    void refreshGitBundleCacheDetached(resolvedCwd, gitRoot, includeNested, { discoverOnly }).catch((error) => {
+    if (typeof body.comparisonBase !== 'string') void refreshGitBundleCacheDetached(resolvedCwd, gitRoot, includeNested, { discoverOnly }).catch((error) => {
       logFsIoEvent({ id: requestId, action, op: 'git.apply-hunk', event: 'bundle-refresh-error', path: requestedPath, cwd, repoRoot: gitRoot, extra: { mode, error: error instanceof Error ? error.message : String(error) } });
     });
     logFsIo({ id: requestId, action, op: 'git.apply-hunk', startedAt, status: 'ok', path: requestedPath, cwd, repoRoot: gitRoot, extra: { mode } });

@@ -572,6 +572,7 @@ export const zh: TranslationDictionary = {
     previewTruncated: '预览已截断至 1 MB',
     branchCandidatesLoading: '正在加载分支候选…',
     includeUncommitted: '包含本地未提交改动',
+    includeUncommittedCurrentBranchOnly: '仅当对比分支是当前检出分支时可开启',
     includeUncommittedHint: '查看对比或生成解释时纳入工作区和未跟踪文件的 diff',
     missingBaseReposSkipped: ({ repositories }) => `未设置基线的仓库会跳过：${repositories}`,
     localBranch: '本地',

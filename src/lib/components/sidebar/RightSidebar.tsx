@@ -373,6 +373,7 @@ interface BranchAuditModuleState {
   previewScrollTops?: Record<string, number>;
   previewMobileSlideIndex?: number;
   includeUncommitted?: boolean;
+  repoIncludeUncommitted?: Record<string, boolean>;
   updatedAt: number;
 }
 
@@ -453,6 +454,7 @@ function isBranchAuditModuleCache(value: unknown): value is Record<string, Branc
         && Object.values(maybe.previewScrollTops as Record<string, unknown>).every((top) => typeof top === 'number')
       ))
       && (maybe.previewMobileSlideIndex === undefined || typeof maybe.previewMobileSlideIndex === 'number')
+      && (maybe.repoIncludeUncommitted === undefined || (Boolean(maybe.repoIncludeUncommitted) && typeof maybe.repoIncludeUncommitted === 'object' && !Array.isArray(maybe.repoIncludeUncommitted) && Object.values(maybe.repoIncludeUncommitted).every((value) => typeof value === 'boolean')))
       && (maybe.includeUncommitted === undefined || typeof maybe.includeUncommitted === 'boolean')
       && typeof maybe.updatedAt === 'number';
   });
@@ -6437,6 +6439,8 @@ export function RightSidebar(
   const [branchAuditPreviewDiff, setBranchAuditPreviewDiff] = useState<BranchDiffResponse | null>(null);
   const [branchAuditPreviewEntries, setBranchAuditPreviewEntries] = useState<BranchAuditPreviewEntry[]>([]);
   const [branchAuditPreviewScrollTops, setBranchAuditPreviewScrollTops] = useState<Record<string, number>>({});
+  const branchAuditPreviewRequestRef = useRef(0);
+  const [branchAuditUndoPending, setBranchAuditUndoPending] = useState(0);
   const [branchAuditPreviewLoading, setBranchAuditPreviewLoading] = useState(false);
   const [branchAuditPreviewError, setBranchAuditPreviewError] = useState<string | null>(null);
   const [commitDiff, setCommitDiff] = useState<BranchDiffResponse | null>(null);
@@ -6460,7 +6464,7 @@ export function RightSidebar(
   const [branchAuditRepoRoots, setBranchAuditRepoRoots] = useState<string[]>([]);
   const [branchAuditRepoBranches, setBranchAuditRepoBranches] = useState<Record<string, string>>({});
   const [branchAuditRepoBaseBranches, setBranchAuditRepoBaseBranches] = useState<Record<string, string>>({});
-  const [branchAuditIncludeUncommitted, setBranchAuditIncludeUncommitted] = useState(true);
+  const [branchAuditRepoIncludeUncommitted, setBranchAuditRepoIncludeUncommitted] = useState<Record<string, boolean>>({});
   const [branchAuditDetailsLoadingRoots, setBranchAuditDetailsLoadingRoots] = useState<Set<string>>(() => new Set());
   const [selectedBranchAuditHistoryKey, setSelectedBranchAuditHistoryKey] = useState<string | null>(null);
   const [selectedBranchAuditFileKey, setSelectedBranchAuditFileKey] = useState<string | null>(null);
@@ -7065,6 +7069,8 @@ export function RightSidebar(
     const restoredPreviewEntry = restoredPreviewKey
       ? restoredPreviewEntries.find((entry) => entry.key === restoredPreviewKey) ?? null
       : null;
+    ++branchAuditPreviewRequestRef.current;
+    setBranchAuditPreviewLoading(false);
     setBranchAuditRepoRoots(branchAuditModuleState?.selectedRepoRoots ?? []);
     setBranchAuditRepoBranches(branchAuditModuleState?.repoTargetBranches ?? {});
     setBranchAuditRepoBaseBranches(branchAuditModuleState?.repoBaseBranches ?? {});
@@ -7076,7 +7082,7 @@ export function RightSidebar(
       setSelectedBranchAuditFileKey(branchAuditModuleState.selectedPreviewFileKey ?? (restoredPreviewEntry.diff.hunks?.[0] ? `${restoredPreviewEntry.diff.hunks[0].filePath}\u0000${restoredPreviewEntry.diff.hunks[0].hunkHeader}\u0000${restoredPreviewEntry.diff.hunks[0].hunkIndex}` : null));
       setBranchAuditDetailOpen(true);
     }
-    setBranchAuditIncludeUncommitted(branchAuditModuleState?.includeUncommitted ?? true);
+    setBranchAuditRepoIncludeUncommitted(branchAuditModuleState?.repoIncludeUncommitted ?? Object.fromEntries(Object.keys(branchAuditModuleState?.repoTargetBranches ?? {}).map((root) => [root, branchAuditModuleState?.includeUncommitted ?? true])));
     branchAuditModuleHydratedRootRef.current = rootPath;
     setGitDetailsLoading(false);
     // The selected repository is not reset here: it is derived from the store
@@ -8157,11 +8163,11 @@ export function RightSidebar(
         previewDetailOpen: Boolean(branchAuditPreviewDiff && branchAuditDetailOpen),
         previewScrollTops: branchAuditPreviewScrollTops,
         previewMobileSlideIndex: 1,
-        includeUncommitted: branchAuditIncludeUncommitted,
+        repoIncludeUncommitted: branchAuditRepoIncludeUncommitted,
         updatedAt: Date.now(),
       },
     }, BRANCH_AUDIT_MODULE_CACHE_WRITE_MS);
-  }, [branchAuditDetailOpen, branchAuditIncludeUncommitted, branchAuditPreviewDiff, branchAuditPreviewEntries, branchAuditPreviewScrollTops, branchAuditRepoBaseBranches, branchAuditRepoBranches, branchAuditRepoRoots, rootPath, selectedBranchAuditFileKey, selectedBranchAuditHistoryKey]);
+  }, [branchAuditDetailOpen, branchAuditRepoIncludeUncommitted, branchAuditPreviewDiff, branchAuditPreviewEntries, branchAuditPreviewScrollTops, branchAuditRepoBaseBranches, branchAuditRepoBranches, branchAuditRepoRoots, rootPath, selectedBranchAuditFileKey, selectedBranchAuditHistoryKey]);
 
   const changedSummary = useMemo(() => summarizeChangedFiles(changedFiles.values()), [changedFiles]);
 
@@ -8579,6 +8585,11 @@ export function RightSidebar(
   const branchAuditReadyRepos = useMemo(() => (
     branchAuditTargetRepos.filter((repo) => Boolean(branchAuditRepoBaseBranches[repo.root]?.trim()))
   ), [branchAuditRepoBaseBranches, branchAuditTargetRepos]);
+  const canIncludeRepoUncommitted = useCallback((repoRoot: string, target: string | null | undefined) => {
+    const current = gitRepositoryByRoot.get(repoRoot)?.context?.branch;
+    return Boolean(current && target && target.replace(/^refs\/heads\//, '') === current);
+  }, [gitRepositoryByRoot]);
+
   const branchAuditMissingBaseRepos = useMemo(() => (
     branchAuditTargetRepos.filter((repo) => !branchAuditRepoBaseBranches[repo.root]?.trim())
   ), [branchAuditRepoBaseBranches, branchAuditTargetRepos]);
@@ -9370,7 +9381,8 @@ export function RightSidebar(
         )) ?? null;
         return {
           key: `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}`,
-          hunk,
+          hunk: hunk.previewRevert && !canIncludeRepoUncommitted(hunk.previewRevert.cwd, hunk.previewRevert.comparisonBranch)
+            ? { ...hunk, previewRevert: undefined } : hunk,
           current,
           stale: null,
         };
@@ -9388,7 +9400,7 @@ export function RightSidebar(
           stale: null,
         };
       });
-  }, [branchAuditPreviewDiff, branchAuditRecords, hasMountedGitPane, selectedBranchAuditHistoryKey]);
+  }, [branchAuditPreviewDiff, branchAuditRecords, canIncludeRepoUncommitted, hasMountedGitPane, selectedBranchAuditHistoryKey]);
 
   const hasBranchAuditRecords = branchAuditRecords.length > 0;
   const branchAuditHistoryGroups = useMemo(() => {
@@ -9471,7 +9483,7 @@ export function RightSidebar(
     const quoteShellArg = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
     const targetRepos = branchAuditReadyRepos;
     const repoList = targetRepos.length > 0
-      ? targetRepos.map((repo) => `- ${repo.label} (${repo.root})，目标分支：${branchAuditRepoBranches[repo.root] || repo.branch || '(current branch)'}，基线分支：${branchAuditRepoBaseBranches[repo.root] || '(not set)'}`).join('\n')
+      ? targetRepos.map((repo) => `- ${repo.label} (${repo.root})，目标分支：${branchAuditRepoBranches[repo.root] || repo.branch || '(current branch)'}，基线分支：${branchAuditRepoBaseBranches[repo.root] || '(not set)'}，包含本地未提交更改：${canIncludeRepoUncommitted(repo.root, branchAuditRepoBranches[repo.root] || repo.branch) && (branchAuditRepoIncludeUncommitted[repo.root] ?? true) ? '是' : '否'}`).join('\n')
       : `- ${rootPath ? '.' : ''}`;
     const exportCommands = targetRepos.length > 0
       ? targetRepos.map((repo) => {
@@ -9490,14 +9502,12 @@ export function RightSidebar(
       '解释目标仓库当前分支相对于基线分支的改动，并把解释写回 Termdock。',
       '',
       `当前工作区：${rootPath ?? ''}`,
-      `包含本地未提交更改：${branchAuditIncludeUncommitted ? '是' : '否'}`,
+      '每个仓库分别遵循下面列出的本地未提交更改选项。',
       '目标仓库：',
       repoList,
       '',
       '操作指令：',
-      branchAuditIncludeUncommitted
-        ? '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。导出内容需要包含目标分支相对基线分支的提交改动，以及当前工作区 staged/unstaged/untracked 改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：'
-        : '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。不要包含本地 staged/unstaged/untracked 改动；如果导出结果里混入了本地工作区改动，生成解释时必须忽略这些本地改动，只解释目标分支相对基线分支的提交改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：',
+      '1. 只针对上面列出的目标仓库导出分支 hunk，按各仓库所选目标分支与基线对比。本地未提交更改标记为是的仓库纳入 staged/unstaged/untracked 改动；标记为否的仓库只解释提交改动，忽略导出中混入的本地改动。嵌套子仓或软链接子仓使用括号内的仓库绝对路径。示例：',
       exportCommands,
       '2. 读取导出的 ~/.termdock/branch-audit/branch-audit-export*.json 中的 hunks[]，不要把临时 JSON 放到业务仓目录，也不要把整份 JSON 粘贴回输入框。导出工具使用 base...HEAD（三点）生成 diff，只表示当前分支独有改动；提交列表使用 base..HEAD（两点）。',
       '3. 先生成 walkthrough，用 highlights[] 说明整批分支改动目的和影响，用 nodes[]/edges[] 画出主链路、分支链路和验证链路；节点可带 anchor，点击后会跳到对应 diff。',
@@ -9541,7 +9551,7 @@ export function RightSidebar(
       }, null, 2),
       '```',
     ].join('\n');
-  }, [branchAuditIncludeUncommitted, branchAuditReadyRepos, branchAuditRepoBaseBranches, branchAuditRepoBranches, rootPath]);
+  }, [branchAuditRepoIncludeUncommitted, canIncludeRepoUncommitted, branchAuditReadyRepos, branchAuditRepoBaseBranches, branchAuditRepoBranches, rootPath]);
 
   const insertBranchAuditScopePrompt = useCallback((mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate') => {
     const basePrompt = mode === 'generate'
@@ -9557,10 +9567,18 @@ export function RightSidebar(
     if (!push) onClose();
   }, [branchAuditPromptText, insertContextText, onClose, push, t]);
 
-  const openBranchAuditPreviewDiff = useCallback(async (options: { refresh?: boolean } = {}) => {
+  const openBranchAuditPreviewDiff = useCallback(async (options: { refresh?: boolean; repoRoot?: string; includeUncommitted?: boolean } = {}) => {
     const isRefresh = options.refresh === true;
-    if (!rootPath || branchAuditReadyRepos.length === 0) return;
+    const comparisonRepos = isRefresh && branchAuditPreviewDiff?.comparisonRepos
+      ? branchAuditPreviewDiff.comparisonRepos
+      : branchAuditReadyRepos.map((repo) => {
+        const target = (branchAuditRepoBranches[repo.root] || repo.branch || '').trim();
+        return { repoRoot: repo.root, label: repo.label, base: branchAuditRepoBaseBranches[repo.root]?.trim() ?? '', head: target || null, includeUncommitted: branchAuditRepoIncludeUncommitted[repo.root] ?? true };
+      });
+    if (!rootPath || comparisonRepos.length === 0) return;
+    const requestId = ++branchAuditPreviewRequestRef.current;
     const expectedRootPath = rootPath;
+    const isCurrentRequest = () => isCurrentSidebarRoot(expectedRootPath) && requestId === branchAuditPreviewRequestRef.current;
     setBranchAuditPreviewLoading(true);
     setBranchAuditPreviewError(null);
     if (!isRefresh) {
@@ -9568,20 +9586,18 @@ export function RightSidebar(
       setCommitDiff(null);
     }
     try {
-      const results = await Promise.all(branchAuditReadyRepos.map(async (repo) => {
-        const base = branchAuditRepoBaseBranches[repo.root]?.trim();
-        if (!base) throw new Error(t('rightSidebar.branchAuditMissingBase', { repo: repo.label }));
-        const targetBranch = (branchAuditRepoBranches[repo.root] || repo.branch || '').trim();
+      const results = await Promise.all(comparisonRepos.map(async (repo) => {
+        if (!repo.base) throw new Error(t('rightSidebar.branchAuditMissingBase', { repo: repo.label }));
         return getBranchDiff({
           cwd: rootPath,
-          repoRoot: repo.root,
-          base,
-          head: targetBranch && targetBranch !== repo.branch ? targetBranch : null,
-          includeUncommitted: branchAuditIncludeUncommitted,
-          requestSlotId: `right-sidebar-branch-preview:${repo.root}`,
+          repoRoot: repo.repoRoot,
+          base: repo.base,
+          head: repo.head,
+          includeUncommitted: canIncludeRepoUncommitted(repo.repoRoot, repo.head) && (options.repoRoot === repo.repoRoot ? options.includeUncommitted ?? false : repo.includeUncommitted ?? branchAuditPreviewDiff?.includeUncommitted ?? true),
+          requestSlotId: `right-sidebar-branch-preview:${repo.repoRoot}`,
         });
       }));
-      if (!isCurrentSidebarRoot(expectedRootPath)) return;
+      if (!isCurrentRequest()) return;
       const unavailable = results.find((result) => !result.available);
       if (unavailable) {
         setBranchAuditPreviewError(unavailable.error ?? 'Branch diff is unavailable');
@@ -9597,11 +9613,11 @@ export function RightSidebar(
         diffFingerprint: results.map((result) => result.diffFingerprint).filter(Boolean).join('+'),
         stat: results.map((result) => result.stat).filter(Boolean).join('\n'),
         files: results.flatMap((result, index) => {
-          const repo = branchAuditReadyRepos[index];
+          const repo = comparisonRepos[index];
           return (result.files ?? []).map((file) => `${repo?.label ?? result.repoRoot ?? 'repo'}/${file}`);
         }),
         hunks: results.flatMap((result, index) => {
-          const repo = branchAuditReadyRepos[index];
+          const repo = comparisonRepos[index];
           const prefix = repo?.label ?? result.repoRoot ?? 'repo';
           return (result.hunks ?? []).map((hunk) => ({
             ...hunk,
@@ -9615,19 +9631,16 @@ export function RightSidebar(
         diff: results.map((result) => result.diff).filter(Boolean).join('\n'),
         truncated: results.some((result) => result.truncated),
       } satisfies BranchDiffResponse;
-      if ((merged.hunks ?? []).length === 0) {
-        if (isRefresh) {
-          // 刷新后已无差异：清掉旧快照，让详情走空状态，而不是继续显示过期内容。
-          setBranchAuditPreviewDiff(merged);
-          setSelectedBranchAuditHistoryKey(null);
-          setSelectedBranchAuditFileKey(null);
-        } else {
-          setBranchAuditPreviewError(t('rightSidebar.branchAuditDiffEmpty'));
-        }
+      merged.comparisonRepos = comparisonRepos.map((repo, index) => ({ ...repo, head: repo.head ?? results[index].currentBranch ?? null, includeUncommitted: results[index].includeUncommitted === true }));
+      merged.canIncludeUncommitted = results.every((result) => result.canIncludeUncommitted === true);
+      merged.includeUncommitted = results.some((result) => result.includeUncommitted === true);
+      setBranchAuditRepoIncludeUncommitted((current) => ({ ...current, ...Object.fromEntries(merged.comparisonRepos!.map((repo) => [repo.repoRoot, repo.includeUncommitted ?? false])) }));
+      if (!isRefresh && (merged.hunks ?? []).length === 0) {
+        setBranchAuditPreviewError(t('rightSidebar.branchAuditDiffEmpty'));
         return;
       }
       const createdAt = Date.now();
-      const entryKey = [
+      const entryKey = (isRefresh ? selectedBranchAuditHistoryKey : null) ?? [
         'preview',
         merged.repoRoot ?? rootPath,
         merged.baseRef ?? merged.baseBranch ?? '',
@@ -9635,9 +9648,9 @@ export function RightSidebar(
         merged.headRef ?? '',
         merged.diffFingerprint ?? createdAt,
       ].join('\0');
-      const repoLabel = branchAuditReadyRepos.length === 1
-        ? branchAuditReadyRepos[0].label
-        : `${branchAuditReadyRepos.length} repos`;
+      const repoLabel = comparisonRepos.length === 1
+        ? comparisonRepos[0].label
+        : `${comparisonRepos.length} repos`;
       setBranchAuditPreviewDiff(merged);
       setBranchAuditPreviewEntries((current) => [
         { key: entryKey, diff: merged, repoLabel, createdAt },
@@ -9653,20 +9666,23 @@ export function RightSidebar(
         const first = merged.hunks?.[0];
         const fallback = first ? `${first.filePath}\u0000${first.hunkHeader}\u0000${first.hunkIndex}` : null;
         if (isRefresh && current && (merged.hunks ?? []).some((hunk) => (
-          `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}` === current
+          hunk.filePath === current.split('\u0000')[0]
         ))) return current;
         return fallback;
       });
       setBranchAuditDetailOpen(true);
     } catch (error) {
-      if (!isCurrentSidebarRoot(expectedRootPath) || isAbortError(error)) return;
+      if (!isCurrentRequest() || isAbortError(error)) return;
       setBranchAuditPreviewError(error instanceof Error ? error.message : 'Failed to load branch diff');
     } finally {
-      if (isCurrentSidebarRoot(expectedRootPath)) setBranchAuditPreviewLoading(false);
+      if (isCurrentRequest()) setBranchAuditPreviewLoading(false);
     }
-  }, [branchAuditIncludeUncommitted, branchAuditReadyRepos, branchAuditRepoBaseBranches, branchAuditRepoBranches, isCurrentSidebarRoot, rootPath, t]);
+  }, [canIncludeRepoUncommitted, branchAuditRepoIncludeUncommitted, branchAuditPreviewDiff, selectedBranchAuditHistoryKey, branchAuditReadyRepos, branchAuditRepoBaseBranches, branchAuditRepoBranches, isCurrentSidebarRoot, rootPath, t]);
 
   const openBranchAuditPreviewEntry = useCallback((entry: BranchAuditPreviewEntry) => {
+    ++branchAuditPreviewRequestRef.current;
+    setBranchAuditPreviewLoading(false);
+
     setBranchAuditPreviewDiff(entry.diff);
     setBranchAuditPreviewError(null);
     setSelectedBranchAuditHistoryKey(entry.key);
@@ -9690,6 +9706,8 @@ export function RightSidebar(
   }, [selectedBranchAuditHistoryKey]);
 
   const openBranchAuditHistoryDetail = useCallback((historyKey: string) => {
+    ++branchAuditPreviewRequestRef.current;
+    setBranchAuditPreviewLoading(false);
     const group = branchAuditHistoryGroups.find((item) => item.key === historyKey);
     if (!group) return;
     setBranchAuditPreviewDiff(null);
@@ -9738,9 +9756,18 @@ export function RightSidebar(
   }, [branchAuditPreviewDiff, selectedBranchAuditHistoryKey]);
 
   useEffect(() => {
-    if (!isMobile || !branchAuditDetailOpen || !branchAuditPreviewDiff) return;
+    if (!branchAuditPreviewDiff || !selectedBranchAuditHistoryKey) return;
+    setBranchAuditPreviewEntries((entries) => entries.map((entry) => (
+      entry.key === selectedBranchAuditHistoryKey && entry.diff !== branchAuditPreviewDiff
+        ? { ...entry, diff: branchAuditPreviewDiff } : entry
+    )));
+  }, [branchAuditPreviewDiff, selectedBranchAuditHistoryKey]);
+
+  const hasBranchAuditPreview = Boolean(branchAuditPreviewDiff);
+  useEffect(() => {
+    if (!isMobile || !branchAuditDetailOpen || !hasBranchAuditPreview) return;
     slideMobileDiffTo(1);
-  }, [branchAuditDetailOpen, branchAuditPreviewDiff, isMobile, slideMobileDiffTo]);
+  }, [branchAuditDetailOpen, hasBranchAuditPreview, isMobile, slideMobileDiffTo]);
 
   const requestDiffStreamScroll = useCallback((path: string | null) => {
     if (!path) return;
@@ -9949,6 +9976,58 @@ export function RightSidebar(
     setDiffRefreshKey((key) => key + 1);
     void loadGitBundle(rootPath ?? undefined, { refresh: true, background: true });
   }, [isCurrentSidebarRoot, loadGitBundle, rootPath]);
+
+  const runBranchPreviewHunkAction = useCallback(async (request: ApplyDiffHunkRequest) => {
+    const preview = branchAuditPreviewDiff;
+    const requestVersion = branchAuditPreviewRequestRef.current;
+    const affected = preview?.hunks?.find((hunk) => hunk.previewRevert?.cwd === request.cwd && hunk.previewRevert.path === request.path);
+    if (!preview || !affected || !request.comparisonBase) throw new Error(t('diffViewer.hunkActionUnavailable'));
+    setBranchAuditUndoPending((count) => count + 1);
+    setBranchAuditPreviewError(null);
+    try {
+      await applyDiffHunk(request);
+    } catch (error) {
+      setBranchAuditUndoPending((count) => count - 1);
+      throw error;
+    }
+    if (requestVersion !== branchAuditPreviewRequestRef.current || !isCurrentSidebarRoot(rootPath)) {
+      setBranchAuditUndoPending((count) => count - 1);
+      return;
+    }
+    const updateFile = (replacement?: BranchDiffHunk[]) => {
+      setBranchAuditPreviewDiff((current) => {
+        if (!current || requestVersion !== branchAuditPreviewRequestRef.current) return current;
+        const hunks = current.hunks ?? [];
+        const nextHunks = replacement === undefined
+          ? hunks.filter((hunk) => !(hunk.previewRevert?.cwd === request.cwd && hunk.previewRevert.patch === request.patch))
+          : [...hunks.filter((hunk) => hunk.filePath !== affected.filePath), ...replacement];
+        const next = { ...current, hunks: nextHunks };
+        return next;
+      });
+    };
+    // Acknowledge the mutation now. Only this file is read back, against the
+    // same pinned base; no branch fetch, full diff or workspace scan follows.
+    updateFile();
+    void getBranchDiff({
+      cwd: request.cwd, repoRoot: request.cwd, base: request.comparisonBase,
+      comparisonBase: request.comparisonBase, filePath: request.path,
+      requestSlotId: `branch-preview-file:${request.cwd}:${request.path}`,
+    }).then((result) => {
+      if (requestVersion !== branchAuditPreviewRequestRef.current || !isCurrentSidebarRoot(rootPath)) return;
+      if (!result.available || result.truncated) throw new Error(result.error ?? t('diffViewer.hunkActionUnavailable'));
+      const relativePath = request.path.slice(request.cwd.length + 1);
+      const prefix = affected.filePath.slice(0, affected.filePath.length - relativePath.length);
+      updateFile((result.hunks ?? []).map((hunk) => ({
+        ...hunk, filePath: `${prefix}${hunk.filePath}`,
+        oldPath: hunk.oldPath ? `${prefix}${hunk.oldPath}` : hunk.oldPath,
+        newPath: hunk.newPath ? `${prefix}${hunk.newPath}` : hunk.newPath,
+      })));
+    }).catch((error) => {
+      if (requestVersion === branchAuditPreviewRequestRef.current && isCurrentSidebarRoot(rootPath) && !isAbortError(error)) {
+        setBranchAuditPreviewError(`${t('diffViewer.hunkActionReverted')} · ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }).finally(() => setBranchAuditUndoPending((count) => count - 1));
+  }, [branchAuditPreviewDiff, isCurrentSidebarRoot, rootPath, t]);
 
   const runRepoGitAction = useCallback((action: 'stage-all' | 'stash-all', repoRoot: string | null, repoLabel: string) => {
     if (!repoRoot) return;
@@ -10162,18 +10241,7 @@ export function RightSidebar(
       statusTitle={branchAuditDetailsLoadingRoots.size > 0 ? t('rightSidebar.branchCandidatesLoading') : undefined}
       extraContent={(
         <div className="mb-2 space-y-1.5">
-          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-foreground">
-            <span className="min-w-0">
-              <span className="block font-medium">{t('rightSidebar.includeUncommitted')}</span>
-              <span className="block truncate text-[10px] text-muted-foreground">{t('rightSidebar.includeUncommittedHint')}</span>
-            </span>
-            <input
-              type="checkbox"
-              checked={branchAuditIncludeUncommitted}
-              onChange={(event) => setBranchAuditIncludeUncommitted(event.target.checked)}
-              className="h-4 w-4 shrink-0 accent-[rgb(var(--primary-rgb))]"
-            />
-          </label>
+
           {branchAuditMissingBaseRepos.length > 0 && (
             <div className="rounded-md bg-[rgb(var(--warning-rgb)_/_0.12)] px-2 py-1.5 text-[10px] text-[color:var(--warning)]">
               {t('rightSidebar.missingBaseReposSkipped', { repositories: branchAuditMissingBaseRepos.map((repo) => repo.label).join(locale === 'zh' ? '、' : ', ') })}
@@ -10183,6 +10251,7 @@ export function RightSidebar(
       )}
       renderRepoExtra={(repo) => {
         const bundle = gitRepositoryByRoot.get(repo.root);
+        const canInclude = canIncludeRepoUncommitted(repo.root, branchAuditRepoBranches[repo.root] || bundle?.context?.branch);
         const branchOptions: GitPickerOption[] = [];
         const seen = new Set<string>();
         const addBranch = (branch: string | null | undefined, meta?: string) => {
@@ -10234,6 +10303,19 @@ export function RightSidebar(
                 }));
               }}
             />
+            <label className="sm:col-span-2 flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-foreground">
+              <span className="min-w-0">
+                <span className="block font-medium">{t('rightSidebar.includeUncommitted')}</span>
+                <span className="block truncate text-[10px] text-muted-foreground">{t(canInclude ? 'rightSidebar.includeUncommittedHint' : 'rightSidebar.includeUncommittedCurrentBranchOnly')}</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={canInclude && (branchAuditRepoIncludeUncommitted[repo.root] ?? true)}
+                disabled={!canInclude}
+                onChange={(event) => setBranchAuditRepoIncludeUncommitted((current) => ({ ...current, [repo.root]: event.target.checked }))}
+                className="h-4 w-4 shrink-0 accent-[rgb(var(--primary-rgb))]"
+              />
+            </label>
           </div>
         );
       }}
@@ -11611,6 +11693,8 @@ export function RightSidebar(
                   ? `${selectedBranchAuditDetailMeta.repoLabel} · ${selectedBranchAuditDetailMeta.branchName ?? 'HEAD'} → ${selectedBranchAuditDetailMeta.baseRef}`
                   : undefined}
                 onClose={() => {
+                  ++branchAuditPreviewRequestRef.current;
+                  setBranchAuditPreviewLoading(false);
                   setBranchAuditDetailOpen(false);
                   setBranchAuditPreviewDiff(null);
                 }}
@@ -11626,6 +11710,15 @@ export function RightSidebar(
                 insertedReferenceKey={insertedReferenceKey}
                 copiedReferenceKey={copiedReferenceKey}
                 onClearAuditRecord={handleClearAuditRecord}
+                localOptions={branchAuditPreviewDiff?.comparisonRepos?.map((repo) => ({
+                  key: repo.repoRoot, label: repo.label,
+                  checked: repo.includeUncommitted ?? branchAuditPreviewDiff.includeUncommitted ?? false,
+                  disabled: !canIncludeRepoUncommitted(repo.repoRoot, repo.head),
+                  onChange: (includeUncommitted: boolean) => void openBranchAuditPreviewDiff({ refresh: true, repoRoot: repo.repoRoot, includeUncommitted }),
+                }))}
+                onHunkGitAction={branchAuditPreviewDiff?.includeUncommitted ? runBranchPreviewHunkAction : undefined}
+                error={branchAuditPreviewError}
+                actionsBusy={branchAuditUndoPending > 0}
                 onRefresh={() => void openBranchAuditPreviewDiff({ refresh: true })}
                 refreshing={branchAuditPreviewLoading}
                 refreshLabel={t('rightSidebar.branchAuditRefreshDiff')}

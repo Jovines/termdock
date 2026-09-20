@@ -357,8 +357,9 @@ interface DiffViewerProps {
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
   /**
    * Hunk-level git actions (stage / revert). Only provided for live worktree
-   * diffs; absent for commit/branch/preview diffs, which hides the buttons.
+   * diffs. Branch previews can supply comparison-based previewReverts separately.
    */
+  previewReverts?: Record<string, DiffHunkActionRequest>;
   onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
@@ -464,6 +465,8 @@ function formatDiffEndpoint(prefix: 'a' | 'b', path: string): string {
 // received, so context lines and "\ No newline" markers survive untouched.
 
 export interface DiffHunkActionRequest {
+  comparisonBase?: string;
+  comparisonBranch?: string;
   mode: DiffHunkApplyMode;
   patch: string;
   cwd: string;
@@ -858,7 +861,7 @@ function isDiffNavTypingTarget(element: Element | null): boolean {
  * Self-dismisses on first tap so it doesn't get in the way of repeat
  * visits — the user has seen it once, they know now.
  */
-export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, previewReverts, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
   const { t, locale } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const initialCacheRef = useRef<{
@@ -1503,8 +1506,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   const canRunHunkActions = Boolean(onHunkGitAction && hunkActionGitRoot && diffOverride == null && preparedDiff == null);
 
   const runHunkGitAction = useCallback(async (mode: DiffHunkApplyMode, actionKey: string, file: FileData, fileIndex: number, hunkIndex: number, displayPath: string) => {
-    if (!onHunkGitAction || !hunkActionGitRoot || hunkActionInFlightRef.current) return;
-    const patch = effectiveDiffContent ? extractHunkPatch(effectiveDiffContent, file, fileIndex, hunkIndex) : null;
+    const previewRevert = mode === 'revert-worktree' ? previewReverts?.[file.hunks[hunkIndex]?.content] : undefined;
+    if (!onHunkGitAction || (!hunkActionGitRoot && !previewRevert) || hunkActionInFlightRef.current) return;
+    const patch = previewRevert?.patch ?? (effectiveDiffContent ? extractHunkPatch(effectiveDiffContent, file, fileIndex, hunkIndex) : null);
     if (!patch) {
       setHunkActionError({ key: actionKey, message: t('diffViewer.hunkActionUnavailable') });
       return;
@@ -1513,11 +1517,11 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     setRunningHunkActionKey(actionKey);
     setHunkActionError(null);
     try {
-      await onHunkGitAction({
+      await onHunkGitAction(previewRevert ?? {
         mode,
         patch,
-        cwd: hunkActionGitRoot,
-        path: joinRepoPath(hunkActionGitRoot, displayPath) ?? displayPath,
+        cwd: hunkActionGitRoot!,
+        path: joinRepoPath(hunkActionGitRoot!, displayPath) ?? displayPath,
       });
       // Keep stale hunks disabled until fresh diff content replaces them.
       setCompletedHunkAction({ key: actionKey, mode, diff: effectiveDiffContent });
@@ -1528,7 +1532,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       setRunningHunkActionKey((current) => (current === actionKey ? null : current));
       setRevertConfirmKey((current) => (current === actionKey ? null : current));
     }
-  }, [onHunkGitAction, hunkActionGitRoot, effectiveDiffContent, t]);
+  }, [onHunkGitAction, previewReverts, hunkActionGitRoot, effectiveDiffContent, t]);
 
   // Per-hunk derived data (sections, inline moved-line candidates, split-view
   // alignment). findMovedLineCandidates is O(deleted × inserted) similarity
@@ -1806,7 +1810,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const stageHunkKey = `stage:${displayPath}:${index}`;
                     const revertHunkKey = `revert:${displayPath}:${index}`;
                     const awaitingFreshDiff = completedHunkAction?.diff === effectiveDiffContent;
-                    const hunkActionBusy = runningHunkActionKey !== null || awaitingFreshDiff;
+                    const hunkActionBusy = runningHunkActionKey !== null || awaitingFreshDiff || !parsedContentReady;
                     const thisHunkCompleted = awaitingFreshDiff && (completedHunkAction?.key === stageHunkKey || completedHunkAction?.key === revertHunkKey);
                     const canStageHunk = canRunHunkActions && (!changedFile || changedFile.unstaged || changedFile.untracked);
                     const thisHunkActionError = hunkActionError && (hunkActionError.key === stageHunkKey || hunkActionError.key === revertHunkKey)
@@ -1962,7 +1966,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                                   {runningHunkActionKey === stageHunkKey ? t('diffViewer.hunkActionApplying') : thisHunkCompleted && completedHunkAction?.mode === 'stage' ? t('diffViewer.hunkActionStaged') : t('diffViewer.stageHunk')}
                                 </button>
                               )}
-                              {canRunHunkActions && (
+                              {(canRunHunkActions || (onHunkGitAction && previewReverts?.[hunk.content])) && (
                                 <button
                                   type="button"
                                   disabled={hunkActionBusy}
@@ -2090,7 +2094,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     );
   };
 
-  if (effectiveDiffLoading) {
+  if (effectiveDiffLoading && !(diffOverride !== undefined && parsedFiles.length > 0)) {
     return embedded ? (
       <div className="absolute inset-0 z-20 flex min-h-16 items-center justify-center gap-2 bg-surface-2 text-xs text-muted-foreground">
         <RiLoader size={18} className="animate-spin" />

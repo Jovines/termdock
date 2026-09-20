@@ -572,6 +572,7 @@ export const en: TranslationDictionary = {
     previewTruncated: 'Preview truncated to 1 MB',
     branchCandidatesLoading: 'Loading branch candidates…',
     includeUncommitted: 'Include local uncommitted changes',
+    includeUncommittedCurrentBranchOnly: 'Available only when the compared branch is checked out',
     includeUncommittedHint: 'Include working tree and untracked diffs when viewing or explaining changes',
     missingBaseReposSkipped: ({ repositories }) => `Repositories without a base branch will be skipped: ${repositories}`,
     localBranch: 'local',

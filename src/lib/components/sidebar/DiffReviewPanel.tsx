@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, RotateCw } from 'lucide-react';
+import type { DiffHunkActionRequest } from './DiffViewer';
 import type { Swiper as SwiperInstance } from 'swiper';
 import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord, ChangeWalkthrough, ChangeWalkthroughAnchor } from '../../terminal/api';
 import { type DiffNavigatorFile } from './DiffFileNavigator';
@@ -39,7 +40,11 @@ interface UniversalDiffReviewProps {
   copiedReferenceKey?: string | null;
   onClearAuditRecord?: (id: string) => void;
   onRefresh?: () => void;
+  localOptions?: { key: string; label: string; checked: boolean; disabled: boolean; onChange: (checked: boolean) => void }[];
+  onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
+  error?: string | null;
   refreshing?: boolean;
+  actionsBusy?: boolean;
   refreshLabel?: string;
   refreshTitle?: string;
   walkthroughs?: ChangeWalkthrough[];
@@ -205,6 +210,8 @@ function buildDiffReviewFiles({
       displayName: name,
       displayDir: dir,
       diffOverride: diffText,
+      previewReverts: Object.fromEntries(group.items.flatMap((item) => item.hunk.previewRevert
+        ? [[item.hunk.hunkHeader, item.hunk.previewRevert]] : [])),
       auditRecords,
       onInsertDiffReference: onInsertDiffReference,
     };
@@ -256,7 +263,11 @@ export function UniversalDiffReview({
   copiedReferenceKey,
   onClearAuditRecord,
   onRefresh,
+  localOptions,
+  onHunkGitAction,
+  error,
   refreshing,
+  actionsBusy,
   refreshLabel,
   refreshTitle,
   walkthroughs = [],
@@ -312,11 +323,20 @@ export function UniversalDiffReview({
     </button>
   ) : null;
 
+  const localToggle = localOptions?.map((option) => (
+    <label key={option.key} title={option.disabled ? t('rightSidebar.includeUncommittedCurrentBranchOnly') : option.key} className="inline-flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+      <input type="checkbox" checked={option.checked} disabled={refreshing || actionsBusy || (option.disabled && !option.checked)}
+        onChange={(event) => option.onChange(event.target.checked)} className="accent-primary" />
+      <span>{option.label} · {t('rightSidebar.includeUncommitted')}{option.disabled && <span className="block text-[10px]">{t('rightSidebar.includeUncommittedCurrentBranchOnly')}</span>}</span>
+    </label>
+  ));
+  const errorMessage = error ? <div role="alert" className="w-full text-xs text-destructive">{error}</div> : null;
+
   const refreshToggle = onRefresh ? (
     <button
       type="button"
       onClick={onRefresh}
-      disabled={refreshing}
+      disabled={refreshing || actionsBusy}
       title={refreshTitle ?? refreshLabel}
       aria-label={refreshTitle ?? refreshLabel}
       className="inline-flex h-7 shrink-0 items-center gap-1 rounded-full bg-surface-2 px-2.5 text-[11px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
@@ -354,8 +374,10 @@ export function UniversalDiffReview({
       </div>
       <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
         {modeToggle}
+        {localToggle}
         {refreshToggle}
         {wrapToggle}
+        {errorMessage}
       </div>
     </div>
   );
@@ -376,7 +398,7 @@ export function UniversalDiffReview({
   }
 
   const mobileDetailHeader = (onToggleWrap || onRefresh) ? ({ slideToList }: { slideToList: () => void }) => (
-    <div className="flex items-center justify-between gap-2">
+    <div className="flex flex-wrap items-center justify-between gap-2">
       <button
         type="button"
         className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
@@ -385,7 +407,8 @@ export function UniversalDiffReview({
         <ArrowLeft size={14} />
         {backLabel}
       </button>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        {localToggle}
         {refreshToggle}
         {onToggleWrap && (
           <button
@@ -404,12 +427,14 @@ export function UniversalDiffReview({
           </button>
         )}
       </div>
+      {errorMessage}
     </div>
   ) : undefined;
 
   return (
     <DiffReview
       mobile={mobile}
+      preserveScrollOnUpdate={Boolean(localOptions?.length)}
       desktopLayout={desktopLayout}
       backLabel={backLabel}
       groups={navigatorGroups}
@@ -483,6 +508,7 @@ export function UniversalDiffReview({
       insertedReferenceKey={insertedReferenceKey}
       copiedReferenceKey={copiedReferenceKey}
       onClearAuditRecord={onClearAuditRecord}
+      onHunkGitAction={refreshing ? undefined : onHunkGitAction}
       emptyContent={<div className="rounded-lg bg-surface-2 px-3 py-6 text-center text-xs text-muted-foreground">{emptyText}</div>}
     />
   );

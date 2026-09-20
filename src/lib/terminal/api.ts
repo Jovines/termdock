@@ -3378,6 +3378,9 @@ export interface ChangeWalkthrough {
 }
 
 export interface BranchDiffResponse {
+  includeUncommitted?: boolean;
+  canIncludeUncommitted?: boolean;
+  comparisonRepos?: { repoRoot: string; label: string; base: string; head: string | null; includeUncommitted?: boolean }[];
   available: boolean;
   repoRoot?: string;
   workspaceRoot?: string;
@@ -3397,6 +3400,7 @@ export interface BranchDiffResponse {
 }
 
 export interface BranchDiffHunk {
+  previewRevert?: { cwd: string; path: string; patch: string; comparisonBase: string; comparisonBranch?: string; mode: 'revert-worktree' };
   filePath: string;
   oldPath?: string | null;
   newPath?: string | null;
@@ -3451,13 +3455,15 @@ export async function getChangeAuditRecords(options: { workspaceRoot?: string | 
   return response.json();
 }
 
-export async function getBranchDiff(options: { cwd?: string | null; repoRoot?: string | null; base: string; head?: string | null; includeUncommitted?: boolean; requestSlotId?: string }, signal?: AbortSignal): Promise<BranchDiffResponse> {
+export async function getBranchDiff(options: { cwd?: string | null; repoRoot?: string | null; base: string; head?: string | null; includeUncommitted?: boolean; filePath?: string; comparisonBase?: string; requestSlotId?: string }, signal?: AbortSignal): Promise<BranchDiffResponse> {
   const params = new URLSearchParams();
   if (options.cwd) params.set('cwd', options.cwd);
   if (options.repoRoot) params.set('repoRoot', options.repoRoot);
   params.set('base', options.base);
   if (options.head) params.set('head', options.head);
   if (options.includeUncommitted === false) params.set('includeUncommitted', '0');
+  if (options.filePath) params.set('filePath', options.filePath);
+  if (options.comparisonBase) params.set('comparisonBase', options.comparisonBase);
   params.set('action', 'load_branch_diff');
   if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
   const response = await fetchWithTimeout(
@@ -3715,6 +3721,8 @@ export async function getGitActionStatus(options: { cwd?: string; action?: GitAc
 export type DiffHunkApplyMode = 'stage' | 'revert-worktree' | 'revert-staged';
 
 export interface ApplyDiffHunkRequest {
+  comparisonBase?: string;
+  comparisonBranch?: string;
   cwd: string;
   path: string;
   mode: DiffHunkApplyMode;

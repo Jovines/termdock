@@ -591,6 +591,7 @@ export type TranslationDictionary = {
     branchCandidatesLoading: string;
     includeUncommitted: string;
     includeUncommittedHint: string;
+    includeUncommittedCurrentBranchOnly: string;
     missingBaseReposSkipped: (params: TranslatorParams) => string;
     localBranch: string;
     remoteBranch: string;
