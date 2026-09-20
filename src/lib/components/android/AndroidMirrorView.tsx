@@ -122,10 +122,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const setOverlay = useAndroidMirrorStore(state => state.setOverlay);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<AndroidMirrorController | null>(null);
+  const connectedSerial = useRef<string | null>(null);
   const initialQuality = useMemo<AndroidQuality>(readStoredQuality, []);
   const qualityRef = useRef<AndroidQuality>(initialQuality);
   const adaptive = useRef<{ serial: string; policy: AutoQuality } | null>(null);
-  const [autoResolution, setAutoResolution] = useState(720);
+  const [autoResolution, setAutoResolution] = useState(1080);
   /** 正在注入设备的那根手指；x/y 是设备坐标，手势被打断时就近作废。 */
   const activePointer = useRef<{ id: number; type: string; x: number; y: number } | null>(null);
   /** 按下的所有指针（client 坐标）：第二根落下即说明用户要操作视图而不是设备。 */
@@ -240,7 +241,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     if (!canvas || !serial) return;
     controllerRef.current?.disconnect();
     setMirrorError(null);
-    if (!preserveFrame) setHeader(null);
+    if (!preserveFrame && connectedSerial.current !== serial) setHeader(null);
+    connectedSerial.current = serial;
     setWarning(null);
     const controller = new AndroidMirrorController(canvas, {
       onState: (state, error) => { if (controllerRef.current !== controller) return; setMirrorState(state); setMirrorError(error ?? null); },
@@ -264,7 +266,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       || !stats.adaptation || pointers.current.size || document.hidden) return;
     const policy = adaptive.current;
     if (!policy || policy.serial !== selectedSerial) return;
-    if (policy.policy.sample(stats.adaptation, performance.now())) connect(selectedSerial, true);
+    const canvas = canvasRef.current;
+    const pixels = canvas ? Math.max(canvas.clientWidth, canvas.clientHeight) * (window.devicePixelRatio || 1) * zoomRef.current : 1600;
+    if (policy.policy.sample(stats.adaptation, performance.now(), pixels || 1600)) connect(selectedSerial, true);
   }, [stats, qualityId, mirrorState, selectedSerial, connect]);
 
   // 偏好存服务端，换浏览器/设备也一致；localStorage 只作为首屏的即时初值。
@@ -558,6 +562,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const stage = canvas.parentElement;
+    if (!stage) return;
     const onWheel = (event: WheelEvent) => {
       // ⌘/Ctrl+滚轮＝缩放（触控板捏合发的也是带 ctrlKey 的滚轮），普通滚轮照旧转发给设备。
       if (event.ctrlKey || event.metaKey) {
@@ -575,13 +581,22 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         return;
       }
       const controller = controllerRef.current;
-      if (!controller) return;
+      if (!controller || event.target !== canvas) return;
       event.preventDefault();
       const point = toDevicePoint(canvas, event.clientX, event.clientY);
       controller.scroll(point.x, point.y, event.deltaX, event.deltaY);
     };
-    canvas.addEventListener('wheel', onWheel, { passive: false });
-    return () => canvas.removeEventListener('wheel', onWheel);
+    const preventNativeGesture = (event: Event) => event.preventDefault();
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    // Safari also exposes native gesture events. Scope suppression to the preview,
+    // including its gutters and reconnecting state, rather than the entire page.
+    stage.addEventListener('gesturestart', preventNativeGesture, { passive: false });
+    stage.addEventListener('gesturechange', preventNativeGesture, { passive: false });
+    return () => {
+      stage.removeEventListener('wheel', onWheel);
+      stage.removeEventListener('gesturestart', preventNativeGesture);
+      stage.removeEventListener('gesturechange', preventNativeGesture);
+    };
   }, [applyZoom, applyViewTransform, syncZoomControls]);
 
   // 面板尺寸或设备方向一变，放大后的画面可能已经越出边界，按新尺寸重新钳制。
@@ -937,7 +952,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
 
   const body = (
     <div
-      className="flex h-full min-h-0 flex-col bg-surface text-foreground"
+      className="android-mirror-panel flex h-full min-h-0 min-w-0 flex-col bg-surface text-foreground"
       data-sidebar-gesture-ignore="true"
       onKeyDown={handleKeyDown}
       tabIndex={-1}
@@ -989,7 +1004,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           title={qualityId === 'auto' ? t('android.qualityAutoHint') : t('android.quality')}
           aria-label={t('android.quality')}
         >
-          <option value="auto">{t('android.qualityAuto')}{qualityId === 'auto' ? ` · ${autoResolution}p` : ''}</option>
+          <option value="auto">{t('android.qualityAuto')}{qualityId === 'auto' ? ` · ${autoResolution}` : ''}</option>
           {ANDROID_QUALITY_PRESETS.map(preset => (
             <option key={preset.id} value={preset.id}>{t(QUALITY_LABEL[preset.id])}</option>
           ))}
@@ -1105,7 +1120,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           <div className="mt-2 grid gap-2">
           <QualitySlider
             label={t('android.qualityResolution')}
-            display={`${custom.maxSize}p`}
+            display={`${custom.maxSize}px`}
             min={360} max={2160} step={8} value={custom.maxSize}
             onChange={value => setCustom(current => ({ ...current, maxSize: value }))}
           />
@@ -1212,7 +1227,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       )}
 
 
-      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[var(--chrome-bg)] p-1">
+      <div className="relative flex min-h-0 min-w-0 flex-1 touch-none items-center justify-center overflow-hidden bg-[var(--chrome-bg)] p-1">
         <canvas
           ref={canvasRef}
           className="max-h-full max-w-full touch-none select-none rounded"
@@ -1308,9 +1323,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         {/* 缩放改的是本地视图，不往设备注入任何东西。 */}
         <ToolButton compact={compact} label={t('android.zoomIn')} onClick={() => zoomByStep('in')} disabled={!streaming || zoom >= ZOOM_MAX - 0.01}><Plus size={14} /></ToolButton>
         <ToolButton compact={compact} label={t('android.zoomOut')} onClick={() => zoomByStep('out')} disabled={!streaming || zoom <= ZOOM_MIN + 0.01}><Minus size={14} /></ToolButton>
-        {/* 统计文字始终占位，状态仅覆盖内容。固定高度包含录屏停止按钮，
-            避免 flex-wrap 在状态切换时换行或改变行高，挤压上方画布。 */}
-        <div className="relative ml-auto h-5 min-w-24 max-w-full" data-mirror-capture-status>
+        {/* 统计区固定宽高，状态仅覆盖内容。数字位数与缩放提示变化不能影响
+            flex-wrap 的换行判断，避免底栏行数变化挤压上方画布。 */}
+        <div className="relative ml-auto h-5 w-56 min-w-0 max-w-full shrink-0" data-mirror-capture-status>
           <span aria-hidden={recording || Boolean(captureStatus) || captureBusy}
             className={`block truncate text-[10px] leading-5 tabular-nums text-muted-foreground ${recording || captureStatus || captureBusy ? 'invisible' : ''}`}>
             {header ? (

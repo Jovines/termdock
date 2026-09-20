@@ -1,10 +1,10 @@
 import type { AndroidQuality } from './api';
 
 export const AUTO_QUALITY_LEVELS: AndroidQuality[] = [
-  { id: 'auto', maxSize: 480, bitRate: 500_000, maxFps: 24 },
-  { id: 'auto', maxSize: 720, bitRate: 1_200_000, maxFps: 30 },
-  { id: 'auto', maxSize: 1080, bitRate: 3_000_000, maxFps: 30 },
-  { id: 'auto', maxSize: 1600, bitRate: 5_000_000, maxFps: 30 },
+  { id: 'auto', maxSize: 480, bitRate: 700_000, maxFps: 24 },
+  { id: 'auto', maxSize: 720, bitRate: 1_800_000, maxFps: 30 },
+  { id: 'auto', maxSize: 1080, bitRate: 4_000_000, maxFps: 30 },
+  { id: 'auto', maxSize: 1600, bitRate: 8_000_000, maxFps: 30 },
 ];
 export interface AutoQualitySample {
   rttMs: number | null;
@@ -13,36 +13,53 @@ export interface AutoQualitySample {
   frames: number;
 }
 
-/** Hysteresis survives stream restarts; quiet screens are not bandwidth probes. */
+/** Probe for clarity; back off specifically when an upgrade proves too costly. */
 export class AutoQuality {
-  level = 1;
-  private bad = 0;
-  private good = 0;
+  level = 2;
+  private badSince: number | null = null;
+  private goodSince: number | null = null;
   private connectedAt = 0;
+  private lastSample = -Infinity;
   private lastChange = -Infinity;
+  private lastUpgrade = -Infinity;
   private upgradeAfter = 0;
+  private failedProbes = 0;
+  private baselineRtt = Infinity;
   get quality(): AndroidQuality { return AUTO_QUALITY_LEVELS[this.level]!; }
-  connected(now: number): void { this.connectedAt = now; this.bad = 0; this.good = 0; }
-  sample(sample: AutoQualitySample, now: number): AndroidQuality | null {
-    if (now - this.connectedAt < 5000 || sample.rttMs === null) {
-      this.bad = 0; this.good = 0;
-      return null;
-    }
-    const bad = sample.rttMs > 350 || sample.deliveryDelayMs > 250 || sample.decodeQueue >= 4;
-    const good = sample.rttMs < 140 && sample.deliveryDelayMs < 80 && sample.decodeQueue <= 1 && sample.frames >= 8;
-    this.bad = bad ? this.bad + 1 : 0;
-    this.good = good ? this.good + 1 : 0;
-    if (now - this.lastChange < 12000) return null;
-    if (this.bad >= 3 && this.level > 0) {
+  connected(now: number): void {
+    this.connectedAt = now;
+    this.badSince = this.goodSince = null;
+    this.lastSample = -Infinity;
+  }
+  sample(sample: AutoQualitySample, now: number, targetPixels = 1600): AndroidQuality | null {
+    if (now - this.lastSample > 2500) this.badSince = this.goodSince = null;
+    this.lastSample = now;
+    if (sample.rttMs !== null) this.baselineRtt = Math.min(this.baselineRtt, sample.rttMs);
+    if (now - this.connectedAt < 3000) return null;
+    const rttGrowth = sample.rttMs !== null && sample.rttMs > this.baselineRtt + 150;
+    // High but stable propagation latency is not evidence of insufficient bandwidth.
+    const bad = sample.deliveryDelayMs > 250 || sample.decodeQueue >= 4
+      || (rttGrowth && sample.frames > 0 && sample.deliveryDelayMs > 100);
+    const severe = sample.deliveryDelayMs > 800 || sample.decodeQueue >= 8;
+    const good = sample.rttMs !== null && sample.rttMs < this.baselineRtt + 100
+      && sample.deliveryDelayMs < 80 && sample.decodeQueue <= 1;
+    this.badSince = bad ? this.badSince ?? now : null;
+    this.goodSince = good ? this.goodSince ?? now : null;
+    const targetLevel = Math.max(2, AUTO_QUALITY_LEVELS.findIndex(level => level.maxSize >= Math.min(1600, targetPixels)));
+    if (this.badSince !== null && now - this.badSince >= (severe ? 1000 : 2000)
+      && now - this.lastChange >= (severe ? 3000 : 6000) && this.level > 0) {
       this.level--;
-      // A failed upgrade must not cause a recurring up/down cycle.
-      this.upgradeAfter = now + 120000;
-    } else if (this.good >= 30 && this.level < AUTO_QUALITY_LEVELS.length - 1 && now >= this.upgradeAfter) {
+      const failedProbe = now - this.lastUpgrade < 20000;
+      this.failedProbes = failedProbe ? this.failedProbes + 1 : 0;
+      this.upgradeAfter = now + (failedProbe ? Math.min(90000, 20000 * 2 ** (this.failedProbes - 1)) : 15000);
+      this.lastUpgrade = -Infinity;
+    } else if (this.goodSince !== null && now - this.goodSince >= 8000
+      && now - this.lastChange >= 10000 && now >= this.upgradeAfter && this.level < targetLevel) {
       this.level++;
+      this.lastUpgrade = now;
     } else return null;
     this.lastChange = now;
-    this.bad = 0;
-    this.good = 0;
+    this.badSince = this.goodSince = null;
     return this.quality;
   }
 }

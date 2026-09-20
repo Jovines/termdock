@@ -9927,19 +9927,15 @@ export function RightSidebar(
     }
   }, [applyGitBundle, isCurrentSidebarRoot, rootPath, t, waitForGitActionJob]);
 
-  // Hunk-level stage/revert from the diff viewer. Errors propagate back to
-  // the hunk header (inline message); on success the refreshed bundle updates
-  // the change list and bumps diffRefreshKey so the diff reloads.
+  // A successful mutation is independent of the slower workspace scan.
+  // Reload the visible diff immediately and update the file list in background.
   const runDiffHunkAction = useCallback(async (request: ApplyDiffHunkRequest) => {
     const expectedRootPath = rootPath;
-    const result = await applyDiffHunk({ ...request, includeNested: isNestedGitScanEnabled(rootPath) });
+    await applyDiffHunk({ ...request, includeNested: isNestedGitScanEnabled(rootPath) });
     if (!isCurrentSidebarRoot(expectedRootPath)) return;
-    const refreshedBundle = rootPath
-      ? await getGitBundle(rootPath, undefined, { includeNested: isNestedGitScanEnabled(rootPath), cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
-      : result.bundle;
-    if (!isCurrentSidebarRoot(expectedRootPath)) return;
-    if (refreshedBundle) applyGitBundle(refreshedBundle, { reloadDiff: true, cacheOnly: true });
-  }, [applyGitBundle, isCurrentSidebarRoot, rootPath]);
+    setDiffRefreshKey((key) => key + 1);
+    void loadGitBundle(rootPath ?? undefined, { refresh: true, background: true });
+  }, [isCurrentSidebarRoot, loadGitBundle, rootPath]);
 
   const runRepoGitAction = useCallback((action: 'stage-all' | 'stash-all', repoRoot: string | null, repoLabel: string) => {
     if (!repoRoot) return;

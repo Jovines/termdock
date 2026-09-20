@@ -5217,9 +5217,13 @@ router.post('/apply-hunk', async (req: Request, res: Response) => {
     }
     await runGitApply(gitRoot, mode, patch, GIT_APPLY_TIMEOUT_MS);
     clearGitBundleCacheForRoot(gitRoot);
-    const bundle = await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, includeNested, { discoverOnly });
+    // git apply has committed the mutation. A slow/failed workspace scan must
+    // neither delay acknowledgement nor report that successful mutation failed.
+    void refreshGitBundleCacheDetached(resolvedCwd, gitRoot, includeNested, { discoverOnly }).catch((error) => {
+      logFsIoEvent({ id: requestId, action, op: 'git.apply-hunk', event: 'bundle-refresh-error', path: requestedPath, cwd, repoRoot: gitRoot, extra: { mode, error: error instanceof Error ? error.message : String(error) } });
+    });
     logFsIo({ id: requestId, action, op: 'git.apply-hunk', startedAt, status: 'ok', path: requestedPath, cwd, repoRoot: gitRoot, extra: { mode } });
-    res.json({ ok: true, bundle });
+    res.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Git apply failed';
     const code = (error as Error & { code?: string }).code ?? 'GIT_APPLY_FAILED';

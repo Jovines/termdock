@@ -649,6 +649,8 @@ export type TranslationDictionary = {
     revertHunk: string;
     revertHunkTitle: string;
     revertHunkConfirm: string;
+    hunkActionReverted: string;
+    hunkActionStaged: string;
     hunkActionApplying: string;
     hunkActionUnavailable: string;
     hunkActionFailed: (params: TranslatorParams) => string;

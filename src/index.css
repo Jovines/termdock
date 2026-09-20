@@ -279,6 +279,16 @@ body {
   overscroll-behavior: none;
 }
 
+/* Component font utilities must not override the touch focus-zoom floor.
+   any-pointer also covers tablets with an attached mouse/trackpad. */
+@media (any-pointer: coarse) {
+  .android-mirror-panel select,
+  .android-mirror-panel input:not([type='range']),
+  .android-mirror-panel textarea {
+    font-size: 16px;
+  }
+}
+
 /* Prevent iOS Safari from auto-zooming the page when focusing form fields
    whose effective font-size is below 16px. We force a 16px floor on touch
    devices only, so desktop layouts keep their compact sizes. */

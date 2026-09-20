@@ -1505,6 +1505,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   // git error instead of silently applying the wrong thing.
   const [runningHunkActionKey, setRunningHunkActionKey] = useState<string | null>(null);
   const [hunkActionError, setHunkActionError] = useState<{ key: string; message: string } | null>(null);
+  const [completedHunkAction, setCompletedHunkAction] = useState<{ key: string; mode: DiffHunkApplyMode; diff: string | null } | null>(null);
+  const hunkActionInFlightRef = useRef(false);
   const [revertConfirmKey, setRevertConfirmKey] = useState<string | null>(null);
 
   // New diff data reshuffles hunks; drop stale action state.
@@ -1523,12 +1525,13 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   const canRunHunkActions = Boolean(onHunkGitAction && hunkActionGitRoot && diffOverride == null && preparedDiff == null);
 
   const runHunkGitAction = useCallback(async (mode: DiffHunkApplyMode, actionKey: string, file: FileData, fileIndex: number, hunkIndex: number, displayPath: string) => {
-    if (!onHunkGitAction || !hunkActionGitRoot) return;
+    if (!onHunkGitAction || !hunkActionGitRoot || hunkActionInFlightRef.current) return;
     const patch = effectiveDiffContent ? extractHunkPatch(effectiveDiffContent, file, fileIndex, hunkIndex) : null;
     if (!patch) {
       setHunkActionError({ key: actionKey, message: t('diffViewer.hunkActionUnavailable') });
       return;
     }
+    hunkActionInFlightRef.current = true;
     setRunningHunkActionKey(actionKey);
     setHunkActionError(null);
     try {
@@ -1538,9 +1541,12 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         cwd: hunkActionGitRoot,
         path: joinRepoPath(hunkActionGitRoot, displayPath) ?? displayPath,
       });
+      // Keep stale hunks disabled until fresh diff content replaces them.
+      setCompletedHunkAction({ key: actionKey, mode, diff: effectiveDiffContent });
     } catch (error) {
       setHunkActionError({ key: actionKey, message: error instanceof Error ? error.message : String(error) });
     } finally {
+      hunkActionInFlightRef.current = false;
       setRunningHunkActionKey((current) => (current === actionKey ? null : current));
       setRevertConfirmKey((current) => (current === actionKey ? null : current));
     }
@@ -1823,7 +1829,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const hunkReferenceActive = insertedReferenceKey === hunkReferenceKey || copiedReferenceKey === hunkReferenceKey;
                     const stageHunkKey = `stage:${displayPath}:${index}`;
                     const revertHunkKey = `revert:${displayPath}:${index}`;
-                    const hunkActionBusy = runningHunkActionKey !== null;
+                    const awaitingFreshDiff = completedHunkAction?.diff === effectiveDiffContent;
+                    const hunkActionBusy = runningHunkActionKey !== null || awaitingFreshDiff;
+                    const thisHunkCompleted = awaitingFreshDiff && (completedHunkAction?.key === stageHunkKey || completedHunkAction?.key === revertHunkKey);
                     const canStageHunk = canRunHunkActions && (!changedFile || changedFile.unstaged || changedFile.untracked);
                     const thisHunkActionError = hunkActionError && (hunkActionError.key === stageHunkKey || hunkActionError.key === revertHunkKey)
                       ? hunkActionError.message
@@ -1978,7 +1986,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                                   className="inline-flex h-6 shrink-0 items-center rounded-full bg-accent/10 px-2 text-[10px] font-semibold text-accent transition hover:bg-accent/20 active:scale-95 disabled:opacity-50"
                                   title={t('diffViewer.stageHunkTitle')}
                                 >
-                                  {runningHunkActionKey === stageHunkKey ? t('diffViewer.hunkActionApplying') : t('diffViewer.stageHunk')}
+                                  {runningHunkActionKey === stageHunkKey ? t('diffViewer.hunkActionApplying') : thisHunkCompleted && completedHunkAction?.mode === 'stage' ? t('diffViewer.hunkActionStaged') : t('diffViewer.stageHunk')}
                                 </button>
                               )}
                               {canRunHunkActions && (
@@ -2001,6 +2009,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                                 >
                                   {runningHunkActionKey === revertHunkKey
                                     ? t('diffViewer.hunkActionApplying')
+                                    : thisHunkCompleted && completedHunkAction?.mode === 'revert-worktree'
+                                      ? t('diffViewer.hunkActionReverted')
                                     : revertConfirmKey === revertHunkKey
                                       ? t('diffViewer.revertHunkConfirm')
                                       : t('diffViewer.revertHunk')}

@@ -23,6 +23,7 @@ vi.mock('../../android/mirrorController', () => {
       }
       connect(_serial?: string, quality?: unknown) {
         (globalThis as Record<string, unknown>).__mirrorConnection = { quality, callbacks: this.callbacks };
+        if ((globalThis as Record<string, unknown>).__pauseMirrorConnect) { this.callbacks.onState?.('connecting'); return; }
         this.callbacks.onHeader?.({ deviceName: 'Test', codec: 'h264', width: 544, height: 1080 });
         this.callbacks.onState?.('streaming');
       }
@@ -82,25 +83,25 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
       quality: ReturnType<typeof normalizeAndroidQuality>;
       callbacks: { onStats: (value: unknown) => void };
     };
-    expect(connection().quality.maxSize).toBe(720);
+    expect(connection().quality.maxSize).toBe(1080);
     const saved = vi.mocked(updateSettings).mock.calls.length;
     const oldConnection = connection();
     const canvas = document.querySelector('canvas')!;
     for (const time of [5000, 6000, 7000, 8000]) {
       if (time === 7000) act(() => firePointer(canvas, 'pointerdown', { pointerId: 9, clientX: 100, clientY: 100 }));
       if (time === 8000) {
-        expect(connection().quality.maxSize).toBe(720);
+        expect(connection().quality.maxSize).toBe(1080);
         act(() => firePointer(canvas, 'pointerup', { pointerId: 9, clientX: 100, clientY: 100 }));
       }
       now = time;
       act(() => oldConnection.callbacks.onStats({ fps: 12, kbps: 700, width: 720, height: 360,
-        adaptation: { rttMs: 500, deliveryDelayMs: 0, decodeQueue: 0, frames: 12 } }));
+        adaptation: { rttMs: 500, deliveryDelayMs: 400, decodeQueue: 0, frames: 12 } }));
     }
-    expect(connection().quality.maxSize).toBe(480);
+    expect(connection().quality.maxSize).toBe(720);
     expect(screen.getByLabelText('Stop recording')).toBeTruthy();
     expect(stopAndroidRecording).not.toHaveBeenCalled();
     expect((screen.getByLabelText('Quality') as HTMLSelectElement).value).toBe('auto');
-    expect(screen.getByRole('option', { name: 'Auto · 480p' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Auto · 720' })).toBeTruthy();
     expect(vi.mocked(updateSettings).mock.calls.length).toBe(saved);
     await userEvent.selectOptions(screen.getByLabelText('Quality'), 'high');
     now = 30000;
@@ -378,7 +379,7 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     expect(viewTransform(canvas).zoom).toBeCloseTo(1.5, 5);
     await userEvent.click(button);
     act(() => { canvas.dispatchEvent(new WheelEvent('wheel', {
-      deltaY: -1, ctrlKey: true, clientX: 150, clientY: 300, cancelable: true,
+      deltaY: -1, ctrlKey: true, clientX: 150, clientY: 300, cancelable: true, bubbles: true,
     })); });
     await nextFrame();
     const interrupted = viewTransform(canvas).zoom;
@@ -418,7 +419,7 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     const view = await streamingView(async () => {});
     const canvas = canvasOf(view);
     const wheel = (deltaY: number) => canvas.dispatchEvent(new WheelEvent('wheel', {
-      deltaY, ctrlKey: true, clientX: 180, clientY: 330, cancelable: true,
+      deltaY, ctrlKey: true, clientX: 180, clientY: 330, cancelable: true, bubbles: true,
     }));
     act(() => { wheel(-1); wheel(0); wheel(-1); });
     expect(viewTransform(canvas).zoom).toBe(1);
@@ -428,6 +429,38 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     expect(viewTransform(canvas).x).toBeCloseTo(30 * (1 - z), 6);
     expect(viewTransform(canvas).y).toBeCloseTo(30 * (1 - z), 6);
     expect(touchCalls()).toEqual([]);
+  });
+
+  it('同设备换画质时保留上一帧，重连空档的捏合仍由预览区域处理', async () => {
+    const view = await streamingView(async () => {});
+    const canvas = canvasOf(view);
+    (globalThis as Record<string, unknown>).__pauseMirrorConnect = true;
+    try {
+      await userEvent.selectOptions(screen.getByLabelText('Quality'), 'high');
+      expect(canvas.style.display).toBe('block');
+      const wheel = new WheelEvent('wheel', { deltaY: -10, ctrlKey: true, bubbles: true, cancelable: true });
+      act(() => { canvas.parentElement!.dispatchEvent(wheel); });
+      expect(wheel.defaultPrevented).toBe(true);
+    } finally { delete (globalThis as Record<string, unknown>).__pauseMirrorConnect; }
+  });
+
+  it('画面留白和原生手势不会把缩放传给浏览器，面板外仍保留默认行为', async () => {
+    const view = await streamingView(async () => {});
+    const canvas = canvasOf(view);
+    const stage = canvas.parentElement!;
+    const wheel = new WheelEvent('wheel', { deltaY: -10, ctrlKey: true, bubbles: true, cancelable: true });
+    act(() => { stage.dispatchEvent(wheel); });
+    expect(wheel.defaultPrevented).toBe(true);
+    await nextFrame();
+    expect(viewTransform(canvas).zoom).toBeGreaterThan(1);
+    for (const type of ['gesturestart', 'gesturechange']) {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      stage.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    const outside = new WheelEvent('wheel', { ctrlKey: true, cancelable: true });
+    document.body.dispatchEvent(outside);
+    expect(outside.defaultPrevented).toBe(false);
   });
 
   it('⌘/Ctrl+滚轮以光标为锚点缩放，普通滚轮照旧滚设备', async () => {

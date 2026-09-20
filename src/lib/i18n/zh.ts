@@ -631,6 +631,8 @@ export const zh: TranslationDictionary = {
     revertHunk: '撤销',
     revertHunkTitle: '撤销这个 hunk 的工作区改动（不可恢复）',
     revertHunkConfirm: '确认撤销？',
+    hunkActionReverted: '已撤销',
+    hunkActionStaged: '已暂存',
     hunkActionApplying: '应用中…',
     hunkActionUnavailable: '无法为这个 hunk 构造补丁',
     hunkActionFailed: ({ message }) => `操作失败：${message}。如改动已变化，请刷新后重试。`,

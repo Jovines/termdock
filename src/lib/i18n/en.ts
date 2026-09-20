@@ -631,6 +631,8 @@ export const en: TranslationDictionary = {
     revertHunk: 'Revert',
     revertHunkTitle: 'Revert this hunk in the worktree (cannot be undone)',
     revertHunkConfirm: 'Confirm revert?',
+    hunkActionReverted: 'Reverted',
+    hunkActionStaged: 'Staged',
     hunkActionApplying: 'Applying…',
     hunkActionUnavailable: 'Cannot build a patch for this hunk',
     hunkActionFailed: ({ message }) => `Failed: ${message}. If the changes moved on, refresh and retry.`,

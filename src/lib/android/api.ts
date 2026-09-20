@@ -60,7 +60,7 @@ export const DEFAULT_ANDROID_QUALITY = ANDROID_QUALITY_PRESETS[1]!;
 export function normalizeAndroidQuality(value: unknown): AndroidQuality {
   if (!value || typeof value !== 'object') return DEFAULT_ANDROID_QUALITY;
   const candidate = value as Partial<AndroidQuality>;
-  if (candidate.id === 'auto') return { id: 'auto', maxSize: 720, bitRate: 1_200_000, maxFps: 30 };
+  if (candidate.id === 'auto') return { id: 'auto', maxSize: 1080, bitRate: 4_000_000, maxFps: 30 };
   const preset = ANDROID_QUALITY_PRESETS.find(item => item.id === candidate.id);
   if (preset) return preset;
   if (candidate.id !== 'custom') return DEFAULT_ANDROID_QUALITY;
