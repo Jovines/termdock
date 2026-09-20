@@ -1786,7 +1786,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
             </div>
           ) : (
             <DiffSplitScrollArea enabled={viewType === 'split' && !wrap} label={t('rightSidebar.horizontalScrollHint')} className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`}>
-              <div className="min-w-full">
+              <div className="termdock-diff-canvas min-w-full">
                 {file.hunks.map((hunk, index) => {
                     const hunkFlatIndex = hunkFlatCursor;
                     hunkFlatCursor += 1;

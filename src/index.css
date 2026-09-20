@@ -1228,6 +1228,14 @@ html[data-theme='light'] .termdock-diff {
   -webkit-overflow-scrolling: touch;
 }
 
+/* All unified hunks share one horizontal canvas. Otherwise each table only
+   grows to its own longest line, leaving shorter row backgrounds and hunk
+   headers behind when the file's shared scroller moves to the right. */
+.termdock-diff-scroll:not(.diff-split):not(.termdock-diff-wrap) > .termdock-diff-canvas {
+  width: max-content;
+  min-width: 100%;
+}
+
 /*
  * Horizontally scrollable content in the mobile file preview is nested inside
  * the sidebar's file-list swiper. iOS is stricter than Android about routing

@@ -537,6 +537,28 @@ Binary files a/preview.png and b/preview.png differ`,
    capture(error);
  }`,
   },
+  multiHunkWidths: {
+    label: 'Multiple hunks with unequal line widths',
+    path: 'UnequalWidths.ts',
+    diff: `diff --git a/UnequalWidths.ts b/UnequalWidths.ts
+--- a/UnequalWidths.ts
++++ b/UnequalWidths.ts
+@@ -1,3 +1,3 @@
+ export function longLine() {
+-  return "${'long-segment-'.repeat(18)}before";
++  return "${'long-segment-'.repeat(18)}after";
+ }
+@@ -20,3 +20,3 @@
+ export function mediumLine() {
+-  return "${'medium-segment-'.repeat(5)}before";
++  return "${'medium-segment-'.repeat(5)}after";
+ }
+@@ -40,3 +40,3 @@
+ export function shortLine() {
+-  return false;
++  return true;
+ }`,
+  },
   multiHunkMixed: {
     label: 'Multiple hunks with mixed change types',
     path: 'MixedChanges.ts',
