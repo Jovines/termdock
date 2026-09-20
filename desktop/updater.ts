@@ -19,6 +19,7 @@ import type { DesktopAppUpdateState, DesktopRuntimeUpdateState } from './types.j
 const AUTOMATIC_CHECK_DELAY_MS = 15_000;
 const AUTOMATIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const UPDATE_CHECK_TIMEOUT_MS = 30_000;
+const UPDATE_INSTALL_TIMEOUT_MS = 30_000;
 
 type ShowMessageBox = (options: MessageBoxOptions) => Promise<MessageBoxReturnValue>;
 type UpdateStateListener = (state: DesktopAppUpdateState) => void;
@@ -30,6 +31,7 @@ let updateDialogShown = false;
 let showMessageBox: ShowMessageBox | null = null;
 let checkPromise: Promise<DesktopAppUpdateState> | null = null;
 let settleCheck: ((state: DesktopAppUpdateState) => void) | null = null;
+let installTimeout: ReturnType<typeof setTimeout> | null = null;
 let checkTimeout: ReturnType<typeof setTimeout> | null = null;
 let updateFeedPromise: Promise<string> | null = null;
 let selectedFeed: UpdateFeedResponse | null = null;
@@ -108,6 +110,12 @@ function finishPendingCheck(state = snapshotUpdateState()): void {
 function normalizeReleaseVersion(releaseName: string): string | null {
   const match = releaseName.match(/v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
   return match?.[1] ?? null;
+}
+
+// quitAndInstall closes windows before app.before-quit; window close handlers
+// must allow this shutdown without applying the normal hide-on-close behavior.
+export function isDesktopUpdateInstalling(): boolean {
+  return updateState.status === 'installing';
 }
 
 export function getDesktopUpdateState(): DesktopAppUpdateState {
@@ -227,22 +235,27 @@ export function checkForRuntimeUpdates(): Promise<DesktopRuntimeUpdateState> {
 }
 
 async function reportUpdateError(error: unknown): Promise<void> {
+  const installing = isDesktopUpdateInstalling();
+  if (installTimeout) {
+    clearTimeout(installTimeout);
+    installTimeout = null;
+  }
   const message = error instanceof Error ? error.message : String(error);
   console.error('[desktop-updater]', message);
   const state = publishUpdateState({
-    status: updateState.status === 'installing' ? 'ready' : 'error',
+    status: installing ? 'ready' : 'error',
     checkedAt: Date.now(),
     error: message,
   });
   finishPendingCheck(state);
-  if (!nativeCheckDialogPending || !showMessageBox) return;
+  if ((!installing && !nativeCheckDialogPending) || !showMessageBox) return;
   nativeCheckDialogPending = false;
   await showMessageBox({
     type: 'error',
-    title: '检查桌面版更新失败',
-    message: '暂时无法检查 Termdock Desktop 更新',
+    title: installing ? '桌面版更新未完成' : '检查桌面版更新失败',
+    message: installing ? 'Termdock Desktop 未能退出并安装更新' : '暂时无法检查 Termdock Desktop 更新',
     detail: message,
-  });
+  }).catch((dialogError) => console.error('[desktop-updater] error dialog failed', dialogError));
 }
 
 function configureUpdaterEvents(): void {
@@ -439,12 +452,19 @@ export function installDownloadedDesktopUpdate(): DesktopAppUpdateState {
   if (updateState.status !== 'ready') {
     throw new Error('Desktop update has not finished downloading');
   }
-  const state = publishUpdateState({ status: 'installing', error: null });
+  publishUpdateState({ status: 'installing', error: null });
+  installTimeout = setTimeout(() => {
+    installTimeout = null;
+    if (isDesktopUpdateInstalling()) {
+      void reportUpdateError(new Error('应用未能在 30 秒内退出，更新尚未完成。请重试；若仍失败，请退出应用后重新打开，或手动安装新版桌面客户端。'));
+    }
+  }, UPDATE_INSTALL_TIMEOUT_MS);
+  installTimeout.unref?.();
   try {
     autoUpdater.quitAndInstall();
   } catch (error) {
-    publishUpdateState({ status: 'ready', error: error instanceof Error ? error.message : String(error) });
-    throw error;
+    void reportUpdateError(error);
   }
-  return state;
+  // Native error events may fire synchronously inside quitAndInstall.
+  return snapshotUpdateState();
 }

@@ -379,14 +379,11 @@ describe('DiffLab regression fixtures', () => {
     ]);
   });
 
-  it('collapses import-only hunks by default', async () => {
+  it('shows import-only hunks by default', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=imports&view=unified&inline=words&wrap=on');
 
-    await waitFor(() => expect(screen.getByText('Import-only changes collapsed.')).toBeTruthy());
-    expect(container.querySelector('.diff-hunk')?.classList.contains('diff-hunk-imports')).toBe(true);
-    expect(screen.getByText('Import-only changes collapsed.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'show' })).toBeTruthy();
-    expect(container.querySelectorAll('.diff-line')).toHaveLength(0);
+    await waitFor(() => expect(container.querySelectorAll('.diff-line').length).toBeGreaterThan(0));
+    expect(screen.queryByText('Import-only changes collapsed.')).toBeNull();
   });
 
   it('keeps same-line import expansions aligned in split view', async () => {

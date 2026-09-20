@@ -1,3 +1,4 @@
+import { MobileSetupGuide } from './lib/components/settings/MobileSetupGuide';
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
 import { ViewportDiagnostics } from './lib/components/terminal/ViewportDiagnostics';
 import { savedConnection } from './lib/federation/browserIntegration';
@@ -33,7 +34,6 @@ import {
   LoaderCircle as RiLoaderCircle,
   CircleHelp as RiCircleHelp,
   BellDot as RiBellDot,
-  AppWindow as RiDesktopLine,
   FolderOpen as RiFolderOpenLine,
   Cable as RiLinkLine,
   Type as RiFontSize,
@@ -788,6 +788,7 @@ function App() {
       setDesktopUpdateState(await desktopBridge.installDesktopUpdate());
     } catch (error) {
       setDesktopActionMessage(error instanceof Error ? error.message : String(error));
+    } finally {
       setDesktopUpdatePending(false);
     }
   }, [desktopBridge, desktopUpdatePending, desktopUpdateState?.status, t]);
@@ -1771,6 +1772,7 @@ function App() {
   const [newSessionShortcutConfirmMode, setNewSessionShortcutConfirmMode] = useState<'shell' | 'tmux' | null>(null);
 
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
+  const [isLocalAccessOpen, setIsLocalAccessOpen] = React.useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = React.useState(false);
   const [notificationTestStatus, setNotificationTestStatus] = React.useState<'idle' | 'checking' | 'delivered' | 'failed'>('idle');
   // Toolbar presets are owned by the server (~/.termdock/toolbar-presets.json)
@@ -1813,6 +1815,7 @@ function App() {
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
   const terminalFocusAvailable = !activeHistoryOverlay
+    && !isLocalAccessOpen
     && !isNotificationsOpen
     && !isToolbarPresetsOpen
     && !isAgentRulesOpen
@@ -1842,6 +1845,11 @@ function App() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (isLocalAccessOpen) {
+        event.preventDefault();
+        setIsLocalAccessOpen(false);
+        return;
+      }
       if (isNotificationsOpen) {
         event.preventDefault();
         setIsNotificationsOpen(false);
@@ -1893,6 +1901,7 @@ function App() {
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
   }, [
+    isLocalAccessOpen,
     isNotificationsOpen,
     isToolbarPresetsOpen,
     isAgentRulesOpen,
@@ -3666,90 +3675,13 @@ function App() {
                 </span>
               </button>
 
-              <details className="mt-3 rounded-xl bg-surface-2 px-3 py-3" open={false}>
-                <summary className="flex cursor-pointer items-start justify-between gap-2 list-none">
-                  <div>
-                    <div className="text-[12px] font-medium text-foreground/90">{t('settings.localAccess')}</div>
-                    <div className="mt-0.5 text-[10px] text-muted-foreground">{t('settings.localAccessHint')}</div>
-                  </div>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] ${localAccess.status === 'active' ? 'bg-primary/15 text-primary' : 'bg-surface text-muted-foreground'}`}>
-                    {localAccess.status}
-                  </span>
-                </summary>
-                <div className="mt-3 flex items-center overflow-hidden rounded-lg bg-surface ring-1 ring-border/10 focus-within:ring-primary/40">
-                  <input
-                    value={localAccessNameInput}
-                    onChange={(event) => setLocalAccessNameInput(event.target.value.toLowerCase())}
-                    className="min-w-0 flex-1 bg-transparent px-2.5 py-2 text-[12px] text-foreground outline-none"
-                    placeholder="jovn"
-                    spellCheck={false}
-                  />
-                  <span className="shrink-0 border-l border-border/10 px-2.5 py-2 text-[11px] text-muted-foreground">.termdock.local</span>
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={localAccessSaving}
-                    onClick={() => void handleSaveLocalAccess()}
-                    className="rounded-full bg-primary/15 px-3 py-1.5 text-[11px] font-medium text-primary transition hover:bg-primary/25 disabled:opacity-50"
-                  >
-                    {localAccessSaving ? t('settings.saving') : t('common.save')}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={localAccessSaving}
-                    onClick={() => void handleResetLocalAccess()}
-                    className="rounded-full bg-surface px-3 py-1.5 text-[11px] font-medium text-muted-foreground transition hover:bg-surface-elevated disabled:opacity-50"
-                  >
-                    {t('settings.resetAutoName')}
-                  </button>
-                </div>
-                <div className="mt-3 space-y-1.5 text-[11px]">
-                  {localAccess.url && (
-                    <button type="button" onClick={() => void handleCopyText(localAccess.url, 'lan')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-muted-foreground transition hover:bg-surface-elevated">
-                      <span className="min-w-0 truncate">Branded: {localAccess.url}</span>
-                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'lan' ? 'Copied' : t('common.copy')}</span>
-                    </button>
-                  )}
-                  {localAccess.interfaces.length > 0 && (
-                    <details className="rounded-lg bg-surface px-2.5 py-2 text-muted-foreground" open={false}>
-                      <summary className="cursor-pointer text-[11px] font-medium text-foreground/80">IP fallback addresses</summary>
-                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        {localAccess.interfaces.map((entry) => {
-                          const url = entry.url ?? `${localAccess.httpsEnabled ? 'https' : 'http'}://${entry.address}:9834`;
-                          return (
-                            <div key={`${entry.name}-${entry.address}`} className="rounded-lg bg-surface-2 p-2">
-                              <div className="text-[11px] font-medium text-foreground/85">{entry.label} ({entry.name})</div>
-                              <div className="mt-0.5 text-[10px] text-muted-foreground">{entry.address}</div>
-                              {entry.qrDataUrl && (
-                                <div className="mt-2 inline-block rounded-lg bg-[var(--background)] p-1.5">
-                                  <img src={entry.qrDataUrl} alt={`QR code for ${url}`} className="h-28 w-28" />
-                                </div>
-                              )}
-                              <button type="button" onClick={() => void handleCopyText(url, `ip-${entry.address}`)} className="mt-2 flex w-full items-center justify-between gap-2 rounded-md bg-surface px-2 py-1.5 text-left text-[11px] transition hover:bg-surface-elevated">
-                                <span className="min-w-0 truncate">{url}</span>
-                                <span className="shrink-0 text-[10px]">{localAccessCopied === `ip-${entry.address}` ? 'Copied' : t('common.copy')}</span>
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </details>
-                  )}
-                  {localAccess.onboardingUrl && (
-                    <button type="button" onClick={() => void handleCopyText(localAccess.onboardingUrl, 'setup')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-muted-foreground transition hover:bg-surface-elevated">
-                      <span className="min-w-0 truncate">{t('settings.onboardingUrl')}: {localAccess.onboardingUrl}</span>
-                      <span className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'setup' ? 'Copied' : t('common.copy')}</span>
-                    </button>
-                  )}
-                  <div className="text-muted-foreground">
-                    {localAccess.httpsEnabled ? t('settings.httpsActive') : t('settings.httpsInactive')}
-                    {!localAccess.caAvailable && ` · ${t('settings.caMissing')}`}
-                  </div>
-                  {localAccess.reason && <div className="text-[color:var(--warning)]">{localAccess.reason}</div>}
-                  {localAccessError && <div className="text-destructive">{localAccessError}</div>}
-                </div>
-              </details>
+              <button type="button" onClick={() => setIsLocalAccessOpen(true)} className="mt-3 flex w-full items-center justify-between gap-3 rounded-xl bg-surface-2 px-3 py-3 text-left transition hover:bg-surface-elevated">
+                <span>
+                  <span className="block text-[12px] font-medium text-foreground/90">{t('settings.localAccess')}</span>
+                  <span className="mt-0.5 block text-[10px] text-muted-foreground">{t('settings.localAccessHint')}</span>
+                </span>
+                <RiChevronRightLine size={16} className="shrink-0 text-muted-foreground" />
+              </button>
 
               <TermdockUpdateSettings
                 state={termdockUpdateState}
@@ -3758,80 +3690,62 @@ function App() {
                 onConfirmRestart={() => void handleConfirmUpdateRestart()}
                 desktopState={desktopUpdateSupported ? desktopUpdateState : undefined}
                 desktopPending={desktopUpdatePending}
-                onCheckDesktop={() => void handleCheckDesktopUpdate()}
+                onCheckDesktop={desktopUpdateSupported ? () => void handleCheckDesktopUpdate() : undefined}
                 onInstallDesktop={() => void handleInstallDesktopUpdate()}
+                desktopSnapshot={desktopSnapshot}
+                desktopActions={desktopBridge ? (
+                  <>
+                    <div className="grid grid-cols-1 gap-px border-t border-border/10 bg-border/10 sm:grid-cols-3">
+                      <button
+                        type="button"
+                        onClick={() => void desktopBridge.showConnectionCenter()}
+                        className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                      >
+                        <RiLinkLine size={13} className="shrink-0 text-primary" />
+                        {t('settings.desktopSwitchService')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDesktopActionMessage(null);
+                          void desktopBridge.installCli()
+                            .then((next) => {
+                              setDesktopSnapshot(next);
+                              setDesktopActionMessage(t('settings.desktopCliUpdated'));
+                            })
+                            .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
+                        }}
+                        className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                      >
+                        <RiTerminalLine size={13} className="shrink-0 text-primary" />
+                        {t('settings.desktopInstallCli')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDesktopActionMessage(null);
+                          void desktopBridge.revealDataDirectory()
+                            .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
+                        }}
+                        className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                      >
+                        <RiFolderOpenLine size={13} className="shrink-0 text-primary" />
+                        {t('settings.desktopOpenDataDirectory')}
+                      </button>
+                    </div>
+                    {desktopActionMessage && (
+                      <div className="border-t border-border/10 px-3 py-2 text-[10px] text-muted-foreground">
+                        {desktopActionMessage}
+                      </div>
+                    )}
+                  </>
+                ) : undefined}
               />
 
               <ServerHealthSettings
                 state={serverHealthState}
                 onDismiss={() => void handleDismissServerHealth()}
               />
-
-              {desktopBridge && (
-                <div className="mt-3 overflow-hidden rounded-xl bg-surface-2">
-                  <div className="flex items-start justify-between gap-3 border-b border-border/10 px-3 py-3">
-                    <div className="flex min-w-0 items-start gap-2.5">
-                      <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
-                        <RiDesktopLine size={15} />
-                      </span>
-                      <div className="min-w-0">
-                        <div className="text-[12px] font-medium text-foreground">{t('settings.desktopTitle')}</div>
-                        <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
-                          {desktopSnapshot
-                            ? `App ${desktopSnapshot.appVersion} · CLI ${desktopSnapshot.bundledCliVersion}`
-                            : t('settings.desktopStatusLoading')}
-                        </div>
-                      </div>
-                    </div>
-                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                      macOS
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-1 gap-px bg-border/10 sm:grid-cols-3">
-                    <button
-                      type="button"
-                      onClick={() => void desktopBridge.showConnectionCenter()}
-                      className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                    >
-                      <RiLinkLine size={13} className="shrink-0 text-primary" />
-                      {t('settings.desktopSwitchService')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDesktopActionMessage(null);
-                        void desktopBridge.installCli()
-                          .then((next) => {
-                            setDesktopSnapshot(next);
-                            setDesktopActionMessage(t('settings.desktopCliUpdated'));
-                          })
-                          .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
-                      }}
-                      className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                    >
-                      <RiTerminalLine size={13} className="shrink-0 text-primary" />
-                      {t('settings.desktopInstallCli')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDesktopActionMessage(null);
-                        void desktopBridge.revealDataDirectory()
-                          .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
-                      }}
-                      className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                    >
-                      <RiFolderOpenLine size={13} className="shrink-0 text-primary" />
-                      {t('settings.desktopOpenDataDirectory')}
-                    </button>
-                  </div>
-                  {desktopActionMessage && (
-                    <div className="border-t border-border/10 px-3 py-2 text-[10px] text-muted-foreground">
-                      {desktopActionMessage}
-                    </div>
-                  )}
-                </div>
-              )}
 
               {/* New session shortcut */}
               <div className="mt-3 flex gap-2">
@@ -4669,6 +4583,88 @@ function App() {
           </>
         );
       })()}
+
+      {isLocalAccessOpen && (
+        <>
+          <button type="button" aria-label={t('common.close')} className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setIsLocalAccessOpen(false)} />
+          <div role="dialog" aria-modal="true" aria-labelledby="local-access-title" className="fixed inset-x-3 top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
+            <div className="flex shrink-0 items-center justify-between border-b border-border/15 p-4">
+              <h2 id="local-access-title" className="section-title">{t('settings.localAccess')}</h2>
+              <button autoFocus type="button" aria-label={t('common.close')} onClick={() => setIsLocalAccessOpen(false)} className="rounded-full bg-surface-2 p-2 text-muted-foreground"><RiCloseLine size={18} /></button>
+            </div>
+            <div className="overflow-y-auto overscroll-contain p-4">
+              <MobileSetupGuide state={localAccess} onCopy={(url) => void handleCopyText(url, 'setup')} copied={localAccessCopied === 'setup'} />
+                <div className="mt-3 flex items-center overflow-hidden rounded-lg bg-surface ring-1 ring-border/10 focus-within:ring-primary/40">
+                  <input
+                    value={localAccessNameInput}
+                    onChange={(event) => setLocalAccessNameInput(event.target.value.toLowerCase())}
+                    className="min-w-0 flex-1 bg-transparent px-2.5 py-2 text-[12px] text-foreground outline-none"
+                    placeholder="jovn"
+                    spellCheck={false}
+                  />
+                  <span className="shrink-0 border-l border-border/10 px-2.5 py-2 text-[11px] text-muted-foreground">.termdock.local</span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={localAccessSaving}
+                    onClick={() => void handleSaveLocalAccess()}
+                    className="rounded-full bg-primary/15 px-3 py-1.5 text-[11px] font-medium text-primary transition hover:bg-primary/25 disabled:opacity-50"
+                  >
+                    {localAccessSaving ? t('settings.saving') : t('common.save')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={localAccessSaving}
+                    onClick={() => void handleResetLocalAccess()}
+                    className="rounded-full bg-surface px-3 py-1.5 text-[11px] font-medium text-muted-foreground transition hover:bg-surface-elevated disabled:opacity-50"
+                  >
+                    {t('settings.resetAutoName')}
+                  </button>
+                </div>
+                <div className="mt-3 space-y-1.5 text-[11px]">
+                  {localAccess.url && (
+                    <button type="button" onClick={() => void handleCopyText(localAccess.url, 'lan')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-muted-foreground transition hover:bg-surface-elevated">
+                      <span className="min-w-0 truncate">Branded: {localAccess.url}</span>
+                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'lan' ? 'Copied' : t('common.copy')}</span>
+                    </button>
+                  )}
+                  {localAccess.interfaces.length > 0 && (
+                    <details className="rounded-lg bg-surface px-2.5 py-2 text-muted-foreground" open={false}>
+                      <summary className="cursor-pointer text-[11px] font-medium text-foreground/80">IP fallback addresses</summary>
+                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {localAccess.interfaces.map((entry) => {
+                          const url = entry.url ?? `${localAccess.httpsEnabled ? 'https' : 'http'}://${entry.address}:9834`;
+                          return (
+                            <div key={`${entry.name}-${entry.address}`} className="rounded-lg bg-surface-2 p-2">
+                              <div className="text-[11px] font-medium text-foreground/85">{entry.label} ({entry.name})</div>
+                              <div className="mt-0.5 text-[10px] text-muted-foreground">{entry.address}</div>
+                              {entry.qrDataUrl && (
+                                <div className="mt-2 inline-block rounded-lg bg-[var(--background)] p-1.5">
+                                  <img src={entry.qrDataUrl} alt={`QR code for ${url}`} className="h-28 w-28" />
+                                </div>
+                              )}
+                              <button type="button" onClick={() => void handleCopyText(url, `ip-${entry.address}`)} className="mt-2 flex w-full items-center justify-between gap-2 rounded-md bg-surface px-2 py-1.5 text-left text-[11px] transition hover:bg-surface-elevated">
+                                <span className="min-w-0 truncate">{url}</span>
+                                <span className="shrink-0 text-[10px]">{localAccessCopied === `ip-${entry.address}` ? 'Copied' : t('common.copy')}</span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  )}
+                  <div className="text-muted-foreground">
+                    {localAccess.httpsEnabled ? t('settings.httpsActive') : t('settings.httpsInactive')}
+                    {!localAccess.caAvailable && ` · ${t('settings.caMissing')}`}
+                  </div>
+                  {localAccess.reason && <div className="text-[color:var(--warning)]">{localAccess.reason}</div>}
+                  {localAccessError && <div className="text-destructive">{localAccessError}</div>}
+                </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {isNotificationsOpen && (
         <>

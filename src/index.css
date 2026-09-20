@@ -1683,14 +1683,6 @@ html[data-theme='light'] .termdock-code .token.important {
   }
 }
 
-.diff-hunk-imports {
-  opacity: 0.78;
-}
-
-.diff-hunk-imports:hover {
-  opacity: 1;
-}
-
 @keyframes diff-hunk-expand {
   from { opacity: 0; transform: translateY(-2px); }
   to   { opacity: 1; transform: translateY(0); }

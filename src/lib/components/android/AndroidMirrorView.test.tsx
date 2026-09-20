@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { normalizeAndroidQuality, startAndroidRecording, stopAndroidRecording, listAndroidRecordings } from '../../android/api';
 import { updateSettings } from '../../terminal/api';
@@ -27,6 +27,9 @@ vi.mock('../../android/mirrorController', () => {
         this.callbacks.onHeader?.({ deviceName: 'Test', codec: 'h264', width: 544, height: 1080 });
         this.callbacks.onState?.('streaming');
       }
+      supportsLiveBitrate = true;
+      canSetBitrate = true;
+      async setBitrate(value: number) { (globalThis as Record<string, unknown>).__mirrorBitrate = value; return true; }
       disconnect() { /* no-op */ }
       back() { keyCalls.push('back'); }
       pointerDown() { touchCalls.push('down'); }
@@ -71,7 +74,7 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
 
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it('服务端录制期间自动画质仍能降档，按住操作时延后调整', async () => {
+  it('录制及按住操作期间不断流调码率，分辨率和连接保持不变', async () => {
     localStorage.removeItem('termdock:android:quality:v1');
     let now = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
@@ -83,25 +86,28 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
       quality: ReturnType<typeof normalizeAndroidQuality>;
       callbacks: { onStats: (value: unknown) => void };
     };
-    expect(connection().quality.maxSize).toBe(1080);
+    expect(connection().quality.maxSize).toBe(1600);
     const saved = vi.mocked(updateSettings).mock.calls.length;
     const oldConnection = connection();
     const canvas = document.querySelector('canvas')!;
     for (const time of [5000, 6000, 7000, 8000]) {
       if (time === 7000) act(() => firePointer(canvas, 'pointerdown', { pointerId: 9, clientX: 100, clientY: 100 }));
       if (time === 8000) {
-        expect(connection().quality.maxSize).toBe(1080);
+        expect(connection().quality.maxSize).toBe(1600);
         act(() => firePointer(canvas, 'pointerup', { pointerId: 9, clientX: 100, clientY: 100 }));
       }
       now = time;
       act(() => oldConnection.callbacks.onStats({ fps: 12, kbps: 700, width: 720, height: 360,
         adaptation: { rttMs: 500, deliveryDelayMs: 400, decodeQueue: 0, frames: 12 } }));
     }
-    expect(connection().quality.maxSize).toBe(720);
+    expect(connection()).toBe(oldConnection);
+    expect(connection().quality.maxSize).toBe(1600);
+    expect((globalThis as Record<string, unknown>).__mirrorBitrate).toBe(3_200_000);
+    await act(async () => {});
     expect(screen.getByLabelText('Stop recording')).toBeTruthy();
     expect(stopAndroidRecording).not.toHaveBeenCalled();
     expect((screen.getByLabelText('Quality') as HTMLSelectElement).value).toBe('auto');
-    expect(screen.getByRole('option', { name: 'Auto · 720' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Auto · 3.2 Mbps' })).toBeTruthy();
     expect(vi.mocked(updateSettings).mock.calls.length).toBe(saved);
     await userEvent.selectOptions(screen.getByLabelText('Quality'), 'high');
     now = 30000;
@@ -429,6 +435,29 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     expect(viewTransform(canvas).x).toBeCloseTo(30 * (1 - z), 6);
     expect(viewTransform(canvas).y).toBeCloseTo(30 * (1 - z), 6);
     expect(touchCalls()).toEqual([]);
+  });
+
+  it('自定义仅改码率时复用连接，不重新创建视频流', async () => {
+    await streamingView(async () => {});
+    const connection = (globalThis as Record<string, unknown>).__mirrorConnection;
+    await userEvent.selectOptions(screen.getByLabelText('Quality'), 'custom');
+    fireEvent.change(screen.getAllByRole('slider')[1]!, { target: { value: '2' } });
+    await userEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect((globalThis as Record<string, unknown>).__mirrorConnection).toBe(connection);
+    expect((globalThis as Record<string, unknown>).__mirrorBitrate).toBe(2_000_000);
+  });
+
+  it('从外部输入框回到画面，首次按下同时聚焦并完整转发触摸', async () => {
+    const view = await streamingView(async () => {});
+    const canvas = canvasOf(view);
+    const outside = document.createElement('input');
+    document.body.append(outside);
+    outside.focus();
+    act(() => firePointer(canvas, 'pointerdown', { pointerId: 99, clientX: 100, clientY: 100 }));
+    expect(document.activeElement).toBe(canvas.closest('.android-mirror-panel'));
+    act(() => firePointer(canvas, 'pointerup', { pointerId: 99, clientX: 100, clientY: 100 }));
+    expect(touchCalls()).toEqual(['down', 'up']);
+    outside.remove();
   });
 
   it('同设备换画质时保留上一帧，重连空档的捏合仍由预览区域处理', async () => {

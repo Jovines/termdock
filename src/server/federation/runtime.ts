@@ -433,7 +433,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             const data = JSON.parse(packet.data);
             if (item.android) {
               if (!full(subjectId)) throw new Error('AUTHORIZATION_DENIED');
-              if (!['control', 'ack', 'ping'].includes(data?.type)) throw new Error('ACTION_NOT_ALLOWED');
+              if (!['control', 'ack', 'ping', 'bitrate'].includes(data?.type)) throw new Error('ACTION_NOT_ALLOWED');
             }
             else if (item.sessionId) { const action = terminalMessageAction(data.type); if (!action) throw new Error('ACTION_NOT_ALLOWED'); check(action, action.startsWith('session.') ? item.sessionId : undefined); }
             else { check('service.view'); if (data?.type !== 'pong') throw new Error('ACTION_NOT_ALLOWED'); }

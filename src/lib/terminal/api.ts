@@ -4,7 +4,7 @@ import { CollaborationDirectory, remoteSessionAddress, type CollaborationDirecto
 import { selectedTarget } from '../federation/clientScope';
 import { prepareEncryptedDownload } from './secureDownload';
 import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
-import { secureSocket } from '../federation/browserIntegration';
+import { currentSecureClient, secureSocket } from '../federation/browserIntegration';
 import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from '../federation/transportLifecycle';
 import { clearPreviewResourceCache, fetchPreviewResource } from '../utils/previewResourceCache';
 import type {
@@ -2999,6 +2999,25 @@ function appendGitDiffOptions(params: URLSearchParams, options?: GitDiffOptions)
 }
 
 export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal, action = filePath ? 'view_diff' : 'view_all_changes', traceId?: string, interactionId?: string, requestSlotId?: string, options?: GitDiffOptions): Promise<FileDiffResponse> {
+  const targetPeerId = selectedTarget()?.targetPeerId;
+  for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
+    const client = currentSecureClient();
+    try {
+      return await getFileDiffOnce(filePath, cached, cwd, signal, action, traceId, interactionId, requestSlotId, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const disconnected = client?.closed || /^(Secure connection closed|Secure response ended unexpectedly)$/.test(message);
+      if (attempt >= 1 || signal?.aborted || !disconnected
+        || !targetPeerId || selectedTarget()?.targetPeerId !== targetPeerId) throw error;
+      // Repeat the complete read, including the response body. The page's
+      // encrypted fetch reconnects as needed; never bypass it or replay writes.
+      logDiffApiEvent('connection_retry', { traceId, interactionId, requestSlotId, filePath, cwd, action, message });
+    }
+  }
+}
+
+async function getFileDiffOnce(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal, action = filePath ? 'view_diff' : 'view_all_changes', traceId?: string, interactionId?: string, requestSlotId?: string, options?: GitDiffOptions): Promise<FileDiffResponse> {
   const params = new URLSearchParams();
   if (filePath) params.set('path', filePath);
   if (cached) params.set('cached', 'true');

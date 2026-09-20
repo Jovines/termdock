@@ -105,7 +105,7 @@ function buildState(
     fallbackHostname,
     url: `${options.scheme}://${hostname}:${options.port}`,
     fallbackUrl: `${options.scheme}://${fallbackHostname}:${options.port}`,
-    onboardingUrl: onboardingHost ? `http://${onboardingHost}:${options.onboardingPort ?? options.port}/onboarding` : null,
+    onboardingUrl: onboardingHost ? `http://${onboardingHost}:${options.onboardingPort ?? options.port}/ca` : null,
     status,
     reason,
     httpsEnabled: options.scheme === 'https',

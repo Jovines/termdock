@@ -1,6 +1,7 @@
+import type { ReactNode } from 'react';
 import { RefreshCw as RiRefreshLine } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import type { DesktopAppUpdateState } from '../../desktop/nativeBridge';
+import type { DesktopAppUpdateState, DesktopNativeSnapshot } from '../../desktop/nativeBridge';
 import type { TermdockUpdateState } from '../../terminal/api';
 
 interface TermdockUpdateSettingsProps {
@@ -10,6 +11,8 @@ interface TermdockUpdateSettingsProps {
   onConfirmRestart: () => void;
   desktopState?: DesktopAppUpdateState | null;
   desktopPending?: boolean;
+  desktopSnapshot?: DesktopNativeSnapshot | null;
+  desktopActions?: ReactNode;
   onCheckDesktop?: () => void;
   onInstallDesktop?: () => void;
 }
@@ -21,6 +24,8 @@ export function TermdockUpdateSettings({
   onConfirmRestart,
   desktopState,
   desktopPending = false,
+  desktopSnapshot,
+  desktopActions,
   onCheckDesktop,
   onInstallDesktop,
 }: TermdockUpdateSettingsProps) {
@@ -41,10 +46,11 @@ export function TermdockUpdateSettings({
             : status === 'error'
               ? (state?.error || t('sidebar.updateFailed'))
               : t('settings.updateHint');
+  const desktopVersion = desktopState?.currentVersion || desktopSnapshot?.appVersion;
   const desktopStatus = desktopState?.status ?? 'idle';
   const desktopBusy = desktopPending || desktopStatus === 'checking' || desktopStatus === 'downloading' || desktopStatus === 'installing';
   const desktopReady = desktopStatus === 'ready';
-  const desktopStatusText = desktopStatus === 'unsupported'
+  const desktopStatusText = desktopState?.error || (desktopStatus === 'unsupported'
     ? t('settings.desktopUpdateUnsupported')
     : desktopStatus === 'checking'
       ? t('settings.desktopUpdateChecking')
@@ -58,7 +64,7 @@ export function TermdockUpdateSettings({
               ? t('settings.desktopUpdateInstalling')
               : desktopStatus === 'error'
                 ? (desktopState?.error || t('settings.desktopUpdateHint'))
-                : t('settings.desktopUpdateHint');
+                : t('settings.desktopUpdateHint'));
 
   return (
     <section className="mt-3 overflow-hidden rounded-xl bg-surface-2" aria-labelledby="termdock-update-title">
@@ -110,7 +116,7 @@ export function TermdockUpdateSettings({
           </button>
         )}
       </div>
-      {desktopState && (
+      {(desktopState || desktopActions) && (
         <div className="flex items-start justify-between gap-3 border-t border-border/10 px-3 py-3">
           <div className="flex min-w-0 items-start gap-2.5">
             <span className={`mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${desktopReady ? 'bg-[rgb(var(--warning-rgb)_/_0.16)] text-[color:var(--warning)]' : 'bg-primary/15 text-primary'}`}>
@@ -118,11 +124,12 @@ export function TermdockUpdateSettings({
             </span>
             <div className="min-w-0">
               <div className="text-[12px] font-medium text-foreground">{t('settings.desktopUpdateTitle')}</div>
-              <div className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">{desktopStatusText}</div>
+              <div className={`mt-0.5 text-[10px] leading-relaxed ${desktopState?.error ? 'text-destructive' : 'text-muted-foreground'}`} role={desktopState?.error ? 'alert' : undefined}>{desktopState ? desktopStatusText : t(onCheckDesktop ? 'settings.desktopStatusLoading' : 'settings.desktopUpdateUnsupported')}</div>
               <div className="mt-1 text-[10px] tabular-nums text-muted-foreground/75">
-                {desktopReady && desktopState.latestVersion
+                {desktopReady && desktopState?.latestVersion
                   ? `${desktopState.currentVersion} → ${desktopState.latestVersion}`
-                  : `v${desktopState.currentVersion}`}
+                  : desktopVersion ? `v${desktopVersion}` : null}
+                {desktopSnapshot && ` · ${t('settings.desktopBundledCli')} ${desktopSnapshot.bundledCliVersion}`}
               </div>
             </div>
           </div>
@@ -138,19 +145,24 @@ export function TermdockUpdateSettings({
           ) : (
             <button
               type="button"
-              disabled={desktopBusy || desktopStatus === 'unsupported' || !onCheckDesktop}
+              disabled={!desktopState || desktopBusy || desktopStatus === 'unsupported' || !onCheckDesktop}
               onClick={onCheckDesktop}
               className="shrink-0 rounded-full bg-surface px-3 py-1.5 text-[11px] font-medium text-foreground transition hover:bg-surface-elevated disabled:cursor-wait disabled:opacity-60"
             >
-              {desktopStatus === 'checking'
-                ? t('settings.updateCheckingShort')
-                : desktopStatus === 'current' || desktopStatus === 'error'
-                  ? t('settings.desktopUpdateCheckAgain')
-                  : t('settings.desktopUpdateCheck')}
+              {desktopStatus === 'installing'
+                ? t('settings.updateInstallingShort')
+                : desktopStatus === 'downloading'
+                  ? t('settings.desktopUpdateDownloadingShort')
+                  : desktopStatus === 'checking'
+                    ? t('settings.updateCheckingShort')
+                    : desktopStatus === 'current' || desktopStatus === 'error'
+                      ? t('settings.desktopUpdateCheckAgain')
+                      : t('settings.desktopUpdateCheck')}
             </button>
           )}
         </div>
       )}
+      {desktopActions}
     </section>
   );
 }

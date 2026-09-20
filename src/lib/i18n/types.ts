@@ -80,6 +80,7 @@ export type TranslationDictionary = {
     fullscreenHint: string;
     quality: string;
     qualityAutoHint: string;
+    qualityAutoUnavailable: string;
     qualityLow: string;
     qualityMedium: string;
     qualityHigh: string;
@@ -914,6 +915,12 @@ export type TranslationDictionary = {
     localAccess: string;
     localAccessHint: string;
     resetAutoName: string;
+    mobileSetupIntro: string;
+    mobileSetupDownload: string;
+    mobileSetupIos: string;
+    mobileSetupAndroid: string;
+    mobileSetupConnect: string;
+    mobileSetupConnectHint: string;
     onboardingUrl: string;
     httpsActive: string;
     httpsInactive: string;

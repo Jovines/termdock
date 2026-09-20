@@ -5,6 +5,8 @@ import { delimiter, dirname, join } from 'node:path';
 import { randomInt } from 'node:crypto';
 import { adbSearchPath, resolveAdbBinary } from './adb.js';
 
+import { LiveBitrateChannel, supportsLiveBitrate, bitrateOverlayPath, bitrateOverlayRemote } from './liveBitrate.js';
+
 const DEVICE_NAME_LENGTH = 64;
 const VIDEO_HEADER_LENGTH = 12;
 const FRAME_HEADER_LENGTH = 12;
@@ -20,6 +22,7 @@ const CODEC_IDS: Record<number, ScrcpyVideoCodec> = {
 export interface ScrcpyVideoHeader { codec: ScrcpyVideoCodec; width: number; height: number; deviceName: string }
 export interface ScrcpyFrame { config: boolean; keyFrame: boolean; pts: bigint; data: Buffer }
 export interface ScrcpySessionEvents {
+  onBitrateSupport?: (supported: boolean) => void;
   onHeader: (header: ScrcpyVideoHeader) => void;
   onFrame: (frame: ScrcpyFrame) => void;
   onError: (error: Error) => void;
@@ -132,11 +135,12 @@ function scidHex(scid: number): string {
 /** 单设备的一条 scrcpy 会话：推送 server → adb reverse → 启动 server → 解析 H.264/H.265 流。 */
 export class ScrcpySession {
   private readonly scid = randomInt(1, 0x7fffffff);
+  private bitrateChannel: LiveBitrateChannel | null = null;
   private child: ChildProcess | null = null;
   private server: net.Server | null = null;
   private videoSocket: net.Socket | null = null;
   private controlSocket: net.Socket | null = null;
-  private videoBuffer = Buffer.alloc(0);
+  private videoBuffer: Buffer = Buffer.alloc(0);
   private controlBuffer = Buffer.alloc(0);
   private videoStage: 'meta' | 'codec' | 'session' | 'frames' = 'meta';
   /** scrcpy 4.0 起：视频头只有 4 字节 codec id，宽高改为独立的 session 包；frame flags 也下移一位。 */
@@ -189,10 +193,32 @@ export class ScrcpySession {
 
       await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:scrcpy_${scidHex(this.scid)}`, `tcp:${this.port}`], 15_000);
 
+      let liveBitrate = false;
+      if (await supportsLiveBitrate(serverJar, version)) {
+        try {
+          this.bitrateChannel = new LiveBitrateChannel(ready => this.events.onBitrateSupport?.(ready));
+          const port = await this.bitrateChannel.listen();
+          await runAdbCapture(['-s', this.serial, 'push', bitrateOverlayPath, bitrateOverlayRemote]);
+          await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:termdock_bitrate_${scidHex(this.scid)}`, `tcp:${port}`]);
+          liveBitrate = true;
+        } catch {
+          this.bitrateChannel?.close();
+          this.bitrateChannel = null;
+        }
+      }
+      if (!liveBitrate) this.events.onBitrateSupport?.(false);
+      if (this.stopped) {
+        this.bitrateChannel?.close();
+        this.server?.close();
+        await Promise.allSettled(['scrcpy_', 'termdock_bitrate_'].map(prefix =>
+          runAdbCapture(['-s', this.serial, 'reverse', '--remove', `localabstract:${prefix}${scidHex(this.scid)}`], 8000)));
+        return;
+      }
+
       const args = [
         '-s', this.serial, 'shell',
-        `CLASSPATH=${remoteJar}`,
-        'app_process', '/',
+        `CLASSPATH=${liveBitrate ? bitrateOverlayRemote + ":" : ""}${remoteJar}`,
+        'app_process', ...(liveBitrate ? [`-Dtermdock.bitrate=termdock_bitrate_${scidHex(this.scid)}`] : []), '/',
         'com.genymobile.scrcpy.Server', version,
         `scid=${this.scid.toString(16)}`,
         'log_level=info',
@@ -250,7 +276,7 @@ export class ScrcpySession {
 
   private readVideo(chunk: Buffer): void {
     if (this.stopped) return;
-    this.videoBuffer = Buffer.concat([this.videoBuffer, chunk]);
+    this.videoBuffer = this.videoBuffer.length ? Buffer.concat([this.videoBuffer, chunk]) : chunk;
     if (this.videoStage === 'meta') {
       if (this.videoBuffer.length < DEVICE_NAME_LENGTH) return;
       this.deviceName = this.videoBuffer.subarray(0, DEVICE_NAME_LENGTH).toString('utf8').replace(/\0+$/, '');
@@ -300,7 +326,7 @@ export class ScrcpySession {
       const ptsFlags = this.videoBuffer.readBigUInt64BE(0);
       const size = this.videoBuffer.readUInt32BE(8);
       if (this.videoBuffer.length < FRAME_HEADER_LENGTH + size) break;
-      const payload = Buffer.from(this.videoBuffer.subarray(FRAME_HEADER_LENGTH, FRAME_HEADER_LENGTH + size));
+      const payload = this.videoBuffer.subarray(FRAME_HEADER_LENGTH, FRAME_HEADER_LENGTH + size);
       this.videoBuffer = this.videoBuffer.subarray(FRAME_HEADER_LENGTH + size);
       const session = this.protocol === 'session';
       const config = session ? ((ptsFlags >> 62n) & 1n) === 1n : ((ptsFlags >> 63n) & 1n) === 1n;
@@ -352,10 +378,15 @@ export class ScrcpySession {
     catch { return false; }
   }
 
+  setBitrate(value: number): Promise<boolean> {
+    return this.bitrateChannel?.setBitrate(value) ?? Promise.resolve(false);
+  }
+
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
     activeSessions.delete(this);
+    this.bitrateChannel?.close();
     const child = this.child;
     this.child = null;
     try { this.videoSocket?.destroy(); } catch { /* ignore */ }
@@ -367,6 +398,8 @@ export class ScrcpySession {
     if (child) { try { child.kill('SIGKILL'); } catch { /* ignore */ } }
     try { await runAdbCapture(['-s', this.serial, 'reverse', '--remove', `localabstract:scrcpy_${scidHex(this.scid)}`], 8000); }
     catch { /* reverse 可能已随进程退出被清理 */ }
+    try { await runAdbCapture(['-s', this.serial, 'reverse', '--remove', `localabstract:termdock_bitrate_${scidHex(this.scid)}`], 8000); }
+    catch { /* optional channel */ }
     this.events.onClose();
   }
 }

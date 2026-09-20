@@ -39,7 +39,6 @@ export function startOnboardingServer(options: OnboardingServerOptions): Onboard
     res.setHeader('Content-Disposition', 'attachment; filename="rootCA.pem"');
     res.send(fs.readFileSync(options.caCertPath));
   });
-  app.get('/', (_req, res) => res.redirect('/onboarding'));
 
   const server = createServer(app);
   server.on('error', (error) => {
@@ -49,7 +48,7 @@ export function startOnboardingServer(options: OnboardingServerOptions): Onboard
     const address = server.address() as AddressInfo | null;
     const port = address?.port ?? null;
     const host = getLanIPv4Addresses()[0] ?? 'localhost';
-    activeUrl = port ? `http://${host}:${port}/onboarding` : null;
+    activeUrl = port ? `http://${host}:${port}/ca` : null;
   });
   server.listen(0, '0.0.0.0');
 

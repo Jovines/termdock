@@ -40,3 +40,46 @@ describe('mirror adaptation telemetry', () => {
     expect(onState).toHaveBeenLastCalledWith('error', 'secure transport unavailable');
   });
 });
+
+describe('live bitrate over the existing encrypted socket', () => {
+  it('negotiates capability, confirms only matching ACKs, and keeps the stream on rejection', async () => {
+    const socket = { readyState: 1, send: vi.fn(), close: vi.fn(), onmessage: null as null | ((event: { data: string }) => void) };
+    vi.mocked(secureSocket).mockReturnValue(socket as unknown as WebSocket);
+    const onState = vi.fn(), onBitrateSupport = vi.fn();
+    const controller = new AndroidMirrorController(document.createElement('canvas'), {
+      onState, onBitrateSupport, onHeader: vi.fn(), onWarning: vi.fn(), onStats: vi.fn(),
+    });
+    const message = (value: unknown) => socket.onmessage?.({ data: JSON.stringify(value) });
+    controller.connect('device');
+    expect(await controller.setBitrate(1_800_000)).toBe(false); // old server: no reconnect/fallback
+    message({ type: 'bitrate-support', supported: true });
+    const pending = controller.setBitrate(1_800_000);
+    expect(socket.send).toHaveBeenLastCalledWith('{"type":"bitrate","requestId":1,"bitRate":1800000}');
+    message({ type: 'bitrate-result', requestId: 999, bitRate: 1_800_000, applied: true });
+    expect(controller.canSetBitrate).toBe(false);
+    message({ type: 'bitrate-result', requestId: 1, bitRate: 1_800_000, applied: true });
+    expect(await pending).toBe(true);
+    const rejected = controller.setBitrate(8_000_000);
+    message({ type: 'bitrate-result', requestId: 2, bitRate: 8_000_000, applied: false });
+    expect(await rejected).toBe(false);
+    expect(onBitrateSupport).toHaveBeenLastCalledWith(false);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(onState).toHaveBeenCalledTimes(1);
+    controller.disconnect();
+  });
+  it('settles outstanding requests on timeout and disconnect without reopening video', async () => {
+    vi.useFakeTimers();
+    const socket = { readyState: 1, send: vi.fn(), close: vi.fn(), onmessage: null as null | ((event: { data: string }) => void) };
+    vi.mocked(secureSocket).mockReturnValue(socket as unknown as WebSocket);
+    const controller = new AndroidMirrorController(document.createElement('canvas'), {
+      onState: vi.fn(), onHeader: vi.fn(), onWarning: vi.fn(), onStats: vi.fn(),
+    });
+    controller.connect('device');
+    socket.onmessage?.({ data: '{"type":"bitrate-support","supported":true}' });
+    const timeout = controller.setBitrate(4_000_000);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(await timeout).toBe(false);
+    expect(socket.close).not.toHaveBeenCalled();
+    controller.disconnect();
+  });
+});

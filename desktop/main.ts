@@ -64,6 +64,7 @@ import {
   getDesktopUpdateState,
   getDesktopRuntimeUpdateState,
   installDownloadedDesktopUpdate,
+  isDesktopUpdateInstalling,
   markDesktopRuntimeRestartFailed,
   markDesktopRuntimeRestarting,
   markDesktopRuntimeRunning,
@@ -1941,15 +1942,16 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
     scheduleServiceWindowRecovery(window, 'window-focus');
   });
   window.on('close', (event) => {
+    const closingForQuit = isQuitting || isDesktopUpdateInstalling();
     const serviceOrigin = windowServiceOrigins.get(window);
-    if (serviceOrigin && !isQuitting && restorableServiceWindows.has(window)) {
+    if (serviceOrigin && !closingForQuit && restorableServiceWindows.has(window)) {
       const config = readDesktopConfig();
       config.openConnectionUrls = config.openConnectionUrls.filter((url) => {
         try { return new URL(url).origin !== serviceOrigin; } catch { return false; }
       });
       writeDesktopConfig(config);
     }
-    if (window === mainWindow && process.platform === 'darwin' && !isQuitting) {
+    if (window === mainWindow && process.platform === 'darwin' && !closingForQuit) {
       event.preventDefault();
       window.hide();
     }

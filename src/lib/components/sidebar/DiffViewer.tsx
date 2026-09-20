@@ -666,27 +666,6 @@ function splitRawFileDiffs(diffContent: string): string[] {
   return starts.map((start, index) => diffContent.slice(start, starts[index + 1] ?? diffContent.length));
 }
 
-function isImportLikeLine(content: string): boolean {
-  const trimmed = content.trim();
-  if (!trimmed) return true;
-  return /^(import|export\s+type|using|#include)\b/.test(trimmed)
-    || /^from\s+[\w.'"/-]+\s+import\b/.test(trimmed)
-    || /^package\s+[\w.]+;?$/.test(trimmed);
-}
-
-function isImportOnlyHunk(hunk: HunkData): boolean {
-  const changed = hunk.changes.filter((change) => change.type === 'insert' || change.type === 'delete');
-  if (changed.length === 0 || !changed.every((change) => isImportLikeLine(change.content))) return false;
-  const changedLineNumbers = new Set<number>();
-  for (const change of changed) {
-    const lineNumber = getChangeLineNumber(change);
-    if (lineNumber === null) continue;
-    if (changedLineNumbers.has(lineNumber)) return false;
-    changedLineNumbers.add(lineNumber);
-  }
-  return true;
-}
-
 function alignAdjacentChangesForSplitView(hunk: HunkData): HunkData {
   const changes: HunkData['changes'] = [];
   let cursor = 0;
@@ -963,7 +942,6 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     && !initialCache.oldSourceResolvedFromCache
   ));
   const initialOldSourceCacheRef = useRef(initialCache.oldSourceResolvedFromCache ? reloadKey : null);
-  const [expandedImportHunks, setExpandedImportHunks] = useState<Set<string>>(() => new Set());
   const [imagePreview, setImagePreview] = useState<{
     objectUrl: string;
     size: number | null;
@@ -1564,7 +1542,6 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       movedCandidates: ReturnType<typeof findMovedLineCandidates>;
       movedOldLines: Set<number>;
       movedNewLines: Set<number>;
-      importOnlyHunk: boolean;
       displayHunk: (typeof files)[number]['hunks'][number];
       /** Rendered-row model of `displayHunk`; drives line-range selection. */
       rowModel: DiffHunkRowModel;
@@ -1602,7 +1579,6 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
           movedCandidates,
           movedOldLines: new Set(movedCandidates.map((candidate) => candidate.oldLineNumber)),
           movedNewLines: new Set(movedCandidates.map((candidate) => candidate.newLineNumber)),
-          importOnlyHunk: isImportOnlyHunk(hunk),
           displayHunk,
           rowModel,
         });
@@ -1660,7 +1636,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       return;
     }
     setLineSelectionPillTop(rowRect.top - card.getBoundingClientRect().top + rowRect.height / 2);
-  }, [lineSelection, files, viewType, wrap, expandedImportHunks]);
+  }, [lineSelection, files, viewType, wrap]);
 
   const handleDiffLineSelect = useCallback((
     _args: { side?: 'old' | 'new'; change: unknown },
@@ -1836,13 +1812,10 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const thisHunkActionError = hunkActionError && (hunkActionError.key === stageHunkKey || hunkActionError.key === revertHunkKey)
                       ? hunkActionError.message
                       : null;
-                    const importCollapseKey = `${displayPath}\0${index}\0${hunk.content}`;
                     const derived = hunkDerivedMap.byHunk.get(hunk);
                     const hunkId = buildDiffHunkId(displayPath, index);
                     const hunkSections = derived?.hunkSections ?? [];
                     const movedCandidates = derived?.movedCandidates ?? [];
-                    const importOnlyHunk = derived?.importOnlyHunk ?? false;
-                    const importCollapsed = importOnlyHunk && !expandedImportHunks.has(importCollapseKey);
                     const movedOldLines = derived?.movedOldLines ?? new Set<number>();
                     const movedNewLines = derived?.movedNewLines ?? new Set<number>();
                     const displayHunk = derived?.displayHunk ?? hunk;
@@ -1960,7 +1933,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     return (
                       <div
                         key={hunk.content}
-                        className={`diff-hunk scroll-mt-16 ${importOnlyHunk ? 'diff-hunk-imports' : ''} ${hunkFlatIndex === activeHunkIndex ? 'diff-hunk--jump-target' : ''}`}
+                        className={`diff-hunk scroll-mt-16 ${hunkFlatIndex === activeHunkIndex ? 'diff-hunk--jump-target' : ''}`}
                         data-diff-hunk-anchor={displayPath}
                         data-diff-hunk-index={index}
                         data-diff-hunk-fingerprint={hunkFingerprint}
@@ -2025,36 +1998,10 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                                   moved {movedCandidates.length}
                                 </span>
                               )}
-                              {importOnlyHunk && (
-                                <>
-                                  <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
-                                    imports
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setExpandedImportHunks((current) => {
-                                        const next = new Set(current);
-                                        if (next.has(importCollapseKey)) next.delete(importCollapseKey);
-                                        else next.add(importCollapseKey);
-                                        return next;
-                                      });
-                                    }}
-                                    className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground transition hover:text-foreground"
-                                  >
-                                    {importCollapsed ? 'show' : 'hide'}
-                                  </button>
-                                </>
-                              )}
                             </div>
                             {thisHunkActionError && (
                               <div className="mt-1 truncate text-[10px] text-destructive" title={thisHunkActionError}>
                                 {t('diffViewer.hunkActionFailed', { message: thisHunkActionError })}
-                              </div>
-                            )}
-                            {importCollapsed && (
-                              <div className="mt-1 rounded bg-surface-2 px-2 py-1 text-[10px] text-muted-foreground">
-                                Import-only changes collapsed.
                               </div>
                             )}
                             {(hunkAudit.current || hunkAudit.stale) && (
@@ -2092,8 +2039,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                               })()
                             )}
                         </div>
-                        {!importCollapsed && renderContextButton('before')}
-                        {!importCollapsed && (
+                        {renderContextButton('before')}
                           <Diff
                             viewType={viewType}
                             diffType={file.type}
@@ -2106,8 +2052,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                           >
                             {(hunks) => hunks.map((singleHunk) => <Hunk key={singleHunk.content} hunk={singleHunk} />)}
                           </Diff>
-                        )}
-                        {!importCollapsed && renderContextButton('after')}
+                        {renderContextButton('after')}
                       </div>
                     );
                   })}

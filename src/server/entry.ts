@@ -790,7 +790,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
         latestOnboardingUrl = onboardingUrl;
         if (state.status === 'active') {
           console.log(`LAN access: ${state.url}`);
-          if (onboardingUrl) console.log(`Mobile setup: ${onboardingUrl} (open this on your phone to download the CA certificate)`);
+          if (onboardingUrl) console.log(`CA certificate: ${onboardingUrl} (open this on your phone to download the CA certificate)`);
         } else {
           console.log(`LAN access: ${state.status}${state.reason ? ` (${state.reason})` : ''}`);
         }

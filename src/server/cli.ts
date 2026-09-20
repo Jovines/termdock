@@ -625,7 +625,7 @@ function printRunningState(state: ServerState) {
   console.log(`  ${c.dim('PID:')}  ${state.pid}`);
   console.log(`  ${c.dim('URL:')}  ${c.cyan(state.localUrl ?? `http://${displayHost}:${state.port}`)}`);
   if (state.lanUrl) console.log(`  ${c.dim('LAN:')}  ${c.cyan(state.lanUrl)} ${state.localAccessStatus ? c.dim(`(${state.localAccessStatus})`) : ''}`);
-  if (state.onboardingUrl) console.log(`  ${c.dim('Setup:')} ${c.cyan(state.onboardingUrl)} ${c.dim('(open this on your phone to download the CA certificate)')}`);
+  if (state.onboardingUrl) console.log(`  ${c.dim('CA certificate:')} ${c.cyan(state.onboardingUrl)} ${c.dim('(open this on your phone to download the CA certificate)')}`);
   if (state.localAccessReason) console.log(`  ${c.dim('LAN note:')} ${state.localAccessReason}`);
   console.log(`  ${c.dim('Log:')}  ${state.logFile}`);
   console.log(`  ${c.dim('Auth:')} ${authLine}`);

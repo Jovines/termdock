@@ -79,7 +79,7 @@ router.delete('/recordings/:id', async (req, res) => {
 
 export default router;
 
-interface AndroidSocketMessage { type?: unknown; data?: unknown; seq?: unknown }
+interface AndroidSocketMessage { type?: unknown; data?: unknown; seq?: unknown; bitRate?: unknown; requestId?: unknown }
 
 function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
@@ -149,6 +149,7 @@ export function handleAndroidWebSocket(
   socket.on('error', () => { closed = true; clearInterval(flowTimer); if (statsTimer) clearInterval(statsTimer); void session?.stop(); session = null; });
 
   session = createScrcpySession(serial, {
+    onBitrateSupport: supported => send({ type: 'bitrate-support', supported }),
     onHeader: header => { send({ type: 'header', ...header }); },
     onFrame: frame => {
       if (closed) return;
@@ -175,6 +176,14 @@ export function handleAndroidWebSocket(
     try { message = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8')) as AndroidSocketMessage; }
     catch { return; }
     switch (message.type) {
+      case 'bitrate': {
+        if (typeof message.requestId !== 'number' || !Number.isSafeInteger(message.requestId)
+          || typeof message.bitRate !== 'number' || !Number.isInteger(message.bitRate)
+          || message.bitRate < 300_000 || message.bitRate > 30_000_000) return;
+        const requestId = message.requestId, bitRate = message.bitRate;
+        void session.setBitrate(bitRate).then(applied => send({ type: 'bitrate-result', requestId, bitRate, applied }));
+        break;
+      }
       case 'control': {
         if (typeof message.data !== 'string' || message.data.length > 64 * 1024) return;
         const bytes = Buffer.from(message.data, 'base64');

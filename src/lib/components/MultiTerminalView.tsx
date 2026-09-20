@@ -2051,11 +2051,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         }`}
         style={options.containerStyle}
         aria-hidden={options.hidden || undefined}
-        onPointerDown={() => {
+        onPointerDownCapture={() => {
           // A neighbouring slide can still be under the finger while a swipe
           // reverses. Only stationary panes in the selected workspace may
           // take focus here; Swiper owns activation across slides.
-          if (!isActive && isLayoutVisible) activateSplitPane(session.id);
+          if (isLayoutVisible) activateSplitPaneForWheel(isActive, () => activateSplitPane(session.id));
         }}
         onWheelCapture={() => {
           // A trackpad/mouse wheel does not emit pointerdown. Activate during

@@ -126,7 +126,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const initialQuality = useMemo<AndroidQuality>(readStoredQuality, []);
   const qualityRef = useRef<AndroidQuality>(initialQuality);
   const adaptive = useRef<{ serial: string; policy: AutoQuality } | null>(null);
-  const [autoResolution, setAutoResolution] = useState(1080);
+  const streamQuality = useRef<AndroidQuality | null>(null);
+  const [autoBitrate, setAutoBitrate] = useState(4_000_000);
   /** 正在注入设备的那根手指；x/y 是设备坐标，手势被打断时就近作废。 */
   const activePointer = useRef<{ id: number; type: string; x: number; y: number } | null>(null);
   /** 按下的所有指针（client 坐标）：第二根落下即说明用户要操作视图而不是设备。 */
@@ -228,23 +229,70 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const adbMissing = Boolean(listError && /ADB_NOT_FOUND|ADB_UNAVAILABLE/i.test(listError));
   const scrcpyMissing = Boolean(listing?.adbAvailable && !listing.scrcpyVersion);
 
+  /** 中断时先清本地状态，再释放捕获，避免 lostpointercapture 重入后重复注入。 */
+  const cancelPointerGesture = useCallback(() => {
+    const active = activePointer.current;
+    const captured = [...pointers.current.keys()];
+    activePointer.current = null;
+    pointers.current.clear();
+    viewGesture.current = null;
+    suppressTouch.current = false;
+    gestureStart.current = null;
+    cancelFrame(gestureFrame.current);
+    gestureFrame.current = 0;
+    if (active) controllerRef.current?.pointerCancel(active.x, active.y, active.type);
+    const canvas = canvasRef.current;
+    if (canvas) for (const id of captured) releasePointer(canvas, id);
+    setPress(null);
+    setDragging(false);
+    setTrail([]);
+    setZoom(zoomRef.current);
+  }, []);
+
+  useEffect(() => {
+    // 捕获失败或被其他分屏接管时，画布可能收不到松手事件。
+    const onPointerEnd = (event: globalThis.PointerEvent) => {
+      if (!pointers.current.has(event.pointerId)) return;
+      if (event.type === 'pointercancel' || event.target !== canvasRef.current) cancelPointerGesture();
+    };
+    const onBlur = () => cancelPointerGesture();
+    const onVisibilityChange = () => { if (document.hidden) cancelPointerGesture(); };
+    window.addEventListener('pointerup', onPointerEnd, true);
+    window.addEventListener('pointercancel', onPointerEnd, true);
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pointerup', onPointerEnd, true);
+      window.removeEventListener('pointercancel', onPointerEnd, true);
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      cancelPointerGesture();
+    };
+  }, [cancelPointerGesture]);
+
   const disconnect = useCallback(() => {
+    cancelPointerGesture();
     controllerRef.current?.disconnect();
     controllerRef.current = null;
     setMirrorState('idle');
     setMirrorError(null);
     setHeader(null);
-  }, []);
+  }, [cancelPointerGesture]);
 
   const connect = useCallback((serial: string, preserveFrame = false) => {
     const canvas = canvasRef.current;
     if (!canvas || !serial) return;
+    cancelPointerGesture();
     controllerRef.current?.disconnect();
     setMirrorError(null);
     if (!preserveFrame && connectedSerial.current !== serial) setHeader(null);
     connectedSerial.current = serial;
     setWarning(null);
     const controller = new AndroidMirrorController(canvas, {
+      onBitrateSupport: supported => {
+        if (controllerRef.current !== controller || qualityRef.current.id !== 'auto') return;
+        if (!supported) setWarning(t('android.qualityAutoUnavailable'));
+      },
       onState: (state, error) => { if (controllerRef.current !== controller) return; setMirrorState(state); setMirrorError(error ?? null); },
       onHeader: next => { if (controllerRef.current === controller) setHeader(next); },
       onStats: next => { if (controllerRef.current === controller) setStats(next); },
@@ -256,19 +304,27 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       if (adaptive.current?.serial !== serial) adaptive.current = { serial, policy: new AutoQuality() };
       adaptive.current.policy.connected(performance.now());
       quality = adaptive.current.policy.quality;
-      setAutoResolution(quality.maxSize);
+      setAutoBitrate(quality.bitRate);
     } else adaptive.current = null;
+    streamQuality.current = quality;
     controller.connect(serial, quality);
-  }, []);
+  }, [cancelPointerGesture]);
 
   useEffect(() => {
     if (qualityId !== 'auto' || qualityRef.current.id !== 'auto' || mirrorState !== 'streaming'
-      || !stats.adaptation || pointers.current.size || document.hidden) return;
+      || !stats.adaptation || document.hidden) return;
     const policy = adaptive.current;
-    if (!policy || policy.serial !== selectedSerial) return;
+    const controller = controllerRef.current;
+    if (!policy || policy.serial !== selectedSerial || !controller?.canSetBitrate) return;
     const canvas = canvasRef.current;
     const pixels = canvas ? Math.max(canvas.clientWidth, canvas.clientHeight) * (window.devicePixelRatio || 1) * zoomRef.current : 1600;
-    if (policy.policy.sample(stats.adaptation, performance.now(), pixels || 1600)) connect(selectedSerial, true);
+    const quality = policy.policy.sample(stats.adaptation, performance.now(), pixels || 1600);
+    if (quality) void controller.setBitrate(quality.bitRate).then(applied => {
+      if (applied && controllerRef.current === controller) {
+        streamQuality.current = quality;
+        setAutoBitrate(quality.bitRate);
+      }
+    });
   }, [stats, qualityId, mirrorState, selectedSerial, connect]);
 
   // 偏好存服务端，换浏览器/设备也一致；localStorage 只作为首屏的即时初值。
@@ -322,6 +378,19 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     rippleTimers.current.push(timer);
   }, []);
 
+  const applyManualQuality = useCallback((serial: string, next: AndroidQuality) => {
+    const controller = controllerRef.current;
+    const current = streamQuality.current;
+    if (controller?.supportsLiveBitrate && connectedSerial.current === serial && current
+      && current.maxSize === next.maxSize && current.maxFps === next.maxFps) {
+      void controller.setBitrate(next.bitRate).then(applied => {
+        if (controllerRef.current !== controller) return;
+        if (applied) streamQuality.current = next;
+        else setWarning(t('android.qualityAutoUnavailable'));
+      });
+    } else connect(serial);
+  }, [connect, t]);
+
   const changeQuality = useCallback((id: string) => {
     adaptive.current = null;
     // 用户保存的预设以 user:<id> 表示，值等同于自定义。
@@ -365,8 +434,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     persistAndroidPanel({ quality: next, activePresetId: null });
     setQualityId('custom');
     setActivePresetId(null);
-    if (selectedSerial) connect(selectedSerial);
-  }, [connect, selectedSerial, custom, persistAndroidPanel]);
+    if (selectedSerial) applyManualQuality(selectedSerial, next);
+  }, [applyManualQuality, selectedSerial, custom, persistAndroidPanel]);
 
   const savePreset = useCallback(() => {
     const name = presetName.trim();
@@ -382,8 +451,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     qualityRef.current = next;
     writeStoredQuality(next);
     persistAndroidPanel({ quality: next, activePresetId: id, presets: nextPresets });
-    if (selectedSerial) connect(selectedSerial);
-  }, [presetName, custom, presets, selectedSerial, connect, persistAndroidPanel]);
+    if (selectedSerial) applyManualQuality(selectedSerial, next);
+  }, [presetName, custom, presets, selectedSerial, applyManualQuality, persistAndroidPanel]);
 
   const deletePreset = useCallback(() => {
     if (!activePresetId) return;
@@ -632,6 +701,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       return;
     }
     event.preventDefault();
+    canvas.closest<HTMLElement>('.android-mirror-panel')?.focus({ preventScroll: true });
     applyViewTransform();
     syncZoomControls();
     flushGestureFrame();
@@ -673,6 +743,19 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     const controller = controllerRef.current;
     const canvas = canvasRef.current;
     if (!canvas || !pointers.current.has(event.pointerId)) return;
+    if (event.pointerType === 'mouse') {
+      const bounds = canvas.getBoundingClientRect();
+      const stage = canvas.parentElement?.getBoundingClientRect() ?? bounds;
+      // 指针捕获期间不会触发 leave，必须按画布与裁切容器的交集判断是否越界。
+      if (!(event.buttons & 1)
+        || event.clientX < Math.max(bounds.left, stage.left)
+        || event.clientX >= Math.min(bounds.right, stage.right)
+        || event.clientY < Math.max(bounds.top, stage.top)
+        || event.clientY >= Math.min(bounds.bottom, stage.bottom)) {
+        cancelPointerGesture();
+        return;
+      }
+    }
     event.preventDefault();
     pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     if (viewGesture.current) { scheduleGestureFrame(); return; }
@@ -702,10 +785,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const handlePointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const controller = controllerRef.current;
     const canvas = canvasRef.current;
-    if (!controller || !canvas) return;
+    if (!canvas || !pointers.current.has(event.pointerId)) return;
     // 抬手时可能还有一帧没落地：先把手指最后的位置结算掉，别丢掉这一段位移。
     flushGestureFrame();
     pointers.current.delete(event.pointerId);
+    // 正常释放捕获时不再把这根指针视为活跃，lostpointercapture 不应取消其余手指。
     releasePointer(canvas, event.pointerId);
     if (pointers.current.size === 0) suppressTouch.current = false;
     // 视图手势要等所有手指抬起才算结束；捏合退成单指时以剩下那根重建基准，画面不跳。
@@ -720,7 +804,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     const active = activePointer.current;
     if (!active || active.id !== event.pointerId) return;
     const point = toDevicePoint(canvas, event.clientX, event.clientY);
-    controller.pointerUp(point.x, point.y, active.type);
+    controller?.pointerUp(point.x, point.y, active.type);
     if (press) addFadingDot(press);
     setPress(null);
     // 松手后拖尾淡出，再清空。
@@ -1004,7 +1088,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           title={qualityId === 'auto' ? t('android.qualityAutoHint') : t('android.quality')}
           aria-label={t('android.quality')}
         >
-          <option value="auto">{t('android.qualityAuto')}{qualityId === 'auto' ? ` · ${autoResolution}` : ''}</option>
+          <option value="auto">{t('android.qualityAuto')}{qualityId === 'auto' ? ` · ${autoBitrate / 1_000_000} Mbps` : ''}</option>
           {ANDROID_QUALITY_PRESETS.map(preset => (
             <option key={preset.id} value={preset.id}>{t(QUALITY_LABEL[preset.id])}</option>
           ))}
@@ -1243,7 +1327,15 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerCancel={() => cancelPointerGesture()}
+          onLostPointerCapture={event => {
+            if (pointers.current.has(event.pointerId)) cancelPointerGesture();
+          }}
+          onPointerLeave={event => {
+            if (pointers.current.has(event.pointerId) && !event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+              cancelPointerGesture();
+            }
+          }}
           onContextMenu={event => event.preventDefault()}
         />
         {press && (

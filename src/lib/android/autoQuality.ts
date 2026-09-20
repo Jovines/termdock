@@ -1,11 +1,10 @@
 import type { AndroidQuality } from './api';
 
+// Fix dimensions/frame rate for the lifetime of the stream. Only bitrate changes.
 export const AUTO_QUALITY_LEVELS: AndroidQuality[] = [
-  { id: 'auto', maxSize: 480, bitRate: 700_000, maxFps: 24 },
-  { id: 'auto', maxSize: 720, bitRate: 1_800_000, maxFps: 30 },
-  { id: 'auto', maxSize: 1080, bitRate: 4_000_000, maxFps: 30 },
-  { id: 'auto', maxSize: 1600, bitRate: 8_000_000, maxFps: 30 },
-];
+  700_000, 1_000_000, 1_400_000, 1_800_000, 2_400_000, 3_200_000,
+  4_000_000, 5_000_000, 6_000_000, 8_000_000, 10_000_000, 12_000_000,
+].map(bitRate => ({ id: 'auto', maxSize: 1600, bitRate, maxFps: 30 }));
 export interface AutoQualitySample {
   rttMs: number | null;
   deliveryDelayMs: number;
@@ -15,7 +14,7 @@ export interface AutoQualitySample {
 
 /** Probe for clarity; back off specifically when an upgrade proves too costly. */
 export class AutoQuality {
-  level = 2;
+  level = 6;
   private badSince: number | null = null;
   private goodSince: number | null = null;
   private connectedAt = 0;
@@ -45,16 +44,16 @@ export class AutoQuality {
       && sample.deliveryDelayMs < 80 && sample.decodeQueue <= 1;
     this.badSince = bad ? this.badSince ?? now : null;
     this.goodSince = good ? this.goodSince ?? now : null;
-    const targetLevel = Math.max(2, AUTO_QUALITY_LEVELS.findIndex(level => level.maxSize >= Math.min(1600, targetPixels)));
+    const targetLevel = targetPixels <= 1080 ? 7 : targetPixels <= 1600 ? 9 : 11;
     if (this.badSince !== null && now - this.badSince >= (severe ? 1000 : 2000)
-      && now - this.lastChange >= (severe ? 3000 : 6000) && this.level > 0) {
-      this.level--;
+      && now - this.lastChange >= (severe ? 2000 : 3000) && this.level > 0) {
+      this.level = Math.max(0, this.level - (severe ? 2 : 1));
       const failedProbe = now - this.lastUpgrade < 20000;
       this.failedProbes = failedProbe ? this.failedProbes + 1 : 0;
-      this.upgradeAfter = now + (failedProbe ? Math.min(90000, 20000 * 2 ** (this.failedProbes - 1)) : 15000);
+      this.upgradeAfter = now + (failedProbe ? Math.min(30000, 8000 * 2 ** (this.failedProbes - 1)) : 5000);
       this.lastUpgrade = -Infinity;
-    } else if (this.goodSince !== null && now - this.goodSince >= 8000
-      && now - this.lastChange >= 10000 && now >= this.upgradeAfter && this.level < targetLevel) {
+    } else if (this.goodSince !== null && now - this.goodSince >= 3000
+      && now - this.lastChange >= 4000 && now >= this.upgradeAfter && this.level < targetLevel) {
       this.level++;
       this.lastUpgrade = now;
     } else return null;
