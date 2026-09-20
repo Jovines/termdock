@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 import type { Swiper as SwiperInstance } from 'swiper';
 import type { ChangeAuditRecord, GitDiffOptions } from '../../terminal/api';
@@ -298,7 +298,7 @@ export function DiffReview({
   const [canvasViewport, setCanvasViewport] = useState<DiffCanvasViewport>({ top: 0, height: 0 });
   const orderedFileKeys = useMemo(() => allOrderedFiles.map((file) => file.key), [allOrderedFiles]);
   const orderedFileKeysSignature = orderedFileKeys.join('');
-  currentVersionsRef.current = new Map(allOrderedFiles.map((file) => [file.key, {
+  currentVersionsRef.current = useMemo(() => new Map(allOrderedFiles.map((file) => [file.key, {
     diffOverride: file.diffOverride,
     reloadKey,
     wrap,
@@ -307,9 +307,9 @@ export function DiffReview({
     algorithm: diffOptions?.algorithm,
     whitespace: diffOptions?.whitespace,
     context: diffOptions?.context,
-  }]));
+  }])), [allOrderedFiles, reloadKey, wrap, diffViewType, inlineMode, diffOptions?.algorithm, diffOptions?.whitespace, diffOptions?.context]);
   orderedFileKeysRef.current = orderedFileKeys;
-  orderedFileIndexRef.current = new Map(orderedFileKeys.map((key, index) => [key, index]));
+  orderedFileIndexRef.current = useMemo(() => new Map(orderedFileKeys.map((key, index) => [key, index])), [orderedFileKeys]);
   const canvasLayout = useMemo<DiffCanvasLayout>(() => {
     const heights = orderedFileKeys.map((key) => measuredItemHeightsRef.current.get(key) ?? DEFAULT_DIFF_ITEM_HEIGHT);
     const tops = new Array<number>(heights.length);
@@ -696,8 +696,8 @@ export function DiffReview({
     const reusableContent = currentVersion !== undefined
       && matchesDiffReadyVersion(readyVersionsRef.current.get(item.key), currentVersion);
     return (
-      <DiffStreamItem
-        file={toStreamFile(item)}
+      <MemoizedReviewStreamItem
+        item={item}
         repoRoot={item.repoRoot}
         selectionPath={item.key}
         displayName={item.displayName}
@@ -715,7 +715,7 @@ export function DiffReview({
         reloadKey={reloadKey}
         auditRecords={item.auditRecords}
         diffOverride={item.diffOverride}
-        renderBadge={(status) => renderStreamBadge(status, item)}
+        renderStreamBadge={renderStreamBadge}
         onInsertDiffReference={item.onInsertDiffReference ?? onInsertDiffReference}
         onHunkGitAction={item.onHunkGitAction ?? onHunkGitAction}
         onReferenceCopied={onReferenceCopied}
@@ -802,6 +802,16 @@ export function DiffReview({
     />
   );
 }
+
+// Scroll position changes the virtual slots, not the contents of each file.
+// Adapt the file/badge inside this boundary so fresh objects and closures do
+// not defeat React's shallow comparison on every animation frame.
+const MemoizedReviewStreamItem = memo(function ReviewStreamItem({ item, renderStreamBadge, ...props }: Omit<ComponentProps<typeof DiffStreamItem>, 'file' | 'renderBadge'> & {
+  item: DiffReviewFile;
+  renderStreamBadge: DiffReviewProps['renderStreamBadge'];
+}) {
+  return <DiffStreamItem {...props} file={toStreamFile(item)} renderBadge={(status) => renderStreamBadge(status, item)} />;
+});
 
 // --- Helpers ---
 

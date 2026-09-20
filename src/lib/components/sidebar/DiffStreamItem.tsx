@@ -210,8 +210,8 @@ export function DiffStreamItem({
         ? (holdingMeasuredContent ? { height: estimatedHeight ?? 104 } : undefined)
         : { height: estimatedHeight ?? 104 }}
     >
-      <div ref={headerRef} data-diff-stream-header className={`sticky top-0 z-10 flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 backdrop-blur ${
-        selected ? 'bg-surface-elevated/95' : 'bg-surface/95'
+      <div ref={headerRef} data-diff-stream-header className={`sticky top-0 z-10 flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 ${
+        selected ? 'bg-surface-elevated' : 'bg-surface'
       }`}>
         {renderBadge(file.status)}
         <div className="min-w-0 flex-1" title={absolutePath}>
