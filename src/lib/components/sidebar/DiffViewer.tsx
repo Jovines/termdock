@@ -23,6 +23,7 @@ import {
   type DiffRowRange,
 } from './diffLineReference';
 import { parseDiffInWorker, type DiffWorkerResult } from './diffWorkerClient';
+import { CONTEXT_EXPANSION_LINES, contextGap, expandContext, sourceLines, type ContextExpansion } from './diffContextExpansion';
 import { DiffSplitScrollArea } from './DiffSplitScrollArea';
 import { resolveLanguage } from '../../utils/syntaxHighlight';
 import { useDiffDisplayPrefs, type DiffContextPref, type DiffWhitespacePref } from './diffDisplayPrefs';
@@ -1410,6 +1411,27 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     onContentReady?.();
   }, [active, effectiveDiffContent, effectiveDiffError, effectiveDiffLoading, diffOverride, imagePreview, onContentReady, preparedDiff]);
 
+  const contextSource = oldSourceOverride ?? oldSourceContent;
+  const contextLines = useMemo(() => contextSource == null ? null : sourceLines(contextSource), [contextSource]);
+  const [contextExpansion, setContextExpansion] = useState<{
+    files: typeof files; source: typeof contextSource; values: Record<number, ContextExpansion>;
+  } | null>(null);
+  const expandedHunks = useMemo(() => {
+    if (files.length !== 1 || !contextLines) return null;
+    const values = contextExpansion?.files === files && contextExpansion.source === contextSource ? contextExpansion.values : {};
+    return files[0].hunks.map((hunk, index) => expandContext(hunk, contextLines, values[index]));
+  }, [files, contextLines, contextSource, contextExpansion]);
+  const expandHunkContext = (index: number, direction: 'before' | 'after') => {
+    if (!contextLines) return;
+    setContextExpansion((current) => {
+      const values = current?.files === files && current.source === contextSource ? current.values : {};
+      const hunks = files[0].hunks.map((hunk, i) => expandContext(hunk, contextLines, values[i]));
+      const amount = Math.min(CONTEXT_EXPANSION_LINES, contextGap(hunks, index, direction, contextLines.length));
+      const previous = values[index] ?? { before: 0, after: 0 };
+      return { files, source: contextSource, values: { ...values, [index]: { ...previous, [direction]: previous[direction] + amount } } };
+    });
+  };
+
   const effectiveAuditRecords = auditRecords ?? [];
 
   const fileTokens = preparedDiff !== undefined ? preparedDiff?.tokens ?? new Map() : workerTokens;
@@ -1566,7 +1588,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         const movedCandidates = fileMovedCandidates.filter((candidate) => (
           oldLines.has(candidate.oldLineNumber) || newLines.has(candidate.newLineNumber)
         ));
-        const displayHunk = viewType === 'split' ? alignAdjacentChangesForSplitView(hunk) : hunk;
+        const expandedHunk = expandedHunks?.[hunkIndex] ?? hunk;
+        const displayHunk = viewType === 'split' ? alignAdjacentChangesForSplitView(expandedHunk) : expandedHunk;
         const rowModel = buildDiffHunkRowModel(displayHunk, viewType);
         map.set(hunk, {
           hunkSections: lightweight ? [] : buildHunkSections(hunk),
@@ -1581,7 +1604,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       }
     }
     return { byHunk: map, byHunkId };
-  }, [files, lightweight, viewType]);
+  }, [files, lightweight, viewType, expandedHunks]);
   const hunkRowModelById = hunkDerivedMap.byHunkId;
 
   const totalHunks = useMemo(() => files.reduce((sum, file) => sum + file.hunks.length, 0), [files]);
@@ -1607,7 +1630,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   // New diff data reshuffles rows; a stale range would point at unrelated lines.
   useEffect(() => {
     setLineSelection(null);
-  }, [files, viewType, reloadKey, lineSelectionEnabled]);
+  }, [files, viewType, reloadKey, lineSelectionEnabled, expandedHunks]);
 
   // The pill hangs off the topmost selected row. Row and card rects move
   // together with the panel's scrolling, so the offset stays valid without a
@@ -1711,7 +1734,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
           const hunk = file.hunks[lineSelection.hunkIndex];
           const rowModel = hunk ? hunkDerivedMap.byHunk.get(hunk)?.rowModel : undefined;
           if (!hunk || !rowModel) return null;
-          const selectedChanges = collectSelectedChanges(hunk, rowModel, lineSelection);
+          const selectedChanges = collectSelectedChanges(expandedHunks?.[lineSelection.hunkIndex] ?? hunk, rowModel, lineSelection);
           const lineLabel = formatDiffSelectionLabel(selectedChanges);
           if (selectedChanges.length === 0 || !lineLabel) return null;
           const referenceKey = buildDiffLineReferenceKey(displayPath, lineSelection.hunkIndex, lineSelection);
@@ -1729,7 +1752,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         })();
         const lineReferenceInserted = Boolean(lineReference && insertedReferenceKey === lineReference.referenceKey);
         const lineReferenceCopied = Boolean(lineReference && copiedReferenceKey === lineReference.referenceKey);
-        const diffGutterStyle = { '--termdock-diff-gutter-width': `${getDiffGutterWidthCh(file.hunks)}ch` } as React.CSSProperties;
+        const diffGutterStyle = { '--termdock-diff-gutter-width': `${getDiffGutterWidthCh(expandedHunks ?? file.hunks)}ch` } as React.CSSProperties;
         return (
         // Keep a stable file anchor on each parsed diff block. It is useful for
         // deep links/debugging and preserves the previous DOM contract even when
@@ -1816,6 +1839,22 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const movedNewLines = derived?.movedNewLines ?? new Set<number>();
                     const displayHunk = derived?.displayHunk ?? hunk;
                     const rowModel = derived?.rowModel;
+                    const renderContextButton = (direction: 'before' | 'after') => {
+                      const remaining = expandedHunks && contextLines ? contextGap(expandedHunks, index, direction, contextLines.length) : 0;
+                      if (!remaining) return null;
+                      const label = t(direction === 'before' ? 'diffViewer.expandAbove' : 'diffViewer.expandBelow', { count: Math.min(CONTEXT_EXPANSION_LINES, remaining) });
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => expandHunkContext(index, direction)}
+                          className="flex w-full items-center justify-center gap-1 bg-surface-2 px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                          aria-label={label}
+                        >
+                          {direction === 'before' ? <RiChevronUp size={13} /> : <RiChevronDown size={13} />}
+                          {label}
+                        </button>
+                      );
+                    };
                     const sectionWidgets = hunkSections.reduce<Record<string, ReactNode>>((widgets, section) => {
                       const sectionFingerprint = buildSectionFingerprint(section);
                       const sectionAudit = getSectionAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint, section.index, sectionFingerprint);
@@ -2043,6 +2082,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                               })()
                             )}
                         </div>
+                        {!importCollapsed && renderContextButton('before')}
                         {!importCollapsed && (
                           <Diff
                             viewType={viewType}
@@ -2057,6 +2097,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                             {(hunks) => hunks.map((singleHunk) => <Hunk key={singleHunk.content} hunk={singleHunk} />)}
                           </Diff>
                         )}
+                        {!importCollapsed && renderContextButton('after')}
                       </div>
                     );
                   })}

@@ -148,6 +148,8 @@ export async function confirmTermdockUpdateRestart(): Promise<TermdockUpdateStat
  * 界面文案由 i18n 的 `settings.serverHealthEvent*` 映射——服务端不该管用户说什么语言。
  */
 export interface ServerHealthIncident {
+  /** Underlying failure retained when the supervisor stops retrying. */
+  causeEvent?: string;
   at: number;
   event: string;
   detail: string;
@@ -162,6 +164,7 @@ export interface ServerHealthIncident {
 
 export interface ServerHealthState {
   supervised: boolean;
+  canEnableSupervision?: boolean;
   supervisor: {
     pid: number;
     alive: boolean;
@@ -174,6 +177,15 @@ export interface ServerHealthState {
   dismissedAt: number | null;
   attention: boolean;
   generatedAt: number;
+}
+
+export async function enableServerSupervision(): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/server-health/enable-supervision', {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new TerminalApiError('Failed to enable automatic recovery', response.status);
 }
 
 export async function getServerHealth(): Promise<ServerHealthState> {
@@ -1693,7 +1705,7 @@ export interface CollaborationPanelState {
   drafts?: Record<string, { content: string; targets: string[] | null }>;
 }
 
-export interface AndroidQualityState { id: 'low' | 'medium' | 'high' | 'custom'; maxSize: number; bitRate: number; maxFps: number }
+export interface AndroidQualityState { id: 'auto' | 'low' | 'medium' | 'high' | 'custom'; maxSize: number; bitRate: number; maxFps: number }
 export interface AndroidSavedPresetState { id: string; name: string; maxSize: number; bitRate: number; maxFps: number }
 export interface AndroidPanelSettingsState {
   enabled: boolean;

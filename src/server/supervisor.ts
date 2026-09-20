@@ -34,6 +34,7 @@ import {
   SUPERVISOR_STATE_VERSION,
   classifyChildExit,
   isReadyMessage,
+  isStartupFailedMessage,
   isServerIntentMessage,
   shouldGiveUp,
   type ExitDecision,
@@ -285,6 +286,10 @@ export function createSupervisor(config: SupervisorConfig, deps: SupervisorDeps)
         deps.notifyLauncher({ type: 'termdock-ready' });
         return;
       }
+      if (isStartupFailedMessage(message) && !becameReady) {
+        portConflict = message.reason === 'port-conflict';
+        return;
+      }
       if (isServerIntentMessage(message)) {
         intent = message.intent;
         deps.log(`[supervisor] server declared intent: ${message.intent}`);
@@ -442,7 +447,6 @@ export function createSupervisor(config: SupervisorConfig, deps: SupervisorDeps)
     }
 
     if (shouldGiveUp(consecutiveCrashes, timing.maxConsecutiveCrashes)) {
-      lastIncident.detail = `${lastIncident.detail} — gave up after ${consecutiveCrashes} consecutive crashes`;
       deps.log(`[supervisor] ${consecutiveCrashes} consecutive crashes; giving up. Service is NOT running.`);
       recordApplicationGaveUp();
       setPhase('gave-up');
@@ -467,7 +471,7 @@ export function createSupervisor(config: SupervisorConfig, deps: SupervisorDeps)
     deps.recordIncident({
       role: 'supervisor',
       event: 'gave-up',
-      detail: `gave up after ${consecutiveCrashes} consecutive crashes`,
+      detail: `gave up after ${consecutiveCrashes} consecutive failures: ${lastIncident?.detail ?? 'unknown cause'}`,
       version: config.version ?? null,
       restarts,
       lastIncident,

@@ -79,6 +79,7 @@ export type TranslationDictionary = {
     exitFullscreen: string;
     fullscreenHint: string;
     quality: string;
+    qualityAutoHint: string;
     qualityLow: string;
     qualityMedium: string;
     qualityHigh: string;
@@ -691,6 +692,8 @@ export type TranslationDictionary = {
     whitespaceIgnore: string;
     whitespaceIgnoreBlankLines: string;
     context: string;
+    expandAbove: (params: TranslatorParams) => string;
+    expandBelow: (params: TranslatorParams) => string;
     contextLines: (params: TranslatorParams) => string;
     contextAll: string;
   };
@@ -733,7 +736,15 @@ export type TranslationDictionary = {
     serverHealthHint: string;
     serverHealthSupervised: string;
     serverHealthUnsupervised: string;
+    serverHealthEnable: string;
+    serverHealthEnableHint: string;
+    serverHealthEnabling: string;
+    serverHealthEnablePending: string;
+    serverHealthEnableError: string;
+    serverHealthEnableUnavailable: string;
     serverHealthClean: string;
+    serverHealthHistory: string;
+    serverHealthRunningNow: string;
     serverHealthLastIncident: string;
     serverHealthRestarted: (params: TranslatorParams) => string;
     serverHealthGaveUp: (params: TranslatorParams) => string;

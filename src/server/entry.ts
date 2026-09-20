@@ -33,6 +33,8 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket, resolveStableFederationSessionId } from './routes/terminal.js';
 import androidRoutes, { handleAndroidWebSocket } from './routes/android.js';
+import { exitWithStartupFailure } from './utils/startupFailure.js';
+import { androidRecordings } from './android/recording.js';
 import { stopAllScrcpySessions } from './android/scrcpy.js';
 import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
@@ -529,7 +531,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const desktopRoutesTimer = setInterval(refreshDirectTargets, 2000); desktopRoutesTimer.unref();
   server.once('close', () => { clearInterval(desktopRoutesTimer); for (const target of dynamicDirectTargets.values()) target.close(); });
   server.once('close', () => relayRouter.close());
-  server.once('close', () => { void stopAllScrcpySessions(); });
+  server.once('close', () => { void stopAllScrcpySessions(); void androidRecordings.stopAll(); });
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket, android: handleAndroidWebSocket,
   }, {
@@ -810,7 +812,8 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       crashForensics.recordIncident('port-conflict', { extra: { port, host, code: error.code } });
       console.error(`Port ${port} is already in use.`);
       console.error(`To free it, find and stop the process: lsof -tiTCP:${port} -sTCP:LISTEN | xargs kill`);
-      process.exit(1);
+      exitWithStartupFailure('port-conflict', `Port ${port} is already in use (EADDRINUSE).`);
+      return;
     }
     console.error('Server error:', error);
     process.exit(1);

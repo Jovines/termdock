@@ -3,6 +3,9 @@ import type { WebSocket } from 'ws';
 import { connectDevice, disconnectDevice, listDevices, resolveAdbBinary } from '../android/adb.js';
 import { createScrcpySession, resolveScrcpyBinaries, type ScrcpySession } from '../android/scrcpy.js';
 
+import { androidRecordings } from '../android/recording.js';
+import { pathValidator } from '../utils/pathValidator.js';
+
 const router = Router();
 
 const SERIAL_PATTERN = /^[0-9a-zA-Z_.:\-]{1,128}$/;
@@ -44,6 +47,34 @@ router.post('/disconnect', async (req, res) => {
     const message = error instanceof Error ? error.message : 'ADB_DISCONNECT_FAILED';
     res.status(400).json({ error: message, code: message });
   }
+});
+
+router.get('/recordings', async (req, res) => {
+  const serial = typeof req.query.serial === 'string' ? req.query.serial : '';
+  if (!isValidAndroidSerial(serial)) { res.status(400).json({ error: 'INVALID_SERIAL' }); return; }
+  try { res.json({ recordings: await androidRecordings.list(serial) }); }
+  catch (error) { res.status(500).json({ error: String(error) }); }
+});
+router.post('/recordings', async (req, res) => {
+  const serial = typeof req.body?.serial === 'string' ? req.body.serial : '';
+  if (!isValidAndroidSerial(serial)) { res.status(400).json({ error: 'INVALID_SERIAL' }); return; }
+  try { res.json(await androidRecordings.start(serial)); }
+  catch (error) { res.status(500).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+router.post('/recordings/:id/stop', async (req, res) => {
+  try { res.json(await androidRecordings.stop(req.params.id)); }
+  catch (error) { res.status(400).json({ error: String(error) }); }
+});
+router.post('/recordings/:id/save', async (req, res) => {
+  try {
+    const directory = req.body?.directory === undefined ? undefined
+      : await (req.pathValidator ?? pathValidator).validateAsync(req.body.directory);
+    res.json({ path: await androidRecordings.save(req.params.id, directory) });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+router.delete('/recordings/:id', async (req, res) => {
+  try { await androidRecordings.discard(req.params.id); res.json({ ok: true }); }
+  catch (error) { res.status(400).json({ error: String(error) }); }
 });
 
 export default router;

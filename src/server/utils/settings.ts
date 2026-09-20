@@ -33,7 +33,7 @@ export interface CollaborationPanelState {
   drafts?: Record<string, { content: string; targets: string[] | null }>;
 }
 
-export interface AndroidQualitySettings { id: 'low' | 'medium' | 'high' | 'custom'; maxSize: number; bitRate: number; maxFps: number }
+export interface AndroidQualitySettings { id: 'auto' | 'low' | 'medium' | 'high' | 'custom'; maxSize: number; bitRate: number; maxFps: number }
 
 export interface AndroidSavedPreset { id: string; name: string; maxSize: number; bitRate: number; maxFps: number }
 
@@ -211,7 +211,7 @@ export function normalizeActiveGitRepos(value: unknown): Record<string, string> 
 function normalizeAndroidQuality(value: unknown): AndroidQualitySettings | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
-  if (item.id !== 'low' && item.id !== 'medium' && item.id !== 'high' && item.id !== 'custom') return null;
+  if (item.id !== 'auto' && item.id !== 'low' && item.id !== 'medium' && item.id !== 'high' && item.id !== 'custom') return null;
   const maxSize = typeof item.maxSize === 'number' ? Math.max(360, Math.min(2160, Math.round(item.maxSize))) : 1080;
   const bitRate = typeof item.bitRate === 'number' ? Math.max(300_000, Math.min(30_000_000, Math.round(item.bitRate))) : 4_000_000;
   const maxFps = typeof item.maxFps === 'number' ? Math.max(0, Math.min(60, Math.round(item.maxFps))) : 30;

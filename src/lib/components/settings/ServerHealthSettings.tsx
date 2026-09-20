@@ -1,6 +1,7 @@
+import { useEffect, useRef, useState } from 'react';
 import { ShieldAlert as RiShieldAlertLine, ShieldCheck as RiShieldCheckLine } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../i18n';
-import type { ServerHealthState } from '../../terminal/api';
+import { enableServerSupervision, type ServerHealthState } from '../../terminal/api';
 
 interface ServerHealthSettingsProps {
   state: ServerHealthState | null;
@@ -36,13 +37,51 @@ function formatDuration(ms: number): string {
 
 export function ServerHealthSettings({ state, onDismiss }: ServerHealthSettingsProps) {
   const { t } = useI18n();
+  const [enabling, setEnabling] = useState(false);
+  const [enableError, setEnableError] = useState(false);
+  const busy = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (state?.supervised) {
+      busy.current = false;
+      setEnabling(false);
+      setEnableError(false);
+    }
+  }, [state?.supervised]);
+  useEffect(() => {
+    if (!enabling) return;
+    const timer = window.setTimeout(() => {
+      busy.current = false;
+      setEnabling(false);
+      setEnableError(true);
+    }, 45_000);
+    return () => window.clearTimeout(timer);
+  }, [enabling]);
+  const enable = async () => {
+    if (busy.current) return;
+    busy.current = true;
+    setEnableError(false);
+    setEnabling(true);
+    try {
+      await enableServerSupervision();
+      // The 202 only acknowledges handoff. The fresh connection's health
+      // snapshot is the evidence that automatic recovery really is enabled.
+    } catch {
+      if (!mounted.current) return;
+      busy.current = false;
+      setEnabling(false);
+      setEnableError(true);
+    }
+  };
   // 快照还没到（首屏、或服务刚重启）时不显示"一切正常"——那会是一句没有依据的话。
   if (!state) return null;
 
   const incident = state.incident;
-  const gaveUp = state.supervisor?.phase === 'gave-up';
-  const supervisorLost = state.supervisor !== null && !state.supervisor.alive;
-  const problem = gaveUp || supervisorLost || Boolean(incident?.event);
+  const gaveUp = !state.supervised && state.supervisor?.phase === 'gave-up';
+  const supervisorLost = !state.supervised && state.supervisor !== null && !state.supervisor.alive;
+  const problem = gaveUp || supervisorLost || state.attention;
+  const historical = state.supervised && state.supervisor?.alive && state.supervisor.phase === 'running';
 
   // 监督状态那一行说清"下次它挂了会怎样"，这是红点背后最要紧的一句话。
   const supervisionText = gaveUp
@@ -55,6 +94,9 @@ export function ServerHealthSettings({ state, onDismiss }: ServerHealthSettingsP
 
   const eventLabel = incident
     ? t(EVENT_KEYS[incident.event] ?? 'settings.serverHealthUnknownEvent')
+    : '';
+  const causeLabel = incident?.causeEvent
+    ? t(EVENT_KEYS[incident.causeEvent] ?? 'settings.serverHealthUnknownEvent')
     : '';
   const timing = incident
     ? [
@@ -78,8 +120,11 @@ export function ServerHealthSettings({ state, onDismiss }: ServerHealthSettingsP
           <div className="min-w-0">
             <div className="text-[12px] font-medium text-foreground">{supervisionText}</div>
             <div className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">
-              {incident ? `${t('settings.serverHealthLastIncident')}: ${eventLabel}` : t('settings.serverHealthClean')}
+              {incident ? `${t(historical ? 'settings.serverHealthHistory' : 'settings.serverHealthLastIncident')}: ${eventLabel}${causeLabel ? ` · ${causeLabel}` : ''}` : t('settings.serverHealthClean')}
             </div>
+            {incident && historical && (
+              <div className="mt-1 text-[11px] text-primary">{t('settings.serverHealthRunningNow')}</div>
+            )}
             {incident && (
               <div className="mt-1 text-[10px] tabular-nums text-muted-foreground/75">{timing}</div>
             )}
@@ -106,6 +151,21 @@ export function ServerHealthSettings({ state, onDismiss }: ServerHealthSettingsP
           </button>
         )}
       </div>
+      {!state.supervised && (
+        <div className="border-t border-border px-3 py-3">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {state.canEnableSupervision ? t('settings.serverHealthEnableHint') : t('settings.serverHealthEnableUnavailable')}
+          </p>
+          {state.canEnableSupervision && (
+            <button type="button" onClick={enable} disabled={enabling}
+              className="mt-2 min-h-11 rounded-lg bg-primary px-3 text-[12px] font-medium text-primary-foreground disabled:opacity-60">
+              {enabling ? t('settings.serverHealthEnabling') : t('settings.serverHealthEnable')}
+            </button>
+          )}
+          {enabling && <p role="status" className="mt-2 text-[11px] text-muted-foreground">{t('settings.serverHealthEnablePending')}</p>}
+          {enableError && <p role="alert" className="mt-2 text-[11px] text-destructive">{t('settings.serverHealthEnableError')}</p>}
+        </div>
+      )}
     </section>
   );
 }

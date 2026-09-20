@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildServerHealthState, dismissServerHealth, type ServerHealthOptions } from './serverHealth.js';
 
 let directory: string;
@@ -37,10 +37,36 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
 describe('serverHealth 快照', () => {
+  it('recovers the exact failed child port conflict from legacy give-up logs', () => {
+    writeCrashLog([
+      entry({ role: 'server', pid: 10, event: 'port-conflict', port: 9834 }),
+      entry({ pid: 20, serverPid: 10, event: 'startup-failure' }),
+      entry({ pid: 20, event: 'gave-up', lastIncident: { event: 'startup-failure' } }),
+    ]);
+    expect(buildServerHealthState(options).incident).toMatchObject({
+      event: 'gave-up', causeEvent: 'port-conflict', detail: 'Port 9834 is already in use (EADDRINUSE).',
+    });
+  });
+
+  it('does not attribute another child port conflict to this failure', () => {
+    writeCrashLog([
+      entry({ role: 'server', pid: 11, event: 'port-conflict', port: 9834 }),
+      entry({ pid: 20, serverPid: 10, event: 'startup-failure' }),
+      entry({ pid: 20, event: 'gave-up', lastIncident: { event: 'startup-failure' } }),
+    ]);
+    expect(buildServerHealthState(options).incident?.causeEvent).toBe('startup-failure');
+  });
+
+  it('retains a new supervisor give-up cause without child log entries', () => {
+    writeCrashLog([entry({ event: 'gave-up', lastIncident: { event: 'port-conflict' } })]);
+    expect(buildServerHealthState(options).incident?.causeEvent).toBe('port-conflict');
+  });
+
   it('没有 crash.log 时什么都不报', () => {
     const state = buildServerHealthState(options);
     expect(state).toMatchObject({ incident: null, attention: false, dismissedAt: null, supervisor: null, supervised: false });
@@ -132,6 +158,7 @@ describe('serverHealth 快照', () => {
       lastIncident: null,
     }));
     process.env.TERMDOCK_SUPERVISED = '1';
+    vi.stubGlobal('process', Object.assign(Object.create(process), { connected: true }));
     expect(buildServerHealthState(options)).toMatchObject({
       supervised: true,
       supervisor: { pid: process.pid, alive: true, phase: 'running', restarts: 2, consecutiveCrashes: 0 },

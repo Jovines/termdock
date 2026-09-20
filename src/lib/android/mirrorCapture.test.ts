@@ -2,32 +2,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   captureMirrorScreenshot, formatRecordingElapsed, mirrorCaptureName,
-  pickMirrorRecordingMime, recordingExtension,
 } from './mirrorCapture';
 
-describe('mirror recording codec selection', () => {
-  it('前面优先选 MP4，浏览器不支持时才回退 WebM', () => {
-    const onlyWebm = pickMirrorRecordingMime(mime => mime.startsWith('video/webm'));
-    expect(onlyWebm).toBe('video/webm;codecs=vp9');
-    expect(pickMirrorRecordingMime(() => true)).toBe('video/mp4;codecs=avc1.42E01E');
-  });
-
-  it('一个都不支持时返回 null，由调用方报错而不是录出坏文件', () => {
-    expect(pickMirrorRecordingMime(() => false)).toBeNull();
-  });
-
-  it('按容器决定扩展名', () => {
-    expect(recordingExtension('video/mp4;codecs=avc1.42E01E')).toBe('mp4');
-    expect(recordingExtension('video/webm;codecs=vp9')).toBe('webm');
-  });
-});
-
 describe('mirror capture naming', () => {
-  it('截图是 png，录屏跟随容器，且多次采集不重名', () => {
-    expect(mirrorCaptureName('shot')).toMatch(/^termdock-mirror-shot-\d{14}-[a-z0-9]+\.png$/);
-    expect(mirrorCaptureName('rec', 'video/mp4')).toMatch(/\.mp4$/);
-    expect(mirrorCaptureName('rec', 'video/webm')).toMatch(/\.webm$/);
-    const names = new Set(Array.from({ length: 20 }, () => mirrorCaptureName('shot')));
+  it('截图是 png，且多次采集不重名', () => {
+    expect(mirrorCaptureName()).toMatch(/^termdock-mirror-shot-\d{14}-[a-z0-9]+\.png$/);
+    const names = new Set(Array.from({ length: 20 }, () => mirrorCaptureName()));
     expect(names.size).toBe(20);
   });
 });

@@ -46,7 +46,7 @@ export async function disconnectAndroidDevice(address: string): Promise<void> {
 }
 
 /** 画质：三档快捷预设 + 自定义。scrcpy 参数在会话启动时固定，切换会重连流。 */
-export type AndroidQualityId = 'low' | 'medium' | 'high' | 'custom';
+export type AndroidQualityId = 'auto' | 'low' | 'medium' | 'high' | 'custom';
 export interface AndroidQuality { id: AndroidQualityId; maxSize: number; bitRate: number; maxFps: number }
 
 export const ANDROID_QUALITY_PRESETS: AndroidQuality[] = [
@@ -60,6 +60,7 @@ export const DEFAULT_ANDROID_QUALITY = ANDROID_QUALITY_PRESETS[1]!;
 export function normalizeAndroidQuality(value: unknown): AndroidQuality {
   if (!value || typeof value !== 'object') return DEFAULT_ANDROID_QUALITY;
   const candidate = value as Partial<AndroidQuality>;
+  if (candidate.id === 'auto') return { id: 'auto', maxSize: 720, bitRate: 1_200_000, maxFps: 30 };
   const preset = ANDROID_QUALITY_PRESETS.find(item => item.id === candidate.id);
   if (preset) return preset;
   if (candidate.id !== 'custom') return DEFAULT_ANDROID_QUALITY;
@@ -96,4 +97,25 @@ export function androidErrorText(code: string): string {
   };
   for (const [key, text] of Object.entries(known)) if (code.includes(key)) return text;
   return code;
+}
+
+export interface AndroidRecording {
+  id: string; serial: string; name: string; size: number; startedAt: number;
+  status: 'starting' | 'recording' | 'stopping' | 'ready' | 'error';
+  error?: string;
+}
+export function listAndroidRecordings(serial: string): Promise<{ recordings: AndroidRecording[] }> {
+  return requestJson(`/api/android/recordings?serial=${encodeURIComponent(serial)}`);
+}
+export function startAndroidRecording(serial: string): Promise<AndroidRecording> {
+  return requestJson('/api/android/recordings', { method: 'POST', body: JSON.stringify({ serial }) });
+}
+export function stopAndroidRecording(id: string): Promise<AndroidRecording> {
+  return requestJson(`/api/android/recordings/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+}
+export function saveAndroidRecording(id: string, directory?: string): Promise<{ path: string }> {
+  return requestJson(`/api/android/recordings/${encodeURIComponent(id)}/save`, { method: 'POST', body: JSON.stringify({ directory }) });
+}
+export function discardAndroidRecording(id: string): Promise<{ ok: boolean }> {
+  return requestJson(`/api/android/recordings/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

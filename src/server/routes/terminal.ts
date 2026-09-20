@@ -1,3 +1,4 @@
+import { androidRecordings } from '../android/recording.js';
 import { assertPeerRegistrationAuthority } from '../agent/collaborationPeerTransport.js';
 import { progressRoutes } from '../notifications/progressRoutes.js';
 import { ensureNodePty } from '../utils/ensureNodePty.js';
@@ -117,6 +118,7 @@ import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
+import { prepareSupervisionEnable } from '../utils/enableSupervision.js';
 import { buildServerHealthState, dismissServerHealth } from '../utils/serverHealth.js';
 import { collaborationRoutes } from '../agent/collaborationRoutes.js';
 import { extrasFromBody } from '../agent/collaborationProtocol.js';
@@ -1039,8 +1041,19 @@ function flushPersistAndExit(): void {
     fs.writeFileSync(TMUX_RECOVERY_STATE_FILE, JSON.stringify(tmuxRecoveryState, null, 2), 'utf-8');
   } catch { /* best effort */ }
 }
-process.on('SIGTERM', () => { flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
-process.on('SIGINT', () => { flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
+let shuttingDown = false;
+const shutdownWithRecordings = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  flushPersistAndExit();
+  void persistToolbarPresetsNow();
+  caffeinateManager.shutdown();
+  // Give the MP4 muxer a chance to write its trailer before the service exits.
+  try { await androidRecordings.stopAll(); }
+  finally { process.exit(0); }
+};
+process.on('SIGTERM', () => { void shutdownWithRecordings(); });
+process.on('SIGINT', () => { void shutdownWithRecordings(); });
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 void (async () => {
@@ -7128,6 +7141,16 @@ router.post('/update/restart', async (_req, res) => {
 // 只读快照，不含任何可变更操作——所以不需要 CSRF，和 GET /update 同档。
 router.get('/server-health', (_req, res) => {
   res.json(buildServerHealthState());
+});
+
+router.post('/server-health/enable-supervision', async (_req, res) => {
+  try {
+    const commit = await prepareSupervisionEnable();
+    res.once('finish', commit);
+    res.status(202).json({ restarting: true });
+  } catch (error) {
+    res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 router.post('/server-health/dismiss', (_req, res) => {

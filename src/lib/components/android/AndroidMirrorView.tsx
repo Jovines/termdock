@@ -11,15 +11,18 @@ import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';
 import { useI18n, type TranslationKey } from '../../i18n';
 import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
+import { AutoQuality } from '../../android/autoQuality';
 import { AndroidMirrorController, type MirrorHeader, type MirrorState, type MirrorStats } from '../../android/mirrorController';
 import {
-  MIRROR_RECORDING_MAX_MS, captureMirrorScreenshot, formatRecordingElapsed, startMirrorRecording, type MirrorRecordingHandle,
+  captureMirrorScreenshot, formatRecordingElapsed,
 } from '../../android/mirrorCapture';
 import { getSettings, updateSettings } from '../../terminal/api';
 import {
   ANDROID_QUALITY_PRESETS, DEFAULT_ANDROID_QUALITY, androidErrorText, connectAndroidDevice, listAndroidDevices,
+  listAndroidRecordings, startAndroidRecording, stopAndroidRecording, type AndroidRecording,
   normalizeAndroidQuality, type AndroidDevice, type AndroidDeviceList, type AndroidQuality, type AndroidQualityId,
 } from '../../android/api';
+import { constrainMirrorPan, moveMirrorViewport, type ViewportGeometry } from '../../android/mirrorViewport';
 import type { AndroidSavedPresetState } from '../../terminal/api';
 
 export const ANDROID_DOCK_GROUP = 'android-mirror';
@@ -33,8 +36,6 @@ const ZOOM_MIN = 1;
 const ZOOM_MAX = 8;
 /** 按钮走档位阶梯；捏合/滚轮可以停在档位之间，再按按钮就归到相邻档。 */
 const ZOOM_LADDER = [1, 1.25, 1.5, 2, 2.5, 3, 4, 6, 8];
-/** 双指平移时间距总在抖：这点以内的变化不算捏合，免得「拖动」里混进缩放。 */
-const PINCH_DEAD_ZONE = 0.12;
 
 const clampZoom = (value: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, value));
 
@@ -44,12 +45,7 @@ function formatZoomLabel(zoom: number): string {
 }
 
 /** 画布容器内容框的几何（client 坐标）：缩放锚点和平移边界都按它算。 */
-interface StageBox {
-  cx: number;
-  cy: number;
-  width: number;
-  height: number;
-}
+type StageBox = ViewportGeometry;
 
 function stageBox(canvas: HTMLCanvasElement): StageBox | null {
   const parent = canvas.parentElement;
@@ -65,17 +61,18 @@ function stageBox(canvas: HTMLCanvasElement): StageBox | null {
     cy: rect.top + parent.clientTop + paddingTop + height / 2,
     width,
     height,
+    contentWidth: canvas.offsetWidth,
+    contentHeight: canvas.offsetHeight,
   };
 }
 
-/** 视图手势的基准：每次都按「相对手势起点」重算，逐帧累积会漂。 */
+/** 上一帧输入与当前布局：在边界丢弃多余位移，反向不用先走回起点。 */
 interface ViewGesture {
   /** client 坐标：单指时就是那根手指，双指时是两指中心。 */
   startCentroid: { x: number; y: number };
   /** 双指间距，单指（鼠标 Alt 拖动）为 0，表示只平移不缩放。 */
   startDistance: number;
-  startZoom: number;
-  startPan: { x: number; y: number };
+  box: StageBox;
 }
 
 /** 指针捕获是尽力而为：jsdom 等环境没有实现，捕获失败也不影响手势本身。 */
@@ -96,6 +93,7 @@ const cancelFrame = (handle: number): void => {
   else window.clearTimeout(handle);
 };
 const QUALITY_LABEL: Record<AndroidQualityId, TranslationKey> = {
+  auto: 'android.qualityAuto',
   low: 'android.qualityLow',
   medium: 'android.qualityMedium',
   high: 'android.qualityHigh',
@@ -117,7 +115,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   onInsertPrompt?: (text: string) => void;
   /** 截图/录屏产物：上传到临时目录后插入路径引用。 */
   onInsertFile?: (file: File) => Promise<unknown> | void;
-  onRecordingComplete?: (file: File) => void;
+  onRecordingComplete?: (file: AndroidRecording) => void;
 }) {
   const { t } = useI18n();
   const overlay = useAndroidMirrorStore(state => state.overlay);
@@ -126,6 +124,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const controllerRef = useRef<AndroidMirrorController | null>(null);
   const initialQuality = useMemo<AndroidQuality>(readStoredQuality, []);
   const qualityRef = useRef<AndroidQuality>(initialQuality);
+  const adaptive = useRef<{ serial: string; policy: AutoQuality } | null>(null);
+  const [autoResolution, setAutoResolution] = useState(720);
   /** 正在注入设备的那根手指；x/y 是设备坐标，手势被打断时就近作废。 */
   const activePointer = useRef<{ id: number; type: string; x: number; y: number } | null>(null);
   /** 按下的所有指针（client 坐标）：第二根落下即说明用户要操作视图而不是设备。 */
@@ -141,6 +141,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const zoomLabelRef = useRef<HTMLSpanElement | null>(null);
   /** 待结算的手势帧句柄（0 表示没有）。 */
   const gestureFrame = useRef(0);
+  const wheelFrame = useRef(0);
   const autoConnected = useRef<string | null>(null);
   const retryAttempt = useRef(0);
 
@@ -181,8 +182,10 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
-  const recordingRef = useRef<MirrorRecordingHandle | null>(null);
-  const recordingStartedAt = useRef(0);
+  const recordingRef = useRef<AndroidRecording | null>(null);
+  const [recordingBusy, setRecordingBusy] = useState(false);
+  const recordingRequest = useRef(false);
+  const deliveredRecordings = useRef(new Set<string>());
   const recordingTimer = useRef<number | null>(null);
   const noticeTimer = useRef<number | null>(null);
   const captureBusyRef = useRef(false);
@@ -232,22 +235,37 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     setHeader(null);
   }, []);
 
-  const connect = useCallback((serial: string) => {
+  const connect = useCallback((serial: string, preserveFrame = false) => {
     const canvas = canvasRef.current;
     if (!canvas || !serial) return;
     controllerRef.current?.disconnect();
     setMirrorError(null);
-    setHeader(null);
+    if (!preserveFrame) setHeader(null);
     setWarning(null);
     const controller = new AndroidMirrorController(canvas, {
-      onState: (state, error) => { setMirrorState(state); setMirrorError(error ?? null); },
-      onHeader: next => setHeader(next),
-      onStats: next => setStats(next),
-      onWarning: message => setWarning(message),
+      onState: (state, error) => { if (controllerRef.current !== controller) return; setMirrorState(state); setMirrorError(error ?? null); },
+      onHeader: next => { if (controllerRef.current === controller) setHeader(next); },
+      onStats: next => { if (controllerRef.current === controller) setStats(next); },
+      onWarning: message => { if (controllerRef.current === controller) setWarning(message); },
     });
     controllerRef.current = controller;
-    controller.connect(serial, qualityRef.current);
+    let quality = qualityRef.current;
+    if (quality.id === 'auto') {
+      if (adaptive.current?.serial !== serial) adaptive.current = { serial, policy: new AutoQuality() };
+      adaptive.current.policy.connected(performance.now());
+      quality = adaptive.current.policy.quality;
+      setAutoResolution(quality.maxSize);
+    } else adaptive.current = null;
+    controller.connect(serial, quality);
   }, []);
+
+  useEffect(() => {
+    if (qualityId !== 'auto' || qualityRef.current.id !== 'auto' || mirrorState !== 'streaming'
+      || !stats.adaptation || pointers.current.size || document.hidden) return;
+    const policy = adaptive.current;
+    if (!policy || policy.serial !== selectedSerial) return;
+    if (policy.policy.sample(stats.adaptation, performance.now())) connect(selectedSerial, true);
+  }, [stats, qualityId, mirrorState, selectedSerial, connect]);
 
   // 偏好存服务端，换浏览器/设备也一致；localStorage 只作为首屏的即时初值。
   const persistAndroidPanel = useCallback((patch: {
@@ -301,6 +319,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   }, []);
 
   const changeQuality = useCallback((id: string) => {
+    adaptive.current = null;
     // 用户保存的预设以 user:<id> 表示，值等同于自定义。
     if (id.startsWith('user:')) {
       const preset = presets.find(item => item.id === id.slice(5));
@@ -325,7 +344,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       setQualityPanelExpanded(true);
       return;
     }
-    const preset = ANDROID_QUALITY_PRESETS.find(item => item.id === id) ?? DEFAULT_ANDROID_QUALITY;
+    const preset = id === 'auto' ? normalizeAndroidQuality({ id: 'auto' })
+      : ANDROID_QUALITY_PRESETS.find(item => item.id === id) ?? DEFAULT_ANDROID_QUALITY;
     qualityRef.current = preset;
     setQualityId(preset.id);
     setActivePresetId(null);
@@ -419,10 +439,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     const canvas = canvasRef.current;
     const box = measured ?? (canvas ? stageBox(canvas) : null);
     if (!canvas || !box) return { x: 0, y: 0 };
-    // 边界＝画面边缘贴住可视区边缘；放大后仍不足一屏的方向上自然锁死在 0。
-    const maxX = Math.max(0, (canvas.offsetWidth * zoomValue - box.width) / 2);
-    const maxY = Math.max(0, (canvas.offsetHeight * zoomValue - box.height) / 2);
-    return { x: Math.max(-maxX, Math.min(maxX, next.x)), y: Math.max(-maxY, Math.min(maxY, next.y)) };
+    return constrainMirrorPan(next, zoomValue, box);
   }, []);
 
   /**
@@ -447,25 +464,31 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   }, []);
 
   /** 以 focus（client 坐标，缺省为画面中心）为锚点缩放：锚点底下那一处画面保持不动。 */
-  const applyZoom = useCallback((value: number, focus?: { x: number; y: number }) => {
+  const applyZoom = useCallback((value: number, focus?: { x: number; y: number }, paint = true) => {
     const canvas = canvasRef.current;
     const current = zoomRef.current;
     const next = clampZoom(value);
-    if (!canvas || Math.abs(next - current) < 0.001) return;
+    if (!canvas || next === current) return;
     const box = stageBox(canvas);
     if (!box) return;
     const anchor = focus ?? { x: box.cx, y: box.cy };
-    const scale = next / current;
-    const previous = panRef.current;
-    const clamped = clampPan({
-      x: previous.x + (anchor.x - box.cx - previous.x) * (1 - scale),
-      y: previous.y + (anchor.y - box.cy - previous.y) * (1 - scale),
-    }, next);
-    zoomRef.current = next;
-    panRef.current = clamped;
-    setZoom(next);
-    applyViewTransform();
-  }, [clampPan, applyViewTransform]);
+    const view = moveMirrorViewport({ zoom: current, pan: panRef.current }, box, anchor, anchor, next / current);
+    zoomRef.current = view.zoom;
+    panRef.current = view.pan;
+    if (paint) applyViewTransform();
+  }, [applyViewTransform]);
+
+  // 连续输入只在按钮可用性变化时触发 React 更新。
+  const syncZoomControls = useCallback(() => {
+    const next = zoomRef.current;
+    setZoom(previous => (previous <= ZOOM_MIN + 0.01) === (next <= ZOOM_MIN + 0.01)
+      && (previous >= ZOOM_MAX - 0.01) === (next >= ZOOM_MAX - 0.01) ? previous : next);
+  }, []);
+
+  useEffect(() => () => {
+    cancelFrame(gestureFrame.current);
+    cancelFrame(wheelFrame.current);
+  }, []);
 
   const readCentroid = () => {
     let x = 0;
@@ -483,38 +506,31 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   /** 每当参与手势的手指数变化（第二根落下、捏合退成拖动）都要重建基准，否则画面会跳。 */
   const beginViewGesture = () => {
     const centroid = readCentroid();
-    if (!centroid) return;
+    const box = canvasRef.current ? stageBox(canvasRef.current) : null;
+    if (!centroid || !box) return;
     viewGesture.current = {
       startCentroid: centroid,
       startDistance: readDistance(),
-      startZoom: zoomRef.current,
-      startPan: panRef.current,
+      box,
     };
   };
 
   /** 双指：整体拖动＝平移，张合＝以双指中心为锚点缩放；两种动作一次算完。 */
   const updateViewGesture = useCallback(() => {
     const gesture = viewGesture.current;
-    const canvas = canvasRef.current;
     const centroid = readCentroid();
-    const box = canvas ? stageBox(canvas) : null;
-    if (!gesture || !canvas || !centroid || !box) return;
+    if (!gesture || !centroid) return;
     const distance = readDistance();
-    let nextZoom = gesture.startZoom;
-    if (gesture.startDistance > 0 && distance > 0) {
-      // 死区从倍率里扣掉而不是直接归零，跨过阈值那一刻才不会有台阶。
-      const ratio = distance / gesture.startDistance;
-      const excess = Math.abs(ratio - 1) - PINCH_DEAD_ZONE;
-      if (excess > 0) nextZoom = clampZoom(gesture.startZoom * (1 + Math.sign(ratio - 1) * excess));
-    }
-    const scale = nextZoom / gesture.startZoom;
-    const clamped = clampPan({
-      x: centroid.x - box.cx - (gesture.startCentroid.x - box.cx - gesture.startPan.x) * scale,
-      y: centroid.y - box.cy - (gesture.startCentroid.y - box.cy - gesture.startPan.y) * scale,
-    }, nextZoom, box);
-    zoomRef.current = nextZoom;
-    panRef.current = clamped;
-  }, [clampPan]);
+    const ratio = gesture.startDistance > 0 && distance > 0 ? distance / gesture.startDistance : 1;
+    const view = moveMirrorViewport(
+      { zoom: zoomRef.current, pan: panRef.current }, gesture.box,
+      gesture.startCentroid, centroid, ratio,
+    );
+    zoomRef.current = view.zoom;
+    panRef.current = view.pan;
+    gesture.startCentroid = centroid;
+    gesture.startDistance = distance;
+  }, []);
 
   /**
    * 一帧最多结算一次手势。一帧里两根手指的 move 是两个独立任务，先到的那根会把
@@ -546,7 +562,16 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       // ⌘/Ctrl+滚轮＝缩放（触控板捏合发的也是带 ctrlKey 的滚轮），普通滚轮照旧转发给设备。
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
-        applyZoom(zoomRef.current * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX, y: event.clientY });
+        if (!event.deltaY || viewGesture.current) return;
+        // 触控板的像素增量保持连续；行/页模式统一为像素，再映射到倍率。
+        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.parentElement?.clientHeight || 600 : 1;
+        const delta = Math.max(-600, Math.min(600, event.deltaY * unit));
+        applyZoom(zoomRef.current * Math.exp(-delta * 0.002), { x: event.clientX, y: event.clientY }, false);
+        if (!wheelFrame.current) wheelFrame.current = requestFrame(() => {
+          wheelFrame.current = 0;
+          applyViewTransform();
+          syncZoomControls();
+        });
         return;
       }
       const controller = controllerRef.current;
@@ -557,7 +582,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [applyZoom]);
+  }, [applyZoom, applyViewTransform, syncZoomControls]);
 
   // 面板尺寸或设备方向一变，放大后的画面可能已经越出边界，按新尺寸重新钳制。
   useEffect(() => {
@@ -565,6 +590,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     const parent = canvas?.parentElement;
     if (!canvas || !parent || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
+      if (viewGesture.current) viewGesture.current.box = stageBox(canvas)!;
       const clamped = clampPan(panRef.current, zoomRef.current);
       if (clamped.x === panRef.current.x && clamped.y === panRef.current.y) return;
       panRef.current = clamped;
@@ -591,6 +617,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       return;
     }
     event.preventDefault();
+    applyViewTransform();
+    syncZoomControls();
+    flushGestureFrame();
     capturePointer(canvas, event.pointerId);
     pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     // 鼠标只有一根指针，Alt+拖动走和双指一样的视图手势。
@@ -738,8 +767,10 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     if (next === undefined) return;
     // 第一次放大时点破一次平移手势：借底部那行既有的短暂反馈位，不新开一行。
     if (current <= ZOOM_MIN && next > ZOOM_MIN) showStatus(t('android.zoomPanHint'));
+    flushGestureFrame();
     applyZoom(next);
-  }, [applyZoom, showStatus, t]);
+    setZoom(next);
+  }, [applyZoom, flushGestureFrame, showStatus, t]);
 
   // 失败要显眼、要能读全，所以走头部错误条（本就是动态提示区）；
   // 成功只占用底部那行两秒半，不新开任何一行。
@@ -769,55 +800,78 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     }
   };
 
-  const stopRecording = useCallback(async (reason: 'manual' | 'limit' | 'disconnected') => {
-    const handle = recordingRef.current;
-    if (!handle) return;
-    recordingRef.current = null;
-    if (recordingTimer.current !== null) {
-      window.clearInterval(recordingTimer.current);
-      recordingTimer.current = null;
+  const receiveRecording = useCallback((item: AndroidRecording) => {
+    if (item.status === 'ready' || item.status === 'error') {
+      if (!deliveredRecordings.current.has(item.id)) {
+        deliveredRecordings.current.add(item.id);
+        onRecordingCompleteRef.current?.(item);
+      }
     }
-    setRecording(false);
-    setRecordingElapsed(0);
-    if (reason !== 'manual') {
-      showStatus(t(reason === 'limit' ? 'android.recordingLimit' : 'android.recordingStopped'));
-    }
-    try {
-      const file = await handle.stop();
-      onRecordingCompleteRef.current?.(file);
-    } catch (error) {
-      setCaptureError(error instanceof Error ? error.message : String(error));
-    }
-  }, [showStatus, t]);
-  const stopRecordingRef = useRef(stopRecording);
-  stopRecordingRef.current = stopRecording;
+  }, []);
 
-  const startRecording = () => {
-    const canvas = canvasRef.current;
-    if (!canvas || recordingRef.current) return;
+  const stopRecording = useCallback(async (_reason: string) => {
+    const item = recordingRef.current;
+    if (!item || recordingRequest.current) return;
+    recordingRequest.current = true;
+    setRecordingBusy(true);
     setCaptureError(null);
     try {
-      // 按投屏自身帧率采，未设上限（自动）时按 30fps。
-      recordingRef.current = startMirrorRecording(canvas, custom.maxFps || 30);
+      const result = await stopAndroidRecording(item.id);
+      recordingRef.current = null;
+      setRecording(false);
+      receiveRecording(result);
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    recordingStartedAt.current = performance.now();
-    setRecordingElapsed(0);
-    setRecording(true);
-    recordingTimer.current = window.setInterval(() => {
-      const elapsed = performance.now() - recordingStartedAt.current;
-      setRecordingElapsed(elapsed);
-      if (elapsed >= MIRROR_RECORDING_MAX_MS) void stopRecordingRef.current('limit');
-    }, 500);
+    } finally { recordingRequest.current = false; setRecordingBusy(false); }
+  }, [receiveRecording]);
+
+  const startRecording = async () => {
+    if (!selectedSerial || recordingRequest.current || recordingRef.current) return;
+    recordingRequest.current = true;
+    setRecordingBusy(true);
+    setCaptureError(null);
+    try {
+      const item = await startAndroidRecording(selectedSerial);
+      if (item.status === 'recording' || item.status === 'starting' || item.status === 'stopping') {
+        recordingRef.current = item;
+        setRecording(true);
+        setRecordingElapsed(Math.max(0, Date.now() - item.startedAt));
+      } else receiveRecording(item);
+    } catch (error) {
+      setCaptureError(error instanceof Error ? error.message : String(error));
+    } finally { recordingRequest.current = false; setRecordingBusy(false); }
   };
 
-  // 投屏断了就别录了：再录下去只是把最后一帧反复复制成静止画面。
+  // 服务端拥有录制生命周期；刷新、切换面板和预览重连都不会停止录像。
   useEffect(() => {
-    if (mirrorState === 'streaming') return;
-    if (recordingRef.current) void stopRecordingRef.current('disconnected');
-  }, [mirrorState]);
+    let cancelled = false;
+    let polling = false;
+    recordingRef.current = null;
+    setRecording(false);
+    const poll = async () => {
+      if (!selectedSerial || polling || recordingRequest.current) return;
+      polling = true;
+      try {
+        const { recordings } = await listAndroidRecordings(selectedSerial);
+        if (cancelled || recordingRequest.current) return;
+        const active = recordings.find(item => ['starting', 'recording', 'stopping'].includes(item.status));
+        recordingRef.current = active ?? null;
+        setRecording(Boolean(active));
+        for (const item of recordings) receiveRecording(item);
+      } catch { /* 保留已知录制状态，断网不等于服务端停止。 */ }
+      finally { polling = false; }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2000);
+    recordingTimer.current = window.setInterval(() => {
+      if (recordingRef.current) setRecordingElapsed(Math.max(0, Date.now() - recordingRef.current.startedAt));
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      if (recordingTimer.current !== null) window.clearInterval(recordingTimer.current);
+    };
+  }, [selectedSerial, receiveRecording]);
 
   // ⋯ 菜单：点外部 / Esc / 视口变化都关掉。菜单是 portal 到 body 的浮层，
   // 用捕获阶段监听，确保 Esc 先被菜单吃掉，不会被下面的 onKeyDown 转成设备返回键。
@@ -846,16 +900,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     };
   }, [moreOpen]);
 
-  // 离开面板前收尾：交给仍挂载的父级确认，不能自动插入。
   useEffect(() => () => {
-    if (recordingTimer.current !== null) window.clearInterval(recordingTimer.current);
     if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
-    const handle = recordingRef.current;
-    recordingRef.current = null;
-    if (!handle) return;
-    void handle.stop()
-      .then(file => onRecordingCompleteRef.current?.(file))
-      .catch(() => { /* 卸载路径上失败就放弃 */ });
   }, []);
 
   const streaming = mirrorState === 'streaming';
@@ -940,9 +986,10 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           className={compact
             ? 'h-5 shrink-0 rounded bg-surface-2 px-1 text-[10px] leading-none text-foreground outline-none'
             : 'shrink-0 rounded bg-surface-2 px-1.5 py-1 text-[11px] text-foreground outline-none'}
-          title={t('android.quality')}
+          title={qualityId === 'auto' ? t('android.qualityAutoHint') : t('android.quality')}
           aria-label={t('android.quality')}
         >
+          <option value="auto">{t('android.qualityAuto')}{qualityId === 'auto' ? ` · ${autoResolution}p` : ''}</option>
           {ANDROID_QUALITY_PRESETS.map(preset => (
             <option key={preset.id} value={preset.id}>{t(QUALITY_LABEL[preset.id])}</option>
           ))}
@@ -978,13 +1025,13 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         {(streaming || recording) && (
           <button
             type="button"
-            onClick={() => { if (recording) void stopRecording('manual'); else startRecording(); }}
-            disabled={!recording && !onRecordingComplete}
+            onClick={() => { if (recording) void stopRecording('manual'); else void startRecording(); }}
+            disabled={recordingBusy || (!recording && !onRecordingComplete)}
             className={`${iconButtonClass} ${recording ? 'text-destructive' : 'text-muted-foreground'}`}
             title={recording ? t('android.recordingStop') : (onRecordingComplete ? t('android.recordingStart') : t('android.captureUnavailable'))}
             aria-label={recording ? t('android.recordingStop') : t('android.recordingStart')}
           >
-            {recording ? <Square size={compact ? 10 : 11} fill="currentColor" /> : <Video size={compact ? 12 : 13} />}
+            {recordingBusy ? <Loader2 className="animate-spin" size={13} /> : recording ? <Square size={compact ? 10 : 11} fill="currentColor" /> : <Video size={compact ? 12 : 13} />}
           </button>
         )}
         <button
@@ -1175,6 +1222,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
             // transform 不在这里给：手势中它由 applyViewTransform 直接写，逐帧渲染太重；
             // 静止态那串空值也由它写，别在这儿追上一条恒等变换（见那边的注释）。
             transformOrigin: 'center',
+            // 全局 * 的 transform 过渡会把每帧输入变成 200ms 的追赶动画。
+            transition: 'none',
           }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}

@@ -85,9 +85,9 @@ class SupervisorHarness {
     this.supervisor = supervisor;
   }
 
-  static async start(): Promise<SupervisorHarness> {
+  static async start(occupiedPort?: number): Promise<SupervisorHarness> {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-supervisor-'));
-    const port = await reservePort();
+    const port = occupiedPort ?? await reservePort();
     const preloadPath = path.join(home, 'preload.mjs');
     // 把 homedir 指到临时目录：supervisor 写的 supervisor.json / crash.log 全落在那里，
     // 既不碰真实 ~/.termdock，也让测试能按 pid 精确地杀——**不能猜 pid**。
@@ -111,6 +111,7 @@ class SupervisorHarness {
     ], {
       env: {
         ...process.env,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import tsx`,
         TERMDOCK_SUPERVISOR_TEST_HOME: home,
         TERMDOCK_SUPERVISOR_TIMING: JSON.stringify(FAST_TIMING),
       },
@@ -208,6 +209,24 @@ class SupervisorHarness {
 }
 
 describe('supervisor 端到端', () => {
+  it('real port conflict crosses IPC and preserves the cause through give-up', async () => {
+    const listener = net.createServer();
+    await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', resolve));
+    const port = (listener.address() as net.AddressInfo).port;
+    const harness = await SupervisorHarness.start(port);
+    try {
+      const gaveUp = await harness.waitForIncident('gave-up');
+      expect(gaveUp.detail).toContain('port already in use');
+      expect(harness.readCrashLog().filter((entry) => entry.event === 'port-conflict')).toHaveLength(5);
+      expect(harness.readCrashLog().some((entry) => entry.event === 'startup-failure')).toBe(false);
+      expect(harness.readState()?.lastIncident?.event).toBe('port-conflict');
+      expect(listener.listening).toBe(true);
+    } finally {
+      await harness.stop();
+      await new Promise<void>((resolve) => listener.close(() => resolve()));
+    }
+  }, 30_000);
+
   it('服务被 SIGKILL 后自动拉起新的，并把这次死亡记进 crash.log', async () => {
     const harness = await SupervisorHarness.start();
     try {
@@ -268,7 +287,7 @@ describe('supervisor 端到端', () => {
       harness.writeControl({ bootExitCode: 1 });
 
       const gaveUp = await harness.waitForIncident('gave-up', 20_000);
-      expect(gaveUp.detail).toContain('consecutive crashes');
+      expect(gaveUp.detail).toContain('consecutive failures');
       expect(gaveUp.restartCommand).toBe('npm i -g termdock@9.9.9-test');
 
       const crashes = harness.readCrashLog().filter((entry) => entry.event === 'startup-failure');

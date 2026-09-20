@@ -1,3 +1,4 @@
+import { ChangesToolbar } from './ChangesToolbar';
 import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
 import { GitLoadingSkeleton } from './GitLoadingSkeleton';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
@@ -88,6 +89,7 @@ import {
 } from './referencePaths';
 import { ContextDraftDock } from './ContextDraftDock';
 import { AndroidMirrorView, ANDROID_DOCK_GROUP } from '../android/AndroidMirrorView';
+import type { AndroidRecording } from '../../android/api';
 import { RecordingSaveDialog } from '../android/RecordingSaveDialog';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';
@@ -197,7 +199,8 @@ const MAX_FILE_TREE_WIDTH_PX = 560;
 // mode collapses to a single column with back-navigation, and the third
 // "File" tab is hidden (its content is reachable via the Files tab).
 const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
-const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
+// Cap intrinsic column sizing, but fill extra space allocated by min-w-full tables.
+const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'min-w-full max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
 const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
 const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-border/10 align-top text-muted-foreground last:border-r-0`;
 // Native horizontal-scroll regions inside the sidebar (code blocks, tables).
@@ -7864,9 +7867,9 @@ export function RightSidebar(
   }, [contextDraftEnabled, insertPathReference, isMobile, onClose, t]);
 
   /** 投屏面板的截图/录屏产物：与临时图片上传同一条链路，只是文件已经在内存里。 */
-  const [pendingRecordings, setPendingRecordings] = useState<File[]>([]);
-  const handleRecordingComplete = useCallback((file: File) => {
-    setPendingRecordings(previous => [...previous, file]);
+  const [pendingRecordings, setPendingRecordings] = useState<AndroidRecording[]>([]);
+  const handleRecordingComplete = useCallback((file: AndroidRecording) => {
+    setPendingRecordings(previous => previous.some(item => item.id === file.id) ? previous : [...previous, file]);
   }, []);
   const handleMirrorCaptureInsert = useCallback(async (file: File) => {
     await uploadTemporaryImageAndInsertReference(file, uploadFiles, (uploadedPath) => {
@@ -11023,7 +11026,7 @@ export function RightSidebar(
       : `${changeAuditTargetRepos.length} repos`;
 
   const changeAuditButton = rootPath ? (
-    <div className="inline-flex h-7 shrink-0 items-center">
+    <div className="inline-flex min-h-9 shrink-0 items-center">
       <AuditPromptScopeButton
         open={changeAuditScopeOpen}
         onOpenChange={setChangeAuditScopeOpen}
@@ -11067,6 +11070,38 @@ export function RightSidebar(
     </div>
   ) : null;
 
+  const changesActionRepo = activeGitRepoSummary ?? (
+    gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1
+      ? { root: rootPath, label: rootName }
+      : null
+  );
+  const changesSecondaryActions = (
+    <>
+      {changesActionRepo && (
+        <div className="flex w-full flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => runRepoGitAction('stage-all', changesActionRepo.root, changesActionRepo.label)}
+            disabled={Boolean(runningGitAction)}
+            className="flex-1 rounded-md bg-accent/10 px-2 py-1 text-[11px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+          >
+            {t('rightSidebar.stageAll')}
+          </button>
+          <button
+            type="button"
+            onClick={() => runRepoGitAction('stash-all', changesActionRepo.root, changesActionRepo.label)}
+            disabled={Boolean(runningGitAction)}
+            className="flex-1 rounded-md bg-surface-elevated px-2 py-1 text-[11px] font-medium text-foreground hover:bg-surface disabled:opacity-50"
+          >
+            {t('rightSidebar.stashAll')}
+          </button>
+        </div>
+      )}
+      {nestedGitScanToggle}
+      {changeAuditButton}
+    </>
+  );
+
   // Reserve the summary row before Git responds. Keep chips on one scrollable
   // line so late branch/status data cannot push the Changes toolbar down.
   const gitSummaryChips = (
@@ -11103,28 +11138,6 @@ export function RightSidebar(
       )}
       {changedSummary.staged > 0 && (
         <span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{t('rightSidebar.stagedCountShort', { count: changedSummary.staged })}</span>
-      )}
-      {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
-        <button
-          type="button"
-          onClick={() => void runSidebarGitAction({ action: 'stage-all', cwd: rootPath }, t('rightSidebar.stageAll'))}
-          disabled={Boolean(runningGitAction)}
-          className="rounded-md bg-accent/10 px-2 py-0.5 font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-          title={t('rightSidebar.stageAll')}
-        >
-          {t('rightSidebar.stageAll')}
-        </button>
-      )}
-      {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
-        <button
-          type="button"
-          onClick={() => setConfirmGitAction({ kind: 'stash-all', repoRoot: rootPath, repoLabel: rootName })}
-          disabled={Boolean(runningGitAction)}
-          className="rounded-md bg-surface-2 px-2 py-0.5 font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
-          title={t('rightSidebar.stashAll')}
-        >
-          {t('rightSidebar.stashAll')}
-        </button>
       )}
     </div>
   );
@@ -11901,9 +11914,8 @@ export function RightSidebar(
                       <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
                     </div>
                   </div>
-                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                  <ChangesToolbar key={rootPath} actions={changesSecondaryActions}>
                     {renderRepoSwitcherButton()}
-                    {nestedGitScanToggle}
                     {modeToggle}
                     {renderDiffViewTypeToggle()}
                     <button
@@ -11920,31 +11932,12 @@ export function RightSidebar(
                       <span className="font-mono text-[12px] leading-none">Aa</span>
                       <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
                     </button>
-                    {changeAuditButton}
                     {diffRefreshButton}
-                  </div>
+                  </ChangesToolbar>
                   {activeGitRepoSummary && (
                     <div className="mt-2 flex items-center gap-1.5">
                       <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
                       {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
-                      <button
-                        type="button"
-                        onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                        disabled={Boolean(runningGitAction)}
-                        className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-                        title={t('rightSidebar.stageAll')}
-                      >
-                        {t('rightSidebar.stageAll')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                        disabled={Boolean(runningGitAction)}
-                        className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
-                        title={t('rightSidebar.stashAll')}
-                      >
-                        {t('rightSidebar.stashAll')}
-                      </button>
                     </div>
                   )}
                   {!activeGitRepoSummary && showGitRepoFilter && (
@@ -12017,14 +12010,12 @@ export function RightSidebar(
                         </div>
                         <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
                       </div>
-                      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                      <ChangesToolbar key={rootPath} actions={changesSecondaryActions}>
                         {renderRepoSwitcherButton()}
-                        {nestedGitScanToggle}
                         {modeToggle}
                         {pinned && renderDiffViewTypeToggle()}
-                        {changeAuditButton}
                         {diffRefreshButton}
-                      </div>
+                      </ChangesToolbar>
                       {activeGitRepoSummary && (
                         <div className="mt-2 flex items-center gap-1.5">
                           <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
@@ -12132,7 +12123,7 @@ export function RightSidebar(
         key={pendingRecordings[0].name}
         file={pendingRecordings[0]}
         initialPath={rootPath || '/'}
-        onInsert={handleMirrorCaptureInsert}
+        onInsert={insertPathReference}
         onDone={() => setPendingRecordings(previous => previous.slice(1))}
       />}
       {isOpen && contextDraftEnabled && (

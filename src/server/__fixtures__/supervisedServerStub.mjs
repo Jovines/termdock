@@ -23,6 +23,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import { exitWithStartupFailure } from '../utils/startupFailure.ts';
 
 const POLL_MS = 50;
 
@@ -77,6 +78,10 @@ const server = http.createServer((req, res) => {
   }
   res.writeHead(404);
   res.end();
+});
+
+server.on('error', (error) => {
+  exitWithStartupFailure(error.code === 'EADDRINUSE' ? 'port-conflict' : 'startup-failure', error.message);
 });
 
 server.listen(requestedPort, '127.0.0.1', () => {

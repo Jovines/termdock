@@ -1,4 +1,5 @@
 import { secureSocket } from '../federation/browserIntegration';
+import type { AutoQualitySample } from './autoQuality';
 import { androidStreamPath, type AndroidQuality } from './api';
 import {
   ANDROID_KEYCODE, BUTTON_PRIMARY, KEY_ACTION_DOWN, KEY_ACTION_UP, MOTION_ACTION_CANCEL, MOTION_ACTION_DOWN, MOTION_ACTION_MOVE,
@@ -11,7 +12,7 @@ import {
 export type MirrorState = 'idle' | 'connecting' | 'streaming' | 'error';
 
 export interface MirrorHeader { deviceName: string; codec: 'h264' | 'h265' | 'av1'; width: number; height: number }
-export interface MirrorStats { fps: number; kbps: number; width: number; height: number; received: number; decoded: number; controls: number; last: string }
+export interface MirrorStats { fps: number; kbps: number; width: number; height: number; received: number; decoded: number; controls: number; last: string; adaptation?: AutoQualitySample }
 export interface MirrorCallbacks {
   onState: (state: MirrorState, error?: string) => void;
   onHeader: (header: MirrorHeader) => void;
@@ -102,6 +103,14 @@ export class AndroidMirrorController {
   private warnedUnsupported = false;
   private lastSampleAt = 0;
   private serial = '';
+  private autoQuality = false;
+  private pingAt: number | null = null;
+  private rttMs: number | null = null;
+  private rttAt = 0;
+  private minimumFrameOffset = Infinity;
+  private deliveryDelayMs = 0;
+  private peakDecodeQueue = 0;
+  private sampleFrames = 0;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -112,6 +121,7 @@ export class AndroidMirrorController {
 
   connect(serial: string, quality?: AndroidQuality): void {
     this.serial = serial;
+    this.autoQuality = quality?.id === 'auto';
     this.closedByUser = false;
     this.callbacks.onState('connecting');
     let socket: WebSocket;
@@ -122,7 +132,7 @@ export class AndroidMirrorController {
     }
     this.socket = socket;
     socket.onopen = () => { this.lastMessageAt = Date.now(); };
-    socket.onmessage = event => this.handleMessage(event.data);
+    socket.onmessage = event => { if (!this.closedByUser) this.handleMessage(event.data); };
     socket.onerror = () => { if (!this.closedByUser) this.callbacks.onState('error', 'SCRCPY_CONNECTION_LOST'); };
     socket.onclose = () => {
       this.teardownTimers();
@@ -158,8 +168,11 @@ export class AndroidMirrorController {
         try { this.socket.close(); } catch { /* ignore */ }
         return;
       }
-      this.send({ type: 'ping' });
-    }, 15_000);
+      if (this.pingAt === null) {
+        this.pingAt = performance.now();
+        this.send({ type: 'ping' });
+      }
+    }, this.autoQuality ? 2000 : 15_000);
     // 卡顿自愈：长时间收不到帧（解码器卡住/时序错位）时请求一次关键帧重置。
     this.stallTimer = setInterval(() => {
       if (!this.header || this.closedByUser) return;
@@ -183,7 +196,17 @@ export class AndroidMirrorController {
         decoded: this.decodedFrames,
         controls: this.controlsSent,
         last: this.lastType,
+        adaptation: this.autoQuality ? {
+          rttMs: this.pingAt !== null && performance.now() - this.pingAt > 2000
+            ? performance.now() - this.pingAt
+            : performance.now() - this.rttAt < 6000 ? this.rttMs : null,
+          deliveryDelayMs: this.sampleFrames ? this.deliveryDelayMs : 0,
+          decodeQueue: Math.max(this.peakDecodeQueue, this.decoder?.decodeQueueSize ?? 0),
+          frames: this.sampleFrames,
+        } : undefined,
       });
+      this.sampleFrames = 0;
+      this.peakDecodeQueue = 0;
       this.frameCount = 0;
       this.bytesSinceSample = 0;
       this.lastSampleAt = now;
@@ -243,6 +266,11 @@ export class AndroidMirrorController {
         this.callbacks.onState('error', 'SCRCPY_SESSION_CLOSED');
         break;
       case 'pong':
+        if (this.pingAt !== null) {
+          this.rttMs = performance.now() - this.pingAt;
+          this.rttAt = performance.now();
+          this.pingAt = null;
+        }
         break;
       default:
         break;
@@ -264,6 +292,14 @@ export class AndroidMirrorController {
       this.configureDecoder();
       this.ack();
       return;
+    }
+    this.sampleFrames++;
+    const pts = Number(message.pts);
+    if (message.pts !== undefined && Number.isFinite(pts)) {
+      // Relative PTS removes the need to synchronise client/server/device clocks.
+      const offset = performance.now() - pts / 1000;
+      this.minimumFrameOffset = Math.min(this.minimumFrameOffset, offset);
+      this.deliveryDelayMs = Math.max(0, offset - this.minimumFrameOffset);
     }
     if (!this.configured) this.configureDecoder();
     const keyFrame = message.key === true;
@@ -353,6 +389,7 @@ export class AndroidMirrorController {
         timestamp: pts ? Number(pts) : this.lastTimestamp + 1,
         data: bytes,
       }));
+      this.peakDecodeQueue = Math.max(this.peakDecodeQueue, this.decoder.decodeQueueSize);
       this.lastTimestamp = pts ? Number(pts) : this.lastTimestamp + 1;
     } catch (error) {
       // 单个 chunk 失败不终止整条流；等待下一个关键帧即可恢复，但要把原因暴露出来。

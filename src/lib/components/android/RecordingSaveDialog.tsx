@@ -2,23 +2,34 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { uploadFiles } from '../../terminal/api';
+import { saveAndroidRecording, discardAndroidRecording, type AndroidRecording } from '../../android/api';
 import { DirectoryPickerDialog } from '../sidebar/DirectoryPickerDialog';
 
-/** 文件在操作成功前留在内存中；取消选目录或上传失败都可以继续处理。 */
+/** 录像始终留在服务端；这里只传保存位置和文件引用。 */
 export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
-  file: File;
+  file: AndroidRecording;
   initialPath: string;
-  onInsert: (file: File) => Promise<unknown>;
+  onInsert: (path: string) => Promise<unknown> | void;
   onDone: () => void;
 }) {
   const { t } = useI18n();
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  const discard = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setDiscarding(true);
+    try { await discardAndroidRecording(file.id); onDone(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { inFlight.current = false; setBusy(false); setDiscarding(false); }
+  };
 
   useEffect(() => {
     if (picking) return;
@@ -48,12 +59,8 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
     setPicking(false);
     setError(null);
     try {
-      if (directory !== undefined) {
-        const result = await uploadFiles(directory, [file]);
-        if (!result.files[0]?.path) throw new Error(t('rightSidebar.uploadFailed'));
-      } else {
-        await onInsert(file);
-      }
+      const result = await saveAndroidRecording(file.id, directory);
+      if (directory === undefined) await onInsert(result.path);
       onDone();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -74,15 +81,15 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
         <h2 id="recording-save-title" className="text-sm font-semibold">{t('android.recordingConfirm')}</h2>
         <p className="mt-2 text-xs text-muted-foreground">{t('android.recordingSaveHint')}</p>
         <p className="mt-2 break-all text-xs text-muted-foreground">{file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB</p>
-        {error && <p role="alert" className="mt-3 break-words text-xs text-destructive">{error}</p>}
+        {(error || file.error) && <p role="alert" className="mt-3 break-words text-xs text-destructive">{error || file.error}</p>}
         {busy && <p role="status" className="mt-3 flex items-center gap-2 text-sm text-primary">
           <Loader2 size={16} className="animate-spin" />
-          {t(saving ? 'android.recordingSaving' : 'android.captureInserting')}
+          {discarding ? `${t('android.recordingDiscard')}…` : t(saving ? 'android.recordingSaving' : 'android.captureInserting')}
         </p>}
         <div className="mt-4 flex flex-col gap-2">
-          <button type="button" disabled={busy} onClick={() => { void run(); }} className="min-h-10 rounded-lg bg-primary px-3 text-sm text-primary-foreground disabled:opacity-40">{t('android.recordingInsert')}</button>
-          <button type="button" disabled={busy} onClick={() => setPicking(true)} className="min-h-10 rounded-lg bg-surface-2 px-3 text-sm disabled:opacity-40">{t('android.recordingSave')}</button>
-          <button type="button" disabled={busy} onClick={onDone} className="min-h-10 rounded-lg px-3 text-sm text-muted-foreground disabled:opacity-40">{t('android.recordingDiscard')}</button>
+          <button type="button" disabled={busy || file.status !== 'ready'} onClick={() => { void run(); }} className="min-h-10 rounded-lg bg-primary px-3 text-sm text-primary-foreground disabled:opacity-40">{t('android.recordingInsert')}</button>
+          <button type="button" disabled={busy || file.status !== 'ready'} onClick={() => setPicking(true)} className="min-h-10 rounded-lg bg-surface-2 px-3 text-sm disabled:opacity-40">{t('android.recordingSave')}</button>
+          <button type="button" disabled={busy} onClick={() => void discard()} className="min-h-10 rounded-lg px-3 text-sm text-muted-foreground disabled:opacity-40">{t('android.recordingDiscard')}</button>
         </div>
       </div>
     </div>, document.body,

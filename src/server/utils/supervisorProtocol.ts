@@ -30,7 +30,13 @@ export interface ServerIntentMessage {
   to?: string;
 }
 
-export type ServerToSupervisorMessage = ReadyMessage | ServerIntentMessage;
+export type ServerToSupervisorMessage = ReadyMessage | ServerIntentMessage | StartupFailedMessage;
+
+export function isStartupFailedMessage(value: unknown): value is StartupFailedMessage {
+  return isRecord(value) && value.type === 'termdock-startup-failed'
+    && typeof value.reason === 'string'
+    && (value.detail === undefined || typeof value.detail === 'string');
+}
 export type SupervisorToLauncherMessage = ReadyMessage | StartupFailedMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {

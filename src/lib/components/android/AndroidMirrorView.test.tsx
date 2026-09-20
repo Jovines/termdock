@@ -2,6 +2,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { normalizeAndroidQuality, startAndroidRecording, stopAndroidRecording, listAndroidRecordings } from '../../android/api';
+import { updateSettings } from '../../terminal/api';
 import { AndroidMirrorView } from './AndroidMirrorView';
 
 // 投屏控制器会去连 WebSocket，组件测试里只关心按钮接线和插入回调。
@@ -19,7 +21,8 @@ vi.mock('../../android/mirrorController', () => {
       constructor(_canvas: HTMLCanvasElement, callbacks: { onState?: (state: string) => void; onHeader?: (header: unknown) => void }) {
         this.callbacks = callbacks;
       }
-      connect() {
+      connect(_serial?: string, quality?: unknown) {
+        (globalThis as Record<string, unknown>).__mirrorConnection = { quality, callbacks: this.callbacks };
         this.callbacks.onHeader?.({ deviceName: 'Test', codec: 'h264', width: 544, height: 1080 });
         this.callbacks.onState?.('streaming');
       }
@@ -39,6 +42,9 @@ vi.mock('../../android/api', async importOriginal => ({
     adbAvailable: true, scrcpyVersion: '4.0', devices: [{ serial: 'emulator-5554', state: 'device', model: 'Test', androidVersion: '14' }],
   })),
   connectAndroidDevice: vi.fn(),
+  listAndroidRecordings: vi.fn(async () => ({ recordings: [] })),
+  startAndroidRecording: vi.fn(async () => ({ id: 'rec-1', serial: 'emulator-5554', name: 'recording.mp4', size: 0, startedAt: Date.now(), status: 'recording' })),
+  stopAndroidRecording: vi.fn(async () => ({ id: 'rec-1', serial: 'emulator-5554', name: 'recording.mp4', size: 123, startedAt: Date.now(), status: 'ready' })),
 }));
 vi.mock('../../terminal/api', () => ({
   getSettings: vi.fn(async () => ({ androidPanel: null })),
@@ -57,11 +63,51 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     // 这个项目没开 testing-library 的自动 cleanup，不手动清会出现多个同名按钮。
     cleanup();
     MediaRecorderSpy.instances.length = 0;
+    vi.mocked(stopAndroidRecording).mockClear();
     keyCalls().length = 0;
     stubCanvasEnvironment();
   });
 
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it('服务端录制期间自动画质仍能降档，按住操作时延后调整', async () => {
+    localStorage.removeItem('termdock:android:quality:v1');
+    let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    await streamingView(async () => {});
+    await userEvent.selectOptions(screen.getByLabelText('Quality'), 'auto');
+    await userEvent.click(screen.getByLabelText('Start recording'));
+    expect(screen.getByLabelText('Stop recording')).toBeTruthy();
+    const connection = () => (globalThis as Record<string, unknown>).__mirrorConnection as {
+      quality: ReturnType<typeof normalizeAndroidQuality>;
+      callbacks: { onStats: (value: unknown) => void };
+    };
+    expect(connection().quality.maxSize).toBe(720);
+    const saved = vi.mocked(updateSettings).mock.calls.length;
+    const oldConnection = connection();
+    const canvas = document.querySelector('canvas')!;
+    for (const time of [5000, 6000, 7000, 8000]) {
+      if (time === 7000) act(() => firePointer(canvas, 'pointerdown', { pointerId: 9, clientX: 100, clientY: 100 }));
+      if (time === 8000) {
+        expect(connection().quality.maxSize).toBe(720);
+        act(() => firePointer(canvas, 'pointerup', { pointerId: 9, clientX: 100, clientY: 100 }));
+      }
+      now = time;
+      act(() => oldConnection.callbacks.onStats({ fps: 12, kbps: 700, width: 720, height: 360,
+        adaptation: { rttMs: 500, deliveryDelayMs: 0, decodeQueue: 0, frames: 12 } }));
+    }
+    expect(connection().quality.maxSize).toBe(480);
+    expect(screen.getByLabelText('Stop recording')).toBeTruthy();
+    expect(stopAndroidRecording).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('Quality') as HTMLSelectElement).value).toBe('auto');
+    expect(screen.getByRole('option', { name: 'Auto · 480p' })).toBeTruthy();
+    expect(vi.mocked(updateSettings).mock.calls.length).toBe(saved);
+    await userEvent.selectOptions(screen.getByLabelText('Quality'), 'high');
+    now = 30000;
+    act(() => oldConnection.callbacks.onStats({ adaptation: { rttMs: 1000 } }));
+    expect(connection().quality.id).toBe('high');
+    localStorage.removeItem('termdock:android:quality:v1');
+  });
 
   it('截图把 PNG 文件交给插入回调', async () => {
     const inserted: File[] = [];
@@ -160,7 +206,8 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     await streamingView(async file => { inserted.push(file); }, completed);
 
     await userEvent.click(screen.getByLabelText('Start recording'));
-    const recorder = MediaRecorderSpy.instances.at(-1)!;
+    expect(MediaRecorderSpy.instances).toHaveLength(0);
+    expect(startAndroidRecording).toHaveBeenCalledWith('emulator-5554');
     // 徽章里的停止按钮带时长，避免与工具栏那个同名按钮混淆。
     const badgeStop = await screen.findByLabelText(/^Stop recording · \d\d:\d\d$/);
     expect(badgeStop).toBeTruthy();
@@ -170,7 +217,7 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     expect(screen.getByText(/fps ·/).getAttribute('aria-hidden')).toBe('true');
 
     // 真实时序：录制途中数据持续到达，点停止时已经攒了内容。
-    recorder.emit(new Blob([new Uint8Array([1, 2, 3])], { type: 'video/mp4' }));
+
     await userEvent.click(badgeStop);
 
     await waitFor(() => expect(completed).toHaveBeenCalledOnce());
@@ -178,14 +225,27 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     expect(inserted).toHaveLength(0);
   });
 
-  it('关闭投屏时收尾的录屏仍需确认', async () => {
+  it('重新打开面板找回进行中的服务端录制，预览重连不会停止它', async () => {
+    vi.mocked(listAndroidRecordings).mockResolvedValueOnce({ recordings: [{
+      id: 'recovered', serial: 'emulator-5554', name: 'recovered.mp4', size: 0,
+      startedAt: Date.now() - 10000, status: 'recording',
+    }] });
+    await streamingView(async () => {});
+    await screen.findByLabelText('Stop recording');
+    await userEvent.selectOptions(screen.getByLabelText('Quality'), 'low');
+    expect(screen.getByLabelText('Stop recording')).toBeTruthy();
+    expect(stopAndroidRecording).not.toHaveBeenCalled();
+  });
+
+  it('关闭面板不停止服务端录像', async () => {
     const inserted = vi.fn();
     const completed = vi.fn();
     const view = await streamingView(inserted, completed);
     await userEvent.click(screen.getByLabelText('Start recording'));
-    MediaRecorderSpy.instances.at(-1)!.emit(new Blob(['video'], { type: 'video/mp4' }));
+
     view.unmount();
-    await waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(stopAndroidRecording).not.toHaveBeenCalled();
+    expect(completed).not.toHaveBeenCalled();
     expect(inserted).not.toHaveBeenCalled();
   });
 });
@@ -216,11 +276,12 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     // 进面板时画布还是默认的 300×150，首帧到达才换成帧尺寸，这层缓存不重算，
     // 整幅画面就被按小尺寸栅格化再放大 —— 「刚进去就糊」只有 262 会出，原因在这。
     expect(canvas.style.transform).toBe('');
+    expect(canvas.style.transition).toBe('none');
 
-    await userEvent.click(screen.getByLabelText('Zoom in'));
+    await zoomClick(screen.getByLabelText('Zoom in'));
     expect(canvas.style.transform).toBe('translate3d(0px, 0px, 0) scale(1.25)');
 
-    for (let press = 0; press < 10; press++) await userEvent.click(screen.getByLabelText('Zoom out'));
+    for (let press = 0; press < 10; press++) await zoomClick(screen.getByLabelText('Zoom out'));
     expect(canvas.style.transform).toBe('');
   });
 
@@ -233,16 +294,16 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     expect(viewTransform(canvas)).toEqual({ x: 0, y: 0, zoom: 1 });
     expect(zoomOut.disabled).toBe(true);
 
-    await userEvent.click(zoomIn);
+    await zoomClick(zoomIn);
     expect(viewTransform(canvas).zoom).toBeCloseTo(1.25, 3);
     // 第一次放大时顺带把双指平移点破一次（借底部那行的短暂反馈位）。
     expect(screen.getByText('Two-finger drag to move the view')).toBeTruthy();
 
-    for (let press = 0; press < 10; press++) await userEvent.click(zoomIn);
+    for (let press = 0; press < 10; press++) await zoomClick(zoomIn);
     expect(viewTransform(canvas).zoom).toBeCloseTo(8, 3);
     expect(zoomIn.disabled).toBe(true);
 
-    for (let press = 0; press < 10; press++) await userEvent.click(zoomOut);
+    for (let press = 0; press < 10; press++) await zoomClick(zoomOut);
     expect(viewTransform(canvas)).toEqual({ x: 0, y: 0, zoom: 1 });
     expect(zoomOut.disabled).toBe(true);
   });
@@ -250,8 +311,8 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
   it('双指拖动只平移画面，不向设备注入触摸，越界钳在边缘', async () => {
     const view = await streamingView(async () => { /* no-op */ });
     const canvas = canvasOf(view);
-    await userEvent.click(screen.getByLabelText('Zoom in'));
-    await userEvent.click(screen.getByLabelText('Zoom in'));
+    await zoomClick(screen.getByLabelText('Zoom in'));
+    await zoomClick(screen.getByLabelText('Zoom in'));
     expect(viewTransform(canvas).zoom).toBeCloseTo(1.5, 3);
 
     act(() => {
@@ -276,14 +337,14 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     act(() => {
       firePointer(canvas, 'pointerdown', { pointerId: 1, clientX: 100, clientY: 300 });
       firePointer(canvas, 'pointerdown', { pointerId: 2, clientX: 200, clientY: 300 });
-      // 间距 100 → 200：扣掉抖动死区后倍率 = 1 + (2 − 1 − 0.12)。中心不动，画面不该平移。
+      // 间距 100 → 200：倍率 = 2。中心不动，画面不该平移。
       firePointer(canvas, 'pointermove', { pointerId: 1, clientX: 50, clientY: 300 });
       firePointer(canvas, 'pointermove', { pointerId: 2, clientX: 250, clientY: 300 });
     });
     await nextFrame();
 
     const transform = viewTransform(canvas);
-    expect(transform.zoom).toBeCloseTo(1.88, 2);
+    expect(transform.zoom).toBeCloseTo(2, 2);
     expect(transform.x).toBeCloseTo(0, 3);
     expect(transform.y).toBeCloseTo(0, 3);
   });
@@ -297,14 +358,76 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
       firePointer(canvas, 'pointerdown', { pointerId: 2, clientX: 200, clientY: 300 });
     });
 
-    // 第一根先动：此刻另一根还停在上一帧的位置，按这半边算会得到 100→140，即 1.28×。
+    // 第一根先动：此刻另一根还停在上一帧的位置，按这半边算会得到 100→140，即 1.4×。
     act(() => { firePointer(canvas, 'pointermove', { pointerId: 1, clientX: 60, clientY: 300 }); });
     expect(viewTransform(canvas).zoom).toBe(1);
 
-    // 同一帧里第二根也动完，一帧只结算一次：按 100→180 算，1 + (1.8 − 1 − 0.12) = 1.68×。
+    // 同一帧里第二根也动完，一帧只结算一次：按 100→180 算，倍率 = 1.8×。
     act(() => { firePointer(canvas, 'pointermove', { pointerId: 2, clientX: 240, clientY: 300 }); });
     await nextFrame();
-    expect(viewTransform(canvas).zoom).toBeCloseTo(1.68, 2);
+    expect(viewTransform(canvas).zoom).toBeCloseTo(1.8, 2);
+  });
+
+  it('按钮立即到达目标档位，滚轮从当前画面继续缩放', async () => {
+    const view = await streamingView(async () => {});
+    const canvas = canvasOf(view);
+    const button = screen.getByLabelText('Zoom in');
+    await userEvent.click(button);
+    await userEvent.click(button);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 190)); });
+    expect(viewTransform(canvas).zoom).toBeCloseTo(1.5, 5);
+    await userEvent.click(button);
+    act(() => { canvas.dispatchEvent(new WheelEvent('wheel', {
+      deltaY: -1, ctrlKey: true, clientX: 150, clientY: 300, cancelable: true,
+    })); });
+    await nextFrame();
+    const interrupted = viewTransform(canvas).zoom;
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 190)); });
+    expect(viewTransform(canvas).zoom).toBe(interrupted);
+    expect(interrupted).toBeCloseTo(2 * Math.exp(0.002), 6);
+  });
+
+  it('捏合越过上限后反向立即缩小，不需要退回越界前的位置', async () => {
+    const view = await streamingView(async () => {});
+    const canvas = canvasOf(view);
+    act(() => {
+      firePointer(canvas, 'pointerdown', { pointerId: 1, clientX: 100, clientY: 300 });
+      firePointer(canvas, 'pointerdown', { pointerId: 2, clientX: 200, clientY: 300 });
+      firePointer(canvas, 'pointermove', { pointerId: 2, clientX: 1100, clientY: 300 });
+    });
+    await nextFrame();
+    expect(viewTransform(canvas).zoom).toBe(8);
+    act(() => { firePointer(canvas, 'pointermove', { pointerId: 2, clientX: 1090, clientY: 300 }); });
+    await nextFrame();
+    expect(viewTransform(canvas).zoom).toBeCloseTo(7.92, 6);
+  });
+
+  it('小幅捏合立即响应', async () => {
+    const view = await streamingView(async () => {});
+    const canvas = canvasOf(view);
+    act(() => {
+      firePointer(canvas, 'pointerdown', { pointerId: 1, clientX: 100, clientY: 300 });
+      firePointer(canvas, 'pointerdown', { pointerId: 2, clientX: 200, clientY: 300 });
+      firePointer(canvas, 'pointermove', { pointerId: 2, clientX: 202, clientY: 300 });
+    });
+    await nextFrame();
+    expect(viewTransform(canvas).zoom).toBeCloseTo(1.02, 4);
+  });
+
+  it('滚轮微小增量连续累积，零增量不缩放，焦点保持不动', async () => {
+    const view = await streamingView(async () => {});
+    const canvas = canvasOf(view);
+    const wheel = (deltaY: number) => canvas.dispatchEvent(new WheelEvent('wheel', {
+      deltaY, ctrlKey: true, clientX: 180, clientY: 330, cancelable: true,
+    }));
+    act(() => { wheel(-1); wheel(0); wheel(-1); });
+    expect(viewTransform(canvas).zoom).toBe(1);
+    await nextFrame();
+    const z = Math.exp(0.004);
+    expect(viewTransform(canvas).zoom).toBeCloseTo(z, 6);
+    expect(viewTransform(canvas).x).toBeCloseTo(30 * (1 - z), 6);
+    expect(viewTransform(canvas).y).toBeCloseTo(30 * (1 - z), 6);
+    expect(touchCalls()).toEqual([]);
   });
 
   it('⌘/Ctrl+滚轮以光标为锚点缩放，普通滚轮照旧滚设备', async () => {
@@ -316,15 +439,17 @@ describe('AndroidMirrorView 视图缩放/平移', () => {
     act(() => {
       canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, clientX: 150, clientY: 300, bubbles: true, cancelable: true }));
     });
-    expect(viewTransform(canvas).zoom).toBeCloseTo(1.15, 3);
-    expect(viewTransform(canvas)).toEqual({ x: 0, y: 0, zoom: 1.15 });
+    await nextFrame();
+    expect(viewTransform(canvas).zoom).toBeCloseTo(Math.exp(0.2), 3);
+    expect(viewTransform(canvas)).toEqual({ x: 0, y: 0, zoom: Math.exp(0.2) });
     expect(touchCalls()).toEqual([]);
 
     act(() => {
       canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true }));
     });
     expect(touchCalls()).toEqual(['scroll']);
-    expect(viewTransform(canvas).zoom).toBeCloseTo(1.15, 3);
+    await nextFrame();
+    expect(viewTransform(canvas).zoom).toBeCloseTo(Math.exp(0.2), 3);
   });
 });
 
@@ -419,3 +544,7 @@ class MediaRecorderSpy {
 HTMLCanvasElement.prototype.captureStream = function captureStream() {
   return { getTracks: () => [{ stop: () => { /* no-op */ } }] } as unknown as MediaStream;
 };
+
+async function zoomClick(element: HTMLElement) {
+  await userEvent.click(element);
+}

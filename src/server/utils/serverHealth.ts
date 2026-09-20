@@ -17,6 +17,7 @@ import {
 } from './termdockState.js';
 import { readCrashLogTail } from './crashForensics.js';
 import { getSupervisorStatus } from './supervisorClient.js';
+import { canEnableSupervision } from './enableSupervision.js';
 import type { SupervisorState } from './supervisorProtocol.js';
 
 /**
@@ -40,6 +41,8 @@ const NOTABLE_EVENTS = new Set([
 ]);
 
 export interface ServerHealthIncident {
+  /** Underlying failure retained when the supervisor stops retrying. */
+  causeEvent?: string;
   /** 事件发生时刻（epoch ms，由记录里的 ts 解析而来） */
   at: number;
   /** 机器可读的事件名，界面文案走 i18n 映射 */
@@ -60,6 +63,7 @@ export interface ServerHealthIncident {
 export interface ServerHealthState {
   /** 本进程是否由 supervisor 盯着（决定"它会自己回来吗"） */
   supervised: boolean;
+  canEnableSupervision?: boolean;
   /**
    * `consecutiveCrashes` 与 `restarts` 不是一回事：放弃时前者才等于"连续崩了几次"
    * （restarts 是它此前成功重启的次数，少一次）。界面说"连续崩溃 N 次后放弃"要用前者。
@@ -121,7 +125,30 @@ export function toIncident(entry: Record<string, unknown>): ServerHealthIncident
 export function findLatestNotableIncident(entries: Record<string, unknown>[]): ServerHealthIncident | null {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const incident = toIncident(entries[index]);
-    if (incident && NOTABLE_EVENTS.has(incident.event)) return incident;
+    if (!incident || !NOTABLE_EVENTS.has(incident.event)) continue;
+    if (incident.event === 'gave-up') {
+      // Old logs store the final failure separately. Match the supervisor, then
+      // its exact child PID; never borrow an unrelated process's port conflict.
+      const summary = entries[index];
+      const failure = entries.slice(0, index).reverse().find((entry) =>
+        entry.role === 'supervisor' && entry.pid === summary.pid
+        && entry.event !== 'gave-up' && NOTABLE_EVENTS.has(String(entry.event)));
+      const nested = summary.lastIncident;
+      const cause = nested && typeof nested === 'object' ? nested as Record<string, unknown> : failure;
+      const portConflict = failure && typeof failure.serverPid === 'number'
+        ? entries.slice(0, index).reverse().find((entry) => entry.role === 'server'
+          && entry.pid === failure.serverPid && entry.event === 'port-conflict'
+          && typeof entry.ts === 'string' && Date.parse(entry.ts) <= incident.at
+          && incident.at - Date.parse(entry.ts) < 60_000)
+        : undefined;
+      const causeEvent = portConflict ? 'port-conflict' : pickString(cause?.event);
+      if (causeEvent) incident.causeEvent = causeEvent;
+      if (portConflict) {
+        const port = pickNumber(portConflict.port);
+        incident.detail = port === null ? 'EADDRINUSE' : `Port ${port} is already in use (EADDRINUSE).`;
+      }
+    }
+    return incident;
   }
   return null;
 }
@@ -164,7 +191,8 @@ export function buildServerHealthState(options: ServerHealthOptions = {}): Serve
 
   const dismissedAt = readDismissal(dismissedPath);
   return {
-    supervised: process.env.TERMDOCK_SUPERVISED === '1',
+    supervised: process.env.TERMDOCK_SUPERVISED === '1' && process.connected === true,
+    canEnableSupervision: canEnableSupervision(),
     supervisor,
     incident,
     dismissedAt,

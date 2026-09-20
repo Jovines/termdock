@@ -58,6 +58,7 @@ import {
   spawnSupervisor,
   stopSupervisor,
 } from './utils/supervisorClient.js';
+import { configureSupervisionEnable } from './utils/enableSupervision.js';
 import type { SupervisorStatus } from './utils/supervisorClient.js';
 import {
   clearAuthFile,
@@ -3903,6 +3904,15 @@ async function main(): Promise<void> {
   const isManagedDefaultHttps = Boolean(https.cert === defaultHttpsCertPath && https.key === defaultHttpsKeyPath);
 
   if (options.supervise && !options.foreground) {
+    // Match daemon startup: a second supervisor must not overwrite the live one's state.
+    const existingSupervisor = getSupervisorStatus();
+    const runningState = getRunningState();
+    if (existingSupervisor?.alive || runningState) {
+      if (runningState) printRunningState(runningState);
+      printSupervisorState(existingSupervisor, Boolean(runningState));
+      console.log('Termdock is already running or supervised; no new instance started.');
+      return;
+    }
     // 前台运行 + 受监督：setsid/systemd/docker 部署走这条。这是**正式服务**的路径——
     // `--foreground` 按设计不受管，而出问题的恰恰是正式服务。
     const { runSupervisor } = await import('./supervisor.js');
@@ -3927,6 +3937,15 @@ async function main(): Promise<void> {
     warnIfAuthDisabled(options.host ?? DEFAULT_HOST);
     // Dynamic import keeps terminal.ts side-effects (loadClientStatesFromDisk
     // etc.) out of fast paths like `termdock --tls` / `--status`.
+    if (resolveSelfEntry().endsWith('/cli.js')) {
+      configureSupervisionEnable({
+        childEntry: resolveSelfEntry(),
+        childArgs: buildForegroundChildArgs(options, https),
+        healthUrl: resolveHealthTarget(options, https).url,
+        healthCaPath: https.ca,
+        version: getTermdockVersion(),
+      });
+    }
     const { startServer } = await import('./entry.js');
     const result = startServer({
       host: options.host,
