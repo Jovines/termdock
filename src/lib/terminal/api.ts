@@ -231,6 +231,7 @@ const HEIC_PREVIEW_REQUEST_TIMEOUT_MS = 32_000;
 // Includes rendering and the complete GLB transfer on mobile connections.
 export const EDA_PREVIEW_REQUEST_TIMEOUT_MS = 125_000;
 const GIT_REQUEST_TIMEOUT_MS = 10_000;
+const GIT_RECENT_COMMITS_REQUEST_TIMEOUT_MS = 65_000;
 const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
 export const TERMINAL_CSRF_REQUEST_TIMEOUT_MS = 8_000;
 export const TERMINAL_HEALTH_REQUEST_TIMEOUT_MS = 8_000;
@@ -3526,7 +3527,7 @@ export async function getRecentCommits(options: { cwd?: string | null; repoRoot?
   const response = await fetchWithTimeout(
     `/api/terminal/fs/git-recent-commits?${params}`,
     { signal },
-    GIT_REQUEST_TIMEOUT_MS,
+    GIT_RECENT_COMMITS_REQUEST_TIMEOUT_MS,
     'Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.',
   );
   if (!response.ok) {

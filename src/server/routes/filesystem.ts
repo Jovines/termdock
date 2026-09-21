@@ -75,6 +75,7 @@ const HEIC_PREVIEW_TIMEOUT_MS = 30_000;
 const EDA_PREVIEW_TIMEOUT_MS = 30_000;
 const EDA_PREVIEW_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const GIT_ROUTE_TIMEOUT_MS = 8_000;
+const GIT_RECENT_COMMITS_ROUTE_TIMEOUT_MS = 60_000;
 const GIT_FILE_DIFF_ROUTE_TIMEOUT_MS = 45_000;
 const GIT_ACTION_TIMEOUT_MS = 10 * 60_000;
 const GIT_APPLY_TIMEOUT_MS = 30_000;
@@ -5109,8 +5110,8 @@ router.get('/git-recent-commits', async (req: Request, res: Response) => {
     }
     repoRootForLog = repoRoot;
     const { commits: page, hasMore, commitSyncStatus, upstream } = await withTimeout(
-      readRecentCommitHistory((args) => execGit(args, repoRoot, controller.signal), { skip, limit, query }),
-      GIT_ROUTE_TIMEOUT_MS,
+      readRecentCommitHistory((args, timeoutMs) => execGit(args, repoRoot, controller.signal, timeoutMs ?? null), { skip, limit, query }),
+      GIT_RECENT_COMMITS_ROUTE_TIMEOUT_MS,
       'Recent commits took too long.',
       'GIT_RECENT_COMMITS_TIMEOUT',
       () => controller.abort(new OperationTimeoutError('Recent commits took too long.', 'GIT_RECENT_COMMITS_TIMEOUT')),

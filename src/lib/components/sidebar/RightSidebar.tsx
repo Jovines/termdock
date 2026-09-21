@@ -10694,11 +10694,11 @@ export function RightSidebar(
                     <div className="rounded-md bg-surface-2 px-2 py-2 text-center text-[11px] text-muted-foreground">
                       {t('common.loading')}
                     </div>
-                  ) : (
+                  ) : !recentCommitsError ? (
                     <div className="rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                       {t('rightSidebar.recentCommitsEmpty')}
                     </div>
-                  )}
+                  ) : null}
                   {recentCommitsLoadingMore && (
                     <div className="flex justify-center rounded-md bg-surface-2 px-2 py-2 text-muted-foreground">
                       <RiLoader size={12} className="animate-spin" />
