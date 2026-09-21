@@ -33,6 +33,7 @@ export default defineConfig({
         'apple-touch-icon-180x180.png',
         'pwa-192x192.png',
         'pwa-512x512.png',
+        'boot-logo.png',
         'maskable-icon-512x512.png',
         'sw-notifications.js',
         'sw-secure-api.js',

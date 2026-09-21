@@ -88,13 +88,38 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 10px;
         min-height: 240px;
         padding: 24px;
         box-sizing: border-box;
+        overflow: hidden;
         background: #1C1B1A;
         color: #878580;
         font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      .termdock-boot-logo {
+        position: absolute;
+        top: calc(50% - 5.859vmin);
+        left: calc(50% + 0.635vmin);
+        display: block;
+        width: 30.957vmin;
+        height: auto;
+        pointer-events: none;
+        user-select: none;
+        transform: translate(-50%, -50%);
+      }
+
+      .termdock-boot-status {
+        position: absolute;
+        top: calc(50% + min(28vw, 28vh, 140px));
+        left: 50%;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        white-space: nowrap;
+        opacity: 0;
+        transform: translateX(-50%);
+        animation: termdock-boot-status-reveal 180ms ease-out 800ms forwards;
       }
 
       .termdock-boot-spinner {
@@ -123,6 +148,41 @@
 
       @keyframes termdock-boot-spin {
         to { transform: rotate(360deg); }
+      }
+
+      @keyframes termdock-boot-status-reveal {
+        to { opacity: 1; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .termdock-boot-spinner { animation: none; }
+        .termdock-boot-status { animation-duration: 1ms; }
+      }
+
+      /* The branded surface bridges the native iOS PWA launch image. A desktop
+         refresh has no native launch image to continue, so keep it compact. */
+      html[data-termdock-desktop='true'] .termdock-boot-logo {
+        display: none;
+      }
+
+      html[data-termdock-desktop='true'] .termdock-boot-status {
+        top: 50%;
+        opacity: 1;
+        animation: none;
+        transform: translate(-50%, -50%);
+      }
+
+      @media (hover: hover) and (pointer: fine) {
+        .termdock-boot-logo {
+          display: none;
+        }
+
+        .termdock-boot-status {
+          top: 50%;
+          opacity: 1;
+          animation: none;
+          transform: translate(-50%, -50%);
+        }
       }
 
     </style>
@@ -192,9 +252,12 @@
   </head>
   <body>
     <div id="root">
-      <div class="termdock-boot">
-        <div class="termdock-boot-spinner" aria-hidden="true"></div>
-        <span>Loading Termdock</span>
+      <div class="termdock-boot" role="status" aria-live="polite">
+        <img class="termdock-boot-logo" src="/boot-logo.png" alt="" aria-hidden="true" />
+        <div class="termdock-boot-status">
+          <div class="termdock-boot-spinner" aria-hidden="true"></div>
+          <span>Loading Termdock</span>
+        </div>
       </div>
     </div>
     <script>

@@ -16,6 +16,7 @@ import { IS_WORKSPACE_DOCUMENT } from './clientScope';
 import { ServiceSwitcher, OPEN_SAVED_SERVICE_EVENT } from '../components/ServiceSwitcher';
 import { activateServiceWorkspace, getWorkspaceHost, isWorkspaceActive, reportWorkspace, workspaceKey, WORKSPACE_VISIBILITY_EVENT, WORKSPACE_ACTIVATE_EVENT } from '../services/workspaceHost';
 import { useSidebarStore } from '../stores/useSidebarStore';
+import { StartupScreen } from '../components/StartupScreen';
 
 
 // Keep the invitation in memory and remove its secret from browser history immediately.
@@ -48,6 +49,12 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [accessError, setAccessError] = useState('');
   const [serviceName, setServiceName] = useState(savedConnection()?.serviceName ?? location.hostname);
   const [remoteSession, setRemoteSession] = useState<string | undefined>(pendingSession);
+  const [showConnectionDetails, setShowConnectionDetails] = useState(false);
+  useEffect(() => {
+    if (!checking || error) return;
+    const timer = window.setTimeout(() => setShowConnectionDetails(true), 1200);
+    return () => window.clearTimeout(timer);
+  }, [checking, error]);
   useEffect(() => {
     // Login and shared-session views are usable destinations too. The full app
     // reports separately once its initial terminal restoration is complete.
@@ -302,7 +309,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     return { url: createInviteLink({ v: 1, serviceId: client.targetPeerId, code: result.code, entryUrl: backup?.url || targetUrl, serviceUrl: targetUrl, name: serviceName, entryServiceId: backup?.targetPeerId, routeCode: backup?.routeCode }), expiresAt: result.expiresAt };
   };
   return <>
-    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
+    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking && !error && !showConnectionDetails ? <StartupScreen /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
       <div className="flex w-full max-w-xs flex-col items-center text-center">
         <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-2 text-muted-foreground" aria-hidden="true">
           <Terminal size={24} strokeWidth={1.5} />

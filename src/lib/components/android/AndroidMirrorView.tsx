@@ -1021,6 +1021,23 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const iconButtonClass = compact
     ? 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-surface-2 disabled:opacity-40'
     : 'rounded p-1.5 hover:bg-surface-2 disabled:opacity-40';
+  const deviceLabel = connectedDevice
+    ? (connectedDevice.model || connectedDevice.serial) + deviceStateSuffix(connectedDevice, t)
+    : devices.length ? t('android.selectDevice') : t('android.noDevices');
+  const activePreset = activePresetId ? presets.find(preset => preset.id === activePresetId) : null;
+  const qualityLabel = activePreset?.name
+    ?? (qualityId === 'auto'
+      ? `${t('android.qualityAuto')} · ${autoBitrate / 1_000_000} Mbps`
+      : t(QUALITY_LABEL[qualityId]));
+  // iOS 会把小于 16px 的原生 select 聚焦后放大页面。原生控件保留为透明点击层，
+  // 可见标签独立保持标题栏密度，避免两个选择器比相邻图标大一圈。
+  const selectSurfaceClass = compact
+    ? 'relative flex h-5 min-w-0 items-center rounded bg-surface-2 focus-within:ring-1 focus-within:ring-primary/50'
+    : 'relative flex h-7 min-w-0 items-center rounded bg-surface-2 focus-within:ring-1 focus-within:ring-primary/50';
+  const selectLabelClass = compact
+    ? 'pointer-events-none block min-w-0 truncate px-1 text-[10px] leading-none text-foreground'
+    : 'pointer-events-none block min-w-0 truncate px-2 text-[11px] leading-none text-foreground';
+  const nativeSelectClass = 'absolute inset-0 h-full w-full cursor-pointer opacity-0';
 
   const openMore = () => {
     const rect = moreButtonRef.current?.getBoundingClientRect();
@@ -1071,44 +1088,46 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           </span>
         )}
         <Smartphone size={compact ? 12 : 14} className="shrink-0 text-muted-foreground" />
-        <select
-          value={selectedSerial}
-          onChange={event => {
-            const serial = event.target.value;
-            setSelectedSerial(serial);
-            autoConnected.current = serial;
-            if (serial) persistAndroidPanel({ deviceSerial: serial });
-          }}
-          className={compact
-            ? 'h-5 min-w-0 flex-1 rounded bg-surface-2 px-1 text-[10px] leading-none text-foreground outline-none'
-            : 'min-w-0 flex-1 rounded bg-surface-2 px-2 py-1 text-[11px] text-foreground outline-none'}
-          aria-label={t('android.device')}
-        >
-          <option value="">{devices.length ? t('android.selectDevice') : t('android.noDevices')}</option>
-          {devices.map(device => (
-            <option key={device.serial} value={device.serial}>
-              {(device.model || device.serial) + deviceStateSuffix(device, t)}
-            </option>
-          ))}
-        </select>
-        <select
-          value={activePresetId ? `user:${activePresetId}` : qualityId}
-          onChange={event => changeQuality(event.target.value)}
-          className={compact
-            ? 'h-5 shrink-0 rounded bg-surface-2 px-1 text-[10px] leading-none text-foreground outline-none'
-            : 'shrink-0 rounded bg-surface-2 px-1.5 py-1 text-[11px] text-foreground outline-none'}
-          title={qualityId === 'auto' ? t('android.qualityAutoHint') : t('android.quality')}
-          aria-label={t('android.quality')}
-        >
-          <option value="auto">{t('android.qualityAuto')}{qualityId === 'auto' ? ` · ${autoBitrate / 1_000_000} Mbps` : ''}</option>
-          {ANDROID_QUALITY_PRESETS.map(preset => (
-            <option key={preset.id} value={preset.id}>{t(QUALITY_LABEL[preset.id])}</option>
-          ))}
-          {presets.map(preset => (
-            <option key={preset.id} value={`user:${preset.id}`}>{preset.name}</option>
-          ))}
-          <option value="custom">{t(QUALITY_LABEL.custom)}</option>
-        </select>
+        <div className={`${selectSurfaceClass} flex-1`}>
+          <span aria-hidden="true" className={`${selectLabelClass} w-full`}>{deviceLabel}</span>
+          <select
+            value={selectedSerial}
+            onChange={event => {
+              const serial = event.target.value;
+              setSelectedSerial(serial);
+              autoConnected.current = serial;
+              if (serial) persistAndroidPanel({ deviceSerial: serial });
+            }}
+            className={nativeSelectClass}
+            aria-label={t('android.device')}
+          >
+            <option value="">{devices.length ? t('android.selectDevice') : t('android.noDevices')}</option>
+            {devices.map(device => (
+              <option key={device.serial} value={device.serial}>
+                {(device.model || device.serial) + deviceStateSuffix(device, t)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className={`${selectSurfaceClass} max-w-[45%] shrink-0`}>
+          <span aria-hidden="true" className={selectLabelClass}>{qualityLabel}</span>
+          <select
+            value={activePresetId ? `user:${activePresetId}` : qualityId}
+            onChange={event => changeQuality(event.target.value)}
+            className={nativeSelectClass}
+            title={qualityId === 'auto' ? t('android.qualityAutoHint') : t('android.quality')}
+            aria-label={t('android.quality')}
+          >
+            <option value="auto">{t('android.qualityAuto')}{qualityId === 'auto' ? ` · ${autoBitrate / 1_000_000} Mbps` : ''}</option>
+            {ANDROID_QUALITY_PRESETS.map(preset => (
+              <option key={preset.id} value={preset.id}>{t(QUALITY_LABEL[preset.id])}</option>
+            ))}
+            {presets.map(preset => (
+              <option key={preset.id} value={`user:${preset.id}`}>{preset.name}</option>
+            ))}
+            <option value="custom">{t(QUALITY_LABEL.custom)}</option>
+          </select>
+        </div>
         <button type="button" onClick={() => void refreshDevices()} className={`${iconButtonClass} text-muted-foreground`} title={t('android.refresh')}>
           {loadingList ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
         </button>

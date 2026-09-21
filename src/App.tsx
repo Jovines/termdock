@@ -99,6 +99,7 @@ import { useServiceWorkspaceActivity } from './lib/components/ServiceSwitcher';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
 import { getTermdockDesktopBridge, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
+import { StartupScreen } from './lib/components/StartupScreen';
 import type { SplitLayout, SplitWorkspaceSummary } from './lib/terminal/splitWorkspaces';
 import { MOBILE_SESSION_DESTROY_DROPPABLE_ID, isMobileSessionDestroyDrop } from './lib/terminal/mobileSessionDestroy';
 
@@ -5308,10 +5309,7 @@ function App() {
   // MultiTerminalView restores the active terminal. Cached chrome may render
   // behind it, but must not expose the empty/history-replay/first-fit frames.
   const initialSessionRestoreOverlay = !hasRestoredSessionChrome ? (
-    <div className="termdock-boot z-modal-panel" role="status" aria-live="polite">
-      <div className="termdock-boot-spinner" aria-hidden="true" />
-      <span>Loading Termdock</span>
-    </div>
+    <StartupScreen className="z-modal-panel" />
   ) : null;
 
   // Keep the terminal tree mounted when sessions have different pin states.
