@@ -40,13 +40,21 @@ describe('standalone boot recovery', () => {
       }
       }
   });
-  it('ignores noncritical resources and cancels recovery after React mounts', () => {
+  it('ignores noncritical resources and cancels recovery after the destination is presented', () => {
     const page = boot();
     page.callbacks.error({ target: page.document.createElement('img') });
     expect(page.setTimeout).not.toHaveBeenCalled();
     page.fail();
     page.document.getElementById('root')!.innerHTML = '<main>Connected</main>';
+    page.document.getElementById('termdock-startup')!.hidden = true;
     page.setTimeout.mock.calls[0][0]();
     expect(page.reload).not.toHaveBeenCalled();
+  });
+  it('keeps the mounted application intact when startup resources fail', () => {
+    const page = boot();
+    page.document.getElementById('root')!.innerHTML = '<main>Restoring</main>';
+    page.fail();
+    expect(page.document.querySelector('main')?.textContent).toBe('Restoring');
+    expect(page.document.getElementById('termdock-startup')?.textContent).toContain('启动资源加载失败');
   });
 });

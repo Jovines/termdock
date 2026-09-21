@@ -6598,6 +6598,7 @@ export function RightSidebar(
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
   const mobileFileSwiperRef = useRef<SwiperInstance | null>(null);
   const mobileDiffSwiperRef = useRef<SwiperInstance | null>(null);
+  const mobileBranchAuditSwiperRef = useRef<SwiperInstance | null>(null);
   // A pinned sidebar survives session switches. Programmatic page restoration
   // must not be mistaken for a user swiping back to the file list, otherwise
   // the old session's onSlideChange closes the newly active session's preview.
@@ -9801,8 +9802,17 @@ export function RightSidebar(
   const hasBranchAuditPreview = Boolean(branchAuditPreviewDiff);
   useEffect(() => {
     if (!isMobile || !branchAuditDetailOpen || !hasBranchAuditPreview) return;
-    slideMobileDiffTo(1);
-  }, [branchAuditDetailOpen, hasBranchAuditPreview, isMobile, slideMobileDiffTo]);
+    const swiper = mobileBranchAuditSwiperRef.current;
+    if (!swiper || swiper.destroyed) return;
+    swiper.update();
+    swiper.slideTo(1, 0);
+    const frame = window.requestAnimationFrame(() => {
+      if (swiper.destroyed) return;
+      swiper.update();
+      swiper.slideTo(1, 0);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [branchAuditDetailOpen, hasBranchAuditPreview, isMobile]);
 
   const requestDiffStreamScroll = useCallback((path: string | null) => {
     if (!path) return;
@@ -11786,7 +11796,7 @@ export function RightSidebar(
                 onWalkthroughNavigate={handleBranchWalkthroughNavigate}
                 initialDetailScrollTop={branchAuditPreviewDiff && selectedBranchAuditHistoryKey ? branchAuditPreviewScrollTops[selectedBranchAuditHistoryKey] : undefined}
                 onDetailScrollPositionChange={handleBranchAuditDetailScrollPositionChange}
-                externalSwiperRef={isMobile ? mobileDiffSwiperRef : undefined}
+                externalSwiperRef={isMobile ? mobileBranchAuditSwiperRef : undefined}
                 onMobileSlideChange={isMobile ? setMobileDiffSlideIndex : undefined}
               />
             </div>
@@ -12205,18 +12215,18 @@ export function RightSidebar(
                       </div>
                     ) : null
                   )}
-                  renderMobileDetailHeader={(
-                    <div className="flex items-center justify-between gap-2">
+                  renderMobileDetailHeader={({ slideToList }) => (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <button
                         type="button"
-                        onClick={() => slideMobileDiffTo(0)}
+                        onClick={slideToList}
                         className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                         title={t('rightSidebar.backToChangeList')}
                       >
                         <RiArrowLeft size={14} />
                         {t('rightSidebar.backToChangeList')}
                       </button>
-                      <div className="flex min-w-0 items-center justify-end gap-1.5">
+                      <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
                         {pinned && renderDiffViewTypeToggle()}
                         <button
                           type="button"
@@ -12232,6 +12242,18 @@ export function RightSidebar(
                           <span className="font-mono text-[12px] leading-none">Aa</span>
                           <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
                         </button>
+                        {rootPath && (
+                          <button
+                            type="button"
+                            onClick={() => void refreshGitState()}
+                            disabled={gitBundleLoading}
+                            aria-label={t('rightSidebar.refreshGit')}
+                            title={t('rightSidebar.refreshGit')}
+                            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+                          >
+                            <RiRefresh size={14} className={gitBundleLoading ? 'animate-spin' : ''} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}

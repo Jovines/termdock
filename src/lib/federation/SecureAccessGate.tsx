@@ -309,7 +309,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     return { url: createInviteLink({ v: 1, serviceId: client.targetPeerId, code: result.code, entryUrl: backup?.url || targetUrl, serviceUrl: targetUrl, name: serviceName, entryServiceId: backup?.targetPeerId, routeCode: backup?.routeCode }), expiresAt: result.expiresAt };
   };
   return <>
-    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking && !error && !showConnectionDetails ? <StartupScreen /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
+    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking && !error && !showConnectionDetails && !open ? <StartupScreen /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
       <div className="flex w-full max-w-xs flex-col items-center text-center">
         <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-2 text-muted-foreground" aria-hidden="true">
           <Terminal size={24} strokeWidth={1.5} />

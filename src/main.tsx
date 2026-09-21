@@ -19,7 +19,7 @@ import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 import { ServiceWorkspaceHost } from './lib/services/ServiceWorkspaceHost';
 import { installWorkspaceHost } from './lib/services/workspaceHost';
 import { savedConnection } from './lib/federation/browserIntegration';
-import { StartupScreen } from './lib/components/StartupScreen';
+import { StartupHandoff, StartupScreen } from './lib/components/StartupScreen';
 
 syncInitialViewportCssVars();
 installEncryptedFetch();
@@ -44,6 +44,7 @@ try {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
+    <StartupHandoff />
     <I18nProvider>
       {window.parent === window && <><PwaUpdateNotice /><SessionNoticeCenter /></>}
       <ErrorBoundary>

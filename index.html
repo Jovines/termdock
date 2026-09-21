@@ -109,6 +109,8 @@
         transform: translate(-50%, -50%);
       }
 
+      #termdock-startup[hidden] { display: none; }
+
       .termdock-boot-status {
         position: absolute;
         top: calc(50% + min(28vw, 28vh, 140px));
@@ -251,23 +253,22 @@
     </style>
   </head>
   <body>
-    <div id="root">
-      <div class="termdock-boot" role="status" aria-live="polite">
+    <div id="termdock-startup" class="termdock-boot z-modal-panel" role="status" aria-live="polite">
         <img class="termdock-boot-logo" src="/boot-logo.png" alt="" aria-hidden="true" />
         <div class="termdock-boot-status">
           <div class="termdock-boot-spinner" aria-hidden="true"></div>
-          <span>Loading Termdock</span>
+          <span data-startup-status>Loading Termdock</span>
         </div>
-      </div>
     </div>
+    <div id="root"></div>
     <script>
       // Keep recovery independent of the module graph: it must work even when
       // an update interrupts loading the entry module or one of its imports.
       var termdockBootRetryKey = 'termdock-boot-retry';
       var termdockBootRetryTimer;
       function showTermdockBootError(event) {
-        var root = document.getElementById('root');
-        if (!root || root.children.length !== 1 || !root.querySelector('.termdock-boot')) return;
+        var root = document.getElementById('termdock-startup');
+        if (!root || root.hidden) return;
         var resource = event && event.target;
         var resourceError = resource && resource !== window;
         if (resourceError && resource.tagName !== 'SCRIPT' &&
@@ -310,7 +311,8 @@
         root.appendChild(errorBox);
         if (retryCount < 3) termdockBootRetryTimer = setTimeout(function () {
           // React may have recovered while a nonfatal boot error was displayed.
-          if (document.querySelector('.termdock-boot-error')) window.location.reload();
+          var surface = document.getElementById('termdock-startup');
+          if (surface && !surface.hidden && surface.querySelector('.termdock-boot-error')) window.location.reload();
         }, 2000 * Math.pow(2, retryCount));
       }
       window.addEventListener('error', showTermdockBootError, true);

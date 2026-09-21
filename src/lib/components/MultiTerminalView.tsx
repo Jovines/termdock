@@ -744,11 +744,28 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
     if (!foregroundViewportReady || !foregroundConnectionReady || !foregroundContentReady) return;
 
-    // Content readiness is protocol-driven: it includes the fitted resize ACK
-    // and, for tmux, the matching authoritative screen-sync generation after
-    // its chunks have painted. No timing guess is needed here.
-    markStartupMilestone('initial-viewport-presented');
-    onInitialViewportReady();
+    // A split workspace is one visible destination. Releasing for just the
+    // focused pane exposes the other panes' history replay and first resize.
+    const allVisibleReady = [...visibleSessionIds].every(id =>
+      viewportReadySessionIds.has(id) && readySessionIds.has(id) && contentReadySessionIds.has(id));
+    let frame = 0;
+    let secondFrame = 0;
+    const present = () => {
+      frame = requestAnimationFrame(() => {
+        secondFrame = requestAnimationFrame(() => {
+          markStartupMilestone('initial-viewport-presented');
+          onInitialViewportReady();
+        });
+      });
+    };
+    if (allVisibleReady) present();
+    // An unavailable secondary pane must not permanently hide a usable one.
+    const timeout = allVisibleReady ? undefined : window.setTimeout(present, 8000);
+    return () => {
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(secondFrame);
+      clearTimeout(timeout);
+    };
   }, [
     foregroundConnectionReady,
     foregroundContentReady,
@@ -756,6 +773,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     isRestoring,
     onInitialViewportReady,
     sessions.length,
+    visibleSessionIds,
+    viewportReadySessionIds,
+    readySessionIds,
+    contentReadySessionIds,
   ]);
 
   // Mobile retains only a small sliding window. Hiding an xterm does not
