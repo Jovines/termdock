@@ -2,7 +2,20 @@ import { useEffect, useMemo, useState } from 'react';
 import type { InlineWhitespacePolicy } from './inlineDiff';
 import { canUseSplitDiffView, DiffViewer, SPLIT_DIFF_MEDIA_QUERY, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 
+import { kotlinCommentGapDiff, kotlinCommentGapSource } from './diffSyntaxFixtures';
+
 export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string; oldSource?: string }> = {
+  kotlinCommentGap: {
+    label: 'Kotlin comment gap (source unavailable)',
+    path: 'CommentGap.kt',
+    diff: kotlinCommentGapDiff,
+  },
+  kotlinCommentGapWithSource: {
+    label: 'Kotlin comment gap (complete source)',
+    path: 'CommentGap.kt',
+    diff: kotlinCommentGapDiff,
+    oldSource: kotlinCommentGapSource,
+  },
   chineseParagraphExpansion: {
     label: 'Chinese paragraph expansion (AGENTS.md)',
     path: 'AGENTS.md',

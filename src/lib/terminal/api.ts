@@ -3380,7 +3380,7 @@ export interface ChangeWalkthrough {
 export interface BranchDiffResponse {
   includeUncommitted?: boolean;
   canIncludeUncommitted?: boolean;
-  comparisonRepos?: { repoRoot: string; label: string; base: string; head: string | null; includeUncommitted?: boolean }[];
+  comparisonRepos?: { repoRoot: string; label: string; base: string; head: string | null; includeUncommitted?: boolean; canIncludeUncommitted?: boolean }[];
   available: boolean;
   repoRoot?: string;
   workspaceRoot?: string;

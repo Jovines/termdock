@@ -6950,7 +6950,26 @@ export function RightSidebar(
       repoFilters = replacement.repoFilters;
     }
     setChangedFiles(toChangedFileMap(files));
-    setGitRepositories(repositories);
+    setGitRepositories((currentRepositories) => {
+      if (!isDiscoverOnly || options.replaceWorkspace) return repositories;
+      const currentByRoot = new Map(currentRepositories.map((repo) => [repo.root, repo]));
+      return repositories.map((repo) => {
+        const loaded = currentByRoot.get(repo.root);
+        if (!repo.deferred || !loaded) return repo;
+        // Discovery only refreshes identity/display metadata. In particular,
+        // a symlink's display path is not its canonical repository key, and
+        // a placeholder's null context does not mean the branch changed.
+        return {
+          ...repo,
+          available: loaded.available,
+          files: loaded.files,
+          context: loaded.context,
+          deferred: loaded.deferred,
+          untrackedDeferred: loaded.untrackedDeferred,
+          error: loaded.error,
+        };
+      });
+    });
     setGitRepoFilters(repoFilters);
     // From here on the workspace's repository list is real, so a selected repo
     // missing from it means the repo actually left — not that we have yet to
@@ -9602,7 +9621,9 @@ export function RightSidebar(
           repoRoot: repo.repoRoot,
           base: repo.base,
           head: repo.head,
-          includeUncommitted: canIncludeRepoUncommitted(repo.repoRoot, repo.head) && (options.repoRoot === repo.repoRoot ? options.includeUncommitted ?? false : repo.includeUncommitted ?? branchAuditPreviewDiff?.includeUncommitted ?? true),
+          // The server resolves HEAD in this repository. A missing/stale
+          // sidebar context must not silently turn off the requested option.
+          includeUncommitted: options.repoRoot === repo.repoRoot ? options.includeUncommitted ?? false : repo.includeUncommitted ?? branchAuditPreviewDiff?.includeUncommitted ?? true,
           requestSlotId: `right-sidebar-branch-preview:${repo.repoRoot}`,
         });
       }));
@@ -9640,7 +9661,12 @@ export function RightSidebar(
         diff: results.map((result) => result.diff).filter(Boolean).join('\n'),
         truncated: results.some((result) => result.truncated),
       } satisfies BranchDiffResponse;
-      merged.comparisonRepos = comparisonRepos.map((repo, index) => ({ ...repo, head: repo.head ?? results[index].currentBranch ?? null, includeUncommitted: results[index].includeUncommitted === true }));
+      merged.comparisonRepos = comparisonRepos.map((repo, index) => ({
+        ...repo,
+        head: repo.head ?? results[index].currentBranch ?? null,
+        includeUncommitted: results[index].includeUncommitted === true,
+        canIncludeUncommitted: results[index].canIncludeUncommitted,
+      }));
       merged.canIncludeUncommitted = results.every((result) => result.canIncludeUncommitted === true);
       merged.includeUncommitted = results.some((result) => result.includeUncommitted === true);
       setBranchAuditRepoIncludeUncommitted((current) => ({ ...current, ...Object.fromEntries(merged.comparisonRepos!.map((repo) => [repo.repoRoot, repo.includeUncommitted ?? false])) }));
@@ -9686,7 +9712,7 @@ export function RightSidebar(
     } finally {
       if (isCurrentRequest()) setBranchAuditPreviewLoading(false);
     }
-  }, [canIncludeRepoUncommitted, branchAuditRepoIncludeUncommitted, branchAuditPreviewDiff, selectedBranchAuditHistoryKey, branchAuditReadyRepos, branchAuditRepoBaseBranches, branchAuditRepoBranches, isCurrentSidebarRoot, rootPath, t]);
+  }, [branchAuditRepoIncludeUncommitted, branchAuditPreviewDiff, selectedBranchAuditHistoryKey, branchAuditReadyRepos, branchAuditRepoBaseBranches, branchAuditRepoBranches, isCurrentSidebarRoot, rootPath, t]);
 
   const openBranchAuditPreviewEntry = useCallback((entry: BranchAuditPreviewEntry) => {
     ++branchAuditPreviewRequestRef.current;
@@ -11746,7 +11772,7 @@ export function RightSidebar(
                 localOptions={branchAuditPreviewDiff?.comparisonRepos?.map((repo) => ({
                   key: repo.repoRoot, label: repo.label,
                   checked: repo.includeUncommitted ?? branchAuditPreviewDiff.includeUncommitted ?? false,
-                  disabled: !canIncludeRepoUncommitted(repo.repoRoot, repo.head),
+                  disabled: !(repo.canIncludeUncommitted ?? canIncludeRepoUncommitted(repo.repoRoot, repo.head)),
                   onChange: (includeUncommitted: boolean) => void openBranchAuditPreviewDiff({ refresh: true, repoRoot: repo.repoRoot, includeUncommitted }),
                 }))}
                 onHunkGitAction={branchAuditPreviewDiff?.includeUncommitted ? runBranchPreviewHunkAction : undefined}

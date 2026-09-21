@@ -33,6 +33,43 @@ function fileTokenKey(file: FileData): string {
   return `${file.oldRevision}-${file.newRevision}-${file.newPath}`;
 }
 
+/** Missing context must not carry an unterminated comment/string into later hunks. */
+function highlightPartialSource(
+  hunks: HunkData[],
+  language: string,
+  inlineMode: SmartInlineDiffMode,
+  whitespace: InlineWhitespacePolicy,
+): HunkTokens {
+  const groups: HunkData[][] = [];
+  for (const hunk of hunks) {
+    const group = groups[groups.length - 1];
+    const previous = group?.[group.length - 1];
+    if (previous && previous.oldStart + previous.oldLines === hunk.oldStart
+      && previous.newStart + previous.newLines === hunk.newStart) {
+      group.push(hunk);
+    } else {
+      groups.push([hunk]);
+    }
+  }
+  const result: HunkTokens = { old: [], new: [] };
+  for (const group of groups) {
+    const tokens = tokenize(group, {
+      enhancers: [markSmartEdits(group, inlineMode, whitespace)],
+      highlight: true, refractor, language,
+    });
+    // tokenize pads omitted lines. Copy only actual hunk ranges so later
+    // groups cannot overwrite earlier tokens with that padding.
+    for (const hunk of group) {
+      for (const side of ['old', 'new'] as const) {
+        const start = hunk[`${side}Start`] - 1;
+        const end = start + hunk[`${side}Lines`];
+        for (let line = start; line < end; line += 1) result[side][line] = tokens[side][line];
+      }
+    }
+  }
+  return result;
+}
+
 self.onmessage = (event: MessageEvent<ParseRequest>) => {
   const { id, diffContent, inlineMode, oldSource, language, whitespace = 'default' } = event.data;
   const parseStarted = performance.now();
@@ -51,7 +88,9 @@ self.onmessage = (event: MessageEvent<ParseRequest>) => {
           let hunkTokens: HunkTokens;
           if (language && syntaxHighlight) {
             try {
-              hunkTokens = tokenize(hunkData, { enhancers, oldSource, highlight: true, refractor, language });
+              hunkTokens = oldSource
+                ? tokenize(hunkData, { enhancers, oldSource, highlight: true, refractor, language })
+                : highlightPartialSource(hunkData, language, inlineMode, whitespace);
             } catch {
               // A syntax grammar failure must not erase the inline edits.
               hunkTokens = tokenize(hunkData, { enhancers, oldSource });
