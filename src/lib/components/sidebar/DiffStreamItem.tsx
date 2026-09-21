@@ -12,6 +12,7 @@ const DIFF_HEADER_ESTIMATE = 44;
 
 export interface DiffStreamFile {
   path: string;
+  oldPath?: string;
   absolutePath?: string | null;
   status: string;
 }
@@ -35,6 +36,7 @@ interface DiffStreamItemProps {
   reloadKey?: number;
   auditRecords: ChangeAuditRecord[];
   diffOverride?: string | null;
+  oldSourceRef?: string;
   preparedDiff?: DiffViewerPreparedDiff | null;
   renderBadge: (status: string) => React.ReactNode;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
@@ -67,6 +69,7 @@ export function DiffStreamItem({
   reloadKey = 0,
   auditRecords,
   diffOverride,
+  oldSourceRef,
   preparedDiff,
   renderBadge,
   onInsertDiffReference,
@@ -246,6 +249,7 @@ export function DiffStreamItem({
             lightweight={lightweight}
             auditRecords={auditRecords}
             diffOverride={diffOverride}
+            oldSourceRef={oldSourceRef}
             preparedDiff={preparedDiff}
             onClearAuditRecord={onClearAuditRecord}
             onContentReady={() => {

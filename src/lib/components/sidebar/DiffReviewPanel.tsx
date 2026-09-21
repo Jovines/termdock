@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, RotateCw } from 'lucide-react';
-import type { DiffHunkActionRequest } from './DiffViewer';
+import type { DiffHunkActionRequest, DiffInlineMode, DiffViewType } from './DiffViewer';
 import type { Swiper as SwiperInstance } from 'swiper';
 import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord, ChangeWalkthrough, ChangeWalkthroughAnchor } from '../../terminal/api';
 import { type DiffNavigatorFile } from './DiffFileNavigator';
@@ -12,6 +12,8 @@ import { useI18n } from '../../i18n';
 
 export interface UniversalDiffReviewItem {
   key: string;
+  repoRoot?: string | null;
+  repositoryPath?: string;
   hunk: BranchDiffHunk;
   current?: BranchAuditRecord | null;
   stale?: BranchAuditRecord | null;
@@ -29,6 +31,9 @@ interface UniversalDiffReviewProps {
   onClose?: () => void;
   closeLabel?: string;
   wrap?: boolean;
+  diffViewType?: DiffViewType;
+  inlineMode?: DiffInlineMode;
+  viewControls?: React.ReactNode;
   onToggleWrap?: () => void;
   wrapTitle?: string;
   wrapOnLabel?: string;
@@ -202,15 +207,23 @@ function buildDiffReviewFiles({
       }));
     const name = group.filePath.split('/').pop() ?? group.filePath;
     const dir = group.filePath.includes('/') ? group.filePath.slice(0, -name.length - 1) : '';
+    const repoRoot = group.items[0]?.repoRoot ?? auditRecords[0]?.repoRoot ?? null;
     return {
       key: group.key,
       path: group.filePath,
-      absolutePath: auditRecords[0]?.repoRoot ? `${auditRecords[0].repoRoot}/${group.filePath}` : group.filePath,
+      oldPath: group.items[0]?.hunk.oldPath ?? undefined,
+      absolutePath: repoRoot ? `${repoRoot}/${group.items[0]?.repositoryPath ?? group.filePath}` : group.filePath,
       status: group.changeType,
-      repoRoot: auditRecords[0]?.repoRoot ?? null,
+      repoRoot,
       displayName: name,
       displayDir: dir,
       diffOverride: diffText,
+      // Older audit records predate preserved blob ids. Resolve their recorded
+      // comparison, not the currently checked-out branch.
+      oldSourceRef: group.items[0]?.current?.headRef
+        ? `${group.items[0].current.baseRef}...${group.items[0].current.headRef}`
+        : group.items[0]?.stale?.headRef
+          ? `${group.items[0].stale.baseRef}...${group.items[0].stale.headRef}` : undefined,
       previewReverts: Object.fromEntries(group.items.flatMap((item) => item.hunk.previewRevert
         ? [[item.hunk.hunkHeader, item.hunk.previewRevert]] : [])),
       auditRecords,
@@ -253,6 +266,9 @@ export function UniversalDiffReview({
   onClose,
   closeLabel = 'Back',
   wrap = true,
+  diffViewType,
+  inlineMode,
+  viewControls,
   onToggleWrap,
   wrapTitle,
   wrapOnLabel = 'Wrap on',
@@ -378,6 +394,7 @@ export function UniversalDiffReview({
         {modeToggle}
         {localToggle}
         {refreshToggle}
+        {viewControls}
         {wrapToggle}
         {errorMessage}
       </div>
@@ -412,6 +429,7 @@ export function UniversalDiffReview({
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         {localToggle}
         {refreshToggle}
+        {viewControls}
         {onToggleWrap && (
           <button
             type="button"
@@ -507,6 +525,8 @@ export function UniversalDiffReview({
       files={files}
       activePane
       wrap={wrap}
+      diffViewType={diffViewType}
+      inlineMode={inlineMode}
       renderStreamBadge={(status, item) => {
         const group = groupByKey.get(item.key);
         return <ChangeStatusWithAuditBadge changeStatus={status} auditStatus={group} renderChangeBadge={(changeStatus) => <ChangeBadge status={changeStatus} />} />;

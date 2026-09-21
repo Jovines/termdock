@@ -1377,14 +1377,16 @@ async function getGitPushTargets(gitRoot: string, signal?: AbortSignal) {
   const [remotesOutput, branchesOutput, remoteBranchesOutput, upstreamOutput, aheadBehindOutput] = await Promise.all([
     execGit(['remote'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], gitRoot, signal).catch(emptyOnNonAbortGitError),
-    execGit(['for-each-ref', '--format=%(refname:short)', 'refs/remotes'], gitRoot, signal).catch(emptyOnNonAbortGitError),
+    // Exclude symbolic remote HEAD refs in Git itself. Their short name is the
+    // bare remote (for example refs/remotes/origin/HEAD becomes "origin"), so
+    // filtering the shortened output for "/HEAD" cannot identify them.
+    execGit(['for-each-ref', '--format=%(if)%(symref)%(then)%(else)%(refname:short)%(end)', 'refs/remotes'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['rev-list', '--left-right', '--count', '@{u}...HEAD'], gitRoot, signal).catch(emptyOnNonAbortGitError),
   ]);
   const remotes = uniqueSortedLines(remotesOutput);
   const branches = uniqueSortedLines(branchesOutput);
-  const remoteBranches = uniqueSortedLines(remoteBranchesOutput)
-    .filter((branch) => !branch.endsWith('/HEAD'));
+  const remoteBranches = uniqueSortedLines(remoteBranchesOutput);
   const upstream = upstreamOutput.trim() || null;
   const { remote: upstreamRemote, branch: upstreamBranch } = splitUpstream(upstream, remotes);
   const { ahead, behind } = parseAheadBehind(aheadBehindOutput, Boolean(upstream));
@@ -2528,6 +2530,7 @@ function parseBranchDiffHunks(diffText: string): BranchDiffHunk[] {
   let currentHeader: string | null = null;
   let currentLines: string[] = [];
   let hunkIndexByFile = 0;
+  let indexHeader: string | null = null;
 
   const flush = () => {
     if (!currentHeader || (!oldPath && !newPath)) return;
@@ -2536,6 +2539,7 @@ function parseBranchDiffHunks(diffText: string): BranchDiffHunk[] {
     const newDiffPath = newPath ? `b/${newPath}` : '/dev/null';
     const hunkDiff = [
       `diff --git a/${oldPath ?? filePath} b/${newPath ?? filePath}`,
+      ...(indexHeader ? [indexHeader] : []),
       `--- ${oldDiffPath}`,
       `+++ ${newDiffPath}`,
       currentHeader,
@@ -2561,9 +2565,14 @@ function parseBranchDiffHunks(diffText: string): BranchDiffHunk[] {
       currentHeader = null;
       currentLines = [];
       hunkIndexByFile = 0;
+      indexHeader = null;
       const match = /^diff --git (.+) (.+)$/.exec(line);
       oldPath = normalizeDiffPath(match?.[1] ?? '');
       newPath = normalizeDiffPath(match?.[2] ?? '');
+      continue;
+    }
+    if (line.startsWith('index ') && !currentHeader) {
+      indexHeader = line;
       continue;
     }
     if (line.startsWith('--- ')) {
@@ -2626,7 +2635,7 @@ async function getBranchFileDiffPayload(repoRoot: string, comparisonBase: string
     return { available: false, error: 'Invalid comparison base' };
   }
   const filePath = await toGitPathspec(repoRoot, requestedPath);
-  const result = await execGitLimited(['diff', comparisonBase, '--', `:(literal)${filePath}`], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal);
+  const result = await execGitLimited(['diff', '--full-index', comparisonBase, '--', `:(literal)${filePath}`], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal);
   const untracked = await appendUntrackedDiffs(repoRoot, result.stdout, signal, {
     filePath, maxBytes: MAX_BRANCH_DIFF_BYTES, perFileMaxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
   });
@@ -2657,14 +2666,29 @@ async function getBranchDiffPayload(
   const remotes = (await execGit(['remote'], repoRoot, signal)).split('\n').filter(Boolean);
   const remoteBase = trimmedBase.replace(/^refs\/remotes\//, '');
   // Match configured remotes, not arbitrary slashes in local branch names.
-  const baseRemote = remotes.sort((a, b) => b.length - a.length)
-    .find((remote) => remoteBase.startsWith(`${remote}/`))
+  const sortedRemotes = remotes.sort((a, b) => b.length - a.length);
+  const exactBaseRemote = sortedRemotes.find((remote) => remoteBase === remote) ?? null;
+  const baseRemote = exactBaseRemote
+    ?? sortedRemotes.find((remote) => remoteBase.startsWith(`${remote}/`))
     ?? (!trimmedBase.includes('/') && remotes.includes('origin') ? 'origin' : null);
   let baseRef = trimmedBase;
   if (baseRemote) {
-    const remoteBranch = remoteBase.startsWith(`${baseRemote}/`)
+    let remoteBranch = remoteBase.startsWith(`${baseRemote}/`)
       ? remoteBase.slice(baseRemote.length + 1)
       : trimmedBase;
+    if (exactBaseRemote) {
+      const trackingPrefix = `refs/remotes/${baseRemote}/`;
+      const remoteHead = await execGit(['symbolic-ref', '--quiet', `${trackingPrefix}HEAD`], repoRoot, signal)
+        .then((value) => value.trim())
+        .catch(emptyOnNonAbortGitError);
+      if (!remoteHead.startsWith(trackingPrefix) || remoteHead.length === trackingPrefix.length) {
+        return {
+          available: false, workspaceRoot, repoRoot, baseBranch: trimmedBase, baseRef,
+          error: `Baseline ${trimmedBase} names a remote, but its default branch is unavailable. Select an explicit remote branch and retry.`,
+        };
+      }
+      remoteBranch = remoteHead.slice(trackingPrefix.length);
+    }
     baseRef = `${baseRemote}/${remoteBranch}`;
     const trackingRef = `refs/remotes/${baseRef}`;
     try {
@@ -2713,8 +2737,8 @@ async function getBranchDiffPayload(
     execGitLimited(['diff', '--name-only', diffBase], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
     fetchSeparateWorktreeDiff ? execGitLimited(['diff', '--name-only', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
     execGitLimited(['log', `${baseGitRef}..${compareHead}`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
-    execGitLimited(['diff', diffBase], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
-    fetchSeparateWorktreeDiff ? execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
+    execGitLimited(['diff', '--full-index', diffBase], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+    fetchSeparateWorktreeDiff ? execGitLimited(['diff', '--full-index', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
   ]);
   const trackedDiff = [diffResult.stdout, workingDiffResult.stdout].filter(Boolean).join('\n');
   const untrackedResult = includeWorkingTree
@@ -2783,7 +2807,7 @@ async function getCommitDiffPayload(
     execGit(['log', '-1', '--format=%s', trimmedCommit], repoRoot, signal).catch(emptyOnNonAbortGitError),
     execGitLimited(['show', '--stat', '--format=', trimmedCommit], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
     execGitLimited(['show', '--name-only', '--format=', trimmedCommit], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
-    execGitLimited(['show', '--format=', trimmedCommit], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+    execGitLimited(['show', '--full-index', '--format=', trimmedCommit], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
   ]);
   const diff = diffResult.stdout;
   const stat = statResult.stdout.trim();
@@ -3444,7 +3468,7 @@ router.get('/git-blob', async (req: Request, res: Response) => {
   const requestedPath = typeof req.query.path === 'string' ? req.query.path : undefined;
   const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined;
   const ref = typeof req.query.ref === 'string' ? req.query.ref : 'HEAD';
-  const source = req.query.source === 'index' ? 'index' : 'ref';
+  const source = req.query.source === 'index' ? 'index' : req.query.source === 'blob' ? 'blob' : req.query.source === 'merge-base' ? 'merge-base' : 'ref';
   const controller = new AbortController();
   const abortRequest = () => {
     if (!res.writableEnded) controller.abort(new SupersededRequestError('git.blob'));
@@ -3456,8 +3480,15 @@ router.get('/git-blob', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Missing path parameter' });
       return;
     }
-    if (source !== 'index' && !isSafeGitRefName(ref)) {
+    const comparisonRefs = source === 'merge-base' ? ref.split('...') : [];
+    if (source === 'merge-base'
+      ? comparisonRefs.length !== 2 || comparisonRefs.some((value) => !isSafeGitRefName(value))
+      : source !== 'index' && !isSafeGitRefName(ref)) {
       res.status(400).json({ error: 'Invalid git ref' });
+      return;
+    }
+    if (source === 'blob' && !/^[a-f0-9]{7,64}$/i.test(ref)) {
+      res.status(400).json({ error: 'Invalid git blob id' });
       return;
     }
     const resolvedCwd = cwd ? await pathValidator.validatePathAsync(cwd) : process.cwd();
@@ -3468,8 +3499,11 @@ router.get('/git-blob', async (req: Request, res: Response) => {
       return;
     }
     const pathspec = await toGitPathspec(gitRoot, requestedPath);
-    const objectSpec = source === 'index' ? `:${pathspec}` : `${ref}:${pathspec}`;
-    const result = await execGitLimited(['show', objectSpec], gitRoot, MAX_FILE_SIZE, false, controller.signal);
+    const resolvedRef = source === 'merge-base'
+      ? (await execGit(['merge-base', ...comparisonRefs], gitRoot, controller.signal)).trim()
+      : ref;
+    const objectSpec = source === 'index' ? `:${pathspec}` : `${resolvedRef}:${pathspec}`;
+    const result = await execGitLimited(source === 'blob' ? ['cat-file', 'blob', ref] : ['show', objectSpec], gitRoot, MAX_FILE_SIZE, false, controller.signal);
     logFsIo({ id: requestId, action: 'git_blob', op: 'git.blob', startedAt, status: 'ok', path: requestedPath, cwd, repoRoot: gitRoot, bytes: Buffer.byteLength(result.stdout), truncated: result.truncated });
     res.json({
       path: requestedPath,

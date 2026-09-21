@@ -45,6 +45,7 @@ interface DiffCanvasViewport {
 
 interface DiffReadyVersion {
   diffOverride: string | null | undefined;
+  oldSourceRef?: string;
   reloadKey: number;
   wrap: boolean;
   viewType: DiffViewType | undefined;
@@ -57,6 +58,7 @@ interface DiffReadyVersion {
 function matchesDiffReadyVersion(left: DiffReadyVersion | undefined, right: DiffReadyVersion): boolean {
   return Boolean(left
     && left.diffOverride === right.diffOverride
+    && left.oldSourceRef === right.oldSourceRef
     && left.reloadKey === right.reloadKey
     && left.wrap === right.wrap
     && left.viewType === right.viewType
@@ -91,12 +93,14 @@ export function ChangeBadge({ status }: { status: string }) {
 export interface DiffReviewFile {
   key: string;
   path: string;
+  oldPath?: string;
   absolutePath?: string | null;
   status: string;
   repoRoot: string | null;
   displayName: string;
   displayDir?: string | null;
   diffOverride?: string | null;
+  oldSourceRef?: string;
   auditRecords: ChangeAuditRecord[];
   /** Optional per-file override for the reference insertion callback. */
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
@@ -303,6 +307,7 @@ export function DiffReview({
   const orderedFileKeysSignature = orderedFileKeys.join('');
   currentVersionsRef.current = useMemo(() => new Map(allOrderedFiles.map((file) => [file.key, {
     diffOverride: file.diffOverride,
+    oldSourceRef: file.oldSourceRef,
     reloadKey,
     wrap,
     viewType: diffViewType,
@@ -719,6 +724,7 @@ export function DiffReview({
         reloadKey={reloadKey}
         auditRecords={item.auditRecords}
         diffOverride={item.diffOverride}
+        oldSourceRef={item.oldSourceRef}
         renderStreamBadge={renderStreamBadge}
         onInsertDiffReference={item.onInsertDiffReference ?? onInsertDiffReference}
         onHunkGitAction={item.onHunkGitAction ?? onHunkGitAction}
@@ -823,6 +829,7 @@ const MemoizedReviewStreamItem = memo(function ReviewStreamItem({ item, renderSt
 function toStreamFile(file: DiffReviewFile): DiffStreamFile {
   return {
     path: file.path,
+    oldPath: file.oldPath,
     absolutePath: file.absolutePath,
     status: file.status,
   };

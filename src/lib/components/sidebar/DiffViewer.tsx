@@ -391,6 +391,7 @@ interface DiffViewerProps {
   inlineMode?: DiffInlineMode;
   diffOptions?: GitDiffOptions;
   oldSourceOverride?: string | null;
+  oldSourceRef?: string;
   onClearAuditRecord?: (id: string) => void;
   onContentReady?: () => void;
   onSummaryChange?: (summary: { files: number; additions: number; deletions: number } | null) => void;
@@ -861,7 +862,7 @@ function isDiffNavTypingTarget(element: Element | null): boolean {
  * Self-dismisses on first tap so it doesn't get in the way of repeat
  * visits — the user has seen it once, they know now.
  */
-export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, previewReverts, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, previewReverts, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, oldSourceRef, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
   const { t, locale } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const initialCacheRef = useRef<{
@@ -1041,20 +1042,22 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       return;
     }
     const gitRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
-    if (!active || diffOverride !== undefined || !gitRoot || !filePath || changedFile?.untracked || changedFileStatus === 'added') {
+    // Supplied patches must expand from their own old blob, never today's HEAD.
+    const oldBlob = diffOverride?.match(/^index ([a-f0-9]{7,64})\.\.[a-f0-9]+/im)?.[1];
+    if (!active || (diffOverride !== undefined && ((!oldBlob && !oldSourceRef) || (oldBlob && /^0+$/.test(oldBlob)))) || !gitRoot || !filePath || (diffOverride === undefined && (changedFile?.untracked || changedFileStatus === 'added'))) {
       setOldSourceContent(null);
       setOldSourceLoading(false);
       return;
     }
-    if (initialOldSourceCacheRef.current === reloadKey) {
+    if (diffOverride === undefined && initialOldSourceCacheRef.current === reloadKey) {
       setOldSourceLoading(false);
       return;
     }
     setOldSourceContent(null);
     setOldSourceLoading(true);
     const controller = new AbortController();
-    const source = 'ref';
-    getGitBlobContent(filePath, gitRoot, 'HEAD', controller.signal, source)
+    const source = oldBlob ? 'blob' : oldSourceRef ? 'merge-base' : 'ref';
+    getGitBlobContent(changedFile?.oldPath ?? filePath, gitRoot, oldBlob ?? oldSourceRef ?? 'HEAD', controller.signal, source)
       .then((result) => {
         if (!controller.signal.aborted) {
           setOldSourceContent(result.truncated || result.error ? null : result.content);
@@ -1068,7 +1071,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         }
       });
     return () => controller.abort();
-  }, [active, changedFile?.untracked, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, oldSourceOverride, preparedDiff, reloadKey, repoRoot, rootPath]);
+  }, [active, changedFile?.untracked, changedFile?.oldPath, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, oldSourceOverride, oldSourceRef, preparedDiff, reloadKey, repoRoot, rootPath]);
 
   useEffect(() => {
     if (preparedDiff !== undefined) return;
@@ -1399,7 +1402,16 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   }, [active, effectiveDiffContent, effectiveDiffError, effectiveDiffLoading, diffOverride, imagePreview, onContentReady, preparedDiff]);
 
   const contextSource = oldSourceOverride ?? oldSourceContent;
-  const contextLines = useMemo(() => contextSource == null ? null : sourceLines(contextSource), [contextSource]);
+  const contextLines = useMemo(() => {
+    if (contextSource == null || files.length !== 1) return null;
+    const lines = sourceLines(contextSource);
+    // Legacy records may refer to a baseline branch that has since moved.
+    // Never expand a source whose original lines disagree with the patch.
+    const matches = files[0].hunks.every((hunk) => hunk.changes.every((change) => (
+      change.type === 'insert' || lines[(change.type === 'delete' ? change.lineNumber : change.oldLineNumber) - 1] === change.content
+    )));
+    return matches ? lines : null;
+  }, [contextSource, files]);
   const [contextExpansion, setContextExpansion] = useState<{
     files: typeof files; source: typeof contextSource; values: Record<number, ContextExpansion>;
   } | null>(null);

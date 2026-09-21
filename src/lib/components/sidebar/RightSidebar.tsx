@@ -9372,6 +9372,10 @@ export function RightSidebar(
     };
     if (branchAuditPreviewDiff) {
       return (branchAuditPreviewDiff.hunks ?? []).map((hunk) => {
+        const comparisonRepo = branchAuditPreviewDiff.comparisonRepos && branchAuditPreviewDiff.comparisonRepos.length > 1
+          ? [...branchAuditPreviewDiff.comparisonRepos].sort((a, b) => b.label.length - a.label.length)
+            .find((repo) => hunk.filePath.startsWith(`${repo.label}/`))
+          : undefined;
         const current = branchAuditRecords.find((record) => (
           record.repoRoot === branchAuditPreviewDiff.repoRoot
           && record.baseRef === branchAuditPreviewDiff.baseRef
@@ -9383,6 +9387,8 @@ export function RightSidebar(
         )) ?? null;
         return {
           key: `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}`,
+          repoRoot: comparisonRepo?.repoRoot ?? branchAuditPreviewDiff.repoRoot,
+          repositoryPath: comparisonRepo ? hunk.filePath.slice(comparisonRepo.label.length + 1) : hunk.filePath,
           hunk: hunk.previewRevert && !canIncludeRepoUncommitted(hunk.previewRevert.cwd, hunk.previewRevert.comparisonBranch)
             ? { ...hunk, previewRevert: undefined } : hunk,
           current,
@@ -9451,11 +9457,12 @@ export function RightSidebar(
   const commitDiffReviewItems = useMemo(() => (
     (commitDiff?.hunks ?? []).map((hunk) => ({
       key: `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}`,
+      repoRoot: commitDiff?.repoRoot,
       hunk,
       current: null,
       stale: null,
     }))
-  ), [commitDiff?.hunks]);
+  ), [commitDiff?.hunks, commitDiff?.repoRoot]);
 
   const selectedBranchWalkthroughs = useMemo(() => {
     if (branchAuditPreviewDiff) return [];
@@ -11656,6 +11663,9 @@ export function RightSidebar(
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               <UniversalDiffReview
                 items={commitDiffReviewItems}
+                diffViewType={effectiveDiffViewType}
+                inlineMode={diffInlineMode}
+                viewControls={pinned ? renderDiffViewTypeToggle() : undefined}
                 renderPathReference={(path, kind) => renderChangeNavigatorReference(
                   resolveAbsoluteReferencePath(path, commitDiff.repoRoot ?? rootPath),
                   t(kind === 'file' ? 'rightSidebar.insertThisFile' : 'fileTree.insertRefTitle'),
@@ -11673,7 +11683,7 @@ export function RightSidebar(
                 }}
                 closeLabel={t('common.back')}
                 wrap={diffWrap}
-                onToggleWrap={isMobile ? toggleDiffWrap : undefined}
+                onToggleWrap={toggleDiffWrap}
                 wrapTitle={t('rightSidebar.wrapLongLines')}
                 wrapOnLabel={t('rightSidebar.wrapOn')}
                 wrapOffLabel={t('rightSidebar.wrapOff')}
@@ -11689,6 +11699,9 @@ export function RightSidebar(
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               <UniversalDiffReview
                 items={branchAuditReviewItems}
+                diffViewType={effectiveDiffViewType}
+                inlineMode={diffInlineMode}
+                viewControls={pinned ? renderDiffViewTypeToggle() : undefined}
                 renderPathReference={(path, kind) => {
                   const repos = branchAuditPreviewDiff?.comparisonRepos;
                   const repo = repos && repos.length > 1
@@ -11720,7 +11733,7 @@ export function RightSidebar(
                 }}
                 closeLabel={t('common.back')}
                 wrap={diffWrap}
-                onToggleWrap={isMobile ? toggleDiffWrap : undefined}
+                onToggleWrap={toggleDiffWrap}
                 wrapTitle={t('rightSidebar.wrapLongLines')}
                 wrapOnLabel={t('rightSidebar.wrapOn')}
                 wrapOffLabel={t('rightSidebar.wrapOff')}

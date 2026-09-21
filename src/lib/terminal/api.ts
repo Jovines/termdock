@@ -2622,11 +2622,11 @@ export async function readFileContent(filePath: string, signal?: AbortSignal, ac
   return response.json();
 }
 
-export async function getGitBlobContent(filePath: string, cwd: string, ref = 'HEAD', signal?: AbortSignal, source: 'ref' | 'index' = 'ref'): Promise<{
-  path: string; ref: string; source?: 'ref' | 'index'; content: string; size: number; truncated?: boolean; error?: string;
+export async function getGitBlobContent(filePath: string, cwd: string, ref = 'HEAD', signal?: AbortSignal, source: 'ref' | 'index' | 'blob' | 'merge-base' = 'ref'): Promise<{
+  path: string; ref: string; source?: 'ref' | 'index' | 'blob' | 'merge-base'; content: string; size: number; truncated?: boolean; error?: string;
 }> {
   const params = new URLSearchParams({ path: filePath, cwd, ref, action: 'git_blob' });
-  if (source === 'index') params.set('source', 'index');
+  if (source !== 'ref') params.set('source', source);
   const response = await fetchWithTimeout(
     `/api/terminal/fs/git-blob?${params}`,
     { signal },
