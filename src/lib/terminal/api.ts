@@ -233,6 +233,7 @@ export const EDA_PREVIEW_REQUEST_TIMEOUT_MS = 125_000;
 const GIT_REQUEST_TIMEOUT_MS = 10_000;
 const GIT_RECENT_COMMITS_REQUEST_TIMEOUT_MS = 65_000;
 const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
+const GIT_BRANCH_DIFF_REQUEST_TIMEOUT_MS = 180_000;
 export const TERMINAL_CSRF_REQUEST_TIMEOUT_MS = 8_000;
 export const TERMINAL_HEALTH_REQUEST_TIMEOUT_MS = 8_000;
 export const TERMINAL_SESSION_OPEN_REQUEST_TIMEOUT_MS = 15_000;
@@ -3470,7 +3471,7 @@ export async function getBranchDiff(options: { cwd?: string | null; repoRoot?: s
   const response = await fetchWithTimeout(
     `/api/terminal/fs/branch-diff?${params}`,
     { signal },
-    GIT_FILE_DIFF_REQUEST_TIMEOUT_MS,
+    options.filePath && options.comparisonBase ? GIT_FILE_DIFF_REQUEST_TIMEOUT_MS : GIT_BRANCH_DIFF_REQUEST_TIMEOUT_MS,
     'Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
   );
   if (!response.ok) {

@@ -77,6 +77,9 @@ const EDA_PREVIEW_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const GIT_ROUTE_TIMEOUT_MS = 8_000;
 const GIT_RECENT_COMMITS_ROUTE_TIMEOUT_MS = 60_000;
 const GIT_FILE_DIFF_ROUTE_TIMEOUT_MS = 45_000;
+// Refreshing a remote baseline includes network transfer before diff generation.
+const GIT_BASELINE_FETCH_TIMEOUT_MS = 120_000;
+const GIT_BRANCH_DIFF_ROUTE_TIMEOUT_MS = GIT_BASELINE_FETCH_TIMEOUT_MS + GIT_FILE_DIFF_ROUTE_TIMEOUT_MS;
 const GIT_ACTION_TIMEOUT_MS = 10 * 60_000;
 const GIT_APPLY_TIMEOUT_MS = 30_000;
 const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
@@ -2695,9 +2698,15 @@ async function getBranchDiffPayload(
     try {
       // Explicitly update the selected tracking ref even with a narrow fetch
       // refspec, and accept a baseline that was force-pushed on the remote.
-      await execGit(['fetch', '--no-tags', '--', baseRemote, `+refs/heads/${remoteBranch}:${trackingRef}`], repoRoot, signal, GIT_ROUTE_TIMEOUT_MS);
+      await execGit(['fetch', '--no-tags', '--no-recurse-submodules', '--', baseRemote, `+refs/heads/${remoteBranch}:${trackingRef}`], repoRoot, signal, GIT_BASELINE_FETCH_TIMEOUT_MS);
     } catch (error) {
       if (signal.aborted) throw error;
+      if (error instanceof Error && error.message === 'git command timed out') {
+        throw new OperationTimeoutError(
+          `Refreshing baseline ${baseRef} timed out after ${GIT_BASELINE_FETCH_TIMEOUT_MS / 1000} seconds. Check the network connection and retry.`,
+          'GIT_BASELINE_FETCH_TIMEOUT',
+        );
+      }
       return {
         available: false, workspaceRoot, repoRoot, baseBranch: trimmedBase, baseRef,
         error: `Failed to refresh baseline ${baseRef}. Check remote access and retry. No comparison was generated from a stale local baseline.`,
@@ -4963,11 +4972,12 @@ router.get('/branch-diff', async (req: Request, res: Response) => {
       return;
     }
     repoRootForLog = repoRoot;
+    const isFileDiff = typeof req.query.filePath === 'string' && typeof req.query.comparisonBase === 'string';
     const payload = await withTimeout(
       typeof req.query.filePath === 'string' && typeof req.query.comparisonBase === 'string'
         ? getBranchFileDiffPayload(repoRoot, req.query.comparisonBase, req.query.filePath, controller.signal)
         : getBranchDiffPayload(workspaceGitRoot, repoRoot, baseBranch, { headRef, includeUncommitted }, controller.signal),
-      GIT_FILE_DIFF_ROUTE_TIMEOUT_MS,
+      isFileDiff ? GIT_FILE_DIFF_ROUTE_TIMEOUT_MS : GIT_BRANCH_DIFF_ROUTE_TIMEOUT_MS,
       'Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
       'GIT_BRANCH_DIFF_TIMEOUT',
       () => controller.abort(new OperationTimeoutError('Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_BRANCH_DIFF_TIMEOUT')),
