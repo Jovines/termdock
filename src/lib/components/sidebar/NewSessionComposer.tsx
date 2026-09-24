@@ -1,4 +1,5 @@
-import { ChevronDown, Folder, History, LoaderCircle, Plus, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
+import { LoadingSpinner as LoaderCircle } from '../ui/Loading';
+import { ChevronDown, Folder, History, Plus, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { AgentLauncherInfo, AgentResumeHistoryEntry } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';

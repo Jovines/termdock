@@ -63,7 +63,7 @@ import {
   writeJsonLog,
   writeTextLog,
 } from './utils/serverLogger.js';
-import { pinBundledRuntimeClientDist, resolveRuntimeClientDist } from './utils/runtimeClient.js';
+import { indexRetainedClientModules, pinBundledRuntimeClientDist, resolveRuntimeClientDist } from './utils/runtimeClient.js';
 import { installCrashForensics } from './utils/crashForensics.js';
 import {
   getTermdockVersion,
@@ -84,6 +84,9 @@ const currentFilePath = fileURLToPath(import.meta.url);
 const currentDirPath = path.dirname(currentFilePath);
 const bundledClientDistPath = path.resolve(currentDirPath, '../client');
 const bundledClientIndexPath = path.join(bundledClientDistPath, 'index.html');
+// This is intentionally not under the client build or PWA precache. It is a
+// 31 MB optional local-video-compression payload fetched only after enabling it.
+const videoCompressionCorePath = path.resolve(currentDirPath, '../../node_modules/@ffmpeg/core/dist/esm');
 const clientLogRecent = new Map<string, number>();
 let clientLogWindowStartedAt = 0;
 let clientLogWindowCount = 0;
@@ -426,10 +429,42 @@ export function createApp(options: AppOptions = {}): express.Express {
         setStaticCacheHeaders({ url: relativePath, path: relativePath } as express.Request, res);
       },
     });
+    app.get(['/assets/video-compression/:asset', '/assets/video-compression/v2/:asset'], (req, res) => {
+      const asset = req.params.asset;
+      if (asset !== 'ffmpeg-core.js' && asset !== 'ffmpeg-core.wasm') {
+        res.sendStatus(404);
+        return;
+      }
+      const assetPath = path.join(videoCompressionCorePath, asset);
+      if (!fs.existsSync(assetPath)) {
+        res.sendStatus(404);
+        return;
+      }
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      res.type(asset.endsWith('.wasm') ? 'application/wasm' : 'text/javascript');
+      res.sendFile(assetPath);
+    });
     app.use((req, res, next) => {
       compression(req, res, (compressionError) => {
         if (compressionError) return next(compressionError);
         staticFiles(req, res, next);
+      });
+    });
+    const retainedModules = indexRetainedClientModules();
+    app.get(/^\/assets\//, (req, res, next) => {
+      const retainedPath = retainedModules.get(req.path);
+      if (!retainedPath) {
+        // Never cache a missing module or return the SPA HTML as JavaScript.
+        res.setHeader('Cache-Control', 'no-store');
+        res.sendStatus(404);
+        return;
+      }
+      setStaticCacheHeaders(req, res);
+      res.sendFile(retainedPath, error => {
+        if (!error) return;
+        if (res.headersSent) return next(error);
+        res.setHeader('Cache-Control', 'no-store');
+        res.sendStatus(404);
       });
     });
     app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (req, res) => {

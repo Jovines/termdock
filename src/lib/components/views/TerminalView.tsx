@@ -51,12 +51,41 @@ import { uploadTemporaryFileAndInsertReference } from '../sidebar/temporaryImage
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { resolveTerminalPath, TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
 import { getSessionFontSize, type SessionFontSizeChangeDetail } from '../../terminal/sessionFontSize';
+import type { VideoCompressionOptions, VideoCompressionPreparationState } from '../../terminal/videoCompression';
+import type { ImageCompressionOptions } from '../../terminal/imageCompression';
+import { useMediaCompressionPreferences } from '../../terminal/mediaCompressionPreferences';
+import { IMAGE_DIMENSIONS, VIDEO_DIMENSIONS, IMAGE_QUALITY, VIDEO_BITRATE, type ImageDimension, type VideoDimension } from '../../terminal/mediaCompressionOptions';
+import { MediaUploadToast, type MediaUploadResult } from '../terminal/MediaUploadToast';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
 const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
 const MOBILE_LONG_PRESS_MODE_STORAGE_KEY = 'termdock:mobile-long-press-mode';
 const CURSOR_POSITION_SETTLE_MS = 80;
+
+function isCompressibleMobileImage(file: File): boolean {
+  return /\.(?:jpe?g|png|heic|heif)$/i.test(file.name)
+    || /^(?:image\/jpeg|image\/png|image\/heic|image\/heif)$/i.test(file.type);
+}
+
+function describeMediaCompressionError(error: unknown): string {
+  const detail = (error instanceof Error ? error.message : String(error)).slice(0, 3000);
+  return /importing a module script failed|dynamically imported module|loading chunk/i.test(detail)
+    ? `压缩模块加载失败，可能是页面版本过旧或网络中断。请更新页面后重试，无需清除转码器缓存。\n${detail}`
+    : detail;
+}
+
+function describeVideoCompressionPreparation(state: VideoCompressionPreparationState | null): string {
+  switch (state?.phase) {
+    case 'loading': return `正在加载转码器… ${state.progress ?? 0}%（优先使用浏览器缓存）`;
+    case 'saving': return '加载完成，正在保存到本机…';
+    case 'initializing': return state.source === 'local' ? '已找到本机缓存，正在初始化转码器…' : '正在初始化本地转码器…';
+    case 'ready': return state.source === 'local'
+      ? '已从本机缓存加载，转码器已就绪。'
+      : state.saved ? '转码器已就绪，已保存到本机供下次使用。' : '转码器已就绪。';
+    default: return '正在检查本机转码器缓存…';
+  }
+}
 
 type Modifier = 'ctrl' | 'alt';
 
@@ -212,6 +241,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [mobileCopyFeedback, setMobileCopyFeedback] = React.useState<'idle' | 'copied' | 'failed'>('idle');
   const [mobileFileUploadState, setMobileFileUploadState] = React.useState<'idle' | 'uploading' | 'inserted' | 'failed'>('idle');
   const [mobileFileUploadProgress, setMobileFileUploadProgress] = React.useState(0);
+  const [mobileFileUploadError, setMobileFileUploadError] = React.useState<{ stage: string; detail: string } | null>(null);
+  const [mediaUploadResult, setMediaUploadResult] = React.useState<MediaUploadResult | null>(null);
+  const dismissMediaUploadToast = React.useCallback(() => setMediaUploadResult(null), []);
+  const { preferences: mediaCompressionPreferences, update: updateMediaCompressionPreferences, saveFailed: mediaCompressionSaveFailed } = useMediaCompressionPreferences();
+  const {
+    videoEnabled: mobileCompressionEnabled,
+    videoMaxHeight: mobileCompressionHeight,
+    videoBitrate: mobileCompressionBitrate,
+    imageEnabled: mobileImageCompressionEnabled,
+    imageMaxDimension: mobileImageMaxDimension,
+    imageQuality: mobileImageQuality,
+  } = mediaCompressionPreferences;
+  const [mobileCompressionOpen, setMobileCompressionOpen] = React.useState(false);
+  const [mobileCompressionPreparation, setMobileCompressionPreparation] = React.useState<VideoCompressionPreparationState | null>(null);
+  const [mobileCompressionError, setMobileCompressionError] = React.useState<string | null>(null);
 
   const terminalState = useTerminalStore((state) => state.sessions.get(sessionId));
   const {
@@ -2274,26 +2318,83 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     mobileFileInputRef.current?.click();
   }, [showMobileFileUploadState]);
 
+  const handleMobileFileLongPress = React.useCallback(() => {
+    setMobileCompressionOpen(true);
+  }, []);
+
   const handleMobileFileChange = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
     if (!file) return;
+    setMobileFileUploadError(null);
+    setMediaUploadResult(null);
     setMobileFileUploadProgress(0);
     showMobileFileUploadState('uploading');
-    void uploadTemporaryFileAndInsertReference(file, (directory, files) => (
-      uploadFiles(directory, files, undefined, setMobileFileUploadProgress)
-    ), (uploadedPath) => {
-      if (!isActiveRef.current || isConnectionTransitionRef.current) {
-        throw new Error('Terminal unavailable');
+    const compression: VideoCompressionOptions | null = mobileCompressionEnabled && file.type.startsWith('video/')
+      ? { maxHeight: mobileCompressionHeight, videoBitrate: mobileCompressionBitrate, onProgress: setMobileFileUploadProgress }
+      : null;
+    const imageCompression: ImageCompressionOptions | null = mobileImageCompressionEnabled && isCompressibleMobileImage(file)
+      ? { maxDimension: mobileImageMaxDimension, quality: mobileImageQuality }
+      : null;
+    let stage = compression ? '视频压缩' : imageCompression ? '图片压缩' : '文件上传';
+    void (async () => {
+      const uploadFile = compression
+        ? await (await import('../../terminal/videoCompression')).compressVideoLocally(file, compression)
+        : imageCompression
+          ? await (await import('../../terminal/imageCompression')).compressImageLocally(file, imageCompression)
+          : file;
+      stage = '文件上传';
+      await uploadTemporaryFileAndInsertReference(uploadFile, (directory, files) => (
+        uploadFiles(directory, files, undefined, setMobileFileUploadProgress)
+      ), (uploadedPath) => {
+        stage = '插入终端';
+        if (!isActiveRef.current || isConnectionTransitionRef.current) {
+          throw new Error(`终端暂不可用，文件已上传至 ${uploadedPath}`);
+        }
+        window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
+          detail: { text: buildReferenceInputText(uploadedPath, null), focus: true },
+        }));
+      });
+      if (compression || imageCompression) {
+        setMediaUploadResult({
+          file: uploadFile,
+          kind: compression ? 'video' : 'image',
+          originalSize: file.size,
+          uploadedSize: uploadFile.size,
+          originalRetained: uploadFile === file,
+        });
       }
-      window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-        detail: { text: buildReferenceInputText(uploadedPath, null), focus: true },
-      }));
-    }).then(
+    })().then(
       () => showMobileFileUploadState('inserted'),
-      () => showMobileFileUploadState('failed'),
+      error => {
+        const detail = describeMediaCompressionError(error);
+        setMobileFileUploadError({ stage, detail });
+        setMobileCompressionOpen(true);
+        showMobileFileUploadState('failed');
+        clientLog('warn', 'MOBILE_MEDIA_UPLOAD failed', { stage, detail });
+      },
     );
-  }, [showMobileFileUploadState]);
+  }, [mobileCompressionBitrate, mobileCompressionEnabled, mobileCompressionHeight, mobileImageCompressionEnabled, mobileImageMaxDimension, mobileImageQuality, showMobileFileUploadState]);
+
+  React.useEffect(() => {
+    // Restoring an enabled preference must not fetch WASM during page startup.
+    // Opening the sheet (or selecting a video above) is the lazy-load boundary.
+    if (!mobileCompressionOpen || !mobileCompressionEnabled) return;
+    let active = true;
+    setMobileCompressionError(null);
+    setMobileCompressionPreparation({ phase: 'checking-cache' });
+    void import('../../terminal/videoCompression')
+      .then(({ prepareLocalVideoCompression }) => {
+        if (!active) return;
+        return prepareLocalVideoCompression(state => {
+          if (active) setMobileCompressionPreparation(state);
+        });
+      })
+      .catch(error => {
+        if (active) setMobileCompressionError(describeMediaCompressionError(error));
+      });
+    return () => { active = false; };
+  }, [mobileCompressionOpen, mobileCompressionEnabled]);
 
   // 重连抖动修复：auto-recreate / 短线重连过渡期 activeProgram 会被清成 null
   // （clearTerminalSession），随后 connected 事件再写回。若直接用它推导 preset，
@@ -2468,6 +2569,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       onTextPress={handleToolbarTextPress}
       onPastePress={isMobile ? handleMobilePastePress : undefined}
       onFilePress={isMobile ? handleMobileFilePress : undefined}
+      onFileLongPress={isMobile ? handleMobileFileLongPress : undefined}
       fileUploadState={mobileFileUploadState}
       fileUploadProgress={mobileFileUploadProgress}
       longPressMode={mobileLongPressMode}
@@ -2489,6 +2591,37 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         className="hidden"
         onChange={handleMobileFileChange}
       />
+      {mobileCompressionOpen && createPortal(
+        <>
+          <button type="button" className="fixed inset-0 z-modal-backdrop cursor-default bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setMobileCompressionOpen(false)} aria-label={t('common.close')} />
+          <section role="dialog" aria-modal="true" aria-labelledby="mobile-video-compression-title" className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] z-modal-panel max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-2xl border border-border/15 bg-surface p-4 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:left-1/2 sm:right-auto sm:w-[min(28rem,calc(100vw-2rem))] sm:-translate-x-1/2">
+            <div className="flex items-start justify-between gap-3"><div><h2 id="mobile-video-compression-title" className="text-sm font-semibold text-foreground">本地媒体压缩</h2><p className="mt-1 text-xs text-muted-foreground">按文件类型选择压缩方式，处理完成后才上传。</p></div><button type="button" className="min-h-10 rounded-lg bg-surface-2 px-3 text-xs" onClick={() => setMobileCompressionOpen(false)}>{t('common.close')}</button></div>
+            {mobileFileUploadError && <div role="alert" className="mt-3 rounded-lg bg-destructive/10 p-3 text-xs text-destructive">
+              <p>{mobileFileUploadError.stage}失败。{mobileFileUploadError.stage.endsWith('压缩') ? '原文件未上传。' : mobileFileUploadError.stage === '插入终端' ? '文件已上传，路径见详情。' : ''}</p>
+              <details className="mt-2"><summary className="cursor-pointer">错误详情</summary><p className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words">{mobileFileUploadError.detail}</p></details>
+            </div>}
+            {mediaCompressionSaveFailed && <p className="mt-2 text-[11px] text-destructive">本机未能保存设置，重新打开后可能恢复默认值。</p>}
+            <label className="mt-4 flex min-h-11 items-center justify-between rounded-xl bg-surface-elevated px-3 text-sm"><span>压缩图片后上传</span><input type="checkbox" checked={mobileImageCompressionEnabled} onChange={event => updateMediaCompressionPreferences({ imageEnabled: event.target.checked })} className="h-4 w-4 accent-primary" /></label>
+            {mobileImageCompressionEnabled && <div className="mt-3 space-y-3"><label className="block text-xs text-muted-foreground">图片最长边
+              <select value={mobileImageMaxDimension} onChange={event => updateMediaCompressionPreferences({ imageMaxDimension: Number(event.target.value) as ImageDimension })} className="mt-1 block min-h-10 w-full rounded-lg bg-surface-2 px-3 text-sm text-foreground">
+                {IMAGE_DIMENSIONS.map(size => <option key={size} value={size}>{size} px{size === 640 ? ' · 最省流量' : size === 2048 ? ' · 推荐' : size === 4096 ? ' · 保留更多细节' : ''}</option>)}
+              </select>
+            </label><label className="block text-xs text-muted-foreground">图片画质：{Math.round(mobileImageQuality * 100)}%
+              <input type="range" min={IMAGE_QUALITY.min} max={IMAGE_QUALITY.max} step={IMAGE_QUALITY.step} value={mobileImageQuality} onChange={event => updateMediaCompressionPreferences({ imageQuality: Number(event.target.value) })} className="mt-2 h-1 w-full accent-primary" />
+            </label><p className="text-[11px] text-muted-foreground">支持 JPEG、PNG、HEIC 照片；GIF、SVG 等保持原文件。压缩后未变小也会保留原图。</p></div>}
+            <div className="mt-4 border-t border-border/15 pt-1" />
+            <label className="mt-4 flex min-h-11 items-center justify-between rounded-xl bg-surface-elevated px-3 text-sm"><span>压缩视频后上传</span><input type="checkbox" checked={mobileCompressionEnabled} onChange={event => updateMediaCompressionPreferences({ videoEnabled: event.target.checked })} className="h-4 w-4 accent-primary" /></label>
+            {mobileCompressionEnabled && <div className="mt-4 space-y-4"><label className="block text-xs text-muted-foreground">视频最长边（像素）
+              <select value={mobileCompressionHeight} onChange={event => updateMediaCompressionPreferences({ videoMaxHeight: Number(event.target.value) as VideoDimension })} className="mt-1 block min-h-10 w-full rounded-lg bg-surface-2 px-3 text-sm text-foreground">
+                {VIDEO_DIMENSIONS.map(size => <option key={size} value={size}>{size} px{size === 240 ? ' · 最省流量' : size === 720 ? ' · 推荐' : size >= 1440 ? ' · 手机处理较慢' : ''}</option>)}
+              </select>
+            </label><label className="block text-xs text-muted-foreground">目标视频码率：{mobileCompressionBitrate / 1_000_000} Mbps
+              <input type="range" min={VIDEO_BITRATE.min} max={VIDEO_BITRATE.max} step={VIDEO_BITRATE.step} value={mobileCompressionBitrate} onChange={event => updateMediaCompressionPreferences({ videoBitrate: Number(event.target.value) })} className="mt-2 h-1 w-full accent-primary" />
+            </label><p className="text-[11px] text-muted-foreground">保持比例，不放大原视频。尺寸越小通常处理越快；码率越低体积通常越小，过高可能比原片更大。</p><p className="text-[11px] text-muted-foreground" role="status" aria-live="polite">{mobileCompressionError ? '本地转码器准备失败，请关闭开关后重试。' : describeVideoCompressionPreparation(mobileCompressionPreparation)}</p>
+              {mobileCompressionPreparation?.saved === false && <p className="text-[11px] text-destructive">本机未能保存转码器，重新打开后可能需要重新下载。</p>}
+              {mobileCompressionError && <p className="text-[11px] text-destructive">{mobileCompressionError}</p>}</div>}
+          </section>
+        </>, document.body)}
       {showDebug && (
         <DebugPanel
           isMobile={isMobile}
@@ -2564,6 +2697,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             />
           </ErrorBoundary>
         </div>
+
+        <MediaUploadToast result={mediaUploadResult} onDismiss={dismissMediaUploadToast} />
 
         <ConnectionStatus
           connectionError={connectionError}

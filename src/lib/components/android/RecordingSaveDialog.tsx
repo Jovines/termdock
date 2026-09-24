@@ -1,6 +1,7 @@
+import { LoadingSpinner as Loader2 } from '../ui/Loading';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Loader2 } from 'lucide-react';
+
 import { useI18n } from '../../i18n';
 import { saveAndroidRecording, discardAndroidRecording, type AndroidRecording } from '../../android/api';
 import { DirectoryPickerDialog } from '../sidebar/DirectoryPickerDialog';

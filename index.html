@@ -111,6 +111,39 @@
 
       #termdock-startup[hidden] { display: none; }
 
+      /* Keep the launch artwork anchored while the terminal measures its
+         viewport or restores keyboard focus. */
+      #termdock-startup {
+        bottom: auto;
+        height: 100vh;
+        height: 100lvh;
+      }
+
+      .termdock-boot-support {
+        position: absolute;
+        top: calc(50% + min(28vw, 28vh, 140px) + 32px);
+        left: 24px;
+        right: 24px;
+        text-align: center;
+        font-size: 12px;
+      }
+
+      .termdock-boot-support p {
+        margin: 0 0 8px;
+        overflow-wrap: anywhere;
+      }
+
+      .termdock-boot-support button {
+        min-height: 44px;
+        padding: 0 16px;
+        border: 1px solid currentColor;
+        border-radius: 8px;
+        color: inherit;
+        background: transparent;
+        font: inherit;
+        cursor: pointer;
+      }
+
       .termdock-boot-status {
         position: absolute;
         top: calc(50% + min(28vw, 28vh, 140px));
@@ -174,7 +207,10 @@
         transform: translate(-50%, -50%);
       }
 
+      html[data-termdock-desktop='true'] .termdock-boot-support { top: calc(50% + 32px); }
+
       @media (hover: hover) and (pointer: fine) {
+        .termdock-boot-support { top: calc(50% + 32px); }
         .termdock-boot-logo {
           display: none;
         }
@@ -253,11 +289,15 @@
     </style>
   </head>
   <body>
-    <div id="termdock-startup" class="termdock-boot z-modal-panel" role="status" aria-live="polite">
+    <div id="termdock-startup" class="termdock-boot z-modal-panel">
         <img class="termdock-boot-logo" src="/boot-logo.png" alt="" aria-hidden="true" />
-        <div class="termdock-boot-status">
+        <div class="termdock-boot-status" role="status" aria-live="polite" aria-atomic="true">
           <div class="termdock-boot-spinner" aria-hidden="true"></div>
           <span data-startup-status>Loading Termdock</span>
+        </div>
+        <div class="termdock-boot-support">
+          <p data-startup-detail hidden></p>
+          <button data-startup-action type="button" hidden></button>
         </div>
     </div>
     <div id="root"></div>

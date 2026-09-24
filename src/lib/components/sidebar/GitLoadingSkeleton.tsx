@@ -4,7 +4,7 @@ import { useI18n } from '../../i18n';
 export function GitLoadingSkeleton({ slow = false }: { slow?: boolean }) {
   const { t } = useI18n();
   return (
-    <div role="status" aria-label={t('rightSidebar.loadingGitChanges')} className="relative h-full min-h-0 overflow-hidden bg-surface px-3">
+    <div role="status" aria-label={t('rightSidebar.loadingGitChanges')} className="td-loading-skeleton relative h-full min-h-0 overflow-hidden bg-surface px-3">
       <span className="sr-only">{t('rightSidebar.loadingGitChanges')}</span>
       <div aria-hidden="true">
         <div className="flex h-[76px] items-center gap-2 border-b border-border/40 px-2">

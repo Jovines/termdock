@@ -1,3 +1,4 @@
+import { LoadingSpinner as RiLoader, LoadingStatus } from '../ui/Loading';
 import { ChangesToolbar } from './ChangesToolbar';
 import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
 import { GitLoadingSkeleton } from './GitLoadingSkeleton';
@@ -29,7 +30,6 @@ import {
   Download as RiDownload,
   RefreshCw as RiRefresh,
   GitBranch as RiGitBranch,
-  Loader2 as RiLoader,
   ListTree as RiListTree,
   Pin as RiPin,
   PinOff as RiPinOff,
@@ -6111,8 +6111,8 @@ export function FilePreview({
         </div>}
       </div>
       {previewState.kind === 'loading' ? (
-        <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">
-          {previewState.mode === 'eda' ? t('rightSidebar.edaLoading') : previewState.mode === 'image' ? t('rightSidebar.loadingImage') : previewState.mode === 'model3d' ? t('rightSidebar.model3dLoading') : previewState.mode === 'video' ? t('rightSidebar.loadingVideo') : 'Loading file…'}
+        <div className="min-h-0 flex-1 overflow-auto px-3 py-8">
+          <LoadingStatus label={previewState.mode === 'eda' ? t('rightSidebar.edaLoading') : previewState.mode === 'image' ? t('rightSidebar.loadingImage') : previewState.mode === 'model3d' ? t('rightSidebar.model3dLoading') : previewState.mode === 'video' ? t('rightSidebar.loadingVideo') : t('common.loading')} />
         </div>
       ) : previewState.kind === 'error' ? (
         <div className="min-h-0 flex-1 overflow-auto">
@@ -6169,7 +6169,7 @@ export function FilePreview({
             onInsertAnnotation={onReviewReference ?? onInsertFeature}
             onRefresh={refreshPreview}
             interactive3d={cachedEda3dPreview ? (
-              <Suspense fallback={<div className="min-h-0 flex-1 px-3 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.model3dLoading')}</div>}>
+              <Suspense fallback={<LoadingStatus label={t('rightSidebar.model3dLoading')} className="min-h-0 flex-1 px-3 py-8" />}>
                 <ModelPreview
                   blobUrl={cachedEda3dPreview.objectUrl}
                   ext=".glb"
@@ -6190,7 +6190,7 @@ export function FilePreview({
         </div>
       ) : previewState.kind === 'model3d' ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
-          <Suspense fallback={<div className="min-h-0 flex-1 px-3 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.model3dLoading')}</div>}>
+          <Suspense fallback={<LoadingStatus label={t('rightSidebar.model3dLoading')} className="min-h-0 flex-1 px-3 py-8" />}>
             <ModelPreview
               blobUrl={previewState.objectUrl}
               ext={previewState.ext}

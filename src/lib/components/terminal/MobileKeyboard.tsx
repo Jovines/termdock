@@ -1,6 +1,7 @@
+import { LoadingSpinner as Loader2 } from '../ui/Loading';
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, FileUp, Loader2, Move, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, FileUp, Move, X } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
@@ -61,6 +62,7 @@ interface MobileKeyboardProps {
   onTextPress: (sequence: string) => void;
   onPastePress?: () => void;
   onFilePress?: () => void;
+  onFileLongPress?: () => void;
   fileUploadState?: 'idle' | 'uploading' | 'inserted' | 'failed';
   fileUploadProgress?: number;
   longPressMode?: 'arrows' | 'copy';
@@ -90,6 +92,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onTextPress,
   onPastePress,
   onFilePress,
+  onFileLongPress,
   fileUploadState = 'idle',
   fileUploadProgress = 0,
   longPressMode = 'arrows',
@@ -120,6 +123,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     timer: number;
   } | null>(null);
   const lastPasteTriggerAtRef = React.useRef(0);
+  const fileLongPressTimerRef = React.useRef<number | null>(null);
+  const fileLongPressTriggeredRef = React.useRef(false);
 
   const preventToolbarButtonFocus = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement> | React.PointerEvent<HTMLDivElement>) => {
@@ -356,8 +361,28 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     if (toolbarDisabled || fileUploadState === 'uploading' || !onFilePress) return;
     event.preventDefault();
     event.stopPropagation();
-    onFilePress();
+    if (!fileLongPressTriggeredRef.current) onFilePress();
+    fileLongPressTriggeredRef.current = false;
   }, [fileUploadState, onFilePress, toolbarDisabled]);
+
+  const cancelFileLongPress = React.useCallback(() => {
+    if (fileLongPressTimerRef.current !== null) window.clearTimeout(fileLongPressTimerRef.current);
+    fileLongPressTimerRef.current = null;
+  }, []);
+
+  const handleFilePointerDown = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (toolbarDisabled || fileUploadState === 'uploading' || !onFileLongPress) return;
+    fileLongPressTriggeredRef.current = false;
+    fileLongPressTimerRef.current = window.setTimeout(() => {
+      fileLongPressTimerRef.current = null;
+      fileLongPressTriggeredRef.current = true;
+      hapticVibrate(TOOLBAR_HAPTIC_PATTERN_MS);
+      onFileLongPress();
+    }, 500);
+  }, [fileUploadState, onFileLongPress, toolbarDisabled]);
+
+  React.useEffect(() => () => cancelFileLongPress(), [cancelFileLongPress]);
 
   const stopToolbarButtonBubble = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => {
@@ -598,8 +623,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
-          onPointerDown={stopToolbarButtonBubble}
-          onTouchStart={stopToolbarButtonBubble}
+          onPointerDown={handleFilePointerDown}
+          onPointerUp={cancelFileLongPress}
+          onPointerCancel={cancelFileLongPress}
           onClick={handleFileClick}
           tabIndex={-1}
           disabled={buttonDisabled || !onFilePress || fileUploadState === 'uploading'}

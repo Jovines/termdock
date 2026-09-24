@@ -1,6 +1,7 @@
+import { LoadingSpinner as LoaderCircle } from '../components/ui/Loading';
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { getWorkspaceHost, WORKSPACE_QUERY, type WorkspaceSnapshot, type WorkspaceHost, type ServiceWorkspace } from './workspaceHost';
-import { LoaderCircle } from 'lucide-react';
+
 import { syncThemeColorMeta } from '../utils/themeColorMeta';
 import { StartupScreen } from '../components/StartupScreen';
 import { WorkspacePortalContext } from './WorkspacePortal';
@@ -141,16 +142,10 @@ export function ServiceWorkspaceHost({ children }: { children: ReactNode }) {
       <WorkspacePortalContext.Provider value={root}>{children}</WorkspacePortalContext.Provider>
     </div>
     {snapshot.items.filter(item => item.key !== 'root').map(item => <WorkspaceFrame key={item.key} host={host} item={item} visible={visibleKey === item.key} active={!switching && visibleKey === item.key} />)}
-    {restoring && (slow || destination?.phase === 'offline' || destination?.phase === 'reconnecting' ? (
-      <div className="termdock-boot z-modal-panel" role="status" aria-live="polite">
-        <div className="flex max-w-xs flex-col items-center gap-3 text-center">
-          <LoaderCircle size={16} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-          <div className="max-w-full truncate text-sm">{destination?.service?.label || 'Termdock'}</div>
-          <div className="text-xs text-muted-foreground">{connectionStatus}</div>
-          <button type="button" className="min-h-11 rounded-lg bg-surface-2 px-4 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setRevealedKey(snapshot.activeKey)}>查看连接页面</button>
-        </div>
-      </div>
-    ) : <StartupScreen className="z-modal-panel" />)}
+    {restoring && <StartupScreen className="z-modal-panel" status={connectionStatus}
+      detail={slow || destination?.phase === 'offline' || destination?.phase === 'reconnecting' ? destination?.service?.label : undefined}
+      actionLabel={slow || destination?.phase === 'offline' || destination?.phase === 'reconnecting' ? '查看连接页面' : undefined}
+      onAction={() => setRevealedKey(snapshot.activeKey)} />}
     {switching && !restoring && <div className="fixed inset-0 z-modal-panel flex items-end justify-center px-3 pb-[calc(env(safe-area-inset-bottom)+96px)]" role="dialog" aria-modal="true" aria-label="切换服务"
       onKeyDown={event => {
         if (event.key === 'Escape' && previous?.service) {

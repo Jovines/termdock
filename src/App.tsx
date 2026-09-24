@@ -1,3 +1,4 @@
+import { LoadingSpinner as RiLoaderLine, LoadingSpinner as RiLoaderCircle } from './lib/components/ui/Loading';
 import { MobileSetupGuide } from './lib/components/settings/MobileSetupGuide';
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
 import { ViewportDiagnostics } from './lib/components/terminal/ViewportDiagnostics';
@@ -25,13 +26,11 @@ import {
   Bot as RiBotLine,
   Bell as RiBellLine,
   ChevronRight as RiChevronRightLine,
-  Loader2 as RiLoaderLine,
   Moon as RiMoonLine,
   Sun as RiSunLine,
   Folder as RiFolderLine,
   Hash as RiHashLine,
   Clock as RiClockLine,
-  LoaderCircle as RiLoaderCircle,
   CircleHelp as RiCircleHelp,
   BellDot as RiBellDot,
   FolderOpen as RiFolderOpenLine,
@@ -93,6 +92,7 @@ import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloating
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
+import { ConnectionQualitySettings } from './lib/components/settings/ConnectionQualitySettings';
 import { ServerHealthSettings } from './lib/components/settings/ServerHealthSettings';
 import { WorkspaceRetentionSettings } from './lib/components/settings/WorkspaceRetentionSettings';
 import { useServiceWorkspaceActivity } from './lib/components/ServiceSwitcher';
@@ -3743,6 +3743,8 @@ function App() {
                 ) : undefined}
               />
 
+              <ConnectionQualitySettings backendSessionId={activeSessionId ? terminalSessions.get(activeSessionId)?.terminalSessionId ?? null : null} />
+
               <ServerHealthSettings
                 state={serverHealthState}
                 onDismiss={() => void handleDismissServerHealth()}
@@ -5309,7 +5311,7 @@ function App() {
   // MultiTerminalView restores the active terminal. Cached chrome may render
   // behind it, but must not expose the empty/history-replay/first-fit frames.
   const initialSessionRestoreOverlay = !hasRestoredSessionChrome ? (
-    <StartupScreen className="z-modal-panel" />
+    <StartupScreen className="z-modal-panel" status="正在恢复终端…" />
   ) : null;
 
   // Keep the terminal tree mounted when sessions have different pin states.

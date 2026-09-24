@@ -1,5 +1,6 @@
+import { LoadingSpinner as RiLoader4Line } from '../ui/Loading';
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowRight as RiArrowRightLine, Loader2 as RiLoader4Line } from 'lucide-react';
+import { ArrowRight as RiArrowRightLine} from 'lucide-react';
 import { loginWithPassword } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 

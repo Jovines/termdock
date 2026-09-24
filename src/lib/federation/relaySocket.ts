@@ -12,6 +12,7 @@ export class RelaySocket extends EventTarget {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
+  readonly connectionTimings = { entryOpenMs: null as number | null, routeOpenMs: null as number | null };
   private upstream: WebSocket;
   private streamId = crypto.randomUUID();
   private requested = false;
@@ -20,7 +21,12 @@ export class RelaySocket extends EventTarget {
   constructor(readonly url: string, targetServiceId: string, socketFactory: (url: string) => WebSocket = url => new WebSocket(url)) {
     super();
     if (!/^[a-zA-Z0-9_.:-]{1,160}$/.test(targetServiceId)) throw new Error('Invalid target identity');
+    const started = performance.now();
+    let entryReadyAt: number | undefined;
     this.upstream = socketFactory(url);
+    this.upstream.addEventListener('open', () => {
+      this.connectionTimings.entryOpenMs = performance.now() - started;
+    });
     this.deadline = setTimeout(() => this.fail('Relay connection timed out'), 20_000);
     this.upstream.addEventListener('message', event => {
       if (this.readyState === 3) return;
@@ -28,11 +34,13 @@ export class RelaySocket extends EventTarget {
         if (typeof event.data !== 'string' || new TextEncoder().encode(event.data).length > MAX_FRAME_BYTES) throw new Error('Invalid relay envelope');
         const frame = JSON.parse(event.data);
         if (frame.type === 'ready' && !this.requested) {
+          entryReadyAt = performance.now();
           this.requested = true;
           this.transmit({ type: 'open', streamId: this.streamId, serviceId: targetServiceId }); return;
         }
         if (frame.streamId !== this.streamId) return;
         if (frame.type === 'opened' && this.readyState === 0) {
+          this.connectionTimings.routeOpenMs = entryReadyAt === undefined ? null : performance.now() - entryReadyAt;
           clearTimeout(this.deadline); this.readyState = 1;
           const e = new Event('open'); this.dispatchEvent(e); this.onopen?.(e); return;
         }

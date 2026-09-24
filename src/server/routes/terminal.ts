@@ -9004,6 +9004,7 @@ export function handleTerminalWebSocket(
 
   // Handle client → server messages
   ws.on('message', async (raw) => {
+    const messageReceivedAt = performance.now();
     let msg: { type: string; [key: string]: unknown };
     try {
       msg = JSON.parse(raw.toString());
@@ -9179,7 +9180,7 @@ export function handleTerminalWebSocket(
           // 心跳算活动：客户端每 20s 发一次 ping，没有这一行就会出现
           // "用户开着页面看 agent 跑、自己不动键盘"被 idle-cleanup 误杀的情况。
           session.lastActivity = Date.now();
-          ws.send(JSON.stringify({ type: 'pong' }));
+          ws.send(JSON.stringify({ type: 'pong', handlerMs: performance.now() - messageReceivedAt, qualityProbeId: typeof msg.qualityProbeId === 'string' ? msg.qualityProbeId.slice(0, 64) : undefined }));
           break;
         }
       }

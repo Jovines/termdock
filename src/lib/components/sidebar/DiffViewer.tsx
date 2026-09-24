@@ -1,5 +1,6 @@
+import { LoadingSpinner as RiLoader } from '../ui/Loading';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
-import { ChevronDown as RiChevronDown, ChevronUp as RiChevronUp, GitCompare as RiGitCompare, Link as RiLink, Loader2 as RiLoader } from 'lucide-react';
+import { ChevronDown as RiChevronDown, ChevronUp as RiChevronUp, GitCompare as RiGitCompare, Link as RiLink} from 'lucide-react';
 import { Diff, Hunk, getChangeKey, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -2119,12 +2120,12 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     && parsedDiffInput?.cacheKey === currentParseCacheKey;
   if (effectiveDiffLoading && !(hasRenderedCurrentFile || (diffOverride !== undefined && parsedFiles.length > 0))) {
     return embedded ? (
-      <div className="absolute inset-0 z-20 flex min-h-16 items-center justify-center gap-2 bg-surface-2 text-xs text-muted-foreground">
+      <div role="status" aria-live="polite" className="absolute inset-0 z-20 flex min-h-16 items-center justify-center gap-2 bg-surface-2 text-xs text-muted-foreground">
         <RiLoader size={18} className="animate-spin" />
         <span>{t('diffViewer.loading')}</span>
       </div>
     ) : (
-      <div className="mx-3 mt-3 flex items-center justify-center gap-2 border border-border/15 bg-surface-2 py-8 text-sm text-muted-foreground">
+      <div role="status" aria-live="polite" className="mx-3 mt-3 flex items-center justify-center gap-2 border border-border/15 bg-surface-2 py-8 text-sm text-muted-foreground">
         <RiLoader size={20} className="animate-spin" />
         <span>{t('diffViewer.loading')}</span>
       </div>

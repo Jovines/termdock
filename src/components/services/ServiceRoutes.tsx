@@ -1,5 +1,6 @@
+import { LoadingSpinner as Loader2 } from '../../lib/components/ui/Loading';
 import { useEffect, useState } from 'react';
-import { Check, ChevronRight, Copy, Loader2, Server } from 'lucide-react';
+import { Check, ChevronRight, Copy, Server } from 'lucide-react';
 import { addServiceAddress, authorizeEntryRoute, connectionRoutes, createEntryInvitation, inspectEntryRoute, revokeEntryRoute, saveServiceRoutes } from '../../lib/federation/browserIntegration';
 import { createInviteLink } from '../../lib/federation/inviteLink';
 import { listServiceConnections, type ServiceConnection, type ServiceRoute } from '../../lib/services/serviceDirectory';

@@ -1,3 +1,4 @@
+import { LoadingStatus } from '../ui/Loading';
 // flexoki-allow-file — 3D viewer 是刻意与主题无关的组件,色值固定为一套
 // 独立观感(对齐 cadquery-print skill 的 view.html),不随 Flexoki 主题切换。
 import { useEffect, useReducer, useRef, useState } from 'react';
@@ -1883,9 +1884,7 @@ export default function ModelPreview({
         onWheel={(event) => event.stopPropagation()}
       />
       {status.kind === 'loading' && (
-        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-          {t('rightSidebar.model3dLoading')}
-        </div>
+        <LoadingStatus label={t('rightSidebar.model3dLoading')} className="absolute inset-0" />
       )}
       {status.kind === 'error' && (
         <div className="absolute inset-0 overflow-auto">

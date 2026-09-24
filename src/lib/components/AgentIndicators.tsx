@@ -1,3 +1,4 @@
+import { LoadingSpinner as RiLoaderCircle } from './ui/Loading';
 /**
  * Agent / 会话状态相关的展示原语，统一收敛在这里。
  *
@@ -16,7 +17,6 @@ import { ServiceAttentionDialog, useServiceAttention } from './ServiceAttentionD
 import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
-  LoaderCircle as RiLoaderCircle,
   CircleHelp as RiCircleHelp,
   BellDot as RiBellDot,
   Bot as RiBot,

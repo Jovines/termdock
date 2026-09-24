@@ -1,5 +1,6 @@
+import { LoadingSpinner as LoaderCircle } from './ui/Loading';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { BellDot, ChevronDown, ChevronUp, LoaderCircle, MoreHorizontal } from 'lucide-react';
+import { BellDot, ChevronDown, ChevronUp, MoreHorizontal } from 'lucide-react';
 import { openServiceAccess } from '../federation/accessEvents';
 import { listServiceConnections, observeServiceConnections, type ServiceConnection } from '../services/serviceDirectory';
 import { activateServiceWorkspace, getWorkspaceHost, reportWorkspace, type WorkspaceSnapshot, type WorkspaceAttentionSession } from '../services/workspaceHost';

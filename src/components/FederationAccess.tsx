@@ -1,3 +1,4 @@
+import { LoadingSpinner as Loader2 } from '../lib/components/ui/Loading';
 import type { DeviceProfile } from '../server/federation/deviceProfile';
 import { RelayServices } from './services/RelayServices';
 import { DeviceAuthorizationRequired } from '../lib/federation/deviceAuthorization';
@@ -8,7 +9,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { toDataURL } from 'qrcode';
 import { parseInviteLink } from '../lib/federation/inviteLink';
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Loader2, Monitor, Plus, Pencil, Server, Smartphone, X } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Monitor, Plus, Pencil, Server, Smartphone, X } from 'lucide-react';
 
 export interface FederationConnection { url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean }
 export interface FederationGrantInput {

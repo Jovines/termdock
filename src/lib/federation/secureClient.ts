@@ -1,3 +1,4 @@
+import type { ConnectionDiagnostics } from './connectionDiagnostics';
 import { createIdentity, secureConnection, MAX_SECURE_CONNECTION_AGE_MS, type Identity } from '../../server/federation/secureProtocol.js';
 import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from './transportLifecycle.js';
 import { AsyncQueue, PacketChannel, fromBase64, toBase64, type Packet } from '../../server/federation/packets.js';
@@ -32,6 +33,9 @@ export class SecureSocket extends EventTarget {
   readonly CONNECTING = 0; readonly OPEN = 1; readonly CLOSING = 2; readonly CLOSED = 3;
   readonly binaryType = 'arraybuffer'; readonly bufferedAmount = 0;
   readonly protocol = 'termdock-e2ee-v1'; readonly extensions = '';
+  getConnectionDiagnostics?: () => ConnectionDiagnostics | undefined;
+  readonly createdAt = performance.now();
+  openedAfterMs?: number;
   readyState = 0;
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -46,7 +50,7 @@ export class SecureSocket extends EventTarget {
   close(code = 1000, reason = '') { if (this.readyState === 3) return; this.disconnect(); this.finish(code, reason); }
   accept(packet: Packet) {
     if (this.readyState === 3) return;
-    if (packet.type === 'ws-ready') { this.readyState = 1; const e = new Event('open'); this.dispatchEvent(e); this.onopen?.(e); }
+    if (packet.type === 'ws-ready') { this.openedAfterMs = performance.now() - this.createdAt; this.readyState = 1; const e = new Event('open'); this.dispatchEvent(e); this.onopen?.(e); }
     else if (packet.type === 'ws-data' && typeof packet.data === 'string') {
       const e = new MessageEvent('message', { data: packet.data }); this.dispatchEvent(e); this.onmessage?.(e);
     } else if (packet.type === 'ws-close') this.finish(typeof packet.code === 'number' ? packet.code : 1000, typeof packet.reason === 'string' ? packet.reason : '');
@@ -60,6 +64,7 @@ export class SecureSocket extends EventTarget {
 }
 
 export class SecureClient {
+  transportDiagnostics?: () => ConnectionDiagnostics;
   private readonly establishedAt = performance.now();
   private readonly establishedWallTime = Date.now();
   private lastInputAt = -Infinity;
@@ -158,7 +163,16 @@ export class SecureClient {
         this.channel.send({ id, type: 'ws-data', data });
       },
       () => { waiting.abort(); if (id) { try { this.channel.send({ id, type: 'ws-close' }); } finally { this.release(id); } } });
+    let queueMs: number | undefined;
+    socket.getConnectionDiagnostics = () => {
+      const transport = this.transportDiagnostics?.();
+      return transport ? { ...transport, socketOpenMs: socket.openedAfterMs, socketQueueMs: queueMs,
+        pendingWrites: this.channel.hasPendingWrites,
+        activeRequests: [...this.pending.values()].filter(item => item.kind !== 'socket').length,
+        waitingRequests: this.waiting.length } : undefined;
+    };
     void this.reserve('socket', waiting.signal).then(allocation => {
+      queueMs = performance.now() - socket.createdAt;
       id = allocation.id;
       if (socket.readyState === 3) { this.release(id); return; }
       const pending = this.pending.get(id); if (!pending) throw new Error('Secure connection closed');
@@ -274,6 +288,7 @@ export async function connect(options: SecureClientOptions): Promise<SecureClien
   if (!['wss:', 'ws:'].includes(url.protocol)) throw new Error('A WebSocket endpoint is required');
   if (url.protocol === 'ws:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Remote secure channels require WSS');
   const identity = options.identity ?? await createIdentity();
+  const started = performance.now();
   const socket = (options.socketFactory ?? (value => new WebSocket(value)))(url.href);
   // Install the byte listener before awaiting open: an eager target may send its first
   // handshake record in the same event turn as the relay's opened event.
@@ -292,8 +307,18 @@ export async function connect(options: SecureClientOptions): Promise<SecureClien
       socket.addEventListener('open', opened); socket.addEventListener('error', failed); socket.addEventListener('close', failed);
       if (socket.readyState === 1) opened();
     });
+    const transportOpened = performance.now();
     const secure = await secureConnection({ identity, duplex, initiator: true, targetPinnedPeerId: options.targetPeerId, signal });
     const client = new SecureClient(new PacketChannel(secure.duplex), identity, secure.authenticatedPeerId);
+    const securedAt = performance.now();
+    const establishedAt = Date.now();
+    const relay = (socket as unknown as { connectionTimings?: ConnectionDiagnostics['relay'] }).connectionTimings;
+    client.transportDiagnostics = () => ({
+      endpoint: url.host, path: relay ? 'relay' : 'direct', targetPeerId: secure.authenticatedPeerId,
+      transportOpenMs: transportOpened - started, handshakeMs: securedAt - transportOpened, establishedAt,
+      relay: relay ? { ...relay } : undefined, bufferedBytes: socket.bufferedAmount,
+      pendingWrites: false, activeRequests: 0, waitingRequests: 0,
+    });
     if (options.pairingCode) {
       try { await client.request({ type: 'pair', code: options.pairingCode }); } catch (error) { client.close(failure(error)); throw error; }
     }

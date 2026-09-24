@@ -1,3 +1,4 @@
+import { pollConnectionQuality, receiveQualityPong } from './connectionQuality';
 import { collaborationServiceLabel } from '../collaboration/display';
 import { listServiceConnections, observeServiceConnections } from '../services/serviceDirectory';
 import { CollaborationDirectory, remoteSessionAddress, type CollaborationDirectoryData } from '../collaboration/directory';
@@ -390,9 +391,11 @@ export function resetCsrfTokenCache(): void {
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PONG_TIMEOUT_MS = 8_000;
 // visibilitychange / online 唤醒后做一次健康探测：发 ping 等若干毫秒，超时直接重连。
-// 1500ms 是给蜂窝网络/弱 Wi-Fi 唤醒首包留的余量（实测 500ms 经常误判半开导致无谓 close）。
+// iOS 文件选择器返回时也会触发 focus/visibility 恢复；图片解码和加密上传
+// 可能短暂占用主线程/链路。可见终端同样需要完整的唤醒首包余量，
+// 否则 250ms 探测会把仍可用的 socket 误判为半开并显示「正在重连」。
 const WAKEUP_PROBE_TIMEOUT_MS = 1500;
-export const VISIBLE_WAKEUP_PROBE_TIMEOUT_MS = 250;
+export const VISIBLE_WAKEUP_PROBE_TIMEOUT_MS = WAKEUP_PROBE_TIMEOUT_MS;
 
 interface WsConnection {
   ws: WebSocket;
@@ -439,6 +442,10 @@ interface WsConnection {
 
 const wsConnections = new Map<string, WsConnection>();
 const outputSubscriptions = new Map<string, boolean>();
+
+export function getTerminalConnectionQuality(sessionId: string) {
+  return pollConnectionQuality(wsConnections.get(sessionId)?.ws);
+}
 
 type LinkQuality = 'good' | 'degraded' | 'congested';
 
@@ -764,6 +771,7 @@ export function connectTerminalStream(
 
         // 服务端 pong 不需要透传给上层。
         if (msg.type === 'pong') {
+          receiveQualityPong(ws, msg.qualityProbeId, msg.handlerMs);
           if (newConn.pongTimer) { clearTimeout(newConn.pongTimer); newConn.pongTimer = null; }
           return;
         }

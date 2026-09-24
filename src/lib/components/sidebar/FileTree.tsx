@@ -1,3 +1,5 @@
+import { FileTreeLoadingSkeleton } from './FileTreeLoadingSkeleton';
+import { LoadingSpinner as RiLoader, LoadingStatus } from '../ui/Loading';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -9,7 +11,6 @@ import {
   FileCode as RiFileCode,
   Box as RiBox,
   Video as RiVideo,
-  Loader2 as RiLoader,
   Pin as RiPin,
   PinOff as RiPinOff,
   MoreHorizontal as RiMoreHorizontal,
@@ -1475,9 +1476,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
 
   if (loading || !sortModeReady) {
     return (
-      <div className="flex items-center justify-center py-8">
-        <RiLoader size={20} className="animate-spin text-muted-foreground" />
-      </div>
+      <FileTreeLoadingSkeleton />
     );
   }
 
@@ -1494,9 +1493,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
             <div className="mt-1 break-words text-[11px] text-muted-foreground/70">{searchError}</div>
           </div>
         ) : searchLoading && contentEntries.length === 0 ? (
-          <div className="flex items-center justify-center py-8">
-            <RiLoader size={20} className="animate-spin text-muted-foreground" />
-          </div>
+          <LoadingStatus label={t('fileTree.searching')} className="py-8" />
         ) : contentEntries.length === 0 ? (
           <div className="mx-1 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
             {t('fileTree.noContentMatches')}
@@ -1552,9 +1549,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       <div className="termdock-native-select min-h-full space-y-px bg-surface px-2 py-2">
         <SearchResultsHeader count={foundCount} loading={searchLoading} engine={searchMeta?.engine} limited={searchMeta?.limited} scope={activeSearchRoot} content={false} />
         {searchLoading && searchEntries.length === 0 ? (
-          <div className="flex items-center justify-center py-8">
-            <RiLoader size={20} className="animate-spin text-muted-foreground" />
-          </div>
+          <LoadingStatus label={t('fileTree.searching')} className="py-8" />
         ) : searchError ? (
           <div className="px-4 py-4 text-sm text-destructive">{searchError}</div>
         ) : searchEntries.length === 0 ? (

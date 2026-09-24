@@ -1,5 +1,6 @@
+import { LoadingSpinner as Loader2 } from '../../lib/components/ui/Loading';
 import { useEffect, useState } from 'react';
-import { ChevronRight, Loader2, Server } from 'lucide-react';
+import { ChevronRight, Server } from 'lucide-react';
 import { listRelayTargets, prepareRelayConnection, type ConnectionIntent, type RelayTarget, type RelayTargetDirectory } from '../../lib/federation/browserIntegration';
 import { DeviceAuthorizationRequired } from '../../lib/federation/deviceAuthorization';
 import type { ServiceConnection } from '../../lib/services/serviceDirectory';

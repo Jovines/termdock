@@ -1,3 +1,4 @@
+import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
 import { collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
@@ -13,7 +14,6 @@ import {
   Server as RiServerLine,
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
-  LoaderCircle as RiLoaderCircle,
   BellDot as RiBellDot,
   ChevronRight as RiChevronRightLine,
   Pin as RiPushpinLine,

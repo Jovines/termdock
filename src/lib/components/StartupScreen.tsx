@@ -2,7 +2,13 @@ import { useLayoutEffect, useRef } from 'react';
 
 // One document-owned surface survives HTML → Suspense → authorization → restore.
 // Components hold leases instead of remounting the image and animations.
-const holders = new Map<HTMLElement, string>();
+interface StartupPresentation {
+  status: string;
+  detail?: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}
+const holders = new Map<HTMLElement, StartupPresentation>();
 let revision = 0;
 let observer: MutationObserver | undefined;
 
@@ -18,13 +24,28 @@ function reconcileStartup() {
     if (visible) {
       surface.hidden = false;
       const label = surface.querySelector('[data-startup-status]');
-      if (label && label.textContent !== visible[1]) label.textContent = visible[1];
+      const presentation = visible[1];
+      if (label && label.textContent !== presentation.status) label.textContent = presentation.status;
+      const detail = surface.querySelector<HTMLElement>('[data-startup-detail]');
+      if (detail) {
+        detail.hidden = !presentation.detail;
+        detail.textContent = presentation.detail ?? '';
+      }
+      const action = surface.querySelector<HTMLButtonElement>('[data-startup-action]');
+      if (action) {
+        action.hidden = !presentation.actionLabel || !presentation.onAction;
+        action.textContent = presentation.actionLabel ?? '';
+        action.onclick = presentation.onAction ?? null;
+      }
       return;
     }
     // Paint the destination before releasing. A new lease cancels this exit,
     // including StrictMode cleanup and lazy boundaries changing in this frame.
     requestAnimationFrame(() => {
-      if (generation === revision) surface.hidden = true;
+      if (generation !== revision) return;
+      surface.hidden = true;
+      const action = surface.querySelector<HTMLButtonElement>('[data-startup-action]');
+      if (action) action.onclick = null;
     });
   });
 }
@@ -35,11 +56,11 @@ export function StartupHandoff() {
   return null;
 }
 
-export function StartupScreen({ status = 'Loading Termdock' }: { className?: string; status?: string }) {
+export function StartupScreen({ status = 'Loading Termdock', detail, actionLabel, onAction }: Partial<StartupPresentation> & { className?: string }) {
   const marker = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
     const element = marker.current!;
-    holders.set(element, status);
+    holders.set(element, { status, detail, actionLabel, onAction });
     if (!observer) {
       observer = new MutationObserver(reconcileStartup);
       const root = document.getElementById('root');
@@ -51,6 +72,6 @@ export function StartupScreen({ status = 'Loading Termdock' }: { className?: str
       if (!holders.size) { observer?.disconnect(); observer = undefined; }
       reconcileStartup();
     };
-  }, [status]);
+  }, [status, detail, actionLabel, onAction]);
   return <span ref={marker} data-startup-pending="" style={{ position: 'absolute', width: 0, height: 0, pointerEvents: 'none' }} />;
 }

@@ -679,6 +679,19 @@ input:autofill {
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
+/* Preserve skeleton geometry and pulse only placeholders, never status text. */
+.td-loading-skeleton [aria-hidden='true'] {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin,
+  .animate-pulse,
+  .td-loading-skeleton [aria-hidden='true'] {
+    animation: none;
+  }
+}
+
 /* Prevent iOS Home Indicator from appearing */
 html {
   overscroll-behavior: none;

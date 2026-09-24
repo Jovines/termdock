@@ -1,4 +1,5 @@
 import React from 'react';
+import { LoadingStatus } from '../ui/Loading';
 import { useI18n } from '../../i18n';
 
 interface ConnectionStatusProps {
@@ -36,9 +37,8 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
     if (!showRecovery) return null;
     return (
       <div className="absolute inset-x-0 bottom-0 flex items-end justify-center pb-2 pointer-events-none">
-        <span className="text-[11px] text-muted-foreground/60 animate-pulse tracking-wide">
-          {t('connection.reconnecting')}
-        </span>
+        <LoadingStatus dots label={t('connection.reconnecting')}
+          className="rounded-full bg-surface-2 px-3 py-1 text-[11px]" />
       </div>
     );
   }

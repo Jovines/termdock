@@ -1,3 +1,4 @@
+import { LoadingStatus } from '../ui/Loading';
 /**
  * QuotaView — modal panel showing all AI subscription plan quotas.
  */
@@ -203,9 +204,7 @@ export function QuotaView({ isOpen, onClose }: QuotaViewProps): React.ReactEleme
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
           {loading && activeProviders.length === 0 ? (
-            <div className="flex items-center justify-center py-12">
-              <RiRefreshLine size={24} className="animate-spin text-muted-foreground" />
-            </div>
+            <LoadingStatus label={t('common.loading')} className="py-12" />
           ) : activeProviders.length === 0 ? (
             <div className="py-8 text-center text-[13px] text-muted-foreground">
               <p>{t('quota.noProviders')}</p>

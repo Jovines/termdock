@@ -425,6 +425,10 @@ export function secureSocket(url: string): WebSocket {
   void getActiveClient().then(client => {
     if (pending.readyState === 3) return;
     target = client.openSocket(parsed.pathname + parsed.search);
+    pending.getConnectionDiagnostics = () => {
+      const details = target?.getConnectionDiagnostics?.();
+      return details ? { ...details, socketOpenMs: pending.openedAfterMs } : undefined;
+    };
     target.onopen = () => pending.accept({ type: 'ws-ready', id: '' });
     target.onmessage = event => pending.accept({ type: 'ws-data', id: '', data: event.data });
     target.onclose = event => pending.accept({ type: 'ws-close', id: '', code: event.code, reason: event.reason });

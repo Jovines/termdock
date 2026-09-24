@@ -1,5 +1,6 @@
+import { LoadingSpinner as LoaderCircle } from './ui/Loading';
 import React from 'react';
-import { BellDot, Check, LoaderCircle, Server, Settings2 } from 'lucide-react';
+import { BellDot, Check, Server, Settings2 } from 'lucide-react';
 import type {
   DesktopServiceActivityBridge,
   DesktopServiceActivity,

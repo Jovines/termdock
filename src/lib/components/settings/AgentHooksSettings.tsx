@@ -1,3 +1,4 @@
+import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
 /**
  * Agent hooks 安装管理：为每个支持的 agent 安装/卸载状态上报 hooks。
  * hooks 让 agent 主动上报回合状态（working / waiting / done），
@@ -8,7 +9,6 @@
 
 import React from 'react';
 import {
-  LoaderCircle as RiLoaderCircle,
   CircleCheck as RiCircleCheck,
   TriangleAlert as RiAlertLine,
   Download as RiDownloadLine,

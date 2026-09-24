@@ -107,6 +107,35 @@ export function pinBundledRuntimeClientDist(
   }
 }
 
+/** Old open pages still import their content-hashed lazy chunks after a restart.
+ * Only expose public JS/CSS build assets from complete, locally pinned snapshots;
+ * never serve an old entry page, service worker, or arbitrary filesystem path.
+ */
+export function indexRetainedClientModules(homeDir = os.homedir()): Map<string, string> {
+  const modules = new Map<string, string>();
+  const root = path.join(homeDir, '.termdock', 'client-snapshots');
+  try {
+    for (const snapshot of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!snapshot.isDirectory() || !/^[a-f0-9]{24}$/.test(snapshot.name)) continue;
+      const snapshotRoot = path.join(root, snapshot.name);
+      const manifest = readManifest(path.join(snapshotRoot, 'snapshot-manifest.json'));
+      const clientDist = path.join(snapshotRoot, 'dist', 'client');
+      if (typeof manifest?.serverBundleHash !== 'string'
+        || typeof manifest.clientBundleHash !== 'string'
+        || !isCompleteSnapshot(clientDist, manifest.serverBundleHash, manifest.clientBundleHash)) continue;
+      try {
+        const assets = path.join(clientDist, 'assets');
+        for (const file of fs.readdirSync(assets, { withFileTypes: true })) {
+          if (!file.isFile() || !/^[\w.-]+-[\w-]{8,}\.(?:js|css)$/.test(file.name)) continue;
+          const url = `/assets/${file.name}`;
+          if (!modules.has(url)) modules.set(url, path.join(assets, file.name));
+        }
+      } catch { /* An incomplete or removed snapshot must not prevent startup. */ }
+    }
+  } catch { /* No retained snapshots on first install. */ }
+  return modules;
+}
+
 export function resolveRuntimeClientDist(
   defaultClientDist: string,
   homeDir = os.homedir(),

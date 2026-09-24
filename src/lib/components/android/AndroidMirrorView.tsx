@@ -1,10 +1,11 @@
+import { LoadingSpinner as Loader2 } from '../ui/Loading';
 import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowLeft, Bell, Camera, Check, ChevronDown, Circle, Columns2, GripVertical, Home, Keyboard, Layers, Loader2, Maximize,
+  ArrowLeft, Bell, Camera, Check, ChevronDown, Circle, Columns2, GripVertical, Home, Keyboard, Layers, Maximize,
   Minimize, Minus, MonitorSmartphone, MoreHorizontal, PanelRightClose, PanelRightOpen, Plug, Plus, Power, RefreshCw, RotateCw, Send, Smartphone, Square, Unplug, Video, Volume1, Volume2, X,
 } from 'lucide-react';
 import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';

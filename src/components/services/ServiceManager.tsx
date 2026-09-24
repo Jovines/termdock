@@ -1,5 +1,6 @@
+import { LoadingSpinner as Loader2 } from '../../lib/components/ui/Loading';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { ArrowLeft, Check, ChevronRight, Loader2, MoreHorizontal, Plus, Server, Smartphone } from 'lucide-react';
+import { ArrowLeft, Check, ChevronRight, MoreHorizontal, Plus, Server, Smartphone } from 'lucide-react';
 import { listServiceConnections, normalizeServiceAddress, observeServiceConnections, removeServiceConnection, sameService, saveServiceConnection, type ServiceConnection } from '../../lib/services/serviceDirectory';
 import './ServiceManager.css';
 

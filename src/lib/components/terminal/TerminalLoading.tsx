@@ -1,30 +1,21 @@
-import React from 'react';
 import { useI18n } from '../../i18n';
+import { LoadingStatus } from '../ui/Loading';
 
 interface TerminalLoadingProps {
   message?: string;
 }
 
-export const TerminalLoading: React.FC<TerminalLoadingProps> = ({ message }) => {
+export function TerminalLoading({ message }: TerminalLoadingProps) {
   const { t } = useI18n();
   return (
-    <div className="absolute inset-0 flex items-center justify-center">
-      <div className="rounded-full bg-surface-2 px-4 py-2 flex items-center gap-3 shadow-sm">
-        <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-        <span className="text-sm text-muted-foreground">{message ?? t('terminal.loading')}</span>
-      </div>
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4">
+      <LoadingStatus dots label={message ?? t('terminal.loading')}
+        className="max-w-full rounded-full bg-surface-2 px-4 py-2 text-center shadow-sm" />
     </div>
   );
-};
+}
 
-export const TerminalInitializing: React.FC = () => {
+export function TerminalInitializing() {
   const { t } = useI18n();
-  return (
-    <div className="absolute inset-0 flex items-center justify-center">
-      <div className="rounded-full bg-surface-2 px-4 py-2 flex items-center gap-3 shadow-sm">
-        <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-        <span className="text-sm text-muted-foreground">{t('terminal.initializing')}</span>
-      </div>
-    </div>
-  );
-};
+  return <TerminalLoading message={t('terminal.initializing')} />;
+}

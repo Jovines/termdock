@@ -1,4 +1,5 @@
-import { LoaderCircle, Terminal } from 'lucide-react';
+import { LoadingSpinner as LoaderCircle } from '../components/ui/Loading';
+import { Terminal } from 'lucide-react';
 import { listServiceConnections, saveServiceConnection, normalizeServiceAddress, type ServiceConnection } from '../services/serviceDirectory';
 import { readDeviceProfile } from './readDeviceProfile';
 import { currentConnectionPath, currentEntryClient } from './browserIntegration';
@@ -52,7 +53,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [showConnectionDetails, setShowConnectionDetails] = useState(false);
   useEffect(() => {
     if (!checking || error) return;
-    const timer = window.setTimeout(() => setShowConnectionDetails(true), 1200);
+    const timer = window.setTimeout(() => setShowConnectionDetails(true), 8000);
     return () => window.clearTimeout(timer);
   }, [checking, error]);
   useEffect(() => {
@@ -309,7 +310,12 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     return { url: createInviteLink({ v: 1, serviceId: client.targetPeerId, code: result.code, entryUrl: backup?.url || targetUrl, serviceUrl: targetUrl, name: serviceName, entryServiceId: backup?.targetPeerId, routeCode: backup?.routeCode }), expiresAt: result.expiresAt };
   };
   return <>
-    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking && !error && !showConnectionDetails && !open ? <StartupScreen /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
+    {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking && !error && !open ? <StartupScreen
+      status={showConnectionDetails ? '连接时间较长，仍在等待服务…' : connectionMessage}
+      detail={showConnectionDetails ? serviceName : undefined}
+      actionLabel={showConnectionDetails ? '管理服务' : undefined}
+      onAction={() => setOpen(true)}
+    /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
       <div className="flex w-full max-w-xs flex-col items-center text-center">
         <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-2 text-muted-foreground" aria-hidden="true">
           <Terminal size={24} strokeWidth={1.5} />
