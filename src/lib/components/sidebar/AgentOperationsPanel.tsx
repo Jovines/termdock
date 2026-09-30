@@ -146,23 +146,6 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
     const top = (viewport?.offsetTop ?? 0) + 12;
     return { x: Math.max(left, Math.min(x, left + (viewport?.width ?? window.innerWidth) - (box?.width ?? 440) - 24)), y: Math.max(top, Math.min(y, top + (viewport?.height ?? window.innerHeight) - (box?.height ?? 340) - 24)) };
   }, []);
-  useLayoutEffect(() => {
-    if (!floating || docked) return;
-    const resize = () => {
-      const viewport = window.visualViewport;
-      setViewportHeight(viewport?.height ?? window.innerHeight);
-      const box = panelRef.current?.getBoundingClientRect();
-      if (!box?.width || !box.height || resizingFloating.current) return;
-      setPosition(clampPosition((viewport?.offsetLeft ?? 0) + 12 + Math.max(0, (viewport?.width ?? window.innerWidth) - box.width - 24) * relativePosition.current.x,
-        (viewport?.offsetTop ?? 0) + 12 + Math.max(0, (viewport?.height ?? window.innerHeight) - box.height - 24) * relativePosition.current.y));
-    };
-    const observer = new ResizeObserver(resize);
-    if (panelRef.current) observer.observe(panelRef.current);
-    window.addEventListener('resize', resize);
-    window.visualViewport?.addEventListener('resize', resize);
-    resize();
-    return () => { observer.disconnect(); window.removeEventListener('resize', resize); window.visualViewport?.removeEventListener('resize', resize); };
-  }, [floating, docked, clampPosition, panelState, panelSize]);
   const [tab, setTab] = useState<Tab>(initialCollaborationGroupId ? 'collaboration' : 'automation');
   const [automations, setAutomations] = useState<AgentAutomation[]>([]);
   const [automationRuns, setAutomationRuns] = useState<AutomationRun[]>([]);
@@ -185,7 +168,31 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
 
   const selectedGroup = selectedGroupId ? groups.find(group => group.id === selectedGroupId) ?? null : groups[0] ?? null;
   const unavailableGroup = !!initialCollaborationGroupId && sessionsState === 'loaded' && !directCollaborationGroup;
-  const floatingVisible = !!activeSessionId && (!!selectedGroup?.sessionIds.includes(activeSessionId) || !!initialCollaborationGroupId && (!directCollaborationGroup || !!preferenceError));
+  // An unresolved group is not an unavailable group. Restored resident panels
+  // must wait for membership and saved layout before appearing over a terminal.
+  const panelPreferencesReady = !!panelState || !!preferenceError;
+  const waitingForDockHost = !overlayOnly && panelMode === 'docked' && !!directCollaborationGroup
+    && !!(dock ?? panelState?.dock) && !dockHost;
+  const floatingVisible = panelPreferencesReady && !waitingForDockHost && !!activeSessionId
+    && (!!selectedGroup?.sessionIds.includes(activeSessionId)
+      || !!initialCollaborationGroupId && (sessionsState !== 'loading' && !directCollaborationGroup || !!preferenceError));
+  useLayoutEffect(() => {
+    if (!floating || docked || !floatingVisible) return;
+    const resize = () => {
+      const viewport = window.visualViewport;
+      setViewportHeight(viewport?.height ?? window.innerHeight);
+      const box = panelRef.current?.getBoundingClientRect();
+      if (!box?.width || !box.height || resizingFloating.current) return;
+      setPosition(clampPosition((viewport?.offsetLeft ?? 0) + 12 + Math.max(0, (viewport?.width ?? window.innerWidth) - box.width - 24) * relativePosition.current.x,
+        (viewport?.offsetTop ?? 0) + 12 + Math.max(0, (viewport?.height ?? window.innerHeight) - box.height - 24) * relativePosition.current.y));
+    };
+    const observer = new ResizeObserver(resize);
+    if (panelRef.current) observer.observe(panelRef.current);
+    window.addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('resize', resize);
+    resize();
+    return () => { observer.disconnect(); window.removeEventListener('resize', resize); window.visualViewport?.removeEventListener('resize', resize); };
+  }, [floating, docked, floatingVisible, clampPosition, panelState, panelSize]);
   // Restore docks only for resident panels, never while loading a full panel.
   // A saved dock can outlive its group. Release the split without discarding
   // drafts or saved preferences: a temporary missing replica may return.
