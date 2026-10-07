@@ -33,6 +33,7 @@ import {
   Clock as RiClockLine,
   CircleHelp as RiCircleHelp,
   BellDot as RiBellDot,
+  Play as RiPlayLine,
   FolderOpen as RiFolderOpenLine,
   Cable as RiLinkLine,
   Type as RiFontSize,
@@ -2839,6 +2840,14 @@ function App() {
   useEffect(() => {
     if (!sidebarCloseChoiceSession) return;
     const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setSidebarCloseChoiceSessionId(null);
+        setSidebarCloseAnchor(null);
+        setTmuxKillError(null);
+        return;
+      }
       if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
       event.preventDefault();
@@ -3150,7 +3159,13 @@ function App() {
             } ${
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
             } ${topBarAgentBg}`}
-            style={{ marginRight: pinnedRightSidebarInset || undefined, display: desktopSplitWorkspace ? 'none' : undefined }}
+            style={{
+              // Older desktop shells inject position: relative for this bar.
+              // Keep it floating: each terminal slide already reserves its height.
+              position: isDesktopViewport ? 'absolute' : undefined,
+              marginRight: pinnedRightSidebarInset || undefined,
+              display: desktopSplitWorkspace ? 'none' : undefined,
+            }}
           >
             {!showPinnedLeft && <button
               type="button"
@@ -3672,6 +3687,39 @@ function App() {
                     <Switch checked={preventSleep} size="sm" />
                   </button>
                 </div>
+              </div>
+
+              <div className="mt-3 space-y-2">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={runningSessionButtonEnabled}
+                  aria-label={t('sidebar.runningSessionButton')}
+                  onClick={() => void handleRunningSessionButtonEnabledChange(!runningSessionButtonEnabled)}
+                  className="flex w-full items-center gap-2 rounded-xl bg-surface-2 px-3 py-2.5 text-left text-[13px] transition hover:bg-surface-elevated"
+                >
+                  <RiPlayLine size={14} className={runningSessionButtonEnabled ? 'shrink-0 text-[color:var(--success)]' : 'shrink-0 text-muted-foreground'} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium text-foreground">{t('sidebar.runningSessionButton')}</span>
+                    <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">{t('sidebar.runningSessionButtonHint')}</span>
+                  </span>
+                  <Switch checked={runningSessionButtonEnabled} size="sm" />
+                </button>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={attentionButtonEnabled}
+                  aria-label={t('sidebar.attentionButton')}
+                  onClick={() => void handleAttentionButtonEnabledChange(!attentionButtonEnabled)}
+                  className="flex w-full items-center gap-2 rounded-xl bg-surface-2 px-3 py-2.5 text-left text-[13px] transition hover:bg-surface-elevated"
+                >
+                  <RiBellDot size={14} className={attentionButtonEnabled ? 'shrink-0 text-[color:var(--warning)]' : 'shrink-0 text-muted-foreground'} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium text-foreground">{t('sidebar.attentionButton')}</span>
+                    <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">{t('sidebar.attentionButtonHint')}</span>
+                  </span>
+                  <Switch checked={attentionButtonEnabled} size="sm" />
+                </button>
               </div>
 
               {/* Notifications */}
@@ -5224,10 +5272,6 @@ function App() {
         serverHealthState={serverHealthState}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
-        runningSessionButtonEnabled={runningSessionButtonEnabled}
-        onRunningSessionButtonEnabledChange={handleRunningSessionButtonEnabledChange}
-        attentionButtonEnabled={attentionButtonEnabled}
-        onAttentionButtonEnabledChange={handleAttentionButtonEnabledChange}
         onTogglePinned={isDesktopViewport ? handleToggleLeftPinned : undefined}
       />)}
       {!showPinnedRight && <RightSidebar
@@ -5372,10 +5416,6 @@ function App() {
             serverHealthState={serverHealthState}
             tmuxAvailable={tmuxStatus.available}
             defaultSessionMode={newSessionMode}
-            runningSessionButtonEnabled={runningSessionButtonEnabled}
-            onRunningSessionButtonEnabledChange={handleRunningSessionButtonEnabledChange}
-            attentionButtonEnabled={attentionButtonEnabled}
-            onAttentionButtonEnabledChange={handleAttentionButtonEnabledChange}
             pinned={true}
             onTogglePinned={handleToggleLeftPinned}
           />

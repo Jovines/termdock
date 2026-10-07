@@ -24,6 +24,8 @@ type ExpandedItem =
   | { id: 'home'; kind: 'key'; keyName: 'home' }
   | { id: 'end'; kind: 'key'; keyName: 'end' }
   | { id: 'ctrl-d'; kind: 'key'; keyName: 'ctrl-d' }
+  | { id: 'esc'; kind: 'key'; keyName: 'esc' }
+  | { id: 'ctrl-c'; kind: 'key'; keyName: 'ctrl-c' }
   | { id: string; kind: 'text'; action: MobileToolbarAction };
 
 const BASE_KEY_SEQUENCES: Record<MobileKey, string> = {
@@ -508,7 +510,13 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     }
 
     if (isDesktopActions) {
-      return defaultItems;
+      return defaultItems.concat([
+        { id: 'esc', kind: 'key', keyName: 'esc' as const },
+        { id: 'ctrl-c', kind: 'key', keyName: 'ctrl-c' as const },
+        { id: 'ctrl-d', kind: 'key', keyName: 'ctrl-d' as const },
+        { id: 'home', kind: 'key', keyName: 'home' as const },
+        { id: 'end', kind: 'key', keyName: 'end' as const },
+      ]);
     }
 
     return defaultItems.concat([
@@ -517,7 +525,10 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       { id: 'ctrl-d', kind: 'key', keyName: 'ctrl-d' as const },
     ]);
   }, [extraActions, hasPresetActions, includeAlt, isDesktopActions]);
-  const expandedRows = React.useMemo(() => splitButtonsIntoRows(expandedItems, presetRowLayout), [expandedItems, presetRowLayout]);
+  const expandedRows = React.useMemo(
+    () => splitButtonsIntoRows(expandedItems, isDesktopActions && !hasPresetActions ? [6] : presetRowLayout),
+    [expandedItems, hasPresetActions, isDesktopActions, presetRowLayout],
+  );
   const expandedContainerClassName = `${isDesktopActions ? 'space-y-1' : 'mt-1 space-y-1'}${
     suppressExpandedInput ? ' pointer-events-none' : ''
   }`;
@@ -862,7 +873,11 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                     disabled={buttonDisabled}
                     className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
                   >
-                    {item.keyName === 'ctrl-d'
+                    {item.keyName === 'esc'
+                      ? 'Esc'
+                      : item.keyName === 'ctrl-c'
+                        ? 'Ctrl-C'
+                        : item.keyName === 'ctrl-d'
                       ? 'Ctrl-D'
                       : item.keyName === 'home'
                           ? 'Home'

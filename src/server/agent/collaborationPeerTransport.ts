@@ -208,7 +208,20 @@ export class CollaborationPeerTransport {
     }
     this.notify();
   }
-  registeredNodes(): CollaborationNode[] { return [...new Map(this.bindings.map(binding => [binding.peer.serviceId, binding.peer])).values()]; }
+  registeredNodes(): CollaborationNode[] { return [...new Map(this.bindings.filter(binding => this.live(binding)).map(binding => [binding.peer.serviceId, binding.peer])).values()]; }
+  forgetUnusedPeer(serviceId: string): void {
+    if (this.bindings.some(binding => binding.peer.serviceId === serviceId && this.live(binding))) throw new Error('该服务仍被协作组使用，请先移出对应成员');
+    const next = this.bindings.filter(binding => binding.peer.serviceId !== serviceId);
+    if (next.length === this.bindings.length) return;
+    mkdirSync(dirname(this.options.file), { recursive: true, mode: 0o700 });
+    const temporary = `${this.options.file}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ version: 1, bindings: next }), { mode: 0o600 });
+    renameSync(temporary, this.options.file); this.bindings = next;
+    for (const [key, client] of this.clients) if (key.endsWith(`:${serviceId}`)) {
+      this.clients.delete(key); this.nextAttempt.delete(key);
+      void client.then(rpc => rpc.close()).catch(() => {});
+    }
+  }
   canRoute(subjectId: string, targetId: string): boolean {
     return this.bindings.some(b => b.peer.serviceId === subjectId && this.live(b)
       && this.bindings.some(target => target.groupId === b.groupId && target.peer.serviceId === targetId && this.live(target)));

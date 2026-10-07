@@ -86,6 +86,8 @@ export interface SettingsDoc {
   serviceSwitcherExpanded: boolean;
   /** Explorer folders whose direct children are sorted by modification time. */
   fileSortModes: Record<string, 'modified'>;
+  /** Explorer roots whose trees hide files ignored by Git. */
+  hideGitIgnoredRoots: Record<string, true>;
   /**
    * Workspace roots the user marked as holding nested sub-repos. Absent means
    * single-repo, which skips the (expensive) nested discovery walk entirely.
@@ -332,6 +334,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     collaborationFloatingGroupId: typeof raw.collaborationFloatingGroupId === 'string' && raw.collaborationFloatingGroupId.trim() ? raw.collaborationFloatingGroupId.trim() : null,
     serviceSwitcherExpanded: raw.serviceSwitcherExpanded === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
+    hideGitIgnoredRoots: normalizeNestedGitScanRoots(raw.hideGitIgnoredRoots),
     nestedGitScanRoots: normalizeNestedGitScanRoots(raw.nestedGitScanRoots),
     pinnedExplorerRoots: normalizePinnedExplorerRoots(raw.pinnedExplorerRoots),
     activeGitRepos: normalizeActiveGitRepos(raw.activeGitRepos),
@@ -729,6 +732,19 @@ export function setFileSortModeSetting(filePath: string, mode: 'name' | 'modifie
     if (mode === 'modified') next[filePath] = mode;
     else delete next[filePath];
     settings.fileSortModes = normalizeFileSortModes(next);
+  });
+}
+
+export function getHideGitIgnoredRootsSetting(): Record<string, true> {
+  return { ...loadSettings().hideGitIgnoredRoots };
+}
+
+export function setHideGitIgnoredRootSetting(rootPath: string, enabled: boolean): SettingsDoc {
+  return updateSettings((settings) => {
+    const next = { ...settings.hideGitIgnoredRoots };
+    if (enabled) next[rootPath] = true;
+    else delete next[rootPath];
+    settings.hideGitIgnoredRoots = normalizeNestedGitScanRoots(next);
   });
 }
 

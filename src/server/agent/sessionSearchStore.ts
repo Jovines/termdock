@@ -71,7 +71,8 @@ export class SessionSearchStore {
   search(query: string, limit = 30): SessionSearchResult[] {
     this.flush();
     const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return [];
+    if (!needle) return [...this.metadata.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, Math.max(1, Math.min(limit, 100))).map(metadata => ({ ...metadata, snippet: '', matchCount: 0 }));
     const results: SessionSearchResult[] = [];
     for (const metadata of this.metadata.values()) {
       const text = this.readLog(metadata.sessionId);

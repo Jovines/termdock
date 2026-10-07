@@ -12,7 +12,8 @@ type Offer = { hash: string; expiresAt: number; acceptedBy?: string };
 /** A peer registered from a device's session-scoped write invitation. It may
  * only ever reference the local sessions that device is still authorized for. */
 type ScopedPeer = { device: string };
-type Document = { version: 1; origin?: string; peers: CollaborationNode[]; offers: Offer[]; replicas?: Record<string, string[]>; departed?: Record<string, number>; scoped?: Record<string, ScopedPeer> };
+type RemovedPeer = CollaborationNode & { scope?: ScopedPeer };
+type Document = { version: 1; origin?: string; peers: CollaborationNode[]; offers: Offer[]; replicas?: Record<string, string[]>; departed?: Record<string, number>; scoped?: Record<string, ScopedPeer>; removedPeers?: RemovedPeer[] };
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const address = (id: string) => { if (!id.startsWith('remote:')) return null; const parts = id.slice(7).split(':'); if (parts.length !== 2) throw new Error('INVALID_SESSION'); return { origin: decodeURIComponent(parts[0]), id: decodeURIComponent(parts[1]) }; };
 const local = (origin: string, id: string) => { const a = address(id); return a?.origin === origin ? a.id : id; };
@@ -43,6 +44,13 @@ export class CollaborationService {
     try { const data = JSON.parse(readFileSync(options.file, 'utf8')) as Document;
       if (data.version !== 1 || !Array.isArray(data.peers) || data.peers.length > 64 || !Array.isArray(data.offers)) throw new Error('INVALID_DIRECTORY');
       for (const peer of data.peers) validateCollaborationNode(peer);
+      if (data.removedPeers !== undefined) {
+        if (!Array.isArray(data.removedPeers) || data.removedPeers.length > 768) throw new Error('INVALID_DIRECTORY');
+        for (const peer of data.removedPeers) {
+          validateCollaborationNode(peer);
+          if (peer.scope && !/^12D3KooW[a-zA-Z0-9]{30,60}$/.test(peer.scope.device)) throw new Error('INVALID_DIRECTORY');
+        }
+      }
       if (data.scoped !== undefined) {
         if (!data.scoped || typeof data.scoped !== 'object' || Array.isArray(data.scoped)) throw new Error('INVALID_DIRECTORY');
         for (const [serviceId, scope] of Object.entries(data.scoped)) {
@@ -58,11 +66,13 @@ export class CollaborationService {
     writeFileSync(temp, JSON.stringify(this.document), { mode: 0o600 }); renameSync(temp, this.options.file); }
   private node(origin = this.document.origin): CollaborationNode { if (!origin) throw new Error('COLLABORATION_ORIGIN_REQUIRED'); const node = { ...this.options.node(), origin }; validateCollaborationNode(node); return node; }
   private setOrigin(origin: string) { this.node(origin); if (this.document.origin && this.document.origin !== origin) throw new Error('COLLABORATION_ORIGIN_MISMATCH'); this.document.origin = origin; }
-  private remember(node: CollaborationNode) { validateCollaborationNode(node);
+  private remember(node: CollaborationNode, explicitPair = false) { validateCollaborationNode(node);
     if (node.serviceId === this.options.node().serviceId || node.origin === this.document.origin) throw new Error('CANNOT_PAIR_SELF');
+    if (this.document.removedPeers?.some(peer => peer.serviceId === node.serviceId) && !explicitPair) throw new Error('COLLABORATION_PEER_REMOVED');
     const old = this.document.peers.find(peer => peer.serviceId === node.serviceId || peer.origin === node.origin);
     if (old && (old.serviceId !== node.serviceId || old.origin !== node.origin || old.caFingerprint256 !== node.caFingerprint256)) throw new Error('PEER_IDENTITY_CHANGED');
     if (!old) { if (this.document.peers.length >= 63) throw new Error('PEER_LIMIT'); this.document.peers.push(node); }
+    if (explicitPair) this.document.removedPeers = this.document.removedPeers?.filter(peer => peer.serviceId !== node.serviceId);
     this.persist();
   }
   descriptor() { return { ...this.options.node(), ...(this.document.origin ? { origin: this.document.origin } : {}) }; }
@@ -81,10 +91,49 @@ export class CollaborationService {
       const old = this.document.peers.find(peer => peer.serviceId === node.serviceId || peer.origin === node.origin);
       if (old && (old.serviceId !== node.serviceId || old.origin !== node.origin || old.caFingerprint256 !== node.caFingerprint256)) throw new Error('PEER_IDENTITY_CHANGED');
     }
-    if (new Set([...this.document.peers.map(peer => peer.serviceId), ...nodes.filter(node => node.serviceId !== self.serviceId).map(node => node.serviceId)]).size > 63) throw new Error('PEER_LIMIT');
+    const removed = new Set(this.document.removedPeers?.map(peer => peer.serviceId));
+    const eligible = nodes.filter(node => node.serviceId !== self.serviceId && !removed.has(node.serviceId));
+    if (new Set([...this.document.peers.map(peer => peer.serviceId), ...eligible.map(node => node.serviceId)]).size > 63) throw new Error('PEER_LIMIT');
     this.setOrigin(origin);
-    this.document.peers = [...new Map([...this.document.peers, ...nodes.filter(node => node.serviceId !== self.serviceId)].map(node => [node.serviceId, node])).values()];
+    this.document.peers = [...new Map([...this.document.peers, ...eligible].map(node => [node.serviceId, node])).values()];
     this.persist(); void this.refresh(); return { ok: true, registered: this.document.peers.map(peer => peer.serviceId) };
+  }
+  private groupsUsing(peer: CollaborationNode) {
+    return this.options.store.list().filter(group => group.sessionIds.some(id => address(id)?.origin === peer.origin)
+      || group.federated && this.document.replicas?.[group.id]?.includes(peer.origin)).map(group => ({ id: group.id, name: group.name }));
+  }
+  /** Explicit removal is durable: other open clients may still enroll their
+   * stale saved catalogs, but only a deliberate restore or pairing re-adds it. */
+  removePeer(serviceId: string) {
+    const peer = this.document.peers.find(item => item.serviceId === serviceId);
+    if (!peer) throw new CollaborationError('PEER_NOT_FOUND', '该协作服务已移除，请刷新列表', 404);
+    const groups = this.groupsUsing(peer);
+    if (groups.length) throw new CollaborationError('PEER_IN_USE', `该服务仍用于协作组「${groups.map(group => group.name).join('」「')}」，请先移出对应成员或删除协作组`, 409, { groups });
+    this.options.transport.forgetUnusedPeer(serviceId);
+    const previous = this.document;
+    const scope = previous.scoped?.[serviceId];
+    this.document = { ...previous, peers: previous.peers.filter(item => item.serviceId !== serviceId),
+      scoped: Object.fromEntries(Object.entries(previous.scoped ?? {}).filter(([id]) => id !== serviceId)),
+      removedPeers: [...(previous.removedPeers ?? []).filter(item => item.serviceId !== serviceId), { ...peer, ...(scope ? { scope } : {}) }].slice(-768) };
+    try { this.persist(); } catch (error) { this.document = previous; throw error; }
+    const client = this.clients.get(serviceId);
+    this.clients.delete(serviceId); this.observations.delete(serviceId);
+    if (client) void client.then(rpc => rpc.close()).catch(() => {});
+    return { ok: true, origin: peer.origin };
+  }
+  restorePeer(serviceId: string) {
+    const removed = this.document.removedPeers?.find(item => item.serviceId === serviceId);
+    if (!removed) throw new CollaborationError('PEER_NOT_FOUND', '找不到这条已移除的协作连接', 404);
+    const { scope, ...node } = removed;
+    validateCollaborationNode(node);
+    if (this.document.peers.some(peer => peer.serviceId === node.serviceId || peer.origin === node.origin)) throw new CollaborationError('PEER_IDENTITY_CHANGED', '该地址已属于另一条服务连接，请重新配对', 409);
+    if (this.document.peers.length >= 63) throw new CollaborationError('PEER_LIMIT', '协作服务数量已达上限', 400);
+    const previous = this.document;
+    this.document = { ...previous, peers: [...previous.peers, node], removedPeers: previous.removedPeers?.filter(item => item.serviceId !== serviceId),
+      scoped: { ...previous.scoped, ...(scope ? { [serviceId]: scope } : {}) } };
+    try { this.persist(); } catch (error) { this.document = previous; throw error; }
+    void this.refresh();
+    return { ok: true, origin: node.origin };
   }
   /** Effective local sessions a peer may touch. `undefined` means a fully
    * authorized directory peer; an array (possibly empty) means a peer that
@@ -123,7 +172,7 @@ export class CollaborationService {
     validateCollaborationNode(invitation.node); this.setOrigin(origin);
     const rpc = await (this.options.pairConnect ?? this.options.connect)(invitation.node);
     try { await rpc.request({ type: 'collaboration-service', action: 'pair', code: invitation.code, node: this.node() });
-      this.remember(invitation.node); void this.refresh(); return { ok: true, peer: invitation.node }; }
+      this.remember(invitation.node, true); void this.refresh(); return { ok: true, peer: invitation.node }; }
     finally { rpc.close(); }
   }
   receive(subject: string, packet: Packet): Record<string, unknown> {
@@ -134,7 +183,7 @@ export class CollaborationService {
       const node = packet.node as CollaborationNode; validateCollaborationNode(node);
       if (!offer || node.serviceId !== subject || offer.acceptedBy && offer.acceptedBy !== subject) throw new Error('PAIRING_EXPIRED_OR_INVALID');
       if (offer.acceptedBy && !this.document.peers.some(peer => peer.serviceId === subject)) throw new Error('PAIRING_REVOKED');
-      offer.acceptedBy = subject; this.remember(node); void this.refresh(); return { ok: true };
+      offer.acceptedBy = subject; this.remember(node, true); void this.refresh(); return { ok: true };
     }
     const peer = this.document.peers.find(node => node.serviceId === subject);
     if (!peer) throw new Error('COLLABORATION_PAIRING_REQUIRED');
@@ -209,6 +258,7 @@ export class CollaborationService {
   refresh(): Promise<void> { if (this.stopped || !this.document.origin) return Promise.resolve();
     return this.inFlight ??= Promise.all(this.document.peers.map(async peer => {
       try { const client = await this.client(peer); const data = await client.request({ type: 'collaboration-service', action: 'directory' });
+        if (!this.document.peers.some(item => item.serviceId === peer.serviceId)) return;
         if (!Array.isArray(data.sessions) || data.sessions.length > 5000 || !Array.isArray(data.groups)) throw new Error('INVALID_DIRECTORY');
         const sessions = data.sessions.filter((s: Session) => s && typeof s.sessionId === 'string' && !s.sessionId.startsWith('remote:')) as Session[];
         this.observations.set(peer.serviceId, { sessions, checkedAt: Date.now() });
@@ -223,18 +273,19 @@ export class CollaborationService {
           this.merge(canonical, nodes);
           await client.request({ type: 'collaboration-service', action: 'group', group: canonical, nodes });
         }
-      } catch (error) { this.observations.set(peer.serviceId, { sessions: this.observations.get(peer.serviceId)?.sessions ?? [], checkedAt: Date.now(), error: error instanceof Error ? error.message.slice(0, 240) : 'PEER_UNAVAILABLE' }); }
+      } catch (error) { if (this.document.peers.some(item => item.serviceId === peer.serviceId)) this.observations.set(peer.serviceId, { sessions: this.observations.get(peer.serviceId)?.sessions ?? [], checkedAt: Date.now(), error: error instanceof Error ? error.message.slice(0, 240) : 'PEER_UNAVAILABLE' }); }
     })).then(() => {}).finally(() => { this.inFlight = undefined; });
   }
   directory() {
     const known = new Set(this.document.peers.map(peer => peer.origin));
     const missing = [...new Set(this.options.store.list().flatMap(group => group.sessionIds.map(id => address(id)?.origin).filter((origin): origin is string => !!origin && !known.has(origin))))];
     const services = this.document.peers.map(peer => { const observed = this.observations.get(peer.serviceId); return { origin: peer.origin, serviceId: peer.serviceId, label: peer.origin,
-      connected: !!observed && !observed.error && Date.now() - observed.checkedAt < 15_000, error: observed?.error ?? (!observed ? 'CONNECTING' : undefined) }; });
+      groups: this.groupsUsing(peer), connected: !!observed && !observed.error && Date.now() - observed.checkedAt < 15_000, error: observed?.error ?? (!observed ? 'CONNECTING' : undefined) }; });
     return { protocolVersion: 2, sessions: this.document.peers.flatMap(peer => this.document.scoped?.[peer.serviceId] ? [] : (this.observations.get(peer.serviceId)?.sessions ?? []).map(session => ({ ...session,
       sessionId: remoteSession(peer.origin, session.sessionId), backendSessionId: null, agentNativeSessionId: null, serviceOrigin: peer.origin, serviceLabel: peer.origin,
       serviceConnected: services.find(s => s.origin === peer.origin)!.connected, serviceCheckedAt: this.observations.get(peer.serviceId)?.checkedAt }))),
-      services: [...services, ...missing.map(origin => ({ origin, label: origin, connected: false, error: '服务连接授权尚未同步；在已授权服务页面连接后会自动完成'  }))] };
+      services: [...services, ...missing.map(origin => ({ origin, label: origin, connected: false, error: '服务连接授权尚未同步；在已授权服务页面连接后会自动完成'  }))],
+      removedServices: this.document.removedPeers?.map(peer => ({ serviceId: peer.serviceId, origin: peer.origin, label: peer.origin, connected: false })) ?? [] };
   }
   async save(input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number }) {
     const existing = input.id ? this.options.store.getGroup(input.id) : null;

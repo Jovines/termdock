@@ -341,7 +341,7 @@ export function buildDesktopToolbarPresetOptions(presets: ToolbarPresetDefinitio
   return [
     { id: 'auto', label: 'Auto' },
     ...presets
-      .filter((preset) => preset.showOnDesktop === true)
+      .filter((preset) => preset.id === 'default' || preset.showOnDesktop === true)
       .map((preset) => ({ id: preset.id, label: preset.label })),
   ];
 }

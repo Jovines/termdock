@@ -13,7 +13,8 @@ export function readPinnedCertificateAuthority(origin: string, fingerprint: stri
   const cached = cache.get(key);
   if (cached && cached.expires > Date.now()) return cached.value;
   const value = new Promise<Buffer>((resolve, reject) => {
-    const request = get(url, { agent: false, rejectUnauthorized: false, signal: AbortSignal.timeout(5000) }, response => {
+    const signal = AbortSignal.timeout(5000);
+    const request = get(url, { agent: false, rejectUnauthorized: false, signal }, response => {
       if (response.statusCode !== 200) { response.resume(); reject(new Error('Pinned certificate authority unavailable')); return; }
       const chunks: Buffer[] = []; let size = 0;
       response.on('data', (chunk: Buffer) => {
@@ -31,7 +32,11 @@ export function readPinnedCertificateAuthority(origin: string, fingerprint: stri
         } catch (error) { reject(error); }
       });
     });
-    request.on('error', reject);
+    request.on('error', error => {
+      if (signal.aborted && signal.reason?.name === 'TimeoutError') {
+        reject(new Error(`连接 ${url.origin} 超时（5 秒）：未能读取远端服务证书，请确认远端服务已启动且网络可达`, { cause: error }));
+      } else reject(error);
+    });
   });
   if (cache.size >= 64) cache.delete(cache.keys().next().value!);
   cache.set(key, { expires: Date.now() + 120_000, value });

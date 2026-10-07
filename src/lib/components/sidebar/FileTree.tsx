@@ -282,6 +282,7 @@ interface FileTreeItemProps {
   onFileDeleteRequest: (node: FileTreeNode) => void;
   deletingFilePath: string | null;
   revealedDirectoryPath?: string | null;
+  gitIgnoreRoot?: string;
 }
 
 const FileTreeItem = memo(function FileTreeItem({
@@ -307,6 +308,7 @@ const FileTreeItem = memo(function FileTreeItem({
   onFileDeleteRequest,
   deletingFilePath,
   revealedDirectoryPath,
+  gitIgnoreRoot,
 }: FileTreeItemProps) {
   const { t } = useI18n();
   // 精确订阅：每个节点只关心和自己相关的字段
@@ -360,7 +362,8 @@ const FileTreeItem = memo(function FileTreeItem({
       loadAbortRef.current = controller;
       setLoading(true);
       try {
-        const result = await listDirectory(node.path, controller.signal, showHiddenFiles, 'expand_directory', requestSlotId, sortMode);
+        const result = await listDirectory(node.path, controller.signal, showHiddenFiles, 'expand_directory', requestSlotId, sortMode, gitIgnoreRoot);
+        if (controller.signal.aborted) return;
         const treeNodes = toTreeNodes(result.entries);
         setDirectoryCache(node.path, treeNodes);
       } catch (error) {
@@ -372,7 +375,7 @@ const FileTreeItem = memo(function FileTreeItem({
         setLoading(false);
       }
     }
-  }, [node.path, loading, setDirectoryCache, showHiddenFiles, sortMode]);
+  }, [node.path, loading, setDirectoryCache, showHiddenFiles, sortMode, gitIgnoreRoot]);
 
   const handleToggle = useCallback(async () => {
     if (node.type !== 'directory') {
@@ -758,6 +761,7 @@ const FileTreeItem = memo(function FileTreeItem({
               onDirectoryDropFiles={onDirectoryDropFiles}
               onFileDeleteRequest={onFileDeleteRequest}
               deletingFilePath={deletingFilePath}
+              gitIgnoreRoot={gitIgnoreRoot}
               revealedDirectoryPath={revealedDirectoryPath}
             />
           ))}
@@ -1229,17 +1233,26 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const fileSortModesHydrated = useSidebarStore((s) => s.fileSortModesHydrated);
   const rootSortMode = useSidebarStore((s) => s.fileSortModes[rootPath] ?? 'name');
   const hydrateFileSortModes = useSidebarStore((s) => s.hydrateFileSortModes);
+  const hydrateHideGitIgnoredRoots = useSidebarStore((s) => s.hydrateHideGitIgnoredRoots);
+  const hideGitIgnored = useSidebarStore((s) => Boolean(s.hideGitIgnoredRoots[rootPath]));
+  const hideGitIgnoredRootsHydrated = useSidebarStore((s) => s.hideGitIgnoredRootsHydrated);
+  const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
+  // Cached paths can belong to another explorer root with a different filter.
+  // Clear before paint, including after restoring a project's tree snapshot.
+  useLayoutEffect(() => {
+    if (rootPath) invalidateDirectoryCache(rootPath, true);
+  }, [rootPath, hideGitIgnored, invalidateDirectoryCache]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rootTruncated, setRootTruncated] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [sortHydrationSettled, setSortHydrationSettled] = useState(fileSortModesHydrated);
-  const sortModeReady = fileSortModesHydrated || sortHydrationSettled;
+  const [sortHydrationSettled, setSortHydrationSettled] = useState(fileSortModesHydrated && hideGitIgnoredRootsHydrated);
+  const sortModeReady = (fileSortModesHydrated && hideGitIgnoredRootsHydrated) || sortHydrationSettled;
 
   useEffect(() => {
     let cancelled = false;
-    void hydrateFileSortModes()
+    void Promise.all([hydrateFileSortModes(), hydrateHideGitIgnoredRoots()])
       .catch(() => undefined)
       .finally(() => {
         if (!cancelled) setSortHydrationSettled(true);
@@ -1247,7 +1260,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     return () => {
       cancelled = true;
     };
-  }, [hydrateFileSortModes]);
+  }, [hydrateFileSortModes, hydrateHideGitIgnoredRoots]);
   const [searchEntries, setSearchEntries] = useState<FileTreeNode[]>([]);
   const [searchMeta, setSearchMeta] = useState<{ truncated: boolean; total: number; engine: FileSearchEngine; limited: boolean; done: boolean } | null>(null);
   const [visibleSearchCount, setVisibleSearchCount] = useState(SEARCH_INITIAL_VISIBLE);
@@ -1336,7 +1349,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     setLoading(true);
     setError(null);
 
-    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', `file-tree-root:${rootPath}`, rootSortMode)
+    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', `file-tree-root:${rootPath}`, rootSortMode, rootPath)
       .then((result) => {
         if (cancelled) return;
         const treeNodes = toTreeNodes(result.entries);
@@ -1356,7 +1369,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       controller.abort();
       cancelIoSlot(`file-tree-root:${rootPath}`);
     };
-  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady]);
+  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady, hideGitIgnored]);
 
   useEffect(() => {
     if (!activeSearchRoot || !queryLower) {
@@ -1640,6 +1653,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
         <FileTreeItem
           key={node.path}
           node={node}
+          gitIgnoreRoot={rootPath}
           depth={0}
           onFileSelect={onFileSelect}
           directoriesOnly={directoriesOnly}

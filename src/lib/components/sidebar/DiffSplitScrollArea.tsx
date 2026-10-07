@@ -81,9 +81,22 @@ export function DiffSplitScrollArea({ enabled, className, label, children }: {
     }) : null;
     observer?.observe(root);
     let disposed = false;
+    let contentFrame: number | null = null;
+    // Virtual hunks mount rows as the vertical window moves. Recalculate the
+    // shared horizontal range once per frame after those DOM changes settle.
+    const mutations = new MutationObserver(() => {
+      if (contentFrame !== null) return;
+      contentFrame = window.requestAnimationFrame(() => {
+        contentFrame = null;
+        if (!disposed) measure();
+      });
+    });
+    mutations.observe(root, { childList: true, subtree: true });
     void document.fonts?.ready.then(() => { if (!disposed) measure(); });
     return () => {
       disposed = true;
+      mutations.disconnect();
+      if (contentFrame !== null) window.cancelAnimationFrame(contentFrame);
       if (frameRef.current !== null) {
         window.cancelAnimationFrame(frameRef.current);
         frameRef.current = null;

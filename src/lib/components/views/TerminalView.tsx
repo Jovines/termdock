@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { buildAtomicTerminalReplay } from '../../terminal/replayPresentation';
 import { buildTmuxScreenReplacement } from '../../terminal/tmuxScreenPresentation';
+import { buildTmuxDefaultColorReplies } from '../../terminal/tmuxColors';
 import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
@@ -350,6 +351,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastSentLogicalFocusRef = React.useRef<boolean | null>(null);
   const lastSentViewingRef = React.useRef<boolean | null>(null);
   const streamVersionRef = React.useRef(0);
+  // A socket can reconnect under the same stream version and backend id.
+  // Invalidate operation responses whenever that connection changes.
+  const terminalOperationEpochRef = React.useRef(0);
   const awaitingInitialWritesRef = React.useRef(false);
   const initialContentTargetChunkIdRef = React.useRef<number | null>(null);
   const pendingTmuxScreenSyncGenerationRef = React.useRef<number | null>(null);
@@ -1120,6 +1124,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const disconnectStream = React.useCallback(() => {
     streamVersionRef.current += 1;
+    terminalOperationEpochRef.current += 1;
     flushPendingShellTitle();
     cancelPendingShellTitle();
     const cleanup = streamCleanupRef.current;
@@ -1190,6 +1195,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             switch (event.type) {
               case 'connected': {
+                terminalOperationEpochRef.current += 1;
                 initialConnectionPendingRef.current = false;
                 const resumeAttempt = resumeAttemptRef.current;
                 if (resumeAttempt) {
@@ -1902,6 +1908,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream, openManagedBackendSession]);
 
+  const handleTerminalOperationError = React.useCallback((error: unknown, terminalId: string, epoch: number, fallbackMessage: string) => {
+    if (terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== epoch) return;
+    if (error instanceof TerminalApiError && isTransientBackendSessionMiss(error)) {
+      // An operation's 404 only describes the old in-memory backend. Reopen
+      // the persisted session before deciding whether it can be restored.
+      debugSession('[Terminal] operation backend missing, recovering', { terminalId, sessionId });
+      setConnectionError('Reconnecting...');
+      setIsFatalError(false);
+      disconnectStream();
+      clearTerminalSession(sessionId);
+      terminalIdRef.current = null;
+      setConnecting(sessionId, true);
+      restartEnsureSession();
+      return;
+    }
+    setConnectionError(error instanceof Error ? error.message : fallbackMessage);
+  }, [clearTerminalSession, debugSession, disconnectStream, restartEnsureSession, sessionId, setConnecting]);
+
   const handleViewportInput = React.useCallback(
     (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean; targeted?: boolean }) => {
       if (!isActiveRef.current && !options?.targeted) {
@@ -1956,6 +1980,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
 
+      const operationEpoch = terminalOperationEpochRef.current;
       const sendPayload = async () => {
         try {
           // 只有非鼠标序列的真键盘输入才触发退出 copy-mode；
@@ -1973,6 +1998,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               // exit-copy-mode failure shouldn't block sending input
             }
 
+            if (terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch) {
+              return false;
+            }
+
             // tmuxAction already consumed Escape's intended effect by leaving
             // copy mode. Sending the byte again would leak Escape into the
             // foreground program in the pane.
@@ -1986,7 +2015,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           clearAgentNeedsReview(sessionId);
           return true;
         } catch (error) {
-          setConnectionError(error instanceof Error ? error.message : 'Failed to send input');
+          handleTerminalOperationError(error, terminalId, operationEpoch, 'Failed to send input');
           return false;
         }
       };
@@ -2001,7 +2030,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       return delivery;
     },
-    [activeModifier, clearAgentNeedsReview, focusTerminalIfActive, isTmuxMode, lockedModifier, terminal]
+    [activeModifier, clearAgentNeedsReview, focusTerminalIfActive, handleTerminalOperationError, isTmuxMode, lockedModifier, sessionId, terminal]
   );
 
   React.useEffect(() => {
@@ -2079,8 +2108,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
 
+    const operationEpoch = terminalOperationEpochRef.current;
     try {
       const result = await terminal.tmuxAction(terminalId, payload);
+      if (terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch) return;
       if (result.layout) {
         setTmuxLayout(result.layout);
         if (payload.action === 'switch-session') {
@@ -2097,9 +2128,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         }
       }
     } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : 'Failed to execute tmux action');
+      handleTerminalOperationError(error, terminalId, operationEpoch, 'Failed to execute tmux action');
     }
-  }, [sessionId, setTerminalSession, terminal]);
+  }, [handleTerminalOperationError, sessionId, setTerminalSession, terminal]);
 
   // A pane layout can trigger a local fit, but its dimensions must never
   // become a client resize request: it may predate the current keyboard size.
@@ -2410,7 +2441,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const presetActiveProgram = isConnectionTransition ? stableActiveProgramRef.current : detectedActiveProgram;
   const detectedPreset = React.useMemo(() => detectToolbarPreset(presetActiveProgram, toolbarPresets), [presetActiveProgram, toolbarPresets]);
   const storedPreset = React.useMemo(() => getToolbarPreset(toolbarPresets, toolbarPresetMode), [toolbarPresetMode, toolbarPresets]);
-  const renderPresetMode = !isMobile && toolbarPresetMode !== 'auto' && storedPreset.showOnDesktop !== true
+  const renderPresetMode = !isMobile && toolbarPresetMode !== 'auto' && storedPreset.id !== 'default' && storedPreset.showOnDesktop !== true
     ? 'auto'
     : toolbarPresetMode;
   const effectivePresetId = renderPresetMode === 'auto' ? detectedPreset : renderPresetMode;
@@ -2470,6 +2501,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const xtermTheme = React.useMemo(() => getTerminalTheme(colorTheme), [colorTheme]);
 
+  React.useEffect(() => {
+    if (!isTmuxMode || !isStreamReady || !isViewportInitialized || !terminalSessionId) return;
+    // tmux consumes OSC 10/11 replies itself and uses them to answer programs
+    // in its panes. Its initial queries can land in the replay, whose replies
+    // are intentionally suppressed. Seed the actual client before launching
+    // an Agent, and repeat after reconnects or a theme change.
+    const replies = buildTmuxDefaultColorReplies(xtermTheme);
+    if (!replies) return;
+    void terminal.sendInput(terminalSessionId, replies).catch(error => {
+      console.warn('[Terminal] Failed to synchronize tmux default colors:', error);
+    });
+  }, [isTmuxMode, isStreamReady, isViewportInitialized, terminalSessionId, terminal, xtermTheme]);
+
   const terminalSessionKey = React.useMemo(() => {
     // 故意只用前端 sessionId（每个 tab 一个，整个生命周期不变），
     // 不绑后端 terminalSessionId。否则 auto-recreate（后端 session 被 idle 清掉后
@@ -2524,13 +2568,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       document.removeEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
     };
   }, [isActive, isMobile, sessionId]);
-  // 桌面端工具条的「显隐」只看 preset 是否声明 showOnDesktop，不再绑 isActive。
+  // 基础快捷栏在桌面端常驻，其余 preset 按 showOnDesktop 显示，不再绑 isActive。
   // 否则每个非激活 tab 的工具条会被收成 max-h-0，切到该 tab 时 isActive false→true
   // 重新从 0 撑开，重放 150ms 展开动画 + 终端回流，表现为「先消失再冒出来」。
   // 让非激活 slide（已在 Swiper 视图外，用户看不见）保持展开，切进来时直接就是
   // 展开态，同类 tab 间切换不再闪动。交互仍由 isKeyboardInteractive=isActive 控制，
   // 非激活 tab 的按钮照旧禁用，不会误触。
-  const isKeyboardVisible = !suppressKeyboard && (isMobile || toolbarPreset.showOnDesktop === true);
+  const isKeyboardVisible = !suppressKeyboard && (isMobile || toolbarPreset.id === 'default' || toolbarPreset.showOnDesktop === true);
   const isKeyboardInteractive = isActive;
 
   // Apply both values from the same CSS-variable update so the terminal top

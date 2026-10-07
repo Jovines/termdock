@@ -1071,7 +1071,7 @@ export async function sendTerminalInput(
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to send input' }));
-    throw new Error(error.error || 'Failed to send terminal input');
+    throw new TerminalApiError(error.error || 'Failed to send terminal input', response.status, error.code);
   }
 }
 
@@ -1288,7 +1288,7 @@ export async function sendTmuxAction(
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to execute tmux action' }));
-    throw new Error(error.error || 'Failed to execute tmux action');
+    throw new TerminalApiError(error.error || 'Failed to execute tmux action', response.status, error.code);
   }
   return response.json();
 }
@@ -1747,6 +1747,7 @@ export interface SettingsState {
   collaborationFloatingGroupId: string | null;
   serviceSwitcherExpanded: boolean;
   fileSortModes: Record<string, 'modified'>;
+  hideGitIgnoredRoots: Record<string, true>;
   /** Workspace roots opted into nested sub-repo scanning. Absent = single-repo. */
   nestedGitScanRoots: Record<string, true>;
   pinnedExplorerRoots: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
@@ -1778,7 +1779,7 @@ export function getSettings(): Promise<SettingsState> {
   return settingsRequest;
 }
 
-export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string; activeGitRepo?: { contextKey: string; repoRoot: string | null } }): Promise<SettingsState> {
+export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; hideGitIgnoredRoot?: { rootPath: string; enabled: boolean }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string; activeGitRepo?: { contextKey: string; repoRoot: string | null } }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -2474,10 +2475,11 @@ export interface FileWatchEvent {
   reason?: string;
 }
 
-export async function listDirectory(dirPath: string, signal?: AbortSignal, showHidden?: boolean, action = 'list_directory', requestSlotId?: string, sortMode: FileSortMode = 'name'): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
+export async function listDirectory(dirPath: string, signal?: AbortSignal, showHidden?: boolean, action = 'list_directory', requestSlotId?: string, sortMode: FileSortMode = 'name', gitIgnoreRoot?: string): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
   const params = new URLSearchParams({ path: dirPath });
   if (showHidden) params.set('showHidden', 'true');
   if (sortMode !== 'name') params.set('sort', sortMode);
+  if (gitIgnoreRoot) params.set('gitIgnoreRoot', gitIgnoreRoot);
   params.set('action', action);
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
   const response = await fetchWithTimeout(
@@ -3800,6 +3802,7 @@ export interface CollaborationGroup {
   sessionIds: string[];
   /** Per-member role (定位) keyed by sessionId; rides the delivery shell header. */
   roles?: Record<string, string>;
+  instructions?: { text: string; version: string; updatedAt: number; updatedBy: string };
   createdAt: number;
   updatedAt: number;
 }
@@ -3852,6 +3855,15 @@ export interface SessionSearchResult {
   matchCount: number;
   live: boolean;
   resumeHistoryId: string | null;
+  source?: 'terminal' | 'codex' | 'claude';
+  nativeKey?: string | null;
+  agentNativeSessionId?: string | null;
+}
+
+export interface SessionSearchResponse {
+  results: SessionSearchResult[];
+  total?: number;
+  index?: { total: number; indexed: number; building: boolean; failed: number; warning: string | null };
 }
 
 async function operationsRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -3918,15 +3930,17 @@ function currentCollaborationDirectory(): CollaborationDirectory {
         const data = await operationsRequest<import('../collaboration/directory').CollaborationPeers>('/collaboration-directory', { signal: AbortSignal.timeout(10_000) });
         let timeout: ReturnType<typeof setTimeout> | undefined;
         const saved = await Promise.race([listServiceConnections().catch(() => []), new Promise<Awaited<ReturnType<typeof listServiceConnections>>>(resolve => { timeout = setTimeout(() => resolve([]), 1000); })]).finally(() => clearTimeout(timeout));
-        const labels = new Map((data.services ?? []).map(service => {
+        const describeService = (service: import('../collaboration/directory').CollaborationPeerService) => {
           // Aliases belong to this user's service directory, not to the remote
           // node. Prefer identity: localhost and entry URLs are not global IDs.
           const match = saved.find(item => service.serviceId && item.targetPeerId === service.serviceId)
             ?? saved.find(item => !service.serviceId && (item.serviceOrigin || item.url) === service.origin);
           const label = collaborationServiceLabel({ serviceLabel: match?.label || service.label, serviceOrigin: service.origin });
-          return [service.origin, label] as const;
-        }));
-        return { ...data, origin, services: data.services?.map(service => ({ ...service, label: labels.get(service.origin) ?? service.label })),
+          return { ...service, label, ...(match ? { accessUrl: match.url } : {}) };
+        };
+        const services = data.services?.map(describeService);
+        const labels = new Map(services?.map(service => [service.origin, service.label]));
+        return { ...data, origin, services, removedServices: data.removedServices?.map(describeService),
           sessions: data.sessions.map(session => ({ ...session, serviceLabel: labels.get(session.serviceOrigin ?? '') ?? session.serviceLabel })) };
       },
       peerProtocol: 'v2' });
@@ -3948,6 +3962,22 @@ export function subscribeCollaborationGroups(listener: (data: CollaborationGroup
 export function retryCollaborationPeers(): void {
   window.dispatchEvent(new Event('termdock:collaboration-enroll'));
   currentCollaborationDirectory().refreshPeers(true);
+}
+
+export async function removeCollaborationConnection(serviceId: string): Promise<void> {
+  await operationsRequest(`/collaboration-connections/${encodeURIComponent(serviceId)}`, { method: 'DELETE' });
+  resetCollaborationDirectory();
+  await listCollaborationGroups();
+}
+
+export async function restoreCollaborationConnection(serviceId: string): Promise<void> {
+  await operationsRequest(`/collaboration-connections/${encodeURIComponent(serviceId)}/restore`, { method: 'POST' });
+  resetCollaborationDirectory();
+  await listCollaborationGroups();
+}
+
+export function setCollaborationGroupRules(groupId: string, input: { sessionId: string; text: string; expectedVersion: string }): Promise<{ group: CollaborationGroup }> {
+  return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/rules`, { method: 'POST', body: JSON.stringify(input) });
 }
 
 export function listCollaborationGroups(): Promise<CollaborationGroupsResponse> {
@@ -4028,6 +4058,10 @@ export function sendCollaborationMessage(groupId: string, input: {
   return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/messages`, { method: 'POST', body: JSON.stringify(input) });
 }
 
-export function searchTerminalSessions(query: string): Promise<{ results: SessionSearchResult[] }> {
-  return operationsRequest(`/session-search?q=${encodeURIComponent(query)}`);
+export function searchTerminalSessions(query: string, limit = 50, signal?: AbortSignal): Promise<SessionSearchResponse> {
+  return operationsRequest(`/session-search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal });
+}
+
+export function prepareSearchSession(nativeKey: string): Promise<{ sessionId?: string; command?: string; cwd?: string }> {
+  return operationsRequest('/session-search/prepare', { method: 'POST', body: JSON.stringify({ nativeKey }) });
 }

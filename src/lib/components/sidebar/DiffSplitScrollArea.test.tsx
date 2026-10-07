@@ -50,6 +50,19 @@ function setup() {
 }
 
 describe('split diff horizontal scrolling', () => {
+  it('applies the current offset to code cells mounted by a virtual hunk', async () => {
+    const view = setup();
+    view.bars[0].scrollLeft = 240;
+    fireEvent.scroll(view.bars[0]);
+    view.flushScroll();
+    const cell = document.createElement('td');
+    cell.className = 'diff-code';
+    cell.textContent = 'Newly mounted long line';
+    await act(async () => { view.root.querySelector('tr')!.append(cell); });
+    view.flushScroll();
+    expect(cell.scrollLeft).toBe(240);
+  });
+
   it('syncs both scrollbars and short/long rows, then clamps after resize', () => {
     const view = setup();
     expect(view.bars).toHaveLength(2);

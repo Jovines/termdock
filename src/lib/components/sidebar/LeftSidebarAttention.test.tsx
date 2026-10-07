@@ -12,8 +12,6 @@ afterEach(() => {
 
 describe('LeftSidebar attention state', () => {
   it('marks the session in place without rendering a duplicate attention queue', () => {
-    const onRunningSessionButtonEnabledChange = vi.fn();
-    const onAttentionButtonEnabledChange = vi.fn();
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       json: async () => ({ locale: 'en' }),
@@ -56,10 +54,6 @@ describe('LeftSidebar attention state', () => {
           onCombineSplitSessions={vi.fn()}
           onReorderSessions={vi.fn()}
           onOpenSettings={vi.fn()}
-          runningSessionButtonEnabled={false}
-          onRunningSessionButtonEnabledChange={onRunningSessionButtonEnabledChange}
-          attentionButtonEnabled={false}
-          onAttentionButtonEnabledChange={onAttentionButtonEnabledChange}
         />
       </I18nProvider>,
     );
@@ -74,13 +68,7 @@ describe('LeftSidebar attention state', () => {
     expect(screen.getByTitle('Copy mode').className).toContain('rounded-[2px]');
 
     fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    const runningButtonToggle = screen.getByRole('menuitemcheckbox', { name: /Running sessions button/ });
-    expect(runningButtonToggle.getAttribute('aria-checked')).toBe('false');
-    fireEvent.click(runningButtonToggle);
-    expect(onRunningSessionButtonEnabledChange).toHaveBeenCalledWith(true);
-    const attentionButtonToggle = screen.getByRole('menuitemcheckbox', { name: /Attention button/ });
-    expect(attentionButtonToggle.getAttribute('aria-checked')).toBe('false');
-    fireEvent.click(attentionButtonToggle);
-    expect(onAttentionButtonEnabledChange).toHaveBeenCalledWith(true);
+    expect(screen.queryByRole('menuitemcheckbox', { name: /Running sessions button/ })).toBeNull();
+    expect(screen.queryByRole('menuitemcheckbox', { name: /Attention button/ })).toBeNull();
   });
 });

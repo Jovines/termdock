@@ -1,3 +1,4 @@
+import { getHideGitIgnoredRootsSetting } from '../utils/settings.js';
 import { readRecentCommitHistory } from '../utils/recentCommitHistory.js';
 import { AUTH_COOKIE, isSessionValid } from '../utils/authProtection.js';
 import { Router, type Request, type Response } from 'express';
@@ -3043,6 +3044,34 @@ async function getCachedNestedGitRoots(workspaceRoot: string, options: { refresh
   return promise;
 }
 
+// Ask Git in one batch so nested .gitignore, .git/info/exclude and global
+// exclusions follow Git semantics; NUL separators preserve unusual filenames.
+function getGitIgnoredPaths(directory: string, entries: Dirent[], signal: AbortSignal): Promise<Set<string>> {
+  if (entries.length === 0) return Promise.resolve(new Set());
+  return new Promise((resolve, reject) => {
+    const proc = execFile('git', ['check-ignore', '-z', '--stdin'], {
+      cwd: directory,
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+      signal,
+    }, (error, stdout, stderr) => {
+      if (error && error.code !== 1) {
+        // Ordinary non-repository directories remain browsable with the filter.
+        if (error.code === 'ENOENT' || /not a git repository/i.test(stderr)) {
+          resolve(new Set());
+        } else {
+          reject(error);
+        }
+        return;
+      }
+      resolve(new Set(stdout.split('\0').filter(Boolean)));
+    });
+    // Git may exit before consuming stdin (e.g. outside a repository).
+    proc.stdin?.on('error', () => undefined);
+    proc.stdin?.end(entries.map((entry) => path.join(directory, entry.name)).join('\0') + '\0');
+  });
+}
+
 // Directory listing
 router.get('/list', async (req: Request, res: Response) => {
   const requestId = ++fsIoRequestSeq;
@@ -3077,7 +3106,19 @@ router.get('/list', async (req: Request, res: Response) => {
       const sortMode = req.query.sort === 'modified' ? 'modified' : 'name';
       const allEntries = await fs.promises.readdir(resolvedPath, { withFileTypes: true });
       throwIfAborted(controller.signal, 'fs.list');
-      const visibleDirents = allEntries.filter(dirent => showHidden || !dirent.name.startsWith('.'));
+      let visibleDirents = allEntries.filter(dirent => showHidden || !dirent.name.startsWith('.'));
+      const gitIgnoreRoot = typeof req.query.gitIgnoreRoot === 'string' ? req.query.gitIgnoreRoot : null;
+      if (gitIgnoreRoot && getHideGitIgnoredRootsSetting()[gitIgnoreRoot]) {
+        const resolvedRoot = await pathValidator.validatePathAsync(gitIgnoreRoot);
+        const relative = path.relative(resolvedRoot, resolvedPath);
+        if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
+          const ignored = await getGitIgnoredPaths(resolvedPath, visibleDirents, controller.signal);
+          throwIfAborted(controller.signal, 'fs.list');
+          // Filter before sorting and capping so ignored folders don't crowd
+          // useful files out of the first page of a large directory.
+          visibleDirents = visibleDirents.filter((entry) => entry.name !== '.git' && !ignored.has(path.join(resolvedPath, entry.name)));
+        }
+      }
       const entries = sortMode === 'modified'
         ? (await loadDirectoryEntriesWithModified(resolvedPath, visibleDirents, controller.signal))
             .sort(compareDirectoryEntriesByModified)

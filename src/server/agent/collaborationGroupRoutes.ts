@@ -92,6 +92,20 @@ export function collaborationGroupRoutes(options: {
           error: error instanceof Error ? error.message : '定位设置失败' });
     }
   });
+  router.post('/collaboration-groups/:groupId/rules', (req, res) => {
+    try {
+      const group = options.store.getGroup(req.params.groupId);
+      if (!group || group.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
+      const { sessionId, text, expectedVersion } = req.body ?? {};
+      if (typeof sessionId !== 'string' || !options.sessions().some(session => session.sessionId === sessionId)
+        || !group.sessionIds.includes(sessionId)) throw new CollaborationError('NOT_A_MEMBER', '请先打开本组当前服务的一个成员会话，再修改群规', 403);
+      if (typeof expectedVersion !== 'string') throw new CollaborationError('INVALID_VERSION', '缺少群规版本，请重新打开组设置', 400);
+      options.store.setRules(group.id, text, sessionId, expectedVersion);
+      res.json({ group: options.store.getGroup(group.id) });
+    } catch (error) {
+      res.status(error instanceof CollaborationError ? error.httpStatus : 400).json({ code: error instanceof CollaborationError ? error.code : 'RULES_SAVE_FAILED', error: error instanceof Error ? error.message : '群规保存失败' });
+    }
+  });
   router.post('/collaboration-groups/:groupId/promote', (req, res) => {
     try {
       const { group, expectedUpdatedAt } = req.body ?? {};

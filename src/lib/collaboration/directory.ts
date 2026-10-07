@@ -4,20 +4,25 @@ export interface CollaborationPeerService {
   serviceId?: string;
   origin: string;
   label: string;
+  /** This user's saved entry address, distinct from the peer's registered origin. */
+  accessUrl?: string;
   connected: boolean;
   error?: string;
+  groups?: Array<{ id: string; name: string }>;
 }
 export interface CollaborationPeers {
   protocolVersion?: number;
   origin?: string;
   sessions: OrchestrationSession[];
   services?: CollaborationPeerService[];
+  removedServices?: CollaborationPeerService[];
 }
 export interface CollaborationPeerState {
   state: 'unavailable' | 'loading' | 'ready' | 'partial' | 'error' | 'unsupported';
   checkedAt: number | null;
   error?: string;
   services?: CollaborationPeerService[];
+  removedServices?: CollaborationPeerService[];
 }
 export interface CollaborationDirectoryData {
   groups: CollaborationGroup[];
@@ -143,7 +148,7 @@ export class CollaborationDirectory {
         return address && address.origin !== this.source.origin && address.origin !== this.source.peerOrigin;
       });
       const services = data.services?.filter((service) => service.origin !== this.source.origin && service.origin !== this.source.peerOrigin);
-      this.peers = { state: services?.some((service) => !service.connected) ? 'partial' : 'ready', checkedAt: Date.now(), services };
+      this.peers = { state: services?.some((service) => !service.connected) ? 'partial' : 'ready', checkedAt: Date.now(), services, removedServices: data.removedServices };
     }).catch((error) => {
       if (this.disposed) return;
       this.remote = this.remote.map((session) => ({ ...session, status: 'offline', serviceConnected: false }));

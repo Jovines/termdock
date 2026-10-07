@@ -81,6 +81,8 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   cursor commit <token> --consumer <name> (commit after processing the page)
 ── 传输与运维 ──
   transport list (server-owned remote session directory) | transport info (this service's public identity and CA fingerprint, no private keys)
+  transport remove <service-id> (stop collaboration with an unused service; preserve terminals and messages)
+  transport restore <service-id> (explicitly reconnect a previously removed service)
   transport invite --origin https://this-service:9834
     (create a 10-minute invitation granting collaboration directory/group
     access; transfer its JSON privately — no browser required)
@@ -183,8 +185,10 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     if (command.operation !== 'save' || positional.length || !options.file) throw new Error('Usage: td collab group save --file group.json');
   } else if (action === 'transport') {
     command.operation = positional.shift(); command.groupId = positional.shift();
-    if (positional.length || !['info', 'list', 'invite', 'accept', 'register'].includes(command.operation ?? '')) throw new Error('Usage: td collab transport info|list|invite|accept|register');
-    if (command.operation === 'register') {
+    if (positional.length || !['info', 'list', 'invite', 'accept', 'register', 'remove', 'restore'].includes(command.operation ?? '')) throw new Error('Usage: td collab transport info|list|invite|accept|register|remove|restore');
+    if (['remove', 'restore'].includes(command.operation!)) {
+      if (!command.groupId || !/^12D3KooW[a-zA-Z0-9]{30,60}$/.test(command.groupId) || options.file || options.origin) throw new Error('transport remove/restore requires a full service id');
+    } else if (command.operation === 'register') {
       if (!command.groupId || !options.file || options.origin) throw new Error('transport register requires <group-id> --file nodes.json');
     } else if (command.groupId || (['info', 'list'].includes(command.operation!) ? options.file || options.origin
       : !options.origin || (command.operation === 'accept' ? !options.file : options.file))) throw new Error('transport invite needs --origin; accept needs --origin and --file');
@@ -369,6 +373,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     if (command.action === 'transport') {
       if (command.operation === 'info') output(await request('GET', '/transport'));
       else if (command.operation === 'list') output(await request('GET', '/directory'));
+      else if (['remove', 'restore'].includes(command.operation!)) output(await request('POST', `/transport/${command.operation}`, { serviceId: command.groupId }));
       else if (command.operation === 'invite') output(await request('POST', '/transport/invite', { origin: o.origin }));
       else {
         if (fs.statSync(String(o.file)).size > 64 * 1024) throw new Error('Peer registration is too large');

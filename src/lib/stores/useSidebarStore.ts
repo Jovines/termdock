@@ -453,6 +453,7 @@ function writeActiveGitReposCache(cache: Record<string, string>): void {
   writeCache(ACTIVE_GIT_REPOS_CACHE_KEY, cache);
 }
 
+let hideGitIgnoredRootsHydration: Promise<void> | null = null;
 let fileSortModesHydration: Promise<void> | null = null;
 const fileSortModeSaveSequences = new Map<string, number>();
 let nestedGitScanRootsHydration: Promise<void> | null = null;
@@ -513,6 +514,13 @@ function toFileTreeNode(event: FileWatchEvent): FileTreeNode | null {
   };
 }
 
+type InitialRightSidebarState = {
+  rightOpen: boolean;
+  rightPinned: boolean;
+  rightSidebarWidth: number;
+  rightTab: RightSidebarTab;
+};
+
 interface SidebarState {
   // Sidebar visibility
   leftOpen: boolean;
@@ -524,6 +532,7 @@ interface SidebarState {
   rightPinned: boolean;
   rightSidebarWidth: number;
   rightSidebarLayoutPreference: RightSidebarLayoutPreference;
+  initialRightSidebarStateBySession: Map<string, InitialRightSidebarState>;
 
   // Right sidebar tab
   rightTab: RightSidebarTab;
@@ -545,6 +554,8 @@ interface SidebarState {
   directoryCache: Map<string, FileTreeNode[]>;
   fileSortModes: Record<string, FileSortMode>;
   fileSortModesHydrated: boolean;
+  hideGitIgnoredRoots: Record<string, true>;
+  hideGitIgnoredRootsHydrated: boolean;
   /** Workspace roots whose Git tab scans for nested sub-repos. Absent = single-repo. */
   nestedGitScanRoots: Record<string, true>;
   nestedGitScanRootsHydrated: boolean;
@@ -604,6 +615,11 @@ interface SidebarState {
   openRightSearch: () => void;
   closeRightSearch: () => void;
   setRightSearchOpen: (open: boolean) => void;
+  initializeRightSidebarForSession: (
+    sessionId: string,
+    rootPath: string | null,
+    initialState: InitialRightSidebarState,
+  ) => void;
   setRootPath: (
     path: string | null,
     sessionId?: string | null,
@@ -627,6 +643,8 @@ interface SidebarState {
   toggleGroupCollapsed: (key: string) => void;
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
   reconcileDirectoryCache: (path: string, entries: FileEntry[]) => void;
+  hydrateHideGitIgnoredRoots: () => Promise<void>;
+  setHideGitIgnoredRoot: (rootPath: string, enabled: boolean) => Promise<void>;
   hydrateFileSortModes: () => Promise<void>;
   setDirectorySortMode: (path: string, mode: FileSortMode) => Promise<void>;
   hydrateNestedGitScanRoots: () => Promise<void>;
@@ -653,6 +671,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   rightPinned: readRightPinnedPreference(),
   rightSidebarWidth: readRightSidebarWidth(),
   rightSidebarLayoutPreference: readRightSidebarLayoutPreference(),
+  initialRightSidebarStateBySession: new Map(),
   rightTab: 'files',
   rightSearchOpen: false,
   rootPath: null,
@@ -667,6 +686,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   directoryCache: new Map(),
   fileSortModes: getInitialFileSortModes(),
   fileSortModesHydrated: false,
+  hideGitIgnoredRoots: {},
+  hideGitIgnoredRootsHydrated: false,
   nestedGitScanRoots: getInitialNestedGitScanRoots(),
   nestedGitScanRootsHydrated: false,
   activeGitRepos: readActiveGitReposCache(),
@@ -743,6 +764,17 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   openRightSearch: () => set({ rightSearchOpen: true }),
   closeRightSearch: () => set({ rightSearchOpen: false }),
   setRightSearchOpen: (open) => set({ rightSearchOpen: open }),
+  initializeRightSidebarForSession: (sessionId, rootPath, initialState) => set((s) => {
+    const contextKey = getSidebarContextKey(sessionId, rootPath);
+    if (contextKey) {
+      writeRightPinnedForContext(contextKey, initialState.rightPinned);
+      writeRightSidebarWidthForContext(contextKey, initialState.rightSidebarWidth);
+      writeRightSidebarTab(contextKey, initialState.rightTab);
+    }
+    const initialRightSidebarStateBySession = new Map(s.initialRightSidebarStateBySession);
+    initialRightSidebarStateBySession.set(sessionId, { ...initialState });
+    return { initialRightSidebarStateBySession };
+  }),
   setRootPath: (path, sessionId = null, splitWorkspaceId = null) => set((s) => {
     const sessionContextKey = getSidebarContextKey(sessionId, path);
     const rightSidebarWidthContextKey = getRightSidebarWidthContextKey(
@@ -753,10 +785,21 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     const contextKey = splitWorkspaceId
       ? rightSidebarWidthContextKey
       : sessionContextKey;
+    const initialState = sessionId && !splitWorkspaceId
+      ? s.initialRightSidebarStateBySession.get(sessionId)
+      : undefined;
     if (
-      s.contextKey === contextKey
+      !initialState
+      && s.contextKey === contextKey
       && s.rightSidebarWidthContextKey === rightSidebarWidthContextKey
     ) return path === s.rootPath ? s : { rootPath: path };
+    const initialRightSidebarStateBySession = new Map(s.initialRightSidebarStateBySession);
+    if (initialState && sessionContextKey && sessionId) {
+      writeRightPinnedForContext(sessionContextKey, initialState.rightPinned);
+      writeRightSidebarWidthForContext(sessionContextKey, initialState.rightSidebarWidth);
+      writeRightSidebarTab(sessionContextKey, initialState.rightTab);
+      initialRightSidebarStateBySession.delete(sessionId);
+    }
     // Data belongs to the directory; selection/layout belongs to the session.
     const rootDataCache = new Map(s.rootDataCache);
     if (s.rootPath) rootDataCache.set(s.rootPath, {
@@ -867,12 +910,13 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       rootPath: path,
       contextKey,
       rightSidebarWidthContextKey,
-      rightSidebarWidth: persistedRightSidebarWidth ?? readRightSidebarWidth(),
-      rightPinned: persistedRightPinned ?? readRightPinnedPreference(),
-      // A pinned session may leave rightOpen set; do not turn it into an
-      // overlay when switching to an unpinned session.
-      rightOpen: s.rightSidebarWidthContextKey === rightSidebarWidthContextKey ? s.rightOpen : false,
-      rightTab: cached?.rightTab ?? persistedRightTab ?? 'files',
+      initialRightSidebarStateBySession,
+      rightSidebarWidth: initialState?.rightSidebarWidth ?? persistedRightSidebarWidth ?? readRightSidebarWidth(),
+      rightPinned: initialState?.rightPinned ?? persistedRightPinned ?? readRightPinnedPreference(),
+      // New sessions inherit visibility once. Ordinary switches still close
+      // overlays so a pinned session cannot open another session's drawer.
+      rightOpen: initialState?.rightOpen ?? (s.rightSidebarWidthContextKey === rightSidebarWidthContextKey ? s.rightOpen : false),
+      rightTab: initialState?.rightTab ?? cached?.rightTab ?? persistedRightTab ?? 'files',
       explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
       selectedFilePath: cached?.selectedFilePath ?? persistedSelectedFilePath ?? null,
@@ -920,7 +964,9 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     const nextWidthCache = { ...widthCache };
     const projectStateCache = new Map(state.projectStateCache);
     const explorerRootCache = { ...state.explorerRootCache };
+    const initialRightSidebarStateBySession = new Map(state.initialRightSidebarStateBySession);
     for (const session of sessions) {
+      initialRightSidebarStateBySession.delete(session.sessionId);
       const sessionContextKey = getSidebarContextKey(session.sessionId, session.rootPath);
       if (!sessionContextKey) continue;
       if (splitWidth !== undefined) nextWidthCache[sessionContextKey] = splitWidth;
@@ -944,7 +990,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     if (splitState) writeExplorerRootCache(explorerRootCache);
     if (splitPinned !== undefined) writeCache(RIGHT_PINNED_BY_CONTEXT_CACHE_KEY, pinnedCache);
     trimCache(projectStateCache, 12, new Set(state.contextKey ? [state.contextKey] : []));
-    return { projectStateCache, explorerRootCache };
+    return { projectStateCache, explorerRootCache, initialRightSidebarStateBySession };
   }),
 
   setExplorerRoot: (path) => set((s) => {
@@ -1146,6 +1192,34 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       }
       return { directoryCache, selectedFilePath };
     }),
+
+  hydrateHideGitIgnoredRoots: async () => {
+    if (useSidebarStore.getState().hideGitIgnoredRootsHydrated) return;
+    if (hideGitIgnoredRootsHydration) return hideGitIgnoredRootsHydration;
+    hideGitIgnoredRootsHydration = (async () => {
+      const settings = await getSettings();
+      set({ hideGitIgnoredRoots: settings.hideGitIgnoredRoots ?? {}, hideGitIgnoredRootsHydrated: true });
+    })().finally(() => { hideGitIgnoredRootsHydration = null; });
+    return hideGitIgnoredRootsHydration;
+  },
+
+  setHideGitIgnoredRoot: async (rootPath, enabled) => {
+    const settings = await updateSettings({ hideGitIgnoredRoot: { rootPath, enabled } });
+    set((s) => {
+      // An expanded directory can be reached from several explorer roots with
+      // different filters. Discard snapshots as well as the active listings.
+      const projectStateCache = new Map(s.projectStateCache);
+      for (const [key, project] of projectStateCache) {
+        projectStateCache.set(key, { ...project, directoryCache: new Map() });
+      }
+      return {
+        hideGitIgnoredRoots: settings.hideGitIgnoredRoots ?? {},
+        hideGitIgnoredRootsHydrated: true,
+        directoryCache: new Map(),
+        projectStateCache,
+      };
+    });
+  },
 
   hydrateFileSortModes: async () => {
     if (useSidebarStore.getState().fileSortModesHydrated) return;
@@ -1368,6 +1442,12 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         const node = toFileTreeNode(event);
         if (!node || !siblings) continue;
         const existing = siblings.find((entry) => entry.path === node.path);
+        const explorerRoot = s.explorerRoot ?? s.rootPath;
+        if (!existing && explorerRoot && s.hideGitIgnoredRoots[explorerRoot] && isSameOrChildPath(explorerRoot, parent)) {
+          // Wait for the filtered parent rescan instead of inserting an entry
+          // that might be ignored by Git.
+          continue;
+        }
         const nextSiblings = sortFileTreeNodes(existing
           ? siblings.map((entry) => entry.path === node.path ? { ...entry, ...node, children: entry.children } : entry)
           : [...siblings, node], s.fileSortModes[parent] ?? 'name');

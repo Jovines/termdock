@@ -26,6 +26,7 @@ import {
 import { parseDiffInWorker, type DiffWorkerResult } from './diffWorkerClient';
 import { CONTEXT_EXPANSION_LINES, contextGap, expandContext, sourceLines, type ContextExpansion } from './diffContextExpansion';
 import { DiffSplitScrollArea } from './DiffSplitScrollArea';
+import { VirtualDiffHunk } from './VirtualDiffHunk';
 import { resolveLanguage } from '../../utils/syntaxHighlight';
 import { useDiffDisplayPrefs, type DiffContextPref, type DiffWhitespacePref } from './diffDisplayPrefs';
 
@@ -866,6 +867,13 @@ function isDiffNavTypingTarget(element: Element | null): boolean {
 export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, previewReverts, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, oldSourceRef, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
   const { t, locale } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
+  const oldSourceGitRoot = changedFile?.repoRoot ?? repoRoot ?? rootPath;
+  // Supplied patches must expand from their own old blob, never today's HEAD.
+  const oldSourceBlob = diffOverride?.match(/^index ([a-f0-9]{7,64})\.\.[a-f0-9]+/im)?.[1];
+  const oldSourceKind = oldSourceBlob ? 'blob' : oldSourceRef ? 'merge-base' : 'ref';
+  const oldSourceRevision = oldSourceBlob ?? oldSourceRef ?? 'HEAD';
+  const oldSourcePath = changedFile?.oldPath ?? filePath;
+  const oldSourceRequestKey = JSON.stringify([oldSourceGitRoot, oldSourcePath, oldSourceKind, oldSourceRevision, reloadKey]);
   const initialCacheRef = useRef<{
     diffContent: string | null;
     diffNotice: string | null;
@@ -938,6 +946,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   const [parsedFiles, setParsedFiles] = useState<FileData[]>(initialCache.parsedFiles);
   const [workerTokens, setWorkerTokens] = useState<Map<string, HunkTokens>>(initialCache.workerTokens);
   const [parsedDiffInput, setParsedDiffInput] = useState<ParsedDiffInput | null>(initialCache.parsedDiffInput);
+  const appliedParsedInputRef = useRef(initialCache.parsedDiffInput);
+  const paneActiveRef = useRef(active);
+  paneActiveRef.current = active;
   const [oldSourceContent, setOldSourceContent] = useState<string | null>(initialCache.oldSourceContent);
   const [oldSourceLoading, setOldSourceLoading] = useState(() => Boolean(
     active
@@ -950,7 +961,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     && changedFile?.status !== 'added'
     && !initialCache.oldSourceResolvedFromCache
   ));
-  const initialOldSourceCacheRef = useRef(initialCache.oldSourceResolvedFromCache ? reloadKey : null);
+  const resolvedOldSourceKeyRef = useRef(initialCache.oldSourceResolvedFromCache && diffOverride === undefined ? oldSourceRequestKey : null);
   const [imagePreview, setImagePreview] = useState<{
     objectUrl: string;
     size: number | null;
@@ -1033,34 +1044,41 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
 
   useEffect(() => {
     if (preparedDiff !== undefined) {
+      resolvedOldSourceKeyRef.current = null;
       setOldSourceContent(null);
       setOldSourceLoading(false);
       return;
     }
     if (oldSourceOverride !== undefined) {
+      resolvedOldSourceKeyRef.current = null;
       setOldSourceContent(oldSourceOverride);
       setOldSourceLoading(false);
       return;
     }
-    const gitRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
-    // Supplied patches must expand from their own old blob, never today's HEAD.
-    const oldBlob = diffOverride?.match(/^index ([a-f0-9]{7,64})\.\.[a-f0-9]+/im)?.[1];
-    if (!active || (diffOverride !== undefined && ((!oldBlob && !oldSourceRef) || (oldBlob && /^0+$/.test(oldBlob)))) || !gitRoot || !filePath || (diffOverride === undefined && (changedFile?.untracked || changedFileStatus === 'added'))) {
+    // Hiding a retained card cancels pending I/O without discarding its source.
+    // Clearing it here reparses every warm diff twice on each Tab round trip.
+    if (!active) {
+      setOldSourceLoading(false);
+      return;
+    }
+    if ((diffOverride !== undefined && ((!oldSourceBlob && !oldSourceRef) || (oldSourceBlob && /^0+$/.test(oldSourceBlob)))) || !oldSourceGitRoot || !filePath || !oldSourcePath || (diffOverride === undefined && (changedFile?.untracked || changedFileStatus === 'added'))) {
+      resolvedOldSourceKeyRef.current = null;
       setOldSourceContent(null);
       setOldSourceLoading(false);
       return;
     }
-    if (diffOverride === undefined && initialOldSourceCacheRef.current === reloadKey) {
+    if (resolvedOldSourceKeyRef.current === oldSourceRequestKey) {
       setOldSourceLoading(false);
       return;
     }
     setOldSourceContent(null);
+    resolvedOldSourceKeyRef.current = null;
     setOldSourceLoading(true);
     const controller = new AbortController();
-    const source = oldBlob ? 'blob' : oldSourceRef ? 'merge-base' : 'ref';
-    getGitBlobContent(changedFile?.oldPath ?? filePath, gitRoot, oldBlob ?? oldSourceRef ?? 'HEAD', controller.signal, source)
+    getGitBlobContent(oldSourcePath, oldSourceGitRoot, oldSourceRevision, controller.signal, oldSourceKind)
       .then((result) => {
         if (!controller.signal.aborted) {
+          if (!result.error) resolvedOldSourceKeyRef.current = oldSourceRequestKey;
           setOldSourceContent(result.truncated || result.error ? null : result.content);
           setOldSourceLoading(false);
         }
@@ -1072,7 +1090,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         }
       });
     return () => controller.abort();
-  }, [active, changedFile?.untracked, changedFile?.oldPath, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, oldSourceOverride, oldSourceRef, preparedDiff, reloadKey, repoRoot, rootPath]);
+  }, [active, changedFile?.untracked, changedFileStatus, diffOverride, filePath, oldSourceBlob, oldSourceGitRoot, oldSourceKind, oldSourceOverride, oldSourcePath, oldSourceRef, oldSourceRequestKey, oldSourceRevision, preparedDiff]);
 
   useEffect(() => {
     if (preparedDiff !== undefined) return;
@@ -1307,7 +1325,11 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
 
   useEffect(() => {
     if (preparedDiff !== undefined) return;
+    // A worker response for a hidden pane must not mount thousands of rows
+    // while the user is switching away. Its result remains in the shared cache.
+    if (!active) return;
     if (!diffContent || diffContent.trim() === '') {
+      appliedParsedInputRef.current = null;
       setParsedFiles([]);
       setWorkerTokens(new Map());
       setParsedDiffInput(null);
@@ -1326,6 +1348,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       parseInlineMode,
       parseLanguage,
     );
+    const applied = appliedParsedInputRef.current;
+    if (applied?.cacheKey === parseCacheKey && applied.diffContent === diffContent
+      && applied.oldSource === (oldSourceContent ?? undefined)) return;
     loadParsedDiffCached(
       diffContent,
       oldSourceContent ?? undefined,
@@ -1337,6 +1362,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     )
       .then((result) => {
         if (cancelled) return;
+        appliedParsedInputRef.current = { cacheKey: parseCacheKey, diffContent, oldSource: oldSourceContent ?? undefined };
         setParsedFiles(result.files);
         setWorkerTokens(result.tokens);
         setParsedDiffInput({ cacheKey: parseCacheKey, diffContent, oldSource: oldSourceContent ?? undefined });
@@ -1365,7 +1391,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     return () => {
       cancelled = true;
     };
-  }, [changedFileRepoRoot, diffContent, diffOptions, filePath, inlineMode, lightweight, oldSourceContent, preparedDiff, repoRoot, rootPath]);
+  }, [active, changedFileRepoRoot, diffContent, diffOptions, filePath, inlineMode, lightweight, oldSourceContent, preparedDiff, repoRoot, rootPath]);
 
   const effectiveDiffContent = preparedDiff !== undefined ? preparedDiff?.diffContent ?? null : diffContent;
   const effectiveDiffNotice = preparedDiff !== undefined ? preparedDiff?.diffNotice ?? null : diffNotice;
@@ -1421,7 +1447,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     const values = contextExpansion?.files === files && contextExpansion.source === contextSource ? contextExpansion.values : {};
     return files[0].hunks.map((hunk, index) => expandContext(hunk, contextLines, values[index]));
   }, [files, contextLines, contextSource, contextExpansion]);
-  const expandHunkContext = (index: number, direction: 'before' | 'after') => {
+  const expandHunkContext = useCallback((index: number, direction: 'before' | 'after') => {
     if (!contextLines) return;
     setContextExpansion((current) => {
       const values = current?.files === files && current.source === contextSource ? current.values : {};
@@ -1430,11 +1456,11 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       const previous = values[index] ?? { before: 0, after: 0 };
       return { files, source: contextSource, values: { ...values, [index]: { ...previous, [direction]: previous[direction] + amount } } };
     });
-  };
+  }, [contextLines, contextSource, files]);
 
-  const effectiveAuditRecords = auditRecords ?? [];
+  const effectiveAuditRecords = useMemo(() => auditRecords ?? [], [auditRecords]);
 
-  const fileTokens = preparedDiff !== undefined ? preparedDiff?.tokens ?? new Map() : workerTokens;
+  const fileTokens = useMemo(() => preparedDiff !== undefined ? preparedDiff?.tokens ?? new Map() : workerTokens, [preparedDiff, workerTokens]);
 
 
   const totalChanges = useMemo(() => {
@@ -1694,7 +1720,11 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     [handleDiffLineSelect, lineSelectionEnabled],
   );
 
-  const renderFileDiffs = (hideSingleFileHeader: boolean) => {
+  const canStageFile = !changedFile || changedFile.unstaged || changedFile.untracked;
+  // Visibility only gates I/O. Reuse the complete row tree when a Tab changes
+  // so retained cards do not reconcile thousands of unchanged diff cells.
+  const renderedFileDiffs = useMemo(() => {
+    const hideSingleFileHeader = embedded;
     // Flat index across all files' hunks, matching the DOM order of
     // [data-diff-hunk-anchor] used by jumpToHunk.
     let hunkFlatCursor = 0;
@@ -1832,7 +1862,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const awaitingFreshDiff = completedHunkAction?.diff === effectiveDiffContent;
                     const hunkActionBusy = runningHunkActionKey !== null || awaitingFreshDiff || effectiveDiffLoading;
                     const thisHunkCompleted = awaitingFreshDiff && (completedHunkAction?.key === stageHunkKey || completedHunkAction?.key === revertHunkKey);
-                    const canStageHunk = canRunHunkActions && (!changedFile || changedFile.unstaged || changedFile.untracked);
+                    const canStageHunk = canRunHunkActions && canStageFile;
                     const thisHunkActionError = hunkActionError && (hunkActionError.key === stageHunkKey || hunkActionError.key === revertHunkKey)
                       ? hunkActionError.message
                       : null;
@@ -1955,8 +1985,12 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                       return `${defaultClassName}${moved ? ' diff-line-moved' : ''}${selected ? ' diff-line-ref-selected' : ''}`;
                     };
                     return (
-                      <div
-                        key={hunk.content}
+                      <VirtualDiffHunk
+                        key={`${hunk.content}:${viewType}:${wrap}:${inlineMode}`}
+                        enabled={embedded}
+                        activeRef={paneActiveRef}
+                        estimatedHeight={32 + (rowModel?.rows.length ?? displayHunk.changes.length) * 19}
+                        pinned={hunkFlatIndex === activeHunkIndex || lineSelection?.hunkId === hunkId}
                         className={`diff-hunk scroll-mt-16 ${hunkFlatIndex === activeHunkIndex ? 'diff-hunk--jump-target' : ''}`}
                         data-diff-hunk-anchor={displayPath}
                         data-diff-hunk-index={index}
@@ -2077,7 +2111,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                             {(hunks) => hunks.map((singleHunk) => <Hunk key={singleHunk.content} hunk={singleHunk} />)}
                           </Diff>
                         {renderContextButton('after')}
-                      </div>
+                      </VirtualDiffHunk>
                     );
                   })}
                 {hasNoFinalNewline && (
@@ -2112,7 +2146,14 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       })}
     </>
     );
-  };
+  }, [activeHunkIndex, auditRepoRoot, canRunHunkActions, canStageFile, completedHunkAction,
+    contextLines, copiedReferenceKey, diffLineEvents, effectiveAuditRecords, effectiveDiffContent,
+    effectiveDiffLoading, embedded, expandHunkContext, expandedHunks, filePath, fileStats,
+    fileTokens, files, getReferenceLongPressHandlers, hunkActionError, hunkDerivedMap,
+    insertedReferenceKey, lineSelection, lineSelectionIsMobile, lineSelectionPillTop, locale,
+    onClearAuditRecord, onHunkGitAction, onInsertDiffReference, previewReverts, rawFileDiffs,
+    referenceRepoRoot, resolvedReferenceFilePath, revertConfirmKey, runHunkGitAction,
+    runningHunkActionKey, t, viewType, wrap, paneActiveRef, inlineMode]);
 
   // Keep the last parsed view while its replacement is being parsed. Never
   // reuse it across file/options changes, where the cache identity differs.
@@ -2233,7 +2274,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       >
         {getReferenceLongPressHandlers.popoverNode}
         {diffNoticeBanner}
-        {renderFileDiffs(true)}
+        {renderedFileDiffs}
       </div>
     );
   }
@@ -2357,7 +2398,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         </div>
       </div>
       {diffNoticeBanner}
-      {renderFileDiffs(false)}
+      {renderedFileDiffs}
     </div>
   );
 }

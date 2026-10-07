@@ -1,6 +1,6 @@
 import { LoadingSpinner as LoaderCircle } from '../ui/Loading';
 import { ChevronDown, Folder, History, Plus, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AgentLauncherInfo, AgentResumeHistoryEntry } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
 import { useI18n } from '../../i18n';
@@ -45,6 +45,8 @@ export function NewSessionComposer({
   onRemoveResumeHistory,
   onClose,
   onOptionsChange,
+  additionalContent,
+  footerActions,
 }: {
   directories: string[];
   tmuxAvailable: boolean;
@@ -63,8 +65,11 @@ export function NewSessionComposer({
   onRemoveResumeHistory: (entryId: string) => void;
   onClose: () => void;
   onOptionsChange: (options: { mode: 'shell' | 'tmux'; cwd?: string; command?: string }) => void;
+  additionalContent?: ReactNode;
+  footerActions?: ReactNode;
 }) {
   const { t, locale } = useI18n();
+  const panelRef = useRef<HTMLElement>(null);
   const [launchAgent, setLaunchAgent] = useState<NewSessionAgentPreference>(selectedAgent);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [customCommandSelected, setCustomCommandSelected] = useState(false);
@@ -139,12 +144,27 @@ export function NewSessionComposer({
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
       if (directoryPickerOpen) return;
       onClose();
     };
     document.addEventListener('keydown', closeOnEscape);
     return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [directoryPickerOpen, onClose]);
+
+  useEffect(() => {
+    if (directoryPickerOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (panelRef.current?.contains(event.target)) return;
+      // Menus rendered in a portal still belong to this panel.
+      if (event.target instanceof Element && event.target.closest('[data-sidebar-composer-popover]')?.getAttribute('data-sidebar-composer-popover') === panelRef.current?.id) return;
+      // The launcher trigger already toggles the panel itself.
+      if (event.target instanceof Element && event.target.closest('[aria-controls="sidebar-launch-options"]')) return;
+      onClose();
+    };
+    document.addEventListener('pointerdown', closeOutside, true);
+    return () => document.removeEventListener('pointerdown', closeOutside, true);
   }, [directoryPickerOpen, onClose]);
 
   const chooseDirectory = (directory: string) => {
@@ -160,7 +180,7 @@ export function NewSessionComposer({
   }).format(new Date(timestamp));
 
   return (
-    <section className="relative z-20 flex max-h-[min(56svh,36rem)] shrink-0 flex-col overflow-hidden border-t border-border bg-[var(--chrome-bg)] animate-slide-down" aria-label={t('sidebar.newSessionComposerTitle')}>
+    <section ref={panelRef} id="sidebar-launch-options" className={`absolute inset-x-3 bottom-3 z-30 flex flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-[0_18px_50px_var(--app-shadow-strong),0_4px_14px_var(--app-shadow-soft)] animate-slide-down ${footerActions ? 'max-h-[min(70svh,42rem,calc(100%_-_4.5rem))]' : 'max-h-[min(56svh,36rem,calc(100%_-_4.5rem))]'}`} aria-label={t('sidebar.newSessionComposerTitle')}>
       <div className="flex shrink-0 items-center justify-between gap-3 px-3 py-1.5">
         <div className="flex min-w-0 items-center gap-2.5">
           <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground"><Terminal size={14} /></span>
@@ -337,12 +357,14 @@ export function NewSessionComposer({
             {resumeHistoryError && <div role="alert" className="mt-1.5 px-1 text-[10px] text-destructive">{resumeHistoryError}</div>}
           </details>
         )}
+        {additionalContent}
       </div>
 
-      <div className="shrink-0 bg-[var(--chrome-bg)] px-3 pb-3 pt-2">
+      <div className="shrink-0 bg-surface px-3 pb-3 pt-2">
         <button type="button" onClick={startSession} disabled={customCommandSelected && !launchCommand.trim()} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 text-[12px] font-semibold text-primary-foreground transition hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40" aria-label={t('sidebar.launchSessionWith', { name: launchName })}>
           {launchAgent ? <AgentBrandAvatar agent={launchAgent} size={15} /> : <Terminal size={14} />}<span className="truncate">{t('sidebar.launchSessionWith', { name: launchName })}</span>
         </button>
+        {footerActions}
       </div>
       <DirectoryPickerDialog
         open={directoryPickerOpen}

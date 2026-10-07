@@ -244,6 +244,9 @@ export type TranslationDictionary = {
     unpinCurrentFolder: string;
     showHiddenFiles: string;
     hideHiddenFiles: string;
+    hideGitIgnoredFiles: string;
+    showGitIgnoredFiles: string;
+    gitIgnoreSaveFailed: string;
     insertCurrentFolder: string;
     insertCurrentFolderShort: string;
     pinnedFolders: string;

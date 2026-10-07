@@ -160,12 +160,23 @@ html[data-termdock-desktop='true'] {
   --safe-top-inset: max(env(safe-area-inset-top, 0px), 38px);
 }
 
-/* The pinned sidebar starts at the native window controls. Keep this in the
-   served stylesheet so existing desktop shells do not depend on header classes.
-   Overlay drawers already reserve the top safe inset. */
-html[data-termdock-desktop='true'] [data-session-sidebar-pinned] > [data-session-sidebar-header] {
-  padding-left: 80px;
+/* Native traffic lights start at y=16 with a 14px diameter, so the pinned
+   header shares their y=23 centerline. Keep this in the served stylesheet for
+   existing desktop shells. The header lives inside the sidebar's content
+   wrapper. Overlay drawers already reserve the safe inset. */
+html[data-termdock-desktop='true'] [data-session-sidebar-pinned] [data-session-sidebar-header] {
+  display: flex;
+  align-items: center;
+  min-height: 46px;
+  padding: 0 10px 0 88px;
   -webkit-app-region: drag;
+}
+
+/* Match the session-row action columns while keeping the overlay drawer's
+   larger touch targets. Both icons use the same box and glyph size. */
+html[data-termdock-desktop='true'] [data-session-sidebar-pinned] [data-session-sidebar-header-action] {
+  width: 26px;
+  height: 26px;
 }
 
 html[data-termdock-desktop='true'] [data-session-sidebar-header] button,

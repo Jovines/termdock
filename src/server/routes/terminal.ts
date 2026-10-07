@@ -60,6 +60,8 @@ import {
   setRunningSessionButtonEnabledSetting,
   setAttentionButtonEnabledSetting,
   getFileSortModesSetting,
+  getHideGitIgnoredRootsSetting,
+  setHideGitIgnoredRootSetting,
   setFileSortModesSetting,
   setFileSortModeSetting,
   getNestedGitScanRootsSetting,
@@ -127,6 +129,8 @@ import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/col
 import { ambiguousIdMessage } from '../agent/collaborationProtocol.js';
 import { buildCollaborationSpawnCommand, resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
+import { NativeSessionSearch } from '../agent/nativeSessionSearch.js';
+import { CollaborationError } from '../agent/collaborationProtocol.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, type CollaborationBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
@@ -208,6 +212,7 @@ const collaborationDeliveryWorker = new CollaborationDeliveryWorker({
   onError: (error) => console.warn('[collaboration] background delivery failed:', getErrorMessage(error)),
 });
 const sessionSearchStore = new SessionSearchStore(`${TERMDOCK_DIR}/session-search`);
+const nativeSessionSearch = new NativeSessionSearch(`${TERMDOCK_DIR}/session-search/native`);
 let atomicJsonWriteSequence = 0;
 
 async function readJsonFileIfExists<T>(filePath: string): Promise<T | null> {
@@ -4128,8 +4133,8 @@ async function findCodexSessionFile(nativeSessionId: string): Promise<string | n
   const cachedPath = codexSessionFileCache.get(nativeSessionId);
   if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
   if (!/^[a-zA-Z0-9._-]{8,160}$/.test(nativeSessionId)) return null;
-  const root = path.join(os.homedir(), '.codex', 'sessions');
-  const pending = [root];
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const pending = [path.join(codexHome, 'sessions'), path.join(codexHome, 'archived_sessions')];
   let visited = 0;
   while (pending.length > 0 && visited < 20_000) {
     const directory = pending.pop()!;
@@ -4154,7 +4159,9 @@ async function findExternalCodexWriter(target: AgentResumeTarget): Promise<numbe
   if (!sessionFile) return null;
   try {
     const { stdout } = await execFileAsync('lsof', ['-t', '--', sessionFile], { timeout: 2500, maxBuffer: 64 * 1024 });
-    const pid = stdout.split(/\s+/).map(Number).find((value) => Number.isInteger(value) && value > 1);
+    // Our search worker reads these files in this process; that read-only
+    // descriptor must not be mistaken for an external Codex conversation owner.
+    const pid = stdout.split(/\s+/).map(Number).find((value) => Number.isInteger(value) && value > 1 && value !== process.pid);
     return pid ?? null;
   } catch {
     return null;
@@ -6471,6 +6478,27 @@ router.get('/operations/collaboration-directory', (req, res) => {
   void service.refresh();
   res.json(service.directory());
 });
+router.delete('/operations/collaboration-connections/:serviceId', (req, res) => {
+  try {
+    assertPeerRegistrationAuthority(req);
+    const service = req.app.locals.collaborationService;
+    if (!service) return res.status(503).json({ error: '协作服务正在启动' });
+    res.json(service.removePeer(req.params.serviceId));
+  } catch (error) {
+    res.status(error instanceof CollaborationError ? error.httpStatus : getErrorMessage(error) === 'AUTHORIZATION_DENIED' ? 403 : 400)
+      .json({ error: getErrorMessage(error), ...(error instanceof CollaborationError ? { code: error.code, ...error.details } : {}) });
+  }
+});
+router.post('/operations/collaboration-connections/:serviceId/restore', (req, res) => {
+  try {
+    assertPeerRegistrationAuthority(req);
+    const service = req.app.locals.collaborationService;
+    if (!service) return res.status(503).json({ error: '协作服务正在启动' });
+    res.json(service.restorePeer(req.params.serviceId));
+  } catch (error) {
+    res.status(error instanceof CollaborationError ? error.httpStatus : getErrorMessage(error) === 'AUTHORIZATION_DENIED' ? 403 : 400).json({ error: getErrorMessage(error) });
+  }
+});
 export function collaborationDirectorySessions() { return globalSessionState.sessions.map(orchestrationSessionSnapshot); }
 
 export function collaborationLocalActivity() {
@@ -6834,16 +6862,68 @@ router.use('/operations/orchestration', collaborationRoutes({ store: collaborati
     return { ok: true };
   } }));
 
-router.get('/operations/session-search', (req, res) => {
-  const query = typeof req.query.q === 'string' ? req.query.q : '';
-  const results = sessionSearchStore.search(query, Number(req.query.limit) || 30).map((result) => {
+router.get('/operations/session-search', async (req, res) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 512) : '';
+  const limit = Math.max(1, Math.min(5000, Math.floor(Number(req.query.limit)) || 50));
+  const controller = new AbortController();
+  const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+  res.once('close', disconnected);
+  const terminalResults = sessionSearchStore.search(query, 100).map((result) => {
     const live = globalSessionState.sessions.some((candidate) => candidate.sessionId === result.sessionId);
     const resumeEntry = result.agentNativeSessionId
-      ? agentResumeHistory.list().find((entry) => entry.agent.sessionId === result.agentNativeSessionId)
+      ? agentResumeHistory.list().find((entry) => entry.agent.slug === result.agentSlug && entry.agent.sessionId === result.agentNativeSessionId)
       : null;
-    return { ...result, live, resumeHistoryId: resumeEntry?.id ?? null };
+    return { ...result, source: 'terminal' as const, nativeKey: null, live, resumeHistoryId: resumeEntry?.id ?? null };
   });
-  res.json({ query, results });
+  try {
+    // Preserve the names users see in Termdock as searchable aliases, including
+    // custom titles for conversations that have already been closed.
+    const titles = [
+      ...sessionSearchStore.search('', 100).flatMap(entry => entry.agentSlug && entry.agentNativeSessionId ? [{ agentSlug: entry.agentSlug, agentNativeSessionId: entry.agentNativeSessionId, title: entry.title }] : []),
+      ...agentResumeHistory.list().reverse().map(entry => ({ agentSlug: entry.agent.slug, agentNativeSessionId: entry.agent.sessionId!, title: entry.title })),
+      ...globalSessionState.sessions.flatMap(entry => entry.customName && entry.agentResume?.sessionId ? [{ agentSlug: entry.agentResume.slug, agentNativeSessionId: entry.agentResume.sessionId, title: entry.name }] : []),
+    ];
+    const native = await nativeSessionSearch.search(query, limit + terminalResults.length, titles, controller.signal);
+    if (controller.signal.aborted) return;
+    const matched = new Set(native.matchedSessions);
+    const additional = terminalResults.filter(result => !result.agentNativeSessionId || !matched.has(`${result.agentSlug}:${result.agentNativeSessionId}`));
+    const results = native.results.map(result => {
+      const owner = findActiveAgentResumeOwner('', { slug: result.agentSlug, nativeSessionId: result.agentNativeSessionId, command: '' });
+      const liveRecord = owner ? globalSessionState.sessions.find(candidate => candidate.backendSessionId === owner) : null;
+      return { ...result, source: result.agentSlug, nativeKey: result.key, sessionId: liveRecord?.sessionId || `native:${result.key}`,
+        live: Boolean(liveRecord), resumeHistoryId: null };
+    });
+    res.json({ query, results: [...results, ...additional].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit), total: native.total + additional.length, index: native.index });
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    res.json({ query, results: terminalResults.slice(0, limit), total: terminalResults.length,
+      index: { total: 0, indexed: 0, building: false, failed: 0, warning: `历史会话暂时无法搜索：${getErrorMessage(error)}` } });
+  } finally { res.off('close', disconnected); }
+});
+
+router.post('/operations/session-search/prepare', async (req, res) => {
+  const key = typeof req.body?.nativeKey === 'string' ? req.body.nativeKey : '';
+  if (!/^[a-f0-9]{64}$/.test(key)) return res.status(400).json({ error: '无效的历史会话' });
+  try {
+    // Resolve the original file and command on the server; never accept a
+    // transcript path, working directory or shell command from search clients.
+    const entry = await nativeSessionSearch.get(key);
+    if (!entry) return res.status(404).json({ error: '这条历史会话已不存在，请重新搜索' });
+    const agent = agentBySlug(entry.agentSlug);
+    const history = agentResumeHistory.list().find(candidate => candidate.agent.slug === entry.agentSlug && candidate.agent.sessionId === entry.agentNativeSessionId);
+    const command = agent ? buildResumeCommand(agent, entry.agentNativeSessionId, history?.agent.launchArgv) : null;
+    if (!command) return res.status(410).json({ error: '当前 Agent 不支持恢复这条历史会话' });
+    const target = { slug: entry.agentSlug, nativeSessionId: entry.agentNativeSessionId, command };
+    const owner = findActiveAgentResumeOwner('', target);
+    const liveRecord = owner ? globalSessionState.sessions.find(candidate => candidate.backendSessionId === owner) : null;
+    if (liveRecord) return res.json({ sessionId: liveRecord.sessionId });
+    if (owner || await findExternalCodexWriter(target)) return res.status(409).json({ error: '这条会话已在其他终端运行，请先切换到原终端或关闭后恢复', code: 'AGENT_SESSION_ACTIVE_ELSEWHERE' });
+    if (!entry.cwd) return res.status(409).json({ error: '尚未找到这条会话的项目目录，请等待索引完成后重试' });
+    const cwd = await resolveWorkingDirectory(req, entry.cwd);
+    res.json({ command, cwd, title: entry.title, agent });
+  } catch (error) {
+    res.status(400).json({ error: `无法恢复会话：${getErrorMessage(error)}` });
+  }
 });
 
 router.get('/agent-resume-history', (_req, res) => {
@@ -7101,6 +7181,7 @@ async function getSettingsPayload() {
     collaborationFloatingGroupId: getCollaborationFloatingGroupIdSetting(),
     serviceSwitcherExpanded: getServiceSwitcherExpandedSetting(),
     fileSortModes: getFileSortModesSetting(),
+    hideGitIgnoredRoots: getHideGitIgnoredRootsSetting(),
     nestedGitScanRoots: getNestedGitScanRootsSetting(),
     activeGitRepos: getActiveGitReposSetting(),
     pinnedExplorerRoots: getPinnedExplorerRootsSetting(),
@@ -7306,6 +7387,19 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setFileSortModeSetting(preference.path as string, preference.mode);
+  }
+
+  if (body.hideGitIgnoredRoot && typeof body.hideGitIgnoredRoot === 'object') {
+    const preference = body.hideGitIgnoredRoot as { rootPath?: unknown; enabled?: unknown };
+    const validPath = typeof preference.rootPath === 'string'
+      && preference.rootPath.length > 0
+      && preference.rootPath.length <= 4096
+      && (preference.rootPath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(preference.rootPath));
+    if (!validPath || typeof preference.enabled !== 'boolean') {
+      res.status(400).json({ error: 'Invalid Git ignore visibility preference', code: 'GIT_IGNORE_VISIBILITY_INVALID' });
+      return;
+    }
+    setHideGitIgnoredRootSetting(preference.rootPath as string, preference.enabled);
   }
 
   if (body.nestedGitScanRoot && typeof body.nestedGitScanRoot === 'object') {

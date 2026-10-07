@@ -448,6 +448,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [releasedResumeToken, setReleasedResumeToken] = useState(0);
   const [viewportReadySessionIds, setViewportReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [contentReadySessionIds, setContentReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const pendingStartupCommandsRef = useRef(new Map<string, { backendSessionId: string; command: string }>());
   const [deferredViewportSessionIds, setDeferredViewportSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const restoredRef = useRef(false);
   const swiperRef = useRef<SwiperInstance | null>(null);
@@ -723,6 +724,28 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    for (const [sessionId, pending] of pendingStartupCommandsRef.current) {
+      const session = sessions.find(candidate => candidate.id === sessionId);
+      if (!session || session.sessionId !== pending.backendSessionId) {
+        pendingStartupCommandsRef.current.delete(sessionId);
+        continue;
+      }
+      if (!readySessionIds.has(sessionId)
+        || !viewportReadySessionIds.has(sessionId)
+        || !contentReadySessionIds.has(sessionId)) continue;
+
+      // Starting immediately after openSession can put an Agent's terminal
+      // probes into the initial replay, before xterm can answer them. Wait for
+      // the stream, parser and initial size synchronization instead of a timer.
+      // Remove before sending so rerenders/reconnects cannot launch it twice.
+      pendingStartupCommandsRef.current.delete(sessionId);
+      void sendTerminalInput(pending.backendSessionId, `${pending.command}\r`).catch(error => {
+        console.error('[Session] Failed to send startup command:', error);
+      });
+    }
+  }, [sessions, readySessionIds, viewportReadySessionIds, contentReadySessionIds]);
   const foregroundViewportReady = foregroundSessionId !== null
     && viewportReadySessionIds.has(foregroundSessionId);
   const foregroundContentReady = foregroundSessionId !== null
@@ -1545,6 +1568,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
     try {
+      // Capture the selected session's layout before the asynchronous request.
+      const sidebar = useSidebarStore.getState();
+      const initialSidebarState = activeSessionId ? {
+        rightOpen: sidebar.rightOpen,
+        rightPinned: sidebar.rightPinned,
+        rightSidebarWidth: sidebar.rightSidebarWidth,
+        rightTab: sidebar.rightTab,
+      } : null;
       const mode: TerminalMode = options?.mode === 'tmux' || options?.mode === 'shell'
         ? options.mode
         : defaultSessionMode;
@@ -1571,6 +1602,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       });
       const canonical = result.session;
       const terminalSession = result.terminalSession;
+      if (!result.reused && initialSidebarState) {
+        useSidebarStore.getState().initializeRightSidebarForSession(
+          canonical.sessionId,
+          terminalSession.cwd ?? effectiveCwd ?? null,
+          initialSidebarState,
+        );
+      }
       const nextSession: TerminalSession = {
         id: canonical.sessionId,
         name: canonical.name,
@@ -1579,6 +1617,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         mode: terminalSession.mode ?? canonical.mode,
         tmuxSessionName: terminalSession.tmuxSessionName ?? canonical.tmuxSessionName,
       };
+
+      const command = options?.command?.trim();
+      if (command) {
+        pendingStartupCommandsRef.current.set(nextSession.id, {
+          backendSessionId: terminalSession.sessionId,
+          command,
+        });
+      }
 
       setSessions((prev) => upsertRuntimeSession(prev, nextSession));
 
@@ -1604,10 +1650,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         mode: nextSession.mode,
         tmuxSessionName: nextSession.tmuxSessionName,
       });
-      const command = options?.command?.trim();
-      if (command) {
-        await sendTerminalInput(terminalSession.sessionId, `${command}\r`);
-      }
       return nextSession.id;
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);

@@ -9,12 +9,9 @@ import { openRemoteSession } from '../../federation/remoteSession';
 import { openServiceAccess } from '../../federation/accessEvents';
 import {
   X as RiCloseLine,
-  Plus as RiAddLine,
-  Settings as RiSettings4Line,
   Server as RiServerLine,
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
-  BellDot as RiBellDot,
   ChevronRight as RiChevronRightLine,
   Pin as RiPushpinLine,
   PinOff as RiPinOffLine,
@@ -57,8 +54,8 @@ import {
 } from '../../terminal/api';
 import { NewSessionComposer } from './NewSessionComposer';
 import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
-import { Switch } from '../ui/Switch';
 import { AgentOperationsPanel } from './AgentOperationsPanel';
+import { SidebarUtilityActions } from './SidebarUtilityActions';
 
 
 interface LeftSidebarProps {
@@ -118,10 +115,6 @@ interface LeftSidebarProps {
   defaultSessionMode?: 'shell' | 'tmux';
   push?: boolean;
   pinned?: boolean;
-  runningSessionButtonEnabled?: boolean;
-  onRunningSessionButtonEnabledChange?: (enabled: boolean) => void;
-  attentionButtonEnabled?: boolean;
-  onAttentionButtonEnabledChange?: (enabled: boolean) => void;
   onTogglePinned?: () => void;
 }
 
@@ -268,10 +261,6 @@ export function LeftSidebar(
     defaultSessionMode = 'shell',
     push,
     pinned,
-    runningSessionButtonEnabled = false,
-    onRunningSessionButtonEnabledChange,
-    attentionButtonEnabled = true,
-    onAttentionButtonEnabledChange,
     onTogglePinned,
     recoverableTmuxSessions = [],
     recoverableTmuxSessionsLoading = false,
@@ -279,7 +268,6 @@ export function LeftSidebar(
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
-  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [, requestAttentionScroll] = useState(0);
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
@@ -335,8 +323,6 @@ export function LeftSidebar(
     refresh: refreshNewSessionAgents,
     selectAgent: selectNewSessionAgent,
   } = useNewSessionAgentPreference();
-  const headerMenuRef = useRef<HTMLDivElement | null>(null);
-  const headerMenuPanelRef = useRef<HTMLDivElement | null>(null);
   const splitLayoutMenuRef = useRef<HTMLDivElement | null>(null);
   const pendingUpdate = Boolean(
     updateState?.latestVersion
@@ -668,7 +654,6 @@ export function LeftSidebar(
 
   useEffect(() => {
     if (!isOpen) {
-      setHeaderMenuOpen(false);
       setNewSessionComposerOpen(false);
     }
   }, [isOpen]);
@@ -688,59 +673,6 @@ export function LeftSidebar(
       .finally(() => { if (!cancelled) setAgentResumeHistoryLoading(false); });
     return () => { cancelled = true; };
   }, [newSessionComposerOpen, t]);
-
-  useLayoutEffect(() => {
-    if (!headerMenuOpen) return;
-    const host = headerMenuRef.current;
-    const panel = headerMenuPanelRef.current;
-    if (!host || !panel) return;
-    const viewport = window.visualViewport;
-    const positionMenu = () => {
-      const margin = 8;
-      const leftEdge = (viewport?.offsetLeft ?? 0) + margin;
-      const topEdge = (viewport?.offsetTop ?? 0) + margin;
-      const width = Math.max(0, (viewport?.width ?? window.innerWidth) - margin * 2);
-      const height = Math.max(0, (viewport?.height ?? window.innerHeight) - margin * 2);
-      panel.style.maxWidth = `${width}px`;
-      panel.style.maxHeight = `${height}px`;
-      const anchor = host.getBoundingClientRect();
-      // Keep the menu in its local stacking context, but constrain it to the viewport.
-      const left = Math.max(leftEdge, Math.min(anchor.right - panel.offsetWidth, leftEdge + width - panel.offsetWidth));
-      const top = Math.max(topEdge, Math.min(anchor.bottom + 4, topEdge + height - panel.offsetHeight));
-      panel.style.left = `${left - anchor.left}px`;
-      panel.style.top = `${top - anchor.top}px`;
-    };
-    positionMenu();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionMenu);
-    observer?.observe(host);
-    observer?.observe(panel);
-    window.addEventListener('resize', positionMenu);
-    window.addEventListener('scroll', positionMenu, true);
-    viewport?.addEventListener('resize', positionMenu);
-    viewport?.addEventListener('scroll', positionMenu);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', positionMenu);
-      window.removeEventListener('scroll', positionMenu, true);
-      viewport?.removeEventListener('resize', positionMenu);
-      viewport?.removeEventListener('scroll', positionMenu);
-    };
-  }, [headerMenuOpen, drawerWidthPx]);
-
-  useEffect(() => {
-    if (!headerMenuOpen) return;
-    const closeMenu = (event: MouseEvent | KeyboardEvent) => {
-      if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
-      if (event instanceof MouseEvent && event.target instanceof Node && headerMenuRef.current?.contains(event.target)) return;
-      setHeaderMenuOpen(false);
-    };
-    window.addEventListener('mousedown', closeMenu);
-    window.addEventListener('keydown', closeMenu);
-    return () => {
-      window.removeEventListener('mousedown', closeMenu);
-      window.removeEventListener('keydown', closeMenu);
-    };
-  }, [headerMenuOpen]);
 
   useEffect(() => {
     if (!layoutMenuWorkspaceId) return;
@@ -825,7 +757,6 @@ export function LeftSidebar(
   };
 
   const toggleNewSessionComposer = () => {
-    setHeaderMenuOpen(false);
     if (newSessionComposerOpen) {
       setNewSessionComposerOpen(false);
       return;
@@ -1770,11 +1701,11 @@ export function LeftSidebar(
   );
 
   const inner = (
-    <>
+    <div className="relative flex min-h-0 flex-1 flex-col">
       {/* Header — single compact row */}
       <div data-session-sidebar-header className="relative z-20 shrink-0 px-3 py-0.5">
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-px bg-border opacity-40" />
-        <div className="flex items-center gap-1.5">
+        <div className="flex w-full items-center gap-1.5">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="text-[12px] font-medium text-muted-foreground">{t('sidebar.sessions')}</span>
@@ -1787,159 +1718,25 @@ export function LeftSidebar(
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <div ref={headerMenuRef} className={headerMenuOpen ? 'relative z-20' : 'relative'}>
-              <button
-                type="button"
-                onClick={() => setHeaderMenuOpen((open) => !open)}
-                className={`relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
-                aria-expanded={headerMenuOpen}
-                aria-haspopup="menu"
-                aria-label={moreButtonLabel}
-                title={moreButtonLabel}
-              >
-                <RiMoreHorizontal size={15} />
-                {serverAttention && (
-                  <span
-                    className="absolute right-0.5 top-0.5 z-10 h-2 w-2 rounded-full bg-destructive ring-2 ring-[var(--chrome-bg)]"
-                    aria-hidden="true"
-                  />
-                )}
-                {pendingUpdate && (
-                  <span
-                    className={`absolute top-0.5 z-10 h-2 w-2 rounded-full bg-[var(--warning)] ring-2 ring-[var(--chrome-bg)] ${serverAttention ? 'right-3.5' : 'right-0.5'}`}
-                    aria-hidden="true"
-                  />
-                )}
-              </button>
-              {headerMenuOpen && (
-                <div ref={headerMenuPanelRef} role="menu" className="absolute z-30 w-60 overflow-y-auto overscroll-contain rounded-xl border border-border/15 bg-surface p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in">
-                  {pendingUpdate && updateState?.latestVersion && (
-                    <div className="mb-1 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.10)] px-2.5 py-2.5 text-foreground">
-                      <div className="flex items-start gap-2">
-                        <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[rgb(var(--warning-rgb)_/_0.16)] text-[color:var(--warning)]">
-                          <RiRefreshLine size={13} className={updateState.status === 'installing' || updateState.status === 'restarting' ? 'animate-spin' : ''} />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block font-semibold">{t('sidebar.updateAvailable', { version: updateState.latestVersion })}</span>
-                          <span className="mt-0.5 block text-[10.5px] leading-relaxed text-muted-foreground">
-                            {updateState.status === 'installing'
-                              ? t('sidebar.updateInstalling')
-                              : updateState.status === 'ready'
-                                ? t('sidebar.updateReady')
-                                : updateState.status === 'restarting'
-                                  ? t('sidebar.updateRestarting')
-                                  : t('sidebar.updateFailed')}
-                          </span>
-                        </span>
-                      </div>
-                      {updateState.status === 'ready' && onConfirmUpdateRestart && (
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={updateActionPending}
-                          onClick={onConfirmUpdateRestart}
-                          className="mt-2 flex w-full items-center justify-center rounded-md bg-[var(--warning)] px-2 py-1.5 text-[11px] font-semibold text-[color:var(--bg)] transition hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
-                        >
-                          {t('sidebar.updateRestart')}
-                        </button>
-                      )}
-                      {updateState.status === 'error' && onRetryUpdate && (
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={updateActionPending}
-                          onClick={onRetryUpdate}
-                          className="mt-2 flex w-full items-center justify-center rounded-md bg-surface-elevated px-2 py-1.5 text-[11px] font-semibold text-foreground transition hover:bg-surface-2 disabled:cursor-wait disabled:opacity-60"
-                        >
-                          {t('sidebar.updateRetry')}
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={toggleNewSessionComposer}
-                    aria-expanded={newSessionComposerOpen}
-                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2"
-                  >
-                    <RiAddLine size={14} className="text-muted-foreground" />
-                    <span>{t('sidebar.moreLaunchOptions')}</span>
-                  </button>
-                  <div role="separator" className="my-1 h-px bg-border/40" />
-                  {onRunningSessionButtonEnabledChange && (
-                    <button
-                      type="button"
-                      role="menuitemcheckbox"
-                      aria-checked={runningSessionButtonEnabled}
-                      onClick={() => onRunningSessionButtonEnabledChange(!runningSessionButtonEnabled)}
-                      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2"
-                      title={t('sidebar.runningSessionButtonHint')}
-                    >
-                      <RiLoaderCircle size={14} className={runningSessionButtonEnabled ? 'text-[color:var(--success)]' : 'text-muted-foreground'} />
-                      <span className="min-w-0 flex-1">
-                        <span className="block">{t('sidebar.runningSessionButton')}</span>
-                        <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">
-                          {t('sidebar.runningSessionButtonHint')}
-                        </span>
-                      </span>
-                      <Switch checked={runningSessionButtonEnabled} size="sm" />
-                    </button>
-                  )}
-                  {onAttentionButtonEnabledChange && (
-                    <button
-                      type="button"
-                      role="menuitemcheckbox"
-                      aria-checked={attentionButtonEnabled}
-                      onClick={() => onAttentionButtonEnabledChange(!attentionButtonEnabled)}
-                      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2"
-                      title={t('sidebar.attentionButtonHint')}
-                    >
-                      <RiBellDot size={14} className={attentionButtonEnabled ? 'text-[color:var(--warning)]' : 'text-muted-foreground'} />
-                      <span className="min-w-0 flex-1">
-                        <span className="block">{t('sidebar.attentionButton')}</span>
-                        <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">
-                          {t('sidebar.attentionButtonHint')}
-                        </span>
-                      </span>
-                      <Switch checked={attentionButtonEnabled} size="sm" />
-                    </button>
-                  )}
-                  {onOpenQuota && (
-                    <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenQuota(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
-                      <RiChartBarLine size={14} className="text-muted-foreground" />
-                      <span>{t('sidebar.subscriptionQuota')}</span>
-                    </button>
-                  )}
-                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); void openAgentOperations(null); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
-                    <RiWorkflowLine size={14} className="text-muted-foreground" />
-                    <span>Agent 工作台</span>
-                  </button>
-                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); openServiceAccess(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
-                    <RiServerLine size={14} className="text-muted-foreground" />
-                    <span>服务与设备</span>
-                  </button>
-                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenSettings(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
-                    <RiSettings4Line size={14} className="text-muted-foreground" />
-                    <span>{t('sidebar.settings')}</span>
-                  </button>
-                  {onTogglePinned && (
-                    <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onTogglePinned(); }} className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${pinned ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}>
-                      {pinned ? <RiPinOffLine size={14} /> : <RiPushpinLine size={14} className="text-muted-foreground" />}
-                      <span>{pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}</span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            <button
+              data-session-sidebar-header-action
+              type="button"
+              onClick={() => { setNewSessionComposerOpen(false); void openAgentOperations(null); }}
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-primary/15 hover:text-primary active:scale-95"
+              aria-label="Agent 工作台"
+              title="Agent 工作台"
+            >
+              <RiWorkflowLine size={16} />
+            </button>
           {(!push || pinned) && (
             <button
+              data-session-sidebar-header-action
               type="button"
               onClick={onClose}
               className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
               aria-label={t('common.close')}
             >
-              <RiCloseLine size={14} />
+              <RiCloseLine size={16} />
             </button>
           )}
           </div>
@@ -2195,6 +1992,76 @@ export function LeftSidebar(
           onRemoveResumeHistory={(entryId) => { void handleRemoveResumeHistory(entryId); }}
           onClose={() => setNewSessionComposerOpen(false)}
           onOptionsChange={setNewSessionOptions}
+          additionalContent={pendingUpdate && updateState?.latestVersion && (
+              <div className="mb-1 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.10)] px-2.5 py-2.5 text-foreground">
+                <div className="flex items-start gap-2">
+                  <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[rgb(var(--warning-rgb)_/_0.16)] text-[color:var(--warning)]">
+                    <RiRefreshLine size={13} className={updateState.status === 'installing' || updateState.status === 'restarting' ? 'animate-spin' : ''} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-semibold">{t('sidebar.updateAvailable', { version: updateState.latestVersion })}</span>
+                    <span className="mt-0.5 block text-[10.5px] leading-relaxed text-muted-foreground">
+                      {updateState.status === 'installing'
+                        ? t('sidebar.updateInstalling')
+                        : updateState.status === 'ready'
+                          ? t('sidebar.updateReady')
+                          : updateState.status === 'restarting'
+                            ? t('sidebar.updateRestarting')
+                            : t('sidebar.updateFailed')}
+                    </span>
+                  </span>
+                </div>
+                {updateState.status === 'ready' && onConfirmUpdateRestart && (
+                  <button
+                    type="button"
+                    disabled={updateActionPending}
+                    onClick={onConfirmUpdateRestart}
+                    className="mt-2 flex w-full items-center justify-center rounded-md bg-[var(--warning)] px-2 py-1.5 text-[11px] font-semibold text-[color:var(--bg)] transition hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {t('sidebar.updateRestart')}
+                  </button>
+                )}
+                {updateState.status === 'error' && onRetryUpdate && (
+                  <button
+                    type="button"
+                    disabled={updateActionPending}
+                    onClick={onRetryUpdate}
+                    className="mt-2 flex w-full items-center justify-center rounded-md bg-surface-elevated px-2 py-1.5 text-[11px] font-semibold text-foreground transition hover:bg-surface-2 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {t('sidebar.updateRetry')}
+                  </button>
+                )}
+              </div>
+          )}
+          footerActions={(
+            <SidebarUtilityActions
+              serverAttention={serverAttention}
+              onOpenSettings={() => { setNewSessionComposerOpen(false); onOpenSettings(); }}
+              actions={[
+                ...(onOpenQuota ? [{
+                  label: t('sidebar.subscriptionQuota'),
+                  icon: RiChartBarLine,
+                  onSelect: () => { setNewSessionComposerOpen(false); onOpenQuota(); },
+                }] : []),
+                {
+                  label: 'Agent 工作台',
+                  icon: RiWorkflowLine,
+                  onSelect: () => { setNewSessionComposerOpen(false); void openAgentOperations(null); },
+                },
+                {
+                  label: '服务与设备',
+                  icon: RiServerLine,
+                  onSelect: () => { setNewSessionComposerOpen(false); openServiceAccess(); },
+                },
+                ...(onTogglePinned ? [{
+                  label: pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar'),
+                  icon: pinned ? RiPinOffLine : RiPushpinLine,
+                  separated: true,
+                  onSelect: () => { setNewSessionComposerOpen(false); onTogglePinned(); },
+                }] : []),
+              ]}
+            />
+          )}
         />
       )}
 
@@ -2209,7 +2076,7 @@ export function LeftSidebar(
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (
         <div className="relative z-10 shrink-0 bg-[var(--chrome-bg)] px-3 pb-3 pt-1 md:border-t md:border-border md:p-2">
-          <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-2' : 'grid-cols-1'}`}>
+          <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
             <button
               type="button"
               onClick={handleQuickLaunchTerminal}
@@ -2232,10 +2099,27 @@ export function LeftSidebar(
                 <span className="truncate">{newSessionAgent.displayName}</span>
               </button>
             )}
+            <button
+              type="button"
+              onClick={toggleNewSessionComposer}
+              className="relative inline-flex w-10 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-[0.97]"
+              title={moreButtonLabel}
+              aria-label={moreButtonLabel}
+              aria-expanded={newSessionComposerOpen}
+              aria-controls="sidebar-launch-options"
+            >
+              <RiMoreHorizontal size={15} />
+              {serverAttention && (
+                <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-destructive ring-2 ring-[var(--chrome-bg)]" aria-hidden="true" />
+              )}
+              {pendingUpdate && (
+                <span className={`absolute top-0.5 h-2 w-2 rounded-full bg-[var(--warning)] ring-2 ring-[var(--chrome-bg)] ${serverAttention ? 'right-3.5' : 'right-0.5'}`} aria-hidden="true" />
+              )}
+            </button>
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 
   return pinned ? (

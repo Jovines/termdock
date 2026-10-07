@@ -57,6 +57,16 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     if (!service) throw new Error('COLLABORATION_UNAVAILABLE');
     void service.refresh(); res.json({ ok: true, ...service.directory() });
   }));
+  router.post('/transport/remove', run((req, res) => {
+    assertPeerRegistrationAuthority(req);
+    if (!req.app.locals.collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+    res.json(req.app.locals.collaborationService.removePeer(String(req.body.serviceId ?? '')));
+  }));
+  router.post('/transport/restore', run((req, res) => {
+    assertPeerRegistrationAuthority(req);
+    if (!req.app.locals.collaborationService) throw new Error('COLLABORATION_UNAVAILABLE');
+    res.json(req.app.locals.collaborationService.restorePeer(String(req.body.serviceId ?? '')));
+  }));
   router.post('/group', run(async (req, res, sessionId) => {
     assertPeerRegistrationAuthority(req);
     const input = req.body.input;
