@@ -12295,6 +12295,7 @@ export function RightSidebar(
           ) : (
             <AndroidMirrorView
               sessionId={sessionId ?? null}
+              onCloseTab={() => toggleAndroidTab(false)}
               onInsertPrompt={(text) => insertContextText('android-deps', text)}
               onInsertFile={handleMirrorCaptureInsert}
               onRecordingComplete={handleRecordingComplete}

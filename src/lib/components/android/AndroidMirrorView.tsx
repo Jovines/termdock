@@ -113,13 +113,14 @@ const writeStoredQuality = (quality: AndroidQuality) => {
   try { localStorage.setItem(QUALITY_STORAGE_KEY, JSON.stringify(quality)); } catch { /* storage unavailable */ }
 };
 
-export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt, onInsertFile, onRecordingComplete }: {
+export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt, onInsertFile, onRecordingComplete, onCloseTab }: {
   sessionId?: string | null;
   dockOnly?: boolean;
   onInsertPrompt?: (text: string) => void | Promise<void>;
   /** 截图/录屏产物：上传到临时目录后插入路径引用。 */
   onInsertFile?: (file: File) => Promise<unknown> | void;
   onRecordingComplete?: (file: AndroidRecording) => void;
+  onCloseTab?: () => void;
 }) {
   const { t } = useI18n();
   const overlay = useAndroidMirrorStore(state => state.overlay);
@@ -1177,6 +1178,21 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         >
           <MoreHorizontal size={compact ? 13 : 14} />
         </button>
+        {onCloseTab && !dockOnly && (
+          <button
+            type="button"
+            onClick={() => {
+              setMoreOpen(false);
+              setOverlay('off');
+              onCloseTab();
+            }}
+            className={`${iconButtonClass} text-muted-foreground hover:bg-destructive/20 hover:text-destructive`}
+            title={t('android.closeTab')}
+            aria-label={t('android.closeTab')}
+          >
+            <X size={14} />
+          </button>
+        )}
       </div>
 
       {moreOpen && moreAnchor && createPortal(

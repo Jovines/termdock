@@ -25,7 +25,6 @@ import {
   ChartBar as RiChartBarLine,
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
-  ChevronDown as RiChevronDownLine,
   Workflow as RiWorkflowLine,
   History as RiHistoryLine,
   GripVertical as RiDragHandle,
@@ -826,6 +825,7 @@ export function LeftSidebar(
   };
 
   const toggleNewSessionComposer = () => {
+    setHeaderMenuOpen(false);
     if (newSessionComposerOpen) {
       setNewSessionComposerOpen(false);
       return;
@@ -1856,6 +1856,17 @@ export function LeftSidebar(
                       )}
                     </div>
                   )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={toggleNewSessionComposer}
+                    aria-expanded={newSessionComposerOpen}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2"
+                  >
+                    <RiAddLine size={14} className="text-muted-foreground" />
+                    <span>{t('sidebar.moreLaunchOptions')}</span>
+                  </button>
+                  <div role="separator" className="my-1 h-px bg-border/40" />
                   {onRunningSessionButtonEnabledChange && (
                     <button
                       type="button"
@@ -2198,7 +2209,7 @@ export function LeftSidebar(
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (
         <div className="relative z-10 shrink-0 bg-[var(--chrome-bg)] px-3 pb-3 pt-1 md:border-t md:border-border md:p-2">
-          <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
+          <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-2' : 'grid-cols-1'}`}>
             <button
               type="button"
               onClick={handleQuickLaunchTerminal}
@@ -2221,16 +2232,6 @@ export function LeftSidebar(
                 <span className="truncate">{newSessionAgent.displayName}</span>
               </button>
             )}
-            <button
-              type="button"
-              onClick={toggleNewSessionComposer}
-              className="inline-flex w-10 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground ring-1 ring-border/20 transition hover:bg-surface-elevated hover:text-foreground active:scale-[0.97]"
-              title={t('sidebar.moreLaunchOptions')}
-              aria-label={t('sidebar.moreLaunchOptions')}
-              aria-expanded={false}
-            >
-              <RiChevronDownLine size={15} className="transition-transform duration-200" />
-            </button>
           </div>
         </div>
       )}

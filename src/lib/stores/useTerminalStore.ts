@@ -409,8 +409,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
 
   setSessionShellTitle: (sessionId: string, title: string | null) => {
     set((state) => {
-      const existing = state.sessions.get(sessionId);
-      if (!existing || existing.shellTitle === title) return state;
+      const existing = state.sessions.get(sessionId) ?? createEmptySessionState(sessionId);
+      if (existing.shellTitle === title) return state;
       const newSessions = new Map(state.sessions);
       newSessions.set(sessionId, { ...existing, shellTitle: title, updatedAt: Date.now() });
       return { sessions: newSessions };

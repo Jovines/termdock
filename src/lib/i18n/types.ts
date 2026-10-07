@@ -25,6 +25,7 @@ export type TranslationDictionary = {
     device: string;
     selectDevice: string;
     noDevices: string;
+    closeTab: string;
     refresh: string;
     connect: string;
     disconnect: string;

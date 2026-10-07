@@ -8,6 +8,7 @@ export const zh: TranslationDictionary = {
     device: '设备',
     selectDevice: '选择设备',
     noDevices: '未发现设备',
+    closeTab: '关闭设备 Tab',
     refresh: '刷新设备',
     connect: '连接',
     disconnect: '停止投屏',

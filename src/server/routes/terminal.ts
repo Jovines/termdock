@@ -438,6 +438,8 @@ interface PersistedClientSession {
   // 最后检测到的前台程序名（last-known）：live 检测只写非空值、不用 null 覆盖,
   // 这样 server 重启 / backend 掉线后 tab 标题仍能回退到最近一次识别结果。
   activeProgram?: string | null;
+  /** Last observed terminal title, also available before a browser attaches. */
+  shellTitle?: string | null;
   // 最近一次的 agent 会话恢复信息（last-known）：agent 退出 / server 重启后
   // 仍可用其原生 session id + 启动参数重建 `claude --resume …` 恢复命令。
   agentResume?: PersistedAgentResumeInfo | null;
@@ -454,6 +456,7 @@ interface TmuxInventoryMeta {
   attachedCount: number;
   friendlyName: string | null;
   program: string | null;
+  shellTitle?: string | null;
   cwd: string | null;
   label: string | null;
   clientCount: number | null;
@@ -472,10 +475,8 @@ interface SessionInventoryClientSession extends PersistedClientSession {
   connected: boolean;
   live: boolean;
   restorable: boolean;
-  // 展示名提示：tab 名按 activeProgram + cwd 计算（见前端 display.ts）。
-  // 这两个值随 inventory 一起返回，让前端冷启动 / 缓存 hydrate 时无需等
-  // WS 连上轮询 tmux 就能算出「coco termdock」，消除「先 wt-xxx 再跳变」。
-  // 仅作展示用，非持久化字段（不写进 PersistedClientSession / 磁盘）。
+  // 展示名提示：随 inventory 返回程序名、目录及继承的 shellTitle。
+  // 未打开的终端也能显示 tmux pane 标题，无需等待终端 WS 连接。
   activeProgram?: string | null;
   cwd?: string | null;
 }
@@ -638,6 +639,9 @@ function getClientStateSemanticSignature(state: GlobalSessionState, inventory: S
         connected: session.connected,
         live: session.live,
         restorable: session.restorable,
+        activeProgram: session.activeProgram ?? null,
+        cwd: session.cwd ?? null,
+        shellTitle: session.shellTitle ?? null,
       })),
       tmuxSessions: inventory.tmuxSessions.map((session) => ({
         name: session.name,
@@ -1371,6 +1375,9 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
       : null,
     activeProgram: typeof candidate.activeProgram === 'string' && candidate.activeProgram.trim().length > 0
       ? candidate.activeProgram
+      : null,
+    shellTitle: typeof candidate.shellTitle === 'string' && candidate.shellTitle.trim().length > 0
+      ? candidate.shellTitle
       : null,
     agentResume: normalizePersistedAgentResumeInfo(candidate.agentResume),
   };
@@ -2987,6 +2994,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       return {
         ...tmux,
         program: metadata.program,
+        shellTitle: metadata.shellTitle,
         cwd: metadata.cwd,
         label: metadata.label,
         lastActiveAt: Date.now(),
@@ -3011,19 +3019,24 @@ async function buildSessionInventory(): Promise<SessionInventory> {
         }
       }
 
-      // 展示名数据（activeProgram / cwd）回写:last-known 持久化,server 重启 /
-      // backend 掉线后 inventory hint 仍能给出上次的程序名与目录。
+      // 展示名数据（程序 / 目录 / 终端标题）回写:last-known 持久化，
+      // server 重启 / backend 掉线后 inventory hint 仍能给出上次的值。
       // live 值只以非空覆盖——检测空窗(null)不抹掉已存结果。
       const backend = next.backendSessionId ? terminalSessions.get(next.backendSessionId) : undefined;
       const tmuxMeta = next.tmuxSessionName ? liveTmuxByName.get(next.tmuxSessionName) : undefined;
       const liveProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? null;
       const liveCwd = backend?.cwd ?? tmuxMeta?.cwd ?? null;
+      const liveShellTitle = tmuxMeta?.shellTitle ?? backend?.lastOscTitle ?? null;
       if (liveProgram && liveProgram !== (next.activeProgram ?? null)) {
         next = { ...next, activeProgram: liveProgram };
         synchronizedPersistedFields = true;
       }
       if (liveCwd && liveCwd !== (next.cwd ?? null)) {
         next = { ...next, cwd: liveCwd };
+        synchronizedPersistedFields = true;
+      }
+      if (liveShellTitle && liveShellTitle !== (next.shellTitle ?? null)) {
+        next = { ...next, shellTitle: liveShellTitle };
         synchronizedPersistedFields = true;
       }
       return next;
@@ -3047,6 +3060,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     const tmuxMeta = session.tmuxSessionName ? liveTmuxByName.get(session.tmuxSessionName) : undefined;
     const activeProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? session.activeProgram ?? null;
     const cwd = backend?.cwd ?? tmuxMeta?.cwd ?? session.cwd ?? null;
+    const shellTitle = tmuxMeta?.shellTitle ?? backend?.lastOscTitle ?? session.shellTitle ?? null;
 
     return {
       ...session,
@@ -3065,6 +3079,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       ),
       activeProgram,
       cwd,
+      shellTitle,
     };
   });
 
@@ -4404,7 +4419,7 @@ function getCwdFromTmuxLayout(layout: TmuxLayout): string | null {
   return activePane?.currentPath || null;
 }
 
-async function resolveLiveTmuxMetadata(tmuxSessionName: string): Promise<TmuxRuntimeMetadata | null> {
+async function resolveLiveTmuxMetadata(tmuxSessionName: string): Promise<(TmuxRuntimeMetadata & { shellTitle: string | null }) | null> {
   const layout = await getTmuxLayout(tmuxSessionName);
   const activePane = getActivePaneFromLayout(layout);
   if (!activePane) {
@@ -4414,12 +4429,15 @@ async function resolveLiveTmuxMetadata(tmuxSessionName: string): Promise<TmuxRun
   const fallback = getActiveProgramFromTmuxLayout(layout);
   const program = resolved?.command ?? fallback?.command ?? null;
   const cwd = getCwdFromTmuxLayout(layout);
-  return buildRuntimeTmuxMetadata({
-    tmuxSessionName,
-    program,
-    cwd,
-    rawArgs: resolved?.rawArgs ?? null,
-  });
+  return {
+    ...buildRuntimeTmuxMetadata({
+      tmuxSessionName,
+      program,
+      cwd,
+      rawArgs: resolved?.rawArgs ?? null,
+    }),
+    shellTitle: activePane.title || null,
+  };
 }
 
 // ── label builder (mirrors the frontend `getSessionDisplayLines` semantics) ──
@@ -9368,7 +9386,12 @@ async function reconcileClientState(): Promise<void> {
     }
   }
 
-  if (toRemove.length === 0 && toDetach.length === 0) return;
+  if (toRemove.length === 0 && toDetach.length === 0) {
+    // The refreshed inventory may contain new titles for unopened panes.
+    // Semantic deduplication suppresses broadcasts when nothing changed.
+    broadcastClientState();
+    return;
+  }
   const detached = new Set(toDetach);
   globalSessionState = {
     sessions: globalSessionState.sessions

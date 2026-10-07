@@ -80,10 +80,11 @@ export interface PersistedSession {
   tmuxSessionName: string | null;
   createdAt: number;
   lastActivity: number;
-  // 展示名提示：缓存上次的程序名 / 目录，冷启动 hydrate 时直接算出 tab 名，
+  // 展示名提示：缓存上次的程序名 / 目录 / 终端标题，冷启动直接显示 tab 名，
   // 不必等 WS 连上轮询 tmux，消除「先 wt-xxx 再跳成 coco termdock」的跳变。
   activeProgram?: string | null;
   cwd?: string | null;
+  shellTitle?: string | null;
 }
 
 interface UseSessionPersistenceReturn {
@@ -126,16 +127,16 @@ function normalizeInventorySessionList(sessionList: SessionInventoryClientSessio
     lastActivity: session.lastActivity,
   }))).map((normalized, index) => ({
     ...normalized,
-    // 把 inventory 带来的展示名提示合并进来（normalizeSessionList 的输入类型
-    // 不含这两个字段，这里按下标对齐补回）。
+    // 把 inventory 带来的展示名提示按下标对齐补回。
     activeProgram: sessionList[index]?.activeProgram ?? null,
     cwd: sessionList[index]?.cwd ?? null,
+    shellTitle: sessionList[index]?.shellTitle ?? null,
   }));
 }
 
 function sessionListKey(sessionList: PersistedSession[]): string {
   return sessionList
-    .map((s) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}:${s.lastActivity}:${s.activeProgram ?? ''}:${s.cwd ?? ''}`)
+    .map((s) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}:${s.lastActivity}:${s.activeProgram ?? ''}:${s.cwd ?? ''}:${s.shellTitle ?? ''}`)
     .join('|');
 }
 

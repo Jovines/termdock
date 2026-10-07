@@ -8,6 +8,7 @@ export const en: TranslationDictionary = {
     device: 'Device',
     selectDevice: 'Select device',
     noDevices: 'No device found',
+    closeTab: 'Close device tab',
     refresh: 'Refresh devices',
     connect: 'Connect',
     disconnect: 'Stop mirroring',

@@ -1394,7 +1394,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           });
         }
       });
-      // 预填展示名提示（activeProgram / cwd）：来自 inventory / localStorage 缓存。
+      // 预填展示名提示（程序 / 目录 / 终端标题）：来自 inventory / localStorage 缓存。
       // 这样 tab 首帧就能显示「coco termdock」，不必等 WS 连上后轮询 tmux 才跳变。
       // WS connected / active-program 事件到达后会用实时值覆盖这里的提示值。
       persistedSessions.forEach((session) => {
@@ -1403,6 +1403,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         }
         if (session.cwd != null) {
           store.setSessionCwd(session.sessionId, session.cwd);
+        }
+        if (session.shellTitle != null) {
+          store.setSessionShellTitle(session.sessionId, session.shellTitle);
         }
       });
 
@@ -1482,6 +1485,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       if (session.cwd != null && session.cwd !== current?.cwd
         && (current?.cwd == null || session.cwd !== previous?.cwd)) {
         store.setSessionCwd(session.sessionId, session.cwd);
+      }
+      if (session.shellTitle != null && session.shellTitle !== current?.shellTitle
+        && (current?.shellTitle == null || session.shellTitle !== previous?.shellTitle)) {
+        store.setSessionShellTitle(session.sessionId, session.shellTitle);
       }
     }
 

@@ -625,6 +625,9 @@ function App() {
       if (session.cwd != null) {
         store.setSessionCwd(session.sessionId, session.cwd);
       }
+      if (session.shellTitle != null) {
+        store.setSessionShellTitle(session.sessionId, session.shellTitle);
+      }
     });
     markStartupMilestone('session-chrome-hydrated');
     // Zustand replaces its state object on every setter call. `store` above is
@@ -2822,6 +2825,30 @@ function App() {
     () => sessions.find((s) => s.id === sidebarCloseChoiceSessionId) ?? null,
     [sessions, sidebarCloseChoiceSessionId],
   );
+  const confirmSidebarCloseSession = useCallback(() => {
+    if (!sidebarCloseChoiceSession) return;
+    dispatchCloseSession({
+      sessionId: sidebarCloseChoiceSession.id,
+      source: 'sidebar',
+      closeMode: 'destroy',
+    });
+    setSidebarCloseChoiceSessionId(null);
+    setSidebarCloseAnchor(null);
+  }, [sidebarCloseChoiceSession, dispatchCloseSession]);
+
+  useEffect(() => {
+    if (!sidebarCloseChoiceSession) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!event.repeat) confirmSidebarCloseSession();
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [sidebarCloseChoiceSession, confirmSidebarCloseSession]);
+
   const sidebarCloseChoiceDisplayName = React.useMemo(() => {
     if (!sidebarCloseChoiceSession) return '';
     const terminalState = terminalSessions.get(sidebarCloseChoiceSession.id);
@@ -4100,15 +4127,7 @@ function App() {
             <div className="flex flex-col py-1">
               <button
                 type="button"
-                onClick={() => {
-                  dispatchCloseSession({
-                    sessionId: sidebarCloseChoiceSession.id,
-                    source: 'sidebar',
-                    closeMode: 'destroy',
-                  });
-                  setSidebarCloseChoiceSessionId(null);
-                  setSidebarCloseAnchor(null);
-                }}
+                onClick={confirmSidebarCloseSession}
                 className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-destructive transition hover:bg-destructive/10"
               >
                 <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive/15 text-destructive">
