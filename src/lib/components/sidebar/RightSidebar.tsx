@@ -4630,8 +4630,8 @@ function scrollDiffAnchorIntoView(anchor: ChangeWalkthroughAnchor): void {
 const IMAGE_MIN_SCALE = 1;
 const IMAGE_MAX_SCALE = 8;
 
-function clampImageScale(scale: number): number {
-  return Math.min(IMAGE_MAX_SCALE, Math.max(IMAGE_MIN_SCALE, scale));
+function clampImageScale(scale: number, maxScale = IMAGE_MAX_SCALE): number {
+  return Math.min(maxScale, Math.max(IMAGE_MIN_SCALE, scale));
 }
 
 interface ZoomableImageProps {
@@ -4647,6 +4647,7 @@ interface ZoomableImageProps {
 
 interface ZoomableViewportProps {
   resetKey: string;
+  maxScale?: number;
   onZoomChange?: (zoomed: boolean) => void;
   onDoubleTap?: () => void;
   children: (state: {
@@ -4664,7 +4665,7 @@ interface ZoomableViewportProps {
 // `data-sidebar-gesture-ignore` only while zoomed, so pans of enlarged content
 // are never hijacked — while an unzoomed horizontal swipe still flows to the
 // sidebar's gesture arbiter (e.g. swiper back-navigation).
-function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: ZoomableViewportProps) {
+function ZoomableViewport({ resetKey, maxScale = IMAGE_MAX_SCALE, onZoomChange, onDoubleTap, children }: ZoomableViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
   const [animateTransform, setAnimateTransform] = useState(false);
@@ -4701,7 +4702,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
 
   const applyZoom = useCallback((nextScale: number, originX?: number, originY?: number) => {
     setTransform((prev) => {
-      const scale = clampImageScale(nextScale);
+      const scale = clampImageScale(nextScale, maxScale);
       const el = containerRef.current;
       if (!el || scale === 1) {
         return { scale, x: 0, y: 0 };
@@ -4716,7 +4717,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
       const y = focalY - (focalY - prev.y) * ratio;
       return { scale, ...clampOffset(scale, x, y) };
     });
-  }, [clampOffset]);
+  }, [clampOffset, maxScale]);
 
   const toggleZoom = useCallback((originX?: number, originY?: number) => {
     setAnimateTransform(true);
@@ -4873,7 +4874,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
       target: containerRef,
       eventOptions: { passive: false },
       pinch: {
-        scaleBounds: { min: IMAGE_MIN_SCALE, max: IMAGE_MAX_SCALE },
+        scaleBounds: { min: IMAGE_MIN_SCALE, max: maxScale },
         from: () => [transformRef.current.scale, 0],
         rubberband: true,
       },
@@ -4891,6 +4892,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
       ref={containerRef}
       data-sidebar-gesture-ignore={zoomed ? '' : undefined}
       className="flex h-full w-full touch-none select-none items-center justify-center overflow-hidden"
+      data-image-zoom-viewport
       style={{ cursor: zoomed ? 'grab' : 'zoom-in' }}
       onDoubleClick={(event) => {
         event.stopPropagation();
@@ -4925,15 +4927,11 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
   );
 }
 
-// Lightbox/preview image with fit-to-stage initial sizing. Previously images
-// rendered at their intrinsic size capped by the stage, so a 100×100 SVG
-// showed up as a postage stamp in a full-size viewer and pinch-zooming it
-// felt broken. Now the initial size fits the stage: SVGs (vector, upscale
-// cleanly) fit in both directions; raster images only shrink (upscaling
-// would blur).
+// Keep the fit-sized surface as the pan boundary, but grow the image's layout
+// box when zooming. Scaling a composited thumbnail can stay blurry in WebKit.
 function ZoomableImage({ src, alt, vector, onLoad, onError, onZoomChange, onDoubleTap }: ZoomableImageProps) {
   const mediaSrc = useEncryptedMediaSource(src, onError);
-  const [fitSize, setFitSize] = useState<{ width: number; height: number } | null>(null);
+  const [fitSize, setFitSize] = useState<{ width: number; height: number; originalScale: number } | null>(null);
   // blob: object URLs carry no extension, so callers with a known MIME type
   // pass `vector` explicitly; otherwise fall back to the URL's .svg suffix.
   const isVector = vector ?? isSvgImageSrc(src);
@@ -4943,61 +4941,61 @@ function ZoomableImage({ src, alt, vector, onLoad, onError, onZoomChange, onDoub
   }, [src]);
 
   return (
-    <ZoomableViewport resetKey={src} onZoomChange={onZoomChange} onDoubleTap={onDoubleTap}>
-      {({ transformStyle, vectorTransformStyle, scale, animateTransform }) => {
-        const image = (
+    <ZoomableViewport
+      resetKey={src}
+      // A very long image may need more than 8× its fitted size to reach its
+      // original resolution. Keep that resolution reachable by pinching.
+      maxScale={Math.max(IMAGE_MAX_SCALE, fitSize?.originalScale ?? 1)}
+      onZoomChange={onZoomChange}
+      onDoubleTap={onDoubleTap}
+    >
+      {({ vectorTransformStyle, scale, animateTransform }) => (
+        <div
+          data-image-zoom-surface
+          data-vector-zoom-surface={isVector ? '' : undefined}
+          className="relative shrink-0 touch-none select-none"
+          style={fitSize
+            ? { ...vectorTransformStyle, width: fitSize.width, height: fitSize.height }
+            : { width: '100%', height: '100%' }}
+        >
           <img
             src={mediaSrc}
             alt={alt}
             draggable={false}
-            className="max-h-full max-w-full touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"
-            style={isVector && fitSize
-              ? {
-                  position: 'absolute',
-                  left: '50%',
-                  top: '50%',
-                  width: fitSize.width * scale,
-                  height: fitSize.height * scale,
-                  maxWidth: 'none',
-                  maxHeight: 'none',
-                  transform: 'translate3d(-50%, -50%, 0)',
-                  transition: animateTransform ? 'width 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
-                }
-              : fitSize
-                ? { ...transformStyle, width: fitSize.width, height: fitSize.height }
-                : isVector
-                  ? vectorTransformStyle
-                  : transformStyle}
+            className="touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"
+            style={{
+              position: 'absolute',
+              left: '50%',
+              top: '50%',
+              width: fitSize ? fitSize.width * scale : undefined,
+              height: fitSize ? fitSize.height * scale : undefined,
+              maxWidth: fitSize ? 'none' : '100%',
+              maxHeight: fitSize ? 'none' : '100%',
+              // Use layout dimensions for raster images too: the browser
+              // repaints from the decoded original at the current zoom.
+              transform: 'translate(-50%, -50%)',
+              transition: animateTransform ? 'width 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
+            }}
             onLoad={(event) => {
               const img = event.currentTarget;
-              const container = img.parentElement;
+              const container = img.closest<HTMLElement>('[data-image-zoom-viewport]');
               if (container && img.naturalWidth > 0 && img.naturalHeight > 0) {
                 const availableWidth = Math.max(1, container.clientWidth - 2);
                 const availableHeight = Math.max(1, container.clientHeight - 2);
                 const fitScale = Math.min(availableWidth / img.naturalWidth, availableHeight / img.naturalHeight);
                 const nextScale = isVector ? fitScale : Math.min(fitScale, 1);
                 setFitSize({
-                  width: Math.max(1, Math.round(img.naturalWidth * nextScale)),
-                  height: Math.max(1, Math.round(img.naturalHeight * nextScale)),
+                  width: img.naturalWidth * nextScale,
+                  height: img.naturalHeight * nextScale,
+                  originalScale: 1 / nextScale,
                 });
               }
               onLoad(event);
             }}
             onError={onError}
           />
-        );
-
-        if (!isVector || !fitSize) return image;
-        return (
-          <div
-            data-vector-zoom-surface
-            className="relative shrink-0 touch-none select-none"
-            style={{ ...vectorTransformStyle, width: fitSize.width, height: fitSize.height }}
-          >
-            {image}
-          </div>
-        );
-      }}
+        </div>
+      )}
     </ZoomableViewport>
   );
 }

@@ -1,5 +1,9 @@
 import { create } from 'zustand';
-export interface CollaborationDock { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' }
+export interface CollaborationDock {
+  sessionId: string;
+  side: 'left' | 'right' | 'top' | 'bottom';
+  preferredWidth?: number;
+}
 export const collaborationPaneId = (groupId: string) => `@collaboration:${groupId}`;
 export const useCollaborationPanelDock = create<{
   activePaneId: string | null;

@@ -9,7 +9,11 @@ const isCollaborationPane = (id: string) => id.startsWith('@collaboration:');
 const rectStyle = (r: PaneRect): CSSProperties => ({ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.width * 100}%`, height: `${r.height * 100}%` });
 function CollaborationHost({ groupId }: { groupId: string }) {
   const setHost = useCollaborationPanelDock(state => state.setHost);
-  const ref = useCallback((host: HTMLDivElement | null) => setHost(groupId, host), [groupId, setHost]);
+  const previousHost = useRef<HTMLDivElement | null>(null);
+  const ref = useCallback((host: HTMLDivElement | null) => {
+    if (host || useCollaborationPanelDock.getState().hosts[groupId] === previousHost.current) setHost(groupId, host);
+    previousHost.current = host;
+  }, [groupId, setHost]);
   return <div ref={ref} className="h-full min-h-0 min-w-0 bg-surface" />;
 }
 
@@ -87,6 +91,24 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
         next = pruneLayout(next, new Set([...allowed].filter(leaf => leaf !== id)))!;
         next = splitLeaf(next, dock.sessionId, id, dock.side);
       }
+      if (dock.preferredWidth && (dock.side === 'left' || dock.side === 'right')) {
+        // Use sidebar sizing for fresh and untouched equal splits.
+        const sizeSidebar = (node: SplitNode, rect: PaneRect): SplitNode => {
+          if ('id' in node) return node;
+          const sidebarFirst = 'id' in node.first && node.first.id === id;
+          const sidebarSecond = 'id' in node.second && node.second.id === id;
+          if (node.axis === 'x' && (sidebarFirst || sidebarSecond) && node.ratio === 0.5) {
+            const width = (container.current?.clientWidth || window.innerWidth) * rect.width;
+            const fraction = Math.max(0.1, Math.min(0.45, dock.preferredWidth! / Math.max(1, width)));
+            return { ...node, ratio: sidebarFirst ? fraction : 1 - fraction };
+          }
+          const first = { ...rect }, second = { ...rect };
+          if (node.axis === 'x') { first.width *= node.ratio; second.x += first.width; second.width -= first.width; }
+          else { first.height *= node.ratio; second.y += first.height; second.height -= first.height; }
+          return { ...node, first: sizeSidebar(node.first, first), second: sizeSidebar(node.second, second) };
+        };
+        next = sizeSidebar(next, { x: 0, y: 0, width: 1, height: 1 });
+      }
     }
     lastDock.current = nextDockKeys;
     if (JSON.stringify(next) !== JSON.stringify(treeRef.current)) { change(next); persist(); }
@@ -111,7 +133,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
     const start = (event: PointerEvent) => {
       if (event.button !== 0 || !(event.target instanceof Element)) return;
       const handle = event.target.closest('[data-split-pane-title], [data-panel-drag-title]');
-      const control = event.target.closest('button, a, input, textarea, select');
+      const control = event.target.closest('button, a, input, textarea, select, summary');
       if (!handle || (control && control !== handle)) return;
       const pane = handle.closest<HTMLElement>('[data-layout-pane]');
       if (!pane || !host.contains(pane)) return;

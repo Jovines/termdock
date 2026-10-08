@@ -1,7 +1,9 @@
 import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
 import { collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
-import { openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
+import { useCollaborationTaskInbox, requestCollaborationTask } from '../../stores/useCollaborationTaskInbox';
+import { collaborationTaskStage } from '../../collaboration/taskState';
+import { collaborationGroupPreferences, openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { SessionNoticeUnreadBadge } from '../SessionNoticeUnreadBadge';
 import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { ServiceSwitcher } from '../ServiceSwitcher';
@@ -294,20 +296,39 @@ export function LeftSidebar(
   const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
   const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
   const [collaborationActionError, setCollaborationActionError] = useState<string | null>(null);
-  const openAgentOperations = async (groupId: string | null) => {
+  const taskInbox = useCollaborationTaskInbox(state => state.tasks);
+  const taskInboxError = useCollaborationTaskInbox(state => state.error);
+  const [inboxExpanded, setInboxExpanded] = useState(false);
+  useEffect(() => {
+    const refresh = () => { if (!document.hidden) void useCollaborationTaskInbox.getState().refresh(); };
+    refresh(); const timer = window.setInterval(refresh, 5000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', refresh); };
+  }, []);
+  const openAgentOperations = async (groupId: string | null): Promise<boolean> => {
     panelIntent.current = true;
-    if (!groupId) { setWorkbenchOpen(true); return; }
+    if (!groupId) {
+      setWorkbenchOpen(true);
+      closeIfOverlay();
+      return true;
+    }
     const group = useSessionOrderStore.getState().collaborationGroups.find(candidate => candidate.id === groupId);
     const anchor = useCollaborationPanelDock.getState().docks[groupId]?.sessionId;
-    const target = sessions.find(session => session.id === anchor)
-      ?? sessions.find(session => session.id === activeSessionId && group?.sessionIds.includes(session.id))
+    const target = sessions.find(session => session.id === activeSessionId && group?.sessionIds.includes(session.id))
+      ?? sessions.find(session => session.id === anchor)
       ?? sessions.find(session => group?.sessionIds.includes(session.id));
     if (target) window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
-    if (groupPanels[groupId] !== undefined) return;
+    if (groupPanels[groupId]) { closeIfOverlay(); return true; }
     try {
-      await saveCollaborationPanel({ floatingGroupId: groupId }, groupId);
+      const settings = await getSettings();
+      const saved = collaborationGroupPreferences(settings.collaborationPanels?.[collaborationPanelClientId()], groupId);
+      const mode = saved.mode ?? 'docked';
+      await saveCollaborationPanel({ floatingGroupId: groupId, mode,
+        ...(mode === 'docked' && (target || activeSessionId) ? { dock: { sessionId: target?.id ?? activeSessionId!, side: saved.dock?.side ?? (window.innerWidth < 640 ? 'bottom' : 'right') } } : {}) }, groupId);
       setGroupPanels(current => ({ ...current, [groupId]: true }));
-    } catch { setCollaborationActionError('协作面板打开失败，请重试'); }
+      closeIfOverlay();
+      return true;
+    } catch { setCollaborationActionError('协作面板打开失败，请重试'); return false; }
   };
   const rawCollaborationGroups = useSessionOrderStore((state) => state.collaborationGroups);
   const setRawCollaborationGroups = useSessionOrderStore((state) => state.setCollaborationGroups);
@@ -1526,15 +1547,17 @@ export function LeftSidebar(
         {renderGroupDragHandle(`移动工作组 ${collaboration.name}`, dragHandleProps)}
         <button
           type="button"
-          className="absolute -right-1 top-1.5 z-10 inline-flex h-4 w-4 items-center justify-center rounded-sm bg-[var(--chrome-bg)] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-          title={`打开 ${collaboration.name} 的协作消息`}
-          aria-label={`打开 Agent 工作组消息：${collaboration.name}`}
+          className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-xs font-medium text-foreground transition hover:bg-surface-elevated md:min-h-8"
+          title={`打开 ${collaboration.name} 的协作工作区`}
+          aria-label={`打开协作工作区：${collaboration.name}`}
           onClick={(event) => {
             event.stopPropagation();
             void openAgentOperations(collaboration.id);
           }}
         >
-          <RiWorkflowLine size={9} />
+          <RiWorkflowLine size={14} className="shrink-0 text-primary" />
+          <span className="min-w-0 flex-1 truncate">{collaboration.name}</span>
+          <span className={`shrink-0 text-[10px] font-normal ${taskInbox.some(t => t.groupId === collaboration.id) ? 'text-primary' : 'text-muted-foreground'}`}>{taskInbox.filter(t => t.groupId === collaboration.id).length ? `${taskInbox.filter(t => t.groupId === collaboration.id).length} 待处理` : '协作'}</span>
         </button>
         <Droppable
           droppableId={`collaboration-members:${collaboration.id}`}
@@ -1749,6 +1772,13 @@ export function LeftSidebar(
       </div>}
       {/* Session list */}
       <div ref={sessionListRef} className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
+        {(taskInbox.length > 0 || taskInboxError) && <section className="mb-2 rounded-lg border border-primary/20 bg-primary/5" aria-label="协作待处理事项">
+          <button type="button" className="flex min-h-11 w-full items-center gap-2 px-3 text-left text-xs text-primary" aria-expanded={inboxExpanded} onClick={() => setInboxExpanded(v => !v)}><RiWorkflowLine size={14} /><span className="min-w-0 flex-1">需要你处理</span><span>{taskInbox.length}</span><RiChevronRightLine size={12} className={inboxExpanded ? 'rotate-90' : ''} /></button>
+          {inboxExpanded && <div className="space-y-1 p-1 pt-0">{taskInboxError && <p role="alert" className="px-2 py-2 text-[11px] text-destructive">{taskInboxError}<button type="button" className="ml-2 text-primary" onClick={() => void useCollaborationTaskInbox.getState().refresh()}>重试</button></p>}{taskInbox.map(task => <button key={task.id} type="button" className="min-h-11 w-full rounded-md px-2 py-2 text-left hover:bg-surface-2" onClick={() => {
+            requestCollaborationTask(task.groupId, task.id);
+            void openAgentOperations(task.groupId).then(opened => { if (opened) requestCollaborationTask(task.groupId, task.id); });
+          }}><span className="block truncate text-xs text-foreground">{task.title}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground">{rawCollaborationGroups.find(g => g.id === task.groupId)?.name ?? '协作组'} · {collaborationTaskStage(task)}</span></button>)}</div>}
+        </section>}
         {recoverableTmuxSessions.length > 0 && (
           <section className="mb-2 shrink-0 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
             <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">
@@ -2068,10 +2098,16 @@ export function LeftSidebar(
         />
       )}
 
-      {workbenchOpen && <AgentOperationsPanel onFloatingChange={async id => { if (id) { await openAgentOperations(id); setWorkbenchOpen(false); } }} activeSessionId={activeSessionId} defaultSessionMode={defaultSessionMode}
+      {workbenchOpen && <AgentOperationsPanel onEnterGroup={async id => { if (!await openAgentOperations(id)) throw new Error('协作组已保存，打开工作区失败，请重试'); setWorkbenchOpen(false); }} onFloatingChange={async id => { if (id) { if (!await openAgentOperations(id)) throw new Error('打开协作工作区失败'); setWorkbenchOpen(false); } }} activeSessionId={activeSessionId} defaultSessionMode={defaultSessionMode}
         onClose={() => setWorkbenchOpen(false)} onNewSession={options => onNewSession(options)} />}
       {Object.entries(groupPanels).map(([groupId, floating]) => <AgentOperationsPanel key={groupId}
         activeSessionId={activeSessionId} initialCollaborationGroupId={groupId} initialFloating={floating}
+        onEnterGroup={async nextId => {
+          if (nextId === groupId) return;
+          if (!await openAgentOperations(nextId)) throw new Error('协作组已保存，打开工作区失败，请重试');
+          await saveCollaborationPanel({ floatingGroupId: null }, groupId);
+          setGroupPanels(current => { const next = { ...current }; delete next[groupId]; return next; });
+        }}
         onFloatingChange={next => persistFloatingPanel(groupId, next)} defaultSessionMode={defaultSessionMode}
         onClose={() => { panelIntent.current = true; setGroupPanels(current => { const next = { ...current }; delete next[groupId]; return next; }); }}
         onNewSession={options => onNewSession(options)} />)}

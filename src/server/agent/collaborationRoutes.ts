@@ -156,6 +156,10 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     }
   };
   router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, limits: COLLAB_LIMITS,
+    task_workflow: { version: 2, command: 'td collab task', single_authority: true, explicit_reports: true,
+      managed_goals: true, automatic_review: true, dependency_dispatch: true, isolated_worktrees: true, encrypted_commit_transfer: true,
+      durable_questions: true, user_acceptance: true, versioned_artifacts: true, independent_reviews: true,
+      task_reply: 'Replies to task-linked user messages are stored in the task; status=stored is not a terminal delivery receipt' },
     routing: { background_recovery: true, explicit_rebind: Boolean(rebind), fixed_tmux_pane: true },
     statuses: ['pending', 'delivered', 'failed', 'expired'], queued_status: 'pending',
     semantics: { delivered: 'written to terminal; no application acknowledgement implied',
@@ -200,7 +204,19 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
   }));
   router.post('/reply', run(async (req, res, sessionId) => {
     const original = ownMessage(String(req.body.messageId ?? ''), sessionId, true);
-    if (!original.fromSessionId) throw new CollaborationError('NO_REPLY_TARGET', 'User messages have no agent reply target');
+    if (!original.fromSessionId) {
+      const link = original.metadata?.termdockTask as { taskId?: string; attemptId?: string } | undefined;
+      if (link?.taskId && req.app.locals.collaborationTasks) {
+        const extras = extrasFromBody(req.body);
+        const status = extras.task?.status ?? (extras.responseKind === 'ack' ? 'ack' : extras.responseKind === 'result' ? 'complete' : extras.responseKind === 'progress' ? 'working' : null);
+        const task = await req.app.locals.collaborationTasks.apply(link.taskId, {
+          kind: status ? 'report' : 'comment', status: status ?? undefined, attemptId: link.attemptId,
+          content: req.body.content, evidence: extras.task?.evidence, idempotencyKey: extras.idempotencyKey,
+        }, req.app.locals.collaborationService.taskMember(sessionId));
+        res.json({ ok: true, status: 'stored', task_recorded: true, task_id: task.id, task_revision: task.revision }); return;
+      }
+      throw new CollaborationError('NO_REPLY_TARGET', '该消息没有成员回复目标；任务请使用 td collab task report 或 task comment');
+    }
     const messages = store.send({ ...extrasFromBody(req.body), groupId: original.groupId, fromSessionId: sessionId,
       toSessionIds: [original.fromSessionId], kind: 'reply', content: typeof req.body.content === 'string' ? req.body.content : '',
       replyTo: original.id, threadId: original.threadId });

@@ -47,7 +47,7 @@ function mapContext(context: CollaborationContext, map: (id: string) => string):
 export class CollaborationRpc {
   private pending = new Map<string, { resolve: (packet: Packet) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   closed = false;
-  constructor(private channel: PacketChannel, private receive?: (packet: Packet) => Record<string, unknown>, externalReader = false) {
+  constructor(private channel: PacketChannel, private receive?: (packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>, externalReader = false) {
     if (!externalReader) void this.read();
     void channel.done.catch(error => this.close(error));
   }
@@ -63,7 +63,10 @@ export class CollaborationRpc {
       if (this.accept(packet) || packet.type === 'result' || packet.type === 'error') continue;
       try {
         if (!this.receive || !['collaboration-service', 'collaboration-exchange'].includes(packet.type)) throw new Error('COLLABORATION_OPERATION_UNSUPPORTED');
-        this.channel.send({ ...this.receive(packet), type: 'result', id: packet.id });
+        // Keep reading replies while a task operation performs another authenticated RPC.
+        void Promise.resolve(this.receive(packet)).then(result => {
+          if (!this.closed) this.channel.send({ ...result, type: 'result', id: packet.id });
+        }).catch(error => { if (!this.closed) this.channel.send({ type: 'error', id: packet.id, error: error instanceof Error ? error.message : 'REQUEST_FAILED' }); });
       } catch (error) { this.channel.send({ type: 'error', id: packet.id, error: error instanceof Error ? error.message : 'REQUEST_FAILED' }); }
     } } catch (error) { this.close(error instanceof Error ? error : new Error('PEER_DISCONNECTED')); }
     finally { this.close(); }
@@ -73,7 +76,8 @@ export class CollaborationRpc {
     if (this.pending.size >= 8) return Promise.reject(new Error('PEER_BUSY'));
     return new Promise((resolve, reject) => {
       const id = randomUUID();
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('PEER_TIMEOUT')); this.close(); }, 10_000);
+      const timeout = packet.action === 'tasks' && ['prepare', 'dependency-bundle', 'bundle-chunk'].includes(String(packet.op)) ? 60_000 : 10_000;
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('PEER_TIMEOUT')); this.close(); }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       try { this.channel.send({ ...packet, id } as Packet); } catch (error) { this.close(error instanceof Error ? error : new Error('PEER_DISCONNECTED')); }
     });
@@ -84,7 +88,7 @@ export class CollaborationRpc {
     this.pending.clear();
   }
 }
-export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string, receive?: (packet: Packet) => Record<string, unknown>): Promise<CollaborationRpc> {
+export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string, receive?: (packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>): Promise<CollaborationRpc> {
   validateCollaborationNode(peer);
   const ca = peer.caFingerprint256 ? await readPinnedCertificateAuthority(peer.origin, peer.caFingerprint256) : undefined;
   const url = endpoint ?? `${peer.origin.replace(/^https:/, 'wss:')}/api/federation/secure`;

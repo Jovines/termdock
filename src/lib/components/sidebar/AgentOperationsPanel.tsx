@@ -1,4 +1,5 @@
-import { collaborationServiceLabel } from '../../collaboration/display';
+import { CollaborationTaskWorkbench } from './CollaborationTaskWorkbench';
+import { collaborationMemberLabel, collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { collaborationGroupPreferences, collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { focusCollaborationInput, registerCollaborationInput } from '../../collaboration/inputTarget';
@@ -9,7 +10,7 @@ import { openRemoteSession } from '../../federation/remoteSession';
 import { shortId } from '../../utils/shortId';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, GripVertical, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, Maximize2, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Bot, MoreHorizontal, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, Maximize2, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   getSettings,
   type CollaborationPanelState,
@@ -67,6 +68,7 @@ function initialWorkbenchTab(): Tab {
 interface AgentOperationsPanelProps {
   initialFloating?: boolean;
   onFloatingChange?: (groupId: string | null) => Promise<void>;
+  onEnterGroup?: (groupId: string) => Promise<void>;
   activeSessionId: string | null;
   initialCollaborationGroupId?: string | null;
   defaultSessionMode?: 'shell' | 'tmux';
@@ -97,7 +99,7 @@ export function AgentOperationsPanel(props: AgentOperationsPanelProps) {
   </>;
 }
 
-function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId = null, initialFloating = false, onFloatingChange, defaultSessionMode = 'shell', onClose, onNewSession,
+function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId = null, initialFloating = false, onFloatingChange, onEnterGroup, defaultSessionMode = 'shell', onClose, onNewSession,
   overlayOnly = false, onOpenOverlay, drafts, loadDrafts, updateDraft,
 }: AgentOperationsPanelProps & {
   overlayOnly?: boolean;
@@ -106,16 +108,19 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
   loadDrafts: (drafts: PanelDrafts) => void;
   updateDraft: (id: string, draft: PanelDrafts[string]) => void;
 }) {
+  const groupWorkspace = !!initialCollaborationGroupId;
   const [floating, setFloating] = useState(initialFloating);
   useEffect(() => { setFloating(initialFloating); }, [initialFloating]);
   const [savingFloating, setSavingFloating] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(initialCollaborationGroupId);
   const dock = useCollaborationPanelDock(state => state.docks[initialCollaborationGroupId ?? 'workbench']);
   const dockHost = useCollaborationPanelDock(state => state.hosts[initialCollaborationGroupId ?? 'workbench']);
-  const [panelMode, setPanelMode] = useState<'floating' | 'docked'>('floating');
+  const [panelMode, setPanelMode] = useState<'floating' | 'docked'>('docked');
   const [panelSize, setPanelSize] = useState<{ width: number; height: number } | null>(null);
   const [position, setPosition] = useState({ x: 16, y: 80 });
   const panelRef = useRef<HTMLElement>(null);
+  // Keep the React tree in one portal while its DOM container follows members.
+  const [portalTarget] = useState(() => document.createElement('div'));
   const relativePosition = useRef({ x: 0.5, y: 0.5 });
   const [panelState, setPanelState] = useState<CollaborationPanelState | null>(null);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
@@ -127,7 +132,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
       if (saved.position) relativePosition.current = saved.position;
       if (saved.size) setPanelSize(saved.size);
       loadDrafts(saved.drafts ?? {});
-      if (!overlayOnly) setPanelMode(saved.mode ?? 'floating');
+      if (!overlayOnly) setPanelMode(saved.mode ?? 'docked');
       setPanelState(saved);
     }).catch(() => {
       if (!cancelled) setPreferenceError('面板草稿加载失败，请重新打开面板重试');
@@ -141,6 +146,11 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
     return () => { window.removeEventListener('termdock-panel-save-error', onError); if (!overlayOnly) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null); };
   }, []);
   const docked = !overlayOnly && floating && panelMode === 'docked' && !!dockHost;
+  useLayoutEffect(() => {
+    portalTarget.className = docked ? 'h-full min-h-0 w-full min-w-0' : 'contents';
+    (docked ? dockHost : document.body)?.appendChild(portalTarget);
+    return () => portalTarget.remove();
+  }, [portalTarget, docked, dockHost]);
   useEffect(() => {
     if (!overlayOnly && !floating) useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', null);
   }, [floating]);
@@ -151,7 +161,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
     try {
       await saveCollaborationPanel({ mode, ...(mode === 'docked' ? { dock: nextDock } : {}) }, initialCollaborationGroupId);
       setPanelMode(mode);
-      useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', mode === 'docked' ? nextDock : null);
+      useCollaborationPanelDock.getState().setDock(initialCollaborationGroupId ?? 'workbench', mode === 'docked' ? { ...nextDock, ...(groupWorkspace ? { preferredWidth: 360 } : {}) } : null);
     } catch { setPreferenceError('面板布局保存失败，请重试'); }
     finally { setSavingFloating(false); }
   };
@@ -180,6 +190,11 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [notice]);
   const [sessionsState, setSessionsState] = useState<'loading' | 'loaded' | 'error'>('loading');
   const [automationsState, setAutomationsState] = useState<'loading' | 'loaded' | 'error'>('loading');
   const [automationsError, setAutomationsError] = useState<string | null>(null);
@@ -214,10 +229,10 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
   // An unresolved group is not an unavailable group. Restored resident panels
   // must wait for membership and saved layout before appearing over a terminal.
   const panelPreferencesReady = !!panelState || !!preferenceError;
-  const waitingForDockHost = !overlayOnly && panelMode === 'docked' && !!directCollaborationGroup
+  const waitingForDockHost = !overlayOnly && floating && panelMode === 'docked'
     && !!(dock ?? panelState?.dock) && !dockHost;
   const floatingVisible = panelPreferencesReady && !waitingForDockHost && !!activeSessionId
-    && (!!selectedGroup?.sessionIds.includes(activeSessionId)
+    && (!initialCollaborationGroupId || !!dockHost || !!selectedGroup?.sessionIds.includes(activeSessionId)
       || !!initialCollaborationGroupId && (sessionsState !== 'loading' && !directCollaborationGroup || !!preferenceError));
   useLayoutEffect(() => {
     if (!floating || docked || !floatingVisible) return;
@@ -239,16 +254,27 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
   // Restore docks only for resident panels, never while loading a full panel.
   // A saved dock can outlive its group. Release the split without discarding
   // drafts or saved preferences: a temporary missing replica may return.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (overlayOnly) return;
     const key = initialCollaborationGroupId ?? 'workbench';
     const state = useCollaborationPanelDock.getState();
     if (unavailableGroup) {
       if (state.docks[key]) state.setDock(key, null);
-    } else if (directCollaborationGroup && floating && panelMode === 'docked' && panelState?.dock && !state.docks[key]) {
-      state.setDock(key, panelState.dock);
+    } else if (panelPreferencesReady && floating && panelMode === 'docked' && activeSessionId
+      && (!initialCollaborationGroupId || directCollaborationGroup)) {
+      const existing = state.docks[key];
+      const anchor = !initialCollaborationGroupId || directCollaborationGroup?.sessionIds.includes(activeSessionId) ? activeSessionId
+        : sessions.find(session => directCollaborationGroup?.sessionIds.includes(session.sessionId) && !remoteSessionAddress(session.sessionId))?.sessionId ?? activeSessionId;
+      const base = existing ?? panelState?.dock ?? { sessionId: anchor, side: window.innerWidth < 640 ? 'bottom' as const : 'right' as const };
+      const next = { ...base, sessionId: directCollaborationGroup?.sessionIds.includes(activeSessionId) ? activeSessionId : base.sessionId,
+        ...(groupWorkspace ? { preferredWidth: existing?.preferredWidth ?? 360 } : {}) };
+      if (!existing || next.sessionId !== existing.sessionId || next.preferredWidth !== existing.preferredWidth) state.setDock(key, next);
+      if (groupWorkspace && existing && next.sessionId !== existing.sessionId) {
+        void saveCollaborationPanel({ dock: { sessionId: next.sessionId, side: next.side } }, initialCollaborationGroupId)
+          .catch(() => setPreferenceError('协作位置保存失败，当前面板仍可使用'));
+      }
     }
-  }, [unavailableGroup, directCollaborationGroup, floating, panelMode, panelState, initialCollaborationGroupId, dock]);
+  }, [unavailableGroup, directCollaborationGroup, floating, panelMode, panelState, panelPreferencesReady, activeSessionId, initialCollaborationGroupId, dock, sessions]);
 
   const changeFloating = async (next: boolean, close = false) => {
     if (savingFloating || (next && !selectedGroup)) return;
@@ -282,7 +308,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
     if (!options.silent) setError(null);
     // Launcher discovery can be slow (custom commands, network PATH entries).
     // It must not gate the already-running sessions or an unrelated tab.
-    if (!automationRefresh.current) {
+    if (!groupWorkspace && !automationRefresh.current) {
       automationRefresh.current = listAgentAutomations().then((data) => {
         setAutomations(data.automations);
         setAutomationRuns(data.runs);
@@ -309,7 +335,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
       }).finally(() => { collaborationRefresh.current = null; });
     }
     await Promise.all([collaborationRefresh.current, automationRefresh.current]);
-  }, [acceptCollaboration]);
+  }, [acceptCollaboration, groupWorkspace]);
 
   useEffect(() => {
     void refresh();
@@ -322,6 +348,17 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onClose, floating]);
 
+  const chooseGroup = (id: string | null) => {
+    if (groupWorkspace && id && id !== initialCollaborationGroupId && groups.some(group => group.id === id) && onEnterGroup) {
+      void onEnterGroup(id).catch(error => setError(error instanceof Error ? error.message : '无法打开工作区'));
+    } else setSelectedGroupId(id);
+  };
+  const openMemberSession = async (session: OrchestrationSession) => {
+    // Local member navigation updates activeSessionId; the group follows it
+    // immediately and saves the anchor without delaying terminal switching.
+    await openCollaborationSession(session);
+  };
+
   return createPortal(
     <>
       {!floating && <button
@@ -331,9 +368,9 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
         aria-label="关闭 Agent 工作台"
       />}
       <section onPointerDown={event => { if (docked) event.stopPropagation(); }} ref={panelRef} aria-label={docked ? '工作组消息分屏' : floating ? '工作组消息浮窗' : 'Agent 工作台'} style={floating && !docked ? { display: floatingVisible ? undefined : 'none', left: position.x, top: position.y, ...(panelSize ? { width: `min(calc(100vw - 24px), max(280px, ${panelSize.width * 100}vw))`, height: `min(calc(100dvh - 24px), max(220px, ${panelSize.height * 100}dvh))` } : {}), maxHeight: viewportHeight ? viewportHeight - 24 : 'calc(100dvh - 24px)' } : undefined} className={docked ? 'flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface' : floating ? 'fixed z-menu-panel flex w-[min(400px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-xl' : 'fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,var(--app-vv-offset-top,0px),env(safe-area-inset-top,0px))] h-[calc(var(--app-visible-vh,100dvh)-max(1.5rem,var(--app-vv-offset-top,0px),env(safe-area-inset-top,0px))-max(1.5rem,env(safe-area-inset-bottom,0px)))] z-modal-panel mx-auto flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[calc(var(--app-visible-vh,100dvh)*0.08)] sm:h-[calc(var(--app-visible-vh,100dvh)*0.84)]'}>
-        <header data-pane-titlebar={docked ? "true" : undefined} data-panel-drag-title={docked ? "true" : undefined} onDragStart={event => event.preventDefault()} className={`flex items-center gap-2 border-b border-border/15 ${docked ? 'h-6 min-h-6 shrink-0 cursor-grab select-none bg-[var(--chrome-bg)] px-2 active:cursor-grabbing' : floating ? 'px-3 py-2 cursor-move touch-none select-none' : 'px-4 py-3'}`}
+        <header data-pane-titlebar={docked ? "true" : undefined} data-panel-drag-title={docked ? "true" : undefined} onDragStart={event => event.preventDefault()} className={`flex items-center gap-2 border-b border-border/15 ${docked ? 'min-h-9 shrink-0 cursor-grab select-none bg-[var(--chrome-bg)] px-3 active:cursor-grabbing' : floating ? 'px-3 py-2 cursor-move touch-none select-none' : 'px-4 py-3'}`}
           onPointerDown={event => {
-            if (!floating || docked || event.button !== 0 || (event.target as Element).closest('button')) return;
+            if (!floating || docked || event.button !== 0 || (event.target as Element).closest('button, summary')) return;
             drag.current = { x: event.clientX, y: event.clientY, left: position.x, top: position.y };
             event.currentTarget.setPointerCapture?.(event.pointerId);
           }}
@@ -350,25 +387,28 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
           }} onPointerCancel={() => { drag.current = null; }}>
           <Bot size={docked ? 13 : 17} className="shrink-0 text-primary" />
           <div className="min-w-0 flex-1">
-            <h2 className={`${floating ? 'truncate text-[12px]' : 'text-[14px]'} font-semibold text-foreground`} title={docked ? '拖动标题移动面板；放在边缘拆分，中央交换' : directCollaborationGroup?.name}>{directCollaborationGroup ? `${directCollaborationGroup.name} · 协作消息` : initialCollaborationGroupId ? '协作消息' : 'Agent 工作台'}</h2>
-            {!docked && <p className="text-[10px] text-muted-foreground">{floating ? '引用、文件路径和粘贴优先加入此处' : directCollaborationGroup ? '选择成员，发送协作消息' : '自动任务、会话协作与历史搜索'}</p>}
+            <h2 className={`${floating ? 'truncate text-[12px]' : 'text-[14px]'} font-semibold text-foreground`} title={docked ? '拖动标题移动面板；放在边缘拆分，中央交换' : directCollaborationGroup?.name}>{directCollaborationGroup ? directCollaborationGroup.name : initialCollaborationGroupId ? '协作工作区' : 'Agent 工作台'}</h2>
+            {!docked && !groupWorkspace && <p className="text-[10px] text-muted-foreground">{floating ? '引用、文件路径和粘贴优先加入此处' : directCollaborationGroup ? '分派任务、回答问题、审阅与验收结果' : '自动任务、会话协作与历史搜索'}</p>}
           </div>
-          {!docked && tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '完整面板' : '常驻浮窗'}</button>}
-          {docked && <>
-            <GripVertical size={14} aria-hidden="true" className="shrink-0 text-muted-foreground" />
-            <button type="button" aria-label="打开完整弹窗" title="打开完整弹窗" disabled={savingFloating} className="rounded p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => onOpenOverlay('full')}><Maximize2 size={14} /></button>
-            <button type="button" aria-label="切换为小浮窗" title="切换为小浮窗" disabled={savingFloating} className="rounded p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => void changePanelMode('floating')}><ExternalLink size={14} /></button>
-          </>}
-          <button className={`${docked ? 'rounded p-1' : 'rounded-lg p-2'} text-muted-foreground hover:bg-surface-2 hover:text-foreground`} disabled={savingFloating} onClick={() => { if (floating) void changeFloating(false, true); else onClose(); }} aria-label="关闭"><X size={16} /></button>
+          {!docked && tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '展开' : '放到终端旁'}</button>}
+          {groupWorkspace && directCollaborationGroup && <span className="shrink-0 text-[11px] text-muted-foreground">{directCollaborationGroup.sessionIds.length} 人</span>}
+          {docked && <details className="relative z-20 shrink-0">
+            <summary aria-label="面板布局" title="面板布局" className="flex min-h-8 cursor-pointer list-none items-center rounded px-2 text-muted-foreground hover:bg-surface-2 [&::-webkit-details-marker]:hidden"><MoreHorizontal size={16} /></summary>
+            <div className="absolute right-0 top-full z-30 w-36 rounded-lg border border-border/20 bg-surface-2 p-1 shadow-lg">
+              <button type="button" disabled={savingFloating} className={`${buttonClass} min-h-11 w-full justify-start text-foreground hover:bg-surface-elevated`} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); onOpenOverlay('full'); }}><Maximize2 size={14} />展开查看</button>
+              <button type="button" disabled={savingFloating} className={`${buttonClass} min-h-11 w-full justify-start text-foreground hover:bg-surface-elevated`} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); void changePanelMode('floating'); }}><ExternalLink size={14} />小浮窗</button>
+            </div>
+          </details>}
+          <button className={`${docked ? 'min-h-8 rounded px-2' : 'rounded-lg p-2'} text-muted-foreground hover:bg-surface-2 hover:text-foreground`} disabled={savingFloating} onClick={() => { if (floating) void changeFloating(false, true); else onClose(); }} aria-label="关闭"><X size={16} /></button>
         </header>
         {floating && !docked && !overlayOnly && <div className="flex flex-wrap items-center gap-1 border-b border-border/15 px-3 py-1.5">
           <button type="button" disabled={savingFloating} aria-pressed={panelMode === 'floating'} className={`${choiceClass} ${panelMode === 'floating' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('floating')}>浮窗</button>
-          <button type="button" disabled={savingFloating || !activeSessionId || unavailableGroup} aria-pressed={panelMode === 'docked'} className={`${choiceClass} ${panelMode === 'docked' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('docked')}>占用分屏</button>
+          <button type="button" disabled={savingFloating || !activeSessionId || unavailableGroup} aria-pressed={panelMode === 'docked'} className={`${choiceClass} ${panelMode === 'docked' ? 'border-primary/40 text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => void changePanelMode('docked')}>放到终端旁</button>
 
         </div>}
-        {!floating && <nav aria-label="工作台功能" className="grid shrink-0 grid-cols-3 gap-1 border-b border-border/15 px-3 py-2">
+        {!groupWorkspace && (!floating || docked) && <nav aria-label="工作台功能" className="grid shrink-0 grid-cols-3 gap-1 border-b border-border/15 px-2 py-1">
           {([
-            ['collaboration', Link2, '会话协作'],
+            ['collaboration', Link2, '协作组'],
             ['automation', Clock3, '自动任务'],
             ['search', Search, '历史搜索'],
           ] as const).map(([id, Icon, label]) => (
@@ -378,10 +418,9 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
           ))}
         </nav>}
         {tab === 'collaboration' && collaborationError && <div role="alert" className="mx-4 mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{collaborationError}<button className={`${buttonClass} ml-2`} onClick={() => void refresh()}>重新加载会话</button></div>}
-        {!floating && tab === 'collaboration' && peerState && <CollaborationServiceManager peers={peerState} currentGroupId={selectedGroup?.id} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} onSelectGroup={setSelectedGroupId} />}
-        {tab !== 'search' && launcherError && <div className="mx-4 mt-3 text-[11px] text-muted-foreground">{launcherError}</div>}
+        {!groupWorkspace && tab !== 'search' && launcherError && <div className="mx-4 mt-3 text-[11px] text-muted-foreground">{launcherError}</div>}
         {error && <div className="mx-4 mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">{error}</div>}
-        {notice && !floating && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
+        {notice && (!floating || docked) && <div role="status" className="mx-3 mt-2 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className="min-h-0 flex-1 overflow-hidden">
           {visitedTabs.has('automation') && <div id="workbench-automation" className={tab === 'automation' ? 'h-full min-h-0 p-4' : 'hidden'}>
             <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions.filter(session => !remoteSessionAddress(session.sessionId))} activeSessionId={activeSessionId} loading={automationsState === 'loading'} loadError={automationsError} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />
@@ -393,7 +432,8 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
             {sessionsState !== 'loading' && <button className={buttonClass} onClick={() => void refresh()}>重新加载</button>}
           </div>}
           {preferenceError && <p role="alert" className="text-[11px] text-destructive">{preferenceError}</p>}
-          {panelState && (!initialCollaborationGroupId || directCollaborationGroup) && <CollaborationTab active={tab === 'collaboration'} notice={notice} initialDrafts={drafts} onDraftChange={updateDraft} docked={docked} inputKeySuffix={overlayOnly ? ':overlay' : ''} selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} onOpenSession={async session => { await openCollaborationSession(session); if (!floating) onClose(); }} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {panelState && (!initialCollaborationGroupId || directCollaborationGroup) && <CollaborationTab active={tab === 'collaboration'} notice={notice} initialDrafts={drafts} onDraftChange={updateDraft} docked={docked} inputKeySuffix={overlayOnly ? ':overlay' : ''} selectedGroupId={selectedGroupId} setSelectedGroupId={chooseGroup} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} onOpenSession={async session => { await openMemberSession(session); if (!floating) onClose(); }} onOpenTaskSession={openMemberSession} onEnterGroup={onEnterGroup} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {!groupWorkspace && peerState && <CollaborationServiceManager peers={peerState} currentGroupId={selectedGroup?.id} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} onSelectGroup={chooseGroup} />}
           </div>}
           {visitedTabs.has('search') && <div id="workbench-search" className={tab === 'search' ? 'h-full min-h-0 overflow-y-auto overscroll-y-contain p-4' : 'hidden'}>
             <SearchTab active={tab === 'search'} onClose={onClose} onNewSession={onNewSession} setError={setError} />
@@ -424,7 +464,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
           }}><span aria-hidden="true">⌟</span></button>}
       </section>
     </>,
-    docked ? dockHost : document.body,
+    portalTarget,
   );
 }
 
@@ -685,10 +725,12 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked, inputKeySuffix, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, onOpenSession, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked, inputKeySuffix, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, onOpenSession, onOpenTaskSession, onEnterGroup, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
   active: boolean;
   notice: string | null;
   onOpenSession: (session: OrchestrationSession) => Promise<void>;
+  onOpenTaskSession: (session: OrchestrationSession) => Promise<void>;
+  onEnterGroup?: (groupId: string) => Promise<void>;
   selectedGroupId: string | null;
   setSelectedGroupId: (id: string | null) => void;
   floatingVisible: boolean;
@@ -701,6 +743,9 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
   groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; defaultSessionMode: 'shell' | 'tmux'; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
 }) {
+  const [workspaceView, setWorkspaceView] = useState<'tasks' | 'messages'>('tasks');
+  const [taskAttention, setTaskAttention] = useState(0);
+  useEffect(() => setTaskAttention(0), [selectedGroupId]);
   const [name, setName] = useState('');
   const [selected, setSelected] = useState<Set<string>>(() => new Set(activeSessionId ? [activeSessionId] : []));
   const [sessionQuery, setSessionQuery] = useState('');
@@ -733,6 +778,7 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
   const selectedGroup = selectedGroupId === 'new'
     ? null
     : (selectedGroupId ? groups.find((group) => group.id === selectedGroupId) : groups[0]) ?? null;
+  const workspaceMembers = selectedGroup?.sessionIds.flatMap(id => { const session = sessions.find(s => s.sessionId === id); return session ? [session] : []; }) ?? [];
   const [uploadingFiles, setUploadingFiles] = useState(0);
   const drafts = useRef(new Map<string, { content: string; targets: string[] | null }>(Object.entries(initialDrafts ?? {})));
   const groupIdRef = useRef<string | undefined>(undefined);
@@ -790,11 +836,12 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
     return () => { document.removeEventListener('visibilitychange', onVisibility); window.removeEventListener('pagehide', flush); flush(); };
   }, [persistDraft]);
   useEffect(() => {
-    if (!floating || !floatingVisible || !selectedGroup) return;
+    if (!floating || !floatingVisible || !selectedGroup || workspaceView !== 'messages') return;
     return registerCollaborationInput(text => {
+      setWorkspaceView('messages');
       setContent(current => current + (current && !/\s$/.test(current) ? '\n' : '') + text.replace(/\r\n?/g, '\n'));
     }, inputKey, requiresPaneFocus);
-  }, [floating, floatingVisible, selectedGroup?.id, requiresPaneFocus, inputKey]);
+  }, [floating, floatingVisible, selectedGroup?.id, requiresPaneFocus, inputKey, workspaceView]);
   useEffect(() => {
     const composer = messageComposerRef.current;
     if (!floating || !composer) return;
@@ -852,7 +899,7 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
     setMessagesError(null);
   }, [selectedGroup?.id]);
   useEffect(() => {
-    if (!active || (floating && !floatingVisible) || !selectedGroup) { setMessagesLoading(false); return; }
+    if (!initialGroupId || !active || (floating && !floatingVisible) || !selectedGroup) { setMessagesLoading(false); return; }
     setMessagesLoading(true);
     let cancelled = false;
     let version = 0;
@@ -871,7 +918,7 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
   useEffect(() => {
     if (!initialGroupId || selectedGroup?.id !== initialGroupId || positionedInitialGroupRef.current) return;
     positionedInitialGroupRef.current = true;
-    messageComposerRef.current?.scrollIntoView?.({ block: 'nearest' });
+    if (workspaceView === 'messages') messageComposerRef.current?.scrollIntoView?.({ block: 'nearest' });
   }, [initialGroupId, selectedGroup?.id]);
 
   const createGroup = async () => {
@@ -881,6 +928,7 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
       const result = await saveCollaborationGroup({ name, sessionIds: [...selected] });
       setName(''); setSessionQuery(''); setSelectedGroupId(result.group.id); await refresh();
       setNotice(`“${result.group.name}”已创建，${result.group.sessionIds.length} 个会话可以开始协作`);
+      if (onEnterGroup) await onEnterGroup(result.group.id);
     } catch (error) { setError(error instanceof Error ? error.message : '创建失败'); }
     finally { setBusy(null); }
   };
@@ -1007,17 +1055,19 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
   const renderSessionOptionRow = (session: OrchestrationSession) => <label key={session.sessionId} className="flex cursor-pointer items-start gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input className="mt-0.5" type="checkbox" disabled={!canAddCollaborationSession(session)} checked={selected.has(session.sessionId)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-[12px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="shrink-0 text-[9px] text-muted-foreground">{collaborationSessionStatus(session)}</span></span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{session.currentTask ? `${friendlyCurrentTask(session.currentTask)} · ${session.cwd}` : session.cwd || session.capability || "终端会话"}</span></span></label>;
   const renderMemberOptionRow = (session: OrchestrationSession) => { const draft = roleDrafts[session.sessionId] ?? ''; const savedRole = selectedGroup?.roles?.[session.sessionId] ?? ''; return <div key={session.sessionId} className="px-2 py-2 transition hover:bg-surface-2"><label className="flex cursor-pointer items-center gap-3"><input type="checkbox" disabled={!selectedGroup?.sessionIds.includes(session.sessionId) && !canAddCollaborationSession(session)} checked={memberSelection.has(session.sessionId)} onChange={() => setMemberSelection((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="block truncate text-[11px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="block truncate text-[9px] text-muted-foreground">{collaborationSessionStatus(session)} · {session.cwd}</span></span></label><div className="mt-2 flex items-center gap-2 pl-7"><span className="shrink-0 text-[9px] text-muted-foreground">定位</span><input aria-label={`${session.name} 的定位`} className={`${inputClass} min-h-8 py-1 text-[10px]`} value={draft} maxLength={200} placeholder="成员收到的定位；清空后保存可移除" onChange={(event) => setRoleDrafts((current) => ({ ...current, [session.sessionId]: event.target.value }))} /><button aria-label={`保存 ${session.name} 的定位`} title={draft.trim() === savedRole ? '定位未变化' : '保存此成员的定位'} disabled={busy !== null || draft.trim() === savedRole} className={`${buttonClass} min-h-8 shrink-0 px-2 text-muted-foreground`} onClick={() => void saveMemberRole(session.sessionId)}>{busy === `role:${session.sessionId}` ? <RefreshCw size={12} className="animate-spin" /> : <Check size={12} />}</button></div></div>; };
 
-  return <div className={floating ? 'space-y-0' : 'space-y-5'}>
-    {messagesError && <p role="alert" className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">消息同步暂时失败，正在自动重试：{messagesError}</p>}
-    <div hidden={floating}>
-    <div className="flex items-start justify-between gap-4">
-      <div><h3 className="text-[13px] font-medium text-foreground">会话协作</h3><p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted-foreground">给单个成员或全组发消息，查看交接记录与明确回复。</p></div>
-      {selectedGroup && <div className="flex shrink-0 flex-wrap justify-end gap-1"><button type="button" aria-expanded={settingsOpen} className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => { setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={13} />组设置</button><button className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => { setSelectedGroupId('new'); setConfirmDelete(false); setNotice(null); }}><Plus size={13} />新建组</button></div>}
-    </div>
-    {groups.length > 4 && <label className="mt-3 block space-y-1 text-[10px] text-muted-foreground">选择协作组<select className={inputClass} value={selectedGroup?.id ?? "new"} onChange={event => setSelectedGroupId(event.target.value)}>{!selectedGroup && <option value="new">正在创建新协作组</option>}{groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.sessionIds.length} 个成员</option>)}</select></label>}
-    {groups.length > 0 && groups.length <= 4 && <div className="mt-3 flex gap-2 overflow-x-auto border-b border-border/15 pb-3">
-      {groups.map((group) => <button key={group.id} aria-pressed={selectedGroup?.id === group.id} onClick={() => setSelectedGroupId(group.id)} className={`${buttonClass} shrink-0 ${selectedGroup?.id === group.id ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-muted-foreground'}`}>{group.name}<span className="text-[9px] opacity-70">{group.sessionIds.length}</span></button>)}
-    </div>}
+  return <div className="space-y-3">
+    {messagesError && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">消息同步暂时失败，正在自动重试：{messagesError}</p>}
+    <div>
+      {(!initialGroupId || !selectedGroup) && <div className="flex items-center gap-2">
+        {groups.length > 0 ? <label className="min-w-0 flex-1"><span className="sr-only">选择协作组</span><select className={inputClass} value={selectedGroup?.id ?? 'new'} onChange={event => setSelectedGroupId(event.target.value)}>
+          {!selectedGroup && <option value="new">新建协作组</option>}
+          {groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.sessionIds.length} 个成员</option>)}
+        </select></label> : <h3 className="min-w-0 flex-1 text-sm font-medium text-foreground">建立协作组</h3>}
+        {selectedGroup && <>
+          <button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} /></button>
+          <button type="button" aria-label="新建协作组" title="新建协作组" className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSelectedGroupId('new'); setConfirmDelete(false); setNotice(null); }}><Plus size={14} /></button>
+        </>}
+      </div>}
 
     {settingsOpen && selectedGroup && <CollaborationGroupSettings key={selectedGroup.id} group={selectedGroup} activeSessionId={activeSessionId} sessions={sessions} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={() => setSettingsOpen(false)} />}
     {!selectedGroup && <section className="border-y border-border/15 py-4">
@@ -1034,7 +1084,12 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
     </section>}
 
     </div>
-    {selectedGroup && <>
+    {selectedGroup && !initialGroupId && <div className="space-y-3 py-3"><p className="text-xs leading-relaxed text-muted-foreground">任务、消息和成员操作在终端旁的协作区处理。</p><button type="button" className={`${buttonClass} min-h-11 bg-primary text-primary-foreground`} onClick={() => void onEnterGroup?.(selectedGroup.id).catch(error => setError(error instanceof Error ? error.message : '无法打开协作区'))}>打开 {selectedGroup.name}</button></div>}
+    {selectedGroup && initialGroupId && <div hidden={settingsOpen} className="space-y-3">
+      <div className="flex items-center gap-1 border-b border-border/15 pb-2" aria-label="协作工作区">{([['tasks', '目标与任务'], ['messages', '消息与成员']] as const).map(([id, label]) => <button type="button" key={id} aria-pressed={workspaceView === id} className={`${buttonClass} min-h-11 ${workspaceView === id ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={() => setWorkspaceView(id)}>{label}{id === 'tasks' && taskAttention > 0 && <span className="rounded bg-primary/15 px-1.5 text-[11px] text-primary">{taskAttention} 待处理</span>}</button>)}<button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} ml-auto min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} /></button></div>
+      <div className="flex gap-1 overflow-x-auto" aria-label="工作组终端">{workspaceMembers.map(session => <button type="button" key={session.sessionId} aria-pressed={session.sessionId === activeSessionId} title={`${session.name} · ${session.cwd || '终端会话'}`} className={`${buttonClass} min-h-9 shrink-0 ${session.sessionId === activeSessionId ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={() => void onOpenTaskSession(session).catch(error => setError(error instanceof Error ? error.message : '无法打开终端'))}>{collaborationMemberLabel(session, workspaceMembers)}</button>)}</div>
+      <div hidden={workspaceView !== 'tasks'}><CollaborationTaskWorkbench key={selectedGroup.id} group={selectedGroup} sessions={sessions} active={active && (!floating || floatingVisible)} onAttentionChange={setTaskAttention} onOpenSession={onOpenTaskSession} /></div>
+      <div hidden={workspaceView !== 'messages'}>
       <section onFocusCapture={() => focusCollaborationInput(inputKey)} onPointerDownCapture={() => focusCollaborationInput(inputKey)} data-termdock-terminal-dropzone={floating ? activeSessionId ?? "collaboration-composer" : undefined} onDragOver={event => { if (floating) event.preventDefault(); }} onDrop={event => {
         if (!floating) return;
         const files = Array.from(event.dataTransfer.files);
@@ -1044,7 +1099,7 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
         else { const text = event.dataTransfer.getData("text/plain") || event.dataTransfer.getData("text/uri-list"); if (text) setContent(current => current + (current ? "\n" : "") + text); }
       }} ref={messageComposerRef} className={floating ? '' : 'rounded-xl border border-primary/20 bg-primary/5 px-3 py-3'}>{!floating && <h4 className="truncate text-[12px] font-medium text-foreground">{selectedGroup.name} · 发送给成员</h4>}<div className={floating ? 'space-y-2' : 'mt-2 space-y-2'}>
           <fieldset className="min-w-0"><legend className="mb-1 text-[10px] text-muted-foreground">接收人（可多选）</legend><div className="flex flex-wrap gap-1">
-            {[{ id: '*', label: '全组成员' }, ...selectedGroup.sessionIds.map(id => ({ id, label: collaborationSessionName(sessions.find(session => session.sessionId === id), sessions.filter(session => selectedGroup.sessionIds.includes(session.sessionId))) ?? `${id.slice(0, 8)}（离线）` }))].map(({ id, label }) => {
+            {[{ id: '*', label: '全组成员' }, ...selectedGroup.sessionIds.map(id => ({ id, label: (() => { const member = workspaceMembers.find(session => session.sessionId === id); return member ? collaborationMemberLabel(member, workspaceMembers) : undefined; })() ?? `${id.slice(0, 8)}（离线）` }))].map(({ id, label }) => {
               const selected = id === '*' ? targetSessionIds === null : targetSessionIds?.includes(id) ?? false;
               const session = sessions.find(session => session.sessionId === id);
               return <span key={id} className="inline-flex max-w-full items-center gap-0.5">
@@ -1061,7 +1116,7 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
         }} onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); void insertFiles(files); } }} className={`${inputClass} min-h-16 max-h-48 resize-y`} value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入消息，可粘贴引用或文件…" /></label>
         <div className="mt-2 flex items-center justify-between gap-3"><p role="status" aria-live="polite" title={floating && notice ? notice : undefined} className={`min-w-0 flex-1 text-[9px] leading-relaxed ${floating ? 'truncate' : ''} ${floating && notice ? 'text-primary' : 'text-muted-foreground'}`}>{uploadingFiles > 0 ? '正在准备文件路径…' : floating && notice ? notice : selectedGroup.federated ? '消息由服务端后台投递，可查看送达结果；无需保持客户端在线。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || uploadingFiles > 0 || !content.trim() || !recipients.length} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} title="发送（⌘ / Ctrl + Enter）" onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
       </section>
-      <div hidden={floating}>
+      <div>
       <details key={selectedGroup.id} className="mt-4 rounded-xl border border-border/15"><summary className="cursor-pointer px-3 py-3 text-[11px] font-medium text-foreground">管理成员、角色与删除 · {selectedGroup.sessionIds.length} 个成员</summary>
       <section className="border-t border-border/15 p-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -1069,7 +1124,7 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
           {confirmDelete ? <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} bg-surface-2 px-2 text-foreground`} onClick={() => setConfirmDelete(false)}>取消</button><button disabled={busy !== null} className={`${buttonClass} bg-destructive px-2 text-destructive-foreground`} onClick={() => void remove()}>{busy === `delete:${selectedGroup.id}` ? <RefreshCw size={13} className="animate-spin" /> : null}确认删除</button></div> : <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} px-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground`} onClick={() => { setMemberSelection(new Set(selectedGroup.sessionIds)); setMemberRevision(selectedGroup.updatedAt); const next = !editingMembers; setEditingMembers(next); if (next) setRoleDrafts(Object.fromEntries(selectedGroup.sessionIds.map((id) => [id, selectedGroup.roles?.[id] ?? '']))); setSpawnOpen(false); }}><Pencil size={13} />管理成员</button><button className={`${buttonClass} px-2 text-primary hover:bg-primary/10`} onClick={openSpawn}><Plus size={13} />新建 Agent</button><button aria-label={`删除协作组 ${selectedGroup.name}`} title="删除协作组" disabled={busy !== null} className="rounded-lg p-2 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive" onClick={() => { setDeleteRevision(selectedGroup.updatedAt); setConfirmDelete(true); }}><Trash2 size={14} /></button></div>}
         </div>
         {confirmDelete && <p role="alert" className="mt-2 rounded-lg bg-destructive/10 px-3 py-2 text-[10px] leading-relaxed text-destructive">将删除“{selectedGroup.name}”协作组及其协作记录，{selectedGroup.sessionIds.length} 个成员的终端会话会保留。</p>}
-        <div className="mt-3 grid divide-y divide-border/10 border-y border-border/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0">{selectedGroup.sessionIds.map((id) => { const session = sessions.find((candidate) => candidate.sessionId === id); const role = selectedGroup.roles?.[id]; const memberName = session?.name ?? id; const dissolves = selectedGroup.sessionIds.length <= 2; return <div key={id} className={`flex min-w-0 items-stretch transition ${confirmRemoveMemberId === id ? 'bg-destructive/5' : 'hover:bg-surface-2'}`}><button disabled={!session} onClick={() => session && void onOpenSession(session).catch((error) => setError(error instanceof Error ? error.message : '无法打开会话'))} className="min-w-0 flex-1 px-3 py-2.5 text-left disabled:cursor-default"><span className="flex items-center gap-2"><span className={`h-2 w-2 shrink-0 rounded-full ${session && ['ready', 'shell', 'service-reachable', 'working', 'idle', 'done'].includes(session.status) && session.serviceConnected !== false ? 'bg-[var(--success)]' : 'bg-muted-foreground'}`} /><span className="truncate text-[11px] text-foreground">{memberName}</span>{session && <ServiceBadge session={session} />}<span className="ml-auto shrink-0 text-[9px] text-muted-foreground">{session ? collaborationSessionStatus(session) : '已离线'}</span></span><span className="mt-1 flex min-w-0 items-center gap-1 text-[9px] text-muted-foreground">{role ? <><span className="min-w-0 truncate font-medium text-primary/80">定位:{role}</span><span className="shrink-0 text-muted-foreground/50">·</span></> : null}{session ? <span className="min-w-0 truncate">{friendlyCurrentTask(session.currentTask)}</span> : <span className="shrink-0">重新上线后可继续接收消息</span>}</span></button><button aria-label={`把 ${memberName} 移出协作组`} aria-expanded={confirmRemoveMemberId === id} title={dissolves ? '移出后不足两个成员，将删除协作组' : '移出协作组'} disabled={busy !== null} className={`mr-1 shrink-0 self-center rounded-lg p-2 transition ${confirmRemoveMemberId === id ? 'text-destructive' : 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive'}`} onClick={() => setConfirmRemoveMemberId(confirmRemoveMemberId === id ? null : id)}><Trash2 size={13} /></button></div>; })}</div>
+        <div className="mt-3 grid divide-y divide-border/10 border-y border-border/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0">{selectedGroup.sessionIds.map((id) => { const session = sessions.find((candidate) => candidate.sessionId === id); const role = selectedGroup.roles?.[id]; const memberName = session?.name ?? id; const dissolves = selectedGroup.sessionIds.length <= 2; return <div key={id} className={`flex min-w-0 items-stretch transition ${confirmRemoveMemberId === id ? 'bg-destructive/5' : 'hover:bg-surface-2'}`}><button disabled={!session} onClick={() => session && void onOpenSession(session).catch((error) => setError(error instanceof Error ? error.message : '无法打开会话'))} className="min-w-0 flex-1 px-3 py-2.5 text-left disabled:cursor-default"><span className="flex items-center gap-2"><span className={`h-2 w-2 shrink-0 rounded-full ${session && ['ready', 'shell', 'terminal-connected', 'service-reachable', 'working', 'idle', 'done'].includes(session.status) && session.serviceConnected !== false ? 'bg-[var(--success)]' : 'bg-muted-foreground'}`} /><span className="truncate text-[11px] text-foreground">{memberName}</span>{session && <ServiceBadge session={session} />}<span className="ml-auto shrink-0 text-[9px] text-muted-foreground">{session ? collaborationSessionStatus(session) : '已离线'}</span></span><span className="mt-1 flex min-w-0 items-center gap-1 text-[9px] text-muted-foreground">{role ? <><span className="min-w-0 truncate font-medium text-primary/80">定位:{role}</span><span className="shrink-0 text-muted-foreground/50">·</span></> : null}{session ? <span className="min-w-0 truncate">{friendlyCurrentTask(session.currentTask)}</span> : <span className="shrink-0">重新上线后可继续接收消息</span>}</span></button><button aria-label={`把 ${memberName} 移出协作组`} aria-expanded={confirmRemoveMemberId === id} title={dissolves ? '移出后不足两个成员，将删除协作组' : '移出协作组'} disabled={busy !== null} className={`mr-1 shrink-0 self-center rounded-lg p-2 transition ${confirmRemoveMemberId === id ? 'text-destructive' : 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive'}`} onClick={() => setConfirmRemoveMemberId(confirmRemoveMemberId === id ? null : id)}><Trash2 size={13} /></button></div>; })}</div>
         {confirmRemoveMemberId && selectedGroup.sessionIds.includes(confirmRemoveMemberId) && (() => { const memberName = sessions.find((session) => session.sessionId === confirmRemoveMemberId)?.name ?? confirmRemoveMemberId; const dissolves = selectedGroup.sessionIds.length <= 2; const pending = busy === `remove-member:${confirmRemoveMemberId}`; return <div role="group" aria-label={`确认移除成员 ${memberName}`} className="flex flex-wrap items-center gap-x-3 gap-y-2 border-y border-destructive/25 bg-destructive/5 px-3 py-2.5"><p className="min-w-0 flex-1 text-[10px] leading-relaxed text-destructive">{dissolves ? `移出“${memberName}”后组内不足两个成员，协作组“${selectedGroup.name}”和它的 ${messages.length} 条协作记录会一并删除` : `把“${memberName}”移出“${selectedGroup.name}”？移出后它不再收到这个组的消息，可以随时重新加入`}</p><div className="flex shrink-0 gap-2"><button className={`${buttonClass} min-h-8 bg-surface-2 px-2 text-[10px] text-foreground`} onClick={() => setConfirmRemoveMemberId(null)}>取消</button><button disabled={busy !== null} className={`${buttonClass} min-h-8 px-2 text-[10px] bg-destructive text-destructive-foreground`} onClick={() => void removeMember(confirmRemoveMemberId)}>{pending ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}{dissolves ? '删除协作组' : '移出'}</button></div></div>; })()}
         {editingMembers && <div className="mt-4 border-t border-border/15 pt-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-[11px] font-medium text-foreground">管理成员</h5><p className="mt-1 text-[9px] text-muted-foreground">暂不可用的原成员会保留，只有取消勾选才会移出；定位（角色）在每行独立保存，成员收到消息时会看到自己的定位。</p></div><span className="text-[9px] text-muted-foreground">已选 {memberSelection.size}</span></div><div className="mt-3 max-h-72 divide-y divide-border/10 overflow-y-auto border-y border-border/10">{memberServiceGroups.length <= 1 ? memberOptions.map(renderMemberOptionRow) : memberServiceGroups.map((group) => { const collapsed = serviceCollapsed(group.key); return <div key={group.key}><ServiceGroupHeader label={group.label} count={group.sessions.length} collapsed={collapsed} onToggle={() => toggleServiceCollapsed(group.key)} />{!collapsed && <div className="divide-y divide-border/10">{group.sessions.map(renderMemberOptionRow)}</div>}</div>; })}</div><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => { setEditingMembers(false); setRoleDrafts({}); }}>取消</button><button disabled={busy !== null || sessionsState !== 'loaded' || memberSelection.size < 2} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void saveMembers()}>{busy === 'save-members' ? <RefreshCw size={13} className="animate-spin" /> : <Check size={13} />}保存成员</button></div></div>}
         {spawnOpen && <div className="mt-4 border-t border-primary/20 pt-4"><div><h5 className="text-[11px] font-medium text-foreground">创建 Agent Session</h5><p className="mt-1 text-[9px] text-muted-foreground">新会话启动后自动加入本组，并收到初始任务和成员信息。</p></div><div className="mt-3 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">Agent / Plugin<select aria-label="新 Agent 类型" className={inputClass} value={spawnAgentSlug} onChange={(event) => setSpawnAgentSlug(event.target.value)}>{agents.map((agent) => <option key={agent.slug} value={agent.slug}>{agent.displayName}{agent.isPlugin ? ' · Plugin' : ''}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">会话名称<input aria-label="新 Agent 会话名称" className={inputClass} value={spawnName} onChange={(event) => setSpawnName(event.target.value)} placeholder="留空则自动命名" /></label></div><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">工作目录<input aria-label="新 Agent 工作目录" className={inputClass} value={spawnCwd} onChange={(event) => setSpawnCwd(event.target.value)} placeholder="默认继承当前会话" /></label><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">初始任务<textarea aria-label="新 Agent 初始任务" className={`${inputClass} min-h-16 resize-y`} value={spawnTask} onChange={(event) => setSpawnTask(event.target.value)} placeholder="说明它加入后要先完成什么" /></label><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSpawnOpen(false)}>取消</button><button disabled={busy !== null || !spawnAgentSlug} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void spawnAgent()}>{busy === 'spawn-agent' ? <RefreshCw size={13} className="animate-spin" /> : <Bot size={13} />}创建并加入</button></div></div>}
@@ -1089,7 +1144,8 @@ function CollaborationTab({ active, notice, initialDrafts, onDraftChange, docked
 
       </div>
 
-    </>}
+      </div>
+    </div>}
   </div>;
 }
 
@@ -1165,7 +1221,7 @@ function CollaborationServiceManager({ peers, currentGroupId, busy, setBusy, set
     } catch (error) { setError(error instanceof Error ? error.message : restore ? '重新连接失败' : '移除连接失败'); }
     finally { setBusy(null); }
   };
-  return <details className="mx-4 mt-3 shrink-0 rounded-lg border border-border/15" key={affected ? 'affected' : 'other'} open={affected || undefined}>
+  return <details className="mt-4 shrink-0 rounded-lg border border-border/15" key={affected ? 'affected' : 'other'} open={affected || undefined}>
     <summary className="cursor-pointer px-3 py-2.5 text-[11px] text-muted-foreground"><span className="font-medium text-foreground">协作连接与管理</span><span className="ml-2">{peers.state === 'loading' ? '正在加载…' : `${services.length - disconnected.length} 个已连接${disconnected.length ? ` · ${disconnected.length} 个离线` : ''}`}</span></summary>
     <div className="max-h-64 overflow-y-auto border-t border-border/15 px-3 py-2">
       {services.length > 0 && <p className="mb-1 text-[10px] leading-relaxed text-muted-foreground">与以下服务进行跨服务协作，名称与服务切换器一致。</p>}
@@ -1249,7 +1305,10 @@ function ServiceBadge({ session }: { session: OrchestrationSession }) {
 }
 
 function collaborationSessionStatus(session: OrchestrationSession): string {
-  return session.serviceConnected === false ? '服务不可达' : humanSessionStatus(session.status);
+  if (session.serviceConnected === false) return '服务不可达';
+  // Older peer services use "recovering" for a route they never checked.
+  if (session.status === 'recovering' && session.route_error === 'ROUTE_NOT_CHECKED') return '投递目标未检查';
+  return humanSessionStatus(session.status);
 }
 
 function collaborationSessionName(session?: OrchestrationSession, peers: OrchestrationSession[] = []): string | undefined {
@@ -1267,7 +1326,8 @@ async function openCollaborationSession(session: OrchestrationSession): Promise<
 
 function humanSessionStatus(status: OrchestrationSession['status']): string {
   const labels: Record<string, string> = {
-    ready: '终端可达', shell: 'Shell 终端', recovering: '正在恢复连接',
+    ready: '终端可达', shell: 'Shell 终端', recovering: '正在检查投递目标',
+    unchecked: '投递目标未检查', 'terminal-connected': '终端已连接',
     detached: '终端未连接', 'agent-exited': 'Agent 已退出', offline: '已离线',
     ambiguous: '需确认目标终端', 'identity-mismatch': '终端身份已变化',
     unavailable: '终端暂不可达', 'service-reachable': '服务可达', 'service-unreachable': '服务不可达',

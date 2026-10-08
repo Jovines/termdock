@@ -50,7 +50,7 @@ interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: numb
 export interface FederationRuntimeOptions {
   collaborationConnected?: (subjectId: string, rpc: CollaborationRpc) => () => void;
   collaborationDescriptor?: () => Record<string, unknown>;
-  collaborationService?: (subjectId: string, packet: Packet) => Record<string, unknown>;
+  collaborationService?: (subjectId: string, packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>;
   collaborationExchange?: (subjectId: string, packet: Packet) => Record<string, unknown>;
   /** Registers another service as a peer limited to the sessions the calling
    * device may write to. The scope is derived from its effective grants here,
@@ -237,7 +237,9 @@ export async function createFederationRuntime(app: express.Express, directory: s
             send({ type: 'result', id: packet.id, node: options.collaborationDescriptor() });
           } else if (packet.type === 'collaboration-service') {
             if (!options.collaborationService) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
-            send({ type: 'result', id: packet.id, ...options.collaborationService(subjectId, packet) });
+            // Task preparation may use the same channel for a directory request; do not block its reader.
+            void Promise.resolve(options.collaborationService(subjectId, packet)).then(result => send({ type: 'result', id: packet.id, ...result }))
+              .catch(error => { try { send({ type: 'error', id: packet.id, error: error instanceof Error ? error.message : 'REQUEST_FAILED' }); } catch { /* Connection closed. */ } });
           } else if (packet.type === 'collaboration-scoped-peer') {
             if (!options.registerScopedCollaborationPeer) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
             const origin = typeof packet.origin === 'string' ? packet.origin : '';

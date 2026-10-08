@@ -198,11 +198,18 @@ import {
 } from '../agent/autoTitle.js';
 import { getTitleNamerCatalog, invalidateTitleNamerCatalog, probePluginTitleNamer } from '../agent/titleNamerCatalog.js';
 import { RenderedTerminalContext } from '../agent/renderedTerminalContext.js';
+import { CollaborationTaskStore } from '../agent/collaborationTaskStore.js';
+import { collaborationTaskRoutes } from '../agent/collaborationTaskRoutes.js';
+import { prepareTaskWorkspace } from '../agent/collaborationTaskWorkspace.js';
+import { importTaskDependency } from '../agent/collaborationTaskBundles.js';
+import type { CollaborationTask, TaskMember, TaskWorkspace } from '../agent/collaborationTaskTypes.js';
+import type { CollaborationService } from '../agent/collaborationService.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
 const TERMDOCK_DIR = `${os.homedir()}/.termdock`;
 const automationStore = new AutomationStore(`${TERMDOCK_DIR}/automations.json`);
+export const collaborationTaskStore = new CollaborationTaskStore(`${TERMDOCK_DIR}/collaboration-tasks.json`);
 export const collaborationStore = new CollaborationStore(`${TERMDOCK_DIR}/collaboration-groups.json`);
 const collaborationRouting = new CollaborationRoutingStore(`${TERMDOCK_DIR}/collaboration-routing.json`);
 const collaborationDeliveryWorker = new CollaborationDeliveryWorker({
@@ -1911,7 +1918,7 @@ interface OrchestrationSessionSnapshot extends ReturnType<CollaborationStore['se
   name: string;
   cwd: string;
   agent: { slug: string; displayName: string } | null;
-  status: AgentSessionStatus | 'shell' | CollaborationRouteState;
+  status: AgentSessionStatus | 'shell' | 'terminal-connected' | CollaborationRouteState;
   capability: string;
   updatedAt: number;
 }
@@ -1939,10 +1946,13 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
   const backendId = binding?.backendSessionId ?? record.backendSessionId;
   const backend = backendId ? terminalSessions.get(backendId) : null;
   const route = collaborationDeliveryWorker.state(record.sessionId);
+  // A live terminal backend is observable even before the delivery worker has
+  // inspected this session. It does not prove a pinned Agent target is writable.
+  const terminalConnected = Boolean(backend);
   const slug = binding?.pane?.agentSlug ?? binding?.agentSlug ?? record.agentResume?.slug;
   const agent = slug ? agentBySlug(slug) : backend?.agent;
   return {
-    ...collaborationStore.sessionFacts(record.sessionId, route.state === 'ready'),
+    ...collaborationStore.sessionFacts(record.sessionId, terminalConnected || route.state === 'ready' || route.state === 'shell'),
     last_terminal_output_at: backend?.lastOutputAt || null,
     activity_observed_at: backend ? Date.now() : null,
     activity_source: backend ? 'terminal_output' : 'unavailable',
@@ -1956,7 +1966,7 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
     name: record.name,
     cwd: backend?.cwd ?? record.cwd ?? '',
     agent: agent ? { slug: agent.slug, displayName: agent.displayName } : null,
-    status: route.state,
+    status: route.state === 'unchecked' && terminalConnected ? 'terminal-connected' : route.state,
     capability: agent
       ? [agent.displayName, ...(agent.capabilities ?? []), backend?.activeProgram?.command || record.activeProgram || 'Agent 会话'].join(' · ')
       : (backend?.activeProgram?.command || record.activeProgram || 'Shell 终端'),
@@ -2318,6 +2328,49 @@ async function spawnCollaborationAgentSession(
     deliverCollaborationInboxWhenAgentReady(frontendSessionId);
   }, 300).unref?.();
   return { group: updatedGroup, session: orchestrationSessionSnapshot(globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId)!) };
+}
+
+const preparingTaskWorkers = new Map<string, Promise<{ sessionId: string; workspace: TaskWorkspace }>>();
+/** Dedicated persistent terminals leave existing member sessions and the user's checkout untouched. */
+export function prepareCollaborationTaskWorker(task: CollaborationTask, template: TaskMember, dependencies: CollaborationTask[], service: CollaborationService,
+  readDependency: (taskId: string, dependencyId: string, offset: number) => Promise<Record<string, any>>) {
+  const key = `${task.id}:${task.events.filter(e => e.kind === 'scheduled').at(-1)?.id}`;
+  const pending = preparingTaskWorkers.get(key); if (pending) return pending;
+  const operation = (async () => {
+    const source = globalSessionState.sessions.find(s => s.sessionId === template.sessionId);
+    if (!source || template.serviceId !== service.descriptor().serviceId) throw new Error('执行成员当前不可用，请协调者重新分派');
+    const snapshot = orchestrationSessionSnapshot(source);
+    const slug = snapshot.agent?.slug ?? source.agentResume?.slug;
+    const launcher = (await listDetectedAgentLaunchers()).find(a => a.slug === slug);
+    if (!launcher || !source.cwd) throw new Error('独立代码任务需要有项目目录的 Agent 成员，请选择可用成员');
+    const workspace = await prepareTaskWorkspace(task, source.cwd, dependencies,
+      (dependency, repository) => importTaskDependency(task, dependency, repository, service, readDependency));
+    await pathValidator.allowSessionCwd(workspace.cwd);
+    const existing = globalSessionState.sessions.find(s => s.cwd === workspace.cwd);
+    const req = {} as express.Request;
+    const opened = await openInventorySession(req, { preferredFrontendSessionId: existing?.sessionId,
+      name: `执行 ${task.title.slice(0, 70)}`, customName: true, mode: 'tmux', cwd: workspace.cwd });
+    const record = globalSessionState.sessions.find(s => s.sessionId === opened.session.sessionId)!;
+    const backend = terminalSessions.get(opened.terminalSession.sessionId);
+    if (!backend) throw new Error('独立执行终端创建失败，目录已保留');
+    const currentAgent = orchestrationSessionSnapshot(record).agent;
+    const launchFile = path.join(path.dirname(workspace.cwd), `${path.basename(workspace.cwd)}.worker.json`);
+    let launch: { sessionId: string; backendId: string } | null = null;
+    try { launch = JSON.parse(await fs.promises.readFile(launchFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (!currentAgent && (!launch || launch.backendId !== opened.terminalSession.sessionId)) {
+      // Persist before typing: a retry must never type the launcher into a newly booted Agent's prompt.
+      const temporary = `${launchFile}.${process.pid}.tmp`;
+      await fs.promises.writeFile(temporary, JSON.stringify({ sessionId: record.sessionId, backendId: opened.terminalSession.sessionId }), { mode: 0o600 });
+      await fs.promises.rename(temporary, launchFile);
+      writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: launcher.command })}\r`);
+    }
+    const group = collaborationStore.getGroup(task.groupId);
+    if (!group || group.deleted) throw new Error('协作组已删除，执行目录已保留');
+    if (!group.sessionIds.includes(record.sessionId)) await service.save({ id: group.id, name: group.name,
+      sessionIds: [...group.sessionIds, record.sessionId], expectedUpdatedAt: group.updatedAt });
+    return { sessionId: record.sessionId, workspace };
+  })().finally(() => preparingTaskWorkers.delete(key));
+  preparingTaskWorkers.set(key, operation); return operation;
 }
 
 function getTmuxBinary(): string {
@@ -6514,6 +6567,9 @@ export function collaborationLocalActivity() {
   });
 }
 export function deliverPeerCollaboration(sessionId: string): void { void tryDeliverCollaborationInbox(sessionId); }
+
+router.use('/operations/collaboration-tasks', collaborationTaskRoutes({ agent: false, store: collaborationStore, resolveSession: resolveFrontendSessionId }));
+router.use('/operations/orchestration/tasks', collaborationTaskRoutes({ agent: true, store: collaborationStore, resolveSession: resolveFrontendSessionId }));
 
 router.use('/operations', collaborationGroupRoutes({ store: collaborationStore,
   sessions: () => globalSessionState.sessions.map(orchestrationSessionSnapshot),

@@ -78,7 +78,7 @@ export class CollaborationDeliveryWorker {
   state(id: string) {
     const state = this.states.get(id);
     return state && Date.now() - state.checkedAt < 15_000 ? state
-      : { state: 'recovering' as const, reason: 'ROUTE_NOT_CHECKED', checkedAt: state?.checkedAt ?? null };
+      : { state: 'unchecked' as const, reason: 'ROUTE_NOT_CHECKED', checkedAt: state?.checkedAt ?? null };
   }
 
   wake(id: string): void {

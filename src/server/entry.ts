@@ -1,7 +1,8 @@
 import { CollaborationService } from './agent/collaborationService.js';
 import { X509Certificate } from 'node:crypto';
 import { CollaborationPeerTransport, connectCollaborationRpc, type CollaborationRpc } from './agent/collaborationPeerTransport.js';
-import { collaborationStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions } from './routes/terminal.js';
+import { collaborationStore, collaborationTaskStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions, prepareCollaborationTaskWorker } from './routes/terminal.js';
+import { CollaborationTaskService } from './agent/collaborationTaskService.js';
 import { setPushTargetPeerId } from './notifications/pushService.js';
 import { desktopDirectTargets } from './federation/desktopTargets.js';
 import { createOpenAccessRouter } from './federation/openAccess.js';
@@ -655,11 +656,22 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     collaborationService = new CollaborationService({ file: path.join(homedir(), '.termdock', 'federation', 'collaboration-services.json'),
       store: collaborationStore, transport: collaborationTransport, node: () => app.locals.collaborationNode,
       sessions: collaborationDirectorySessions, reverse: reverseCollaboration, connect: connectPeer,
+      tasks: {
+        receive: (peer, packet) => app.locals.collaborationTasks.receive(peer, packet),
+        heads: ids => app.locals.collaborationTasks?.heads(ids) ?? [],
+        sync: (peer, heads) => app.locals.collaborationTasks.sync(peer, heads),
+      },
       deviceScope: device => runtime.store.listEffective({ subjectId: device, serviceId: runtime.serviceId })
         .filter(grant => grant.scope.kind === 'sessions' && grant.actions.includes('session.input'))
         .flatMap(grant => grant.scope.kind === 'sessions' ? grant.scope.sessionIds : []),
       pairConnect: peer => connectCollaborationRpc(runtime.identity, peer) });
     app.locals.collaborationService = collaborationService;
+    const collaborationTasks: CollaborationTaskService = new CollaborationTaskService(collaborationTaskStore, collaborationStore, collaborationService, deliverPeerCollaboration,
+      (task, template, dependencies) => prepareCollaborationTaskWorker(task, template, dependencies, collaborationService!,
+        (taskId, dependencyId, offset) => collaborationTasks.dependencyChunk(taskId, dependencyId, offset)));
+    app.locals.collaborationTasks = collaborationTasks;
+    collaborationTasks.start();
+    server.once('close', () => collaborationTasks.close());
     collaborationService.start();
     server.once('close', () => collaborationService?.close());
     collaborationTransport.start();

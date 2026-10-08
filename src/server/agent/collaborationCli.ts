@@ -1,15 +1,35 @@
 import fs from 'node:fs';
+import { executeTaskCommand } from './collaborationTaskCli.js';
 import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError, canonicalShortId } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
+  action: 'task' | 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
   target?: string; message?: string; groupId?: string; sessionId?: string; sessionIds?: string[]; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
   operation?: string;
 }
 export const COLLAB_HELP = `td collab — durable messages; no agent-specific hooks required
+── 任务闭环 ──
+  task list [--group <组id>] | task get <任务id>
+  task create --group <组id> --title <标题> --content <正文> [--assignee <成员id>]
+    [--constraints <约束>] [--acceptance <验收标准>] [--coordinator <成员id>]
+    [--parent <任务id>] [--depends-on <任务id,任务id>] [--integration]
+  task assign <任务id> --assignee <成员id> --revision <当前版本>
+  task report <任务id> --attempt <尝试id> --status ack|working|blocked|complete|failed --content <正文>
+  task ask <任务id> --attempt <尝试id> --content <问题> [--options '["选项一","选项二"]']
+  task plan <任务id> --attempt <尝试id> --content <方案>
+  task review <任务id> --artifact <交付物id> --verdict pass|changes|blocked --content <独立评审>
+  task request-review <任务id> --artifact <版本id> --assignee <评审成员id> --revision <当前版本>
+  task comment <任务id> --content <补充说明>
+  task revise|close|reopen <任务id> --revision <当前版本> [--content <说明>]
+  task coordinate <目标id> --revision <当前版本> --content <本次协调说明>
+  task pause|resume|retry <任务id> --revision <当前版本>
+  task create 支持 --managed --coordinator <成员id> --reviewers <成员id,成员id>；默认独立代码目录
+  正文支持 --file <文本文件> 或 --stdin；变更支持 --idempotency-key。
+  report|plan|review 支持 --evidence <JSON> 保存证据。
+  complete 提交结果；用户在工作台回答问题与验收。报告保留成员原文与时间。
   我想…
     回复刚收到的消息 → 用投递「来自」行里的 id: td collab reply <id> "内容" --text
     看有谁、我在哪些组 → td collab status --text
@@ -137,8 +157,8 @@ interface RoleGroupView {
   members?: Array<{ sessionId: string; name?: string | null }>;
 }
 
-const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules']);
-const VALUE_OPTIONS = new Set(['session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
+const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules', 'managed', 'shared-directory', 'integration']);
+const VALUE_OPTIONS = new Set(['verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -163,7 +183,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     positional.push('capture');
   }
   const action = (requestedAction === 'capture' ? 'drive' : requestedAction === 'traits' ? 'role' : requestedAction) as CollaborationCommand['action'];
-  if (!['status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['task', 'status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (typeof options.session === 'string' && !options.session.trim()) throw new Error('--session requires a non-empty full Termdock session id');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
@@ -171,7 +191,11 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   if (options['expect-reply'] && !['ack', 'result', 'any'].includes(String(options['expect-reply']))) throw new Error('expect-reply must be ack, result or any');
   if (options.timeout) duration(String(options.timeout));
   const command: CollaborationCommand = { action, json: !options.text, options };
-  if (['send', 'reply', 'handoff'].includes(action)) {
+  if (action === 'task') {
+    command.operation = positional.shift(); command.target = positional.shift();
+    if (positional.length || !['list', 'get', 'create', 'assign', 'report', 'ask', 'plan', 'review', 'request-review', 'comment', 'revise', 'close', 'reopen', 'coordinate', 'pause', 'resume', 'retry'].includes(command.operation ?? '')) throw new Error('Usage: td collab task list|get|create|assign|report|ask|plan|review|request-review|comment|revise|close|reopen');
+    if (['list', 'create'].includes(command.operation!) ? Boolean(command.target) : !command.target) throw new Error('task command requires a full task id except list/create');
+  } else if (['send', 'reply', 'handoff'].includes(action)) {
     command.target = positional.shift(); command.message = positional.join(' ');
     if (!command.target || (!command.message && !options.file && !options.stdin)) throw new Error(`${action} requires a target and message`);
     if ([Boolean(command.message), Boolean(options.file), Boolean(options.stdin)].filter(Boolean).length !== 1) throw new Error('Choose inline body, --file, or --stdin');
@@ -236,6 +260,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session']);
   const byAction: Record<string, string[]> = {
+    task: ['integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
     rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
@@ -350,6 +375,12 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
   let receipt: Json | undefined;
   let idempotencyKey: string | undefined;
   try {
+    if (command.action === 'task') {
+      if (!['list', 'get'].includes(command.operation!)) {
+        idempotencyKey = String(o['idempotency-key'] ?? randomUUID()); o['idempotency-key'] = idempotencyKey;
+      }
+      output({ ...await executeTaskCommand(command, request, io), ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}) }); return 0;
+    }
     if (command.action === 'rules') {
       let body: Json;
       if (command.operation === 'get') body = await request('GET', `/rules?group=${encodeURIComponent(command.groupId!)}`);
@@ -490,6 +521,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       // CLI receipts stay small even when the message is a large evidence package.
       delete receipt.messages;
       receipt.idempotency_key = idempotencyKey;
+      if (receipt.task_recorded) { output(receipt); return 0; }
     } else if (command.action === 'role') {
       if (command.operation === 'list') {
         const body = await request('GET', `/role?group=${encodeURIComponent(command.groupId!)}`);

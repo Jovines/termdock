@@ -3831,6 +3831,9 @@ export interface CollaborationMessage {
 }
 
 export interface OrchestrationSession {
+  route_state?: string;
+  route_error?: string | null;
+  route_checked_at?: number | null;
   serviceOrigin?: string;
   serviceLabel?: string;
   serviceConnected?: boolean;
@@ -3878,6 +3881,24 @@ async function operationsRequest<T>(path: string, init?: RequestInit): Promise<T
     throw new TerminalApiError(body.error || '操作失败', response.status);
   }
   return (response.status === 204 ? undefined : await response.json()) as T;
+}
+
+export type { CollaborationTaskView, TaskOperation, TaskCreateInput, TaskMember } from '../../server/agent/collaborationTaskTypes';
+type TaskView = import('../../server/agent/collaborationTaskTypes').CollaborationTaskView;
+export function listCollaborationTasks(groupId?: string): Promise<{ tasks: TaskView[] }> {
+  return operationsRequest(`/collaboration-tasks${groupId ? `?group=${encodeURIComponent(groupId)}` : ''}`);
+}
+export function getCollaborationTask(taskId: string): Promise<{ task: TaskView }> {
+  return operationsRequest(`/collaboration-tasks/${encodeURIComponent(taskId)}`);
+}
+export function createCollaborationTask(input: { idempotencyKey: string; groupId: string; title: string; spec: string;
+  constraints?: string; acceptance?: string; assigneeSessionId?: string; coordinatorSessionId?: string; parentTaskId?: string; dependsOn?: string[];
+  managed?: boolean; isolated?: boolean; reviewerSessionIds?: string[] }): Promise<{ task: TaskView }> {
+  return operationsRequest('/collaboration-tasks', { method: 'POST', body: JSON.stringify({ input }) });
+}
+export function updateCollaborationTask(taskId: string, input: Omit<import('../../server/agent/collaborationTaskTypes').TaskOperation, 'assignee' | 'coordinator'> & {
+  assigneeSessionId?: string; coordinatorSessionId?: string | null }): Promise<{ task: TaskView }> {
+  return operationsRequest(`/collaboration-tasks/${encodeURIComponent(taskId)}`, { method: 'POST', body: JSON.stringify({ input }) });
 }
 
 export function listAgentAutomations(): Promise<{ automations: AgentAutomation[]; runs: AutomationRun[] }> {

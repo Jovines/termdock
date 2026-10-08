@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type CollaborationRouteState = 'shell' | 'recovering' | 'detached' | 'ready' | 'agent-exited' | 'offline' | 'ambiguous' | 'identity-mismatch' | 'unavailable';
+export type CollaborationRouteState = 'unchecked' | 'shell' | 'recovering' | 'detached' | 'ready' | 'agent-exited' | 'offline' | 'ambiguous' | 'identity-mismatch' | 'unavailable';
 
 export interface CollaborationPaneBinding {
   serverPid: number;

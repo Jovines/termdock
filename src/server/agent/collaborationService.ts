@@ -5,6 +5,7 @@ import type { Packet } from '../federation/packets.js';
 import type { CollaborationGroup, CollaborationStore } from './collaborationStore.js';
 import { CollaborationError } from './collaborationProtocol.js';
 import { COLLAB_NAME_FORBIDDEN } from './collaborationPrompt.js';
+import type { TaskMember } from './collaborationTaskTypes.js';
 import { remoteSession, validateCollaborationNode, type CollaborationNode, type CollaborationPeerTransport, type CollaborationRpc } from './collaborationPeerTransport.js';
 
 type Session = { sessionId: string; name: string; cwd: string; status: string; capability: string; updatedAt: number; agent: { slug: string; displayName: string } | null };
@@ -40,6 +41,8 @@ export class CollaborationService {
     /** Live capability of a device: the stable local session ids it may write
      * to right now. Scoped peers derive their whole surface from this. */
     deviceScope?: (deviceSubject: string) => string[];
+    tasks?: { receive: (peer: CollaborationNode, packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>;
+      heads: (groupIds: string[]) => unknown[]; sync: (peer: CollaborationNode, heads: unknown[]) => Promise<void> };
     connect: (node: CollaborationNode) => Promise<CollaborationRpc> }) {
     try { const data = JSON.parse(readFileSync(options.file, 'utf8')) as Document;
       if (data.version !== 1 || !Array.isArray(data.peers) || data.peers.length > 64 || !Array.isArray(data.offers)) throw new Error('INVALID_DIRECTORY');
@@ -76,6 +79,27 @@ export class CollaborationService {
     this.persist();
   }
   descriptor() { return { ...this.options.node(), ...(this.document.origin ? { origin: this.document.origin } : {}) }; }
+  taskMember(sessionId: string): TaskMember {
+    const parsed = address(sessionId);
+    if (!parsed) return { serviceId: this.options.node().serviceId, sessionId };
+    const peer = this.document.peers.find(node => node.origin === parsed.origin);
+    if (!peer) throw new CollaborationError('TASK_PEER_UNAVAILABLE', '成员所在服务尚未配对', 409);
+    return { serviceId: peer.serviceId, sessionId: parsed.id };
+  }
+  taskSession(member: TaskMember): string {
+    if (member.serviceId === this.options.node().serviceId) return member.sessionId;
+    const peer = this.document.peers.find(node => node.serviceId === member.serviceId);
+    if (!peer) throw new CollaborationError('TASK_PEER_UNAVAILABLE', '任务所在服务尚未配对', 409);
+    return remoteSession(peer.origin, member.sessionId);
+  }
+  async requestTasks(serviceId: string, payload: Record<string, unknown>): Promise<Record<string, any>> {
+    const peer = this.document.peers.find(node => node.serviceId === serviceId);
+    if (!peer) throw new CollaborationError('TASK_PEER_UNAVAILABLE', '任务来源服务未连接，记录已保留', 409);
+    const result = await (await this.client(peer)).request({ type: 'collaboration-service', action: 'tasks', ...payload });
+    if (result.taskError) { const error = result.taskError as { code: string; message: string; status: number };
+      throw new CollaborationError(error.code, error.message, error.status); }
+    return result;
+  }
   /** Called through the existing authenticated administrator connection. No
    * client key is copied; only pinned public service descriptors are persisted. */
   connectKnown(origin: string, nodes: CollaborationNode[]) {
@@ -175,7 +199,7 @@ export class CollaborationService {
       this.remember(invitation.node, true); void this.refresh(); return { ok: true, peer: invitation.node }; }
     finally { rpc.close(); }
   }
-  receive(subject: string, packet: Packet): Record<string, unknown> {
+  receive(subject: string, packet: Packet): Record<string, unknown> | Promise<Record<string, unknown>> {
     if (packet.action === 'pair') {
       if (typeof packet.code !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(packet.code)) throw new Error('PAIRING_EXPIRED_OR_INVALID');
       const codeHash = hash(packet.code);
@@ -189,6 +213,13 @@ export class CollaborationService {
     if (!peer) throw new Error('COLLABORATION_PAIRING_REQUIRED');
     if (packet.action === 'duplex') return { ok: true };
     if (packet.action === 'directory') return this.snapshot(peer);
+    if (packet.action === 'tasks' && this.options.tasks) {
+      try { return Promise.resolve(this.options.tasks.receive(peer, packet)).catch(error => ({ taskError: {
+        code: error instanceof CollaborationError ? error.code : 'TASK_ERROR', message: error instanceof Error ? error.message : String(error),
+        status: error instanceof CollaborationError ? error.httpStatus : 400 } })); }
+      catch (error) { return { taskError: { code: error instanceof CollaborationError ? error.code : 'TASK_ERROR',
+        message: error instanceof Error ? error.message : String(error), status: error instanceof CollaborationError ? error.httpStatus : 400 } }; }
+    }
     if (packet.action === 'group') {
       const canonical = packet.group as CollaborationGroup;
       if (!canonical?.sessionIds?.some(id => address(id)?.origin === peer.origin) && !this.document.replicas?.[canonical?.id]?.includes(peer.origin)) throw new Error('GROUP_SENDER_NOT_MEMBER');
@@ -208,7 +239,7 @@ export class CollaborationService {
       .filter(group => scope === undefined || group.sessionIds.every(id => address(id) ? true : scope.includes(id)))
       .map(group => mapGroup(group, id => address(id) ? id : remoteSession(origin, id)));
     return { sessions: scope === undefined ? sessions : sessions.filter(session => scope.includes(session.sessionId)),
-      groups, nodes: scope === undefined ? this.nodes() : [this.node(), peer] };
+      groups, taskHeads: this.options.tasks?.heads(groups.map(g => g.id)) ?? [], nodes: scope === undefined ? this.nodes() : [this.node(), peer] };
   }
   private merge(canonical: CollaborationGroup, nodes: CollaborationNode[], source?: CollaborationNode) {
     if (!canonical || typeof canonical.id !== 'string' || !canonical.id.startsWith('cross-') || !Array.isArray(canonical.sessionIds)
@@ -263,6 +294,7 @@ export class CollaborationService {
         const sessions = data.sessions.filter((s: Session) => s && typeof s.sessionId === 'string' && !s.sessionId.startsWith('remote:')) as Session[];
         this.observations.set(peer.serviceId, { sessions, checkedAt: Date.now() });
         for (const group of data.groups as CollaborationGroup[]) this.merge(group, data.nodes as CollaborationNode[], peer);
+        if (Array.isArray(data.taskHeads)) await this.options.tasks?.sync(peer, data.taskHeads);
         for (const group of this.options.store.federationSnapshot().groups.filter(g => g.federated && (g.sessionIds.some(id => address(id)?.origin === peer.origin) || this.document.replicas?.[g.id]?.includes(peer.origin)))) {
           const scope = this.effectiveScope(peer.serviceId);
           // Never push a group to a scoped peer if it involves other local sessions.
