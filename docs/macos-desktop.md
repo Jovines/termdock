@@ -28,6 +28,9 @@ Your sessions, authentication, certificates, and preferences remain under
 ## macOS integration
 
 - Native inset title bar and traffic lights share Termdock's chrome surface.
+- Service windows open at the cursor's display work-area size, filling the
+  available desktop while leaving room for the macOS menu bar and Dock.
+  This also applies to connections restored on launch.
 - `⌘,` opens Termdock Settings, including service switching, application updates, and data actions.
 - `⌘T` creates a session, `⌘W` closes the active session, and `⌘⇧[` / `⌘⇧]`
   switch sessions.

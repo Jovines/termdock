@@ -1279,14 +1279,16 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
       .slice(0, 24)}`)
     : null;
   if (serviceSession) installCertificateVerifyProcedure(serviceSession, options?.serviceOrigin);
+  // macOS clips the old fixed width on smaller displays but leaves the fixed
+  // height untouched. Size workspace windows to the active display's usable
+  // area before loading, including restored windows shown without focus.
+  const workspaceBounds = options && process.platform === 'darwin'
+    ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea
+    : { width: options ? 1500 : 1280, height: 820 };
   const window = new BrowserWindow({
     title: options ? `Termdock — ${options.label}` : 'Termdock — 连接中心',
     show: false,
-    // The web workspace enables its persistent right inspector at 1440px.
-    // Open service windows above that breakpoint so the visible pin action
-    // cannot write a pinned state that the initial layout refuses to render.
-    width: options ? 1500 : 1280,
-    height: 820,
+    ...workspaceBounds,
     minWidth: 760,
     minHeight: 520,
     backgroundColor: 'rgb(28, 27, 26)',
