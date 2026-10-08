@@ -60,10 +60,8 @@
 
 ### macOS 桌面版
 
-桌面版内置 Node.js、Termdock 服务端、tmux、Git、rg 和 mkcert，运行时不依赖
-Homebrew、Node.js 或预装 CLI。首次打开会检测并引导安装 `td` / `termdock`；
-桌面版和 CLI 完全共用 `~/.termdock`，也可以连接本机已有服务或任意 Termdock
-地址。若要接管正在运行的本机 CLI 服务，必须先由用户确认。
+桌面版用于连接本机、局域网或公网中独立运行的 Termdock 服务。
+本机服务需先通过 CLI 启动；桌面版不安装 CLI，也不启动或接管服务。
 
 正式版可从 [GitHub Releases](https://github.com/Jovines/termdock/releases)
 下载 DMG；安装后的桌面版支持在应用菜单中检查并安装更新。

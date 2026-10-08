@@ -1,46 +1,23 @@
-# Desktop Runtime updates
+# Desktop and service updates
 
-Termdock Desktop is split into two independently versioned layers:
+Termdock Desktop connects to independently installed Termdock services.
+Each connected service owns its CLI installation and Runtime update lifecycle.
+The CLI and service Runtime controls in Settings operate on that connected
+service through its encrypted page transport.
 
-- **Desktop Shell**: Electron, native menus and permissions, bundled Node,
-  native production dependencies, and the bundled toolchain.
-- **App Runtime**: the npm package's compiled `dist/server` and `dist/client`.
+The macOS application uses the Squirrel.Mac GitHub release feed. Its update
+check is independent of the connected service version; a downloaded application
+update is installed after the user chooses to restart and install.
 
-The settings panel reports and updates these layers separately:
+Desktop no longer downloads or executes npm server runtimes, installs CLI
+symlinks, stages production dependencies, or manages a local server through an
+owner socket. Existing user data is left intact. See
+[the upgrade notes](macos-desktop.md#upgrading-from-a-desktop-managed-service)
+for installations that used the older bundled CLI.
 
-- **CLI and service Runtime** checks the signed npm package and stages a compatible
-  Runtime without replacing the desktop shell.
-- **macOS desktop app** always checks the Squirrel.Mac GitHub release feed. A
-  current Runtime never suppresses this desktop check. The user can start the
-  check manually and, after download, explicitly restart to install it.
-
-The shell always contains a complete fallback Runtime, so it remains usable
-offline and can recover from a bad downloaded update.
-
-Desktop-managed and globally installed services share the same user state under
-`~/.termdock`, including authentication, settings, sessions, certificates, and
-Agent plugin packages. Only the executable Runtime differs. A desktop-managed
-service never invokes `npm install --global`; its update and restart are owned by
-the Electron main process and use the bundled Node executable.
-
-## Update flow
-
-1. The packaged app checks `termdock/latest` on the npm registry.
-2. It verifies the registry ECDSA package signature and the tarball SHA-512 SRI.
-3. It validates every archive path before extraction.
-4. It compares the Runtime protocol, minimum shell version, Node major, and
-   production dependency hash with the bundled Runtime.
-5. Compatible packages are staged under
-   `~/.termdock/desktop-runtime/versions`, then activated by atomically replacing
-   the `current` symlink.
-6. The existing service is never killed by a background update. The new Runtime
-   is used the next time Desktop starts its local service or the bundled `td`
-   launcher runs. The launcher repeats the compatibility checks before using a
-   downloaded CLI.
-7. If a newly activated Runtime cannot start, Desktop switches back to the
-   previous Runtime (or the bundled fallback) and retries once.
-
-Set `TERMDOCK_RUNTIME_UPDATE=0` to disable registry checks.
+Direct connections load the service's web frontend. A saved connection reachable
+only through an entry service uses static frontend resources bundled with the
+Desktop application; those resources update with the application.
 
 ## Deciding whether to rebuild macOS
 
@@ -51,13 +28,10 @@ git fetch --tags
 npm run release:classify -- <last-desktop-tag>
 ```
 
-Normal changes under `src/` publish through npm and do not require a new DMG.
-A Desktop rebuild is required when `desktop/`, Forge/signing configuration,
-the embedded toolchain preparation, Node major, or production dependencies
-change. Unknown code paths are conservatively classified as Desktop changes.
+Desktop source, Forge/signing configuration, and packaging workflow changes
+require rebuilding the application. Standalone service changes publish through
+npm. If an entry-service connection needs a newer bundled frontend, rebuild the
+application with that frontend.
 
-When a Desktop rebuild is intentional, update
-`desktop/runtime-compatibility.json` as needed. Raising
-`minimumDesktopVersion`, `runtimeProtocolVersion`, `nodeMajor`, or changing the
-production dependency hash causes older shells to reject the Runtime and use
-their safe fallback until the Desktop app is upgraded.
+The npm runtime manifest remains available for standalone service client
+snapshots and previously released Desktop versions.

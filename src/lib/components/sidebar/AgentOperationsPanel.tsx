@@ -455,7 +455,7 @@ function AutomationTab({ automations, runs, agents, sessions, activeSessionId, l
     {!loading && !loadError && automations.length === 0 && <div className="border-y border-border/15 py-8 text-center">
       <CalendarClock size={24} className="mx-auto text-primary" />
       <p className="mt-3 text-[13px] font-medium text-foreground">把重复工作交给 Agent</p>
-      <p className="mx-auto mt-1 max-w-sm text-[11px] leading-relaxed text-muted-foreground">选择运行会话、写清任务内容，再设定时间。创建后可以先手动运行一次确认效果。</p>
+      <p className="mx-auto mt-1 max-w-sm text-[11px] leading-relaxed text-muted-foreground">写清任务内容，选择运行频率。创建后可以先手动运行一次确认效果。</p>
       <button className={`${buttonClass} mt-4 bg-primary text-primary-foreground`} onClick={() => setShowForm(true)}><Plus size={13} />创建第一个任务</button>
     </div>}
     <div className="space-y-2">
@@ -528,6 +528,10 @@ function AutomationForm({ agents, sessions, activeSessionId, initial, onCancel, 
   const [everyMinutes, setEveryMinutes] = useState(initial?.schedule.kind === 'interval' ? initial.schedule.everyMinutes : 60);
   const [time, setTime] = useState(initial?.schedule.kind === 'daily' ? initial.schedule.time : '09:00');
   const [weekdays, setWeekdays] = useState<number[]>(initial?.schedule.kind === 'daily' ? initial.schedule.weekdays : [1, 2, 3, 4, 5]);
+  const [customSchedule, setCustomSchedule] = useState(() => initial?.schedule.kind === 'interval'
+    ? ![15, 60, 1440].includes(initial.schedule.everyMinutes)
+    : !!initial && !['1,2,3,4,5', '0,1,2,3,4,5,6'].includes([...initial.schedule.weekdays].sort().join()));
+  const [showSettings, setShowSettings] = useState(false);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [saving, setSaving] = useState(false);
   const selectedAgent = agents.find((agent) => agent.slug === selectedAgentSlug) ?? null;
@@ -541,47 +545,130 @@ function AutomationForm({ agents, sessions, activeSessionId, initial, onCancel, 
   useEffect(() => {
     if (!initial && !cwdEdited.current && suggestedCwd) setCwd(suggestedCwd);
   }, [initial, suggestedCwd]);
+  const taskName = name.trim() || Array.from(prompt.trim().split('\n')[0].trim()).slice(0, 40).join('');
+  const targetSession = sessions.find(session => session.sessionId === targetSessionId);
+  const schedulePreset = customSchedule ? `custom-${kind}` : kind === 'interval' ? String(everyMinutes) : weekdays.length === 7 ? 'daily' : 'workdays';
+  const changeSchedulePreset = (value: string) => {
+    setCustomSchedule(value.startsWith('custom-'));
+    if (['15', '60', '1440', 'custom-interval'].includes(value)) {
+      setKind('interval');
+      if (value !== 'custom-interval') setEveryMinutes(Number(value));
+    } else {
+      setKind('daily');
+      if (value === 'daily') setWeekdays([0, 1, 2, 3, 4, 5, 6]);
+      if (value === 'workdays') setWeekdays([1, 2, 3, 4, 5]);
+    }
+  };
   const submit = async () => {
     if (saving || !canSave) return;
     setSaving(true); setError(null);
     try {
-      await saveAgentAutomation({ id: initial?.id, name, cwd, command: targetMode === 'new' ? command : '', prompt, targetSessionId: targetMode === 'existing' ? targetSessionId || null : null, enabled, schedule: kind === 'interval' ? { kind, everyMinutes } : { kind, time, weekdays } });
-      await onSaved(name.trim(), enabled);
+      await saveAgentAutomation({ id: initial?.id, name: taskName, cwd, command: targetMode === 'new' ? command : '', prompt, targetSessionId: targetMode === 'existing' ? targetSessionId || null : null, enabled, schedule: kind === 'interval' ? { kind, everyMinutes } : { kind, time, weekdays } });
+      await onSaved(taskName, enabled);
     } catch (error) { setError(error instanceof Error ? error.message : '保存失败'); }
     finally { setSaving(false); }
   };
   const schedule = kind === 'interval' ? { kind, everyMinutes } as const : { kind, time, weekdays } as const;
   const [hours, minutes] = time.split(':');
   const setTimePart = (nextHours: string, nextMinutes: string) => setTime(`${nextHours}:${nextMinutes}`);
-  const missing = !name.trim() ? '请填写任务名称' : !prompt.trim() ? '请填写任务内容'
+  const missing = !prompt.trim() ? '请填写任务内容'
     : targetMode === 'existing' && !sessions.some(session => session.sessionId === targetSessionId) ? '请选择当前服务的可用会话'
       : targetMode === 'new' && !command ? '请选择可启动的 Agent'
         : kind === 'interval' && (!Number.isInteger(everyMinutes) || everyMinutes < 1 || everyMinutes > 43200) ? '间隔需要是 1–43200 分钟的整数'
           : kind === 'daily' && !weekdays.length ? '至少选择一天' : '';
   const canSave = !missing;
-  return <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-primary/25 bg-primary/5">
-    <div className="flex shrink-0 items-center justify-between border-b border-primary/15 px-3 py-2"><div><p className="text-[13px] font-medium text-foreground">{initial ? '编辑自动任务' : '创建自动任务'}</p><p className="mt-0.5 text-[10px] text-muted-foreground">填写任务、选择会话和时间；切换标签会保留填写内容</p></div><button disabled={saving} className="rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground disabled:opacity-40" onClick={onCancel} aria-label="关闭任务表单"><X size={14} /></button></div>
-    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-y-contain p-3">
-      <fieldset disabled={saving} className="space-y-3"><legend className="text-[11px] font-medium text-foreground"><span className="mr-2 text-primary">1</span>要做什么</legend>
-        <label className="block space-y-1 text-[10px] text-muted-foreground">任务名称<input autoFocus className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：每日代码巡检" /></label>
-        <label className="block space-y-1 text-[10px] text-muted-foreground">任务内容<textarea className={`${inputClass} min-h-24 resize-y`} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="说明目标、检查范围和期望产出，例如：检查当前分支的测试与待办，修复可安全处理的问题并总结结果。" /></label>
-      </fieldset>
-      <fieldset disabled={saving} className="space-y-2 border-t border-border/10 pt-3"><legend className="text-[11px] font-medium text-foreground"><span className="mr-2 text-primary">2</span>在哪里运行</legend>
-        <div className="grid grid-cols-2 gap-2">
-          <button type="button" aria-pressed={targetMode === 'new'} className={`${buttonClass} justify-start border px-3 text-left ${targetMode === 'new' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/15 bg-surface-2 text-muted-foreground'}`} onClick={() => setTargetMode('new')}>每次新建会话</button>
-          <button type="button" aria-pressed={targetMode === 'existing'} disabled={sessions.length === 0} className={`${buttonClass} justify-start border px-3 text-left ${targetMode === 'existing' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/15 bg-surface-2 text-muted-foreground'}`} onClick={() => { setTargetMode('existing'); if (!targetSessionId) setTargetSessionId(activeSession?.sessionId ?? sessions[0]?.sessionId ?? ''); }}>发送到现有会话</button>
+  return <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div className="flex shrink-0 items-center justify-between gap-3 pb-3">
+      <h3 className="text-[13px] font-medium text-foreground">{initial ? '编辑自动任务' : '创建自动任务'}</h3>
+      <button disabled={saving} className="rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground disabled:opacity-40" onClick={onCancel} aria-label="关闭任务表单"><X size={14} /></button>
+    </div>
+    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-y-contain pb-4">
+      <fieldset disabled={saving} className="min-w-0 space-y-4">
+        <label className="block space-y-1.5 text-[11px] text-muted-foreground">
+          任务内容
+          <textarea autoFocus className={`${inputClass} min-h-24 resize-y`} rows={3} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="例如：检查当前项目的待办，整理需要我处理的问题。" />
+        </label>
+        <div className="space-y-2">
+          <label className="block space-y-1.5 text-[11px] text-muted-foreground">
+            运行频率
+            <select className={inputClass} value={schedulePreset} onChange={(event) => changeSchedulePreset(event.target.value)}>
+              <option value="15">每 15 分钟</option>
+              <option value="60">每小时</option>
+              <option value="1440">每 24 小时</option>
+              <option value="daily">每天定时</option>
+              <option value="workdays">工作日定时</option>
+              <option value="custom-interval">自定义间隔</option>
+              <option value="custom-daily">自定义星期</option>
+            </select>
+          </label>
+          {kind === 'interval' && customSchedule && <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            每隔多少分钟
+            <input className={`${inputClass} min-w-0 flex-1`} type="number" min={1} max={43200} value={everyMinutes} onChange={(event) => setEveryMinutes(Number(event.target.value))} />
+          </label>}
+          {kind === 'daily' && <div className="space-y-2">
+            <div className="flex items-center rounded-lg border border-border/20 bg-surface-2 px-3 py-1.5 focus-within:border-primary/60">
+              <Clock3 size={14} className="mr-2 shrink-0 text-primary" />
+              <TimePartSelect label="小时" value={hours} options={24} onChange={(value) => setTimePart(value, minutes)} />
+              <span aria-hidden="true" className="px-2 text-[16px] text-muted-foreground">:</span>
+              <TimePartSelect label="分钟" value={minutes} options={60} onChange={(value) => setTimePart(hours, value)} />
+              <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">24 小时制</span>
+            </div>
+            {customSchedule && <div className="grid grid-cols-7 gap-1">{['日', '一', '二', '三', '四', '五', '六'].map((label, day) => {
+              const selected = weekdays.includes(day);
+              return <button key={day} type="button" aria-pressed={selected} aria-label={`星期${label}`} className={`rounded-lg py-2.5 text-[11px] transition ${selected ? 'bg-primary text-primary-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'}`} onClick={() => setWeekdays((current) => selected ? current.filter((value) => value !== day) : [...current, day].sort())}>{label}</button>;
+            })}</div>}
+            {weekdays.length === 0 && <p className="text-[10px] text-destructive">至少选择一天</p>}
+          </div>}
         </div>
-        {targetMode === 'new' ? <><div className="grid gap-3 sm:grid-cols-2"><label className="space-y-1 text-[10px] text-muted-foreground">Agent / Plugin<select className={inputClass} value={selectedAgentSlug} onChange={(event) => setSelectedAgentSlug(event.target.value)}>{initial && !agents.some((agent) => agent.command === initial.command) && <option value="">原 Agent 当前不可用</option>}{agents.map((agent) => <option key={agent.slug} value={agent.slug}>{agent.displayName}{agent.isPlugin ? ' · Plugin' : ''}</option>)}</select></label><label className="space-y-1 text-[10px] text-muted-foreground">工作目录<div className="flex gap-2"><input className={inputClass} value={cwd} onChange={(event) => { cwdEdited.current = true; setCwd(event.target.value); }} placeholder="默认使用当前目录" /><button type="button" aria-haspopup="dialog" className={`${buttonClass} shrink-0 bg-surface-2 text-foreground`} onClick={() => setDirectoryPickerOpen(true)}><FolderOpen size={13} />选择</button></div></label></div>
-          {agents.length === 0 && <p className="text-[10px] text-destructive">没有检测到可启动的 Agent。请先在 Plugin 设置中安装或配置 Agent。</p>}</> : <label className="block space-y-1 text-[10px] text-muted-foreground">目标会话<select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}>{!sessions.some(session => session.sessionId === targetSessionId) && <option value={targetSessionId}>{targetSessionId ? "原目标会话不可用，请重新选择" : "请选择会话"}</option>}{sessions.map((session) => <option key={session.sessionId} value={session.sessionId}>{session.name} · {collaborationSessionStatus(session)}</option>)}</select><span className="block leading-relaxed">仅支持当前服务的会话。运行时会直接写入终端，请确保目标会话保持在线。</span></label>}
-      </fieldset>
-      <fieldset disabled={saving} className="space-y-2 border-t border-border/10 pt-3"><legend className="text-[11px] font-medium text-foreground"><span className="mr-2 text-primary">3</span>什么时候运行</legend>
-        <div className="grid grid-cols-2 gap-2"><button type="button" aria-pressed={kind === 'interval'} className={`${buttonClass} border ${kind === 'interval' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/15 bg-surface-2 text-muted-foreground'}`} onClick={() => setKind('interval')}>固定间隔</button><button type="button" aria-pressed={kind === 'daily'} className={`${buttonClass} border ${kind === 'daily' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/15 bg-surface-2 text-muted-foreground'}`} onClick={() => setKind('daily')}>指定日期与时间</button></div>
-        {kind === 'interval' ? <div className="space-y-2"><div className="flex flex-wrap gap-1.5">{([[15, '每 15 分钟'], [60, '每小时'], [1440, '每 24 小时']] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={everyMinutes === value} className={`${choiceClass} ${everyMinutes === value ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/20 bg-surface-2 text-muted-foreground'}`} onClick={() => setEveryMinutes(value)}>{label}</button>)}</div><label className="block space-y-1 text-[10px] text-muted-foreground">每隔多少分钟<input className={inputClass} type="number" min={1} max={43200} value={everyMinutes} onChange={(event) => setEveryMinutes(Number(event.target.value))} /><span className="block">按创建时间计算间隔；编辑不会重置节奏。</span></label></div> : <div className="space-y-3"><div><span className="text-[10px] text-muted-foreground">运行时间</span><div className="mt-1 flex items-center rounded-xl border border-border/20 bg-surface-2 px-3 py-2.5 focus-within:border-primary/60"><Clock3 size={15} className="mr-3 shrink-0 text-primary" /><TimePartSelect label="小时" value={hours} options={24} onChange={(value) => setTimePart(value, minutes)} /><span aria-hidden="true" className="px-2 text-[18px] font-medium text-muted-foreground">:</span><TimePartSelect label="分钟" value={minutes} options={60} onChange={(value) => setTimePart(hours, value)} /><span className="ml-3 shrink-0 rounded-md bg-surface-elevated px-2 py-1 text-[9px] font-medium text-muted-foreground">24 小时制</span></div></div><div><div className="flex flex-wrap items-center gap-2"><span className="mr-auto text-[10px] text-muted-foreground">运行日期</span>{([[[1, 2, 3, 4, 5], "工作日"], [[0, 1, 2, 3, 4, 5, 6], "每天"]] as const).map(([days, label]) => <button key={label} type="button" aria-pressed={weekdays.join() === days.join()} className={`${choiceClass} ${weekdays.join() === days.join() ? "border-primary/40 bg-primary/10 text-primary" : "border-border/20 bg-surface-2 text-muted-foreground"}`} onClick={() => setWeekdays([...days])}>{label}</button>)}</div><div className="mt-1 grid grid-cols-7 gap-1">{['日', '一', '二', '三', '四', '五', '六'].map((label, day) => { const selected = weekdays.includes(day); return <button key={day} type="button" aria-pressed={selected} aria-label={`星期${label}`} className={`rounded-lg py-2.5 text-[10px] transition ${selected ? 'bg-primary text-primary-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'}`} onClick={() => setWeekdays((current) => selected ? current.filter((value) => value !== day) : [...current, day].sort())}>{label}</button>; })}</div>{weekdays.length === 0 && <p className="mt-1 text-[10px] text-destructive">至少选择一天</p>}</div></div>}
+        <div className="space-y-1 text-[11px] text-muted-foreground">
+          <p className="flex items-center gap-1.5"><Bot size={13} className="shrink-0" />{targetMode === 'new' ? `每次新建会话 · ${selectedAgent?.displayName ?? (initial?.command ? '原 Agent' : '暂无可用 Agent')}` : `发送到现有会话 · ${targetSession?.name ?? '目标会话不可用'}`}</p>
+          <p className="break-all pl-[19px] text-[10px]">{targetMode === 'new' ? cwd || '默认使用当前目录' : '直接写入终端，目标会话需保持在线'}</p>
+        </div>
+        <div className="border-t border-border/15 pt-2">
+          <button type="button" aria-expanded={showSettings} aria-controls="automation-more-settings" className={`${buttonClass} -ml-2 px-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground`} onClick={() => setShowSettings(value => !value)}>
+            <ChevronDown size={13} className={`transition-transform ${showSettings ? 'rotate-180' : ''}`} />更多设置
+          </button>
+          {showSettings && <div id="automation-more-settings" className="space-y-3 pt-2">
+            <label className="block space-y-1 text-[10px] text-muted-foreground">任务名称（可选）<input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder={taskName || '留空则从任务内容自动生成'} /></label>
+            <label className="block space-y-1 text-[10px] text-muted-foreground">运行方式
+              <select className={inputClass} value={targetMode} onChange={(event) => {
+                const mode = event.target.value as 'new' | 'existing';
+                setTargetMode(mode);
+                if (mode === 'existing' && !targetSessionId) setTargetSessionId(activeSession?.sessionId ?? sessions[0]?.sessionId ?? '');
+              }}>
+                <option value="new">每次新建会话</option>
+                <option value="existing" disabled={sessions.length === 0}>发送到现有会话</option>
+              </select>
+            </label>
+            {targetMode === 'new' ? <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="min-w-0 space-y-1 text-[10px] text-muted-foreground">Agent / Plugin
+                  <select className={inputClass} value={selectedAgentSlug} onChange={(event) => setSelectedAgentSlug(event.target.value)}>
+                    {initial && !agents.some((agent) => agent.command === initial.command) && <option value="">原 Agent 当前不可用</option>}
+                    {agents.map((agent) => <option key={agent.slug} value={agent.slug}>{agent.displayName}{agent.isPlugin ? ' · Plugin' : ''}</option>)}
+                  </select>
+                </label>
+                <label className="min-w-0 space-y-1 text-[10px] text-muted-foreground">工作目录
+                  <div className="flex gap-2"><input className={`${inputClass} min-w-0`} value={cwd} onChange={(event) => { cwdEdited.current = true; setCwd(event.target.value); }} placeholder="默认使用当前目录" /><button type="button" aria-haspopup="dialog" className={`${buttonClass} shrink-0 bg-surface-2 text-foreground`} onClick={() => setDirectoryPickerOpen(true)}><FolderOpen size={13} />选择</button></div>
+                </label>
+              </div>
+              {agents.length === 0 && <p className="text-[10px] text-destructive">没有检测到可启动的 Agent。请先在 Plugin 设置中安装或配置 Agent。</p>}
+            </> : <label className="block space-y-1 text-[10px] text-muted-foreground">目标会话
+              <select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}>
+                {!targetSession && <option value={targetSessionId}>{targetSessionId ? '原目标会话不可用，请重新选择' : '请选择会话'}</option>}
+                {sessions.map((session) => <option key={session.sessionId} value={session.sessionId}>{session.name} · {collaborationSessionStatus(session)}</option>)}
+              </select>
+              <span className="block leading-relaxed">仅支持当前服务的会话。运行时会直接写入终端，请确保目标会话保持在线。</span>
+            </label>}
+            <label className="flex items-center gap-2 text-[11px] text-foreground"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />保存后启用</label>
+          </div>}
+        </div>
       </fieldset>
     </div>
-    <div className="flex shrink-0 flex-col gap-2 border-t border-primary/15 bg-surface px-3 py-3 sm:flex-row sm:items-center">
-      <div className="min-w-0 flex-1"><label className="flex items-center gap-2 text-[11px] text-foreground"><input type="checkbox" disabled={saving} checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />保存后启用</label><p className="mt-1 truncate text-[10px] text-muted-foreground">{enabled && canSave ? `${initial ? '下次运行' : '首次运行'}：${formatDateTime(nextScheduledAt(schedule, Date.now(), initial?.createdAt))}` : enabled ? missing : missing || '任务会保存，但不会自动运行'}</p></div>
-      <div className="flex justify-end gap-2"><button disabled={saving} className={`${buttonClass} bg-surface-2 text-foreground`} onClick={onCancel}>取消</button><button title={missing || undefined} disabled={saving || !canSave} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void submit()}>{saving ? '保存中…' : initial ? '保存修改' : '创建任务'}</button></div>
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border/15 pt-3">
+      <p role="status" className="mr-auto min-w-0 flex-[1_1_160px] text-[10px] text-muted-foreground">{missing || (enabled ? `${initial ? '下次运行' : '首次运行'}：${formatDateTime(nextScheduledAt(schedule, Date.now(), initial?.createdAt))}` : '保存后暂停，不会自动运行')}</p>
+      <button disabled={saving} className={`${buttonClass} bg-surface-2 text-foreground`} onClick={onCancel}>取消</button>
+      <button title={missing || undefined} disabled={saving || !canSave} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void submit()}>{saving ? '保存中…' : initial ? '保存修改' : '创建任务'}</button>
     </div>
     <DirectoryPickerDialog
       open={directoryPickerOpen}

@@ -941,8 +941,6 @@ export type TranslationDictionary = {
     desktopTitle: string;
     desktopStatusLoading: string;
     desktopSwitchService: string;
-    desktopInstallCli: string;
-    desktopCliUpdated: string;
     desktopOpenDataDirectory: string;
   };
   toolbarPresets: {

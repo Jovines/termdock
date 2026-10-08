@@ -129,7 +129,6 @@ export function TermdockUpdateSettings({
                 {desktopReady && desktopState?.latestVersion
                   ? `${desktopState.currentVersion} → ${desktopState.latestVersion}`
                   : desktopVersion ? `v${desktopVersion}` : null}
-                {desktopSnapshot && ` · ${t('settings.desktopBundledCli')} ${desktopSnapshot.bundledCliVersion}`}
               </div>
             </div>
           </div>

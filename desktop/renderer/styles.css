@@ -264,7 +264,6 @@ p {
 
 .topbar,
 .local-stage,
-.utility-section,
 .desktop-status-section,
 .remote-section,
 .notice {
@@ -369,11 +368,8 @@ p {
 
 .stage-head,
 .section-intro,
-.inline-title,
 .service-line,
 .primary-actions,
-.utility-section,
-.utility-copy,
 .connection-row,
 .connection-actions,
 .form-actions {
@@ -384,7 +380,6 @@ p {
 .stage-head,
 .section-intro,
 .service-line,
-.utility-section,
 .connection-row {
   justify-content: space-between;
 }
@@ -563,19 +558,6 @@ p {
   background: var(--surface-2);
 }
 
-.secondary.compact {
-  min-height: 34px;
-  flex: 0 0 auto;
-}
-
-.utility-section {
-  gap: 24px;
-  margin-top: 16px;
-  border-bottom: 1px solid var(--border);
-  padding: 20px 4px 22px;
-  animation: enter-up 480ms 120ms ease-out both;
-}
-
 .desktop-status-section {
   margin-top: 16px;
   border-bottom: 1px solid var(--border);
@@ -686,55 +668,6 @@ p {
 .preference-row input:focus-visible + .switch-track {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
-}
-
-.utility-copy {
-  min-width: 0;
-  gap: 13px;
-}
-
-.utility-icon {
-  display: grid;
-  flex: 0 0 auto;
-  width: 37px;
-  height: 37px;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--surface);
-  color: var(--primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.inline-title {
-  gap: 10px;
-}
-
-.inline-title h2 {
-  color: var(--foreground);
-  font-size: 13px;
-  font-weight: 630;
-}
-
-.text-state {
-  color: var(--muted-foreground);
-  font-size: 10px;
-}
-
-.text-state.ok {
-  color: var(--success);
-}
-
-.utility-copy p {
-  max-width: 600px;
-  margin-top: 5px;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 1.5;
-  text-overflow: ellipsis;
-  white-space: pre-line;
 }
 
 .remote-section {
@@ -894,7 +827,6 @@ p {
 
   .topbar,
   .local-stage,
-  .utility-section,
   .desktop-status-section,
   .remote-section,
   .notice {

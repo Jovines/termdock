@@ -133,13 +133,14 @@ describe('AgentOperationsPanel', () => {
     const user = userEvent.setup();
     render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
     await user.click(screen.getByRole('button', { name: '创建第一个任务' }));
+    await user.click(screen.getByRole('button', { name: '更多设置' }));
     const picker = await screen.findByLabelText('Agent / Plugin');
     expect(picker.textContent).toContain('Codex');
     expect(picker.textContent).toContain('Custom Agent · Plugin');
     expect(screen.queryByText('启动命令')).toBeNull();
   });
 
-  it('starts with an orienting empty state and reveals a guided form on demand', async () => {
+  it('starts with an orienting empty state and reveals a compact form with custom scheduling on demand', async () => {
     const user = userEvent.setup();
     render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
 
@@ -147,11 +148,12 @@ describe('AgentOperationsPanel', () => {
     expect(screen.queryByLabelText('任务名称')).toBeNull();
 
     await user.click(screen.getByRole('button', { name: '创建第一个任务' }));
-    expect(screen.getByText('1', { selector: 'span' })).toBeTruthy();
-    expect(screen.getByLabelText('任务名称')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /选择/ })).toBeTruthy();
+    expect(screen.getByLabelText('任务内容')).toBeTruthy();
+    expect(screen.queryByLabelText('任务名称（可选）')).toBeNull();
+    expect(screen.queryByLabelText('Agent / Plugin')).toBeNull();
+    expect(screen.getByRole('button', { name: '更多设置' }).getAttribute('aria-expanded')).toBe('false');
 
-    await user.click(screen.getByRole('button', { name: '指定日期与时间' }));
+    await user.selectOptions(screen.getByLabelText('运行频率'), 'custom-daily');
     expect(screen.getByRole('button', { name: '星期一' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: '星期日' }).getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByLabelText('小时')).toHaveProperty('value', '09');
@@ -191,12 +193,13 @@ describe('AgentOperationsPanel', () => {
     render(<AgentOperationsPanel activeSessionId={null} onClose={onClose} onNewSession={() => undefined} />);
 
     await user.click(screen.getByRole('button', { name: '创建第一个任务' }));
+    await user.click(screen.getByRole('button', { name: '更多设置' }));
     await user.click(screen.getByRole('button', { name: '选择' }));
     expect(screen.getByRole('dialog', { name: '选择工作目录' })).toBeTruthy();
 
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog', { name: '选择工作目录' })).toBeNull();
-    expect(screen.getByLabelText('任务名称')).toBeTruthy();
+    expect(screen.getByLabelText('任务内容')).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
   });
 

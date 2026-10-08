@@ -3771,7 +3771,7 @@ function App() {
                 desktopSnapshot={desktopSnapshot}
                 desktopActions={desktopBridge ? (
                   <>
-                    <div className="grid grid-cols-1 gap-px border-t border-border/10 bg-border/10 sm:grid-cols-3">
+                    <div className="grid grid-cols-1 gap-px border-t border-border/10 bg-border/10 sm:grid-cols-2">
                       <button
                         type="button"
                         onClick={() => void desktopBridge.showConnectionCenter()}
@@ -3779,22 +3779,6 @@ function App() {
                       >
                         <RiLinkLine size={13} className="shrink-0 text-primary" />
                         {t('settings.desktopSwitchService')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDesktopActionMessage(null);
-                          void desktopBridge.installCli()
-                            .then((next) => {
-                              setDesktopSnapshot(next);
-                              setDesktopActionMessage(t('settings.desktopCliUpdated'));
-                            })
-                            .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
-                        }}
-                        className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                      >
-                        <RiTerminalLine size={13} className="shrink-0 text-primary" />
-                        {t('settings.desktopInstallCli')}
                       </button>
                       <button
                         type="button"

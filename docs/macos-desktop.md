@@ -1,47 +1,34 @@
 # Termdock for macOS
 
-Termdock Desktop is a self-contained macOS application. The packaged app includes
-Node.js, the Termdock server, `tmux`, `rg`, Git, and `mkcert`; users do not need
-Homebrew, Node.js, npm, or a separately installed CLI to run it.
+Termdock Desktop is a macOS client for independently running Termdock services.
+It connects to local, LAN, and public service URLs without installing a CLI,
+starting a server, taking over an existing process, or changing the shell environment.
 
-## Shared state and service behavior
+## Service behavior
 
-- Desktop and CLI both use `~/.termdock`. Authentication, certificates, sessions,
-  preferences, and caches are deliberately shared.
-- The connection center can open an existing local CLI service, start a
-  desktop-managed local service, or save and connect to any Termdock URL.
-- After connecting, the window becomes the Termdock workspace itself.
-  Desktop-only actions are embedded in Termdock Settings and the native macOS
-  menu instead of living in a second application shell.
-- A desktop-managed service exposes the same HTTP/WebSocket service as the CLI.
-- If a local CLI service is already running, Desktop connects to it by default.
-  Replacing it requires an explicit confirmation before Desktop sends `SIGTERM`.
-- Closing the Desktop window does not silently stop a detached service.
+- Start local services separately with the standalone `termdock` CLI.
+- The connection center detects an existing local service and can open it, or
+  save and connect to another Termdock URL.
+- Desktop-only bookmarks and UI preferences live in `~/.termdock/desktop.json`.
+- Direct connections load the service's frontend. Saved connections reachable
+  only through an entry service use the app's bundled static frontend.
+- Closing or quitting Desktop leaves independently running services untouched.
+- The app bundles static frontend resources for entry-service connections;
+  Node.js, server dependencies, CLI launchers, and terminal tools are not bundled.
 
-Desktop-only connection bookmarks and UI state live in
-`~/.termdock/desktop.json`. This file does not duplicate or isolate Termdock
-server state.
+## Upgrading from a desktop-managed service
 
-## CLI installation and versions
-
-On first launch the connection center detects `td`/`termdock` on the user's login
-shell `PATH`, shows both installed and bundled versions, and offers a one-click
-install. Installation creates `/usr/local/bin/td` and
-`/usr/local/bin/termdock` symlinks to the launcher's copy inside the app bundle.
-macOS requests administrator authorization when needed.
-
-An existing CLI is never overwritten without the install action. The bundled
-launcher always uses the app's private runtime and server, while sharing
-`~/.termdock` with every other Termdock installation.
-
-`td at [name]` uses the bundled tmux client and the same per-user default tmux
-socket as the desktop service. A separately installed tmux normally sees the
-same sessions too, but `td at` remains reliable if tmux client versions differ.
+Older apps could install `td` / `termdock` symlinks into the app bundle. Before
+replacing one of those apps, install the standalone CLI with `npm install -g termdock`
+and verify that the commands resolve to that installation. If an old bundled
+service is still running, stop it with the CLI and start the standalone service.
+Your sessions, authentication, certificates, and preferences remain under
+`~/.termdock`; upgrading the app does not delete them or stop the old process.
 
 ## macOS integration
 
 - Native inset title bar and traffic lights share Termdock's chrome surface.
-- `⌘,` opens Termdock Settings, including Desktop service, CLI, and data actions.
+- `⌘,` opens Termdock Settings, including service switching, application updates, and data actions.
 - `⌘T` creates a session, `⌘W` closes the active session, and `⌘⇧[` / `⌘⇧]`
   switch sessions.
 - `⌘B` toggles sessions and `⌘⇧B` toggles the file sidebar.
@@ -61,8 +48,9 @@ npm install
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run desktop:make
 ```
 
-The build performs a real `node-pty` spawn probe and stages all runtime
-dependencies under `.desktop-runtime`. Artifacts are written to `out/make`.
+The build compiles the desktop shell and web frontend. Only the static frontend
+is copied as an extra resource; no server runtime or toolchain is staged.
+Artifacts are written to `out/make`.
 
 By default Forge uses an ad-hoc signature for local development. For distribution,
 provide a Developer ID Application identity:

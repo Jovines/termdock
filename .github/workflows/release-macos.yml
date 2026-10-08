@@ -74,9 +74,6 @@ jobs:
           security list-keychains -d user -s "$keychain_path"
           rm -f "$certificate_path"
 
-      - name: Install bundled toolchain inputs
-        run: brew install git mkcert ripgrep tmux
-
       - name: Install dependencies
         run: npm ci
 

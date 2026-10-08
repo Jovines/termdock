@@ -717,7 +717,6 @@ export const zh: TranslationDictionary = {
     updateCheckingShort: '检查中…',
     updateInstallingShort: '安装中…',
     updateCurrent: 'Termdock 已是最新版本。',
-    desktopBundledCli: '内置 CLI',
     desktopUpdateTitle: 'macOS 桌面版',
     desktopUpdateHint: '手动检查 GitHub 发布的签名桌面版本。',
     desktopUpdateUnsupported: '仅签名安装的 macOS 桌面版支持应用内更新。',
@@ -925,8 +924,6 @@ export const zh: TranslationDictionary = {
     desktopTitle: 'Termdock 桌面端',
     desktopStatusLoading: '正在读取 macOS 原生状态…',
     desktopSwitchService: '切换服务',
-    desktopInstallCli: '安装 / 修复 CLI',
-    desktopCliUpdated: 'CLI 状态已更新',
     desktopOpenDataDirectory: '打开数据目录',
   },
   toolbarPresets: {

@@ -2,7 +2,6 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   DesktopAppUpdateState,
   DesktopPreferences,
-  DesktopRuntimeUpdateState,
   DesktopServiceActivity,
   DesktopSnapshot,
   DesktopStatusSnapshot,
@@ -67,18 +66,9 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   setFloatingMetricCount: (count: number): Promise<void> =>
     ipcRenderer.invoke('desktop:set-floating-metric-count', count),
   disableFloatingWidget: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:disable-floating-widget'),
-  startLocal: (): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:start-local'),
-  getLocalInvite: (): Promise<{ url: string; targetPeerId: string; pairingCode: string; serviceName: string } | null> => ipcRenderer.invoke('desktop:local-invite'),
-  installCli: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:install-cli'),
   desktopUpdateState: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:update-state'),
   checkDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:check-update'),
   installDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:install-update'),
-  runtimeUpdateState: (): Promise<DesktopRuntimeUpdateState> => ipcRenderer.invoke('desktop:runtime-update-state'),
-  checkRuntimeUpdate: (): Promise<DesktopRuntimeUpdateState> => ipcRenderer.invoke('desktop:check-runtime-update'),
-  restartRuntime: (): Promise<DesktopRuntimeUpdateState> => ipcRenderer.invoke('desktop:restart-runtime'),
-  onRuntimeUpdateState: (callback: (state: DesktopRuntimeUpdateState) => void): void => {
-    ipcRenderer.on('desktop:runtime-update-state-changed', (_event, state: DesktopRuntimeUpdateState) => callback(state));
-  },
   onStartupProgress: (callback: (message: string | null) => void): void => {
     ipcRenderer.on('desktop:startup-progress', (_event, message: string | null) => callback(message));
   },

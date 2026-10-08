@@ -63,7 +63,7 @@ import {
   writeJsonLog,
   writeTextLog,
 } from './utils/serverLogger.js';
-import { indexRetainedClientModules, pinBundledRuntimeClientDist, resolveRuntimeClientDist } from './utils/runtimeClient.js';
+import { indexRetainedClientModules, pinBundledRuntimeClientDist } from './utils/runtimeClient.js';
 import { installCrashForensics } from './utils/crashForensics.js';
 import {
   getTermdockVersion,
@@ -317,7 +317,6 @@ export function createApp(options: AppOptions = {}): express.Express {
       version: getTermdockVersion(),
       protocolVersion: TERMDOCK_PROTOCOL_VERSION,
       capabilities: TERMDOCK_CAPABILITIES,
-      desktopManaged: process.env.TERMDOCK_DESKTOP === '1',
     });
   });
 
@@ -417,10 +416,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use('/api/android', androidRoutes);
 
   if (fs.existsSync(bundledClientIndexPath)) {
-    const selectedClientPath = resolveRuntimeClientDist(bundledClientDistPath);
-    const clientPath = selectedClientPath === bundledClientDistPath
-      ? pinBundledRuntimeClientDist(bundledClientDistPath)
-      : selectedClientPath;
+    const clientPath = pinBundledRuntimeClientDist(bundledClientDistPath);
     const compression = createStaticCompressionMiddleware(clientPath);
     const staticFiles = express.static(clientPath, {
       setHeaders: (res, filePath, stat) => {

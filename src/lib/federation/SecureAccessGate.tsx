@@ -117,9 +117,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
           if (incomingInvitation) { setChecking(false); return; }
           localPairing ??= (async () => {
             if (native?.targetPeerId) { await connectDevice({ ...native, targetPeerId: native.targetPeerId, serviceName: native.label }); return; }
-            const invite = await window.termdockDesktop?.getLocalInvite?.();
-            if (invite) await connectDevice(invite);
-            else await connectOpenService();
+            await connectOpenService();
           })();
           await localPairing;
           if (!savedConnection()) { if (!stopped) { setReady(false); setChecking(false); setError(false); } return; }

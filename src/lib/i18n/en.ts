@@ -717,7 +717,6 @@ export const en: TranslationDictionary = {
     updateCheckingShort: 'Checking…',
     updateInstallingShort: 'Installing…',
     updateCurrent: 'Termdock is up to date.',
-    desktopBundledCli: 'Bundled CLI',
     desktopUpdateTitle: 'macOS desktop app',
     desktopUpdateHint: 'Manually check signed desktop releases published on GitHub.',
     desktopUpdateUnsupported: 'In-app updates require an installed, signed macOS app.',
@@ -925,8 +924,6 @@ export const en: TranslationDictionary = {
     desktopTitle: 'Termdock Desktop',
     desktopStatusLoading: 'Reading native macOS status…',
     desktopSwitchService: 'Switch service',
-    desktopInstallCli: 'Install / Repair CLI',
-    desktopCliUpdated: 'CLI status updated',
     desktopOpenDataDirectory: 'Open data directory',
   },
   toolbarPresets: {

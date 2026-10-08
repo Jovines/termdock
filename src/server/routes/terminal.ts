@@ -20,7 +20,6 @@ import { createHash, randomBytes, randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
-import { DesktopRuntimeOwnerClient } from '../utils/desktopRuntimeOwner.js';
 import { gitStatusCache, type GitStatus } from '../utils/gitStatus.js';
 import { getPtyHostManager, type PtyHostClient } from '../ptyhost/manager.js';
 import { pathValidator } from '../utils/pathValidator.js';
@@ -793,22 +792,7 @@ const npmAutoUpdateManager = new TermdockAutoUpdateManager({
   log: (message) => console.warn(message),
 });
 
-const desktopRuntimeOwner = process.env.TERMDOCK_DESKTOP_OWNER_SOCKET
-  ? new DesktopRuntimeOwnerClient(
-    process.env.TERMDOCK_DESKTOP_OWNER_SOCKET,
-    TERMDOCK_VERSION,
-    (state) => broadcastControlEvent({ type: 'update-state', state }),
-  )
-  : null;
-
-// Packaged desktop builds already have a signed app/runtime updater. The npm
-// updater only owns standalone CLI services, otherwise both mechanisms could
-// race to replace the runtime.
-if (desktopRuntimeOwner) {
-  desktopRuntimeOwner.start();
-} else {
-  npmAutoUpdateManager.start();
-}
+npmAutoUpdateManager.start();
 
 async function flushClientStateBroadcast(): Promise<void> {
   if (broadcastClientStateInFlight) {
@@ -7204,15 +7188,11 @@ router.get('/auto-title/catalog', async (req, res) => {
 });
 
 router.get('/update', (_req, res) => {
-  res.json(desktopRuntimeOwner?.getState() ?? npmAutoUpdateManager.getState());
+  res.json(npmAutoUpdateManager.getState());
 });
 
 router.post('/update/check', async (_req, res) => {
   try {
-    if (desktopRuntimeOwner) {
-      res.json(await desktopRuntimeOwner.checkForUpdates());
-      return;
-    }
     // npm 查询加全局安装动辄二三十秒，而加密传输对 30s 内收不到任何回包就判超时，
     // 客户端会弹「服务响应超时」——更新其实装完了。检查照常跑，进度与结果都由控制
     // WS 的 update-state 广播推送，这里立刻回当前状态（通常是 checking）即可。
@@ -7227,9 +7207,7 @@ router.post('/update/check', async (_req, res) => {
 
 router.post('/update/restart', async (_req, res) => {
   try {
-    const state = desktopRuntimeOwner
-      ? await desktopRuntimeOwner.restart()
-      : npmAutoUpdateManager.confirmRestart();
+    const state = npmAutoUpdateManager.confirmRestart();
     res.status(202).json(state);
   } catch (error) {
     res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
@@ -9365,7 +9343,7 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
       ws.send(JSON.stringify({ type: 'client-state', seq: initialSeq, state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
       ws.send(JSON.stringify({
         type: 'update-state',
-        state: desktopRuntimeOwner?.getState() ?? npmAutoUpdateManager.getState(),
+        state: npmAutoUpdateManager.getState(),
       }));
       // 服务健康快照：崩溃时服务自己已经死了、推不出任何东西，所以"红点"这件事
       // 只能靠客户端重连时的这一发。客户端断线重连的既有逻辑正好覆盖了那个时刻。

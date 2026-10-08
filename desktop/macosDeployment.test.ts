@@ -10,11 +10,10 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 };
 
 describe('macOS deployment target', () => {
-  it('keeps the launcher binary and Info.plist on macOS 12', () => {
+  it('keeps the main executable and Info.plist on macOS 12', () => {
     expect(forgeConfig.packagerConfig.extendInfo.LSMinimumSystemVersion).toBe('12.0');
     expect(forgeConfig.packagerConfig.extendInfo.NSUserNotificationAlertStyle).toBe('banner');
     expect(forgeSource).not.toContain('fs.renameSync(launcherPath, electronPath)');
-    expect(forgeSource).toContain('afterCopyExtraResources: [signBundledRuntime]');
   });
 
   it('bundles the sandboxed preload into one CommonJS file', () => {

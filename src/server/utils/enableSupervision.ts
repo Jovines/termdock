@@ -8,15 +8,14 @@ import { SERVER_LOG_PATH } from './termdockState.js';
 let config: SupervisorConfig | null = null;
 let pending = false;
 
-// Only the production CLI registers a launch recipe. Desktop and development
-// runtimes must remain owned by their original launcher.
+// Only the production CLI registers a launch recipe. Development runtimes
+// must remain owned by their original launcher.
 export function configureSupervisionEnable(value: SupervisorConfig): void {
   config = value;
 }
 
 export function canEnableSupervision(): boolean {
   return config !== null && !(process.env.TERMDOCK_SUPERVISED === '1' && process.connected)
-    && !process.env.TERMDOCK_DESKTOP && !process.env.TERMDOCK_DESKTOP_OWNER_SOCKET
     && !process.env.INVOCATION_ID && !process.env.NOTIFY_SOCKET && !process.env.PM2_HOME
     && !getSupervisorStatus()?.alive;
 }

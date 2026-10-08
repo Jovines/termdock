@@ -110,7 +110,7 @@ export interface TermdockUpdateState {
   status: TermdockUpdateStatus;
   currentVersion: string;
   latestVersion: string | null;
-  source: 'official' | 'configured' | 'desktop' | null;
+  source: 'official' | 'configured' | null;
   checkedAt: number | null;
   error: string | null;
 }

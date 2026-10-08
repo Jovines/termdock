@@ -9,7 +9,6 @@ describe('desktop bridge capability compatibility', () => {
     const legacyBridge = {
       platform: 'darwin',
       snapshot: async () => ({}),
-      installCli: async () => ({}),
       showConnectionCenter: async () => undefined,
       revealDataDirectory: async () => undefined,
       showNotification: async () => true,

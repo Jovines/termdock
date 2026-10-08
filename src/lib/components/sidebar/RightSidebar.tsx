@@ -11084,10 +11084,9 @@ export function RightSidebar(
               })
               .finally(() => setSavingGitIgnoreFilter(false));
           }}
-          className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] font-medium transition active:scale-95 disabled:opacity-40 ${hideGitIgnored ? 'bg-primary/15 text-primary hover:bg-primary/20' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-35 ${hideGitIgnored ? 'bg-surface-2 text-primary hover:bg-surface-elevated' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
         >
-          {savingGitIgnoreFilter ? <RiLoader size={13} className="animate-spin" /> : <RiFilter size={13} />}
-          <span>Git ignore</span>
+          {savingGitIgnoreFilter ? <RiLoader size={14} className="animate-spin" /> : <RiFilter size={14} />}
         </button>
         <div ref={explorerMenuRef} className="relative shrink-0">
           <button

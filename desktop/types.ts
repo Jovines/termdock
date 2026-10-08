@@ -14,7 +14,6 @@ export interface ServiceProbe {
   url: string;
   version?: string;
   protocolVersion?: number;
-  desktopManaged?: boolean;
   error?: string;
 }
 
@@ -34,18 +33,8 @@ export interface LocalServiceStatus {
   probe: ServiceProbe | null;
 }
 
-export interface CliInstallation {
-  path: string;
-  version: string | null;
-  bundled: boolean;
-}
-
 export interface DesktopSnapshot {
   appVersion: string;
-  runtimeVersion: string;
-  packaged: boolean;
-  bundledCliVersion: string;
-  cliInstallations: CliInstallation[];
   localService: LocalServiceStatus;
   connections: SavedConnection[];
   lastConnectionUrl: string | null;
@@ -98,23 +87,6 @@ export interface DesktopAppUpdateState {
   currentVersion: string;
   latestVersion: string | null;
   releaseName: string | null;
-  checkedAt: number | null;
-  error: string | null;
-}
-
-export type DesktopRuntimeUpdateStatus =
-  | 'idle'
-  | 'checking'
-  | 'current'
-  | 'ready'
-  | 'restarting'
-  | 'error';
-
-export interface DesktopRuntimeUpdateState {
-  status: DesktopRuntimeUpdateStatus;
-  currentVersion: string;
-  latestVersion: string | null;
-  source: 'desktop';
   checkedAt: number | null;
   error: string | null;
 }

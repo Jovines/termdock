@@ -2,16 +2,8 @@ import { routeCollaborationInput } from '../collaboration/inputTarget';
 import { escapeShellPath } from './shellPath';
 import type { ServiceDirectoryBridge } from '../services/serviceDirectory';
 import { installEncryptedFileDrops } from './encryptedFileDrops';
-export interface DesktopCliInstallation {
-  path: string;
-  version: string | null;
-  bundled: boolean;
-}
-
 export interface DesktopNativeSnapshot {
   appVersion: string;
-  bundledCliVersion: string;
-  cliInstallations: DesktopCliInstallation[];
   localService: {
     running: boolean;
     probe: {
@@ -50,20 +42,9 @@ export interface DesktopAppUpdateState {
   error: string | null;
 }
 
-export interface DesktopRuntimeUpdateState {
-  status: 'idle' | 'checking' | 'current' | 'ready' | 'restarting' | 'error';
-  currentVersion: string;
-  latestVersion: string | null;
-  source: 'desktop';
-  checkedAt: number | null;
-  error: string | null;
-}
-
 export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   platform: string;
   deviceInfo?(): Promise<import('../../server/federation/deviceProfile').DeviceProfile>;
-  /** Available only to the managed local loopback application's top-level page. */
-  getLocalInvite?(): Promise<{ url: string; targetPeerId: string; pairingCode: string; serviceName?: string } | null>;
   /** Versioned discovery/mutation contract; legacy clients omit this object. */
   collaboration?: { protocolVersion: number; peers: boolean; save: boolean };
   collaborationPeers?(): Promise<import('../collaboration/directory').CollaborationPeers>;
@@ -74,15 +55,10 @@ export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   /** Present when the desktop shell only acknowledges confirmed native delivery. */
   notificationDeliveryConfirmation?: boolean;
   snapshot(): Promise<DesktopNativeSnapshot>;
-  installCli(): Promise<DesktopNativeSnapshot>;
   desktopUpdateState?(): Promise<DesktopAppUpdateState>;
   checkDesktopUpdate?(): Promise<DesktopAppUpdateState>;
   installDesktopUpdate?(): Promise<DesktopAppUpdateState>;
   onDesktopUpdateState?(callback: (state: DesktopAppUpdateState) => void): void;
-  runtimeUpdateState?(): Promise<DesktopRuntimeUpdateState>;
-  checkRuntimeUpdate?(): Promise<DesktopRuntimeUpdateState>;
-  restartRuntime?(): Promise<DesktopRuntimeUpdateState>;
-  onRuntimeUpdateState?(callback: (state: DesktopRuntimeUpdateState) => void): void;
   onStartupProgress?(callback: (message: string | null) => void): void;
   reportServiceActivity?(activity: { runningCount: number; reviewCount: number }): void;
   focusService?(origin: string): Promise<boolean>;

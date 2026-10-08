@@ -9,10 +9,6 @@ const elements = {
   visualStatus: document.querySelector('#visual-status'),
   navLocalDot: document.querySelector('#nav-local-dot'),
   connectLocal: document.querySelector('#connect-local'),
-  startLocal: document.querySelector('#start-local'),
-  cliState: document.querySelector('#cli-state'),
-  cliDetail: document.querySelector('#cli-detail'),
-  installCli: document.querySelector('#install-cli'),
   menuBarStatusEnabled: document.querySelector('#menu-bar-status-enabled'),
   floatingWidgetEnabled: document.querySelector('#floating-widget-enabled'),
   desktopStatusPreview: document.querySelector('#desktop-status-preview'),
@@ -59,9 +55,7 @@ async function busy(button, task) {
 
 function render(snapshot) {
   currentSnapshot = snapshot;
-  elements.version.textContent = snapshot.runtimeVersion === snapshot.appVersion
-    ? `Termdock Desktop ${snapshot.appVersion}`
-    : `Termdock Desktop ${snapshot.appVersion} · Runtime ${snapshot.runtimeVersion}`;
+  elements.version.textContent = `Termdock Desktop ${snapshot.appVersion}`;
   elements.connectionCount.textContent = String(snapshot.connections.length);
 
   const local = snapshot.localService;
@@ -75,21 +69,11 @@ function render(snapshot) {
     const serviceUrl = local.probe?.url || local.state.localUrl;
     elements.localAddress.textContent = serviceUrl || 'localhost';
     elements.localDetail.textContent = `PID ${local.state.pid}${version}`;
-    elements.startLocal.textContent = '由桌面版接管';
   } else {
     elements.localAddress.textContent = 'localhost:9834';
-    elements.localDetail.textContent = '等待桌面版或 CLI 启动';
-    elements.startLocal.textContent = '由桌面版启动';
+    elements.localDetail.textContent = '请在终端运行 termdock 启动本机服务';
   }
 
-  const cli = snapshot.cliInstallations;
-  const bundled = cli.find((entry) => entry.bundled);
-  elements.cliState.textContent = bundled ? '已连接桌面版本' : (cli.length > 0 ? '检测到其他版本' : '未安装');
-  elements.cliState.classList.toggle('ok', Boolean(bundled));
-  elements.cliDetail.textContent = cli.length > 0
-    ? cli.map((entry) => `${entry.path} · ${entry.version || '版本未知'}${entry.bundled ? ' · 桌面内嵌' : ''}`).join('\n')
-    : `桌面内嵌版本 ${snapshot.bundledCliVersion}，尚未安装命令入口。`;
-  elements.installCli.hidden = !snapshot.packaged;
   elements.menuBarStatusEnabled.checked = snapshot.desktopPreferences.menuBarStatusEnabled;
   elements.floatingWidgetEnabled.checked = snapshot.desktopPreferences.floatingWidgetEnabled;
 
@@ -126,21 +110,6 @@ elements.connectLocal.addEventListener('click', () => {
     if (!url) throw new Error('本机服务地址不可用');
     const result = await api.connect(url);
     if (!result.ok) showNotice(result.error || '连接失败', true);
-  });
-});
-
-elements.startLocal.addEventListener('click', () => {
-  void busy(elements.startLocal, async () => {
-    const result = await api.startLocal();
-    if (!result.ok) showNotice(result.error || '服务启动失败', true);
-  });
-});
-
-elements.installCli.addEventListener('click', () => {
-  void busy(elements.installCli, async () => {
-    currentSnapshot = await api.installCli();
-    render(currentSnapshot);
-    showNotice('CLI 安装状态已刷新。');
   });
 });
 

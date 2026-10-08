@@ -22,18 +22,16 @@ import {
   type MessageBoxOptions,
   type Session,
 } from 'electron';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
-import http from 'node:http';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type {
-  CliInstallation,
   DesktopConfig,
   DesktopPreferences,
   DesktopServiceActivity,
@@ -58,33 +56,14 @@ import {
 } from './activityStatus.js';
 import {
   checkForDesktopUpdates,
-  checkForRuntimeUpdates,
   configureDesktopUpdater,
-  ensureLatestRuntime,
   getDesktopUpdateState,
-  getDesktopRuntimeUpdateState,
   installDownloadedDesktopUpdate,
   isDesktopUpdateInstalling,
-  markDesktopRuntimeRestartFailed,
-  markDesktopRuntimeRestarting,
-  markDesktopRuntimeRunning,
-  subscribeDesktopRuntimeUpdateState,
   subscribeDesktopUpdateState,
 } from './updater.js';
-import {
-  resolvePackagedRuntime,
-  rollbackDownloadedRuntime,
-  type DesktopRuntimePaths,
-} from './runtime.js';
 import { isExternalLinkStagingUrl, isSafeExternalUrl } from './externalLinks.js';
 import { shouldThrottleDesktopRenderer } from './windowPolicy.js';
-import {
-  checkConnectedServiceRuntime,
-  getConnectedServiceRuntimeState,
-  restartConnectedServiceRuntime,
-} from './connectedServiceRuntime.js';
-import { isOwnedDesktopRuntimeTarget } from './runtimeTarget.js';
-import { canReadLocalInvite } from './localInviteGuard.js';
 import { serviceDocumentNeedsReload } from './serviceWindowRecovery.js';
 import {
   CertificateTrustRequests,
@@ -103,13 +82,10 @@ const projectRoot = path.resolve(currentDir, '..');
 const termdockDir = path.join(os.homedir(), '.termdock');
 const desktopConfigPath = path.join(termdockDir, 'desktop.json');
 const serverStatePath = path.join(termdockDir, 'server.json');
-const desktopRuntimeOwnerSocketPath = path.join(termdockDir, 'desktop-runtime-owner.sock');
-let federationRelayProcess: ChildProcess | null = null;
 const DEFAULT_LOCAL_URL = 'http://localhost:9834';
 const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
 const SERVICE_RECOVERY_PROBE_TIMEOUT_MS = 5_000;
-const START_TIMEOUT_MS = 90_000;
 const RESTORE_LOAD_TIMEOUT_MS = 15_000;
 const localServiceCertificatePath = path.join(termdockDir, 'certs', 'termdock-local.pem');
 const sessionTrustedCertificateTargets = new Set<string>();
@@ -157,9 +133,6 @@ let menuBarStatus: Tray | null = null;
 let menuBarStatusWidth = 0;
 let floatingWidgetWindow: BrowserWindow | null = null;
 let floatingPositionTimer: ReturnType<typeof setTimeout> | null = null;
-let desktopRuntimeOwnerServer: http.Server | null = null;
-let connectedServiceRuntimePollTimer: ReturnType<typeof setInterval> | null = null;
-let connectedServiceRuntimePollInFlight = false;
 let isQuitting = false;
 const FLOATING_WIDGET_WIDTHS = [64, 108, 152] as const;
 const FLOATING_WIDGET_HEIGHT = 40;
@@ -932,7 +905,6 @@ async function probeServiceWithCertificateAuthority(
           product?: unknown;
           version?: unknown;
           protocolVersion?: unknown;
-          desktopManaged?: unknown;
         } | null;
         if (metadata?.product && metadata.product !== 'termdock') {
           return { ok: false, url, error: '目标服务的产品标识不是 Termdock' };
@@ -944,7 +916,6 @@ async function probeServiceWithCertificateAuthority(
           protocolVersion: typeof metadata?.protocolVersion === 'number'
             ? metadata.protocolVersion
             : undefined,
-          desktopManaged: metadata?.desktopManaged === true,
         };
       }
     } catch {
@@ -981,7 +952,6 @@ async function probeService(rawUrl: string): Promise<ServiceProbe> {
           product?: unknown;
           version?: unknown;
           protocolVersion?: unknown;
-          desktopManaged?: unknown;
         };
         if (metadata.product && metadata.product !== 'termdock') {
           return { ok: false, url, error: '目标服务的产品标识不是 Termdock' };
@@ -993,7 +963,6 @@ async function probeService(rawUrl: string): Promise<ServiceProbe> {
           protocolVersion: typeof metadata.protocolVersion === 'number'
             ? metadata.protocolVersion
             : undefined,
-          desktopManaged: metadata.desktopManaged === true,
         };
       }
     } catch {
@@ -1071,484 +1040,21 @@ async function getLocalServiceStatus(): Promise<LocalServiceStatus> {
   return { running: probe.ok, state, probe };
 }
 
-type ResolvedDesktopRuntime = DesktopRuntimePaths & {
-  node: string;
-  launcher: string;
-  toolchainBin: string;
-};
-
-function runtimePaths(): ResolvedDesktopRuntime {
-  if (app.isPackaged) {
-    const selected = resolvePackagedRuntime({
-      appVersion: app.getVersion(),
-      resourcesPath: process.resourcesPath,
-    });
-    return {
-      ...selected,
-      node: path.join(process.resourcesPath, 'runtime', 'bin', 'node'),
-      launcher: path.join(process.resourcesPath, 'cli', 'td'),
-      toolchainBin: path.join(process.resourcesPath, 'toolchain', 'bin'),
-    };
-  }
-  return {
-    node: process.env.TERMDOCK_NODE_BIN || 'node',
-    serverRoot: projectRoot,
-    cli: path.join(projectRoot, 'dist', 'server', 'cli.js'),
-    launcher: path.join(projectRoot, 'desktop', 'cli', 'td'),
-    toolchainBin: path.join(projectRoot, '.desktop-runtime', 'toolchain', 'bin'),
-    version: app.getVersion(),
-    source: 'development',
-  };
-}
-
-/** Explicit opt-in only; all routing and reconnect behavior lives in the shared CLI. */
-function startConfiguredFederationRelay(): void {
-  const configPath = path.join(termdockDir, 'federation', 'relay.json');
-  if (federationRelayProcess || !fs.existsSync(configPath)) return;
-  let logFd: number | undefined;
-  try {
-    const runtime = runtimePaths();
-    if (!fs.existsSync(runtime.cli)) throw new Error('Runtime unavailable');
-    const logPath = path.join(termdockDir, 'federation', 'relay.log');
-    logFd = fs.openSync(logPath, 'a', 0o600);
-    fs.fchmodSync(logFd, 0o600);
-    const child = spawn(runtime.node, [runtime.cli, '--federation-relay', configPath], {
-      detached: false,
-      stdio: ['ignore', logFd, logFd],
-      env: desktopRuntimeEnv(runtime),
-    });
-    federationRelayProcess = child;
-    child.once('error', () => {
-      if (federationRelayProcess === child) federationRelayProcess = null;
-      console.error('[federation] Configured relay failed to start; inspect the private relay log.');
-    });
-    child.once('exit', () => { if (federationRelayProcess === child) federationRelayProcess = null; });
-  } catch {
-    console.error('[federation] Unable to start configured relay; verify the runtime and private configuration.');
-  } finally { if (logFd !== undefined) fs.closeSync(logFd); }
-}
-
-async function executableVersion(executable: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync(executable, ['--version'], {
-      timeout: 5_000,
-      maxBuffer: 128 * 1024,
-    });
-    return stdout.trim().split(/\s+/).at(-1) || null;
-  } catch {
-    return null;
-  }
-}
-
-async function discoverCliInstallations(): Promise<CliInstallation[]> {
-  const candidates = new Set<string>();
-  try {
-    const { stdout } = await execFileAsync('/bin/zsh', ['-lic', 'whence -pa td termdock'], {
-      timeout: 5_000,
-      maxBuffer: 128 * 1024,
-    });
-    for (const line of stdout.split('\n')) {
-      const candidate = line.trim();
-      if (candidate.startsWith('/')) candidates.add(candidate);
-    }
-  } catch {
-    // A clean machine may not have any CLI entry yet.
-  }
-  for (const candidate of ['/usr/local/bin/td', '/opt/homebrew/bin/td']) {
-    if (fs.existsSync(candidate)) candidates.add(candidate);
-  }
-
-  const bundledLauncher = runtimePaths().launcher;
-  return Promise.all([...candidates].map(async (candidate) => {
-    let resolved = candidate;
-    try {
-      resolved = fs.realpathSync(candidate);
-    } catch {
-      // Keep the visible path for a broken symlink so the repair UI can show it.
-    }
-    return {
-      path: candidate,
-      version: await executableVersion(candidate),
-      bundled: resolved === bundledLauncher,
-    };
-  }));
-}
-
-async function bundledCliVersion(): Promise<string> {
-  const runtime = runtimePaths();
-  try {
-    const { stdout } = await execFileAsync(runtime.node, [runtime.cli, '--version'], {
-      timeout: 5_000,
-      maxBuffer: 128 * 1024,
-      env: desktopRuntimeEnv(runtime),
-    });
-    return stdout.trim() || app.getVersion();
-  } catch {
-    return app.getVersion();
-  }
-}
-
 async function snapshot(): Promise<DesktopSnapshot> {
   const config = readDesktopConfig();
-  const [localService, cliInstallations, cliVersion] = await Promise.all([
-    getLocalServiceStatus(),
-    discoverCliInstallations(),
-    bundledCliVersion(),
-  ]);
   return {
     appVersion: app.getVersion(),
-    runtimeVersion: cliVersion,
-    packaged: app.isPackaged,
-    bundledCliVersion: cliVersion,
-    cliInstallations,
-    localService,
+    localService: await getLocalServiceStatus(),
     connections: config.connections,
     lastConnectionUrl: config.lastConnectionUrl,
     desktopPreferences: config.desktopPreferences,
   };
 }
 
-function desktopRuntimeEnv(runtime = runtimePaths()): NodeJS.ProcessEnv {
-  const currentPath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin';
-  const userBinPaths = [
-    path.join(os.homedir(), '.local', 'bin'),
-    path.join(os.homedir(), 'bin'),
-    path.join(os.homedir(), '.npm-global', 'bin'),
-  ];
-  return {
-    ...process.env,
-    LANG: process.env.LANG || 'en_US.UTF-8',
-    LC_CTYPE: process.env.LC_CTYPE || process.env.LANG || 'en_US.UTF-8',
-    PATH: [runtime.toolchainBin, ...userBinPaths, '/opt/homebrew/bin', '/usr/local/bin', currentPath]
-      .filter(Boolean)
-      .join(path.delimiter),
-    TERMDOCK_DESKTOP: '1',
-    TERMDOCK_DESKTOP_OWNER_SOCKET: desktopRuntimeOwnerSocketPath,
-    TERMDOCK_BUNDLED_RUNTIME: app.isPackaged ? '1' : '0',
-    TERMDOCK_VERSION: runtime.version,
-    TERMDOCK_DESKTOP_SHELL_VERSION: app.getVersion(),
-    TMUX_BIN: fs.existsSync(path.join(runtime.toolchainBin, 'tmux'))
-      ? path.join(runtime.toolchainBin, 'tmux')
-      : process.env.TMUX_BIN,
-  };
-}
-
-async function waitForLocalService(childPid?: number): Promise<ServiceProbe> {
-  const deadline = Date.now() + START_TIMEOUT_MS;
-  let lastProbe: ServiceProbe = { ok: false, url: DEFAULT_LOCAL_URL, error: '服务尚未启动' };
-  while (Date.now() < deadline) {
-    const state = readServerState();
-    const url = state ? stateUrl(state) : DEFAULT_LOCAL_URL;
-    lastProbe = await probeService(url);
-    if (lastProbe.ok) return lastProbe;
-    if (childPid && !isProcessRunning(childPid)) {
-      return { ...lastProbe, error: '服务进程在健康检查通过前退出' };
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-  return lastProbe;
-}
-
-async function ensureTmuxUtf8Environment(runtime: ResolvedDesktopRuntime): Promise<void> {
-  const tmux = path.join(runtime.toolchainBin, 'tmux');
-  if (!fs.existsSync(tmux)) return;
-  const locale = desktopRuntimeEnv(runtime).LANG || 'en_US.UTF-8';
-  for (const name of ['LANG', 'LC_CTYPE']) {
-    try {
-      await execFileAsync(tmux, ['set-environment', '-g', name, locale], {
-        timeout: 5_000,
-        maxBuffer: 128 * 1024,
-        env: desktopRuntimeEnv(runtime),
-      });
-    } catch {
-      // tmux is optional and may not have a running server yet.
-    }
-  }
-}
-
-async function confirmAndStopExisting(status: LocalServiceStatus): Promise<boolean> {
-  if (!status.state) return true;
-  const version = status.probe?.version ? `版本：${status.probe.version}\n` : '';
-  const result = await showDesktopMessageBox({
-    type: 'warning',
-    title: '接管本机 Termdock 服务',
-    message: '检测到正在运行的 Termdock 服务',
-    detail: `${version}地址：${stateUrl(status.state)}\nPID：${status.state.pid}\n\n停止后将由桌面版使用同一个 ~/.termdock 重新启动。tmux 会话不会被删除。`,
-    buttons: ['连接现有服务', '停止并由桌面版接管', '取消'],
-    defaultId: 0,
-    cancelId: 2,
-  });
-  if (result.response === 0) {
-    await connectWindow(stateUrl(status.state));
-    return false;
-  }
-  if (result.response !== 1) return false;
-  if (!isProcessRunning(status.state.pid)) return true;
-  process.kill(status.state.pid, 'SIGTERM');
-  const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline && isProcessRunning(status.state.pid)) {
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
-  if (isProcessRunning(status.state.pid)) {
-    throw new Error(`旧服务 PID ${status.state.pid} 未能在超时时间内退出`);
-  }
-  try {
-    const latest = readServerState();
-    if (latest?.pid === status.state.pid) fs.rmSync(serverStatePath, { force: true });
-  } catch {
-    // The exiting CLI normally removes the state file itself.
-  }
-  return true;
-}
-
-async function startLocalService(): Promise<ServiceProbe> {
-  const existing = await getLocalServiceStatus();
-  if (existing.running) {
-    const shouldStart = await confirmAndStopExisting(existing);
-    if (!shouldStart) {
-      return existing.probe ?? { ok: true, url: stateUrl(existing.state!) };
-    }
-  }
-
-  if (app.isPackaged) {
-    try {
-      await ensureLatestRuntime();
-    } catch (error) {
-      console.error('[desktop-runtime] update check failed; using the current runtime', error);
-    }
-  }
-
-  let runtime = runtimePaths();
-  if (!fs.existsSync(runtime.cli)) {
-    throw new Error('未找到 Termdock 服务端构建，请先运行 npm run build');
-  }
-  if (app.isPackaged && !fs.existsSync(runtime.node)) {
-    throw new Error('安装包缺少内嵌 Node Runtime');
-  }
-  const startRuntime = async (selected: ResolvedDesktopRuntime): Promise<ServiceProbe> => {
-    fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
-    const logPath = path.join(termdockDir, 'server.log');
-    const logFd = fs.openSync(logPath, 'a');
-    const child = spawn(selected.node, [
-      selected.cli,
-      '--foreground',
-      '--host',
-      '0.0.0.0',
-      '--port',
-      '9834',
-    ], {
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-      env: desktopRuntimeEnv(selected),
-    });
-    fs.closeSync(logFd);
-    child.unref();
-    return waitForLocalService(child.pid);
-  };
-
-  let probe = await startRuntime(runtime);
-  if (!probe.ok && app.isPackaged && runtime.source === 'downloaded') {
-    if (rollbackDownloadedRuntime({
-      appVersion: app.getVersion(),
-      resourcesPath: process.resourcesPath,
-    }, runtime.version)) {
-      console.error(`[desktop-runtime] ${runtime.version} failed to start; rolled back`);
-      runtime = runtimePaths();
-      probe = await startRuntime(runtime);
-    }
-  }
-  if (!probe.ok) {
-    throw new Error(`桌面版服务启动失败：${probe.error ?? '未知错误'}。日志：${path.join(termdockDir, 'server.log')}`);
-  }
-  await ensureTmuxUtf8Environment(runtime);
-  markDesktopRuntimeRunning(runtime.version);
-  await connectWindow(probe.url);
-  return probe;
-}
-
-async function restartDesktopManagedRuntime(): Promise<ReturnType<typeof getDesktopRuntimeUpdateState>> {
-  const status = await getLocalServiceStatus();
-  const update = getDesktopRuntimeUpdateState();
-  if (!status.running || status.probe?.desktopManaged !== true) {
-    throw new Error('当前服务不是由这个 Termdock Desktop 宿主管理的。');
-  }
-  if (update.status !== 'ready' || !update.latestVersion) {
-    throw new Error('没有等待重启的 Runtime 更新。');
-  }
-
-  markDesktopRuntimeRestarting();
-  const restartTimer = setTimeout(() => {
-    void (async () => {
-      const pid = status.state?.pid;
-      if (!pid || !isProcessRunning(pid)) {
-        throw new Error('本机服务状态已失效，请重试。');
-      }
-      process.kill(pid, 'SIGTERM');
-      const deadline = Date.now() + 15_000;
-      while (isProcessRunning(pid) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-      if (isProcessRunning(pid)) throw new Error(`本机服务 PID ${pid} 未能正常退出。`);
-      const latest = readServerState();
-      if (latest?.pid === pid) fs.rmSync(serverStatePath, { force: true });
-      await startLocalService();
-    })().catch((error) => {
-      markDesktopRuntimeRestartFailed(error);
-      console.error('[desktop-runtime] restart failed', error);
-    });
-  }, 250);
-  restartTimer.unref();
-  return getDesktopRuntimeUpdateState();
-}
-
-function isOwnedDesktopRuntimeWindow(
-  window: BrowserWindow,
-  status: LocalServiceStatus,
-): boolean {
-  const origin = windowServiceOrigins.get(window);
-  if (!origin || !status.running || status.probe?.desktopManaged !== true || !status.state) return false;
-  const localAddresses = new Set(Object.values(os.networkInterfaces())
-    .flatMap((addresses) => addresses?.map((address) => address.address.toLowerCase()) ?? []));
-  return isOwnedDesktopRuntimeTarget({
-    origin,
-    servicePort: status.state.port,
-    desktopManaged: true,
-    localAddresses,
-  });
-}
-
-async function routeRuntimeOperationForWindow(
-  webContents: Electron.WebContents,
-  desktopOperation: () => Promise<unknown> | unknown,
-  serviceOperation: () => Promise<unknown>,
-): Promise<unknown> {
-  const sourceWindow = BrowserWindow.fromWebContents(webContents);
-  if (!sourceWindow || !windowServiceOrigins.has(sourceWindow)) {
-    throw new Error('只能从已连接的 Termdock 服务窗口操作 Runtime。');
-  }
-  const status = await getLocalServiceStatus();
-  return isOwnedDesktopRuntimeWindow(sourceWindow, status)
-    ? desktopOperation()
-    : serviceOperation();
-}
-
-function startConnectedServiceRuntimePolling(): void {
-  if (connectedServiceRuntimePollTimer) return;
-  const poll = async () => {
-    if (connectedServiceRuntimePollInFlight) return;
-    connectedServiceRuntimePollInFlight = true;
-    try {
-      const status = await getLocalServiceStatus();
-      await Promise.all(BrowserWindow.getAllWindows().map(async (window) => {
-        if (window.isDestroyed() || !windowServiceOrigins.has(window)) return;
-        if (isOwnedDesktopRuntimeWindow(window, status)) return;
-        try {
-          const state = await getConnectedServiceRuntimeState(window.webContents);
-          if (!window.isDestroyed()) {
-            window.webContents.send('desktop:runtime-update-state-changed', state);
-          }
-        } catch {
-          // A disconnected or older service will be retried on the next poll.
-        }
-      }));
-    } finally {
-      connectedServiceRuntimePollInFlight = false;
-    }
-  };
-  void poll();
-  connectedServiceRuntimePollTimer = setInterval(() => void poll(), 2_000);
-  connectedServiceRuntimePollTimer.unref();
-}
-
-function writeRuntimeOwnerResponse(
-  response: http.ServerResponse,
-  statusCode: number,
-  payload: unknown,
-): void {
-  response.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
-  response.end(JSON.stringify(payload));
-}
-
-async function startDesktopRuntimeOwnerServer(): Promise<void> {
-  if (desktopRuntimeOwnerServer) return;
-  fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
-  fs.rmSync(desktopRuntimeOwnerSocketPath, { force: true });
-  const server = http.createServer((request, response) => {
-    void (async () => {
-      if (request.method === 'GET' && request.url === '/runtime-update') {
-        writeRuntimeOwnerResponse(response, 200, getDesktopRuntimeUpdateState());
-        return;
-      }
-      if (request.method === 'POST' && request.url === '/runtime-update/check') {
-        writeRuntimeOwnerResponse(response, 200, await checkForRuntimeUpdates());
-        return;
-      }
-      if (request.method === 'POST' && request.url === '/runtime-update/restart') {
-        writeRuntimeOwnerResponse(response, 202, await restartDesktopManagedRuntime());
-        return;
-      }
-      writeRuntimeOwnerResponse(response, 404, { error: '未知的 Desktop Runtime 操作。' });
-    })().catch((error) => {
-      writeRuntimeOwnerResponse(response, 409, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(desktopRuntimeOwnerSocketPath, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-  server.on('error', (error) => {
-    console.error('[desktop-runtime] owner socket failed', error);
-  });
-  fs.chmodSync(desktopRuntimeOwnerSocketPath, 0o600);
-  desktopRuntimeOwnerServer = server;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function appleScriptQuote(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-async function installCli(): Promise<DesktopSnapshot> {
-  if (!app.isPackaged) {
-    throw new Error('CLI 一键安装只在打包后的 Termdock.app 中可用');
-  }
-  const runtime = runtimePaths();
-  if (!fs.existsSync(runtime.launcher)) {
-    throw new Error('安装包中缺少 CLI 启动器');
-  }
-  const current = await discoverCliInstallations();
-  const detailLines = current.length > 0
-    ? current.map((entry) => `${entry.path}（${entry.version ?? '版本未知'}）`)
-    : ['未检测到已有 td/termdock 命令'];
-  const confirmation = await showDesktopMessageBox({
-    type: 'question',
-    title: '安装 Termdock CLI',
-    message: '将桌面版内嵌 CLI 安装为 td 和 termdock',
-    detail: `${detailLines.join('\n')}\n\n目标目录：/usr/local/bin\n已有同名入口只会在你确认后替换。`,
-    buttons: ['安装', '取消'],
-    defaultId: 0,
-    cancelId: 1,
-  });
-  if (confirmation.response !== 0) return snapshot();
-
-  const command = [
-    'mkdir -p /usr/local/bin',
-    `ln -sfn ${shellQuote(runtime.launcher)} /usr/local/bin/td`,
-    `ln -sfn ${shellQuote(runtime.launcher)} /usr/local/bin/termdock`,
-  ].join(' && ');
-  await execFileAsync('/usr/bin/osascript', [
-    '-e',
-    `do shell script "${appleScriptQuote(command)}" with administrator privileges`,
-  ], { timeout: 120_000, maxBuffer: 256 * 1024 });
-  return snapshot();
+function bundledClientDist(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'client')
+    : path.join(projectRoot, 'dist', 'client');
 }
 
 async function connectWindow(
@@ -1619,7 +1125,7 @@ async function connectWindow(
   const workspaceWindow = createDesktopWindow({ serviceOrigin: key, label: serviceLabel(probe.url) });
   if (known?.targetPeerId) serviceWindowPeers.set(workspaceWindow, known.targetPeerId);
   try {
-    await prepareServiceFrontend(workspaceWindow.webContents.session, key, frontendSource, () => path.join(runtimePaths().serverRoot, 'dist', 'client'));
+    await prepareServiceFrontend(workspaceWindow.webContents.session, key, frontendSource, bundledClientDist);
   } catch (error) {
     workspaceWindow.destroy();
     return { ...probe, ok: false, error: networkErrorDetails(error) };
@@ -2121,30 +1627,6 @@ function installIpcHandlers(): void {
     broadcastServiceActivity();
     return true;
   });
-  ipcMain.handle('desktop:local-invite', async (event) => {
-    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
-    if (!sourceWindow || sourceWindow.isDestroyed() || event.senderFrame !== event.sender.mainFrame) return null;
-    const registeredOrigin = windowServiceOrigins.get(sourceWindow);
-    const initialUrl = event.sender.getURL();
-    // First reject remote/preview callers before any asynchronous local probing.
-    let callerPort: number;
-    try { const url = new URL(initialUrl); callerPort = Number(url.port || (url.protocol === 'https:' ? 443 : 80)); } catch { return null; }
-    if (!canReadLocalInvite({ registeredOrigin, currentUrl: initialUrl, mainFrame: true, running: true, desktopManaged: true, servicePort: callerPort })) return null;
-    const status = await getLocalServiceStatus().catch(() => null);
-    if (!status || !status.state || sourceWindow.isDestroyed() || event.sender.isDestroyed()
-      || event.senderFrame !== event.sender.mainFrame || event.sender.getURL() !== initialUrl
-      || windowServiceOrigins.get(sourceWindow) !== registeredOrigin
-      || !canReadLocalInvite({ registeredOrigin, currentUrl: event.sender.getURL(), mainFrame: true,
-        running: status.running, desktopManaged: status.probe?.desktopManaged === true, servicePort: status.state.port })
-      || !isOwnedDesktopRuntimeWindow(sourceWindow, status)) return null;
-    try {
-      const data = JSON.parse(fs.readFileSync(path.join(termdockDir, 'federation', 'pairing.json'), 'utf8'));
-      if (typeof data.serviceId !== 'string' || !/^12D3KooW[1-9A-HJ-NP-Za-km-z]{44}$/.test(data.serviceId)
-        || typeof data.pairingCode !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(data.pairingCode)) return null;
-      return { url: registeredOrigin, targetPeerId: data.serviceId, pairingCode: data.pairingCode, serviceName: '本机 Termdock' };
-    } catch { return null; }
-  });
-  ipcMain.handle('desktop:start-local', () => startLocalService());
   ipcMain.handle('desktop:update-preferences', async (_event, preferences: {
     menuBarStatusEnabled?: unknown;
     floatingWidgetEnabled?: unknown;
@@ -2177,25 +1659,9 @@ function installIpcHandlers(): void {
     updateDesktopPreferences({ floatingWidgetEnabled: false });
     return snapshot();
   });
-  ipcMain.handle('desktop:install-cli', () => installCli());
   ipcMain.handle('desktop:update-state', () => getDesktopUpdateState());
   ipcMain.handle('desktop:check-update', () => checkForDesktopUpdates());
   ipcMain.handle('desktop:install-update', () => installDownloadedDesktopUpdate());
-  ipcMain.handle('desktop:runtime-update-state', (event) => routeRuntimeOperationForWindow(
-    event.sender,
-    () => getDesktopRuntimeUpdateState(),
-    () => getConnectedServiceRuntimeState(event.sender),
-  ));
-  ipcMain.handle('desktop:check-runtime-update', (event) => routeRuntimeOperationForWindow(
-    event.sender,
-    () => checkForRuntimeUpdates(),
-    () => checkConnectedServiceRuntime(event.sender),
-  ));
-  ipcMain.handle('desktop:restart-runtime', (event) => routeRuntimeOperationForWindow(
-    event.sender,
-    () => restartDesktopManagedRuntime(),
-    () => restartConnectedServiceRuntime(event.sender),
-  ));
   ipcMain.handle('desktop:show-connection-center', () => showConnectionCenter());
   ipcMain.handle('desktop:reveal-data-directory', async () => {
     fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
@@ -2343,16 +1809,6 @@ function installMenu(): void {
         },
         { label: '打开服务', submenu: serviceItems },
         {
-          label: '安装或修复 CLI…',
-          click: () => void installCli().catch((error) => {
-            void showDesktopMessageBox({
-              type: 'error',
-              title: 'CLI 安装失败',
-              message: error instanceof Error ? error.message : String(error),
-            });
-          }),
-        },
-        {
           label: '检查更新…',
           click: () => void checkForDesktopUpdates({ presentNativeDialogs: true }),
         },
@@ -2471,7 +1927,6 @@ function installMenu(): void {
 app.whenReady().then(async () => {
   triggerLocalNetworkPermission();
   configureLocalServiceCertificateTrust();
-  await startDesktopRuntimeOwnerServer();
   installIpcHandlers();
   installMenu();
   refreshDesktopStatusSurfaces();
@@ -2488,22 +1943,11 @@ app.whenReady().then(async () => {
       if (!window.isDestroyed()) window.webContents.send('desktop:update-state-changed', state);
     }
   });
-  subscribeDesktopRuntimeUpdateState((state) => {
-    void getLocalServiceStatus().then((status) => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        if (!window.isDestroyed() && isOwnedDesktopRuntimeWindow(window, status)) {
-          window.webContents.send('desktop:runtime-update-state-changed', state);
-        }
-      }
-    });
-  });
-  startConnectedServiceRuntimePolling();
-  startConfiguredFederationRelay();
   const startupConfig = readDesktopConfig();
   const restoreUrls = startupConfig.openConnectionUrls;
   startupRestoreActive = true;
   const startupProgressTimer = setTimeout(() => {
-    void showStartupProgress('正在检查本机 Runtime 和已保存连接…');
+    void showStartupProgress('正在检查已保存连接…');
   }, 350);
   startupProgressTimer.unref();
   let completedRestores = 0;
@@ -2551,20 +1995,11 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   // Keep the macOS application lifecycle conventional: closing the last
-  // window keeps the app available in the Dock, while the detached Termdock
-  // service continues independently.
+  // window keeps the app available in the Dock.
 });
 
 app.on('before-quit', () => {
   isQuitting = true;
-  federationRelayProcess?.kill('SIGTERM');
-  federationRelayProcess = null;
-  desktopRuntimeOwnerServer?.close();
-  desktopRuntimeOwnerServer = null;
-  if (connectedServiceRuntimePollTimer) clearInterval(connectedServiceRuntimePollTimer);
-  connectedServiceRuntimePollTimer = null;
-  connectedServiceRuntimePollInFlight = false;
-  fs.rmSync(desktopRuntimeOwnerSocketPath, { force: true });
 });
 
 export { PROTOCOL_VERSION };
