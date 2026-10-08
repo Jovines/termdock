@@ -86,18 +86,14 @@ interface FileAuditGroup {
   changeType: string;
 }
 
-/** Derive git change type from hunk oldPath/newPath. */
+/** File status follows path metadata, not whether its hunks only add/remove lines. */
 function deriveChangeType(items: UniversalDiffReviewItem[]): string {
   for (const item of items) {
     const hunk = item.hunk;
     if (hunk.oldPath && hunk.newPath && hunk.oldPath !== hunk.newPath) return 'renamed';
-    if (!hunk.oldPath && hunk.newPath) return 'added';
-    if (hunk.oldPath && !hunk.newPath) return 'deleted';
+    if (hunk.oldPath === null && hunk.newPath) return 'added';
+    if (hunk.oldPath && hunk.newPath === null) return 'deleted';
   }
-  const hasAdditions = items.some((item) => item.hunk.additions > 0);
-  const hasDeletions = items.some((item) => item.hunk.deletions > 0);
-  if (hasAdditions && !hasDeletions) return 'added';
-  if (!hasAdditions && hasDeletions) return 'deleted';
   return 'modified';
 }
 
