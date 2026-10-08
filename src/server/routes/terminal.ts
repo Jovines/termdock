@@ -460,6 +460,7 @@ interface TmuxInventoryMeta {
   attachedCount: number;
   friendlyName: string | null;
   program: string | null;
+  rawArgs?: string | null;
   shellTitle?: string | null;
   cwd: string | null;
   label: string | null;
@@ -483,6 +484,7 @@ interface SessionInventoryClientSession extends PersistedClientSession {
   // 未打开的终端也能显示 tmux pane 标题，无需等待终端 WS 连接。
   activeProgram?: string | null;
   cwd?: string | null;
+  agent?: AgentStatusWirePayload['agent'];
 }
 
 interface SessionInventoryTmuxSession {
@@ -646,6 +648,7 @@ function getClientStateSemanticSignature(state: GlobalSessionState, inventory: S
         activeProgram: session.activeProgram ?? null,
         cwd: session.cwd ?? null,
         shellTitle: session.shellTitle ?? null,
+        agent: session.agent ?? null,
       })),
       tmuxSessions: inventory.tmuxSessions.map((session) => ({
         name: session.name,
@@ -2983,6 +2986,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       return {
         ...tmux,
         program: metadata.program,
+        rawArgs: metadata.rawArgs,
         shellTitle: metadata.shellTitle,
         cwd: metadata.cwd,
         label: metadata.label,
@@ -3050,6 +3054,16 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     const activeProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? session.activeProgram ?? null;
     const cwd = backend?.cwd ?? tmuxMeta?.cwd ?? session.cwd ?? null;
     const shellTitle = tmuxMeta?.shellTitle ?? backend?.lastOscTitle ?? session.shellTitle ?? null;
+    // Identity is available without opening a terminal stream. Use foreground
+    // argv for interpreter/wrapper launches, and resume identity at shell prompts.
+    const foregroundAgent = (backend ? detectSessionAgent(backend) : null)
+      ?? detectAgentFromCommand(tmuxMeta?.rawArgs ?? '', agentCustomCommands())
+      ?? detectAgentFromCommand(activeProgram ?? '', agentCustomCommands());
+    const resumableAgent = !live || !activeProgram || shellNamesBackend.has(activeProgram.toLowerCase())
+      ? agentBySlug(session.agentResume?.slug)
+      : null;
+    const agent = (backend ? buildAgentStatusPayload(session.backendSessionId!, backend).agent : null)
+      ?? serializeAgentIdentity(foregroundAgent ?? resumableAgent);
 
     return {
       ...session,
@@ -3069,6 +3083,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       activeProgram,
       cwd,
       shellTitle,
+      agent,
     };
   });
 
@@ -3770,9 +3785,7 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
     agentStatusDetail: presentation
       ? { id: presentation.id, label: presentation.label, tone: presentation.tone ?? 'neutral' }
       : null,
-    agent: agent
-      ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false, iconMode: agent.iconMode, iconVersion: agent.iconVersion }
-      : null,
+    agent: serializeAgentIdentity(agent),
     agentMessage: state?.message ?? null,
     reviewed: state?.reviewed ?? session.lastAgentReviewed ?? null,
     agentNativeSessionId: nativeSessionId,
@@ -3781,6 +3794,12 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
     agentActivity: state?.activity ?? 0,
     agentCwd: state?.agentCwd ?? null,
   };
+}
+
+function serializeAgentIdentity(agent: AgentInfo | null): AgentStatusWirePayload['agent'] {
+  return agent
+    ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false, iconMode: agent.iconMode, iconVersion: agent.iconVersion }
+    : null;
 }
 
 let lastAgentStatusSnapshots = new Map<string, string>();

@@ -85,6 +85,7 @@ export interface PersistedSession {
   activeProgram?: string | null;
   cwd?: string | null;
   shellTitle?: string | null;
+  agent?: import('../terminal/types').AgentIdentity | null;
 }
 
 interface UseSessionPersistenceReturn {
@@ -131,12 +132,13 @@ function normalizeInventorySessionList(sessionList: SessionInventoryClientSessio
     activeProgram: sessionList[index]?.activeProgram ?? null,
     cwd: sessionList[index]?.cwd ?? null,
     shellTitle: sessionList[index]?.shellTitle ?? null,
+    agent: sessionList[index]?.agent,
   }));
 }
 
 function sessionListKey(sessionList: PersistedSession[]): string {
   return sessionList
-    .map((s) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}:${s.lastActivity}:${s.activeProgram ?? ''}:${s.cwd ?? ''}:${s.shellTitle ?? ''}`)
+    .map((s) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}:${s.lastActivity}:${s.activeProgram ?? ''}:${s.cwd ?? ''}:${s.shellTitle ?? ''}:${JSON.stringify(s.agent) ?? ''}`)
     .join('|');
 }
 

@@ -115,6 +115,8 @@ export interface SessionInventoryClientSession {
   activeProgram?: string | null;
   cwd?: string | null;
   shellTitle?: string | null;
+  /** Brand identity for unopened sessions, independent of terminal streaming. */
+  agent?: AgentIdentity | null;
 }
 
 export interface SessionInventoryTmuxSession extends TmuxSessionSummary {

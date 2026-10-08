@@ -54,6 +54,7 @@ export interface TerminalStore {
   setSessionTuiProgress: (sessionId: string, report: TuiProgressReport | null) => void;
   setSessionGitStatus: (sessionId: string, gitStatus: import('../terminal/types').GitStatusReport | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
+  setSessionAgentIdentity: (sessionId: string, agent: import('../terminal/types').AgentIdentity | null) => void;
   setSessionAgentStatus: (sessionId: string, payload: AgentStatusPayload) => void;
   setAgentResumeRecovered: (sessionId: string, recovered: boolean) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
@@ -354,6 +355,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         activeProgramRaw: terminalSession.activeProgramRaw ?? existing?.activeProgramRaw ?? baseState.activeProgramRaw,
         activeProgramSource: terminalSession.activeProgramSource ?? existing?.activeProgramSource ?? baseState.activeProgramSource,
         cwd: terminalSession.cwd ?? existing?.cwd ?? baseState.cwd,
+        agent: existing?.agent ?? getCachedAgentIdentity(sessionId) ?? baseState.agent,
         agentResumeRecovered: existing?.agentResumeRecovered ?? baseState.agentResumeRecovered,
         shellTitle: existing?.shellTitle ?? readCachedShellTitles()[sessionId] ?? baseState.shellTitle,
         sessionId,
@@ -467,6 +469,19 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       if (!existing || existing.inCopyMode === inCopyMode) return state;
       newSessions.set(sessionId, { ...existing, inCopyMode, updatedAt: Date.now() });
       return { sessions: newSessions };
+    });
+  },
+
+  // Inventory supplies branding only; it must not fabricate status transitions
+  // or trigger notifications for sessions that have never been opened.
+  setSessionAgentIdentity: (sessionId, agent) => {
+    writeCachedAgent(sessionId, agent);
+    set((state) => {
+      const existing = state.sessions.get(sessionId) ?? createEmptySessionState(sessionId);
+      if (JSON.stringify(existing.agent) === JSON.stringify(agent)) return state;
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...existing, agent, updatedAt: Date.now() });
+      return { sessions };
     });
   },
 

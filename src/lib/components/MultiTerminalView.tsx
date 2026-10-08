@@ -1421,6 +1421,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       // 这样 tab 首帧就能显示「coco termdock」，不必等 WS 连上后轮询 tmux 才跳变。
       // WS connected / active-program 事件到达后会用实时值覆盖这里的提示值。
       persistedSessions.forEach((session) => {
+        if (session.agent !== undefined) {
+          store.setSessionAgentIdentity(session.sessionId, session.agent);
+        }
         if (session.activeProgram != null) {
           store.setSessionActiveProgram(session.sessionId, session.activeProgram);
         }
@@ -1501,6 +1504,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     for (const session of curr) {
       const previous = previousById.get(session.sessionId);
       const current = useTerminalStore.getState().sessions.get(session.sessionId);
+      if (session.agent !== undefined
+        && JSON.stringify(session.agent) !== JSON.stringify(current?.agent)
+        && (current?.agent == null || JSON.stringify(session.agent) !== JSON.stringify(previous?.agent))) {
+        store.setSessionAgentIdentity(session.sessionId, session.agent);
+      }
       if (session.activeProgram != null && session.activeProgram !== current?.activeProgram
         && (current?.activeProgram == null || session.activeProgram !== previous?.activeProgram)) {
         store.setSessionActiveProgram(session.sessionId, session.activeProgram);
