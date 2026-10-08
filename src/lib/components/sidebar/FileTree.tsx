@@ -1236,12 +1236,13 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const hydrateHideGitIgnoredRoots = useSidebarStore((s) => s.hydrateHideGitIgnoredRoots);
   const hideGitIgnored = useSidebarStore((s) => Boolean(s.hideGitIgnoredRoots[rootPath]));
   const hideGitIgnoredRootsHydrated = useSidebarStore((s) => s.hideGitIgnoredRootsHydrated);
+  const gitIgnoreExceptionsKey = useSidebarStore((s) => JSON.stringify(s.gitIgnoreExceptions[rootPath] ?? []));
   const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
   // Cached paths can belong to another explorer root with a different filter.
   // Clear before paint, including after restoring a project's tree snapshot.
   useLayoutEffect(() => {
     if (rootPath) invalidateDirectoryCache(rootPath, true);
-  }, [rootPath, hideGitIgnored, invalidateDirectoryCache]);
+  }, [rootPath, hideGitIgnored, gitIgnoreExceptionsKey, invalidateDirectoryCache]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rootTruncated, setRootTruncated] = useState(false);
@@ -1369,7 +1370,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       controller.abort();
       cancelIoSlot(`file-tree-root:${rootPath}`);
     };
-  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady, hideGitIgnored]);
+  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady, hideGitIgnored, gitIgnoreExceptionsKey]);
 
   useEffect(() => {
     if (!activeSearchRoot || !queryLower) {

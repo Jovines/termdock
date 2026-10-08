@@ -247,6 +247,12 @@ export type TranslationDictionary = {
     hideGitIgnoredFiles: string;
     showGitIgnoredFiles: string;
     gitIgnoreSaveFailed: string;
+    gitIgnoreConfigureHint: string;
+    gitIgnoreExceptionsTitle: string;
+    gitIgnoreExceptionsHint: string;
+    gitIgnoreExceptionsPaths: string;
+    gitIgnoreExceptionsInvalid: string;
+    gitIgnoreExceptionsSaveFailed: string;
     insertCurrentFolder: string;
     insertCurrentFolderShort: string;
     pinnedFolders: string;

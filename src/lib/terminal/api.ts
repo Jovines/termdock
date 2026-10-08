@@ -1748,6 +1748,7 @@ export interface SettingsState {
   serviceSwitcherExpanded: boolean;
   fileSortModes: Record<string, 'modified'>;
   hideGitIgnoredRoots: Record<string, true>;
+  gitIgnoreExceptions: Record<string, string[]>;
   /** Workspace roots opted into nested sub-repo scanning. Absent = single-repo. */
   nestedGitScanRoots: Record<string, true>;
   pinnedExplorerRoots: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
@@ -1779,7 +1780,7 @@ export function getSettings(): Promise<SettingsState> {
   return settingsRequest;
 }
 
-export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; hideGitIgnoredRoot?: { rootPath: string; enabled: boolean }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string; activeGitRepo?: { contextKey: string; repoRoot: string | null } }): Promise<SettingsState> {
+export async function updateSettings(settings: { collaborationPanel?: { clientId: string; state: CollaborationPanelState }; androidPanel?: Partial<AndroidPanelSettingsState>; locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; attentionButtonEnabled?: boolean; collaborationFloatingGroupId?: string | null; serviceSwitcherExpanded?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; hideGitIgnoredRoot?: { rootPath: string; enabled: boolean }; gitIgnoreExceptions?: { rootPath: string; paths: string[] }; nestedGitScanRoot?: { rootPath: string; enabled: boolean }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string; activeGitRepo?: { contextKey: string; repoRoot: string | null } }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',

@@ -2,6 +2,7 @@ import { readClipboardFiles } from './clipboardFiles.js';
 import { sessionAddress } from './collaborationFederation.js';
 import { prepareServiceFrontend, selectServiceFrontend } from './bundledFrontend.js';
 import { serviceConnection, serviceConnectionKeys, importServiceConnection, saveServiceConnection, invitationForService } from './serviceConnections.js';
+import { serviceMenuEntries } from './serviceMenu.js';
 const pendingServiceInvitations = new WeakMap<BrowserWindow, string>();
 import {
   app,
@@ -1786,13 +1787,15 @@ function installMenu(): void {
     });
   };
   const config = readDesktopConfig();
-  const serviceItems: MenuItemConstructorOptions[] = [
-    { label: '本机', click: openLocalService },
-    ...config.connections.map((connection) => ({
-      label: connection.label || new URL(connection.url).host,
-      click: () => openService(connection.url),
-    })),
-  ];
+  const localState = readServerState();
+  const localUrl = localState ? stateUrl(localState) : DEFAULT_LOCAL_URL;
+  const serviceItems: MenuItemConstructorOptions[] = serviceMenuEntries(config.connections, localUrl)
+    .map(({ label, connection }) => ({
+      label,
+      click: connection
+        ? () => openService(connection.serviceOrigin || connection.url)
+        : openLocalService,
+    }));
   const menu = Menu.buildFromTemplate([
     {
       label: 'Termdock',

@@ -60,6 +60,8 @@ import {
   setAttentionButtonEnabledSetting,
   getFileSortModesSetting,
   getHideGitIgnoredRootsSetting,
+  getGitIgnoreExceptionsSetting,
+  setGitIgnoreExceptionsSetting,
   setHideGitIgnoredRootSetting,
   setFileSortModesSetting,
   setFileSortModeSetting,
@@ -7185,6 +7187,7 @@ async function getSettingsPayload() {
     serviceSwitcherExpanded: getServiceSwitcherExpandedSetting(),
     fileSortModes: getFileSortModesSetting(),
     hideGitIgnoredRoots: getHideGitIgnoredRootsSetting(),
+    gitIgnoreExceptions: getGitIgnoreExceptionsSetting(),
     nestedGitScanRoots: getNestedGitScanRootsSetting(),
     activeGitRepos: getActiveGitReposSetting(),
     pinnedExplorerRoots: getPinnedExplorerRootsSetting(),
@@ -7397,6 +7400,31 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setHideGitIgnoredRootSetting(preference.rootPath as string, preference.enabled);
+  }
+
+  if (body.gitIgnoreExceptions) {
+    const preference = body.gitIgnoreExceptions as { rootPath?: unknown; paths?: unknown };
+    if (typeof preference.rootPath !== 'string' || !path.isAbsolute(preference.rootPath)
+      || preference.rootPath.length > 4096 || !Array.isArray(preference.paths) || preference.paths.length > 200
+      || preference.paths.some((entry) => typeof entry !== 'string' || !entry || entry.length > 4096 || entry.includes('\0'))) {
+      res.status(400).json({ error: 'Invalid Git ignore exceptions', code: 'GIT_IGNORE_EXCEPTIONS_INVALID' });
+      return;
+    }
+    const root = path.resolve(preference.rootPath);
+    const paths: string[] = [];
+    for (const entry of preference.paths as string[]) {
+      const absolute = path.resolve(root, entry);
+      const relative = path.relative(root, absolute);
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        res.status(400).json({ error: 'Exception paths must be inside the explorer root', code: 'GIT_IGNORE_EXCEPTIONS_INVALID' });
+        return;
+      }
+      // Existing directories need no trailing slash in user input. Keep explicit
+      // directory entries valid even when their build output doesn't exist yet.
+      const directory = entry.endsWith('/') || (await fs.promises.stat(absolute).catch(() => null))?.isDirectory();
+      paths.push(relative.split(path.sep).join('/') + (directory ? '/' : ''));
+    }
+    setGitIgnoreExceptionsSetting(preference.rootPath, paths);
   }
 
   if (body.nestedGitScanRoot && typeof body.nestedGitScanRoot === 'object') {

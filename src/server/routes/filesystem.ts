@@ -1,4 +1,4 @@
-import { getHideGitIgnoredRootsSetting } from '../utils/settings.js';
+import { getHideGitIgnoredRootsSetting, getGitIgnoreExceptionsSetting } from '../utils/settings.js';
 import { readRecentCommitHistory } from '../utils/recentCommitHistory.js';
 import { AUTH_COOKIE, isSessionValid } from '../utils/authProtection.js';
 import { Router, type Request, type Response } from 'express';
@@ -3106,18 +3106,33 @@ router.get('/list', async (req: Request, res: Response) => {
       const sortMode = req.query.sort === 'modified' ? 'modified' : 'name';
       const allEntries = await fs.promises.readdir(resolvedPath, { withFileTypes: true });
       throwIfAborted(controller.signal, 'fs.list');
-      let visibleDirents = allEntries.filter(dirent => showHidden || !dirent.name.startsWith('.'));
+      let visibleDirents = allEntries;
+      let gitIgnoreFilterApplied = false;
       const gitIgnoreRoot = typeof req.query.gitIgnoreRoot === 'string' ? req.query.gitIgnoreRoot : null;
       if (gitIgnoreRoot && getHideGitIgnoredRootsSetting()[gitIgnoreRoot]) {
         const resolvedRoot = await pathValidator.validatePathAsync(gitIgnoreRoot);
         const relative = path.relative(resolvedRoot, resolvedPath);
         if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
           const ignored = await getGitIgnoredPaths(resolvedPath, visibleDirents, controller.signal);
+          const exceptions = (getGitIgnoreExceptionsSetting()[gitIgnoreRoot] ?? []).map((entry) => ({
+            path: path.resolve(resolvedRoot, entry),
+            directory: entry.endsWith('/'),
+          }));
           throwIfAborted(controller.signal, 'fs.list');
           // Filter before sorting and capping so ignored folders don't crowd
           // useful files out of the first page of a large directory.
-          visibleDirents = visibleDirents.filter((entry) => entry.name !== '.git' && !ignored.has(path.join(resolvedPath, entry.name)));
+          gitIgnoreFilterApplied = true;
+          visibleDirents = visibleDirents.filter((entry) => {
+            const entryPath = path.join(resolvedPath, entry.name);
+            const exception = exceptions.some((item) => item.path === entryPath
+              || (item.directory && entryPath.startsWith(item.path + path.sep))
+              || ((entry.isDirectory() || entry.isSymbolicLink()) && item.path.startsWith(entryPath + path.sep)));
+            return exception || ((showHidden || !entry.name.startsWith('.')) && entry.name !== '.git' && !ignored.has(entryPath));
+          });
         }
+      }
+      if (!gitIgnoreFilterApplied) {
+        visibleDirents = visibleDirents.filter((entry) => showHidden || !entry.name.startsWith('.'));
       }
       const entries = sortMode === 'modified'
         ? (await loadDirectoryEntriesWithModified(resolvedPath, visibleDirents, controller.signal))

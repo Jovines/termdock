@@ -48,7 +48,6 @@ import {
   ArrowDownAZ as RiSortName,
   FolderSearch as RiFolderSearch,
   SlidersHorizontal as RiSliders,
-  Filter as RiFilter,
   CaseSensitive as RiCaseSensitive,
   WholeWord as RiWholeWord,
   Regex as RiRegex,
@@ -57,6 +56,7 @@ import {
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
+import { GitIgnoreFilterButton } from './GitIgnoreFilterButton';
 import { insertDirectReference } from './insertDirectReference';
 import { MODEL_PREVIEW_REQUEST_TIMEOUT_MS } from '../../terminal/api';
 import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
@@ -11075,13 +11075,12 @@ export function RightSidebar(
             ? <RiCheck size={13} />
             : <RiLink size={13} />}
         </button>
-        <button
-          type="button"
+        <GitIgnoreFilterButton
+          rootPath={fileTreeRoot}
           disabled={!fileTreeRoot || !hideGitIgnoredRootsHydrated || savingGitIgnoreFilter}
-          aria-pressed={hideGitIgnored}
-          aria-label={hideGitIgnored ? t('rightSidebar.showGitIgnoredFiles') : t('rightSidebar.hideGitIgnoredFiles')}
-          title={hideGitIgnored ? t('rightSidebar.showGitIgnoredFiles') : t('rightSidebar.hideGitIgnoredFiles')}
-          onClick={() => {
+          pressed={hideGitIgnored}
+          saving={savingGitIgnoreFilter}
+          onToggle={() => {
             if (!fileTreeRoot || savingGitIgnoreFilter) return;
             const savingRoot = fileTreeRoot;
             setSavingGitIgnoreFilter(true);
@@ -11095,10 +11094,7 @@ export function RightSidebar(
               })
               .finally(() => setSavingGitIgnoreFilter(false));
           }}
-          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-35 ${hideGitIgnored ? 'bg-surface-2 text-primary hover:bg-surface-elevated' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
-        >
-          {savingGitIgnoreFilter ? <RiLoader size={14} className="animate-spin" /> : <RiFilter size={14} />}
-        </button>
+        />
         <div ref={explorerMenuRef} className="relative shrink-0">
           <button
             type="button"

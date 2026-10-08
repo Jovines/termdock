@@ -88,6 +88,8 @@ export interface SettingsDoc {
   fileSortModes: Record<string, 'modified'>;
   /** Explorer roots whose trees hide files ignored by Git. */
   hideGitIgnoredRoots: Record<string, true>;
+  /** Root-relative exceptions; a trailing slash includes directory descendants. */
+  gitIgnoreExceptions: Record<string, string[]>;
   /**
    * Workspace roots the user marked as holding nested sub-repos. Absent means
    * single-repo, which skips the (expensive) nested discovery walk entirely.
@@ -185,6 +187,23 @@ export function normalizeNestedGitScanRoots(value: unknown): Record<string, true
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)
     .filter(([rootPath, enabled]) => enabled === true && isAbsoluteFilePath(rootPath))
     .slice(-500)) as Record<string, true>;
+}
+
+function normalizeGitIgnoreExceptions(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result: Record<string, string[]> = {};
+  for (const [root, entries] of Object.entries(value).slice(-500)) {
+    if (!isAbsoluteFilePath(root) || !Array.isArray(entries)) continue;
+    const paths = new Set<string>();
+    for (const entry of entries.slice(0, 200)) {
+      if (typeof entry !== 'string' || !entry || entry.length > 4096 || entry.includes('\0')) continue;
+      const relative = path.relative(root, path.resolve(root, entry));
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+      paths.add(relative.split(path.sep).join('/') + (entry.endsWith('/') ? '/' : ''));
+    }
+    if (paths.size) result[root] = [...paths];
+  }
+  return result;
 }
 
 // Context keys are opaque here — `<sessionId>\u0000<rootPath>`, a bare
@@ -335,6 +354,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     serviceSwitcherExpanded: raw.serviceSwitcherExpanded === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
     hideGitIgnoredRoots: normalizeNestedGitScanRoots(raw.hideGitIgnoredRoots),
+    gitIgnoreExceptions: normalizeGitIgnoreExceptions(raw.gitIgnoreExceptions),
     nestedGitScanRoots: normalizeNestedGitScanRoots(raw.nestedGitScanRoots),
     pinnedExplorerRoots: normalizePinnedExplorerRoots(raw.pinnedExplorerRoots),
     activeGitRepos: normalizeActiveGitRepos(raw.activeGitRepos),
@@ -737,6 +757,16 @@ export function setFileSortModeSetting(filePath: string, mode: 'name' | 'modifie
 
 export function getHideGitIgnoredRootsSetting(): Record<string, true> {
   return { ...loadSettings().hideGitIgnoredRoots };
+}
+
+export function getGitIgnoreExceptionsSetting(): Record<string, string[]> {
+  return structuredClone(loadSettings().gitIgnoreExceptions);
+}
+
+export function setGitIgnoreExceptionsSetting(rootPath: string, paths: string[]): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.gitIgnoreExceptions = normalizeGitIgnoreExceptions({ ...settings.gitIgnoreExceptions, [rootPath]: paths });
+  });
 }
 
 export function setHideGitIgnoredRootSetting(rootPath: string, enabled: boolean): SettingsDoc {

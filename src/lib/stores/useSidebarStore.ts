@@ -555,6 +555,7 @@ interface SidebarState {
   fileSortModes: Record<string, FileSortMode>;
   fileSortModesHydrated: boolean;
   hideGitIgnoredRoots: Record<string, true>;
+  gitIgnoreExceptions: Record<string, string[]>;
   hideGitIgnoredRootsHydrated: boolean;
   /** Workspace roots whose Git tab scans for nested sub-repos. Absent = single-repo. */
   nestedGitScanRoots: Record<string, true>;
@@ -645,6 +646,7 @@ interface SidebarState {
   reconcileDirectoryCache: (path: string, entries: FileEntry[]) => void;
   hydrateHideGitIgnoredRoots: () => Promise<void>;
   setHideGitIgnoredRoot: (rootPath: string, enabled: boolean) => Promise<void>;
+  setGitIgnoreExceptions: (rootPath: string, paths: string[]) => Promise<void>;
   hydrateFileSortModes: () => Promise<void>;
   setDirectorySortMode: (path: string, mode: FileSortMode) => Promise<void>;
   hydrateNestedGitScanRoots: () => Promise<void>;
@@ -687,6 +689,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   fileSortModes: getInitialFileSortModes(),
   fileSortModesHydrated: false,
   hideGitIgnoredRoots: {},
+  gitIgnoreExceptions: {},
   hideGitIgnoredRootsHydrated: false,
   nestedGitScanRoots: getInitialNestedGitScanRoots(),
   nestedGitScanRootsHydrated: false,
@@ -1198,7 +1201,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     if (hideGitIgnoredRootsHydration) return hideGitIgnoredRootsHydration;
     hideGitIgnoredRootsHydration = (async () => {
       const settings = await getSettings();
-      set({ hideGitIgnoredRoots: settings.hideGitIgnoredRoots ?? {}, hideGitIgnoredRootsHydrated: true });
+      set({ hideGitIgnoredRoots: settings.hideGitIgnoredRoots ?? {}, gitIgnoreExceptions: settings.gitIgnoreExceptions ?? {}, hideGitIgnoredRootsHydrated: true });
     })().finally(() => { hideGitIgnoredRootsHydration = null; });
     return hideGitIgnoredRootsHydration;
   },
@@ -1214,7 +1217,23 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       }
       return {
         hideGitIgnoredRoots: settings.hideGitIgnoredRoots ?? {},
+        gitIgnoreExceptions: settings.gitIgnoreExceptions ?? {},
         hideGitIgnoredRootsHydrated: true,
+        directoryCache: new Map(),
+        projectStateCache,
+      };
+    });
+  },
+
+  setGitIgnoreExceptions: async (rootPath, paths) => {
+    const settings = await updateSettings({ gitIgnoreExceptions: { rootPath, paths } });
+    set((s) => {
+      const projectStateCache = new Map(s.projectStateCache);
+      for (const [key, project] of projectStateCache) {
+        projectStateCache.set(key, { ...project, directoryCache: new Map() });
+      }
+      return {
+        gitIgnoreExceptions: settings.gitIgnoreExceptions ?? {},
         directoryCache: new Map(),
         projectStateCache,
       };
