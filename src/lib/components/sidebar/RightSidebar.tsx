@@ -982,18 +982,29 @@ function MarkdownImage({ src, alt, title, requestedWidthPx }: { src: string; alt
   const [state, setState] = useState<MarkdownImageState>({ status: 'loading' });
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
 
-  // Measure the enclosing block container (placeholder → button/span wrapper →
-  // <p>) so width-capped boxes match the CSS max-w-full constraint exactly.
+  // Reference-line spans and inline formatting can sit between the image
+  // wrapper and its block container. Their clientWidth is zero, so skip them
+  // rather than sizing the image as if the sidebar had no width constraint.
   // Tracked with a ResizeObserver because the sidebar width can change.
   useLayoutEffect(() => {
     const root = rootRef.current;
-    const container = root?.parentElement?.parentElement ?? root?.parentElement;
+    let container = root?.parentElement?.parentElement ?? root?.parentElement;
+    while (container) {
+      const display = window.getComputedStyle(container).display;
+      if (display !== 'inline' && display !== 'contents') break;
+      container = container.parentElement;
+    }
     if (!container) return;
-    const update = () => setContainerWidth(container.clientWidth);
+    const blockContainer = container;
+    const update = () => {
+      const style = window.getComputedStyle(blockContainer);
+      const padding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+      setContainerWidth(Math.max(0, blockContainer.clientWidth - padding));
+    };
     update();
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(update);
-    observer.observe(container);
+    observer.observe(blockContainer);
     return () => observer.disconnect();
   }, []);
 
@@ -1075,11 +1086,11 @@ function MarkdownImage({ src, alt, title, requestedWidthPx }: { src: string; alt
           className={`${isVector ? '' : 'termdock-fade-in '}block max-h-[480px] max-w-full object-contain`}
           style={box ? { width: box.width, height: box.height } : undefined}
           onLoad={(event) => {
-            // No dimension headers (older server / remote image): measure
-            // after decode and resize the box once, like before.
-            if (naturalSize) return;
+            // Headers are only an estimate (e.g. EXIF rotation). Decoded
+            // dimensions also correct the box after an on-disk image change.
             const img = event.currentTarget;
-            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+            if (img.naturalWidth > 0 && img.naturalHeight > 0
+              && (naturalSize?.width !== img.naturalWidth || naturalSize?.height !== img.naturalHeight)) {
               setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
             }
           }}
@@ -1096,9 +1107,9 @@ function MarkdownImage({ src, alt, title, requestedWidthPx }: { src: string; alt
           onLoad={(event) => {
             // Fetch failed or remote image without headers: measure after
             // decode and resize once (also rescues 0×0-collapsed SVGs).
-            if (naturalSize) return;
             const img = event.currentTarget;
-            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+            if (img.naturalWidth > 0 && img.naturalHeight > 0
+              && (naturalSize?.width !== img.naturalWidth || naturalSize?.height !== img.naturalHeight)) {
               setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
             }
           }}
