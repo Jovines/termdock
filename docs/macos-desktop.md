@@ -63,28 +63,18 @@ APPLE_SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" \
   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run desktop:make
 ```
 
-Public distribution also requires Apple notarization. Forge performs it when
-the Apple ID notarization environment variables documented below are present;
-ordinary local builds remain unnotarized.
+Public distribution also requires Apple notarization. Build, sign, notarize,
+and staple the app and installation artifacts on the local Mac before uploading
+them. Keep signing and notarization credentials outside the repository.
 
 ## GitHub releases and application updates
 
-The `release-macos.yml` GitHub Actions workflow builds on an Apple Silicon
-runner. A tag named `v<package-version>` produces a Developer ID signed and
-notarized DMG plus an arm64 ZIP, uploads both as workflow artifacts, and attaches
-them to the matching public GitHub Release.
-
-Configure these repository secrets before publishing:
-
-- `APPLE_CERTIFICATE_BASE64`
-- `APPLE_CERTIFICATE_PASSWORD`
-- `APPLE_KEYCHAIN_PASSWORD`
-- `APPLE_SIGNING_IDENTITY`
-- `APPLE_ID`
-- `APPLE_APP_SPECIFIC_PASSWORD`
-- `APPLE_TEAM_ID`
-
-Secret values must never be committed. The workflow contains only their names.
+macOS releases are built, signed, and notarized on the local Mac. Upload the
+verified `Termdock.dmg` and `Termdock-darwin-arm64-<package-version>.zip` to a
+draft GitHub Release targeting the matching source commit, then publish it as
+`v<package-version>` after both uploaded assets match their local SHA-256 hashes.
+GitHub hosts the release artifacts; creating a version tag does not run a
+macOS packaging workflow.
 
 Users can download `Termdock.dmg` from the GitHub Releases page. Installed,
 signed builds use Electron's native Squirrel.Mac updater and the public

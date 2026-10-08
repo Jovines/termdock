@@ -45,7 +45,6 @@ const desktopPatterns = [
   /^forge\.config\.cjs$/,
   /^tsconfig\.desktop\.json$/,
   /^scripts\/prepare-desktop-tokens\.mjs$/,
-  /^\.github\/workflows\/release-macos\.yml$/,
 ];
 const runtimePatterns = [
   /^src\//,
