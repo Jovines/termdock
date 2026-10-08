@@ -106,7 +106,7 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
     silent?: boolean;
     persistent?: boolean;
   }): Promise<boolean> => ipcRenderer.invoke('desktop:show-notification', payload),
-  readClipboardFiles: (): Promise<Array<{ name: string; bytes: ArrayBuffer }>> => ipcRenderer.invoke('desktop:read-clipboard-files'),
+  readClipboardFiles: (options?: { localServiceId?: string }): Promise<Array<{ name: string; bytes?: ArrayBuffer; type?: string; path?: string }>> => ipcRenderer.invoke('desktop:read-clipboard-files', options),
   readClipboardImage: (): Promise<ArrayBuffer | null> => ipcRenderer.invoke('desktop:read-clipboard-image'),
   pasteClipboardImage: async (): Promise<string | null> => {
     const png = await ipcRenderer.invoke('desktop:read-clipboard-image') as ArrayBuffer | null;

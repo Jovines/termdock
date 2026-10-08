@@ -4,7 +4,7 @@ import { isWorkspaceActive } from '../../services/workspaceHost';
 import React from 'react';
 import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
-import { readTerminalClipboardFiles, uploadTerminalClipboardFiles, readTerminalClipboardImage, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
+import { readTerminalClipboardFiles, uploadTerminalClipboardFiles, readTerminalClipboardImage, readTerminalClipboardVideos, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
 import { useI18n } from '../../i18n';
 import { flushSync } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
@@ -1692,7 +1692,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       setPasteError(null);
       try {
         if (getTermdockDesktopBridge()?.readClipboardFiles) {
-          const files = await readTerminalClipboardFiles();
+          const { files, paths } = await readTerminalClipboardFiles();
+          if (paths.length) return pasteTextIntoTerminal(`${paths.map(escapeShellPath).join(' ')} `, textarea);
           if (files.length) return pasteFilesIntoTerminal(files, textarea);
         }
         if (!getTermdockDesktopBridge()?.readClipboardImage) {
@@ -1700,6 +1701,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             // Request access once, within the button's user gesture. Reuse the
             // returned items for text too: a later readText() can be denied by iOS.
             const items = await navigator.clipboard.read();
+            const videos = await readTerminalClipboardVideos({ read: async () => items });
+            if (videos.length) return pasteFilesIntoTerminal(videos, textarea);
             const image = await readTerminalClipboardImage({ read: async () => items });
             if (image) return pasteImageIntoTerminal(image, textarea);
             for (const item of items) {
@@ -1707,6 +1710,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               const text = await (await item.getType('text/plain')).text();
               return pasteTextIntoTerminal(text, textarea);
             }
+            setPasteError('剪贴板未提供可读取的文字、图片或视频；视频可通过文件按钮选择上传。');
             return false;
           }
           // Older browsers exposing only readText must call it before any await.
@@ -5159,7 +5163,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   void readClipboardIntoTerminal(event.currentTarget);
                   return;
                 }
-                const files = Array.from(event.clipboardData.files);
+                // Browser paste events can expose videos as Files or file
+                // items even when the async clipboard API cannot read them.
+                const files = event.clipboardData.files.length
+                  ? Array.from(event.clipboardData.files)
+                  : Array.from(event.clipboardData.items)
+                    .filter(item => item.kind === 'file')
+                    .map(item => item.getAsFile())
+                    .filter((file): file is File => file !== null);
                 if (files.length && (files.length > 1 || !files[0].type.startsWith('image/'))) {
                   event.preventDefault();
                   void pasteFilesIntoTerminal(files, event.currentTarget);
@@ -5173,8 +5184,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
                 const text = event.clipboardData.getData('text/plain');
                 if (!text) {
-                  // Native macOS image formats do not always appear as DOM Files.
-                  if (window.termdockDesktop) {
+                  // Some clipboard formats are absent from the paste payload
+                  // but readable through the native or async clipboard API.
+                  if (window.termdockDesktop || typeof navigator.clipboard?.read === 'function') {
                     event.preventDefault();
                     void readClipboardIntoTerminal(event.currentTarget);
                   }
@@ -5207,13 +5219,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
                   // ---- Cmd/Ctrl + V：粘贴 ----
                   if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) {
-                    if (window.termdockDesktop?.readClipboardFiles || window.termdockDesktop?.readClipboardImage) {
-                      event.preventDefault();
-                      void readClipboardIntoTerminal(event.currentTarget);
-                      return;
-                    }
-                    // Let the system paste event supply image bytes as well as
-                    // text, without an isolated preload upload or read prompt.
+                    // Let onPaste handle native path reuse/movie reads or the
+                    // browser's video/file payload within the paste gesture.
                     return;
                   }
 

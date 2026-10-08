@@ -40,6 +40,14 @@ Your sessions, authentication, certificates, and preferences remain under
 - Pasting a macOS clipboard image uploads a PNG to the active service's `/tmp`
   directory and inserts the returned shell-quoted path. Local windows therefore
   receive a local path, while LAN service windows receive a path on that host.
+- Pasting files copied in Finder reuses their original paths when the target
+  service identity matches this Mac's local service. Remote targets receive an
+  upload, including targets reached through a local entry service. This avoids
+  reading and copying large local videos just to insert a file reference.
+- Videos copied as native movie data from other apps are read before their
+  thumbnails, uploaded to the active service, and inserted as file references.
+  They have no reusable original file path. The native reader removes its
+  private staging directory after passing the bytes to the page.
 - The last successful Termdock connection is reopened on the next launch.
 
 ## Building
