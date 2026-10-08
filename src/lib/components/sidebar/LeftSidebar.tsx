@@ -1642,7 +1642,7 @@ export function LeftSidebar(
             ref={provided.innerRef}
             {...provided.droppableProps}
             data-sidebar-entity-list-id={droppableId}
-            className="space-y-0.5"
+            className="flex-1 space-y-0.5"
           >
             {entities.map((entity, index) => (
               <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
@@ -1748,9 +1748,9 @@ export function LeftSidebar(
         <button type="button" aria-label="关闭协作错误提示" className="shrink-0" onClick={() => setCollaborationActionError(null)}><RiCloseLine size={14} /></button>
       </div>}
       {/* Session list */}
-      <div ref={sessionListRef} className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
+      <div ref={sessionListRef} className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
         {recoverableTmuxSessions.length > 0 && (
-          <section className="mb-2 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
+          <section className="mb-2 shrink-0 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
             <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">
               <RiHistoryLine size={12} className="shrink-0" />
               <span className="min-w-0 flex-1 truncate">{t('sidebar.recoverableSessions')}</span>
@@ -1811,7 +1811,7 @@ export function LeftSidebar(
             <p className="text-[12px] text-muted-foreground">{t('sidebar.noMatchingSessions')}</p>
           </div>
         ) : groupByFolder ? (
-          <div className="space-y-1.5">
+          <div className="flex flex-1 flex-col">
             <DragDropContext
               onBeforeCapture={captureSidebarDropGeometry}
               onDragStart={handleSidebarDragStart}
@@ -1819,9 +1819,12 @@ export function LeftSidebar(
             >
               <Droppable droppableId="sidebar-groups" type="group" direction="vertical">
                 {(groupsProvided) => (
-                  <div ref={groupsProvided.innerRef} {...groupsProvided.droppableProps} className="space-y-1.5">
+                  <div ref={groupsProvided.innerRef} {...groupsProvided.droppableProps} className="flex flex-1 flex-col space-y-1.5">
                     {folderGroups.map((group, groupIndex) => {
                       const collapsed = collapsedGroups.has(group.key);
+                      // Extend the final open list through the unused sidebar
+                      // space, so dropping below its last row still reorders.
+                      const fillRemainingSpace = !collapsed && groupIndex === folderGroups.length - 1;
                       const folderEntities = buildSidebarEntities(
                         group.sessions,
                         splitWorkspaces,
@@ -1849,7 +1852,7 @@ export function LeftSidebar(
                             <div
                               ref={groupDragProvided.innerRef}
                               {...groupDragProvided.draggableProps}
-                              className={`rounded-md transition-colors ${groupSnapshot.isDragging ? 'bg-surface-elevated shadow-lg opacity-90' : ''}`}
+                              className={`shrink-0 rounded-md transition-colors ${fillRemainingSpace ? 'flex flex-1 flex-col ' : ''}${groupSnapshot.isDragging ? 'bg-surface-elevated shadow-lg opacity-90' : ''}`}
                             >
                               <button
                                 type="button"
@@ -1860,7 +1863,7 @@ export function LeftSidebar(
                                   toggleGroupCollapsed(group.key);
                                   autoExpandedGroupKeysRef.current.delete(group.key);
                                 }}
-                                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2 ${groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'}`}
+                                className={`flex w-full shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2 ${groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'}`}
                                 title={group.key || group.label}
                               >
                                 <RiChevronRightLine
@@ -1880,14 +1883,14 @@ export function LeftSidebar(
                                 <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
                               </button>
                               {!collapsed && (
-                                <div className="mt-0.5 pl-2">
+                                <div className={`mt-0.5 pl-2 ${fillRemainingSpace ? 'flex flex-1 flex-col' : ''}`}>
                                   <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="vertical" isCombineEnabled={!isSidebarGroupDragging}>
                                     {(sessionsProvided) => (
                                       <div
                                         ref={sessionsProvided.innerRef}
                                         {...sessionsProvided.droppableProps}
                                         data-sidebar-entity-list-id={`group-sessions:${group.key}`}
-                                        className="space-y-0.5"
+                                        className={`${fillRemainingSpace ? 'flex-1 ' : ''}space-y-0.5`}
                                       >
                                         {folderEntities.map((entity, index) => (
                                           <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
