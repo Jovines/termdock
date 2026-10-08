@@ -48,6 +48,10 @@ Your sessions, authentication, certificates, and preferences remain under
   thumbnails, uploaded to the active service, and inserted as file references.
   They have no reusable original file path. The native reader removes its
   private staging directory after passing the bytes to the page.
+- Native movie recognition binds the LaunchServices UTI functions directly,
+  avoiding framework imports that require newer JXA BridgeSupport metadata.
+  If the native file reader fails, the page still uses text and file/image data
+  captured from the paste event, or the separate native image reader.
 - The last successful Termdock connection is reopened on the next launch.
 
 ## Building

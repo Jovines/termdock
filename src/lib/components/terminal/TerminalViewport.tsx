@@ -1,6 +1,7 @@
 import { encodeTerminalKey } from '../../terminal/keyboard';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { isWorkspaceActive } from '../../services/workspaceHost';
+import { selectedTarget } from '../../federation/clientScope';
 import React from 'react';
 import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
@@ -1688,13 +1689,36 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }, [dismissMobileCopyPopover, sendTerminalSeq]);
 
-    const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
+    const readClipboardIntoTerminal = React.useCallback(async (
+      textarea?: HTMLTextAreaElement | null,
+      pasteData?: { files: File[]; text: string },
+    ): Promise<boolean> => {
       setPasteError(null);
       try {
+        const targetPeerId = selectedTarget()?.targetPeerId;
+        let nativeFileError: unknown;
         if (getTermdockDesktopBridge()?.readClipboardFiles) {
-          const { files, paths } = await readTerminalClipboardFiles();
-          if (paths.length) return pasteTextIntoTerminal(`${paths.map(escapeShellPath).join(' ')} `, textarea);
-          if (files.length) return pasteFilesIntoTerminal(files, textarea);
+          try {
+            const { files, paths } = await readTerminalClipboardFiles();
+            if (paths.length) return pasteTextIntoTerminal(`${paths.map(escapeShellPath).join(' ')} `, textarea);
+            if (files.length) return pasteFilesIntoTerminal(files, textarea);
+          } catch (error) {
+            // File/movie detection must not prevent ordinary text or image
+            // paste, including when an older installed native reader fails.
+            nativeFileError = error;
+          }
+          if (selectedTarget()?.targetPeerId !== targetPeerId) throw new Error('目标服务已切换，请重新粘贴');
+        }
+        // Snapshot the event payload before awaiting IPC: browsers can clear
+        // clipboardData after the synchronous paste handler has returned.
+        if (pasteData?.files.length) {
+          const image = pasteData.files[0];
+          return pasteData.files.length === 1 && image.type.startsWith('image/')
+            ? pasteImageIntoTerminal(image, textarea)
+            : pasteFilesIntoTerminal(pasteData.files, textarea);
+        }
+        if (pasteData?.text) {
+          return pasteTextIntoTerminal(pasteData.text, textarea);
         }
         if (!getTermdockDesktopBridge()?.readClipboardImage) {
           if (typeof navigator.clipboard?.read === 'function') {
@@ -1720,9 +1744,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const image = await readTerminalClipboardImage(navigator.clipboard);
         if (image) return pasteImageIntoTerminal(image, textarea);
         if (!navigator.clipboard?.readText) {
+          if (nativeFileError) throw nativeFileError;
           return false;
         }
         const text = await navigator.clipboard.readText();
+        if (!text && nativeFileError) throw nativeFileError;
         return pasteTextIntoTerminal(text, textarea);
       } catch (error) {
         setPasteError(error instanceof Error ? error.message : 'Clipboard read failed');
@@ -5158,11 +5184,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 syncTextareaToPty(event.currentTarget);
               }}
               onPaste={(event) => {
-                if (window.termdockDesktop?.readClipboardFiles) {
-                  event.preventDefault();
-                  void readClipboardIntoTerminal(event.currentTarget);
-                  return;
-                }
                 // Browser paste events can expose videos as Files or file
                 // items even when the async clipboard API cannot read them.
                 const files = event.clipboardData.files.length
@@ -5171,6 +5192,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     .filter(item => item.kind === 'file')
                     .map(item => item.getAsFile())
                     .filter((file): file is File => file !== null);
+                const text = event.clipboardData.getData('text/plain');
+                if (window.termdockDesktop?.readClipboardFiles) {
+                  event.preventDefault();
+                  void readClipboardIntoTerminal(event.currentTarget, { files, text });
+                  return;
+                }
                 if (files.length && (files.length > 1 || !files[0].type.startsWith('image/'))) {
                   event.preventDefault();
                   void pasteFilesIntoTerminal(files, event.currentTarget);
@@ -5182,7 +5209,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   void pasteImageIntoTerminal(image, event.currentTarget);
                   return;
                 }
-                const text = event.clipboardData.getData('text/plain');
                 if (!text) {
                   // Some clipboard formats are absent from the paste payload
                   // but readable through the native or async clipboard API.

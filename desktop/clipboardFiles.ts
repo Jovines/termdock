@@ -60,10 +60,19 @@ export async function readClipboardFiles(options?: { localServiceId?: string }):
   try {
     const { stdout } = await execFileAsync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `
     ObjC.import('AppKit');
-    ObjC.import('UniformTypeIdentifiers');
+    // ObjC.import depends on OS-specific BridgeSupport metadata. Load the
+    // longstanding LaunchServices UTI API directly instead. CFString is
+    // toll-free bridged to NSString; binding it as id returns wrapped objects
+    // rather than opaque C pointers that cannot be unwrapped by JXA.
+    if (!$.NSBundle.bundleWithPath(
+      '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework'
+    ).load) throw new Error('无法加载剪贴板类型识别组件');
+    ObjC.bindFunction('UTTypeConformsTo', ['bool', ['id', 'id']]);
+    ObjC.bindFunction('UTTypeCreatePreferredIdentifierForTag', ['id', ['id', 'id', 'id']]);
+    ObjC.bindFunction('UTTypeCopyPreferredTagWithClass', ['id', ['id', 'id']]);
     function isMovie(type) {
       return type && !type.isNil() &&
-        (type.conformsToType($.UTTypeMovie) || type.conformsToType($.UTTypeVideo));
+        ($.UTTypeConformsTo(type, $('public.movie')) || $.UTTypeConformsTo(type, $('public.video')));
     }
     function run(argv) {
       const pasteboard = $.NSPasteboard.generalPasteboard;
@@ -77,7 +86,9 @@ export async function readClipboardFiles(options?: { localServiceId?: string }):
           const url = urls.objectAtIndex(i);
           if (!url.isFileURL) continue;
           paths.push(ObjC.unwrap(url.path));
-          if (isMovie($.UTType.typeWithFilenameExtension(url.pathExtension))) hasVideoFile = true;
+          if (isMovie($.UTTypeCreatePreferredIdentifierForTag(
+            $('public.filename-extension'), url.pathExtension, null
+          ))) hasVideoFile = true;
         }
       }
       // Finder already supplies the original file. Avoid requesting another
@@ -94,16 +105,16 @@ export async function readClipboardFiles(options?: { localServiceId?: string }):
             const identifier = item.types.objectAtIndex(j);
             const value = ObjC.unwrap(identifier);
             const type = value.indexOf('video/') === 0
-              ? $.UTType.typeWithMIMEType(value)
-              : $.UTType.typeWithIdentifier(identifier);
+              ? $.UTTypeCreatePreferredIdentifierForTag($('public.mime-type'), identifier, null)
+              : identifier;
             if (!isMovie(type)) continue;
             advertisedMovie = true;
             const data = item.dataForType(identifier);
             if (!data || data.isNil() || !data.length) continue;
-            const preferredExtension = ObjC.unwrap(type.preferredFilenameExtension);
+            const preferredExtension = ObjC.unwrap($.UTTypeCopyPreferredTagWithClass(type, $('public.filename-extension')));
             const extension = typeof preferredExtension === 'string' && /^[a-z0-9]+$/i.test(preferredExtension)
               ? preferredExtension : 'mov';
-            const preferredMime = ObjC.unwrap(type.preferredMIMEType);
+            const preferredMime = ObjC.unwrap($.UTTypeCopyPreferredTagWithClass(type, $('public.mime-type')));
             const mime = typeof preferredMime === 'string' && preferredMime.indexOf('video/') === 0
               ? preferredMime : 'application/octet-stream';
             const filePath = argv[0] + '/video-' + i + '.' + extension;
@@ -147,6 +158,14 @@ export async function readClipboardFiles(options?: { localServiceId?: string }):
       files.push({ name, bytes: Uint8Array.from(data).buffer, type: entry.type });
     }
     return files;
+  } catch (error) {
+    // execFile errors include the entire source and temporary path in message.
+    // Surface only the script's diagnostic instead of flooding the terminal UI.
+    if (error && typeof error === 'object' && 'stderr' in error) {
+      const diagnostic = String(error.stderr).trim().split(/\r?\n/).at(-1);
+      throw new Error(`无法读取剪贴板文件或视频${diagnostic ? `：${diagnostic}` : ''}`);
+    }
+    throw error;
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
