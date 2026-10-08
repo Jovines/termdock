@@ -110,7 +110,8 @@ export async function readClipboardFiles(options?: { localServiceId?: string }):
             if (!isMovie(type)) continue;
             advertisedMovie = true;
             const data = item.dataForType(identifier);
-            if (!data || data.isNil() || !data.length) continue;
+            // JXA exposes NSUInteger as a string; "0" is truthy.
+            if (!data || data.isNil() || Number(data.length) === 0) continue;
             const preferredExtension = ObjC.unwrap($.UTTypeCopyPreferredTagWithClass(type, $('public.filename-extension')));
             const extension = typeof preferredExtension === 'string' && /^[a-z0-9]+$/i.test(preferredExtension)
               ? preferredExtension : 'mov';
@@ -118,12 +119,16 @@ export async function readClipboardFiles(options?: { localServiceId?: string }):
             const mime = typeof preferredMime === 'string' && preferredMime.indexOf('video/') === 0
               ? preferredMime : 'application/octet-stream';
             const filePath = argv[0] + '/video-' + i + '.' + extension;
-            if (!data.writeToFileAtomically(filePath, true)) throw new Error('无法读取剪贴板视频');
+            if (!data.writeToFileAtomically(filePath, true)) {
+              throw new Error('TERMDOCK_CLIPBOARD_VIDEO_ERROR: 无法读取剪贴板视频');
+            }
             videos.push({ path: filePath, type: mime });
             savedMovie = true;
             break;
           }
-          if (advertisedMovie && !savedMovie) throw new Error('复制来源未提供可读取的视频数据，请重新复制视频或选择文件上传');
+          if (advertisedMovie && !savedMovie) {
+            throw new Error('TERMDOCK_CLIPBOARD_VIDEO_ERROR: 复制来源未提供可读取的视频数据，请重新复制视频或选择文件上传');
+          }
         }
       }
       // Other apps can publish a movie and a thumbnail file together.

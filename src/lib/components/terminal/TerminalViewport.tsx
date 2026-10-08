@@ -5,7 +5,7 @@ import { selectedTarget } from '../../federation/clientScope';
 import React from 'react';
 import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
-import { readTerminalClipboardFiles, uploadTerminalClipboardFiles, readTerminalClipboardImage, readTerminalClipboardVideos, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
+import { TerminalClipboardVideoError, readTerminalClipboardFiles, uploadTerminalClipboardFiles, readTerminalClipboardImage, readTerminalClipboardVideos, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
 import { useI18n } from '../../i18n';
 import { flushSync } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
@@ -1703,6 +1703,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             if (paths.length) return pasteTextIntoTerminal(`${paths.map(escapeShellPath).join(' ')} `, textarea);
             if (files.length) return pasteFilesIntoTerminal(files, textarea);
           } catch (error) {
+            if (error instanceof TerminalClipboardVideoError) throw error;
             // File/movie detection must not prevent ordinary text or image
             // paste, including when an older installed native reader fails.
             nativeFileError = error;

@@ -2,6 +2,9 @@ import { uploadFiles } from './api';
 import { getTermdockDesktopBridge } from '../desktop/nativeBridge';
 import { selectedTarget } from '../federation/clientScope';
 
+/** A recognized movie must never fall through to its text or cover image. */
+export class TerminalClipboardVideoError extends Error {}
+
 /** Keep uploads in the renderer, where fetch is bound to the active encrypted
  * service. The desktop preload's isolated-world fetch cannot use that channel. */
 export async function uploadTerminalClipboardImage(image: File): Promise<string> {
@@ -67,13 +70,31 @@ export async function readTerminalClipboardVideos(clipboard?: Pick<Clipboard, 'r
  * A localhost entry relaying to a remote peer never qualifies for local paths. */
 export async function readTerminalClipboardFiles(): Promise<{ files: File[]; paths: string[] }> {
   const targetPeerId = selectedTarget()?.targetPeerId;
-  const input = await getTermdockDesktopBridge()?.readClipboardFiles?.({ localServiceId: targetPeerId });
+  let input;
+  try {
+    input = await getTermdockDesktopBridge()?.readClipboardFiles?.({ localServiceId: targetPeerId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const marker = 'TERMDOCK_CLIPBOARD_VIDEO_ERROR:';
+    const index = message.indexOf(marker);
+    if (index !== -1) throw new TerminalClipboardVideoError(message.slice(index + marker.length).trim());
+    // 1.4.292–1.4.294 readers have no marker. Match only the actual stderr
+    // diagnostic at the end, since older IPC errors also contain script source.
+    const legacyVideoError = message.match(/execution error: Error: (复制来源未提供可读取的视频数据[^\r\n]*|无法读取剪贴板视频)(?:\s*\(-\d+\))?\s*$/);
+    if (legacyVideoError) throw new TerminalClipboardVideoError(legacyVideoError[1]);
+    throw error;
+  }
   if (selectedTarget()?.targetPeerId !== targetPeerId) throw new Error('目标服务已切换，请重新粘贴');
   const files: File[] = [];
   const paths: string[] = [];
   for (const file of input ?? []) {
     if (file.path && targetPeerId) paths.push(file.path);
-    else if (file.bytes) files.push(new File([file.bytes], file.name, { type: file.type || 'application/octet-stream' }));
+    else if (file.bytes) {
+      if (file.type?.startsWith('video/') && file.bytes.byteLength === 0) {
+        throw new TerminalClipboardVideoError('复制来源未提供可读取的视频数据，请重新复制视频或选择文件上传');
+      }
+      files.push(new File([file.bytes], file.name, { type: file.type || 'application/octet-stream' }));
+    }
     else throw new Error('剪贴板未提供可读取的文件');
   }
   return { files, paths };

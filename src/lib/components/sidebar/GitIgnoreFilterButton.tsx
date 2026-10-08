@@ -4,6 +4,7 @@ import { Filter, X } from 'lucide-react';
 import { LoadingSpinner } from '../ui/Loading';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useI18n } from '../../i18n';
+import { GitIgnoreExceptionPicker } from './GitIgnoreExceptionPicker';
 
 interface Props {
   rootPath: string | null;
@@ -18,12 +19,11 @@ export function GitIgnoreFilterButton({ rootPath, disabled, pressed, saving, onT
   const id = useId();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLFormElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const suppressClickRef = useRef(false);
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState<string[]>([]);
   const [savingExceptions, setSavingExceptions] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const setExceptions = useSidebarStore((s) => s.setGitIgnoreExceptions);
@@ -36,7 +36,7 @@ export function GitIgnoreFilterButton({ rootPath, disabled, pressed, saving, onT
   const openConfiguration = () => {
     cancelPress();
     if (disabled || savingExceptions || !rootPath) return;
-    setDraft((useSidebarStore.getState().gitIgnoreExceptions[rootPath] ?? []).join('\n'));
+    setDraft([...(useSidebarStore.getState().gitIgnoreExceptions[rootPath] ?? [])]);
     setError(null);
     setOpen(true);
   };
@@ -62,7 +62,7 @@ export function GitIgnoreFilterButton({ rootPath, disabled, pressed, saving, onT
   }, [rootPath]);
   useEffect(() => {
     if (!open) return;
-    inputRef.current?.focus();
+    dialogRef.current?.focus();
     return () => buttonRef.current?.focus();
   }, [open]);
 
@@ -111,7 +111,7 @@ export function GitIgnoreFilterButton({ rootPath, disabled, pressed, saving, onT
             aria-modal="true"
             aria-labelledby={`${id}-title`}
             aria-describedby={`${id}-hint`}
-            className="relative z-modal-panel flex max-h-[80dvh] w-full max-w-md flex-col gap-3 overflow-y-auto rounded-xl border border-border/20 bg-surface p-4 text-foreground shadow-2xl"
+            className="relative z-modal-panel flex max-h-[80dvh] w-full max-w-lg flex-col gap-3 overflow-y-auto rounded-xl border border-border/20 bg-surface p-4 text-foreground shadow-2xl"
             onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
@@ -120,22 +120,22 @@ export function GitIgnoreFilterButton({ rootPath, disabled, pressed, saving, onT
                 close();
               }
               if (event.key === 'Tab') {
-                const targets = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), textarea:not(:disabled)') ?? []);
+                const targets = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? []);
                 if (!targets.length) { event.preventDefault(); dialogRef.current?.focus(); return; }
                 const first = targets[0];
                 const last = targets[targets.length - 1];
                 if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-                if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+                if (document.activeElement === dialogRef.current) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
               }
             }}
             onSubmit={(event) => {
               event.preventDefault();
               if (!rootPath || savingExceptions) return;
-              const paths = draft.split('\n').map((entry) => entry.trim()).filter(Boolean);
-              if (paths.length > 200) { setError(t('rightSidebar.gitIgnoreExceptionsInvalid')); return; }
+              if (draft.length > 200) { setError(t('rightSidebar.gitIgnoreExceptionsInvalid')); return; }
               setSavingExceptions(true);
               setError(null);
-              void setExceptions(rootPath, paths)
+              void setExceptions(rootPath, draft)
                 .then(() => setOpen(false))
                 .catch(() => setError(t('rightSidebar.gitIgnoreExceptionsSaveFailed')))
                 .finally(() => setSavingExceptions(false));
@@ -147,18 +147,8 @@ export function GitIgnoreFilterButton({ rootPath, disabled, pressed, saving, onT
             </div>
             <p className="truncate text-xs text-muted-foreground" title={rootPath ?? undefined}>{rootPath}</p>
             <p id={`${id}-hint`} className="text-xs leading-relaxed text-muted-foreground">{t('rightSidebar.gitIgnoreExceptionsHint')}</p>
-            <label htmlFor={`${id}-paths`} className="text-xs font-medium">{t('rightSidebar.gitIgnoreExceptionsPaths')}</label>
-            <textarea
-              ref={inputRef}
-              id={`${id}-paths`}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              disabled={savingExceptions}
-              rows={7}
-              spellCheck={false}
-              placeholder={'dist/\n.env.local\nbuild/report.html'}
-              className="min-h-32 w-full resize-y rounded-lg border border-border/30 bg-surface-2 p-3 font-mono text-xs leading-relaxed outline-none focus:border-primary disabled:opacity-60"
-            />
+            <p className="text-xs font-medium">{t('rightSidebar.gitIgnoreExceptionsPaths')}</p>
+            {rootPath && <GitIgnoreExceptionPicker rootPath={rootPath} paths={draft} onChange={setDraft} disabled={savingExceptions} />}
             {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
             <div className="flex justify-end gap-2">
               <button type="button" disabled={savingExceptions} onClick={close} className="rounded-lg px-3 py-2 text-xs text-muted-foreground hover:bg-surface-2 disabled:opacity-40">{t('common.cancel')}</button>

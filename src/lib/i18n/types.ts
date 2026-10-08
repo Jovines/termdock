@@ -252,6 +252,13 @@ export type TranslationDictionary = {
     gitIgnoreExceptionsHint: string;
     gitIgnoreExceptionsPaths: string;
     gitIgnoreExceptionsInvalid: string;
+    gitIgnoreExceptionsLoadFailed: string;
+    gitIgnoreExceptionsEmptyDirectory: string;
+    gitIgnoreExceptionsOpenDirectory: (params: TranslatorParams) => string;
+    gitIgnoreExceptionsSelected: (params: TranslatorParams) => string;
+    gitIgnoreExceptionsClear: string;
+    gitIgnoreExceptionsRemove: (params: TranslatorParams) => string;
+    gitIgnoreExceptionsTruncated: string;
     gitIgnoreExceptionsSaveFailed: string;
     insertCurrentFolder: string;
     insertCurrentFolderShort: string;
