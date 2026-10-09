@@ -1,8 +1,8 @@
-import { collaborationUpdatedLabel } from '../../collaboration/taskTime';
+import { CollaborationReportMeta } from './CollaborationReportMeta';
 import { collaborationResultPresentation } from '../../collaboration/resultPresentation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, ArrowUpRight, Circle, CircleCheck, MessageCircle, MoreHorizontal, Play, Search, SlidersHorizontal, X } from 'lucide-react';
-import { collaborationTaskNeedsAttention, collaborationTaskStage } from '../../collaboration/taskState';
+import { collaborationTaskBlockers, collaborationTaskNeedsAttention, collaborationTaskStage } from '../../collaboration/taskState';
 import type { CollaborationTaskView, TaskMember } from '../../terminal/api';
 
 export type TaskLane = 'backlog' | 'running' | 'attention' | 'done';
@@ -98,6 +98,7 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
     && (!query.trim() || `${t.title} ${t.spec} ${t.attempts.map(a => name(t, a.assignee)).join(' ')}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
   const filterCount = Number(scope !== 'all') + Number(closed);
   const compactButton = 'inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary';
+  const menuItem = 'flex min-h-11 w-full items-center justify-start gap-3 rounded-lg px-3 text-left text-sm font-medium text-foreground hover:bg-surface-2 active:bg-surface-elevated focus-visible:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary';
   const searchField = <div className={`relative flex min-w-0 items-center ${desktop ? 'flex-1 max-w-[240px]' : 'w-full'}`}><span className="sr-only">搜索任务</span><Search aria-hidden="true" size={15} className="pointer-events-none absolute left-3 text-muted-foreground" /><input ref={searchInput} aria-label="搜索任务" type="search" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (!query) { setSearchOpen(false); requestAnimationFrame(() => (desktop ? searchButton : toolsButton).current?.focus()); } else setQuery(''); } }} placeholder="搜索任务或负责人" className="min-h-11 w-full rounded-lg border border-border/20 bg-transparent pl-9 pr-9 text-xs outline-none focus:border-primary" /><button type="button" aria-label="关闭搜索" className="absolute right-0 flex min-h-11 w-9 items-center justify-center text-muted-foreground" onClick={() => { setQuery(''); setSearchOpen(false); requestAnimationFrame(() => (desktop ? searchButton : toolsButton).current?.focus()); }}><X size={14} /></button></div>;
   const filterPanel = <div aria-label="任务筛选" className="absolute right-0 top-full z-30 mt-1 w-64 space-y-3 rounded-xl border border-border/30 bg-surface p-3 shadow-xl">
           <label className="block space-y-1 text-xs text-muted-foreground"><span>目标范围</span><select aria-label="按目标查看" value={scope} onChange={e => setScope(e.target.value)} className="min-h-11 w-full rounded-lg border border-border/20 bg-surface-2 px-3 text-xs text-foreground"><option value="all">所有目标</option>{roots.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></label>
@@ -120,11 +121,11 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
         {navigation && <div className="mr-auto flex min-w-0 items-center">{navigation}</div>}
         {action && <div className="shrink-0">{action}</div>}
         <div ref={toolsHost} className="relative shrink-0">
-          <button ref={toolsButton} type="button" aria-label="更多看板操作" aria-expanded={toolsOpen} className={`${compactButton} ${filterCount || query.trim() ? 'text-primary' : ''}`} onClick={() => { setToolsOpen(v => !v); setFiltersOpen(false); }}><MoreHorizontal size={18} />{filterCount > 0 && <span className="text-[10px]">{filterCount}</span>}</button>
-          {toolsOpen && <div aria-label="看板更多操作" className="absolute right-0 top-full z-30 mt-1 flex w-48 flex-col rounded-xl border border-border/30 bg-surface p-1 shadow-xl" onClick={() => setToolsOpen(false)}>
-            <button ref={searchButton} type="button" aria-label="搜索任务" className={`${compactButton} justify-start px-3`} onClick={() => setSearchOpen(true)}><Search size={16} />搜索任务</button>
-            <button ref={filtersButton} type="button" aria-label={filterCount ? `筛选任务，${filterCount} 项已启用` : '筛选任务'} className={`${compactButton} justify-start px-3`} onClick={() => setFiltersOpen(true)}><SlidersHorizontal size={15} />筛选任务{filterCount > 0 && <span className="ml-auto">{filterCount}</span>}</button>
-            {settings && <div className="border-t border-border/15 pt-1 [&>button]:w-full [&>button]:justify-start">{settings}</div>}
+          <button ref={toolsButton} type="button" aria-label="更多看板操作" aria-expanded={toolsOpen} className={`${compactButton} ${toolsOpen ? 'bg-surface-2 text-foreground' : filterCount || query.trim() ? 'text-primary' : ''}`} onClick={() => { setToolsOpen(v => !v); setFiltersOpen(false); }}><MoreHorizontal size={18} />{filterCount > 0 && <span className="text-[10px]">{filterCount}</span>}</button>
+          {toolsOpen && <div role="group" aria-label="看板更多操作" className="absolute right-0 top-full z-30 mt-2 flex w-52 max-w-[calc(100vw-2rem)] flex-col gap-0.5 rounded-xl border border-border/40 bg-surface p-1.5 shadow-xl" onClick={() => setToolsOpen(false)}>
+            <button ref={searchButton} type="button" aria-label="搜索任务" className={menuItem} onClick={() => setSearchOpen(true)}><Search size={18} className="shrink-0 text-muted-foreground" />搜索任务</button>
+            <button ref={filtersButton} type="button" aria-label={filterCount ? `筛选任务，${filterCount} 项已启用` : '筛选任务'} className={menuItem} onClick={() => setFiltersOpen(true)}><SlidersHorizontal size={18} className="shrink-0 text-muted-foreground" />筛选任务{filterCount > 0 && <span className="ml-auto rounded bg-primary/10 px-1.5 text-xs tabular-nums text-primary">{filterCount}</span>}</button>
+            {settings && <div className="mt-1 border-t border-border/30 pt-1 [&>button]:min-h-11 [&>button]:w-full [&>button]:justify-start [&>button]:gap-3 [&>button]:px-3 [&>button]:text-left [&>button]:text-sm [&>button]:text-foreground [&>button:hover]:bg-surface-2 [&>button:active]:bg-surface-elevated [&>button:focus-visible]:bg-surface-2 [&>button>svg]:h-[18px] [&>button>svg]:w-[18px] [&>button>svg]:shrink-0 [&>button>svg]:text-muted-foreground [&>button>span]:not-sr-only">{settings}</div>}
           </div>}
         </div>
         {searchOpen && searchField}
@@ -152,23 +153,29 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
               const attempt = task.attempts.find(a => a.id === task.activeAttemptId);
               const question = task.decisions.find(d => d.status === 'pending');
               const stage = collaborationTaskStage(task);
-              const issue = task.status === 'open' ? task.automationIssue : undefined;
+              const blockers = collaborationTaskBlockers(task);
+              const blocker = blockers[0];
+              const systemBlocker = blockers.find(entry => entry.source === 'system');
+              const unknownRecord = blockers.find(entry => entry.source === 'unknown');
+              const issue = systemBlocker?.content;
               const attention = l.id === 'attention';
-              const actionLabel = question ? '回答问题' : issue ? '查看原因与处理' : stage === '等待你验收' ? '查看结果并验收' : stage === '需要你确认方案' ? '查看并确认方案' : '查看任务并处理';
+              const actionLabel = question ? '回答问题' : unknownRecord ? '查看详情核对记录' : blocker?.source === 'member' && systemBlocker ? '查看条件与异常处理' : blocker?.source === 'member' ? '查看阻塞并补充条件' : issue ? '查看原因与处理' : stage === '等待你验收' ? '查看结果并验收' : stage === '需要你确认方案' ? '查看并确认方案' : '查看任务并处理';
               const result = task.artifacts.filter(a => a.kind === 'result' && a.attemptId === task.activeAttemptId).at(-1);
               const followup = task.events.filter(e => e.kind === 'revise' && e.source === 'user' && e.attemptId === task.activeAttemptId && (!result || e.createdAt >= result.createdAt)).at(-1);
-              const preview = question?.question || issue || followup?.content || (result?.summary || (attempt?.report?.content ? collaborationResultPresentation(attempt.report.content).summary : ''));
+              const preview = question?.question || blocker?.summary || followup?.content || (result?.summary || (attempt?.report?.content ? collaborationResultPresentation(attempt.report.content).summary : ''));
               const parent = tasks.find(t => t.id === task.parentTaskId);
               const done = task.children?.filter(t => t.status === 'accepted').length ?? 0;
               const total = task.children?.filter(t => t.status !== 'closed').length ?? 0;
               return <button type="button" key={task.id} data-task-id={task.id} aria-pressed={selectedId === task.id} className={`block w-full rounded-xl border bg-surface p-4 text-left shadow-sm transition hover:border-primary/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${selectedId === task.id ? 'border-primary/60' : issue ? 'border-destructive/35' : 'border-border/20'}`} onClick={() => onSelect(task.id)}>
                 {parent && <span className="mb-2 block truncate text-[10px] text-muted-foreground">{parent.title}</span>}
                 <span className="block break-words text-sm font-medium leading-6 text-foreground">{task.title}</span>
-                <span className={`mt-3 flex items-center gap-1.5 text-xs ${issue ? 'text-destructive' : attention ? 'text-primary' : 'text-muted-foreground'}`}>{issue && <AlertTriangle size={13} className="shrink-0" />}{stage}</span>
+                <span className={`mt-3 flex items-center gap-1.5 text-xs ${issue && blocker?.source !== 'member' ? 'text-destructive' : attention ? 'text-primary' : 'text-muted-foreground'}`}>{issue && blocker?.source !== 'member' && <AlertTriangle size={13} className="shrink-0" />}{stage}</span>
                 {preview && <span className="mt-2 line-clamp-3 break-words text-xs leading-5 text-foreground/80">{preview}</span>}
+                {systemBlocker && blocker?.source === 'member' && <span className="mt-2 block line-clamp-2 break-words text-xs leading-5 text-destructive">{systemBlocker.label}：{systemBlocker.summary}</span>}
+                {unknownRecord && <span className="mt-2 block line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{unknownRecord.label}：{unknownRecord.summary}</span>}
                 {attention && <span className={`mt-4 flex min-h-9 items-center justify-between rounded-lg px-2.5 text-xs font-medium ${issue ? 'bg-destructive/10 text-destructive' : 'bg-primary/10 text-primary'}`}>{actionLabel}<ArrowUpRight size={14} /></span>}
                 {total > 0 && <span className="mt-3 block text-[11px] text-muted-foreground">{done}/{total} 子任务已验收</span>}
-                <span className="mt-4 flex items-center justify-between gap-2 border-t border-border/10 pt-3 text-[11px] text-muted-foreground"><span className="truncate">{attempt ? name(task, attempt.assignee) : task.scheduledAssignee ? name(task, task.scheduledAssignee) : '未分派'}</span><time dateTime={new Date(task.updatedAt).toISOString()} title={`更新于 ${new Date(task.updatedAt).toLocaleString()}`} className="shrink-0">{collaborationUpdatedLabel(task.updatedAt, now)}</time></span>
+                <span className="mt-4 block border-t border-border/10 pt-3 text-[11px] text-muted-foreground"><span className="block truncate">{attempt ? name(task, attempt.assignee) : task.scheduledAssignee ? name(task, task.scheduledAssignee) : '未分派'}</span><CollaborationReportMeta task={task} now={now} /></span>
               </button>;
             })}{!records.length && <p className="px-2 py-3 text-xs leading-6 text-muted-foreground/70">{query || scope !== 'all' ? '没有匹配的任务' : tasks.length ? '暂无任务' : l.hint}</p>}</div>
           </section>;

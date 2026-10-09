@@ -127,9 +127,12 @@ export class CollaborationTaskStore {
       const current = task.attempts.find(a => a.id === task.activeAttemptId);
       const result = task.artifacts.filter(a => a.kind === 'result' && a.attemptId === task.activeAttemptId).at(-1);
       const plan = task.artifacts.filter(a => a.kind === 'plan' && a.attemptId === task.activeAttemptId).at(-1);
-      return { ...task, spec: task.spec.slice(0, 512), constraints: '', acceptance: '',
+      const reportSummary = current?.report?.content.split(/\n\s*\n/).map(paragraph => paragraph.split('\n').filter(line => !/^#{1,6}\s/.test(line)).join('\n').trim()).find(Boolean)?.slice(0, 512);
+      const automationIssueSource = task.automationIssue ? current?.report && ['blocked', 'failed'].includes(current.report.status)
+        && task.automationIssue === current.report.content.slice(0, 1000) ? 'member-report' as const : 'system' as const : undefined;
+      return { ...task, automationIssueSource, spec: task.spec.slice(0, 512), constraints: '', acceptance: '',
         deliveries: task.deliveries.filter(d => d.attemptId === task.activeAttemptId && d.error).slice(-1),
-        attempts: current ? [{ ...current, report: current.report ? { ...current.report, content: '', evidence: undefined } : undefined }] : [],
+        attempts: current ? [{ ...current, report: current.report ? { ...current.report, summary: reportSummary, content: '', evidence: undefined } : undefined }] : [],
         artifacts: [plan, result, ...task.artifacts.filter(a => a.kind === 'review' && a.reviewsArtifactId === result?.id)].filter((a): a is NonNullable<typeof a> => !!a).map(a => ({ ...a, content: '', summary: (a.summary || (a.kind === 'result' && collaborationResultPresentation(a.content).condensed ? collaborationResultPresentation(a.content).summary : undefined))?.slice(0, 800), evidence: undefined })),
         decisions: task.decisions.filter(d => d.status === 'pending').map(d => ({ ...d, question: '', options: [] })),
         events: task.events.filter(e => ['revise', 'request-review'].includes(e.kind) && e.attemptId === task.activeAttemptId).slice(-4).map(e => ({ ...e, content: e.source === 'user' && e.kind === 'revise' ? e.content.slice(0, 512) : '' })) };
@@ -393,7 +396,8 @@ export class CollaborationTaskStore {
         if (!task.workflow) throw new CollaborationError('WORKFLOW_REQUIRED', '此任务未启用自动协作');
         if (input.kind !== 'retry') task.workflow.paused = input.kind === 'pause';
         delete task.automationIssue;
-        this.event(task, input.kind, actor, content || (input.kind === 'pause' ? '暂停后续自动安排，已写入终端的工作继续保留' : '继续推进自动协作'));
+        this.event(task, input.kind, actor, content || (input.kind === 'pause' ? '暂停后续自动安排，已写入终端的工作继续保留'
+          : input.kind === 'retry' ? '请求重新检查现有投递与协调条件，成员原报告保留' : '继续推进自动协作'));
         if (input.kind === 'retry' && task.coordination) task.coordination.notifiedSequence = 0;
         if (input.kind === 'retry') for (const outbox of doc.outbox.filter(o => o.taskId === task.id)) {
           const receipt = task.deliveries.find(d => d.id === outbox.id);
@@ -439,7 +443,9 @@ export class CollaborationTaskStore {
         || task.workflow?.paused || !root || root.status !== 'open' || root.workflow?.paused || this.planPending(root)
         || task.dependsOn.some(id => doc.tasks.find(t => t.id === id)?.status !== 'accepted')) return;
       if (workspace) task.workspace = workspace;
-      this.assign(doc, task, assignee, task.coordinator, '服务已接续依赖并准备执行'); delete task.scheduledAssignee;
+      const dependencyContext = task.dependsOn.map(id => doc.tasks.find(t => t.id === id)!).map(dependency =>
+        `「${dependency.title}」：${dependency.workflow?.workType === 'read-only' ? '已验收的只读报告，作为执行上下文' : '已验收的前置交付'}；用 td collab task get ${dependency.id} --text 读取报告、证据和限制。`).join('\n');
+      this.assign(doc, task, assignee, task.coordinator, `服务已接续依赖并准备执行${dependencyContext ? `\n前置任务：\n${dependencyContext}` : ''}`); delete task.scheduledAssignee;
       task.revision++; task.updatedAt = Date.now(); this.touchParent(doc, task, '已自动分派');
     });
   }

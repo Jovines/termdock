@@ -187,7 +187,7 @@ describe('settings persistence', () => {
   it('observes explorer pin writes made through the shared settings file', async () => {
     const settingsFile = tempSettingsPath();
     loadSettingsFile(settingsFile);
-    let stopWatching = () => undefined;
+    let stopWatching: () => void = () => undefined;
     const observed = new Promise<Record<string, Array<{ path: string; kind: 'directory' }>>>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('settings watcher did not observe pin update')), 2_000);
       stopWatching = watchPinnedExplorerRootsSetting((roots) => {

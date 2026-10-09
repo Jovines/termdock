@@ -143,6 +143,10 @@ export function normalizeSessionOrderGroups<T extends SessionOrderGroup>(
   const claimed = new Set<string>();
   return groups.flatMap((group) => {
     const sessionIds = [...new Set(group.sessionIds)].filter((id) => availableSessionIds.has(id) && !claimed.has(id));
+    // A genuinely empty project is explicit (including after archiving its
+    // last worker). Old local IDs with no available members are not new empty
+    // projects; preserve their records without reviving them in navigation.
+    if (!group.federated && group.sessionIds.length > 0 && sessionIds.length === 0) return [];
     sessionIds.forEach((id) => claimed.add(id));
     return [{ ...group, sessionIds }];
   });

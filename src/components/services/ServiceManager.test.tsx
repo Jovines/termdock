@@ -3,8 +3,28 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ServiceManager } from './ServiceManager';
 import { readBrowserServices, saveServiceConnection } from '../../lib/services/serviceDirectory';
+import { createInviteLink } from '../../lib/federation/inviteLink';
 afterEach(() => { cleanup(); localStorage.clear(); });
 describe('shared service manager', () => {
+  it.each(['://', 'ftp://computer.example', 'https://computer.example?secret=value', 'https://computer.example/#termdock-invite=broken'])('keeps invalid input %s editable without attempting a connection or saving it', async input => {
+    const onAdd = vi.fn();
+    render(<ServiceManager initiallyAdding onAdd={onAdd} onOpen={async () => {}} />);
+    fireEvent.change(screen.getByLabelText('服务地址或邀请链接'), { target: { value: input } });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(input.includes('#termdock-invite=') ? 'Copy the full invitation link' : 'Enter a valid HTTPS service address');
+    expect((screen.getByLabelText('服务地址或邀请链接') as HTMLInputElement).value).toBe(input);
+    expect(onAdd).not.toHaveBeenCalled(); expect(readBrowserServices()).toEqual([]);
+    expect((screen.getByRole('button', { name: '继续' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+  it.each(['computer.example:9834', 'https://computer.example:9834', 'https://[::1]:9834', '[::1]:9834', createInviteLink({ v: 1, serviceId: `12D3KooW${'a'.repeat(44)}`, code: 'b'.repeat(32), entryUrl: 'https://computer.example:9834' })])('retains support for %s', async input => {
+    const onAdd = vi.fn().mockResolvedValue({ passwordRequired: true });
+    render(<ServiceManager initiallyAdding onAdd={onAdd} onOpen={async () => {}} />);
+    fireEvent.change(screen.getByLabelText('服务地址或邀请链接'), { target: { value: input } });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await screen.findByLabelText('服务密码'); expect(onAdd).toHaveBeenCalledWith(input, undefined);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
   it('keeps newly added addresses when returning from routes and saving the service name', async () => {
     const service = { id: 'computer', targetPeerId: 'computer', url: 'https://home.example', label: 'Computer' };
     const routes = [{ url: 'https://office.example', targetPeerId: 'computer' }];

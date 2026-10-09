@@ -98,7 +98,7 @@ function ChangeBadge({ path }: { path: string }) {
 
 function iconActionVisibilityClass(visible: boolean): string {
   if (visible) return 'ml-1 w-6 opacity-100';
-  return 'ml-1 w-6 opacity-100 sm:ml-0 sm:w-0 sm:overflow-hidden sm:opacity-0 sm:group-hover:ml-1 sm:group-hover:w-6 sm:group-hover:opacity-100';
+  return 'ml-1 w-6 opacity-100 sm:ml-0 sm:w-0 sm:overflow-hidden sm:opacity-0 sm:group-hover:ml-1 sm:group-hover:w-6 sm:group-hover:opacity-100 sm:group-focus-within:ml-1 sm:group-focus-within:w-6 sm:group-focus-within:overflow-visible sm:group-focus-within:opacity-100';
 }
 
 function textActionVisibilityClass(visible: boolean): string {
@@ -125,15 +125,16 @@ const FileDownloadAction = memo(function FileDownloadAction({ path }: { path: st
   }, [path, status, t]);
 
   return (
-    <span
-      role="button"
-      tabIndex={-1}
+    <button
+      type="button"
+      disabled={status === 'pending'}
+      aria-label={t('rightSidebar.downloadFile')}
       onClick={(e) => void handleClick(e)}
-      className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(status === 'pending')} ${status === 'pending' ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+      className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(status === 'pending')} ${status === 'pending' ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
       title={status === 'error' ? errorMsg ?? t('rightSidebar.downloadFailed') : t('rightSidebar.downloadFile')}
     >
       {status === 'pending' ? <RiLoader size={12} className="animate-spin" /> : <RiDownload size={12} />}
-    </span>
+    </button>
   );
 });
 
@@ -539,7 +540,7 @@ const FileTreeItem = memo(function FileTreeItem({
         }}
         onContextMenu={handleDirectoryContextMenu}
         onKeyDown={(event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return;
+          if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
           event.preventDefault();
           void handleToggle();
         }}
@@ -591,38 +592,44 @@ const FileTreeItem = memo(function FileTreeItem({
         <div
           className={`sticky right-0 z-20 flex shrink-0 items-center rounded pl-1 ${isSelected ? 'bg-surface-elevated' : 'bg-surface group-hover:bg-surface-2'}`}
           onClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
         >
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
         {hasDirectoryActions && (
-          <span
+          <button
+            type="button"
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            aria-label={t('fileTree.moreDirActions')}
+            aria-expanded={actionsOpen}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
-          </span>
+          </button>
         )}
         {!isDirectory && (
-          <span
+          <button
+            type="button"
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            aria-label={t('fileTree.moreFileActions')}
+            aria-expanded={actionsOpen}
             title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
             {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
-          </span>
+          </button>
         )}
         {onPathReference && (
-          <span
+          <button
+            type="button"
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
             title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
-          </span>
+          </button>
         )}
         {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
           <div
@@ -902,7 +909,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         onClick={handleClick}
         onContextMenu={handleDirectoryContextMenu}
         onKeyDown={(event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return;
+          if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
           event.preventDefault();
           handleClick();
         }}
@@ -937,33 +944,40 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         </span>
         <ChangeBadge path={node.path} />
         {node.type === 'directory' && (onDirectoryPinToggle || onSearchFromDirectory) && (
-          <span
+          <button
+            type="button"
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            aria-label={t('fileTree.moreDirActions')}
+            aria-expanded={actionsOpen}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
-          </span>
+          </button>
         )}
         {!isDirectory && (
-          <span
+          <button
+            type="button"
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            aria-label={t('fileTree.moreFileActions')}
+            aria-expanded={actionsOpen}
             title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
             {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
-          </span>
+          </button>
         )}
         {onPathReference && (
-          <span
+          <button
+            type="button"
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
             title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
-          </span>
+          </button>
         )}
       </div>
       {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
@@ -1157,7 +1171,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
           setExpanded((open) => !open);
         }}
         onKeyDown={(event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return;
+          if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
           event.preventDefault();
           setExpanded((open) => !open);
         }}
@@ -1175,18 +1189,19 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
         <span className="shrink-0 select-none rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
         <FileDownloadAction path={entry.path} />
         {onPathReference && (
-          <span
+          <button
+            type="button"
             onClick={(event) => {
               event.stopPropagation();
               onPathReference(entry.path, referenceKey);
             }}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
             title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
-          </span>
+          </button>
         )}
       </div>
       {expanded && (
@@ -1202,7 +1217,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
                 onContentMatchSelect?.(entry.path, match.line);
               }}
               onKeyDown={(event) => {
-                if (event.key !== 'Enter' && event.key !== ' ') return;
+                if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
                 event.preventDefault();
                 onContentMatchSelect?.(entry.path, match.line);
               }}

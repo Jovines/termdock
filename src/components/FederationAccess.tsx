@@ -1,3 +1,4 @@
+import { useKeyboardLayer } from '../lib/hooks/useKeyboardLayer';
 import { LoadingSpinner as Loader2 } from '../lib/components/ui/Loading';
 import type { DeviceProfile } from '../server/federation/deviceProfile';
 import { RelayServices } from './services/RelayServices';
@@ -109,10 +110,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
   const deviceName = (grant: FederationGrant) => grant.subjectId === currentIdentity ? '此设备' : grant.label || '未命名设备';
   const dismiss = () => { if (selectingSessions) setSelectingSessions(false); else onClose(); };
   const panel = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    panel.current?.focus(); return () => { previous?.focus(); };
-  }, []);
+  useKeyboardLayer(panel, true, () => { if (!busy) dismiss(); });
   useEffect(() => {
     let canceled = false; setQr('');
     if (invitation) {
@@ -166,15 +164,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
   const returnToOverview = () => { if (serviceNavigation.back) { serviceNavigation.back(); return; } if (selectingSessions) setSelectingSessions(false); else back(); };
   const scopeName = (deviceGrants: FederationGrant[]) => deviceGrants.every(grant => grant.routeTargetServiceId) ? `${new Set(deviceGrants.map(grant => grant.routeTargetServiceId)).size} 台服务` : deviceGrants.some(grant => grant.scope.kind === 'service') ? '全部终端' : `${new Set(deviceGrants.flatMap(grant => grant.scope.kind === 'sessions' ? grant.scope.sessionIds : [])).size} 个终端`;
   return createPortal(<div className="fixed inset-0 z-modal-backdrop flex items-end justify-center bg-[var(--app-backdrop)] backdrop-blur-sm sm:items-center sm:p-6" data-sidebar-gesture-ignore onMouseDown={event => { if (event.target === event.currentTarget && !busy) dismiss(); }}>
-    <div ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="federation-title" className="z-modal-panel flex max-h-[calc(100dvh-env(safe-area-inset-top)-12px)] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl border border-border bg-surface font-sans text-foreground shadow-xl outline-none sm:max-h-[min(720px,90dvh)] sm:rounded-2xl" onKeyDown={event => {
-      if (event.key === 'Escape' && !busy) { event.stopPropagation(); dismiss(); }
-      if (event.key !== 'Tab') return;
-      const nodes = panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"], summary');
-      if (!nodes?.length) { event.preventDefault(); return; }
-      const first = nodes[0], last = nodes[nodes.length - 1];
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && (document.activeElement === last || document.activeElement === panel.current)) { event.preventDefault(); first.focus(); }
-    }}>
+    <div ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="federation-title" className="z-modal-panel flex max-h-[calc(100dvh-env(safe-area-inset-top)-12px)] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl border border-border bg-surface font-sans text-foreground shadow-xl outline-none sm:max-h-[min(720px,90dvh)] sm:rounded-2xl">
       <header className="shrink-0 border-b border-border px-5 pt-3">
         <div className="flex min-h-12 items-center gap-2 pb-2">
           {showBack && <button type="button" className={`${button} -ml-3 inline-flex w-11 items-center justify-center text-muted-foreground`} disabled={busy} onClick={returnToOverview} aria-label={selectingSessions ? '取消选择终端' : tab === 'devices' ? '返回设备' : '返回服务'}><ArrowLeft size={20} /></button>}

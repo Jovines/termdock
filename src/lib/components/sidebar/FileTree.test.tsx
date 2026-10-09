@@ -9,8 +9,10 @@ import { FileTree } from './FileTree';
 
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
 
-const { deleteFileMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
+const { deleteFileMock, downloadFileMock, searchFilesStreamMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
   deleteFileMock: vi.fn(async () => undefined),
+  downloadFileMock: vi.fn(async () => undefined),
+  searchFilesStreamMock: vi.fn(),
   getSettingsMock: vi.fn(async () => ({ fileSortModes: {} })),
   listDirectoryMock: vi.fn(async (path: string): Promise<{ path: string; entries: FileTreeNode[] }> => ({ path, entries: [] })),
   updateSettingsMock: vi.fn(async (settings: { fileSortMode?: { path: string; mode: 'name' | 'modified' } }) => ({
@@ -21,6 +23,8 @@ const { deleteFileMock, getSettingsMock, listDirectoryMock, updateSettingsMock }
 vi.mock('../../terminal/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../terminal/api')>()),
   deleteFile: deleteFileMock,
+  downloadFile: downloadFileMock,
+  searchFilesStream: searchFilesStreamMock,
   getSettings: getSettingsMock,
   listDirectory: listDirectoryMock,
   updateSettings: updateSettingsMock,
@@ -51,6 +55,7 @@ describe('FileTree file deletion', () => {
         loaded: false,
       }]]]),
     });
+    vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ locale: 'en' }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -62,10 +67,77 @@ describe('FileTree file deletion', () => {
     if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView);
     else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     deleteFileMock.mockClear();
+    downloadFileMock.mockReset();
+    searchFilesStreamMock.mockReset();
     listDirectoryMock.mockClear();
     getSettingsMock.mockClear();
     updateSettingsMock.mockClear();
     vi.unstubAllGlobals();
+  });
+
+  it('tabs to file actions and activates them without opening the row', async () => {
+    const user = userEvent.setup(); const onFileSelect = vi.fn(); const onPathReference = vi.fn();
+    await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={onFileSelect} onPathReference={onPathReference} /></I18nProvider>);
+    screen.getByTitle('/workspace/notes.txt').focus();
+    await user.tab();
+    let more = screen.getByRole('button', { name: 'More file actions' });
+    expect(document.activeElement).toBe(more);
+    expect(more.tagName).toBe('BUTTON');
+    await user.keyboard('{Enter}');
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Download file' })).toBeTruthy();
+    await user.keyboard('{Escape}');
+    more = screen.getByRole('button', { name: 'More file actions' }); more.focus(); await user.keyboard(' ');
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    await user.keyboard('{Escape}');
+    more = screen.getByRole('button', { name: 'More file actions' }); more.focus(); await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Insert file reference into active terminal' }));
+    await user.keyboard(' ');
+    expect(onPathReference).toHaveBeenCalledExactlyOnceWith('/workspace/notes.txt', 'path:/workspace/notes.txt');
+    expect(onFileSelect).not.toHaveBeenCalled();
+  });
+
+  it('opens folder actions with the keyboard without expanding the folder', async () => {
+    const user = userEvent.setup(); const onPathReference = vi.fn();
+    useSidebarStore.setState({ directoryCache: new Map([['/workspace', [{ name: 'src', path: '/workspace/src', type: 'directory', expanded: false, loaded: true, children: [] }]]]) });
+    await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={vi.fn()} onSearchFromDirectory={vi.fn()} onPathReference={onPathReference} /></I18nProvider>);
+    screen.getByTitle('/workspace/src').focus(); await user.tab();
+    let more = screen.getByRole('button', { name: 'More folder actions' });
+    expect(document.activeElement).toBe(more);
+    await user.keyboard(' ');
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(useSidebarStore.getState().expandedPaths.has('/workspace/src')).toBe(false);
+    await user.keyboard('{Escape}'); more.focus(); await user.tab(); await user.keyboard('{Enter}');
+    expect(onPathReference).toHaveBeenCalledWith('/workspace/src', 'path:/workspace/src');
+    expect(useSidebarStore.getState().expandedPaths.has('/workspace/src')).toBe(false);
+  });
+
+  it.each(['name', 'content'] as const)('keeps %s search result actions keyboard accessible without opening or collapsing results', async (mode) => {
+    const user = userEvent.setup(); const onFileSelect = vi.fn(); const onPathReference = vi.fn();
+    searchFilesStreamMock.mockImplementation(async (_root, _query, onProgress) => {
+      onProgress(mode === 'content' ? { contentEntries: [{ name: 'notes.txt', path: '/workspace/notes.txt', matches: [{ line: 1, text: 'needle content' }] }], done: true } : { entries: [{ name: 'notes.txt', path: '/workspace/notes.txt', type: 'file' }], done: true });
+    });
+    await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={onFileSelect} onPathReference={onPathReference} query="needle" searchMode={mode} /></I18nProvider>);
+    await screen.findByTitle('/workspace/notes.txt');
+    screen.getByTitle('/workspace/notes.txt').focus(); await user.tab();
+    if (mode === 'name') {
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'More file actions' }));
+      await user.keyboard('{Enter}'); await user.keyboard('{Escape}');
+      screen.getByRole('button', { name: 'More file actions' }).focus(); await user.tab();
+    } else {
+      const download = screen.getByRole('button', { name: 'Download file' });
+      expect(document.activeElement).toBe(download);
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(downloadFileMock).toHaveBeenCalledWith('/workspace/notes.txt'));
+      expect(screen.getByTitle('notes.txt:1')).toBeTruthy();
+      download.focus(); await user.keyboard(' ');
+      await waitFor(() => expect(downloadFileMock).toHaveBeenCalledTimes(2));
+      download.focus(); await user.tab();
+    }
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Insert file reference into active terminal' }));
+    await user.keyboard('{Enter}');
+    expect(onPathReference).toHaveBeenCalledExactlyOnceWith('/workspace/notes.txt', 'path:/workspace/notes.txt');
+    expect(onFileSelect).not.toHaveBeenCalled();
   });
 
   it('only deletes after the user confirms the irreversible action', async () => {

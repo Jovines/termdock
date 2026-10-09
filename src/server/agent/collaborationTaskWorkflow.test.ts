@@ -88,6 +88,17 @@ describe('classified collaboration workflows', () => {
     expect(message.content).toContain('模板身份和 tmux 标识不能替代它');
     expect(store.get(child.id)?.attempts[0].assignee).toEqual(actual);
   });
+  it('makes an accepted read-only report available as context for the dependent code worker', () => {
+    const root = goal(), audit = step(root, 'read-only');
+    store.activateScheduled(audit.id, audit.revision, worker); finish(audit);
+    const code = step(root, 'code', [audit.id]);
+    expect(store.scheduled(owner).map(task => task.id)).toContain(code.id);
+    store.activateScheduled(code.id, code.revision, worker);
+    const message = store.pending(code.id).find(outbox => outbox.kind === 'task')!;
+    expect(message.content).toContain('已验收的只读报告，作为执行上下文');
+    expect(message.content).toContain(`td collab task get ${audit.id} --text`);
+    expect(store.get(code.id)?.automationIssue).toBeUndefined();
+  });
   it('runs the service scheduler without preparing another terminal for read-only work', async () => {
     const messages = new CollaborationStore(join(dir, 'messages.json'));
     const group = messages.save({ name: 'test', sessionIds: ['lead', 'worker'] });

@@ -2,6 +2,8 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MobileKeyboard } from './MobileKeyboard';
+import { createDefaultToolbarPresets } from './mobileKeyboardPresets';
+import { encodeTerminalKey } from '../../terminal/keyboard';
 
 const baseProps = {
   visible: true,
@@ -101,6 +103,21 @@ describe('MobileKeyboard interaction state', () => {
     fireEvent.pointerDown(ctrlUButton);
 
     expect(onKeyPress).toHaveBeenCalledWith('ctrl-u');
+  });
+
+  it.each(['mobile', 'desktop-actions'] as const)('sends Shift+Left immediately from the Codex %s toolbar', (presentation) => {
+    const codex = createDefaultToolbarPresets().find(preset => preset.id === 'codex')!;
+    const onTextPress = vi.fn();
+    const { rerender } = render(<MobileKeyboard {...baseProps} presentation={presentation} extraActions={codex.actions} presetRowLayout={codex.rowLayout} onTextPress={onTextPress} />);
+
+    fireEvent.pointerDown(screen.getByText('⇧←'), { pointerType: 'touch' });
+    expect(onTextPress).toHaveBeenCalledExactlyOnceWith(encodeTerminalKey({
+      key: 'ArrowLeft', shiftKey: true, altKey: false, ctrlKey: false, metaKey: false,
+    }));
+
+    rerender(<MobileKeyboard {...baseProps} presentation={presentation} extraActions={codex.actions} presetRowLayout={codex.rowLayout} onTextPress={onTextPress} interactive={false} />);
+    fireEvent.pointerDown(screen.getByText('⇧←'), { pointerType: 'touch' });
+    expect(onTextPress).toHaveBeenCalledTimes(1);
   });
 
   it('closes the preset menu when it becomes non-interactive', () => {

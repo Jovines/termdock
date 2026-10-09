@@ -146,7 +146,12 @@ export class CollaborationFederation {
           roleVersions: mapRoles(group.roleVersions, id => qualifySession(service.origin, id)),
           instructions: group.instructions ? { ...group.instructions, updatedBy: qualifySession(service.origin, group.instructions.updatedBy) } : undefined };
         const existing = this.groups.get(group.id);
-        if (!existing || canonical.updatedAt > existing.updatedAt) this.groups.set(group.id, canonical);
+        if (!existing || (!existing.deleted && canonical.deleted)) {
+          this.groups.set(group.id, canonical.deleted && existing
+            ? { ...canonical, updatedAt: Math.max(canonical.updatedAt, existing.updatedAt + 1) } : canonical);
+        } else if (!(existing.deleted && !canonical.deleted) && canonical.updatedAt > existing.updatedAt) {
+          this.groups.set(group.id, canonical);
+        }
       }
       for (const message of data.messages) this.mergeMessage(mapMessage(message, (id) => qualifySession(service.origin, id)));
     }

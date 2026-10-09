@@ -3,6 +3,12 @@ export const FILE_PREVIEW_SEARCH_CURRENT_HIGHLIGHT = 'termdock-file-search-curre
 
 export type FilePreviewSearchShortcut = 'open' | 'next' | 'previous' | 'close';
 
+export function ownsFilePreviewSearchShortcut(root: HTMLElement | null, active: boolean, event: Pick<KeyboardEvent, 'defaultPrevented' | 'target'>): boolean {
+  return Boolean(active && root?.isConnected && !event.defaultPrevented
+    && !root.closest('[inert], [aria-hidden="true"], [hidden]')
+    && event.target instanceof Node && root.contains(event.target));
+}
+
 export function resolveFilePreviewSearchShortcut(event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey'>): FilePreviewSearchShortcut | null {
   const modifier = event.metaKey || event.ctrlKey;
   const key = event.key.toLocaleLowerCase();
@@ -73,15 +79,24 @@ function highlightRegistry(): HighlightRegistry | null {
   return typeof CSS !== 'undefined' && CSS.highlights ? CSS.highlights : null;
 }
 
-export function clearFilePreviewSearchHighlights(): void {
+let highlightOwner: object | undefined;
+
+export function ownsFilePreviewSearchHighlights(owner: object): boolean {
+  return highlightOwner === owner;
+}
+
+export function clearFilePreviewSearchHighlights(owner?: object): void {
+  if (owner && highlightOwner !== owner) return;
   const registry = highlightRegistry();
   registry?.delete(FILE_PREVIEW_SEARCH_HIGHLIGHT);
   registry?.delete(FILE_PREVIEW_SEARCH_CURRENT_HIGHLIGHT);
+  highlightOwner = undefined;
 }
 
-export function paintFilePreviewSearchHighlights(ranges: Range[], currentIndex: number): void {
+export function paintFilePreviewSearchHighlights(ranges: Range[], currentIndex: number, owner?: object): void {
   const registry = highlightRegistry();
   if (!registry || typeof Highlight === 'undefined') return;
+  highlightOwner = owner;
   registry.set(FILE_PREVIEW_SEARCH_HIGHLIGHT, new Highlight(...ranges));
   const current = ranges[currentIndex];
   if (current) registry.set(FILE_PREVIEW_SEARCH_CURRENT_HIGHLIGHT, new Highlight(current));

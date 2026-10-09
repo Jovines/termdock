@@ -23,6 +23,15 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); delete (window as unknown as { termdockDesktop?: unknown }).termdockDesktop; });
 
 describe('secure RDP tunnel', () => {
+  it('carries login verification inside the encrypted socket without consuming display sequence numbers', () => {
+    const fail = vi.fn(), tunnel = new SecureRdpTunnel(options(), fail), authentication = vi.fn();
+    tunnel.onauthentication = authentication; tunnel.connect(); socket.readyState = 1; socket.onopen!();
+    socket.onmessage!({ data: JSON.stringify({ type: 'authentication', state: 'pending' }) });
+    socket.onmessage!({ data: JSON.stringify({ type: 'instructions', seq: 1, instructions: [['ready', 'session']] }) });
+    socket.onmessage!({ data: JSON.stringify({ type: 'authentication', state: 'authenticated' }) });
+    expect(authentication.mock.calls).toEqual([['pending'], ['authenticated']]); expect(fail).not.toHaveBeenCalled();
+    expect(socket.send.mock.calls.map(call => JSON.parse(call[0]))).toContainEqual({ type: 'ack', seq: 1 }); tunnel.disconnect();
+  });
   it('works on first load without worker control or native transports, sends credentials after open, and acknowledges display records', () => {
     const credentials = options(), tunnel = new SecureRdpTunnel(credentials, vi.fn());
     const instruction = vi.fn(); tunnel.oninstruction = instruction;
@@ -30,7 +39,7 @@ describe('secure RDP tunnel', () => {
     expect(mocks.socket).toHaveBeenCalledWith('/api/computer/ws?host=127.0.0.1&protocol=rdp&port=3389');
     expect(socket.send).not.toHaveBeenCalled();
     socket.readyState = 1; socket.onopen!();
-    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({ type: 'start', password: 'private-password', ignoreCert: false });
+    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({ type: 'start', password: 'private-password', ignoreCert: false, verifyLogin: true });
     expect(credentials.password).toBe('');
     socket.onmessage!({ data: JSON.stringify({ type: 'instructions', seq: 1, instructions: [['ready', 'session-id'], ['size', '0', '1280', '800']] }) });
     expect(tunnel.state).toBe(Guacamole.Tunnel.State.OPEN);
@@ -43,6 +52,26 @@ describe('secure RDP tunnel', () => {
     tunnel.disconnect();
   });
 
+  it('accepts authentication states outside the display sequence without acknowledging or forwarding them as drawing instructions', () => {
+    const fail = vi.fn(), credentials = options(), tunnel = new SecureRdpTunnel(credentials, fail);
+    const authentication = vi.fn(), instruction = vi.fn(); tunnel.onauthentication = authentication; tunnel.oninstruction = instruction;
+    tunnel.connect(); socket.readyState = 1; socket.onopen!(); socket.send.mockClear();
+    for (const state of ['pending', 'authenticated', 'unavailable']) socket.onmessage!({ data: JSON.stringify({ type: 'authentication', state }) });
+    expect(authentication.mock.calls).toEqual([['pending'], ['authenticated'], ['unavailable']]);
+    expect(socket.send).not.toHaveBeenCalled(); expect(instruction).not.toHaveBeenCalled();
+    socket.onmessage!({ data: JSON.stringify({ type: 'instructions', seq: 1, instructions: [['ready', 'session']] }) });
+    expect(tunnel.state).toBe(Guacamole.Tunnel.State.OPEN);
+    expect(JSON.parse(socket.send.mock.lastCall![0])).toEqual({ type: 'ack', seq: 1 });
+    expect(fail).not.toHaveBeenCalled(); expect(credentials.password).toBe(''); tunnel.disconnect();
+  });
+  it('rejects unknown authentication state and clears credentials without a transport fallback', () => {
+    const fail = vi.fn(), credentials = options(), tunnel = new SecureRdpTunnel(credentials, fail);
+    const authentication = vi.fn(); tunnel.onauthentication = authentication; tunnel.connect();
+    socket.onmessage!({ data: JSON.stringify({ type: 'authentication', state: 'failed' }) });
+    expect(authentication).not.toHaveBeenCalled(); expect(fail).toHaveBeenCalledWith('COMPUTER_INVALID_MESSAGE');
+    expect(credentials.password).toBe(''); expect(socket.close).toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled(); expect(WebSocket).not.toHaveBeenCalled(); expect(socket.onopen).toBeNull();
+  });
   it('coalesces high-frequency movement while preserving clicks, scroll, and keyboard ordering', () => {
     const frames: Array<FrameRequestCallback> = [];
     vi.stubGlobal('requestAnimationFrame', vi.fn(callback => { frames.push(callback); return frames.length; }));
@@ -50,15 +79,16 @@ describe('secure RDP tunnel', () => {
     const tunnel = new SecureRdpTunnel(options(), vi.fn()); tunnel.connect(); socket.readyState = 1; socket.onopen!();
     socket.onmessage!({ data: JSON.stringify({ type: 'instructions', seq: 1, instructions: [['ready', 'session']] }) }); socket.send.mockClear();
     for (let i = 0; i < 200; i++) tunnel.sendMessage('mouse', i, i, 0);
-    expect(socket.send).not.toHaveBeenCalled(); frames[0](0);
-    expect(JSON.parse(socket.send.mock.lastCall![0])).toEqual({ type: 'instruction', opcode: 'mouse', args: ['199', '199', '0'] });
     expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(socket.send.mock.calls[0][0]).args).toEqual(['0', '0', '0']); frames[0](0);
+    expect(JSON.parse(socket.send.mock.lastCall![0])).toEqual({ type: 'instruction', opcode: 'mouse', args: ['199', '199', '0'] });
+    expect(socket.send).toHaveBeenCalledTimes(2);
     tunnel.sendMessage('mouse', 210, 210, 0); tunnel.sendMessage('mouse', 211, 211, 1);
     tunnel.sendMessage('mouse', 220, 220, 1); tunnel.sendMessage('mouse', 221, 221, 0);
     tunnel.sendMessage('mouse', 230, 230, 0); tunnel.sendMessage('key', 13, 1);
     const inputs = socket.send.mock.calls.map(call => JSON.parse(call[0]));
     expect(inputs.map(input => [input.opcode, ...input.args])).toEqual([
-      ['mouse', '199', '199', '0'], ['mouse', '210', '210', '0'], ['mouse', '211', '211', '1'],
+      ['mouse', '0', '0', '0'], ['mouse', '199', '199', '0'], ['mouse', '210', '210', '0'], ['mouse', '211', '211', '1'],
       ['mouse', '220', '220', '1'], ['mouse', '221', '221', '0'], ['mouse', '230', '230', '0'], ['key', '13', '1'],
     ]);
     tunnel.sendMessage('mouse', 240, 240, 8); tunnel.sendMessage('mouse', 240, 240, 0);

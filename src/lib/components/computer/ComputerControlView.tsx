@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Monitor, Maximize2, Minimize2, Unplug, Loader2 } from 'lucide-react';
+import { Monitor, Maximize2, Unplug, Loader2, MousePointer2, Settings2, Keyboard, Clipboard, X, ChevronLeft, ZoomIn } from 'lucide-react';
 import type RFB from '@novnc/novnc';
 import { useComputerPreferences } from '../../computer/useComputerPreferences';
 import { computerLoginKey, type ComputerProfile } from '../../computer/preferences';
@@ -9,7 +9,12 @@ import { useI18n, type TranslationKey } from '../../i18n';
 import { savedConnection, SECURE_STATE_EVENT } from '../../federation/browserIntegration';
 import { SecureVncChannel } from '../../computer/secureVncChannel';
 import { computerShortcuts, isComputerPlatform } from '../../computer/platform';
+import { vncPointer } from '../../computer/pointer';
+import { attachComputerTouchpad, readComputerTouchMode, saveComputerTouchMode, type ComputerTouchMode, type TouchpadPosition } from '../../computer/touchpad';
 import { isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../../services/workspaceHost';
+import { computerDesktopSize } from '../../computer/viewport';
+import ComputerKeyboardInput from './ComputerKeyboardInput';
+import { computerKeyQueue, type ComputerKeyEvent } from '../../computer/keyQueue';
 
 type State = 'idle' | 'connecting' | 'credentials' | 'connected' | 'error';
 const buttonClass = 'inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md border border-border px-2.5 text-xs hover:bg-surface-2 disabled:opacity-40';
@@ -47,7 +52,7 @@ export default function ComputerControlView() {
   const setDomain = (domain: string) => updateProfile({ domain });
   const setIgnoreCert = (ignoreCert: boolean) => { updateProfile({ ignoreCert }); void flush(); };
   const setPort = (port: string) => updateProfile({ port });
-  const setViewOnly = (viewOnly: boolean) => { change(value => ({ ...value, viewOnly })); void flush(); };
+  const setViewOnly = (viewOnly: boolean) => { if (viewOnly) { releaseTouchpad.current(); keyQueue.clear(); setPanel(null); } change(value => ({ ...value, viewOnly })); void flush(); };
   const [advanced, setAdvanced] = useState(false);
   const shortcuts = computerShortcuts(platform);
   const pasteLabel = platform === 'mac' ? '⌘V' : 'Ctrl+V';
@@ -56,9 +61,15 @@ export default function ComputerControlView() {
   const [error, setError] = useState<TranslationKey | null>(null);
   const [desktopName, setDesktopName] = useState('');
   const [expanded, setExpanded] = useState(false);
+  const [panel, setPanel] = useState<'tools' | 'clipboard' | 'keyboard' | null>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState('');
   const [clipboardSent, setClipboardSent] = useState(false);
   const [authNeedsUsername, setAuthNeedsUsername] = useState(false);
+  const [touchMode, setTouchMode] = useState(readComputerTouchMode);
+  const cursorRef = useRef<HTMLDivElement>(null);
+  const pointerPosition = useRef<TouchpadPosition | null>(null);
+  const releaseTouchpad = useRef<() => void>(() => {});
   const [visible, setVisible] = useState(isWorkspaceActive);
   const autoAttempt = useRef(false);
   const loginPassword = useRef('');
@@ -72,10 +83,14 @@ export default function ComputerControlView() {
     return element;
   }, []);
   const rfbRef = useRef<RFB | RdpSession | null>(null);
+  const keyQueue = useMemo(() => computerKeyQueue(([key, code, down]) => rfbRef.current?.sendKey(key, code, down)), []);
   const channelRef = useRef<SecureVncChannel | null>(null);
   const generation = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const dispose = useCallback(() => {
+    releaseTouchpad.current();
+    keyQueue.clear();
+    pointerPosition.current = null;
     generation.current++;
     clearTimeout(timer.current);
     const rfb = rfbRef.current;
@@ -84,7 +99,7 @@ export default function ComputerControlView() {
     channelRef.current?.close();
     channelRef.current = null;
     screen.replaceChildren();
-  }, [screen]);
+  }, [screen, keyQueue]);
 
   useLayoutEffect(() => {
     mountRef.current?.appendChild(screen);
@@ -96,7 +111,7 @@ export default function ComputerControlView() {
       const active = isWorkspaceActive(); setVisible(active);
       if (active) return;
       autoAttempt.current = false; loginPassword.current = '';
-      dispose(); setState('idle'); setPassword(''); setExpanded(false);
+      dispose(); setState('idle'); setPassword(''); setExpanded(false); setPanel(null);
     };
     window.addEventListener(WORKSPACE_VISIBILITY_EVENT, hidden);
     return () => window.removeEventListener(WORKSPACE_VISIBILITY_EVENT, hidden);
@@ -110,7 +125,7 @@ export default function ComputerControlView() {
     dispose();
     autoAttempt.current = false; loginPassword.current = '';
     setState('idle'); setError(null); setPassword(''); setService(null);
-    setExpanded(false); setAdvanced(false); setDesktopName(''); setText(''); setClipboardSent(false);
+    setExpanded(false); setPanel(null); setAdvanced(false); setDesktopName(''); setText(''); setClipboardSent(false);
     const abort = new AbortController();
     void fetch('/api/computer/status', { signal: abort.signal }).then(async response => {
       if (!response.ok) throw new Error(response.status === 403 ? 'API_NOT_ALLOWED' : 'COMPUTER_FAILED');
@@ -123,6 +138,8 @@ export default function ComputerControlView() {
   }, [serviceId, dispose]);
   useEffect(() => { if (rfbRef.current) rfbRef.current.viewOnly = viewOnly; }, [viewOnly]);
   useEffect(() => { if (rfbRef.current) rfbRef.current.scaleViewport = fit; }, [fit]);
+  useEffect(() => { if (rfbRef.current && 'pauseResize' in rfbRef.current) rfbRef.current.pauseResize = Boolean(panel); }, [panel]);
+  useEffect(() => { if (rfbRef.current && 'keyboardActive' in rfbRef.current) rfbRef.current.keyboardActive = panel === 'keyboard'; }, [panel]);
 
   const chooseTarget = (local: boolean) => {
     if (local === localTarget || busy || !loaded) return;
@@ -131,7 +148,7 @@ export default function ComputerControlView() {
   };
   const disconnect = () => {
     autoAttempt.current = true; loginPassword.current = '';
-    dispose(); setState('idle'); setPassword(''); setExpanded(false); setClipboardSent(false);
+    dispose(); setState('idle'); setPassword(''); setExpanded(false); setPanel(null); setClipboardSent(false);
   };
   const connect = async (event?: FormEvent) => {
     event?.preventDefault(); autoAttempt.current = true;
@@ -146,7 +163,7 @@ export default function ComputerControlView() {
     const attempt = generation.current;
     const fail = (key: TranslationKey) => {
       if (attempt !== generation.current) return;
-      dispose(); setState('error'); setError(key);
+      dispose(); setState('error'); setError(key); setPanel(null);
       loginPassword.current = '';
       if (key === 'computer.authFailed' || key === 'computer.permission' || key === 'computer.loginExpired') setPassword('');
       if (hasSavedLogin && (key === 'computer.authFailed' || key === 'computer.loginExpired')) void credentialRequest('forget', profile).catch(() => {});
@@ -160,8 +177,12 @@ export default function ComputerControlView() {
       if (protocol === 'rdp') {
         const { RdpSession } = await import('../../computer/rdpSession');
         if (attempt !== generation.current) return;
+        const mobile = window.innerWidth <= 640;
+        const bounds = frameRef.current?.getBoundingClientRect();
+        const initialSize = computerDesktopSize(mobile ? window.innerWidth : bounds?.width || 1280,
+          Math.max(1, (mobile ? window.innerHeight : bounds?.height || 800) - 100));
         rfb = new RdpSession(screen, { host: host.trim(), port: Number(port), username: username.trim(), password: secret || '',
-          domain: domain.trim(), ignoreCert, width: Math.max(screen.clientWidth, 1280), height: Math.max(screen.clientHeight, 800) }, reason => fail(errorKey(reason)));
+          domain: domain.trim(), ignoreCert, ...initialSize }, reason => fail(errorKey(reason)));
       } else {
         const { default: Vnc } = await import('@novnc/novnc');
         if (attempt !== generation.current) return;
@@ -179,6 +200,9 @@ export default function ComputerControlView() {
         if (attempt !== generation.current) return;
         clearTimeout(timer.current);
         setState('connected'); setPassword('');
+        if (window.innerWidth <= 640) {
+          (document.activeElement as HTMLElement | null)?.blur?.(); setExpanded(true);
+        }
         const successfulPassword = loginPassword.current; loginPassword.current = '';
         if (profile.rememberLogin && successfulPassword) void credentialRequest('save', profile, successfulPassword).catch(() => {});
       });
@@ -198,31 +222,62 @@ export default function ComputerControlView() {
   const sendKeys = (keys: Array<[number, string]>) => {
     const rfb = rfbRef.current;
     if (!rfb || state !== 'connected' || viewOnly) return;
-    keys.forEach(([key, code]) => rfb.sendKey(key, code, true));
-    [...keys].reverse().forEach(([key, code]) => rfb.sendKey(key, code, false));
+    keyQueue.send([...keys.map(([key, code]): ComputerKeyEvent => [key, code, true]), ...[...keys].reverse().map(([key, code]): ComputerKeyEvent => [key, code, false])]);
   };
   const connected = state === 'connected';
   const busy = state === 'connecting' || state === 'credentials';
+  useEffect(() => {
+    const session = rfbRef.current, viewport = mountRef.current, cursor = cursorRef.current;
+    if (!connected || viewOnly || (panel && panel !== 'keyboard') || touchMode !== 'trackpad' || !session || !viewport || !cursor) return;
+    const pointer = 'pointerTarget' in session ? session.pointerTarget : vncPointer(session);
+    const release = attachComputerTouchpad(viewport, pointer, cursor, pointerPosition);
+    releaseTouchpad.current = release;
+    return () => { release(); if (releaseTouchpad.current === release) releaseTouchpad.current = () => {}; };
+  }, [connected, viewOnly, touchMode, expanded, panel]);
+  const chooseTouchMode = (mode: ComputerTouchMode) => {
+    if (mode === touchMode) return;
+    releaseTouchpad.current();
+    setTouchMode(mode); saveComputerTouchMode(mode);
+  };
   connectRef.current = () => { void connect(); };
   useEffect(() => {
     if (visible && loaded && service && preferences.autoConnect && hasSavedLogin && state === 'idle' && !autoAttempt.current) connectRef.current();
   }, [visible, loaded, service, preferences.autoConnect, hasSavedLogin, state]);
   const forgetLogin = () => { autoAttempt.current = true; void credentialRequest('forget', profile).catch(() => {}); };
+  const togglePanel = (next: 'tools' | 'clipboard' | 'keyboard') => { releaseTouchpad.current(); setPanel(value => value === next ? null : next); };
+  const sendText = (value: string) => {
+    if (!rfbRef.current || viewOnly) return;
+    const events: ComputerKeyEvent[] = [];
+    for (const character of value) {
+      const code = character.codePointAt(0)!;
+      const keysym = character === '\n' ? 0xff0d : character === '\t' ? 0xff09 : code < 256 ? code : 0x01000000 | code;
+      events.push([keysym, null, true], [keysym, null, false]);
+    }
+    keyQueue.send(events);
+  };
+  useEffect(() => {
+    if (!connected || (panel !== 'keyboard' && panel !== 'clipboard') || !expanded || !window.visualViewport) return;
+    const viewport = window.visualViewport, frame = frameRef.current;
+    const update = () => { if (frame && viewport.height >= 160) { frame.style.height = `${viewport.height}px`; frame.style.top = `${viewport.offsetTop}px`; } };
+    update(); viewport.addEventListener('resize', update); viewport.addEventListener('scroll', update);
+    return () => { viewport.removeEventListener('resize', update); viewport.removeEventListener('scroll', update); if (frame) { frame.style.height = ''; frame.style.top = ''; } };
+  }, [connected, panel, expanded]);
 
   const body = (
-    <div className={`flex min-h-0 flex-col bg-surface text-foreground ${expanded ? 'fixed inset-0 z-modal-panel h-dvh px-3 pb-[env(safe-area-inset-bottom)] pt-[max(0.75rem,env(safe-area-inset-top))]' : 'h-full'}`}
+    <div ref={frameRef} className={`flex min-h-0 flex-col bg-surface text-foreground ${expanded ? 'fixed inset-0 z-modal-panel h-dvh pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]' : 'relative h-full'}`}
       role={expanded ? 'dialog' : undefined} aria-modal={expanded || undefined} aria-label={t('computer.title')}
-      onKeyDown={event => event.stopPropagation()} onKeyUp={event => event.stopPropagation()}>
-      <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+      onKeyDown={event => { event.stopPropagation(); if (event.key === 'Escape' && !event.nativeEvent.isComposing && panel) { event.preventDefault(); setPanel(null); } }} onKeyUp={event => event.stopPropagation()}>
+      <div className="relative z-30 flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-3">
+        {expanded && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" onClick={() => { setExpanded(false); setPanel(null); }} aria-label={t('computer.exitFullscreen')}><ChevronLeft size={20} /></button>}
         <Monitor size={16} className="shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">{desktopName || t('computer.title')}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{connected ? desktopName || (localTarget ? service?.hostname || savedConnection()?.serviceName : host) || t('computer.title') : t('computer.title')}</span>
         {connected && <span className="text-[11px] text-primary">{t('computer.connected')}</span>}
         {connected && loginState === 'error' && <span role="alert" className="text-[11px] text-destructive">{t('computer.loginSaveFailed')}</span>}
-        {connected && hasSavedLogin && <button type="button" className={buttonClass} disabled={loginState === 'saving'} onClick={forgetLogin}>{t('computer.forgetLogin')}</button>}
         {connected && saveState === 'saving' && <span role="status" aria-label={t('computer.settingsSaving')} title={t('computer.settingsSaving')}><Loader2 size={12} className="animate-spin text-muted-foreground" /></span>}
         {connected && saveState === 'error' && <button type="button" className={buttonClass} title={t('computer.settingsSaveFailed')} aria-label={t('computer.settingsSaveFailed')} onClick={retry}>! {t('computer.retry')}</button>}
-        {(connected || busy) && <button type="button" className={buttonClass} onClick={disconnect} aria-label={t(busy ? 'computer.cancel' : 'computer.disconnect')}><Unplug size={14} />{busy ? t('computer.cancel') : t('computer.disconnect')}</button>}
-        {connected && <button type="button" className={buttonClass} onClick={() => setExpanded(value => !value)} aria-label={t(expanded ? 'computer.exitFullscreen' : 'computer.fullscreen')}>{expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>}
+        {busy && <button type="button" className={buttonClass} onClick={disconnect}><Unplug size={14} />{t('computer.cancel')}</button>}
+        {connected && !expanded && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center gap-1 text-xs" onClick={() => setExpanded(true)} aria-label={t('computer.fullscreen')}><Maximize2 size={16} />{t('computer.expand')}</button>}
+        {connected && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" onClick={() => togglePanel('tools')} aria-label={t('computer.tools')} aria-expanded={panel === 'tools'}><Settings2 size={18} /></button>}
       </div>
       {!connected && <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
         <div className="mx-auto w-full max-w-md">
@@ -288,7 +343,16 @@ export default function ComputerControlView() {
         </details>
         </div>
       </div>}
-      {connected && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-2 text-xs">
+      {connected && panel === 'tools' && <button type="button" className="absolute inset-x-0 bottom-14 top-12 z-20 bg-background/40" aria-label={t('computer.returnToDesktop')} onClick={() => setPanel(null)} />}
+      {connected && <div hidden={panel !== 'tools'} className={`${panel === 'tools' ? 'flex' : 'hidden'} absolute inset-x-3 top-14 z-30 max-h-[calc(100%-7rem)] flex-wrap items-center gap-3 overflow-y-auto rounded-lg border border-border bg-surface px-4 py-3 text-xs shadow-lg [&_button]:min-h-11 [&_select]:min-h-11 [&_label]:min-h-11`} role="region" aria-label={t('computer.tools')}>
+        <div className="flex w-full items-center justify-between"><span className="font-medium">{t('computer.tools')}</span><button type="button" className="flex min-w-11 items-center justify-center" aria-label={t('computer.closeTools')} onClick={() => setPanel(null)}><X size={18} /></button></div>
+        <div className="flex w-full items-center gap-2">
+          <div className="inline-flex rounded-md bg-background p-0.5" role="group" aria-label={t('computer.touchMode')}>
+            {(['trackpad', 'direct'] as const).map(mode => <button key={mode} type="button"
+              className={`min-h-9 rounded px-3 text-xs ${touchMode === mode ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface'}`}
+              aria-pressed={touchMode === mode} onClick={() => chooseTouchMode(mode)}>{t(mode === 'trackpad' ? 'computer.trackpadMode' : 'computer.directTouchMode')}</button>)}
+          </div>
+        </div>
         <label className="flex min-h-9 items-center gap-1.5"><input type="checkbox" checked={viewOnly} onChange={event => setViewOnly(event.target.checked)} />{t('computer.viewOnly')}</label>
         <button type="button" className={buttonClass} onClick={() => { change(value => ({ ...value, fit: !value.fit })); void flush(); }}>{t(fit ? 'computer.actualSize' : 'computer.fit')}</button>
         <select className={`${buttonClass} min-w-0 bg-surface`} aria-label={t('computer.shortcuts')} value="" disabled={viewOnly} onChange={event => {
@@ -298,18 +362,44 @@ export default function ComputerControlView() {
           <option value="copy">{platform === 'mac' ? '⌘C' : 'Ctrl+C'}</option><option value="paste">{pasteLabel}</option><option value="escape">Esc</option><option value="enter">Enter</option><option value="backspace">⌫</option>
           <option value="up">↑</option><option value="down">↓</option><option value="left">←</option><option value="right">→</option>
         </select>
+        <div className="flex w-full items-center justify-between border-t border-border pt-2">
+          {hasSavedLogin && <button type="button" className={buttonClass} disabled={loginState === 'saving'} onClick={forgetLogin}>{t('computer.forgetLogin')}</button>}
+          <button type="button" className={`${buttonClass} ml-auto text-destructive`} onClick={disconnect}><Unplug size={14} />{t('computer.disconnect')}</button>
+        </div>
       </div>}
-      <div ref={mountRef} className={`min-h-0 flex-1 overflow-hidden bg-[var(--chrome-bg)] ${connected ? '' : 'hidden'}`} aria-label={t('computer.remoteTitle')} />
-      {connected && !viewOnly && <form className="shrink-0 space-y-1 border-t border-border p-2" onSubmit={event => {
+      <div ref={mountRef} data-sidebar-gesture-ignore="" className={`relative z-10 min-h-0 flex-1 overflow-hidden bg-[var(--chrome-bg)] ${connected ? '' : 'hidden'}`}
+        style={{ touchAction: connected && touchMode === 'trackpad' && !viewOnly ? 'none' : undefined }} aria-label={t('computer.remoteTitle')}>
+        {connected && touchMode === 'trackpad' && !viewOnly && <div ref={cursorRef} hidden aria-hidden="true" className="pointer-events-none absolute left-0 top-0 z-20 h-5 w-5 will-change-transform">
+          <MousePointer2 size={20} strokeWidth={2} className="fill-background text-primary drop-shadow" />
+        </div>}
+      </div>
+      <div hidden={panel !== 'tools'}>
+        {connected && !viewOnly && <p className="shrink-0 border-t border-border px-2 py-1 text-[10px] leading-relaxed text-muted-foreground">{t(touchMode === 'trackpad' ? 'computer.trackpadHint' : 'computer.directTouchHint')}</p>}
+      </div>
+      {connected && panel === 'keyboard' && !viewOnly && <ComputerKeyboardInput sendText={sendText} sendKey={key => sendKeys(shortcuts[key])} />}
+      {connected && panel === 'clipboard' && !viewOnly && <form className="shrink-0 space-y-2 border-t border-border p-3" onSubmit={event => {
         event.preventDefault();
         if (!text || !rfbRef.current) return;
         try { rfbRef.current.clipboardPasteFrom(text); setClipboardSent(true); }
         catch { setError('computer.clipboardFailed'); }
       }}>
-        <div className="flex gap-1"><input className={`${inputClass} min-w-0 flex-1`} aria-label={t('computer.clipboard')} placeholder={t('computer.clipboardPlaceholder')} value={text} onChange={event => { setText(event.target.value); setClipboardSent(false); }} maxLength={16_384} /><button type="submit" className={buttonClass} disabled={!text}>{t('computer.clipboard')}</button><button type="button" className={buttonClass} onClick={() => sendKeys(shortcuts.paste)}>{pasteLabel}</button></div>
+        <textarea className={`${inputClass} min-w-0 resize-none py-2 text-base`} rows={2} aria-label={t('computer.clipboard')} placeholder={t('computer.clipboardPlaceholder')} value={text} onChange={event => { setText(event.target.value); setClipboardSent(false); }} maxLength={16_384} />
+        <div className="flex gap-2"><button type="submit" className={`${buttonClass} min-h-11 flex-1`} disabled={!text}>{t('computer.clipboard')}</button><button type="button" className={`${buttonClass} min-h-11`} onClick={() => sendKeys(shortcuts.paste)}>{pasteLabel}</button></div>
         <p role="status" className="text-[10px] leading-relaxed text-muted-foreground">{clipboardSent ? t('computer.clipboardSent') : t('computer.clipboardHint', { shortcut: pasteLabel })}</p>
         {error && <p role="alert" className="text-xs text-destructive">{t(error)}</p>}
       </form>}
+      {connected && <div className={`relative z-30 grid shrink-0 ${panel === 'keyboard' ? 'grid-cols-5' : 'grid-cols-4'} border-t border-border bg-surface px-1 py-1 text-[11px]`}>
+        <button type="button" className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md ${panel === 'keyboard' ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('keyboard')} aria-pressed={panel === 'keyboard'}><Keyboard size={18} />{t('computer.keyboard')}</button>
+        <button type="button" className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md ${panel === 'clipboard' ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('clipboard')} aria-pressed={panel === 'clipboard'}><Clipboard size={18} />{t('computer.clipboardTool')}</button>
+        {panel === 'keyboard' ? <>
+          <button type="button" className="min-h-11 rounded-md text-sm" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys([[0xff09, 'Tab']])}>Tab</button>
+          <button type="button" className="min-h-11 rounded-md text-lg" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys(shortcuts.backspace)}>⌫</button>
+          <button type="button" className="min-h-11 rounded-md text-lg" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys(shortcuts.enter)}>↵</button>
+        </> : <>
+          <button type="button" className="flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md" onClick={() => { change(value => ({ ...value, fit: !value.fit })); void flush(); }}><ZoomIn size={18} />{t(fit ? 'computer.zoom' : 'computer.fit')}</button>
+          <button type="button" className="flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md" disabled={viewOnly} onClick={() => chooseTouchMode(touchMode === 'trackpad' ? 'direct' : 'trackpad')} aria-label={t('computer.switchTouchMode')}><MousePointer2 size={18} />{t(touchMode === 'trackpad' ? 'computer.trackpadMode' : 'computer.directTouchMode')}</button>
+        </>}
+      </div>}
     </div>
   );
   return expanded ? createPortal(body, document.body) : body;

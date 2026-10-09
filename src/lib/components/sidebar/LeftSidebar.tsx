@@ -1,3 +1,4 @@
+import { sessionCreationErrorKey, type NewSessionRequestOptions, type NewSessionCreationError } from '../../terminal/newSessionRequest';
 import { Archive, RefreshCw } from 'lucide-react';
 import { CollaborationExecutionArchives } from './CollaborationExecutionArchives';
 import { completedTaskSessions } from '../../collaboration/completedSessions';
@@ -92,7 +93,7 @@ interface LeftSidebarProps {
     tuiProgress?: TuiProgressReport | null;
     gitStatus?: GitStatusReport | null;
   }>; 
-  onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => void;
+  onNewSession: (opts?: NewSessionRequestOptions) => void;
   recoverableTmuxSessions?: TmuxSessionSummary[];
   recoverableTmuxSessionsLoading?: boolean;
   onRefreshRecoverableTmuxSessions?: () => void;
@@ -278,6 +279,10 @@ export function LeftSidebar(
   const [, requestAttentionScroll] = useState(0);
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
+  const [sessionLaunchPending, setSessionLaunchPending] = useState(false);
+  const [sessionLaunchError, setSessionLaunchError] = useState<NewSessionCreationError | null>(null);
+  const sessionLaunchPendingRef = useRef(false);
+  const composerGenerationRef = useRef(0);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
   const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
@@ -713,14 +718,30 @@ export function LeftSidebar(
     if (!push && !pinned) onClose();
   };
   const quickLaunchMode = defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' as const : defaultSessionMode;
+  const launchSession = (options: NewSessionRequestOptions, fromComposer = false) => {
+    if (sessionLaunchPendingRef.current) return;
+    sessionLaunchPendingRef.current = true;
+    setSessionLaunchPending(true);
+    setSessionLaunchError(null);
+    const generation = composerGenerationRef.current;
+    onNewSession({ ...options, onResult: (result) => {
+      sessionLaunchPendingRef.current = false;
+      setSessionLaunchPending(false);
+      if (!result.ok) {
+        setSessionLaunchError(result.error);
+        return;
+      }
+      if (generation !== composerGenerationRef.current) return;
+      if (fromComposer) setNewSessionComposerOpen(false);
+      closeIfOverlay();
+    } });
+  };
   const handleQuickLaunchTerminal = () => {
-    onNewSession({ mode: quickLaunchMode });
-    closeIfOverlay();
+    launchSession({ mode: quickLaunchMode });
   };
   const handleQuickLaunchDefaultAgent = () => {
     if (!newSessionAgent) return;
-    onNewSession({ mode: quickLaunchMode, command: newSessionAgent.command });
-    closeIfOverlay();
+    launchSession({ mode: quickLaunchMode, command: newSessionAgent.command });
   };
 
   const handleRestoreTmuxSession = (session: TmuxSessionSummary) => {
@@ -737,13 +758,11 @@ export function LeftSidebar(
   }, [attachingTmuxName, recoverableTmuxSessions]);
 
   const handleQuickLaunchAgent = (agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference, command?: string) => {
-    onNewSession({
+    launchSession({
       ...newSessionOptions,
       cwd: newSessionOptions.cwd?.trim() || undefined,
       command: command ?? agent?.command,
-    });
-    setNewSessionComposerOpen(false);
-    closeIfOverlay();
+    }, true);
   };
 
   const handleResumeHistory = async (entry: AgentResumeHistoryEntry) => {
@@ -751,9 +770,7 @@ export function LeftSidebar(
     setAgentResumeHistoryError(null);
     try {
       const prepared = await prepareAgentResumeHistory(entry.id);
-      onNewSession({ mode: 'shell', cwd: prepared.cwd, command: prepared.command });
-      setNewSessionComposerOpen(false);
-      closeIfOverlay();
+      launchSession({ mode: 'shell', cwd: prepared.cwd, command: prepared.command }, true);
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error
         ? String((error as { code?: unknown }).code ?? '')
@@ -781,6 +798,9 @@ export function LeftSidebar(
       setNewSessionComposerOpen(false);
       return;
     }
+    if (sessionLaunchPendingRef.current) return;
+    composerGenerationRef.current += 1;
+    if (!sessionLaunchPendingRef.current) setSessionLaunchError(null);
     setNewSessionOptions({
       mode: defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' : defaultSessionMode,
       cwd: activeSessionId ? sessionStates.get(activeSessionId)?.cwd ?? undefined : undefined,
@@ -2039,6 +2059,8 @@ export function LeftSidebar(
           })}
           tmuxAvailable={tmuxAvailable}
           options={newSessionOptions}
+          launchPending={sessionLaunchPending}
+          launchError={sessionLaunchError ? t(sessionCreationErrorKey(sessionLaunchError)) : null}
           agents={newSessionAgents}
           selectedAgent={newSessionAgent}
           detecting={detectingNewSessionAgents}
@@ -2143,21 +2165,26 @@ export function LeftSidebar(
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (
         <div className="relative z-10 shrink-0 bg-[var(--chrome-bg)] px-3 pb-3 pt-1 md:border-t md:border-border md:p-2">
+          {sessionLaunchError && <p role="alert" className="mb-2 text-[11px] leading-relaxed text-destructive">{t(sessionCreationErrorKey(sessionLaunchError))}</p>}
           <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
             <button
               type="button"
               onClick={handleQuickLaunchTerminal}
+              disabled={sessionLaunchPending}
+              aria-busy={sessionLaunchPending}
               className={`flex min-w-0 items-center justify-center gap-2 rounded-lg px-2 py-2.5 text-[12px] font-semibold transition active:scale-[0.99] ${newSessionAgent ? 'bg-surface-elevated text-foreground ring-1 ring-border/30 hover:bg-surface-2' : 'bg-primary text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'}`}
               title={t('sidebar.newSession')}
               aria-label={t('sidebar.newSession')}
             >
               <RiTerminalLine size={15} className="shrink-0" />
-              <span className="truncate">Terminal</span>
+              <span className="truncate">{sessionLaunchPending ? t('sidebar.sessionCreating') : 'Terminal'}</span>
             </button>
             {newSessionAgent && (
               <button
                 type="button"
                 onClick={handleQuickLaunchDefaultAgent}
+                disabled={sessionLaunchPending}
+                aria-busy={sessionLaunchPending}
                 className="flex min-w-0 items-center justify-center gap-2 rounded-lg bg-primary px-2 py-2.5 text-[12px] font-semibold text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 transition hover:bg-primary/90 active:scale-[0.99]"
                 title={t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName })}
                 aria-label={t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName })}
@@ -2169,6 +2196,7 @@ export function LeftSidebar(
             <button
               type="button"
               onClick={toggleNewSessionComposer}
+              disabled={sessionLaunchPending}
               className="relative inline-flex w-10 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-[0.97]"
               title={moreButtonLabel}
               aria-label={moreButtonLabel}

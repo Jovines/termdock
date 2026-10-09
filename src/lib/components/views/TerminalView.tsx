@@ -1,3 +1,4 @@
+import { isKeyboardLayerOpen, useKeyboardLayerOpen } from '../../hooks/useKeyboardLayer';
 import { isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../../services/workspaceHost';
 import { scheduleInteractionIdle } from '../../utils/interactionIdle';
 import { readTerminalSnapshot, writeTerminalSnapshot } from '../../utils/terminalSnapshotCache';
@@ -147,7 +148,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   colorTheme = 'dark',
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
-  focusSuspended = false,
+  focusSuspended: externalFocusSuspended = false,
   deferCursorUntilPositioned = false,
   isLayoutVisible = true,
   focusRequestToken = 0,
@@ -198,6 +199,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // Must be correct on the first render. A false desktop default briefly sends
   // autoFocus=true to TerminalViewport when split panes are reparented, which
   // opens the soft keyboard before the mobile-detection effect can run.
+  const keyboardLayerOpen = useKeyboardLayerOpen();
+  const focusSuspended = externalFocusSuspended || keyboardLayerOpen;
   const [isMobile, setIsMobile] = React.useState(detectMobileTerminalLayout);
   const [isIOS, setIsIOS] = React.useState(false);
   const [isInputFocused, setIsInputFocused] = React.useState(false);
@@ -1928,6 +1931,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleViewportInput = React.useCallback(
     (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean; targeted?: boolean }) => {
+      if (focusSuspendedRef.current || isKeyboardLayerOpen()) return;
       if (!isActiveRef.current && !options?.targeted) {
         return;
       }

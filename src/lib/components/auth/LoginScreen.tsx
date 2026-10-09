@@ -6,6 +6,7 @@ import { useI18n } from '../../i18n';
 
 interface LoginScreenProps {
   onLoginSuccess: () => void;
+  focusEnabled?: boolean;
 }
 
 // ASCII banner for the brand mark. Kept as a single string so the monospace
@@ -21,17 +22,17 @@ const ASCII_LOGO = String.raw`
 
 // Renders a fullscreen password form. Stays mounted for the lifetime of the
 // "logged out" state — the parent App swaps it in/out based on auth status.
-export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
+export function LoginScreen({ onLoginSuccess, focusEnabled = true }: LoginScreenProps) {
   const { t } = useI18n();
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<'login.invalidPassword' | 'login.rateLimited' | 'login.failed' | null>(null);
   const [retrySecondsLeft, setRetrySecondsLeft] = useState<number>(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (focusEnabled && !submitting && retrySecondsLeft === 0) inputRef.current?.focus();
+  }, [focusEnabled, submitting, retrySecondsLeft]);
 
   // When rate-limited, count down so the button stays disabled and the
   // remaining seconds are visible to the user.
@@ -44,7 +45,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
   }, [retrySecondsLeft]);
 
   const blocked = retrySecondsLeft > 0;
-  const canSubmit = !submitting && !blocked && password.length > 0;
+  const canSubmit = focusEnabled && !submitting && !blocked && password.length > 0;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,12 +59,12 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         onLoginSuccess();
         return;
       }
-      setError(result.error || t('login.invalidPassword'));
+      setError(result.rateLimited ? 'login.rateLimited' : 'login.invalidPassword');
       if (result.rateLimited && typeof result.retryAfterMs === 'number') {
         setRetrySecondsLeft(Math.max(1, Math.ceil(result.retryAfterMs / 1000)));
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('login.failed'));
+    } catch {
+      setError('login.failed');
     } finally {
       setSubmitting(false);
     }
@@ -120,11 +121,12 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
             autoComplete="current-password"
             value={password}
             placeholder={placeholder}
+            aria-label={t('login.placeholder')}
             onChange={(e) => {
               setPassword(e.target.value);
               if (error) setError(null);
             }}
-            disabled={submitting || blocked}
+            disabled={!focusEnabled || submitting || blocked}
             // font-size must be >= 16px to prevent iOS Safari from auto-zooming
             // the page when the input gains focus.
             className="flex-1 bg-transparent text-foreground placeholder:text-muted-foreground/70 focus:outline-none disabled:opacity-60"
@@ -145,7 +147,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         </div>
 
         {error && !blocked ? (
-          <div className="mt-3 text-center text-xs text-destructive">{error}</div>
+          <div role="alert" className="mt-3 text-center text-xs text-destructive">{t(error)}</div>
         ) : null}
       </form>
 

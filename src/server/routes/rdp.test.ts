@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFederationRuntime } from '../federation/runtime.js';
 import { createIdentity, secureConnection } from '../federation/secureProtocol.js';
 import { socketDuplex } from '../federation/socketDuplex.js';
@@ -17,9 +17,15 @@ import { loadSettingsFile, saveSettingsFile } from '../utils/settings.js';
 import { defaultComputerPreferences } from '../../lib/computer/preferences.js';
 import { ComputerCredentialStore } from '../utils/computerCredentials.js';
 import { GuacamoleParser, guacamoleInstruction } from './guacamoleProtocol.js';
+import { observeLocalXrdpLogin } from './xrdpLogin.js';
+
+const { observeLogin } = vi.hoisted(() => ({ observeLogin: vi.fn(async (_address: string, _port: number,
+  _result: (state: 'authenticated' | 'failed' | 'unavailable' | 'timeout') => void): Promise<{ clientName: string; close(): void } | null> => null) }));
+vi.mock('./xrdpLogin.js', () => ({ observeLocalXrdpLogin: observeLogin }));
+beforeEach(() => observeLogin.mockReset().mockResolvedValue(null));
 
 const cleanups: Array<() => void> = [];
-afterEach(() => { stopComputerBridges(); for (const close of cleanups.splice(0).reverse()) close(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+afterEach(() => { stopComputerBridges(); for (const close of cleanups.splice(0).reverse()) close(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.mocked(observeLocalXrdpLogin).mockReset().mockResolvedValue(null); });
 async function wsServer() {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
   cleanups.push(() => { for (const socket of server.clients) socket.terminate(); server.close(); });
@@ -38,7 +44,7 @@ async function fixture(mode: 'direct' | 'relay', full = true) {
   const connections = new Set<Socket>();
   const guacd = createServer(socket => {
     connections.add(socket); socket.once('close', () => connections.delete(socket)); socket.setEncoding('utf8');
-    const names = ['VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'domain', 'security', 'ignore-cert', 'enable-drive', 'resize-method'];
+    const names = ['VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'domain', 'security', 'ignore-cert', 'enable-drive', 'resize-method', 'client-name'];
     const parser = new GuacamoleParser(values => {
       const [op, ...args] = values;
       if (op === 'select') { expect(args).toEqual(['rdp']); socket.write(guacamoleInstruction('args', ...names)); }
@@ -103,7 +109,7 @@ async function fixture(mode: 'direct' | 'relay', full = true) {
     return take(id, full ? 'ws-ready' : 'error');
   };
   const send = (data: unknown, id = 'rdp') => channel.send({ type: 'ws-data', id, data: JSON.stringify(data) });
-  const start = { type: 'start', username: 'test-rdp-user', password: 'private-rdp-password-unique', domain: '', ignoreCert: false, width: 1280, height: 800 };
+  const start = { type: 'start', verifyLogin: true, username: 'test-rdp-user', password: 'private-rdp-password-unique', domain: '', ignoreCert: false, width: 1280, height: 800 };
   const api = async (method: string, body?: unknown, path = '/preferences') => {
     const id = crypto.randomUUID();
     channel.send({ type: 'http', id, method, path: '/api/computer' + path, headers: { 'content-type': 'application/json' } });
@@ -118,6 +124,87 @@ async function fixture(mode: 'direct' | 'relay', full = true) {
 }
 
 describe('RDP over the authenticated encrypted transport', () => {
+  const legacyCapabilities = ['direct', 'relay'].flatMap(mode => [undefined, false, 'true', 1].map(verifyLogin => ({ mode: mode as 'direct' | 'relay', verifyLogin })));
+  it.each(legacyCapabilities)('keeps non-opt-in clients on instruction-only transport over $mode with verifyLogin=$verifyLogin', async ({ mode, verifyLogin }) => {
+    const f = await fixture(mode); await f.open();
+    const { verifyLogin: _capability, ...legacy } = f.start;
+    f.send(verifyLogin === undefined ? legacy : { ...legacy, verifyLogin });
+    const frame = JSON.parse(String((await f.take('rdp', 'ws-data')).data));
+    expect(frame).toMatchObject({ type: 'instructions', seq: 1 });
+    expect(frame.instructions).toContainEqual(['ready', 'rdp-id']); expect(observeLogin).not.toHaveBeenCalled();
+    expect(f.configurations[0]['client-name']).toBe('');
+    f.send({ type: 'instruction', opcode: 'key', args: ['97', '1'] });
+    await vi.waitFor(() => expect(f.inputs).toContainEqual(['key', '97', '1']));
+  });
+  it.each(['direct', 'relay'] as const)('orders pending before display and authenticated over %s, and closes its observer on cancellation', async mode => {
+    let report!: Parameters<typeof observeLogin>[2]; const close = vi.fn();
+    observeLogin.mockImplementationOnce(async (_address, _port, result) => { report = result; return { clientName: 'td-auth-fixture', close }; });
+    const f = await fixture(mode); await f.open(); f.send(f.start);
+    expect(JSON.parse(String((await f.take('rdp', 'ws-data')).data))).toEqual({ type: 'authentication', state: 'pending' });
+    expect(JSON.parse(String((await f.take('rdp', 'ws-data')).data)).instructions).toContainEqual(['ready', 'rdp-id']);
+    expect(f.configurations[0]).toMatchObject({ 'client-name': 'td-auth-fixture', password: f.start.password });
+    report('authenticated');
+    expect(JSON.parse(String((await f.take('rdp', 'ws-data')).data))).toEqual({ type: 'authentication', state: 'authenticated' });
+    expect(f.wire.every(chunk => !chunk.includes(f.start.password) && !chunk.includes(f.start.username))).toBe(true);
+    f.channel.send({ type: 'ws-close', id: 'rdp' });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(f.connections.size).toBe(0));
+  });
+  it.each(['direct', 'relay'] as const)('keeps legacy Guacamole operation after optional journal unavailability over %s', async mode => {
+    let report!: Parameters<typeof observeLogin>[2];
+    observeLogin.mockImplementationOnce(async (_address, _port, result) => { report = result; return { clientName: 'td-auth-fixture', close: vi.fn() }; });
+    const f = await fixture(mode); await f.open(); f.send(f.start);
+    expect(JSON.parse(String((await f.take('rdp', 'ws-data')).data))).toMatchObject({ type: 'authentication', state: 'pending' });
+    await f.take('rdp', 'ws-data'); report('unavailable');
+    expect(JSON.parse(String((await f.take('rdp', 'ws-data')).data))).toEqual({ type: 'authentication', state: 'unavailable' });
+    f.send({ type: 'instruction', opcode: 'key', args: ['97', '1'] });
+    await vi.waitFor(() => expect(f.inputs).toContainEqual(['key', '97', '1']));
+  });
+  it.each(['direct', 'relay'] as const)('closes and releases guacd on journal PAM failure over %s without exposing credentials', async mode => {
+    let report!: Parameters<typeof observeLogin>[2]; const close = vi.fn();
+    observeLogin.mockImplementationOnce(async (_address, _port, result) => { report = result; return { clientName: 'td-auth-fixture', close }; });
+    const f = await fixture(mode); await f.open(); f.send(f.start);
+    await f.take('rdp', 'ws-data'); await f.take('rdp', 'ws-data'); report('failed');
+    expect(await f.take('rdp', 'ws-close')).toMatchObject({ code: 4401, reason: 'COMPUTER_AUTH_FAILED' });
+    await vi.waitFor(() => expect(f.connections.size).toBe(0)); expect(close).toHaveBeenCalledOnce();
+    expect(f.wire.every(chunk => !chunk.includes(f.start.password) && !chunk.includes(f.start.username))).toBe(true);
+    await f.open('127.0.0.1', 'retry');
+  });
+  it('closes a matched authentication timeout and cancels the observer', async () => {
+    let report!: Parameters<typeof observeLogin>[2]; const close = vi.fn();
+    observeLogin.mockImplementationOnce(async (_address, _port, result) => { report = result; return { clientName: 'td-auth-fixture', close }; });
+    const f = await fixture('direct'); await f.open(); f.send(f.start);
+    await f.take('rdp', 'ws-data'); await f.take('rdp', 'ws-data'); report('timeout');
+    expect(await f.take('rdp', 'ws-close')).toMatchObject({ code: 4408, reason: 'COMPUTER_CONNECT_TIMEOUT' });
+    await vi.waitFor(() => expect(f.connections.size).toBe(0)); expect(close).toHaveBeenCalledOnce();
+  });
+  it('closes an observer prepared after cancellation without creating a guacd connection', async () => {
+    let resolve!: (observer: { clientName: string; close(): void }) => void; const close = vi.fn();
+    observeLogin.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    const f = await fixture('direct'); await f.open(); f.send(f.start);
+    await vi.waitFor(() => expect(observeLogin).toHaveBeenCalledOnce());
+    f.channel.send({ type: 'ws-close', id: 'rdp' });
+    await f.take('rdp', 'ws-close');
+    resolve({ clientName: 'td-auth-fixture', close });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce()); expect(f.configurations).toEqual([]); expect(f.connections.size).toBe(0);
+  });
+  it.each(['direct', 'relay'] as const)('waits for the local XRDP login result over %s and returns rejected credentials to the app', async mode => {
+    let result!: Parameters<typeof observeLocalXrdpLogin>[2]; const close = vi.fn();
+    vi.mocked(observeLocalXrdpLogin).mockImplementation(async (_address, _port, callback) => {
+      result = callback; return { clientName: 'td-login-test', close };
+    });
+    const f = await fixture(mode); await f.open(); f.send(f.start);
+    expect(JSON.parse(String((await f.take('rdp', 'ws-data')).data))).toEqual({ type: 'authentication', state: 'pending' });
+    await f.take('rdp', 'ws-data');
+    expect(f.configurations[0]).toMatchObject({ 'client-name': 'td-login-test', password: f.start.password });
+    result('authenticated');
+    expect(JSON.parse(String((await f.take('rdp', 'ws-data')).data))).toEqual({ type: 'authentication', state: 'authenticated' });
+    f.channel.send({ type: 'ws-close', id: 'rdp' }); await vi.waitFor(() => expect(close).toHaveBeenCalled());
+    await f.open('127.0.0.1', 'retry'); f.send(f.start, 'retry');
+    await f.take('retry', 'ws-data'); await f.take('retry', 'ws-data'); result('failed');
+    expect(await f.take('retry', 'ws-close')).toMatchObject({ reason: 'COMPUTER_AUTH_FAILED' });
+    expect(f.wire.every(chunk => !chunk.includes(f.start.password))).toBe(true);
+  });
   it.each(['direct', 'relay'] as const)('remembers, uses and forgets login over %s without exposing secrets in settings or outer traffic', async mode => {
     const f = await fixture(mode), preferences = defaultComputerPreferences('linux');
     preferences.local.username = f.start.username; preferences.local.port = '3390'; preferences.local.ignoreCert = true;
@@ -201,8 +288,12 @@ describe('RDP over the authenticated encrypted transport', () => {
     expect(f.configurations).toHaveLength(1);
   });
 
-  it('reports backend failure and keeps the encrypted connection available for a fresh attempt', async () => {
-    const f = await fixture('direct'); vi.stubEnv('TERMDOCK_GUACD_PORT', '1');
+  it.each(['direct', 'relay'] as const)('reports real TCP backend refusal and keeps the encrypted connection available for a fresh attempt over %s', async mode => {
+    const f = await fixture(mode);
+    const refused = createServer(); refused.listen(0, '127.0.0.1'); await once(refused, 'listening');
+    const address = refused.address(); if (!address || typeof address === 'string') throw new Error('No refusal fixture port');
+    await new Promise<void>((resolve, reject) => refused.close(error => error ? reject(error) : resolve()));
+    vi.stubEnv('TERMDOCK_GUACD_PORT', String(address.port));
     await f.open(); f.send(f.start);
     expect(await f.take('rdp', 'ws-close')).toMatchObject({ reason: 'COMPUTER_RDP_BACKEND_UNAVAILABLE' });
     await f.open('127.0.0.1', 'retry');

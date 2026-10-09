@@ -32,7 +32,7 @@ export interface CollaborationTaskAttempt {
   id: string; assignee: TaskMember; createdAt: number;
   threadId: string; messageId?: string; deliveryStatus?: 'pending' | 'delivered' | 'failed' | 'expired';
   deliveredAt?: number | null; deliveryError?: string | null;
-  report?: { status: TaskReportStatus; content: string; evidence?: unknown; createdAt: number };
+  report?: { status: TaskReportStatus; content: string; evidence?: unknown; createdAt: number; summary?: string };
 }
 export interface CollaborationTask {
   id: string; ownerServiceId: string; groupId: string; title: string; spec: string;
@@ -69,6 +69,8 @@ export interface TaskCreateInput {
   workType?: 'code' | 'read-only';
 }
 export interface CollaborationTaskView extends CollaborationTask {
+  /** Response metadata computed before a summary omits the report body; never persisted. */
+  automationIssueSource?: 'member-report' | 'system';
   summaryOnly?: boolean; replica?: boolean;
   memberSessions: Record<string, string>;
   outbox: Array<{ id: string; attemptId: string | null; messageId?: string; lastError?: string }>;

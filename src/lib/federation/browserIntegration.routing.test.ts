@@ -35,6 +35,45 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it.each(['direct', 'relay'] as const)('reads native architecture over %s on first load and rejects disconnects without native fallback', async mode => {
+    vi.stubGlobal('navigator', { serviceWorker: { controller: null } });
+    const base = mocks.connect.getMockImplementation()!;
+    const document = { version: 1, generatedAt: '2026-10-09T09:00:00Z', summary: 'Remote project',
+      perspectives: [{ id: 'overview', title: 'Overview', summary: '',
+        nodes: [{ id: 'server', title: 'Server', summary: '', files: [{ path: 'src/server.ts', line: 2 }] }], edges: [] }] };
+    const business = vi.fn(async (input: string) => input.startsWith('/api/terminal/fs/list?')
+      ? Response.json({ entries: [{ name: 'feature-Upload-12345678.json', isDirectory: false }] })
+      : Response.json({ content: JSON.stringify(document), binary: false, truncated: false }));
+    mocks.connect.mockImplementation(async args => {
+      if (mode === 'relay' && args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('direct unavailable');
+      return Object.assign(await base(args), { fetch: business });
+    });
+    const legacyUpload = vi.fn();
+    Object.assign(window, { electronAPI: { uploadClipboardImage: legacyUpload, uploadDroppedFiles: legacyUpload } });
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://b.example', targetPeerId: 'B',
+      routes: mode === 'relay' ? [{ url: 'https://a.example', targetPeerId: 'A' }] : [] };
+    mocks.saved.mockReturnValue(target);
+    await integration.connectDevice(target);
+    integration.installEncryptedFetch(); vi.stubGlobal('fetch', window.fetch);
+    const { listArchitectures, readArchitecture } = await import('../architecture/api');
+    const controller = new AbortController();
+    expect(await readArchitecture('/remote project', controller.signal)).toEqual(document);
+    expect(business).toHaveBeenCalledWith('/api/terminal/fs/read?path=%2Fremote+project%2F.termdock%2Farchitecture.json&action=view_architecture', expect.objectContaining({ signal: controller.signal, cache: 'no-store' }));
+    expect(await listArchitectures('/remote project', controller.signal)).toEqual(['.termdock/architectures/feature-Upload-12345678.json']);
+    expect(business).toHaveBeenCalledWith('/api/terminal/fs/list?path=%2Fremote+project%2F.termdock%2Farchitectures&action=list_architectures&showHidden=false', expect.objectContaining({ signal: controller.signal, cache: 'no-store' }));
+    business.mockResolvedValueOnce(Response.json({ error: 'Path does not exist: /remote project/.termdock/architecture.json' }, { status: 403 }));
+    expect(await readArchitecture('/remote project', controller.signal)).toBeNull();
+    business.mockRejectedValueOnce(new Error('Secure connection closed'));
+    await expect(readArchitecture('/remote project', controller.signal)).rejects.toThrow('Secure connection closed');
+    business.mockRejectedValueOnce(new Error('Secure connection closed'));
+    await expect(listArchitectures('/remote project', controller.signal)).rejects.toThrow('Secure connection closed');
+    expect(business).toHaveBeenCalledTimes(5);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(legacyUpload).not.toHaveBeenCalled();
+    expect(integration.currentConnectionPath()).toBe(mode);
+  });
+
   it.each(['direct', 'relay'] as const)('reconnects concurrent complete collaboration reads over %s after a suspended channel closes', async mode => {
     vi.stubGlobal('navigator', { onLine: true, serviceWorker: { controller: null } });
     const base = mocks.connect.getMockImplementation()!;

@@ -40,6 +40,27 @@ function setup() {
 }
 
 describe('real stores over the desktop collaboration bridge', () => {
+  it.each([false, true])('keeps deletion across relay restart and an offline peer update (reverse order: %s)', async reverse => {
+    const { nodes, services, bridge } = setup();
+    await bridge.save(nodes[0].origin, { name: 'Pair', sessionIds: ['generic', qualifySession(nodes[1].origin, 'generic')] });
+    await bridge.refresh();
+    const original = nodes[1].store.list()[0];
+    nodes[1].connected = false;
+    nodes[0].store.remove(original.id);
+    const deletion = nodes[0].store.getGroup(original.id)!;
+    nodes[1].store.mergeFederatedGroup({ ...original, name: 'Offline edit', updatedAt: deletion.updatedAt + 500 });
+    nodes[0].store = new CollaborationStore(nodes[0].file);
+    nodes[1].connected = true;
+    const restartedRelay = new CollaborationFederation(() => reverse ? [...services].reverse() : services);
+    await restartedRelay.refresh();
+    await restartedRelay.refresh();
+    for (const node of nodes.slice(0, 2)) {
+      expect(new CollaborationStore(node.file).list()).toEqual([]);
+      expect(node.store.getGroup(original.id)?.deleted).toBe(true);
+      expect((await restartedRelay.list(node.origin)).groups).toEqual([]);
+    }
+    expect(nodes[2].store.list()).toEqual([]);
+  });
   it.each(['hello', 'evidence '.repeat(20_000)])('syncs sender shell confirmation on an existing pending message (%#)', async (content) => {
     const { nodes, bridge } = setup();
     await bridge.save(nodes[0].origin, { name: 'Pair', sessionIds: ['generic', qualifySession(nodes[1].origin, 'generic')] });

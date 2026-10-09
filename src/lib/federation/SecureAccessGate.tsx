@@ -19,6 +19,7 @@ import { activateServiceWorkspace, getWorkspaceHost, isWorkspaceActive, reportWo
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { StartupScreen } from '../components/StartupScreen';
 import { setConnectionRecovery } from './connectionRecovery';
+import { useI18n } from '../i18n';
 
 
 // Keep the invitation in memory and remove its secret from browser history immediately.
@@ -36,6 +37,7 @@ function pendingSession(): string | undefined {
 }
 
 export function SecureAccessGate({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
   const [incomingInvitation, setIncomingInvitation] = useState(initialInvitation);
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(!!initialInvitation);
@@ -66,19 +68,38 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   }, [ready, checking, fullService, remoteSession]);
   useEffect(() => { void getIdentity().then(identity => setDeviceIdentity(identity.peerId)).catch(() => setError(true)); }, []);
   useEffect(() => {
+    let stopped = false, revision = 0;
     const handler = (event: Event) => {
       const { origin, sessionId } = (event as CustomEvent<{ origin: string; sessionId: string }>).detail;
-      try {
-        const connections = JSON.parse(localStorage.getItem('termdock.federation.connections.v1') ?? '[]') as ConnectionIntent[];
-        const connection = connections.find(item => connectionAddresses(item).some(address => new URL(address).origin === new URL(origin).origin));
-        if (!connection) { setOpen(true); return; }
-        if (getWorkspaceHost()?.focusSession(connection.targetPeerId, sessionId)) return;
+      const request = ++revision;
+      void (async () => {
+        const connections = (await listServiceConnections()).filter((item): item is ServiceConnection & { targetPeerId: string } => !!item.targetPeerId);
+        let service = connections.find(item => connectionAddresses(item).some(address => new URL(address).origin === new URL(origin).origin));
+        if (!service) {
+          // Collaboration IDs use the node's registered origin, which can
+          // differ from this device's saved LAN/domain/relay address. Resolve
+          // that origin through the current encrypted service's peer directory;
+          // only a matching saved identity can select a workspace.
+          const response = await (await getActiveClient()).fetch('/api/terminal/operations/collaboration-directory', { signal: AbortSignal.timeout(5000) });
+          if (!response.ok) throw new Error('暂时无法读取协作服务目录，请重试。');
+          const directory = await response.json() as { services?: { origin: string; serviceId?: string }[] };
+          const peer = directory.services?.find(item => item.origin === origin && item.serviceId);
+          service = connections.find(item => item.targetPeerId === peer?.serviceId);
+        }
+        if (stopped || request !== revision) return;
+        if (!service) { setOpen(true); return; }
+        if (getWorkspaceHost()?.focusSession(service.targetPeerId, sessionId)) return;
+        const connection = { ...service, serviceName: service.label };
         sessionStorage.setItem(OPEN_SESSION_KEY, JSON.stringify({ serviceId: connection.targetPeerId, sessionId }));
-        void connectDevice(connection).then(() => { setRemoteSession(sessionId); setReady(true); }).catch(() => { setError(true); setOpen(true); });
-      } catch { setOpen(true); }
+        await connectDevice(connection);
+        if (!stopped && request === revision) { setRemoteSession(sessionId); setReady(true); }
+      })().catch(failure => {
+        if (stopped || request !== revision) return;
+        setAccessError(failure instanceof Error ? failure.message : '暂时无法打开远程会话'); setOpen(true);
+      });
     };
     window.addEventListener('termdock:open-remote-session', handler);
-    return () => window.removeEventListener('termdock:open-remote-session', handler);
+    return () => { stopped = true; window.removeEventListener('termdock:open-remote-session', handler); };
   }, []);
   const readPermissions = async (timeoutMs = 5000) => {
     const client = await getActiveClient();
@@ -332,10 +353,10 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
           {!error && <LoaderCircle size={13} className="shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
           <span>{connectionMessage}</span>
         </div>
-        {error && <p className="mt-2 text-xs leading-5 text-muted-foreground">登录信息已保留</p>}
+        {error && <p className="mt-2 text-xs leading-5 text-muted-foreground">{t(savedConnection() ? 'login.savedConnectionRetained' : 'login.continueAfterReconnect')}</p>}
         <button type="button" className="mt-6 min-h-11 rounded-lg px-4 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setOpen(true)}>管理服务</button>
       </div>
-    </div> : <><div className="fixed left-0 right-0 top-[var(--safe-top-inset)] z-chrome sm:right-auto sm:w-72"><ServiceSwitcher /></div><LoginScreen onLoginSuccess={() => { void readPermissions().catch(() => setError(true)); }} /></>}
+    </div> : <><div className="fixed left-0 right-0 top-[var(--safe-top-inset)] z-chrome sm:right-auto sm:w-72"><ServiceSwitcher /></div><LoginScreen focusEnabled={!open} onLoginSuccess={() => { void readPermissions().catch(() => setError(true)); }} /></>}
     {open && <FederationAccess onConnect={connect} onClose={() => setOpen(false)} onAddService={addService} onOpenService={openService} onConnectWithPassword={async (connection, password) => { await authenticateKnownConnection(connection, password); await readPermissions(); setOpen(false); }} paired={ready || !!savedConnection()} initialInvite={incomingInvitation} currentServiceName={serviceName} currentServiceId={currentSecureClient()?.targetPeerId || savedConnection()?.targetPeerId} currentServiceOrigin={savedConnection()?.serviceOrigin} currentIdentity={deviceIdentity} grants={grants} sessions={sessions} loading={loadingAccess} loadError={accessError} onRetry={() => void refresh()}
       onRename={async (subjectId, name) => { await (await getActiveClient()).request({ type: 'device-name', subjectId, name }); await refresh(); }}
       hasBackup={!!savedConnection() && connectionRoutes(savedConnection()!).length > 0} inviteAddresses={inviteAddresses} onCreateInvite={canManage ? invite : undefined}

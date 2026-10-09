@@ -1,3 +1,5 @@
+import { sessionCreationErrorKey, type NewSessionCreationResult, type NewSessionRequestOptions } from './lib/terminal/newSessionRequest';
+import { isKeyboardLayerOpen } from './lib/hooks/useKeyboardLayer';
 import { CollaborationWorkspaceFrame } from './lib/components/CollaborationWorkspaceFrame';
 import { useCollaborationNavigation } from './lib/stores/useCollaborationNavigation';
 import { LoadingSpinner as RiLoaderLine, LoadingSpinner as RiLoaderCircle } from './lib/components/ui/Loading';
@@ -1859,7 +1861,7 @@ function App() {
   // 顺序：通知/工具栏/AI 规则 二级 modal → tab 长按菜单 → settings drawer → 侧边栏。
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || isKeyboardLayerOpen()) return;
       if (isLocalAccessOpen) {
         event.preventDefault();
         setIsLocalAccessOpen(false);
@@ -2672,7 +2674,12 @@ function App() {
     }
   }, [activeSessionId, connectionPrioritySessionId, sessions, terminalSessions]);
 
-  const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => {
+  const quickSessionPendingRef = useRef(false);
+  const [quickSessionPending, setQuickSessionPending] = useState(false);
+  const dispatchNewSession = useCallback((overrides?: NewSessionRequestOptions) => {
+    const quick = !overrides?.onResult;
+    if (quick && quickSessionPendingRef.current) return;
+    if (quick) { quickSessionPendingRef.current = true; setQuickSessionPending(true); }
     const mode = overrides?.mode ?? newSessionMode;
     const tmuxSessionName = mode === 'tmux'
       ? (overrides?.tmuxSessionName?.trim() || newSessionTmuxName.trim() || undefined)
@@ -2687,9 +2694,14 @@ function App() {
         tmuxSessionName,
         cwd: activeCwd,
         command: overrides?.command,
+        onResult: overrides?.onResult ?? ((result: NewSessionCreationResult) => {
+          quickSessionPendingRef.current = false;
+          setQuickSessionPending(false);
+          if (!result.ok) setAgentResumeNotice({ tone: 'error', message: t(sessionCreationErrorKey(result.error)) });
+        }),
       },
     }));
-  }, [newSessionMode, newSessionTmuxName, activeSessionId]);
+  }, [newSessionMode, newSessionTmuxName, activeSessionId, t]);
 
   const refreshTmuxSessions = useCallback(async () => {
     setTmuxRefreshing(true);
@@ -3323,6 +3335,8 @@ function App() {
               <button
                 type="button"
                 onClick={() => dispatchNewSession()}
+                disabled={quickSessionPending}
+                aria-busy={quickSessionPending}
                 className="my-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-primary/15 hover:text-primary active:scale-95"
                 aria-label={t('tab.new')}
                 title={t('tab.new')}
@@ -3382,6 +3396,8 @@ function App() {
               <button
                 type="button"
                 onClick={() => dispatchNewSession()}
+                disabled={quickSessionPending}
+                aria-busy={quickSessionPending}
                 className="ml-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-primary/15 hover:text-primary active:scale-95"
                 aria-label={t('tab.new')}
                 title={t('tab.new')}

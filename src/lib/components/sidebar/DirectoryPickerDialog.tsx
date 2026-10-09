@@ -1,8 +1,9 @@
 import { ArrowUp, Check, FolderTree, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import { FileTree } from './FileTree';
+import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
 
 function normalizeDirectory(path: string): string {
   return path.trim().replace(/\/+$/, '') || '/';
@@ -44,6 +45,8 @@ export function DirectoryPickerDialog({
     close: labels?.close ?? t('common.close'),
     parent: labels?.parent ?? t('rightSidebar.parentFolder'),
   };
+  const dialogRef = useRef<HTMLElement>(null);
+  useKeyboardLayer(dialogRef, open, onCancel);
   const [currentPath, setCurrentPath] = useState(() => normalizeDirectory(initialPath));
 
   useEffect(() => {
@@ -53,19 +56,11 @@ export function DirectoryPickerDialog({
   useEffect(() => {
     if (!open) return;
     const previousOverflow = document.body.style.overflow;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      onCancel();
-    };
     document.body.style.overflow = 'hidden';
-    document.addEventListener('keydown', closeOnEscape, true);
     return () => {
       document.body.style.overflow = previousOverflow;
-      document.removeEventListener('keydown', closeOnEscape, true);
     };
-  }, [onCancel, open]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -78,6 +73,8 @@ export function DirectoryPickerDialog({
         aria-label={copy.cancel}
       />
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="directory-picker-title"
@@ -89,7 +86,7 @@ export function DirectoryPickerDialog({
             <h2 id="directory-picker-title" className="text-[13px] font-semibold text-foreground">{title}</h2>
             <p className="mt-0.5 text-[10px] text-muted-foreground">{copy.hint}</p>
           </div>
-          <button type="button" autoFocus onClick={onCancel} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-2 hover:text-foreground" aria-label={copy.close}><X size={15} /></button>
+          <button type="button" onClick={onCancel} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-2 hover:text-foreground" aria-label={copy.close}><X size={15} /></button>
         </header>
 
         <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border/15 px-3 py-1.5">

@@ -17,6 +17,20 @@ export async function prepareTaskWorkspace(task: CollaborationTask, sourceCwd: s
   if (!/^[a-f0-9]{32}$/.test(task.id)) throw new Error('任务标识无效');
   const generation = task.events.filter(e => e.kind === 'scheduled').at(-1)?.id;
   if (!generation || !/^[a-f0-9]{32}$/.test(generation)) throw new Error('缺少执行目录准备记录');
+  // Reports provide context and ordering; only code contributes commits.
+  // Validate before creating a checkout so a missing delivery leaves no orphan.
+  const codeDependencies = dependencies.flatMap(dependency => {
+    const artifact = dependency.artifacts.find(a => a.id === dependency.acceptedArtifactId && a.kind === 'result');
+    if (dependency.status !== 'accepted' || !artifact) throw new Error(`前置任务「${dependency.title}」尚未交付并验收，请先完成前置任务`);
+    if (dependency.workflow?.workType === 'read-only') return [];
+    const commit = (artifact.evidence as { commit?: string } | undefined)?.commit;
+    // Older report-only records did not have workType. An isolated workspace
+    // or an explicit code/integration task must still deliver its commit.
+    if (!commit && !dependency.workspace && !dependency.workflow?.isolated && !dependency.workflow?.integration
+      && dependency.workflow?.workType !== 'code') return [];
+    if (!commit || !/^[a-f0-9]{40,64}$/.test(commit)) throw new Error(`代码前置任务「${dependency.title}」已验收，但缺少可继承的提交。请协调者补齐该任务的代码交付后再试`);
+    return [{ dependency, commit }];
+  });
   const repository = await git(sourceCwd, ['rev-parse', '--show-toplevel']);
   const rootId = task.workflow?.rootTaskId ?? task.id;
   const goalDir = path.join(home, rootId);
@@ -48,10 +62,7 @@ export async function prepareTaskWorkspace(task: CollaborationTask, sourceCwd: s
   if (!ready) {
     // A failed merge is deliberately left in this task's worktree for a member to resolve.
     if (await git(cwd, ['status', '--porcelain'])) throw new Error(`依赖集成需要处理，现场保留在 ${cwd}；请协调者安排解决冲突后继续`);
-    for (const dependency of dependencies) {
-      const artifact = dependency.artifacts.find(a => a.id === dependency.acceptedArtifactId);
-      const commit = (artifact?.evidence as { commit?: string } | undefined)?.commit;
-      if (!commit || !/^[a-f0-9]{40,64}$/.test(commit)) throw new Error(`依赖「${dependency.title}」缺少已评审提交，请补充交付`);
+    for (const { dependency, commit } of codeDependencies) {
       try { await git(cwd, ['cat-file', '-e', `${commit}^{commit}`]); }
       catch {
         if (!importCommit) throw new Error(`依赖「${dependency.title}」的提交在此仓库不可用，请协调者先同步提交`);
