@@ -7,6 +7,8 @@ import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { useInitialGitLoad, waitForGitPreferences } from './useInitialGitLoad';
 import { fetchPreviewResource } from '../../utils/previewResourceCache';
 import { downloadMarkdownImage } from './markdownImageDownload';
+import { initializeMermaid, loadMermaid } from '../../utils/mermaid';
+import type { ArchitectureFile } from '../../architecture/model';
 import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, lazy, Suspense, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useGesture } from '@use-gesture/react';
@@ -55,13 +57,15 @@ import {
   Regex as RiRegex,
   Plus as RiPlus,
   Archive as RiArchive,
+  Network as RiNetwork,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { GitIgnoreFilterButton } from './GitIgnoreFilterButton';
 import { insertDirectReference } from './insertDirectReference';
+import { requestReferenceInsertion } from './requestReferenceInsertion';
 import { MODEL_PREVIEW_REQUEST_TIMEOUT_MS } from '../../terminal/api';
-import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
+import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { ReviewReferenceHandler } from './reviewReference';
 import { UniversalDiffReview } from './DiffReviewPanel';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
@@ -109,7 +113,7 @@ import { SvgInspectionPreview } from './SvgInspectionPreview';
 import { CsvPreview } from './CsvPreview';
 import { KicadProjectPreview } from './KicadProjectPreview';
 import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFrame';
-import { clearFilePreviewSearchHighlights, collectFilePreviewSearchRanges, paintFilePreviewSearchHighlights, resolveFilePreviewSearchShortcut, scrollFilePreviewSearchRangeIntoView } from './filePreviewSearch';
+import { clearFilePreviewSearchHighlights, collectFilePreviewSearchRanges, paintFilePreviewSearchHighlights, ownsFilePreviewSearchHighlights, ownsFilePreviewSearchShortcut, resolveFilePreviewSearchShortcut, scrollFilePreviewSearchRangeIntoView } from './filePreviewSearch';
 import { describeSearchScope, parseExcludePatterns, resolveSearchScopePath } from './fileSearchOptions';
 import './sidebarSelection.css';
 import { TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
@@ -218,6 +222,7 @@ const FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS = 'termdock-file-preview-horizontal-s
 // three.js is heavy (~600 kB), so the 3D viewer loads on demand the first
 // time a .stl/.glb/.gltf file is previewed.
 const ModelPreview = lazy(() => import('./ModelPreview'));
+const ArchitecturePanel = lazy(() => import('./ArchitecturePanel').then(module => ({ default: module.ArchitecturePanel })));
 const ComputerControlView = lazy(() => import('../computer/ComputerControlView'));
 // 类型导入: 查看器的语义特征(来自 .features.json sidecar)
 import type { ModelFeature } from './ModelPreview';
@@ -2186,37 +2191,8 @@ interface MarkdownCodeBlockProps {
   lineRange?: { start: number; end: number } | null;
 }
 
-interface MermaidLike {
-  initialize: (config: Record<string, unknown>) => void;
-  render: (id: string, text: string) => Promise<{ svg: string }>;
-}
-
-let mermaidPromise: Promise<MermaidLike> | null = null;
-let mermaidInitialized = false;
 const MERMAID_SVG_PADDING = 16;
 const MERMAID_SVG_MIN_WIDTH = 192;
-
-function loadMermaid(): Promise<MermaidLike> {
-  if (!mermaidPromise) {
-    mermaidPromise = import('mermaid')
-      .then((mod) => ((mod as { default?: MermaidLike }).default ?? mod) as MermaidLike)
-      .catch((error) => {
-        mermaidPromise = null;
-        throw error;
-      });
-  }
-  return mermaidPromise;
-}
-
-function initializeMermaid(mermaid: MermaidLike): void {
-  if (mermaidInitialized) return;
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: 'neutral',
-  });
-  mermaidInitialized = true;
-}
 
 function normalizeMermaidSvgSize(svg: string): string {
   const viewBoxMatch = svg.match(/\sviewBox=(["'])([^"']+)\1/i);
@@ -5177,8 +5153,8 @@ interface FilePreviewProps {
   onReviewReference?: ReviewReferenceHandler;
   filePath: string | null;
   active?: boolean;
-  onInsertReference: (path: string, key?: string) => void;
-  onInsertText: (text: string, key: string) => void;
+  onInsertReference: (path: string, key?: string, source?: HTMLElement) => void;
+  onInsertText: (text: string, key: string, source?: HTMLElement) => void;
   /** Insert a model-feature reference (draft-aware, same as file refs). */
   onInsertFeature?: (text: string, key: string) => void;
   onReferenceCopied: (key: string) => void;
@@ -5322,6 +5298,9 @@ export function FilePreview({
 }: FilePreviewProps) {
   const { t } = useI18n();
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const fileSearchHighlightOwner = useRef({});
+  const activeRef = useRef(active);
+  activeRef.current = active;
   useEffect(() => {
     if (active) return;
     // Markdown can also contain videos. Leaving the tab must stop playback.
@@ -5804,17 +5783,20 @@ export function FilePreview({
     setFileSearchQuery('');
     setFileSearchMatches([]);
     setFileSearchIndex(0);
-    clearFilePreviewSearchHighlights();
+    clearFilePreviewSearchHighlights(fileSearchHighlightOwner.current);
   }, []);
 
   const openFileSearch = useCallback(() => {
-    if (!searchableFilePreview) return;
+    if (!active || !searchableFilePreview) return;
     setFileSearchOpen(true);
     requestAnimationFrame(() => {
+      const container = previewContainerRef.current;
+      if (!activeRef.current || !container?.isConnected || container.closest('[inert], [aria-hidden="true"], [hidden]')) return;
+      if (container.getClientRects().length === 0 || getComputedStyle(container).visibility === 'hidden' || !container.contains(document.activeElement)) return;
       fileSearchInputRef.current?.focus();
       fileSearchInputRef.current?.select();
     });
-  }, [searchableFilePreview]);
+  }, [active, searchableFilePreview]);
 
   const moveFileSearch = useCallback((direction: 1 | -1) => {
     setFileSearchIndex((current) => {
@@ -5823,30 +5805,27 @@ export function FilePreview({
     });
   }, [fileSearchMatches.length]);
 
-  useEffect(() => {
-    const handleFileSearchShortcut = (event: globalThis.KeyboardEvent) => {
-      const action = resolveFilePreviewSearchShortcut(event);
-      if (action === 'open' && searchableFilePreview) {
-        event.preventDefault();
-        openFileSearch();
-        return;
-      }
-      if (!fileSearchOpen) return;
-      if (action === 'close') {
-        event.preventDefault();
-        closeFileSearch();
-      } else if (action === 'next' || action === 'previous') {
-        event.preventDefault();
-        moveFileSearch(action === 'previous' ? -1 : 1);
-      }
-    };
-    document.addEventListener('keydown', handleFileSearchShortcut);
-    return () => document.removeEventListener('keydown', handleFileSearchShortcut);
-  }, [closeFileSearch, fileSearchOpen, moveFileSearch, openFileSearch, searchableFilePreview]);
+  const handleFileSearchShortcut = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing || !ownsFilePreviewSearchShortcut(previewContainerRef.current, active, event)) return;
+    const action = resolveFilePreviewSearchShortcut(event);
+    if (action === 'open' && searchableFilePreview) {
+      event.preventDefault();
+      openFileSearch();
+      return;
+    }
+    if (!fileSearchOpen) return;
+    if (action === 'close') {
+      event.preventDefault();
+      closeFileSearch();
+    } else if (action === 'next' || action === 'previous') {
+      event.preventDefault();
+      moveFileSearch(action === 'previous' ? -1 : 1);
+    }
+  }, [active, closeFileSearch, fileSearchOpen, moveFileSearch, openFileSearch, searchableFilePreview]);
 
   useLayoutEffect(() => {
-    clearFilePreviewSearchHighlights();
-    if (!fileSearchOpen || !fileSearchQuery.trim() || !scrollerRef.current) {
+    clearFilePreviewSearchHighlights(fileSearchHighlightOwner.current);
+    if (!active || !fileSearchOpen || !fileSearchQuery.trim() || !scrollerRef.current) {
       setFileSearchMatches([]);
       setFileSearchIndex(0);
       return;
@@ -5854,18 +5833,21 @@ export function FilePreview({
     const ranges = collectFilePreviewSearchRanges(scrollerRef.current, fileSearchQuery);
     setFileSearchMatches(ranges);
     setFileSearchIndex(0);
-    paintFilePreviewSearchHighlights(ranges, 0);
-    scrollFilePreviewSearchRangeIntoView(ranges[0]);
-    return clearFilePreviewSearchHighlights;
-  }, [fileSearchOpen, fileSearchQuery, highlightedLines, markdownViewMode, previewState]);
+    if (previewContainerRef.current?.contains(document.activeElement) || ownsFilePreviewSearchHighlights(fileSearchHighlightOwner.current)) {
+      paintFilePreviewSearchHighlights(ranges, 0, fileSearchHighlightOwner.current);
+      scrollFilePreviewSearchRangeIntoView(ranges[0]);
+    }
+    return () => clearFilePreviewSearchHighlights(fileSearchHighlightOwner.current);
+  }, [active, fileSearchOpen, fileSearchQuery, highlightedLines, markdownViewMode, previewState]);
 
   useEffect(() => {
-    if (!fileSearchOpen) return;
-    paintFilePreviewSearchHighlights(fileSearchMatches, fileSearchIndex);
+    if (!active || !fileSearchOpen || !fileSearchQuery.trim()) return;
+    if (!previewContainerRef.current?.contains(document.activeElement) && !ownsFilePreviewSearchHighlights(fileSearchHighlightOwner.current)) return;
+    paintFilePreviewSearchHighlights(fileSearchMatches, fileSearchIndex, fileSearchHighlightOwner.current);
     scrollFilePreviewSearchRangeIntoView(fileSearchMatches[fileSearchIndex]);
-  }, [fileSearchIndex, fileSearchMatches, fileSearchOpen]);
+  }, [active, fileSearchIndex, fileSearchMatches, fileSearchOpen, fileSearchQuery]);
 
-  useEffect(() => clearFilePreviewSearchHighlights, []);
+  useEffect(() => () => clearFilePreviewSearchHighlights(fileSearchHighlightOwner.current), []);
 
   if (!filePath) {
     return <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
@@ -6003,13 +5985,13 @@ export function FilePreview({
     });
   };
 
-  const insertRangeReference = () => {
+  const insertRangeReference = (event: MouseEvent<HTMLElement>) => {
     if (onReviewReference) {
       onReviewReference(lineReferenceText, lineReferenceKey);
       return;
     }
     if (!lineRange) return;
-    onInsertText(lineReferenceText, lineReferenceKey);
+    onInsertText(lineReferenceText, lineReferenceKey, event.currentTarget);
   };
 
   const handleDownload = async () => {
@@ -6028,7 +6010,24 @@ export function FilePreview({
     // The container is a flex column that fills the panel. The middle scroller
     // is `min-h-0 flex-1` so the bottom action bar can stick to the visible
     // bottom regardless of file length.
-    <div ref={previewContainerRef} className="flex h-full min-h-0 flex-col bg-surface text-foreground">
+    <div
+      ref={previewContainerRef}
+      tabIndex={-1}
+      onKeyDown={handleFileSearchShortcut}
+      onFocusCapture={() => {
+        if (active && fileSearchOpen && fileSearchQuery.trim()) {
+          paintFilePreviewSearchHighlights(fileSearchMatches, fileSearchIndex, fileSearchHighlightOwner.current);
+        }
+      }}
+      onPointerDownCapture={(event) => {
+        // Plain Markdown content needs a focus owner too; leave native controls
+        // and selectable source lines to their own focus behavior.
+        if (event.target instanceof Element && !event.target.closest('button, input, textarea, select, a, [tabindex]:not([tabindex="-1"])')) {
+          event.currentTarget.focus({ preventScroll: true });
+        }
+      }}
+      className="flex h-full min-h-0 flex-col bg-surface text-foreground"
+    >
       {getReferenceLongPressHandlers.popoverNode}
       <div className={`shrink-0 border-b border-border/15 px-3 ${isMobile && (showMarkdownPreview || showHtmlPreview) ? 'py-1.5' : 'py-2'}`}>
         <div className="flex items-center justify-between gap-2">
@@ -6128,7 +6127,7 @@ export function FilePreview({
             {!isMobile && (
               <button
                 type="button"
-                onClick={() => onInsertReference(readablePath, fileReferenceKey)}
+                onClick={event => onInsertReference(readablePath, fileReferenceKey, event.currentTarget)}
                 {...getReferenceLongPressHandlers(reference, fileReferenceKey)}
                 className={`inline-flex h-9 items-center gap-1 rounded-full px-3 text-xs font-semibold transition active:scale-95 ${
                   fileReferenceInserted || fileReferenceCopied
@@ -6450,6 +6449,21 @@ export function FilePreview({
       ) : null}
     </div>
   );
+}
+
+function ArchitectureSourcePreview({ rootPath, file, active, ...shared }: {
+  rootPath: string;
+  file: ArchitectureFile;
+  active: boolean;
+} & Pick<FilePreviewProps, 'isMobile' | 'onInsertReference' | 'onInsertText' | 'onReferenceCopied' | 'insertedReferenceKey' | 'copiedReferenceKey'>) {
+  const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
+  const [line, setLine] = useState<number | null>(file.line ?? 1);
+  const handleScrollToLineHandled = useCallback(() => setLine(null), []);
+  return <div data-architecture-source className="h-full min-h-0">
+    <FilePreview {...shared} filePath={`${rootPath.replace(/\/+$/, '')}/${file.path}`} active={active}
+      lineRange={lineRange} onLineRangeChange={setLineRange} scrollToLine={line} onScrollToLineHandled={handleScrollToLineHandled}
+      markdownOutlineOpen={false} markdownImageLightboxOpen={false} />
+  </div>;
 }
 
 export function RightSidebar(
@@ -7643,6 +7657,11 @@ export function RightSidebar(
   const diffPaneActive = effectiveRightTab === 'diff';
   const androidPaneActive = effectiveRightTab === 'android';
   const computerPaneActive = effectiveRightTab === 'computer';
+  const architecturePaneActive = effectiveRightTab === 'architecture';
+  const [hasMountedArchitecturePane, setHasMountedArchitecturePane] = useState(false);
+  useEffect(() => {
+    if (isOpen && architecturePaneActive) setHasMountedArchitecturePane(true);
+  }, [isOpen, architecturePaneActive]);
   const pendingTabSwitchRef = useRef<{ from: string; to: string; startedAt: number; inputDelayMs: number | null } | null>(null);
   const handleTabClick = useCallback((tab: Parameters<typeof setRightTab>[0], event: MouseEvent<HTMLButtonElement>) => {
     const from = useSidebarStore.getState().rightTab;
@@ -8000,11 +8019,11 @@ export function RightSidebar(
     }, 500);
   }, [contextDraftText, draftHydrated]);
 
-  const routeReferenceText = useCallback((text: string, key: string, suffix?: string) => {
-    if (!text) return;
+  const routeReferenceText = useCallback(async (text: string, key: string, suffix?: string, source?: HTMLElement) => {
+    if (!text) return false;
     if (routeCollaborationInput(suffix ? text + suffix : text)) {
       markReferenceInserted(key);
-      return;
+      return true;
     }
     if (contextDraftEnabled) {
       setContextDraftText((current) => appendContextDraft(current, text) + (suffix ?? ''));
@@ -8014,12 +8033,14 @@ export function RightSidebar(
         setDraftFocusRequest((n) => n + 1);
       }
     } else {
-      window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-        detail: { text: suffix ? text + suffix : text, focus: true },
-      }));
+      const session = sessionId ?? useTerminalStore.getState().activeSessionId;
+      const accepted = await requestReferenceInsertion(suffix ? text + suffix : text, session,
+        () => referenceMountedRef.current && session === useTerminalStore.getState().activeSessionId, source);
+      if (!accepted) return false;
     }
     markReferenceInserted(key);
-  }, [contextDraftEnabled, markReferenceInserted]);
+    return true;
+  }, [contextDraftEnabled, markReferenceInserted, sessionId]);
 
   const getPathReferenceText = useCallback((path: string) => {
     const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
@@ -8027,9 +8048,9 @@ export function RightSidebar(
   }, [rootPath]);
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(markReferenceCopied);
 
-  const insertPathReference = useCallback((path: string, key?: string) => {
+  const insertPathReference = useCallback((path: string, key?: string, source?: HTMLElement) => {
     const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
-    routeReferenceText(buildReferenceInputText(absolutePath, rootPath), key ?? `path:${absolutePath}`);
+    return routeReferenceText(buildReferenceInputText(absolutePath, rootPath), key ?? `path:${absolutePath}`, undefined, source);
   }, [rootPath, routeReferenceText]);
 
   const handleTemporaryImageUpload = useCallback(async (file: File) => {
@@ -8074,11 +8095,11 @@ export function RightSidebar(
     } else await insertAndroidPath(path, sessionId);
   }, [contextDraftEnabled, insertPathReference, sessionId]);
 
-  const insertReferenceText = useCallback((text: string, key: string) => {
-    if (!text) return;
+  const insertReferenceText = useCallback((text: string, key: string, source?: HTMLElement) => {
+    if (!text) return Promise.resolve(false);
     // 多行代码块（有 \n）插入末尾加换行，单行路径不加
     const suffix = text.includes('\n') ? '\n' : undefined;
-    routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key, suffix);
+    return routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key, suffix, source);
   }, [routeReferenceText]);
 
   const referenceRouteRef = useRef(insertReferenceText);
@@ -8091,14 +8112,15 @@ export function RightSidebar(
   const pendingReferencesRef = useRef(new Set<string>());
   const beginReviewReference: ReviewReferenceHandler = useCallback((text, key, evidence) => {
     if (pendingReferencesRef.current.has(key)) return;
-    const session = useMultiSessionStore.getState().activeSessionId;
+    const session = sessionId ?? useTerminalStore.getState().activeSessionId;
     pendingReferencesRef.current.add(key);
     void insertDirectReference(text, key, evidence, {
       insert: insertReferenceText,
       upload: async (file, signal) => (await uploadFiles('/tmp', [file], signal)).files[0]?.path,
-      isCurrent: () => referenceMountedRef.current && referenceRouteRef.current === insertReferenceText && session === useMultiSessionStore.getState().activeSessionId,
-    }).finally(() => pendingReferencesRef.current.delete(key));
-  }, [insertReferenceText]);
+      isCurrent: () => referenceMountedRef.current && referenceRouteRef.current === insertReferenceText && session === useTerminalStore.getState().activeSessionId,
+    }).catch(() => { /* The reference stays available for retry; never mark a failed insert. */ })
+      .finally(() => pendingReferencesRef.current.delete(key));
+  }, [insertReferenceText, sessionId]);
 
   const insertContextText = useCallback((label: string, text: string, key?: string) => {
     if (!text) return;
@@ -11837,7 +11859,7 @@ export function RightSidebar(
             and Device so mirroring stays reachable everywhere. */}
         <div
           className="mt-2 grid gap-0.5 rounded-md bg-surface-2 p-0.5"
-          style={{ gridTemplateColumns: `repeat(${(gitKnownUnavailable ? 2 : 3) + (androidTabEnabled ? 1 : 0) + 1}, minmax(0, 1fr))` }}
+          style={{ gridTemplateColumns: `repeat(${(gitKnownUnavailable ? 3 : 5) + (androidTabEnabled ? 1 : 0)}, minmax(0, 1fr))` }}
         >
           {!gitKnownUnavailable && (
             <>
@@ -11881,6 +11903,14 @@ export function RightSidebar(
           >
             <RiFolder size={12} />
             {t('rightSidebar.tabFiles')}
+          </button>
+          <button
+            type="button"
+            onClick={(event) => handleTabClick('architecture', event)}
+            className={`flex items-center justify-center gap-1 rounded px-1 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${architecturePaneActive ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-2'}`}
+          >
+            <RiNetwork size={12} />
+            {t('architecture.tab')}
           </button>
           <button
             type="button"
@@ -12122,7 +12152,7 @@ export function RightSidebar(
               <div className="min-w-0 flex-1 overflow-hidden bg-surface">
                 <FilePreview
                   filePath={selectedFilePath}
-                  active={filesPaneActive}
+                  active={isOpen && filesPaneActive}
                   onInsertReference={insertPathReference}
                   onInsertText={insertReferenceText}
                   onInsertFeature={insertReferenceText}
@@ -12226,7 +12256,7 @@ export function RightSidebar(
                 <div className="h-full overflow-hidden bg-surface">
                   <FilePreview
                     filePath={mobileFilePreviewOpen || mobileFileSlideIndex === 1 ? selectedFilePath : null}
-                    active={filesPaneActive}
+                    active={isOpen && filesPaneActive && mobileFileSlideIndex === 1}
                     onInsertReference={insertPathReference}
                     onInsertText={insertReferenceText}
                       onInsertFeature={insertReferenceText}
@@ -12509,6 +12539,23 @@ export function RightSidebar(
           ))}
         </Pane>
 
+        <Pane active={architecturePaneActive} mounted={hasMountedArchitecturePane || (isOpen && architecturePaneActive)}>
+          <Suspense fallback={<p role="status" className="p-4 text-sm text-muted-foreground">{t('architecture.loading')}</p>}>
+            <ArchitecturePanel
+              key={rootPath}
+              rootPath={rootPath}
+              active={isOpen && architecturePaneActive}
+              onInsertPrompt={(prompt, source) => insertReferenceText(prompt, `architecture:${rootPath}`, source)}
+              renderSource={(file) => rootPath && <ArchitectureSourcePreview key={`${file.path}:${file.line ?? 1}`} rootPath={rootPath} file={file} active={isOpen && architecturePaneActive} isMobile={isMobile} onInsertReference={insertPathReference} onInsertText={insertReferenceText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />}
+              onOpenFile={(file) => {
+                if (!rootPath) return;
+                setRightTab('files');
+                setExplorerRoot(null);
+                handleContentMatchSelect(`${rootPath.replace(/\/+$/, '')}/${file.path}`, file.line ?? 1);
+              }}
+            />
+          </Suspense>
+        </Pane>
         <Pane active={computerPaneActive} mounted={isOpen && computerPaneActive}>
           <Suspense fallback={<div className="p-3 text-xs text-muted-foreground">{t('computer.loading')}</div>}>
             <ComputerControlView />

@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { WebSocket } from 'ws';
 import { resolveComputerHost } from './computerTarget.js';
 import { GuacamoleParser, guacamoleInstruction } from './guacamoleProtocol.js';
+import { observeLocalXrdpLogin } from './xrdpLogin.js';
 
 const guacdPort = () => Number(process.env.TERMDOCK_GUACD_PORT) || 4822;
 const bridges = new Set<Socket>();
@@ -28,10 +29,12 @@ export function handleRdpWebSocket(socket: WebSocket, host: string, port: number
   let acked = 0;
   let lastAckAt = Date.now();
   let credentials: Record<string, string> = {};
+  let closeLoginObserver: (() => void) | undefined;
   const finish = (code = 1000, reason = '') => {
     if (closed) return;
     closed = true; credentials = {};
     clearTimeout(timer); clearInterval(flowTimer);
+    closeLoginObserver?.();
     if (tcp) { bridges.delete(tcp); tcp.destroy(); }
     socket.close(code, reason);
   };
@@ -93,8 +96,21 @@ export function handleRdpWebSocket(socket: WebSocket, host: string, port: number
           'color-depth': '32', 'disable-audio': 'true', 'enable-drive': 'false',
           'disable-copy': 'true', 'server-layout': 'en-us-qwerty', 'resize-method': 'display-update',
         };
-        void resolveComputerHost(host).then(address => {
+        void resolveComputerHost(host).then(async address => {
           if (closed) return;
+          // Older clients only accept instruction records. Enable host observation explicitly.
+          const observer = message.verifyLogin === true ? await observeLocalXrdpLogin(address.address, port, state => {
+            if (closed) return;
+            if (state === 'failed') finish(4401, 'COMPUTER_AUTH_FAILED');
+            else if (state === 'timeout') finish(4408, 'COMPUTER_CONNECT_TIMEOUT');
+            else if (message.verifyLogin === true) socket.send(JSON.stringify({ type: 'authentication', state }));
+          }) : null;
+          if (closed) { observer?.close(); return; }
+          if (observer) {
+            closeLoginObserver = observer.close;
+            credentials['client-name'] = observer.clientName;
+            if (message.verifyLogin === true) socket.send(JSON.stringify({ type: 'authentication', state: 'pending' }));
+          }
           credentials.hostname = address.address;
           tcp = new Socket(); bridges.add(tcp); tcp.setNoDelay(true);
           tcp.on('readable', pump);

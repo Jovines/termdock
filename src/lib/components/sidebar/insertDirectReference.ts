@@ -2,13 +2,12 @@ import { formatReviewReference, type ReferenceEvidence } from './reviewReference
 
 /** One click, one insertion. Optional evidence must never block a reference. */
 export async function insertDirectReference(text: string, key: string, evidence: ReferenceEvidence | undefined, options: {
-  insert: (text: string, key: string) => void;
+  insert: (text: string, key: string) => boolean | Promise<boolean>;
   upload: (file: File, signal: AbortSignal) => Promise<string | undefined>;
   isCurrent: () => boolean;
-}) {
+}): Promise<boolean> {
   if (!evidence?.snapshot) {
-    if (options.isCurrent()) options.insert(text, key);
-    return;
+    return options.isCurrent() ? await options.insert(text, key) : false;
   }
   const capturedAt = new Date().toISOString();
   const controller = new AbortController();
@@ -29,5 +28,5 @@ export async function insertDirectReference(text: string, key: string, evidence:
     clearTimeout(timer);
     controller.abort();
   }
-  if (options.isCurrent()) options.insert(imagePath ? formatReviewReference(text, '', capturedAt, imagePath) : text, key);
+  return options.isCurrent() ? await options.insert(imagePath ? formatReviewReference(text, '', capturedAt, imagePath) : text, key) : false;
 }

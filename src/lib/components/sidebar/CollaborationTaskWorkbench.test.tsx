@@ -111,7 +111,7 @@ describe('collaboration goal journeys', () => {
     await screen.findByText('未确认保存：网络断开。内容已保留，可重试。');
     expect(field.value).toBe('追加磁盘统计');
     fireEvent.click(screen.getByRole('button', { name: '发送补充' }));
-    await screen.findByText('补充已保存，服务端将继续投递。');
+    await screen.findByText('补充已保存，投递结果可在任务管理中查看凭证。');
     expect(api.update.mock.calls[0][1].idempotencyKey).toBe(api.update.mock.calls[1][1].idempotencyKey);
     expect(field.value).toBe('');
   });
@@ -434,10 +434,34 @@ it('shows the real failure on the card and opens the existing explicit retry flo
   expect(card.textContent).not.toContain('tmux:');
   expect(api.update).not.toHaveBeenCalled();
   fireEvent.click(card);
-  await screen.findByRole('button', { name: '重试并继续协调' });
+  await screen.findByRole('button', { name: '重新检查自动安排' });
   api.update.mockResolvedValue({ task: { ...record, revision: 3, automationIssue: undefined } });
-  fireEvent.click(screen.getByRole('button', { name: '重试并继续协调' }));
+  fireEvent.click(screen.getByRole('button', { name: '重新检查自动安排' }));
   await waitFor(() => expect(api.update).toHaveBeenCalledWith('goal', expect.objectContaining({ kind: 'retry', expectedRevision: 2 })));
+});
+
+it('shows a reported prerequisite, keeps detailed logs folded, and sends clarification to the current member', async () => {
+  const report = '# 登录阻挡记录\n\n本轮登录失败后已停止，需要确认授权或服务身份后继续。\n\n原始请求日志与采样时间。';
+  const record = task({ automationIssue: report,
+    attempts: [{ id: 'attempt', assignee: member, createdAt: 1, threadId: 'thread', report: { status: 'blocked', content: report, createdAt: 2 } }] });
+  setup([record], { board: true });
+  const card = await screen.findByRole('button', { name: /查看阻塞并补充条件/ });
+  expect(card.textContent).toContain('本轮登录失败后已停止'); expect(card.textContent).not.toContain('原始请求日志');
+  fireEvent.click(card);
+  await screen.findByRole('heading', { name: '成员报告受阻' });
+  expect(screen.queryByRole('button', { name: '重新检查自动安排' })).toBeNull();
+  expect(screen.queryByRole('heading', { name: '等待第一条更新' })).toBeNull();
+  expect(screen.getByText('完整阻塞报告').closest('details')?.open).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: '补充条件并通知成员' }));
+  const textbox = screen.getByRole('textbox', { name: '补充处理说明' });
+  fireEvent.change(textbox, { target: { value: '已确认授权条件，请继续本次检查。' } });
+  api.update.mockResolvedValue({ task: { ...record, revision: 3 } });
+  fireEvent.click(screen.getByRole('button', { name: '发送条件说明' }));
+  await waitFor(() => expect(api.update).toHaveBeenCalledWith(record.id, expect.objectContaining({ kind: 'comment', content: '已确认授权条件，请继续本次检查。' })));
+  await screen.findByText('补充已保存，投递结果可在任务管理中查看凭证；成员原报告仍保留，等待新的明确回复。');
+  expect(screen.getByRole('heading', { name: '成员报告受阻' })).toBeTruthy();
+  expect(screen.getByRole('complementary', { name: '任务详情' }).querySelector('time')?.dateTime).toBe(new Date(2).toISOString());
+  expect(api.update.mock.calls.every(([, op]) => op.kind !== 'retry')).toBe(true);
 });
 
 // Starting a goal, rather than creating its workspace, provisions Agent members.
@@ -454,4 +478,50 @@ it('starts a goal from an empty group and keeps the provisioned team on a task-s
  expect(api.team).toHaveBeenCalledTimes(1);expect(api.create).toHaveBeenCalledTimes(2);
  expect(api.create.mock.calls[0][0]).toEqual(api.create.mock.calls[1][0]);
  expect(api.create.mock.calls[1][0]).toMatchObject({coordinatorSessionId:'new-lead',reviewerSessionIds:['new-worker']});
+});
+
+it('shows member conditions and independent delivery errors together, keeping original report time after a paused retry with no outbox', async () => {
+  const reportAt = Date.parse('2026-10-09T14:30:00Z'), updatedAt = Date.parse('2026-10-09T14:37:00Z');
+  const record = task({ updatedAt, automationIssue: '消息投递失败：成员连接未恢复',
+    workflow: { kind: 'goal', reviewers: [], isolated: false, paused: true, maxRevisions: 3 },
+    attempts: [{ id: 'attempt', assignee: member, createdAt: 1, threadId: 'thread', report: { status: 'blocked', content: '# 原报告\n\n需要补齐测试授权条件。\n\n详细原文。', createdAt: reportAt } }] });
+  const summary = { ...record, summaryOnly: true, automationIssueSource: 'system' as const, attempts: [{ ...record.attempts[0], report: { ...record.attempts[0].report!, content: '', summary: '需要补齐测试授权条件。' } }] };
+  setup([summary], { board: true }); api.get.mockResolvedValue({ task: record });
+  const card = await screen.findByRole('button', { name: /查看条件与异常处理/ });
+  expect(card.textContent).toContain('需要补齐测试授权条件'); expect(card.textContent).toContain('消息投递失败：成员连接未恢复');
+  expect(within(card).getByText(/最近明确报告：成员报告受阻/).querySelector('time')?.dateTime).toBe(new Date(reportAt).toISOString());
+  fireEvent.click(card);
+  await screen.findByRole('heading', { name: '成员报告受阻' });
+  expect(screen.getByRole('heading', { name: '投递需要处理' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '补充条件并通知成员' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '重新检查投递记录' })).toBeTruthy();
+  const after = { ...record, revision: 3, automationIssue: undefined, events: [{ id: 'retry-new', sequence: 1, kind: 'retry', actor: null, content: '重试', createdAt: updatedAt + 1000, attemptId: 'attempt' }], updatedAt: updatedAt + 1000 };
+  api.update.mockResolvedValue({ task: after });
+  fireEvent.click(screen.getByRole('button', { name: '重新检查投递记录' }));
+  await screen.findByText(/当前没有待重试的投递记录/);
+  expect(screen.getByRole('heading', { name: '成员报告受阻' })).toBeTruthy();
+  expect(screen.queryByRole('heading', { name: '投递需要处理' })).toBeNull();
+  const article = screen.getByRole('heading', { name: record.title }).closest('article')!;
+  expect(within(article).getByText(/最近明确报告：成员报告受阻/).querySelector('time')?.dateTime).toBe(new Date(reportAt).toISOString());
+  expect(api.update.mock.calls.every(([, operation]) => operation.kind === 'retry')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: '动态' }));
+  expect(within(screen.getByRole('region', { name: '任务动态' })).getByText('请求重新检查')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: '任务动态' })).queryByText('继续协调')).toBeNull();
+});
+
+
+it('leaves an omitted legacy record source unclassified and offers no system retry before evidence arrives', async () => {
+  const raw = '# 原报告\n\n需要补齐授权条件。';
+  const summary = task({ summaryOnly: true, automationIssue: raw, attempts: [{ id: 'attempt', assignee: member, createdAt: 1, threadId: 'thread', report: { status: 'blocked', content: '', createdAt: 2 } }] });
+  setup([summary], { board: true }); api.get.mockResolvedValue({ task: summary });
+  const card = await screen.findByRole('button', { name: /查看详情核对记录/ });
+  expect(card.textContent).toContain('服务记录（来源待核对）');
+  expect(card.textContent).toContain('报告摘要未提供');
+  fireEvent.click(card);
+  await screen.findByRole('heading', { name: '服务记录（来源待核对）' });
+  expect(screen.getByRole('status', { name: '待核对服务记录' }).textContent).toContain(raw);
+  expect(screen.queryByRole('button', { name: '重新检查投递记录' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '重新检查自动安排' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '重试现有投递' })).toBeNull();
+  expect(api.update).not.toHaveBeenCalled();
 });

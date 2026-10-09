@@ -625,7 +625,7 @@ describe('useSidebarStore per-directory file sorting', () => {
 
   it('migrates legacy local preferences when the server has none', async () => {
     getSettingsMock.mockResolvedValueOnce({ fileSortModes: {} });
-    updateSettingsMock.mockResolvedValueOnce({ fileSortModes: { '/workspace/legacy': 'modified' } });
+    updateSettingsMock.mockResolvedValueOnce({ fileSortModes: { '/workspace/legacy': 'modified' }, pinnedExplorerRoots: {} });
     useSidebarStore.setState({
       fileSortModes: { '/workspace/legacy': 'modified' },
       fileSortModesHydrated: false,

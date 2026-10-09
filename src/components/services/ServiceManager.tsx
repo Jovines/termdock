@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, ChevronRight, MoreHorizontal, Plus, Server, Smartphone } from 'lucide-react';
 import { listServiceConnections, normalizeServiceAddress, observeServiceConnections, removeServiceConnection, sameService, saveServiceConnection, type ServiceConnection } from '../../lib/services/serviceDirectory';
 import './ServiceManager.css';
+import { useI18n } from '../../lib/i18n';
+import { parseInviteLink } from '../../lib/federation/inviteLink';
 
 export interface ServiceNavigation { title?: string; back?: () => void }
 export interface ServiceManagerProps {
@@ -19,6 +21,15 @@ export interface ServiceManagerProps {
 }
 type Page = { kind: 'list' } | { kind: 'add'; input?: string; passwordRequired?: boolean } | { kind: 'edit'; service: ServiceConnection } | { kind: 'routes' | 'relay-services'; service: ServiceConnection };
 export function ServiceManager({ current, renderRoutes, renderRelayServices, onOpen, onAdd, onInvite, hideHeader, onNavigation, onBusyChange, initiallyAdding = false }: ServiceManagerProps) {
+  const { t } = useI18n();
+  const validateInput = (input: string) => {
+    try {
+      if (input.includes('#termdock-invite=')) parseInviteLink(input);
+      else normalizeServiceAddress(input);
+    } catch {
+      throw new Error(t(input.includes('#termdock-invite=') ? 'login.invalidInvitation' : 'login.invalidAddress'));
+    }
+  };
   const [services, setServices] = useState<ServiceConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState<Page>(initiallyAdding ? { kind: 'add' } : { kind: 'list' });
@@ -71,9 +82,9 @@ export function ServiceManager({ current, renderRoutes, renderRelayServices, onO
   </>;
   return <div className="service-manager">
     {!hideHeader && <div className="service-heading">{title && <button type="button" className="service-icon-button" aria-label="返回服务" disabled={busy} onClick={back}><ArrowLeft size={20} /></button>}<h2>{title || '服务'}</h2></div>}
-    {page.kind === 'relay-services' ? renderRelayServices?.(pageService!, setBusy) : page.kind === 'routes' ? renderRoutes?.(pageService!, setBusy) : page.kind === 'list' ? list : page.kind === 'add' ? <AddServiceForm onSave={input => perform(async () => { const url = normalizeServiceAddress(input); setServices(await saveServiceConnection({ id: url, url, label: new URL(url).host })); back(); })} initialInput={page.input} passwordRequired={page.passwordRequired} busy={busy} onSubmit={async (input, password) => {
+    {page.kind === 'relay-services' ? renderRelayServices?.(pageService!, setBusy) : page.kind === 'routes' ? renderRoutes?.(pageService!, setBusy) : page.kind === 'list' ? list : page.kind === 'add' ? <AddServiceForm onSave={input => perform(async () => { validateInput(input); const url = normalizeServiceAddress(input); setServices(await saveServiceConnection({ id: url, url, label: new URL(url).host })); back(); })} initialInput={page.input} passwordRequired={page.passwordRequired} busy={busy} onSubmit={async (input, password) => {
       let result: { passwordRequired?: boolean } | void;
-      await perform(async () => { result = await onAdd(input, password); if (!result?.passwordRequired) back(); });
+      await perform(async () => { validateInput(input); result = await onAdd(input, password); if (!result?.passwordRequired) back(); });
       return result!;
     }} /> : <EditServiceForm onRelayServices={renderRelayServices && page.service.targetPeerId ? () => setPage({ kind: 'relay-services', service: page.service }) : undefined} onRoutes={renderRoutes && page.service.targetPeerId ? () => setPage({ kind: 'routes', service: page.service }) : undefined} service={pageService!} busy={busy} canRemove={!current || !sameService(page.service, current)} onSave={name => void perform(async () => { setServices(await saveServiceConnection({ ...pageService!, label: name })); back(); })} onRemove={() => void perform(async () => { setServices(await removeServiceConnection(page.service.id)); back(); })} />}
     {error && <p className="service-error" role="alert">{error}</p>}

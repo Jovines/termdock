@@ -471,8 +471,12 @@ it('labels remote members and reports unreachable delivery without claiming succ
   expect(await screen.findByText('Mac mini')).toBeTruthy();
   expect(screen.getByText('服务不可达')).toBeTruthy();
   await user.type(screen.getByPlaceholderText(/输入消息/), '请检查');
+  expect(screen.getByPlaceholderText(/输入消息/)).toHaveProperty('value', '请检查');
   await user.click(screen.getByRole('button', { name: '发送' }));
   expect(await screen.findByText(/1 个接收成员的服务不可达，尚未送达/)).toBeTruthy();
+  expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledOnce();
+  expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledWith('cross-pair', expect.objectContaining({ content: '请检查', fromSessionId: null }));
+  expect(screen.queryByText(/消息已送达/)).toBeNull();
 });
 
 it('filters new results independently of ACKs and never marks filtered-out records seen', async () => {

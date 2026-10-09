@@ -33,7 +33,9 @@ import {
   type SelectionCell,
 } from '../../terminal/selectionHandles';
 import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal/imeAnchor';
-import { buildBracketedPastePayload, detectTextareaPaste } from '../../terminal/bracketedPaste';
+import { detectTextareaPaste } from '../../terminal/bracketedPaste';
+import { terminalSequencePayload, type TerminalSequenceOptions } from '../../terminal/sequencePayload';
+import type { OwnedTerminalPaste } from '../../terminal/ownedPaste';
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
 import {
   shouldPreserveBottomAfterFit,
@@ -316,7 +318,7 @@ export type TerminalController = {
    * 为「未知」——否则工具栏方向键移动了 PTY 光标而模型不知情，
    * 后续 textarea diff / 退格会全部打在错误的位置上。
    */
-  sendSequence: (seq: string, options?: { consumeModifier?: boolean; paste?: boolean; targeted?: boolean }) => void | Promise<boolean>;
+  sendSequence: (seq: string, options?: TerminalSequenceOptions) => void | Promise<boolean>;
   /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
   getDimensions: () => { cols: number; rows: number } | null;
   /**
@@ -362,6 +364,7 @@ export type TerminalViewportInputOptions = {
   skipModifierTransform?: boolean;
   targeted?: boolean;
   consumeModifier?: boolean;
+  ownedPaste?: OwnedTerminalPaste;
 };
 
 interface TerminalViewportProps {
@@ -831,7 +834,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const suppressSmoothScrollRef = React.useRef(suppressSmoothScroll);
     suppressSmoothScrollRef.current = suppressSmoothScroll;
     const fitAddonRef = React.useRef<FitAddon | null>(null);
-    const inputHandlerRef = React.useRef<(data: string, options?: TerminalViewportInputOptions) => void>(onInput);
+    const inputHandlerRef = React.useRef<typeof onInput>(onInput);
     const resizeHandlerRef = React.useRef<(cols: number, rows: number, seq: number) => void>(onResize);
     const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
@@ -1608,7 +1611,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      * 2. clearSelection()：与 xterm 默认"输入即清选区"行为一致
      * 3. 带 skipModifierTransform 让 TerminalView 不再叠加移动端修饰符工具栏的状态
      */
-    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null, options?: { consumeModifier?: boolean; paste?: boolean; submitAfterPaste?: boolean; targeted?: boolean }) => {
+    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null, options?: TerminalSequenceOptions) => {
       if (!seq) return;
       clearPendingTextareaSync();
       const target = textarea ?? hiddenInputRef.current;
@@ -1620,20 +1623,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
       endSelectionSession();
 
-      // 多行 paste 模式：手动构造 bracketed-paste 序列（与 xterm paste()
-      // 内部行为一致：\r?\n 归一化为 \r，ESC 转义为 ␛），并将 \r 拼接
-      // 到同一段 payload 中，作为一条 WS 消息发送。避免原先 terminal.paste()
-      // + 单独 \r 两条消息的时序竞争，防止 paste 内容已插入但回车丢失
-      // 导致的「有时能发送，有时不能」。
-      if (options?.paste && /[\r\n]/.test(seq)) {
-        // 显式“粘贴并发送”动作保留末尾 CR 作为 block 外提交；系统剪贴板
-        // 粘贴则把所有换行都留在 bracketed-paste 内，避免 TUI 连发多条消息。
-        const submitAfterPaste = options.submitAfterPaste ?? seq.endsWith('\r');
-        const payload = buildBracketedPastePayload(seq, submitAfterPaste);
-        return inputHandlerRef.current(payload, { skipModifierTransform: true, consumeModifier: options?.consumeModifier, targeted: options?.targeted });
-      }
-
-      return inputHandlerRef.current(seq, { skipModifierTransform: true, consumeModifier: options?.consumeModifier, targeted: options?.targeted });
+      const payload = terminalSequencePayload(seq, options);
+      return inputHandlerRef.current(payload, { skipModifierTransform: true, consumeModifier: options?.consumeModifier,
+        targeted: options?.targeted, ownedPaste: options?.ownedPaste });
     }, [clearPendingTextareaSync]);
 
     const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
@@ -4654,7 +4646,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           onMobilePasteResultRef.current?.(ok);
           return ok;
         },
-        sendSequence: (seq: string, options?: { consumeModifier?: boolean; paste?: boolean; targeted?: boolean }) => {
+        sendSequence: (seq: string, options?: TerminalSequenceOptions) => {
           return sendTerminalSeq(seq, null, options);
         },
         getDimensions: () => {

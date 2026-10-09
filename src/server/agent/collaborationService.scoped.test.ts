@@ -43,6 +43,20 @@ async function fixture() {
 const wire = (service: CollaborationService, peerId: string, payload: Record<string, unknown>) => service.receive(peerId, { type: 'collaboration-service', id: 'test', ...payload } as Packet);
 
 describe('session-scoped collaboration peers', () => {
+  it('accepts an authorized deletion despite clock skew and rejects later resurrection through peer RPC', async () => {
+    const f = await fixture();
+    f.service.registerScopedPeer(f.selfOrigin, f.devices.device, f.peerNode, ['granted']);
+    const canonical = { ...f.store.getGroup('cross-scoped')!, updatedAt: 100,
+      sessionIds: [remoteSession(f.selfOrigin, 'granted'), f.remote] };
+    const send = (group: typeof canonical) => wire(f.service, f.peerId, { action: 'group', group, nodes: [f.selfNode, f.peerNode] });
+    send(canonical);
+    send({ ...canonical, deleted: true, updatedAt: 50 });
+    send({ ...canonical, updatedAt: 200 });
+    expect(f.store.getGroup(canonical.id)?.deleted).toBe(true);
+    expect(f.store.list().map(group => group.id)).not.toContain(canonical.id);
+    const directory = wire(f.service, f.peerId, { action: 'directory' }) as { groups: { id: string; deleted?: boolean }[] };
+    expect(directory.groups).toContainEqual(expect.objectContaining({ id: canonical.id, deleted: true }));
+  });
   it('registers a peer from a device write grant and exposes only the granted sessions and groups', async () => {
     const f = await fixture();
     expect(f.service.registerScopedPeer(f.selfOrigin, f.devices.device, f.peerNode, ['granted'])).toMatchObject({ ok: true, peer: f.peerId, sessions: ['granted'] });

@@ -9,8 +9,9 @@ import ComputerControlView from './ComputerControlView';
 const mocks = vi.hoisted(() => ({
   peer: 'ubuntu-service',
   platform: 'linux',
-  clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn> }>,
+  clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn>; keyboardActive?: boolean }>,
   hosts: [] as string[],
+  pointerSend: vi.fn(),
   rdpOptions: [] as RdpConnection[],
   preferences: null as ComputerPreferences | null,
   writes: [] as ComputerPreferences[],
@@ -42,10 +43,13 @@ vi.mock('@novnc/novnc', () => ({ default: class extends EventTarget {
 } }));
 
 vi.mock('../../computer/rdpSession', () => ({ RdpSession: class extends EventTarget {
+  keyboardActive = false;
+  surface = document.createElement('div');
+  pointerTarget = { size: () => ({ width: 1280, height: 800 }), surface: () => this.surface, send: mocks.pointerSend };
   sendKey = vi.fn();
   disconnect() {}
   constructor(_target: HTMLElement, options: RdpConnection, fail: (reason: string) => void) {
-    super(); mocks.clients.push(this); mocks.rdpOptions.push(options); mocks.failures.push(fail);
+    super(); _target.append(this.surface); mocks.clients.push(this); mocks.rdpOptions.push(options); mocks.failures.push(fail);
   }
 } }));
 
@@ -53,7 +57,7 @@ beforeEach(() => {
   localStorage.clear();
   mocks.peer = 'ubuntu-service'; mocks.platform = 'linux';
   mocks.clients.length = 0; mocks.hosts.length = 0; mocks.rdpOptions.length = 0; mocks.failures.length = 0;
-  mocks.preferences = null; mocks.writes = [];
+  mocks.preferences = null; mocks.writes = []; mocks.pointerSend.mockClear();
   mocks.credentials = {}; mocks.credentialWrites = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
     if (url.includes('/credentials/')) {
@@ -77,6 +81,71 @@ async function ready() {
 }
 
 describe('computer targets', () => {
+  it('opens a portrait desktop full-screen on phones with tools and clipboard closed, and accepts direct keyboard input', async () => {
+    const beforeWidth = window.innerWidth, beforeHeight = window.innerHeight;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 }); Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
+    try {
+      await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+      fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
+      await waitFor(() => expect(mocks.clients).toHaveLength(1)); expect(mocks.rdpOptions[0]).toMatchObject({ width: 640, height: 1221 });
+      act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+      expect(screen.getByRole('dialog')).toBeTruthy(); expect(screen.queryByRole('textbox', { name: '发送剪贴板' })).toBeNull();
+      expect(screen.queryByRole('region', { name: '控制设置' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+      const proxy = screen.getByLabelText('直接输入到电脑'); expect(document.activeElement).toBe(proxy);
+      fireEvent.change(proxy, { target: { value: 'a你' } });
+      expect(mocks.clients[0].sendKey.mock.calls).toEqual([[97, null, true], [97, null, false], [0x01004f60, null, true], [0x01004f60, null, false]]);
+      expect(mocks.clients[0].keyboardActive).toBe(true);
+      const phoneInput = screen.getByLabelText('直接输入到电脑');
+      for (const name of ['Tab', '⌫', '↵']) {
+        const button = screen.getByRole('button', { name });
+        expect(fireEvent.pointerDown(button)).toBe(false);
+        fireEvent.click(button); expect(document.activeElement).toBe(phoneInput);
+      }
+      await waitFor(() => expect(mocks.clients[0].sendKey.mock.calls.slice(4)).toEqual([
+        [0xff09, 'Tab', true], [0xff09, 'Tab', false],
+        [0xff08, 'Backspace', true], [0xff08, 'Backspace', false],
+        [0xff0d, 'Enter', true], [0xff0d, 'Enter', false],
+      ]));
+      fireEvent.keyDown(screen.getByLabelText('直接输入到电脑'), { key: 'Escape', isComposing: true });
+      expect(screen.getByLabelText('直接输入到电脑')).toBeTruthy();
+      fireEvent.keyDown(screen.getByLabelText('直接输入到电脑'), { key: 'Escape' });
+      expect(screen.queryByLabelText('直接输入到电脑')).toBeNull(); expect(mocks.clients[0].keyboardActive).toBe(false);
+      // Also retain the explicit toolbar-toggle path covered by the incoming work.
+      fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+      const reopenedProxy = screen.getByLabelText('直接输入到电脑'); expect(document.activeElement).toBe(reopenedProxy);
+      fireEvent.pointerDown(screen.getByRole('button', { name: 'Tab' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Tab' }));
+      expect(document.activeElement).toBe(reopenedProxy);
+      await waitFor(() => expect(mocks.clients[0].sendKey.mock.calls.slice(-2)).toEqual([[0xff09, 'Tab', true], [0xff09, 'Tab', false]]));
+      fireEvent.click(screen.getByRole('button', { name: '键盘' })); expect(screen.queryByLabelText('直接输入到电脑')).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: '控制设置' })); expect(screen.getByRole('region', { name: '控制设置' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: '返回桌面' })); expect(screen.queryByRole('region', { name: '控制设置' })).toBeNull();
+      expect(mocks.clients).toHaveLength(1);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: beforeWidth }); Object.defineProperty(window, 'innerHeight', { configurable: true, value: beforeHeight });
+    }
+  });
+  it('keeps actual trackpad taps active while the phone keyboard is open, without taking its focus', async () => {
+    localStorage.setItem('termdock:computer-touch-mode:v1', 'trackpad');
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
+    await waitFor(() => expect(mocks.clients).toHaveLength(1)); act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+    fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+    const phoneInput = screen.getByLabelText('直接输入到电脑');
+    const viewport = screen.getByLabelText('远程电脑桌面');
+    const touch = (type: string) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { pointerType: 'touch', pointerId: 1, clientX: 30, clientY: 40 });
+      fireEvent(viewport, event); return event;
+    };
+    expect(touch('pointerdown').defaultPrevented).toBe(true); touch('pointerup');
+    expect(mocks.pointerSend.mock.calls).toEqual([[640, 400, 1], [640, 400, 0]]);
+    expect(document.activeElement).toBe(phoneInput);
+    fireEvent.click(screen.getByRole('button', { name: '剪贴板' })); mocks.pointerSend.mockClear();
+    touch('pointerdown'); touch('pointerup'); expect(mocks.pointerSend).not.toHaveBeenCalled();
+  });
   it('saves login only after success, automatically connects after reopening and does not loop after cancellation', async () => {
     await ready();
     fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
@@ -227,6 +296,7 @@ describe('computer targets', () => {
     fireEvent.submit(screen.getByLabelText('密码').closest('form')!);
     await waitFor(() => expect(mocks.clients).toHaveLength(1));
     act(() => { mocks.clients[0].dispatchEvent(new Event('connect')); });
+    fireEvent.click(screen.getByRole('button', { name: '剪贴板' }));
     fireEvent.click(screen.getByRole('button', { name: label }));
     expect(mocks.clients[0].sendKey.mock.calls).toEqual([
       [modifier, code, true], [0x76, 'KeyV', true],
@@ -250,6 +320,7 @@ describe('computer targets', () => {
     expect(mocks.preferences?.local.port).toBe('3390');
     expect(JSON.stringify(mocks.writes)).not.toContain('private-rdp-password');
     expect(JSON.stringify(localStorage)).not.toContain('private-rdp-password');
+    fireEvent.click(screen.getByRole('button', { name: '控制设置' }));
     fireEvent.click(screen.getByRole('button', { name: '断开' }));
     expect((screen.getByLabelText('密码') as HTMLInputElement).value).toBe('');
   });

@@ -111,6 +111,7 @@ On iPhone, use Safari's **Share → Add to Home Screen**. On Android, use the br
 | AI sessions | Built-in recognition and resume adapters for multiple Agent CLIs; extensible through plugins |
 | Collaboration | Groups, messages, goals and subtasks, questions, plans, independent reviews, and explicit acceptance |
 | Files and review | File browser, upload/download, clipboard images, drag and drop, Git diffs, contextual references |
+| Architecture | Native project maps with nested modules, perspectives, source-line navigation, zoom and SVG export |
 | Previews | Markdown, images, video, sandboxed HTML, STL / GLB / glTF, and KiCad files; some conversions require additional host tools |
 | Connected devices | RDP/VNC desktop control; Android mirroring with adb, scrcpy, and an authorized device |
 | Clients | Browser, installable PWA, and macOS desktop app; English and Chinese UI; Flexoki dark and light themes |
@@ -121,6 +122,8 @@ Desktop control supports RDP and VNC. Ubuntu/Linux and Windows default to RDP; m
 PWA caching lets you reopen the cached interface offline. Terminal input, file access, and device control still need a working service connection. Phones may pause background clients; tmux continues on the service host.
 
 ## AI and collaboration
+
+Open an Agent in your project terminal, then select **Map → Generate** in the right sidebar. Review the built-in analysis prompt, insert it into the current input or context draft, and send it to the Agent. Choose the entire project, selected directories/modules (multiple relative paths), or a feature flow across directories. Optional controls set dependency depth, starting paths and focus; large projects do not need a full overview first. The overview uses `.termdock/architecture.json`; scoped maps are saved independently under `.termdock/architectures/`. Switch with **Saved analyses**. **Update** targets only the selected map; **Analyze this module in detail** prepares its source paths directly. The panel checks for saved changes every 10 seconds while visible and offers manual refresh. Analysis uses the current Agent's time and allowance. Maps and source files use the selected service's encrypted transport, including remote projects reached through an entry relay. On phones, module cards open a separate reading panel that preserves list position. Selecting a fullscreen graph node shows a compact two-line preview on phones; open or collapse its details explicitly. Desktop uses a side inspector. Reading panes reserve space for the canvas, preserve zoom, and keep the selected node visible. Follow related modules and step back through them; preview source at its referenced line within the map, then return to the module in one action. Switch perspectives and explore submodules without leaving fullscreen. Diagrams also support drag-to-pan and pinch-to-zoom, with readable labels by default. Long analysis notes, path lists and limitations are kept in collapsible sections.
 
 ### Use your preferred CLI
 

@@ -1,4 +1,5 @@
 import { CollaborationTaskWorkbench } from './CollaborationTaskWorkbench';
+import { freshGroupSettingsDraft, groupSettingsDirty, readGroupSettingsDraft, writeGroupSettingsDraft, type GroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
 import { collaborationMemberLabel, collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { collaborationGroupPreferences, collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
@@ -82,14 +83,20 @@ const choiceClass = 'inline-flex min-h-7 items-center justify-center rounded-md 
 const buttonClass = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40';
 
 type PanelDrafts = NonNullable<CollaborationPanelState['drafts']>;
+// Origin identity stays in memory; persisted panel drafts keep their existing shape.
+const sharedDraftOrigins = new WeakMap<object, object>();
 
 export function AgentOperationsPanel(props: AgentOperationsPanelProps) {
   const [overlay, setOverlay] = useState<'floating' | 'full' | null>(null);
   const [residentClosed, setResidentClosed] = useState(false);
   const [drafts, setDrafts] = useState<PanelDrafts>({});
   const loadDrafts = useCallback((saved: PanelDrafts) => setDrafts(current => ({ ...saved, ...current })), []);
-  const updateDraft = useCallback((id: string, draft: PanelDrafts[string]) => setDrafts(current =>
-    JSON.stringify(current[id]) === JSON.stringify(draft) ? current : { ...current, [id]: draft }), []);
+  const updateDraft = useCallback((id: string, draft: PanelDrafts[string], origin?: object) => setDrafts(current => {
+    if (JSON.stringify(current[id]) === JSON.stringify(draft)) return current;
+    const shared = { ...draft };
+    if (origin) sharedDraftOrigins.set(shared, origin);
+    return { ...current, [id]: shared };
+  }), []);
   const shared = { drafts, loadDrafts, updateDraft };
   return <>
     {!residentClosed && <AgentOperationsPanelView {...props} {...shared} overlayObscured={!!overlay} onOpenOverlay={setOverlay}
@@ -108,7 +115,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
   onOpenOverlay: (mode: 'floating' | 'full') => void;
   drafts: PanelDrafts;
   loadDrafts: (drafts: PanelDrafts) => void;
-  updateDraft: (id: string, draft: PanelDrafts[string]) => void;
+  updateDraft: (id: string, draft: PanelDrafts[string], origin?: object) => void;
 }) {
   const groupWorkspace = !!initialCollaborationGroupId;
   const [floating, setFloating] = useState(initialFloating);
@@ -771,7 +778,7 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   initialDrafts?: CollaborationPanelState['drafts'];
   docked: boolean;
   inputKeySuffix: string;
-  onDraftChange: (groupId: string, draft: { content: string; targets: string[] | null }) => void;
+  onDraftChange: (groupId: string, draft: { content: string; targets: string[] | null }, origin?: object) => void;
   groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; defaultSessionMode: 'shell' | 'tmux'; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
 }) {
@@ -795,6 +802,16 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   const [content, setContent] = useState('');
   const [editingMembers, setEditingMembers] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsContainer = useRef<HTMLDivElement | null>(null);
+  const settingsTrigger = useRef<HTMLButtonElement | null>(null);
+  const closeSettings = () => {
+    setSettingsOpen(false);
+    // The hidden board measures as narrow; allow its responsive toolbar to return first.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (settingsTrigger.current?.isConnected && settingsTrigger.current.getClientRects().length) settingsTrigger.current.focus();
+      else Array.from(settingsContainer.current?.querySelectorAll<HTMLElement>('button[aria-label="组设置"], button[aria-label="更多看板操作"]') ?? []).find(button => button.getClientRects().length)?.focus();
+    }));
+  };
   const [confirmRemoveMemberId, setConfirmRemoveMemberId] = useState<string | null>(null);
   const [memberSelection, setMemberSelection] = useState<Set<string>>(new Set());
   const [memberRevision, setMemberRevision] = useState<number | undefined>();
@@ -814,6 +831,7 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   const workspaceMembers = selectedGroup?.sessionIds.flatMap(id => { const session = sessions.find(s => s.sessionId === id); return session ? [session] : []; }) ?? [];
   const [uploadingFiles, setUploadingFiles] = useState(0);
   const drafts = useRef(new Map<string, { content: string; targets: string[] | null }>(Object.entries(initialDrafts ?? {})));
+  const [draftOrigin] = useState(() => ({}));
   const groupIdRef = useRef<string | undefined>(undefined);
   const restoringDraft = useRef(false);
   const targetsRef = useRef(targetSessionIds);
@@ -839,9 +857,12 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   useLayoutEffect(() => {
     if (appliedDrafts.current === initialDrafts) return;
     appliedDrafts.current = initialDrafts;
-    for (const [id, draft] of Object.entries(initialDrafts ?? {})) drafts.current.set(id, draft);
+    for (const [id, draft] of Object.entries(initialDrafts ?? {})) {
+      if (sharedDraftOrigins.get(draft) !== draftOrigin) drafts.current.set(id, draft);
+    }
     const incoming = initialDrafts?.[selectedGroup?.id ?? ''];
-    if (!incoming || (incoming.content === contentRef.current && JSON.stringify(incoming.targets) === JSON.stringify(targetsRef.current))) return;
+    if (!incoming || sharedDraftOrigins.get(incoming) === draftOrigin
+      || (incoming.content === contentRef.current && JSON.stringify(incoming.targets) === JSON.stringify(targetsRef.current))) return;
     restoringDraft.current = true;
     pendingDraft.current = null;
     setContent(incoming.content);
@@ -850,11 +871,13 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   const persistDraft = useCallback((patch: CollaborationPanelState) => {
     void saveCollaborationPanel(patch).catch(() => setError('草稿保存失败，请保持面板打开，修改内容后重试'));
   }, [setError]);
-  useEffect(() => {
+  // Share edits before the next input event; a delayed self-echo must not replace newer typing.
+  useLayoutEffect(() => {
     if (restoringDraft.current) { restoringDraft.current = false; return; }
     if (!selectedGroup || groupIdRef.current !== selectedGroup.id) return;
     const patch = { drafts: { [selectedGroup.id]: { content, targets: targetSessionIds } } };
-    onDraftChange(selectedGroup.id, patch.drafts[selectedGroup.id]);
+    sharedDraftOrigins.set(patch.drafts[selectedGroup.id], draftOrigin);
+    onDraftChange(selectedGroup.id, patch.drafts[selectedGroup.id], draftOrigin);
     pendingDraft.current = patch;
     const timer = setTimeout(() => { pendingDraft.current = null; persistDraft(patch); }, 400);
     return () => { clearTimeout(timer); };
@@ -1091,11 +1114,17 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
 
   const workspaceNavigation = <nav aria-label="协作工作区" className="flex shrink-0 items-center gap-1">{([['tasks', fullWorkspace ? '看板' : '目标'], ['messages', '成员与消息']] as const).map(([id, label]) => <button type="button" key={id} aria-label={label} aria-pressed={workspaceView === id} className={`${buttonClass} min-h-11 ${workspaceView === id ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={event => {
       const root = event.currentTarget.closest('[data-collaboration-views]');
+      const trigger = event.currentTarget;
       setWorkspaceView(id);
-      requestAnimationFrame(() => Array.from(root?.querySelectorAll<HTMLButtonElement>('nav[aria-label="协作工作区"] button') ?? []).find(node => node.getAttribute('aria-pressed') === 'true' && !node.closest('[hidden]'))?.focus());
+      requestAnimationFrame(() => {
+        const focused = document.activeElement;
+        // A user may already be typing; restoring navigation must not steal that focus.
+        if (focused !== trigger && focused !== document.body && focused?.isConnected && !focused.closest('[hidden]')) return;
+        Array.from(root?.querySelectorAll<HTMLButtonElement>('nav[aria-label="协作工作区"] button') ?? []).find(node => node.getAttribute('aria-pressed') === 'true' && !node.closest('[hidden]'))?.focus();
+      });
     }}>{fullWorkspace && id === 'messages' ? <><span className="sm:hidden">成员</span><span className="hidden sm:inline">{label}</span></> : label}{!fullWorkspace && id === 'tasks' && taskAttention > 0 && <span className="rounded bg-primary/15 px-1.5 text-[11px] text-primary">{taskAttention} 待处理</span>}</button>)}</nav>;
-  const workspaceSettings = <button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} />{fullWorkspace && <span className="sm:sr-only">组设置</span>}</button>;
-  return <div className={fullWorkspace ? "flex min-h-0 flex-1 flex-col gap-3" : "space-y-3"}>
+  const workspaceSettings = <button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={event => { settingsTrigger.current = event.currentTarget; setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} />{fullWorkspace && <span className="sm:sr-only">组设置</span>}</button>;
+  return <div ref={settingsContainer} className={fullWorkspace ? "flex min-h-0 flex-1 flex-col gap-3" : "space-y-3"}>
     {messagesError && connection === 'ready' && !isConnectionInterruption(messagesError) && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">消息同步暂时失败，正在自动重试：{messagesError}</p>}
     {messagesError && isConnectionInterruption(messagesError) && !fullWorkspace && <p role="status" className="text-[11px] text-muted-foreground">正在恢复消息同步，现有记录已保留</p>}
     <div className={fullWorkspace ? settingsOpen ? "min-h-0 flex-1 overflow-auto" : "contents" : undefined}>
@@ -1105,12 +1134,12 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
           {groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.sessionIds.length} 个成员</option>)}
         </select></label> : <h3 className="min-w-0 flex-1 text-sm font-medium text-foreground">建立协作组</h3>}
         {selectedGroup && <>
-          <button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} /></button>
+          <button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={event => { settingsTrigger.current = event.currentTarget; setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} /></button>
           <button type="button" aria-label="新建协作组" title="新建协作组" className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSelectedGroupId('new'); setConfirmDelete(false); setNotice(null); }}><Plus size={14} /></button>
         </>}
       </div>}
 
-    {settingsOpen && selectedGroup && <CollaborationGroupSettings key={selectedGroup.id} group={selectedGroup} activeSessionId={activeSessionId} sessions={sessions} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={() => setSettingsOpen(false)} />}
+    {settingsOpen && selectedGroup && <CollaborationGroupSettings key={selectedGroup.id} group={selectedGroup} activeSessionId={activeSessionId} sessions={sessions} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={closeSettings} />}
     {!selectedGroup && <section className="border-y border-border/15 py-4">
       <div className="flex items-start justify-between gap-3"><div><h4 className="text-[12px] font-medium text-foreground">创建协作组</h4><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">先建立项目或目标空间，再写下目标。开始协作时配置 Agent；也可以复用已有会话。</p></div><span className={`shrink-0 text-[10px] ${selectedCount >= 2 ? 'text-primary' : 'text-muted-foreground'}`}>已选 {selectedCount} 个</span></div>
       <label className="mt-4 block space-y-1 text-[10px] text-muted-foreground">协作组名称<input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：发布准备" /></label>
@@ -1197,22 +1226,26 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void;
   refresh: () => Promise<void>; onClose: () => void;
 }) {
-  const [base, setBase] = useState(group);
-  const [name, setName] = useState(group.name);
-  const [rules, setRules] = useState(group.instructions?.text ?? '');
-  const [rulesVersion, setRulesVersion] = useState(group.instructions?.version ?? '');
-  const [savedRules, setSavedRules] = useState(group.instructions?.text ?? '');
   const localMembers = sessions.filter(session => group.sessionIds.includes(session.sessionId) && !remoteSessionAddress(session.sessionId));
-  const [rulesMemberId, setRulesMemberId] = useState(() => activeSessionId && localMembers.some(session => session.sessionId === activeSessionId) ? activeSessionId : '');
+  const [draft, setDraft] = useState(() => readGroupSettingsDraft(group, activeSessionId && localMembers.some(session => session.sessionId === activeSessionId) ? activeSessionId : ''));
+  const draftRef = useRef(draft);
+  const updateDraft = (patch: Partial<GroupSettingsDraft>) => {
+    const next = { ...draftRef.current, ...patch };
+    draftRef.current = next;
+    writeGroupSettingsDraft(group.id, next);
+    setDraft(next);
+  };
+  const { name, rules, savedName, savedRules, rulesVersion, rulesMemberId } = draft;
+  const dirty = groupSettingsDirty(draft);
   const rulesBytes = new TextEncoder().encode(rules).length;
   const canEditRules = localMembers.some(session => session.sessionId === rulesMemberId);
   const rename = async () => {
     if (busy || !name.trim()) return;
     setBusy('group-name'); setError(null); setNotice(null);
     try {
-      const result = await saveCollaborationGroup({ id: base.id, name: name.trim(), sessionIds: base.sessionIds, expectedUpdatedAt: base.updatedAt });
-      setBase(result.group); setName(result.group.name);
-      if (rules === savedRules) { setRules(result.group.instructions?.text ?? ''); setSavedRules(result.group.instructions?.text ?? ''); setRulesVersion(result.group.instructions?.version ?? ''); }
+      const result = await saveCollaborationGroup({ id: group.id, name: name.trim(), sessionIds: group.sessionIds, expectedUpdatedAt: draft.updatedAt });
+      updateDraft({ savedName: result.group.name, name: result.group.name, updatedAt: result.group.updatedAt,
+        ...(rules === savedRules ? { rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' } : {}) });
       await refresh(); setNotice('协作组名称已更新');
     } catch (error) { setError(error instanceof Error ? error.message : '改名失败'); }
     finally { setBusy(null); }
@@ -1221,24 +1254,29 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
     if (busy || !canEditRules || rulesBytes > 8192) return;
     setBusy('group-rules'); setError(null); setNotice(null);
     try {
-      const result = await setCollaborationGroupRules(base.id, { sessionId: rulesMemberId, text: rules, expectedVersion: rulesVersion });
-      if (name === base.name) setName(result.group.name);
-      setBase(result.group); setSavedRules(result.group.instructions?.text ?? ''); setRulesVersion(result.group.instructions?.version ?? '');
+      const result = await setCollaborationGroupRules(group.id, { sessionId: rulesMemberId, text: rules, expectedVersion: rulesVersion });
+      updateDraft({ savedName: result.group.name, ...(name === savedName ? { name: result.group.name } : {}),
+        updatedAt: result.group.updatedAt, rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' });
       await refresh(); setNotice(rules.trim() ? '群规已保存，变更通知已入队' : '群规已清空，变更通知已入队');
     } catch (error) { setError(error instanceof Error ? error.message : '群规保存失败'); }
     finally { setBusy(null); }
   };
   const reload = () => {
-    setBase(group); setName(group.name); setRules(group.instructions?.text ?? ''); setSavedRules(group.instructions?.text ?? ''); setRulesVersion(group.instructions?.version ?? ''); setError(null);
+    updateDraft(freshGroupSettingsDraft(group, rulesMemberId)); setError(null);
   };
-  return <section aria-label="协作组设置" className="mt-3 rounded-xl border border-border/20 bg-surface-2 p-3">
+  return <section aria-label="协作组设置" onKeyDown={event => {
+    if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+    event.preventDefault(); event.stopPropagation();
+    if (!busy) onClose();
+  }} className="mt-3 rounded-xl border border-border/20 bg-surface-2 p-3">
     <div className="mb-3 flex items-center justify-between gap-2"><h4 className="text-[12px] font-medium text-foreground">组设置</h4><button type="button" disabled={Boolean(busy)} aria-label="关闭组设置" className="rounded-lg p-2 text-muted-foreground hover:bg-surface-elevated" onClick={onClose}><X size={14} /></button></div>
-    <label className="block space-y-1 text-[10px] text-muted-foreground">协作组名称<input autoFocus className={inputClass} value={name} maxLength={240} disabled={Boolean(busy)} onChange={event => setName(event.target.value)} /></label>
-    <div className="mt-2 flex justify-end"><button type="button" disabled={Boolean(busy) || !name.trim() || name.trim() === base.name} className={`${buttonClass} min-h-9 bg-primary text-primary-foreground`} onClick={() => void rename()}>{busy === 'group-name' ? '保存中…' : '保存名称'}</button></div>
-    <div className="mt-3 space-y-2 border-t border-border/15 pt-3"><label className="block space-y-1 text-[10px] text-muted-foreground">由本组成员发布群规变更<select className={inputClass} value={rulesMemberId} disabled={Boolean(busy) || !localMembers.length} onChange={event => setRulesMemberId(event.target.value)}><option value="">选择当前服务的一个成员</option>{!localMembers.some(session => session.sessionId === rulesMemberId) && rulesMemberId && <option value={rulesMemberId}>原成员已不在组内，请重新选择</option>}{localMembers.map(session => <option key={session.sessionId} value={session.sessionId}>{session.name}</option>)}</select></label><label className="block space-y-1 text-[10px] text-muted-foreground">群规与协作约定<textarea className={`${inputClass} min-h-24 resize-y`} value={rules} maxLength={8192} disabled={Boolean(busy)} onChange={event => setRules(event.target.value)} placeholder="例如：说明分工、交接要求和结果格式。清空后保存可移除群规。" /></label></div>
+    <label className="block space-y-1 text-[10px] text-muted-foreground">协作组名称<input autoFocus className={inputClass} value={name} maxLength={240} disabled={Boolean(busy)} onChange={event => updateDraft({ name: event.target.value })} /></label>
+    <div className="mt-2 flex justify-end"><button type="button" disabled={Boolean(busy) || !name.trim() || name.trim() === savedName} className={`${buttonClass} min-h-9 bg-primary text-primary-foreground`} onClick={() => void rename()}>{busy === 'group-name' ? '保存中…' : '保存名称'}</button></div>
+    <div className="mt-3 space-y-2 border-t border-border/15 pt-3"><label className="block space-y-1 text-[10px] text-muted-foreground">由本组成员发布群规变更<select className={inputClass} value={rulesMemberId} disabled={Boolean(busy) || !localMembers.length} onChange={event => updateDraft({ rulesMemberId: event.target.value })}><option value="">选择当前服务的一个成员</option>{!localMembers.some(session => session.sessionId === rulesMemberId) && rulesMemberId && <option value={rulesMemberId}>原成员已不在组内，请重新选择</option>}{localMembers.map(session => <option key={session.sessionId} value={session.sessionId}>{session.name}</option>)}</select></label><label className="block space-y-1 text-[10px] text-muted-foreground">群规与协作约定<textarea className={`${inputClass} min-h-24 resize-y`} value={rules} maxLength={8192} disabled={Boolean(busy)} onChange={event => updateDraft({ rules: event.target.value })} placeholder="例如：说明分工、交接要求和结果格式。清空后保存可移除群规。" /></label></div>
     {!canEditRules && <p className="mt-1 text-[10px] text-muted-foreground">{localMembers.length ? '选择发布变更的成员后即可保存，不需要关闭工作台。' : '当前服务没有本组成员，请先添加成员或切换到成员所在的服务。已有群规可在此查看。'}</p>}
     <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-[9px] ${rulesBytes > 8192 ? 'text-destructive' : 'text-muted-foreground'}`}>{rulesBytes > 8192 ? '内容过长，请缩短群规' : '保存或清空群规会通知本组其他成员'}</p><button type="button" disabled={Boolean(busy) || !canEditRules || rulesBytes > 8192 || rules === savedRules} className={`${buttonClass} min-h-9 shrink-0 bg-primary text-primary-foreground`} onClick={() => void saveRules()}>{busy === 'group-rules' ? '保存中…' : rules.trim() ? '保存群规' : '清空群规'}</button></div>
-    <div className="mt-3 flex justify-between gap-2 border-t border-border/15 pt-2"><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 text-muted-foreground hover:bg-surface-elevated`} onClick={reload}><RefreshCw size={12} />重新载入{(name !== base.name || rules !== savedRules) && '（放弃草稿）'}</button><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 bg-surface text-foreground`} onClick={onClose}>完成</button></div>
+    {dirty && <p role="status" className="mt-3 text-[11px] leading-5 text-muted-foreground">有未保存修改。关闭、Escape 或切换组后，草稿仍保留在本标签页；名称与群规需分别保存。</p>}
+    <div className="mt-3 flex justify-between gap-2 border-t border-border/15 pt-2"><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 text-muted-foreground hover:bg-surface-elevated`} onClick={reload}><RefreshCw size={12} />重新载入{dirty && '（放弃草稿）'}</button><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 bg-surface text-foreground`} onClick={onClose}>{dirty ? '关闭并保留草稿' : '关闭'}</button></div>
   </section>;
 }
 

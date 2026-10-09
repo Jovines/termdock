@@ -1,7 +1,7 @@
 import { ChangesLoadingSkeleton } from './ChangesLoadingSkeleton';
 import { GitLoadingSkeleton } from './GitLoadingSkeleton';
 import { lazy, Suspense, useEffect, useRef, type ComponentProps } from 'react';
-import { X, Search, PencilLine, MoreHorizontal, GitBranch, GitCompare, Folder, Monitor } from 'lucide-react';
+import { X, Search, PencilLine, MoreHorizontal, GitBranch, GitCompare, Folder, Monitor, Network } from 'lucide-react';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { scheduleInteractionIdle } from '../../utils/interactionIdle';
 import { Sidebar } from './Sidebar';
@@ -48,11 +48,12 @@ export function DeferredRightSidebar(props: Props) {
               <X size={14} />
             </button>
           </div>
-          <div className="mt-2 grid grid-cols-4 gap-0.5 rounded-md bg-surface-2 p-0.5">
+          <div className="mt-2 grid grid-cols-5 gap-0.5 rounded-md bg-surface-2 p-0.5">
             {([
               ['git', GitBranch, 'rightSidebar.tabGit'],
               ['diff', GitCompare, 'rightSidebar.tabChanges'],
               ['files', Folder, 'rightSidebar.tabFiles'],
+              ['architecture', Network, 'architecture.tab'],
               ['computer', Monitor, 'rightSidebar.tabComputer'],
             ] as const).map(([tab, Icon, label]) => (
               <button key={tab} type="button" onClick={() => setRightTab(tab)}
@@ -64,7 +65,8 @@ export function DeferredRightSidebar(props: Props) {
           <div className="h-2" />
         </div>
         <div className="min-h-0 flex-1 bg-surface">
-          {rightTab === 'computer' ? <div className="p-3 text-xs text-muted-foreground">{t('computer.loading')}</div>
+          {rightTab === 'architecture' ? <div role="status" className="p-3 text-xs text-muted-foreground">{t('architecture.loading')}</div>
+            : rightTab === 'computer' ? <div className="p-3 text-xs text-muted-foreground">{t('computer.loading')}</div>
             : rightTab === 'git' ? <GitLoadingSkeleton /> : <ChangesLoadingSkeleton />}
         </div>
       </div>

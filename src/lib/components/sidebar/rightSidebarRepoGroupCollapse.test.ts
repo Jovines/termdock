@@ -35,9 +35,11 @@ describe('repo group collapse follows header visibility', () => {
 // selection the moment a placeholder chip was clicked.
 describe('known repo roots include unread placeholders', () => {
   it('counts a deferred placeholder listed only in the filters', () => {
+    const repoFilters = [{ root: '/work/app' }, { root: '/work/app/vendor/lib', deferred: true, context: null }];
+    const repositories = [{ root: '/work/app', context: { available: true } }];
     const roots = collectKnownGitRepoRoots(
-      [{ root: '/work/app' }, { root: '/work/app/vendor/lib', deferred: true, context: null }],
-      [{ root: '/work/app', context: { available: true } }],
+      repoFilters,
+      repositories,
     );
     expect(roots.has('/work/app/vendor/lib')).toBe(true);
     expect(roots.has('/work/app')).toBe(true);

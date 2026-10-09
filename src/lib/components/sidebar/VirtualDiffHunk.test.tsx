@@ -13,7 +13,7 @@ beforeEach(() => {
     disconnect() {}
   });
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     const top = Number(this.dataset.top ?? 0);
     const height = this.classList.contains('termdock-diff-stream-scroller') ? 600 : 200;
     return { top, bottom: top + height, height, width: 500, left: 0, right: 500, x: 0, y: top, toJSON() {} };

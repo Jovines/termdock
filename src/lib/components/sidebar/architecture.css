@@ -1,0 +1,17 @@
+.termdock-architecture-diagram svg { display: block; width: 100%; height: 100%; max-width: none !important; }
+.termdock-architecture-diagram .node { cursor: pointer; }
+.termdock-architecture-diagram .node rect,
+.termdock-architecture-diagram .node polygon { fill: var(--surface) !important; stroke: var(--border) !important; }
+.termdock-architecture-diagram .node[aria-pressed='true'] rect,
+.termdock-architecture-diagram .node[aria-pressed='true'] polygon,
+.termdock-architecture-diagram .node:focus rect { stroke: var(--primary) !important; stroke-width: 2px !important; }
+.termdock-architecture-diagram .node[data-architecture-related='true'] rect,
+.termdock-architecture-diagram .node[data-architecture-related='true'] polygon { stroke: var(--primary) !important; }
+.termdock-architecture-diagram .nodeLabel,
+.termdock-architecture-diagram .edgeLabel,
+.termdock-architecture-diagram text { color: var(--foreground) !important; fill: var(--foreground) !important; }
+.termdock-architecture-diagram .edgeLabel,
+.termdock-architecture-diagram .labelBkg { background-color: var(--surface-2) !important; fill: var(--surface-2) !important; }
+.termdock-architecture-diagram .edgeLabel rect { fill: var(--surface-2) !important; }
+.termdock-architecture-diagram .flowchart-link { stroke: var(--muted-foreground) !important; }
+.termdock-architecture-diagram marker path { fill: var(--muted-foreground) !important; stroke: var(--muted-foreground) !important; }

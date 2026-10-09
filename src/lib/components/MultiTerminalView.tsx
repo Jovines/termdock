@@ -1,3 +1,4 @@
+import { classifySessionCreationError, type NewSessionRequestOptions } from '../terminal/newSessionRequest';
 import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 import { legacySplitTree } from '../terminal/freeSplitLayout';
 import { FreeSplitLayout } from './FreeSplitLayout';
@@ -88,7 +89,7 @@ export interface TerminalSessionInfo {
   tmuxSessionName: string | null;
 }
 
-interface NewSessionEventDetail {
+interface NewSessionEventDetail extends NewSessionRequestOptions {
   preferredFrontendSessionId?: string;
   requireExisting?: boolean;
   mode?: TerminalMode;
@@ -1662,9 +1663,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         mode: nextSession.mode,
         tmuxSessionName: nextSession.tmuxSessionName,
       });
+      options?.onResult?.({ ok: true, sessionId: nextSession.id });
       return nextSession.id;
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
+      options?.onResult?.({ ok: false, error: classifySessionCreationError(error) });
       return null;
     }
   }, [defaultSessionMode, defaultTmuxSessionName, activeSessionId, openSession, debugSession]);

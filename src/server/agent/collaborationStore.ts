@@ -206,6 +206,7 @@ export class CollaborationStore {
   save(input: { id?: string; name: string; sessionIds: string[] }): CollaborationGroup {
     const now = Date.now();
     const existing = input.id ? this.document.groups.find((group) => group.id === input.id) : null;
+    if (input.id && (!existing || existing.deleted)) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
     const sessionIds = Array.from(new Set(input.sessionIds.map((id) => id.trim()).filter(Boolean)));
     const group = pruneRoles({
       ...existing,
@@ -245,14 +246,16 @@ export class CollaborationStore {
   }
 
   remove(id: string): boolean {
-    const before = this.document.groups.length;
     const existing = this.getGroup(id);
+    if (!existing || existing.deleted) return false;
     if (existing?.federated) {
       this.mergeFederatedGroup({ ...existing, deleted: true, updatedAt: Math.max(Date.now(), existing.updatedAt + 1) });
       return true;
     }
-    this.document.groups = this.document.groups.filter((group) => group.id !== id);
-    if (before === this.document.groups.length) return false;
+    // Keep the identity reserved even for local groups. Late edits must not
+    // create a replacement after an explicit delete or a service restart.
+    this.document.groups = this.document.groups.map((group) => group.id === id
+      ? { ...group, deleted: true, updatedAt: Math.max(Date.now(), group.updatedAt + 1) } : group);
     this.document.messages = this.document.messages.filter((message) => message.groupId !== id);
     this.persist();
     return true;
@@ -349,8 +352,8 @@ export class CollaborationStore {
 
   clear(): void {
     if (this.document.groups.length === 0 && this.document.messages.length === 0) return;
-    this.document = { version: 2, groups: this.document.groups.filter((group) => group.federated)
-      .map((group) => ({ ...group, deleted: true, updatedAt: Math.max(Date.now(), group.updatedAt + 1) })), messages: [] };
+    this.document = { version: 2, groups: this.document.groups
+      .map((group) => group.deleted ? group : ({ ...group, deleted: true, updatedAt: Math.max(Date.now(), group.updatedAt + 1) })), messages: [] };
     this.persist();
   }
 
@@ -495,7 +498,7 @@ export class CollaborationStore {
    * a global deletion of the group that still exists on other services. */
   dropFederatedReplica(id: string, updatedAt: number): void {
     const group = this.getGroup(id);
-    if (!group?.federated || group.updatedAt > updatedAt) return;
+    if (!group?.federated || group.deleted || group.updatedAt > updatedAt) return;
     this.document.groups = this.document.groups.filter(item => item.id !== id);
     this.document.messages = this.document.messages.filter(item => item.groupId !== id);
     this.persist();
@@ -504,9 +507,14 @@ export class CollaborationStore {
   mergeFederatedGroup(group: CollaborationGroup): void {
     validateFederatedGroup(group);
     const existing = this.getGroup(group.id);
-    if (existing && (!existing.federated || existing.updatedAt > group.updatedAt)) return;
+    // Deletion is final for an ID, regardless of peer clock skew or edits made
+    // while offline. A new collaboration always receives a new ID.
+    if (existing && (!existing.federated || (existing.deleted && (!group.deleted || existing.updatedAt >= group.updatedAt))
+      || (!group.deleted && existing.updatedAt > group.updatedAt))) return;
+    const incoming = group.deleted && existing && !existing.deleted
+      ? { ...group, updatedAt: Math.max(group.updatedAt, existing.updatedAt + 1) } : group;
     const priorContext = existing ? this.context(group.id) : undefined;
-    this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), { ...group }];
+    this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), { ...incoming }];
     if (priorContext) this.mergeContext(group.id, priorContext);
     if (group.deleted) this.document.messages = this.document.messages.filter((item) => item.groupId !== group.id);
     this.persist();

@@ -80,6 +80,14 @@ describe('authoritative collaboration membership HTTP API', () => {
     expect(store.list()).toEqual([]); expect(store.federationSnapshot().groups[0].deleted).toBe(true);
     expect(await save({ id: 'cross-group', name: 'Resurrect', sessionIds: ['custom', 'shell'] })).toMatchObject({ status: 404 });
   });
+  it('deleting a local group remains authoritative after restart and rejects a stale client save', async () => {
+    const group = store.save({ name: 'Empty project', sessionIds: [] });
+    expect((await fetch(`${url}/${group.id}`, { method: 'DELETE' })).status).toBe(204);
+    expect(store.getGroup(group.id)?.deleted).toBe(true);
+    expect(await save({ id: group.id, name: 'Old client', sessionIds: [] })).toMatchObject({ status: 404 });
+    expect((await (await fetch(url)).json()).groups).toEqual([]);
+    expect(new CollaborationStore(path.join(directory, 'groups.json')).list()).toEqual([]);
+  });
   it('moves a member between groups atomically and rolls both groups back on failure', async () => {
     const source = store.save({ name: 'Source', sessionIds: ['custom', 'offline-source'] });
     const target = store.save({ name: 'Target', sessionIds: ['shell', 'offline-target'] });
