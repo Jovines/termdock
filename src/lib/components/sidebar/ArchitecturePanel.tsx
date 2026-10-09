@@ -23,7 +23,7 @@ function hasSelection(root: string | null): boolean {
 export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile, renderSource }: {
   rootPath: string | null;
   active: boolean;
-  onInsertPrompt: (prompt: string) => void;
+  onInsertPrompt: (prompt: string, source: HTMLElement) => boolean | Promise<boolean>;
   onOpenFile: (file: ArchitectureFile) => void;
   renderSource?: (file: ArchitectureFile) => ReactNode;
 }) {

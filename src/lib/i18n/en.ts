@@ -60,6 +60,8 @@ export const en: TranslationDictionary = {
     insertPrompt: "Insert prompt",
     copyPrompt: "Copy prompt",
     previewPrompt: "Review analysis prompt",
+    inserting: "Adding to the current input…",
+    insertFailed: "Could not add the prompt. Check the current session, or copy it below.",
     inserted: "Review the current input or context draft, then send it to your Agent.",
     copied: "Prompt copied.",
     failed: "Copy failed. Copy manually from the prompt below.",

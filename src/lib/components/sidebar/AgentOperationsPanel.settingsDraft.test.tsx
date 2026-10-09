@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CollaborationTab } from './AgentOperationsPanel';
 import type { CollaborationGroup } from '../../terminal/api';
+import { freshGroupSettingsDraft, writeGroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
 
 const api = vi.hoisted(() => ({ rename: vi.fn(), rules: vi.fn() }));
 vi.mock('../../terminal/api', async original => ({
@@ -16,10 +17,11 @@ vi.mock('./CollaborationTaskWorkbench', () => ({ CollaborationTaskWorkbench: ({ 
 const alpha: CollaborationGroup = { id: 'alpha-draft', name: 'Alpha', sessionIds: ['member'], createdAt: 1, updatedAt: 1 };
 const beta: CollaborationGroup = { ...alpha, id: 'beta-draft', name: 'Beta' };
 const member = { sessionId: 'member', backendSessionId: 'member', agent: null, name: '测试成员', cwd: '/tmp', status: 'ready', capability: 'terminal', currentTask: '', updatedAt: 1 };
-function Harness({ group = alpha }: { group?: CollaborationGroup }) {
+const secondMember = { ...member, sessionId: 'second-member', backendSessionId: 'second-member', name: '第二成员' };
+function Harness({ group = alpha, activeSessionId = 'member' }: { group?: CollaborationGroup; activeSessionId?: string }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  return <>{error && <p role="alert">{error}</p>}<CollaborationTab key={group.id} fullWorkspace active notice={null} onDraftChange={vi.fn()} docked={false} inputKeySuffix="" selectedGroupId={group.id} setSelectedGroupId={vi.fn()} floatingVisible floating={false} sessionsState="loaded" groups={[group]} sessions={[member]} agents={[]} activeSessionId="member" initialGroupId={group.id} onOpenSession={vi.fn()} onOpenTaskSession={vi.fn()} defaultSessionMode="shell" busy={busy} setBusy={setBusy} setError={setError} setNotice={vi.fn()} refresh={vi.fn().mockResolvedValue(undefined)} /></>;
+  return <>{error && <p role="alert">{error}</p>}<CollaborationTab key={group.id} fullWorkspace active notice={null} onDraftChange={vi.fn()} docked={false} inputKeySuffix="" selectedGroupId={group.id} setSelectedGroupId={vi.fn()} floatingVisible floating={false} sessionsState="loaded" groups={[group]} sessions={[member, secondMember]} agents={[]} activeSessionId={activeSessionId} initialGroupId={group.id} onOpenSession={vi.fn()} onOpenTaskSession={vi.fn()} defaultSessionMode="shell" busy={busy} setBusy={setBusy} setError={setError} setNotice={vi.fn()} refresh={vi.fn().mockResolvedValue(undefined)} /></>;
 }
 function open() { fireEvent.click(screen.getByRole('button', { name: '组设置' })); }
 const nameInput = () => screen.getByRole('textbox', { name: '协作组名称' }) as HTMLInputElement;
@@ -28,8 +30,19 @@ function edit(name = '名称草稿', rules = '群规草稿') {
   fireEvent.change(nameInput(), { target: { value: name } });
   fireEvent.change(rulesInput(), { target: { value: rules } });
 }
-beforeEach(() => { sessionStorage.clear(); localStorage.clear(); vi.clearAllMocks(); });
-afterEach(cleanup);
+const draftKey = (group: CollaborationGroup) => `termdock-group-settings:${location.origin}:${group.id}`;
+function failDraftStorage(method: 'setItem' | 'removeItem' | 'getItem', group: CollaborationGroup) {
+  const original = Storage.prototype[method];
+  return vi.spyOn(Storage.prototype, method).mockImplementation(function (this: Storage, key: string, value?: string) {
+    if (this === sessionStorage && key === draftKey(group)) throw new DOMException('Blocked', 'SecurityError');
+    return method === 'setItem' ? (original as Storage['setItem']).call(this, key, value!) : (original as Storage['getItem']).call(this, key);
+  });
+}
+beforeEach(() => { sessionStorage.clear(); localStorage.clear(); vi.clearAllMocks(); api.rename.mockReset(); api.rules.mockReset(); });
+afterEach(() => {
+  cleanup(); vi.restoreAllMocks(); sessionStorage.clear();
+  for (const group of [alpha, beta]) writeGroupSettingsDraft(group.id, freshGroupSettingsDraft(group));
+});
 
 it('keeps both drafts on close, Escape and a complete unmount without publishing', () => {
   const view = render(<Harness />); open(); edit();
@@ -109,4 +122,80 @@ it('does not let Escape close a parent during a save and updates the cached draf
   view.rerender(<Harness />); open();
   expect(nameInput().value).toBe('名称草稿'); expect(rulesInput().value).toBe('群规草稿');
   expect(within(screen.getByRole('region', { name: '协作组设置' })).getByRole('button', { name: '保存名称' }).hasAttribute('disabled')).toBe(true);
+});
+
+it('restores the latest failed write over stale storage after closing, switching groups and a complete unmount without publishing', () => {
+  const saved: CollaborationGroup = { ...alpha, sessionIds: ['member', 'second-member'], updatedAt: 10,
+    instructions: { text: '已保存群规', version: 'v10', updatedAt: 10, updatedBy: 'member' } };
+  const view = render(<Harness group={saved} />); open(); edit('旧名称草稿', '旧群规草稿');
+  const oldRaw = sessionStorage.getItem(draftKey(saved));
+  failDraftStorage('setItem', saved);
+  edit('最新名称草稿', '最新群规草稿');
+  fireEvent.change(screen.getByRole('combobox', { name: '由本组成员发布群规变更' }), { target: { value: 'second-member' } });
+  expect(sessionStorage.getItem(draftKey(saved))).toBe(oldRaw);
+  fireEvent.click(screen.getByRole('button', { name: '关闭并保留草稿' })); open();
+  expect(nameInput().value).toBe('最新名称草稿'); expect(rulesInput().value).toBe('最新群规草稿');
+  view.rerender(<Harness group={beta} />); open(); edit('Beta最新名称', 'Beta最新群规');
+  const unavailableReads = failDraftStorage('getItem', saved);
+  view.rerender(<Harness group={saved} activeSessionId="member" />); open();
+  expect(nameInput().value).toBe('最新名称草稿'); expect(rulesInput().value).toBe('最新群规草稿');
+  expect((screen.getByRole('combobox', { name: '由本组成员发布群规变更' }) as HTMLSelectElement).value).toBe('second-member');
+  unavailableReads.mockRestore();
+  view.rerender(<Harness group={beta} />); open();
+  expect(nameInput().value).toBe('Beta最新名称'); expect(rulesInput().value).toBe('Beta最新群规');
+  view.unmount(); render(<Harness group={saved} />); open();
+  expect(nameInput().value).toBe('最新名称草稿'); expect(rulesInput().value).toBe('最新群规草稿');
+  expect(api.rename).not.toHaveBeenCalled(); expect(api.rules).not.toHaveBeenCalled();
+});
+
+it('keeps discarded drafts cleared after failed removal and reopens current saved values and publisher metadata', () => {
+  const view = render(<Harness />); open(); edit();
+  const oldRaw = sessionStorage.getItem(draftKey(alpha));
+  failDraftStorage('removeItem', alpha);
+  const saved: CollaborationGroup = { ...alpha, name: '服务端新名称', sessionIds: ['member', 'second-member'], updatedAt: 20,
+    instructions: { text: '服务端新群规', version: 'v20', updatedAt: 20, updatedBy: 'second-member' } };
+  view.rerender(<Harness group={saved} />);
+  fireEvent.click(screen.getByRole('button', { name: '重新载入（放弃草稿）' }));
+  expect(nameInput().value).toBe(saved.name); expect(rulesInput().value).toBe(saved.instructions!.text);
+  expect(sessionStorage.getItem(draftKey(alpha))).toBe(oldRaw);
+  fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+  view.unmount(); render(<Harness group={saved} activeSessionId="second-member" />); open();
+  expect(nameInput().value).toBe(saved.name); expect(rulesInput().value).toBe(saved.instructions!.text);
+  expect((screen.getByRole('combobox', { name: '由本组成员发布群规变更' }) as HTMLSelectElement).value).toBe('second-member');
+  expect(screen.queryByText(/有未保存修改/)).toBeNull();
+  expect(api.rename).not.toHaveBeenCalled(); expect(api.rules).not.toHaveBeenCalled();
+});
+
+it.each(['name', 'rules'] as const)('saves %s independently through failed storage, preserves the other draft, and clears both after the final explicit save', async first => {
+  const saved: CollaborationGroup = { ...alpha, sessionIds: ['member', 'second-member'], updatedAt: 10,
+    instructions: { text: '已保存群规', version: 'v10', updatedAt: 10, updatedBy: 'member' } };
+  const partiallySaved: CollaborationGroup = first === 'name'
+    ? { ...saved, name: '最新名称草稿', updatedAt: 11 }
+    : { ...saved, updatedAt: 11, instructions: { text: '最新群规草稿', version: 'v11', updatedAt: 11, updatedBy: 'second-member' } };
+  const fullySaved: CollaborationGroup = { ...partiallySaved, name: '最新名称草稿', updatedAt: 12,
+    instructions: { text: '最新群规草稿', version: first === 'name' ? 'v12' : 'v11', updatedAt: 12, updatedBy: 'second-member' } };
+  (first === 'name' ? api.rename : api.rules).mockResolvedValue({ group: partiallySaved });
+  (first === 'name' ? api.rules : api.rename).mockResolvedValue({ group: fullySaved });
+  let view = render(<Harness group={saved} />); open(); edit('旧名称草稿', '旧群规草稿');
+  const oldRaw = sessionStorage.getItem(draftKey(saved));
+  failDraftStorage('setItem', saved); failDraftStorage('removeItem', saved);
+  edit('最新名称草稿', '最新群规草稿');
+  fireEvent.change(screen.getByRole('combobox', { name: '由本组成员发布群规变更' }), { target: { value: 'second-member' } });
+  fireEvent.click(screen.getByRole('button', { name: first === 'name' ? '保存名称' : '保存群规' }));
+  await waitFor(() => expect((screen.getByRole('button', { name: first === 'name' ? '保存名称' : '保存群规' }) as HTMLButtonElement).disabled).toBe(true));
+  expect(first === 'name' ? api.rules : api.rename).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '关闭并保留草稿' })); view.unmount();
+  view = render(<Harness group={partiallySaved} />); open();
+  expect(nameInput().value).toBe('最新名称草稿'); expect(rulesInput().value).toBe('最新群规草稿');
+  expect((screen.getByRole('combobox', { name: '由本组成员发布群规变更' }) as HTMLSelectElement).value).toBe('second-member');
+  fireEvent.click(screen.getByRole('button', { name: first === 'name' ? '保存群规' : '保存名称' }));
+  await waitFor(() => expect(screen.queryByText(/有未保存修改/)).toBeNull());
+  expect(api.rename).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ expectedUpdatedAt: first === 'name' ? 10 : 11 }));
+  expect(api.rules).toHaveBeenCalledExactlyOnceWith(saved.id, { sessionId: 'second-member', text: '最新群规草稿', expectedVersion: 'v10' });
+  expect(sessionStorage.getItem(draftKey(saved))).toBe(oldRaw);
+  fireEvent.click(screen.getByRole('button', { name: '关闭' })); view.unmount();
+  render(<Harness group={fullySaved} activeSessionId="second-member" />); open();
+  expect(nameInput().value).toBe(fullySaved.name); expect(rulesInput().value).toBe(fullySaved.instructions!.text);
+  expect(screen.queryByText(/有未保存修改/)).toBeNull();
+  expect(api.rename).toHaveBeenCalledOnce(); expect(api.rules).toHaveBeenCalledOnce();
 });

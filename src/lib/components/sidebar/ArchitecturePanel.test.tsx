@@ -15,7 +15,7 @@ const document: ArchitectureDocument = {
     { id: 'input', title: 'Input', summary: 'Terminal input', files: [] },
   ], edges: [] }],
 };
-const props = () => ({ rootPath: '/project', active: true, onInsertPrompt: vi.fn(), onOpenFile: vi.fn() });
+const props = () => ({ rootPath: '/project', active: true, onInsertPrompt: vi.fn().mockResolvedValue(true), onOpenFile: vi.fn() });
 beforeEach(() => { sessionStorage.clear(); read.mockReset(); list.mockReset(); list.mockResolvedValue([]); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('native architecture browsing', () => {
@@ -148,7 +148,8 @@ describe('native architecture browsing', () => {
     expect((screen.getByRole('button', { name: 'Insert prompt' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByRole('textbox', { name: 'Feature to understand' }), { target: { value: 'File upload' } });
     fireEvent.click(screen.getByRole('button', { name: 'Insert prompt' }));
-    expect(input.onInsertPrompt).toHaveBeenCalledWith(expect.stringContaining('Analyze ONLY the requested feature'));
+    await waitFor(() => expect(input.onInsertPrompt).toHaveBeenCalledWith(expect.stringContaining('Analyze ONLY the requested feature'), expect.any(HTMLFormElement)));
+    await screen.findByText(/Review the current input/);
     expect(input.onInsertPrompt.mock.calls[0][0]).toContain('.termdock/architectures/feature-File-upload-');
     fireEvent.click(screen.getByRole('button', { name: 'Close analysis settings' }));
     await screen.findByText(/This analysis has not been saved yet/);
@@ -167,9 +168,38 @@ describe('native architecture browsing', () => {
     expect((screen.getByRole('button', { name: 'Insert prompt' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(field, { target: { value: 'src/server\npackages/auth' } });
     fireEvent.click(screen.getByRole('button', { name: 'Insert prompt' }));
+    await waitFor(() => expect(input.onInsertPrompt).toHaveBeenCalledOnce());
     expect(input.onInsertPrompt.mock.calls[0][0]).toContain('src/server');
     expect(input.onInsertPrompt.mock.calls[0][0]).toContain('packages/auth');
     expect(input.onInsertPrompt.mock.calls[0][0]).toContain('Analyze ONLY the specified module paths');
+  });
+  it('keeps the selected map and prepared feature unchanged until insertion succeeds', async () => {
+    read.mockResolvedValue(null);
+    const input = props();
+    let finish!: (accepted: boolean) => void;
+    input.onInsertPrompt.mockReturnValueOnce(new Promise<boolean>(resolve => { finish = resolve; })).mockResolvedValueOnce(true);
+    render(<ArchitecturePanel {...input} />);
+    await screen.findByText("Understand this project's architecture");
+    fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Analysis scope' }), { target: { value: 'feature' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Feature to understand' }), { target: { value: 'Upload retries' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Insert prompt' }));
+    await waitFor(() => expect(input.onInsertPrompt).toHaveBeenCalledOnce());
+    expect(read).toHaveBeenLastCalledWith('/project', expect.any(AbortSignal), '.termdock/architecture.json');
+    expect(read).toHaveBeenCalledTimes(1);
+    await act(async () => finish(false));
+    expect(screen.getByRole('status').textContent).toContain('Could not add the prompt');
+    expect(read).toHaveBeenLastCalledWith('/project', expect.any(AbortSignal), '.termdock/architecture.json');
+    expect(sessionStorage.getItem('termdock.architecture.selection:/project')).toBeNull();
+    expect((screen.getByRole('textbox', { name: 'Feature to understand' }) as HTMLInputElement).value).toBe('Upload retries');
+    expect(read).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Insert prompt' }));
+    await screen.findByText(/Review the current input/);
+    const featureFile = analysisFile({ ...DEFAULT_ANALYSIS, kind: 'feature', target: 'Upload retries' });
+    fireEvent.click(screen.getByRole('button', { name: 'Close analysis settings' }));
+    expect((screen.getByRole('combobox', { name: 'Saved analyses' }) as HTMLSelectElement).value).toBe(featureFile);
+    expect(sessionStorage.getItem('termdock.architecture.selection:/project')).toBe(featureFile);
+    await waitFor(() => expect(read).toHaveBeenLastCalledWith('/project', expect.any(AbortSignal), featureFile));
   });
   it('prepares a module analysis from verified sources without changing the current map on cancel', async () => {
     read.mockResolvedValue(document);
@@ -206,6 +236,7 @@ describe('native architecture browsing', () => {
     expect((screen.getByRole('combobox', { name: 'Analysis scope' }) as HTMLSelectElement).disabled).toBe(true);
     expect((screen.getByRole('textbox', { name: 'Feature to understand' }) as HTMLInputElement).readOnly).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Insert prompt' }));
+    await waitFor(() => expect(input.onInsertPrompt).toHaveBeenCalledOnce());
     expect(input.onInsertPrompt.mock.calls[0][0]).toContain(JSON.stringify(file));
     expect(input.onInsertPrompt.mock.calls[0][0]).toContain('leave all other saved maps unchanged');
   });
@@ -230,8 +261,8 @@ describe('native architecture browsing', () => {
     expect(input.onInsertPrompt).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Insert prompt' }));
-    expect(input.onInsertPrompt).toHaveBeenCalledWith(expect.stringContaining('.termdock/architecture.json'));
-    expect(screen.getByRole('status').textContent).toContain('Review the current input');
+    await waitFor(() => expect(input.onInsertPrompt).toHaveBeenCalledWith(expect.stringContaining('.termdock/architecture.json'), expect.any(HTMLFormElement)));
+    expect((await screen.findByRole('status')).textContent).toContain('Review the current input');
   });
   it('browses nested modules, opens source at a verified line, and resets hierarchy when changing perspective', async () => {
     read.mockResolvedValue(document);

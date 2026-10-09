@@ -1,4 +1,5 @@
 import { isKeyboardLayerOpen, useKeyboardLayerOpen } from '../../hooks/useKeyboardLayer';
+import { authorizeOwnedTerminalPaste, consumeOwnedTerminalPaste, isOwnedTerminalPasteCurrent } from '../../terminal/ownedPaste';
 import { isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../../services/workspaceHost';
 import { scheduleInteractionIdle } from '../../utils/interactionIdle';
 import { readTerminalSnapshot, writeTerminalSnapshot } from '../../utils/terminalSnapshotCache';
@@ -13,7 +14,7 @@ import { buildAtomicTerminalReplay } from '../../terminal/replayPresentation';
 import { buildTmuxScreenReplacement } from '../../terminal/tmuxScreenPresentation';
 import { buildTmuxDefaultColorReplies } from '../../terminal/tmuxColors';
 import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
-import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
+import { TerminalViewport, type RefreshReason, type TerminalController, type TerminalViewportInputOptions } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { TerminalApiError, listDirectory, openSessionInventoryEntry, probeTerminalConnection, reconnectTerminalConnectionNow, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry, uploadFiles } from '../../terminal/api';
@@ -208,6 +209,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isDocumentVisible, setIsDocumentVisible] = React.useState(() => typeof document === 'undefined' ? true : !document.hidden && isWorkspaceActive());
   const [isWindowFocused, setIsWindowFocused] = React.useState(() => typeof document === 'undefined' ? true : document.hasFocus());
   const [isStreamReady, setIsStreamReady] = React.useState(false);
+  const isStreamReadyRef = React.useRef(isStreamReady);
+  isStreamReadyRef.current = isStreamReady;
   const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
   const [isInitialSizeReady, setIsInitialSizeReady] = React.useState(false);
   const [isViewportInitialized, setIsViewportInitialized] = React.useState(false);
@@ -375,6 +378,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   isActiveRef.current = isActive;
   const focusSuspendedRef = React.useRef(focusSuspended);
   focusSuspendedRef.current = focusSuspended;
+  const externalFocusSuspendedRef = React.useRef(externalFocusSuspended);
+  externalFocusSuspendedRef.current = externalFocusSuspended;
   const isMobileRef = React.useRef(isMobile);
   const desktopResumeFocusTimerRef = React.useRef<number | null>(null);
   const desktopInteractionFocusTimerRef = React.useRef<number | null>(null);
@@ -1135,6 +1140,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     activeTerminalIdRef.current = null;
     initialConnectionPendingRef.current = false;
     // 断开后立即把 sessionReady 复位：后续 resize push 会被编排器 gate 住，
+    isStreamReadyRef.current = false;
     setIsStreamReady(false);
     // 直到下次 connected 事件再 setSessionReady(true)。
     // 这样避免把新 resize 用旧 terminalId 发出去。
@@ -1223,6 +1229,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setReconnectStartedAt(null);
 
                 // 标记 WS 已就绪：编排器从这一刻起才允许 push resize 给服务端。
+                isStreamReadyRef.current = true;
                 setIsStreamReady(true);
                 // 重连后重新声明当前 focus / viewing：服务端分别用它做 tmux
                 // focus tracking 和推送抑制（ref 去重会吞掉未变化的值）。
@@ -1361,6 +1368,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 break;
               }
               case 'reconnecting': {
+                isStreamReadyRef.current = false;
+                setIsStreamReady(false);
                 setReconnectStartedAt((startedAt) => startedAt ?? Date.now());
                 setConnectionError('Reconnecting...');
                 setIsFatalError(false);
@@ -1527,6 +1536,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             const storeSessionId = sessionId;
             if (!storeSessionId) return;
             initialConnectionPendingRef.current = false;
+            isStreamReadyRef.current = false;
+            setIsStreamReady(false);
 
             const isAuthenticationFailure = fatal && error.message === 'Authentication required';
             const isRecoverableBackendMiss = isTransientBackendSessionMiss(error);
@@ -1930,8 +1941,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [clearTerminalSession, debugSession, disconnectStream, restartEnsureSession, sessionId, setConnecting]);
 
   const handleViewportInput = React.useCallback(
-    (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean; targeted?: boolean }) => {
-      if (focusSuspendedRef.current || isKeyboardLayerOpen()) return;
+    (data: string, options?: TerminalViewportInputOptions) => {
+      const ownedPaste = options?.ownedPaste
+        ? consumeOwnedTerminalPaste(options.ownedPaste, sessionId, data) : false;
+      if (options?.ownedPaste && !ownedPaste) return Promise.resolve(false);
+      if (externalFocusSuspendedRef.current || ((focusSuspendedRef.current || isKeyboardLayerOpen()) && !ownedPaste)) return Promise.resolve(false);
+      const ownedCurrent = () => !!options?.ownedPaste && isOwnedTerminalPasteCurrent(options.ownedPaste, sessionId)
+        && isActiveRef.current && !externalFocusSuspendedRef.current && isStreamReadyRef.current
+        && !isConnectionTransitionRef.current && !document.hidden && navigator.onLine !== false && isWorkspaceActive();
+      if (ownedPaste && !ownedCurrent()) return Promise.resolve(false);
       if (!isActiveRef.current && !options?.targeted) {
         return;
       }
@@ -2014,7 +2032,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
           }
 
+          if (ownedPaste && (!ownedCurrent() || terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch)) return false;
           await terminal.sendInput(terminalId, payload);
+          if (ownedPaste && (!ownedCurrent() || terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch)) return false;
           // If user is on the session and agent just finished, user input = reviewed
           clearAgentNeedsReview(sessionId);
           return true;
@@ -2039,7 +2059,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   React.useEffect(() => {
     const handleInsertReference = (event: Event) => {
-      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean; paste?: boolean; nonce?: string; sessionId?: string }>;
+      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean; paste?: boolean; submitAfterPaste?: boolean; ownedPaste?: boolean; nonce?: string; sessionId?: string }>;
       const target = customEvent.detail?.sessionId;
       if (target ? target !== sessionId : !isActiveRef.current) return;
       const text = customEvent.detail?.text;
@@ -2057,7 +2077,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       // 引用插入也是带外输入：重置输入模型后发送，避免 textarea diff 拿
       // 过期基线算错
-      const delivery = terminalControllerRef.current?.sendSequence(text, { paste: customEvent.detail?.paste, targeted: Boolean(target) });
+      const ownedPaste = authorizeOwnedTerminalPaste(customEvent.detail, sessionId);
+      const delivery = customEvent.detail?.ownedPaste && !ownedPaste ? Promise.resolve(false)
+        : terminalControllerRef.current.sendSequence(text, { paste: customEvent.detail?.paste,
+          submitAfterPaste: customEvent.detail?.submitAfterPaste, targeted: Boolean(target), ownedPaste: ownedPaste ?? undefined });
       if (nonce) {
         void Promise.resolve(delivery).then(ok => {
           window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', {

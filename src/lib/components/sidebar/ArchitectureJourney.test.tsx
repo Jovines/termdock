@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArchitecturePanel } from './ArchitecturePanel';
 import type { ArchitectureDocument } from '../../architecture/model';
@@ -31,7 +31,7 @@ afterEach(() => {
   else delete (SVGElement.prototype as { getBBox?: unknown }).getBBox;
 });
 const setup = async () => {
-  const onOpenFile = vi.fn(), onInsertPrompt = vi.fn();
+  const onOpenFile = vi.fn(), onInsertPrompt = vi.fn().mockResolvedValue(true);
   const view = render(<ArchitecturePanel rootPath="/project" active onOpenFile={onOpenFile} onInsertPrompt={onInsertPrompt} renderSource={file => <div data-architecture-source>Source {file.path}:{file.line}</div>} />);
   await screen.findByRole('button', { name: 'Server' });
   fireEvent.click(screen.getByRole('button', { name: 'Relationship diagram' }));
@@ -116,9 +116,9 @@ describe('architecture reading journey', () => {
     fireEvent.keyDown(document.activeElement!, { key: 'Escape', isComposing: true });
     expect(within(dialog).getByRole('button', { name: 'Insert prompt' })).toBeTruthy();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Insert prompt' }));
-    expect(onInsertPrompt).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onInsertPrompt).toHaveBeenCalledOnce());
     expect((screen.getByRole('combobox', { name: 'Saved analyses' }) as HTMLSelectElement).value).toBe('.termdock/architecture.json');
-    expect(within(dialog).getByRole('button', { name: 'View this analysis' })).toBeTruthy();
+    expect(await within(dialog).findByRole('button', { name: 'View this analysis' })).toBeTruthy();
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(within(dialog).getByRole('region', { name: 'Server' })).toBeTruthy();
     expect(screen.getByRole('dialog', { name: 'Architecture diagram' })).toBe(dialog);

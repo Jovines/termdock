@@ -6,6 +6,15 @@ const listeners = new Set<() => void>();
 const notify = () => listeners.forEach((listener) => listener());
 
 export const isKeyboardLayerOpen = () => layers.length > 0;
+export const getActiveKeyboardLayer = () => layers[layers.length - 1] ?? null;
+
+/** Explicit input actions may belong only to the current, visible keyboard owner. */
+export function isKeyboardLayerSource(source: HTMLElement): boolean {
+  const top = getActiveKeyboardLayer();
+  const layerRoots = top ? roots(top.element) : [document.body];
+  return source.isConnected && !source.closest('[hidden], [inert], [aria-hidden="true"]')
+    && (!top || layerRoots.some(root => root.contains(source))) && visibleInLayer(source, layerRoots);
+}
 export function useKeyboardLayerOpen(): boolean {
   return useSyncExternalStore((listener) => {
     listeners.add(listener);

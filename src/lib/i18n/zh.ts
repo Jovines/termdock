@@ -60,6 +60,8 @@ export const zh: TranslationDictionary = {
     insertPrompt: "放入输入区",
     copyPrompt: "复制提示词",
     previewPrompt: "查看分析提示词",
+    inserting: "正在添加到当前输入区…",
+    insertFailed: "未能添加提示词，请检查当前会话，或从下方复制。",
     inserted: "请检查当前输入区或上下文草稿，并发送给 Agent。",
     copied: "提示词已复制。",
     failed: "复制失败，请从下方提示词中手动复制。",

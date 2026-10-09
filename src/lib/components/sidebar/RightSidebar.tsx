@@ -63,8 +63,9 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { GitIgnoreFilterButton } from './GitIgnoreFilterButton';
 import { insertDirectReference } from './insertDirectReference';
+import { requestReferenceInsertion } from './requestReferenceInsertion';
 import { MODEL_PREVIEW_REQUEST_TIMEOUT_MS } from '../../terminal/api';
-import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
+import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { ReviewReferenceHandler } from './reviewReference';
 import { UniversalDiffReview } from './DiffReviewPanel';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
@@ -5152,8 +5153,8 @@ interface FilePreviewProps {
   onReviewReference?: ReviewReferenceHandler;
   filePath: string | null;
   active?: boolean;
-  onInsertReference: (path: string, key?: string) => void;
-  onInsertText: (text: string, key: string) => void;
+  onInsertReference: (path: string, key?: string, source?: HTMLElement) => void;
+  onInsertText: (text: string, key: string, source?: HTMLElement) => void;
   /** Insert a model-feature reference (draft-aware, same as file refs). */
   onInsertFeature?: (text: string, key: string) => void;
   onReferenceCopied: (key: string) => void;
@@ -5984,13 +5985,13 @@ export function FilePreview({
     });
   };
 
-  const insertRangeReference = () => {
+  const insertRangeReference = (event: MouseEvent<HTMLElement>) => {
     if (onReviewReference) {
       onReviewReference(lineReferenceText, lineReferenceKey);
       return;
     }
     if (!lineRange) return;
-    onInsertText(lineReferenceText, lineReferenceKey);
+    onInsertText(lineReferenceText, lineReferenceKey, event.currentTarget);
   };
 
   const handleDownload = async () => {
@@ -6126,7 +6127,7 @@ export function FilePreview({
             {!isMobile && (
               <button
                 type="button"
-                onClick={() => onInsertReference(readablePath, fileReferenceKey)}
+                onClick={event => onInsertReference(readablePath, fileReferenceKey, event.currentTarget)}
                 {...getReferenceLongPressHandlers(reference, fileReferenceKey)}
                 className={`inline-flex h-9 items-center gap-1 rounded-full px-3 text-xs font-semibold transition active:scale-95 ${
                   fileReferenceInserted || fileReferenceCopied
@@ -6457,9 +6458,10 @@ function ArchitectureSourcePreview({ rootPath, file, active, ...shared }: {
 } & Pick<FilePreviewProps, 'isMobile' | 'onInsertReference' | 'onInsertText' | 'onReferenceCopied' | 'insertedReferenceKey' | 'copiedReferenceKey'>) {
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
   const [line, setLine] = useState<number | null>(file.line ?? 1);
+  const handleScrollToLineHandled = useCallback(() => setLine(null), []);
   return <div data-architecture-source className="h-full min-h-0">
     <FilePreview {...shared} filePath={`${rootPath.replace(/\/+$/, '')}/${file.path}`} active={active}
-      lineRange={lineRange} onLineRangeChange={setLineRange} scrollToLine={line} onScrollToLineHandled={() => setLine(null)}
+      lineRange={lineRange} onLineRangeChange={setLineRange} scrollToLine={line} onScrollToLineHandled={handleScrollToLineHandled}
       markdownOutlineOpen={false} markdownImageLightboxOpen={false} />
   </div>;
 }
@@ -8017,11 +8019,11 @@ export function RightSidebar(
     }, 500);
   }, [contextDraftText, draftHydrated]);
 
-  const routeReferenceText = useCallback((text: string, key: string, suffix?: string) => {
-    if (!text) return;
+  const routeReferenceText = useCallback(async (text: string, key: string, suffix?: string, source?: HTMLElement) => {
+    if (!text) return false;
     if (routeCollaborationInput(suffix ? text + suffix : text)) {
       markReferenceInserted(key);
-      return;
+      return true;
     }
     if (contextDraftEnabled) {
       setContextDraftText((current) => appendContextDraft(current, text) + (suffix ?? ''));
@@ -8031,12 +8033,14 @@ export function RightSidebar(
         setDraftFocusRequest((n) => n + 1);
       }
     } else {
-      window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-        detail: { text: suffix ? text + suffix : text, focus: true },
-      }));
+      const session = sessionId ?? useTerminalStore.getState().activeSessionId;
+      const accepted = await requestReferenceInsertion(suffix ? text + suffix : text, session,
+        () => referenceMountedRef.current && session === useTerminalStore.getState().activeSessionId, source);
+      if (!accepted) return false;
     }
     markReferenceInserted(key);
-  }, [contextDraftEnabled, markReferenceInserted]);
+    return true;
+  }, [contextDraftEnabled, markReferenceInserted, sessionId]);
 
   const getPathReferenceText = useCallback((path: string) => {
     const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
@@ -8044,9 +8048,9 @@ export function RightSidebar(
   }, [rootPath]);
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(markReferenceCopied);
 
-  const insertPathReference = useCallback((path: string, key?: string) => {
+  const insertPathReference = useCallback((path: string, key?: string, source?: HTMLElement) => {
     const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
-    routeReferenceText(buildReferenceInputText(absolutePath, rootPath), key ?? `path:${absolutePath}`);
+    return routeReferenceText(buildReferenceInputText(absolutePath, rootPath), key ?? `path:${absolutePath}`, undefined, source);
   }, [rootPath, routeReferenceText]);
 
   const handleTemporaryImageUpload = useCallback(async (file: File) => {
@@ -8091,11 +8095,11 @@ export function RightSidebar(
     } else await insertAndroidPath(path, sessionId);
   }, [contextDraftEnabled, insertPathReference, sessionId]);
 
-  const insertReferenceText = useCallback((text: string, key: string) => {
-    if (!text) return;
+  const insertReferenceText = useCallback((text: string, key: string, source?: HTMLElement) => {
+    if (!text) return Promise.resolve(false);
     // 多行代码块（有 \n）插入末尾加换行，单行路径不加
     const suffix = text.includes('\n') ? '\n' : undefined;
-    routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key, suffix);
+    return routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key, suffix, source);
   }, [routeReferenceText]);
 
   const referenceRouteRef = useRef(insertReferenceText);
@@ -8108,14 +8112,15 @@ export function RightSidebar(
   const pendingReferencesRef = useRef(new Set<string>());
   const beginReviewReference: ReviewReferenceHandler = useCallback((text, key, evidence) => {
     if (pendingReferencesRef.current.has(key)) return;
-    const session = useMultiSessionStore.getState().activeSessionId;
+    const session = sessionId ?? useTerminalStore.getState().activeSessionId;
     pendingReferencesRef.current.add(key);
     void insertDirectReference(text, key, evidence, {
       insert: insertReferenceText,
       upload: async (file, signal) => (await uploadFiles('/tmp', [file], signal)).files[0]?.path,
-      isCurrent: () => referenceMountedRef.current && referenceRouteRef.current === insertReferenceText && session === useMultiSessionStore.getState().activeSessionId,
-    }).finally(() => pendingReferencesRef.current.delete(key));
-  }, [insertReferenceText]);
+      isCurrent: () => referenceMountedRef.current && referenceRouteRef.current === insertReferenceText && session === useTerminalStore.getState().activeSessionId,
+    }).catch(() => { /* The reference stays available for retry; never mark a failed insert. */ })
+      .finally(() => pendingReferencesRef.current.delete(key));
+  }, [insertReferenceText, sessionId]);
 
   const insertContextText = useCallback((label: string, text: string, key?: string) => {
     if (!text) return;
@@ -12540,7 +12545,7 @@ export function RightSidebar(
               key={rootPath}
               rootPath={rootPath}
               active={isOpen && architecturePaneActive}
-              onInsertPrompt={(prompt) => insertReferenceText(prompt, `architecture:${rootPath}`)}
+              onInsertPrompt={(prompt, source) => insertReferenceText(prompt, `architecture:${rootPath}`, source)}
               renderSource={(file) => rootPath && <ArchitectureSourcePreview key={`${file.path}:${file.line ?? 1}`} rootPath={rootPath} file={file} active={isOpen && architecturePaneActive} isMobile={isMobile} onInsertReference={insertPathReference} onInsertText={insertReferenceText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />}
               onOpenFile={(file) => {
                 if (!rootPath) return;

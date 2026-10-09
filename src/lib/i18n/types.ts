@@ -77,6 +77,8 @@ export type TranslationDictionary = {
     insertPrompt: string;
     copyPrompt: string;
     previewPrompt: string;
+    inserting: string;
+    insertFailed: string;
     inserted: string;
     copied: string;
     failed: string;
