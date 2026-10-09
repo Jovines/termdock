@@ -3,6 +3,7 @@ import { sessionAddress } from './collaborationFederation.js';
 import { prepareServiceFrontend, selectServiceFrontend } from './bundledFrontend.js';
 import { serviceConnection, serviceConnectionKeys, importServiceConnection, saveServiceConnection, invitationForService } from './serviceConnections.js';
 import { serviceMenuEntries } from './serviceMenu.js';
+import { LocalServiceSetupController } from './localServiceSetup.js';
 const pendingServiceInvitations = new WeakMap<BrowserWindow, string>();
 import {
   app,
@@ -31,7 +32,7 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type {
   DesktopConfig,
   DesktopPreferences,
@@ -121,6 +122,12 @@ function triggerLocalNetworkPermission(): void {
 }
 
 let mainWindow: BrowserWindow | null = null;
+const localServiceSetup = new LocalServiceSetupController(getLocalServiceStatus, status => {
+  if (startupRestoreActive && ['checking', 'starting'].includes(status.phase)) updateStartupProgress(status.message);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('desktop:local-service-setup', status);
+  }
+});
 let startupRestoreActive = false;
 let startupProgressMessage = '正在启动 Termdock Desktop…';
 const serviceWindows = new Map<string, BrowserWindow>();
@@ -1045,7 +1052,7 @@ async function snapshot(): Promise<DesktopSnapshot> {
   const config = readDesktopConfig();
   return {
     appVersion: app.getVersion(),
-    localService: await getLocalServiceStatus(),
+    localService: { ...await getLocalServiceStatus(), setup: localServiceSetup.status },
     connections: config.connections,
     lastConnectionUrl: config.lastConnectionUrl,
     desktopPreferences: config.desktopPreferences,
@@ -1513,6 +1520,25 @@ function installIpcHandlers(): void {
     })();
   });
   ipcMain.handle('desktop:snapshot', () => snapshot());
+  const connectionCenterSender = (event: Electron.IpcMainInvokeEvent) => {
+    const rendererPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'renderer', 'index.html')
+      : path.join(projectRoot, 'desktop', 'renderer', 'index.html');
+    if (!mainWindow || event.sender !== mainWindow.webContents
+      || event.senderFrame !== event.sender.mainFrame
+      || event.senderFrame.url !== pathToFileURL(rendererPath).href) {
+      throw new Error('请在连接中心准备本机服务。');
+    }
+  };
+  ipcMain.handle('desktop:prepare-local-service', async (event, install: unknown) => {
+    connectionCenterSender(event);
+    await localServiceSetup.prepare(install === true);
+    return snapshot();
+  });
+  ipcMain.handle('desktop:download-node', async event => {
+    connectionCenterSender(event);
+    await shell.openExternal('https://nodejs.org/en/download');
+  });
   const directorySender = (event: Electron.IpcMainInvokeEvent) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || event.senderFrame !== event.sender.mainFrame) throw new Error('无法访问服务列表。');
@@ -1933,6 +1959,7 @@ app.whenReady().then(async () => {
   triggerLocalNetworkPermission();
   configureLocalServiceCertificateTrust();
   installIpcHandlers();
+  const localPreparation = localServiceSetup.prepare();
   installMenu();
   refreshDesktopStatusSurfaces();
   screen.on('display-removed', keepFloatingWidgetOnScreen);
@@ -1958,6 +1985,9 @@ app.whenReady().then(async () => {
   let completedRestores = 0;
   updateStartupProgress(`正在恢复连接 0/${restoreUrls.length}…`);
   const restoreResults = await Promise.all(restoreUrls.map(async (url) => {
+    try {
+      if (['localhost', '127.0.0.1', '[::1]'].includes(new URL(url).hostname)) await localPreparation;
+    } catch { /* The connection probe reports malformed saved URLs. */ }
     const probe = await connectWindow(url, {
       focus: false,
       updateLastConnection: false,

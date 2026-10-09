@@ -17,8 +17,8 @@ export function collaborationTaskStage(task: CollaborationTaskView): string {
     if (task.workflow && review?.verdict !== 'pass') return review?.verdict === 'changes' ? '评审要求修改' : '等待独立评审';
     return task.workflow?.kind === 'step' ? '评审通过 · 等待接续' : '等待你验收';
   }
-  if (revised) return '已要求修改 · 等待新结果';
-  if (!attempt) return task.scheduledAssignee ? task.dependsOn.length ? '依赖完成后自动分派' : '准备独立执行目录' : task.dependsOn.length ? '等待依赖与分派' : '待分派';
+  if (revised) return task.events.some(e => e.kind === 'revise' && e.source === 'user' && e.attemptId === task.activeAttemptId && e.createdAt >= result!.createdAt) ? '已要求跟进 · 等待新结果' : '已要求修改 · 等待新结果';
+  if (!attempt) return task.scheduledAssignee ? task.dependsOn.length ? '依赖完成后自动分派' : task.workflow?.isolated === false ? '等待分派' : '准备独立执行目录' : task.dependsOn.length ? '等待依赖与分派' : '待分派';
   if (attempt.report) return taskReportLabels[attempt.report.status];
   if (['failed', 'expired'].includes(attempt.deliveryStatus ?? '')) return '投递未成功';
   if (task.deliveries.some(d => d.attemptId === task.activeAttemptId && d.error)) return '投递需要关注';

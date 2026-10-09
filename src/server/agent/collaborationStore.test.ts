@@ -73,19 +73,18 @@ describe('CollaborationStore', () => {
     expect(store.listMessages(group.id)).toHaveLength(1);
   });
 
-  it('removes a deleted Session and dissolves groups that can no longer collaborate', () => {
+  it('removes a terminal while retaining project identity and message history', () => {
     const store = new CollaborationStore(filePath);
     const pair = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });
     const trio = store.save({ name: 'Trio', sessionIds: ['a', 'b', 'c'] });
     store.send({ groupId: pair.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'message', content: 'pair' });
     store.send({ groupId: trio.id, fromSessionId: 'b', toSessionIds: ['a', 'c'], kind: 'message', content: 'trio' });
 
-    expect(store.removeSession('a')).toEqual({ updatedGroups: 1, dissolvedGroups: 1 });
-    expect(store.getGroup(pair.id)).toBeNull();
+    expect(store.removeSession('a')).toEqual({ updatedGroups: 2, dissolvedGroups: 0 });
+    expect(store.getGroup(pair.id)?.sessionIds).toEqual(['b']);
     expect(store.getGroup(trio.id)?.sessionIds).toEqual(['b', 'c']);
-    expect(store.listMessages(pair.id)).toEqual([]);
-    expect(store.listMessages(trio.id)).toHaveLength(1);
-    expect(store.listMessages(trio.id)[0]?.toSessionId).toBe('c');
+    expect(store.listMessages(pair.id)).toHaveLength(1);
+    expect(store.listMessages(trio.id)).toHaveLength(2);
   });
 
   it('keeps explicit task reports without inventing whole-session or read state', () => {

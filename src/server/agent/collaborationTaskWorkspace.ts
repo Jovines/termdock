@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, writeFile, rename, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { CollaborationTask, TaskWorkspace } from './collaborationTaskTypes.js';
@@ -71,4 +71,51 @@ export async function captureTaskCommit(workspace: TaskWorkspace): Promise<{ com
   if (await git(workspace.cwd, ['status', '--porcelain'])) throw new Error('独立目录还有未提交改动，请先提交再报告完成；不会自动暂存或提交');
   const commit = await git(workspace.cwd, ['rev-parse', 'HEAD']);
   return { commit, branch: workspace.branch, cwd: workspace.cwd, base: workspace.base };
+}
+
+async function assertManagedWorkspace(workspace: TaskWorkspace): Promise<void> {
+  const relative = path.relative(home, workspace.cwd);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)
+    || !/^termdock\/task\/[a-f0-9]{32}-[a-f0-9]{8}$/.test(workspace.branch)) throw new Error('目录不是 Termdock 独立执行工作区');
+  const actual = await realpath(workspace.cwd);
+  if (actual !== path.resolve(workspace.cwd) || !actual.startsWith(`${await realpath(home)}${path.sep}`)
+    || await git(actual, ['rev-parse', '--show-toplevel']) !== actual
+    || await git(actual, ['branch', '--show-current']) !== workspace.branch) throw new Error('执行目录或分支发生变化，现场已保留');
+  const common = async (cwd: string) => realpath(path.resolve(cwd, await git(cwd, ['rev-parse', '--git-common-dir'])));
+  if (await common(actual) !== await common(workspace.repository)) throw new Error('执行目录不属于原仓库，现场已保留');
+}
+
+/** Remove only a verified, clean worktree. Keep its branch and all Git commits. */
+export async function archiveTaskWorkspace(workspace: TaskWorkspace): Promise<{ state: 'removed' | 'retained'; reason?: string; commit?: string }> {
+  try {
+    await assertManagedWorkspace(workspace);
+    const commit = await git(workspace.cwd, ['rev-parse', 'HEAD']);
+    if (await git(workspace.cwd, ['status', '--porcelain']) || await git(workspace.cwd, ['ls-files', '--others', '--ignored', '--exclude-standard'])) {
+      return { state: 'retained', reason: '目录含未提交或忽略的文件，已保留现场', commit };
+    }
+    await git(workspace.repository, ['worktree', 'remove', workspace.cwd]);
+    return { state: 'removed', commit };
+  } catch (error) { return { state: 'retained', reason: error instanceof Error ? error.message : String(error) }; }
+}
+
+export async function snapshotTaskWorkspace(workspace: TaskWorkspace): Promise<string> {
+  await assertManagedWorkspace(workspace);
+  return git(workspace.cwd, ['rev-parse', 'HEAD']);
+}
+
+export async function restoreTaskWorkspace(workspace: TaskWorkspace, cleanup: { state: string; commit?: string }): Promise<void> {
+  if (cleanup.state !== 'removed') {
+    try { await assertManagedWorkspace(workspace); return; }
+    catch (error) { if (cleanup.state !== 'pending' || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  const relative = path.relative(home, workspace.cwd);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)
+    || !/^termdock\/task\/[a-f0-9]{32}-[a-f0-9]{8}$/.test(workspace.branch) || !cleanup.commit) throw new Error('工作区恢复记录无效');
+  try { await stat(workspace.cwd); await assertManagedWorkspace(workspace); return; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (await git(workspace.repository, ['rev-parse', workspace.branch]) !== cleanup.commit) throw new Error('归档分支已有变化，请核对后再恢复；不会重置分支');
+  await mkdir(path.dirname(workspace.cwd), { recursive: true, mode: 0o700 });
+  if (!(await realpath(path.dirname(workspace.cwd))).startsWith(`${await realpath(home)}${path.sep}`)) throw new Error('工作区父目录发生变化');
+  await git(workspace.repository, ['worktree', 'add', workspace.cwd, workspace.branch]);
+  await assertManagedWorkspace(workspace);
 }

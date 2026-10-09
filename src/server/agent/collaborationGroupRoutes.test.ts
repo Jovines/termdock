@@ -97,7 +97,7 @@ describe('authoritative collaboration membership HTTP API', () => {
     rename.mockRestore();
     expect(await move()).toBe(200);
     const restored = new CollaborationStore(path.join(directory, 'groups.json'));
-    expect(restored.getGroup(source.id)).toBeNull();
+    expect(restored.getGroup(source.id)?.sessionIds).toEqual(['offline-source']);
     expect(restored.getGroup(target.id)?.sessionIds).toEqual(['shell', 'offline-target', 'custom']);
   });
 
@@ -126,7 +126,7 @@ describe('authoritative collaboration membership HTTP API', () => {
   });
 
   it('rejects malformed members instead of coercing a partially valid request', async () => {
-    for (const sessionIds of [['custom', 'shell', 7], ['custom', 'shell', ''], ['custom', 'custom']]) {
+    for (const sessionIds of [['custom', 'shell', 7], ['custom', 'shell', '']]) {
       expect((await save({ name: 'Invalid', sessionIds })).status).toBe(400);
     }
     expect(store.list()).toEqual([]);

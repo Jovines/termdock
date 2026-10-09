@@ -5,6 +5,7 @@ export class TerminalOutputDelivery {
   active = true;
   replaying = true;
   needsReplay = false;
+  private paused = false;
   private queue: OutputFrame[] = [];
   private queuedBytes = 0;
   private outstanding: Array<{ id: number; bytes: number }> = [];
@@ -25,6 +26,13 @@ export class TerminalOutputDelivery {
     this.active = active;
     if (!active) { this.queue = []; this.queuedBytes = 0; }
     return changed;
+  }
+
+  /** Short flow-control pauses retain the ordered stream within its budget.
+   * Unlike an unsubscribe, they do not discard output or require a new PTY. */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    this.flush();
   }
 
   enqueue(frame: OutputFrame): void {
@@ -67,7 +75,7 @@ export class TerminalOutputDelivery {
   get pendingBytes(): number { return this.queuedBytes + this.outstandingBytes; }
 
   private flush(): void {
-    if (!this.active || this.replaying || this.needsReplay) return;
+    if (!this.active || this.paused || this.replaying || this.needsReplay) return;
     while (this.queue.length && (!this.flowControl || this.outstandingBytes < this.windowBytes)) {
       const frame = this.queue.shift()!;
       const bytes = Buffer.byteLength(frame.data);

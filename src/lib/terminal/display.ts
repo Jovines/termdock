@@ -143,7 +143,6 @@ export function normalizeSessionOrderGroups<T extends SessionOrderGroup>(
   const claimed = new Set<string>();
   return groups.flatMap((group) => {
     const sessionIds = [...new Set(group.sessionIds)].filter((id) => availableSessionIds.has(id) && !claimed.has(id));
-    if (sessionIds.length < (group.federated ? 1 : 2)) return [];
     sessionIds.forEach((id) => claimed.add(id));
     return [{ ...group, sessionIds }];
   });

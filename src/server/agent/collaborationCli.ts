@@ -26,7 +26,7 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   task revise|close|reopen <任务id> --revision <当前版本> [--content <说明>]
   task coordinate <目标id> --revision <当前版本> --content <本次协调说明>
   task pause|resume|retry <任务id> --revision <当前版本>
-  task create 支持 --managed --coordinator <成员id> --reviewers <成员id,成员id>；默认独立代码目录
+  task create 支持 --managed --coordinator <成员id> --reviewers <成员id,成员id>；子任务用 --work-type read-only|code 分类，代码默认独立目录
   正文支持 --file <文本文件> 或 --stdin；变更支持 --idempotency-key。
   report|plan|review 支持 --evidence <JSON> 保存证据。
   complete 提交结果；用户在工作台回答问题与验收。报告保留成员原文与时间。
@@ -158,7 +158,7 @@ interface RoleGroupView {
 }
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules', 'managed', 'shared-directory', 'integration']);
-const VALUE_OPTIONS = new Set(['verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
+const VALUE_OPTIONS = new Set(['work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -260,7 +260,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session']);
   const byAction: Record<string, string[]> = {
-    task: ['integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
+    task: ['work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
     rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],

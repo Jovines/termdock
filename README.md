@@ -1,21 +1,98 @@
 # Termdock
 
-> 命名备注：项目新名称暂定为 **Termcove**。目前仅记录改名意向，程序名称、CLI 命令和 npm 包名仍沿用 Termdock / `termdock`；待未来正式决定全面改名时统一迁移。
+<p align="center">
+  <img src="public/pwa-192x192.png" alt="Termdock 图标" width="96" />
+</p>
 
-一个面向移动端与桌面端的 Web 终端，由 tmux 持久托管会话，xterm.js + WebGL 负责渲染，Express + WebSocket 提供后端通信。
+**把终端和 AI 编程工作区，带到你的手机、浏览器和 Mac。**
 
-![License](https://img.shields.io/badge/license-MIT-green)
+[![npm](https://img.shields.io/npm/v/termdock)](https://www.npmjs.com/package/termdock)
+[![Downloads](https://img.shields.io/npm/dm/termdock)](https://www.npmjs.com/package/termdock)
+[![macOS Download](https://img.shields.io/github/v/release/Jovines/termdock?label=macOS)](https://github.com/Jovines/termdock/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+
+简体中文 · [English](README.en.md)
+
+Termdock 是一个可自托管的 Web 终端与 AI Agent 工作区。你可以在电脑上运行 Claude Code、Codex、Gemini CLI 等工具，再从手机继续操作同一个 tmux 会话；也可以连接多台机器，把任务、消息、代码审阅和文件预览放在同一工作区里。
+
+终端与命令在运行 Termdock 服务的机器上执行。浏览器、PWA 和 macOS 客户端负责连接与交互；AI CLI 需要在服务所在机器上单独安装和登录。
+
+[快速开始](#快速开始) · [功能特性](#功能特性) · [AI 与协作](#ai-与协作) · [常见问题](#常见问题) · [文档](#文档导航) · [参与贡献](#参与贡献)
+
+## 为什么用 Termdock
+
+- **离开电脑后继续工作**：手机打开同一服务，查看输出、补充指令、处理 Agent 提问；关闭页面后，tmux 会话继续运行。
+- **给手机一个适合终端的界面**：可定制快捷键栏、触摸滚动、滑动切换会话，以及 iOS 软键盘适配。
+- **把 AI 工作放在一起**：管理多个 Agent 会话，在协作组中分派任务、回答问题、审阅交付物和验收结果。
+- **跨机器连接**：切换多个服务；经过配置的入口可以中转目标服务的加密流量，目标仍独立检查身份与权限。
+- **直接查看工作成果**：浏览文件、查看 Git diff，预览 Markdown、图片、视频、HTML、3D 模型和 KiCad 文件，并把选中的内容引用给 Agent。
+
+## 快速开始
+
+### 运行环境
+
+| 项目 | 要求 |
+| --- | --- |
+| 服务系统 | macOS 或 Linux；Windows 用户可在 WSL2 的 Linux 环境中尝试 |
+| Node.js | **22 或更新版本**，并安装 npm |
+| 持久会话 | `tmux`，需要能从 `PATH` 找到 |
+| 客户端 | 当前版本的 Chrome、Edge、Firefox 或 Safari；手机可通过 HTTPS 安装 PWA |
+| macOS 桌面安装包 | 当前打包目标为 Apple Silicon（arm64），见 [Releases](https://github.com/Jovines/termdock/releases) |
+
+安装过程会检查原生终端模块和 tmux，并尝试修复依赖。手动准备 tmux：
+
+```bash
+# macOS（已安装 Homebrew）
+brew install tmux
+
+# Ubuntu / Debian
+sudo apt-get update
+sudo apt-get install -y tmux
+```
+
+如果 `node-pty` 需要本机编译，macOS 安装 `xcode-select --install`，Ubuntu / Debian 安装 `build-essential` 和 `python3`。WSL2、不同 Linux 发行版和手机系统的具体行为请以实际环境为准。
+
+### 安装并启动
+
+```bash
+npm install -g termdock
+
+# 先设置密码，再启动服务
+td --set-password
+td
+
+# 查看实际访问地址和服务状态
+td --status
+```
+
+`td` 和 `termdock` 是同一个 CLI 的两个名称。首次启动可能引导配置局域网名称与 HTTPS；打开启动日志或 `td --status` 给出的地址，登录后创建终端即可开始使用。
+
+只想先在本机试用，也可以运行：
+
+```bash
+npx termdock --host 127.0.0.1
+```
+
+没有配置证书时，本机地址为 `http://localhost:9834`；配置证书后使用日志显示的 HTTPS 地址。默认监听地址为 `0.0.0.0:9834`，后台模式由 supervisor 监督运行。手机访问和 PWA 安装请继续阅读[局域网 HTTPS 配置](#局域网-https-访问手机--本机)。
+
+### macOS 桌面版
+
+从 [GitHub Releases](https://github.com/Jovines/termdock/releases) 下载 DMG，安装后打开连接中心。桌面版可以复用本机服务，也可以连接局域网或公网中的独立服务。
+
+如果本机已有 Node.js 22+ 和 CLI，桌面版会检测并按需启动服务；缺少 CLI 时，可点击「安装并启动」安装到 `~/.termdock/cli`。缺少合适的 Node.js 时，连接中心提供官网下载入口。退出桌面版后，独立服务继续运行。
+
+桌面版提供原生窗口、快捷键、Finder 文件交互和独立的应用更新。打包、签名与升级说明见 [Termdock for macOS](docs/macos-desktop.md)。
 
 ## 功能特性
 
 ### 终端能力
 
 - **xterm.js + WebGL 渲染**：使用 `@xterm/addon-webgl` 加速绘制，自动处理上下文丢失与纹理刷新
-- **tmux 持久会话**：所有会话由 tmux 托管，关闭页面/掉线后仍可恢复，支持 `detach`、`destroy`、强杀
-- **WebSocket 双向通信**：单条持久连接同时承载输入与输出（取代旧的 SSE + POST 方案）
+- **tmux 持久会话**：tmux 模式下关闭页面或掉线后仍可恢复，支持分离、销毁和强制结束；持久运行需要 tmux 可用
+- **加密双向通信**：通过 Noise 加密通道传输终端输入与输出，底层使用 WebSocket
 - **自动重连**：网络或后端中断后会自动尝试 attach 回原会话
 - **鼠标支持**：完整透传 SGR 鼠标协议，vim、htop、tmux copy-mode 内的滚动/点击都按预期工作
-- **OSC 0 CWD 嗅探**：标签页可动态显示当前进程或目录，无需轮询 `/proc`
+- **会话标题与目录**：结合终端标题、shell integration 与进程信息显示当前会话上下文
 
 ### 多会话与标签栏
 
@@ -31,19 +108,77 @@
 - **手势**：点击 = 鼠标左键，长按 = 右键，捏合缩放调字号，触摸滑动 = 终端滚动
 - **iOS 适配**：处理选择菜单、键盘弹起、翻页与会话恢复时的纹理刷新等细节
 
+### 电脑控制
+
+右侧边栏的「电脑」页支持 RDP 和 VNC，提供鼠标、触摸、键盘、仅查看、桌面展开和系统快捷键。
+Ubuntu / Linux、Windows 默认选择 RDP，macOS 默认选择 VNC；目标系统与协议可以分别切换。
+VNC 使用 [noVNC](https://github.com/novnc/noVNC)，RDP 使用 [Apache Guacamole](https://guacamole.apache.org/)。
+
+1. 在 Mac 上打开「系统设置 → 通用 → 共享 → 屏幕共享」，允许用于登录的 Mac 账户。
+2. 在「电脑」页填写当前 Termdock 服务能访问的电脑内网 IP 或主机名；VNC 端口固定为 5900，RDP 默认 3389，可按目标设置调整。
+   可选择「连接服务所在电脑」，使用服务端本机地址；这里的本机是当前服务所在电脑。
+3. 填写 Mac 用户名和账户密码；如果使用独立 VNC 密码，先在 Mac 的屏幕共享设置中
+   开启「VNC 查看器可以使用密码控制屏幕」，用户名可留空，按服务器要求补充。
+
+连接需要当前服务的全权授权。目标、协议、端口、账号和证书信任选择保存在当前服务。
+默认勾选「记住登录」，成功连接后将密码加密保存到服务端，下次打开自动连接；高级设置可关闭自动连接，
+「清除登录」可删除当前目标账号的凭据。密码不会进入浏览器存储或普通设置文件，服务端凭据文件及密钥仅供当前系统用户读取。
+切换侧栏页面、关闭侧栏或离开服务工作区时会断开控制。浏览器到 Termdock 的画面和输入复用现有加密通道；服务到目标电脑的 VNC 段
+应放在可信内网或 VPN 中。文字发送使用远程剪贴板，字符支持取决于服务器能力。
+系统设置步骤可参考 [Apple 屏幕共享说明](https://support.apple.com/guide/mac-help/mh11848/mac)。
+
+选择 VNC 时，Ubuntu / Linux 需要先启动兼容的 VNC 服务。共享现有 X11 桌面可使用
+[x11vnc](https://github.com/LibVNC/x11vnc)，在桌面终端设置 VNC 密码，并以
+`-localhost -usepw -forever -shared -rfbport 5900` 启动，随后连接服务所在电脑。
+[Ubuntu 24.04 内置远程桌面](https://documentation.ubuntu.com/desktop/en/24.04/how-to/share-your-desktop-remotely/)
+使用 RDP，可在此面板选择 RDP 连接。VNC 下的 Wayland 需要兼容该桌面的 VNC 服务。
+TigerVNC 虚拟桌面是独立会话，不等同于当前屏幕。
+
+使用 RDP 时，在目标电脑启用远程桌面并设置登录凭据。Ubuntu 的「桌面共享」与「远程登录」
+可能使用不同会话和端口（3389 / 3390），填写设置界面中的实际端口、RDP 用户名和密码。
+目标使用自签名证书时，确认电脑身份后可勾选「信任此电脑的 RDP 证书（跳过校验）」。
+域可留空；连接服务所在电脑时使用 `127.0.0.1`。RDP 登录可能创建新会话，是否显示当前屏幕
+由目标远程桌面服务决定。
+
+RDP 需要在 **Termdock 服务电脑** 启动支持 RDP 的 `guacd`，仅监听回环地址 `127.0.0.1:4822`。
+Linux Docker 示例（复用主机网络，使 `127.0.0.1` 指向服务电脑）：
+
+```bash
+docker run -d --name termdock-guacd --network host --restart unless-stopped \
+  -e LOG_LEVEL=warning guacamole/guacd:1.6.0 -b 127.0.0.1
+```
+
+也可在服务电脑安装 Apache Guacamole 的 `guacd` 并绑定回环地址；自定义后端端口使用
+`TERMDOCK_GUACD_PORT`。转换服务没有独立认证，不能暴露到局域网或公网。
+浏览器通过当前 Termdock 服务的全权授权与加密通道连接；RDP 密码的传输与保存请求均通过该通道，
+不写入 URL、日志或普通连接配置。无需部署 Guacamole 网页、数据库或另外开放业务 HTTP / WebSocket 端口。
+
 ### 安全与认证
 
-- **密码保护**（可选）：通过 `termdock --set-password` 启用，登录页 + Cookie 会话
+- **密码登录**：通过 `td --set-password` 设置密码，浏览器使用 OPAQUE 密码证明授权设备，再建立 Noise 加密连接
+- **设备邀请与撤销**：一次性邀请链接和二维码，可选择会话查看、操作或完整服务权限
+- **加密中继**：已配置的入口转发密文，目标服务独立验证设备身份与权限
 - **登录限流**：基于来源 IP 的指数退避，防暴力破解
 - **CSRF 防护**：所有写入接口要求 CSRF token
 - **WebSocket 升级鉴权**：未登录的 upgrade 请求会被 401 拒绝
 - **路径校验**：内置 `pathValidator` 防止路径穿越
 
+终端操作拥有服务所在系统账户的权限。公网部署需要强密码、可信 HTTPS 证书和明确的访问入口；配置方法与权限边界见[配置说明](docs/configuration.md#公网安全模式)和[加密连接文档](src/server/federation/README.md)。普通 PWA 仍依赖可信的前端代码来源。
+
+### 文件、审阅与设备
+
+- 文件树、上传、下载、图片粘贴和文件拖拽，方便给 Agent 提供上下文。
+- Git diff 与代码审阅，支持把选中的内容引用到终端或上下文草稿。
+- Markdown、图片、视频与沙箱 HTML 预览；HTML 的支持范围见[加密连接文档](src/server/federation/README.md)。
+- STL / GLB / glTF 模型查看与位置引用；KiCad 原理图、PCB 和工程预览。部分转换需要服务机上的额外工具，见[电子设计预览](docs/electronics-preview.md)。
+- Android 投屏与控制，需要服务机上的 adb、scrcpy 及已授权的设备；电脑桌面控制步骤见上文。
+
 ### PWA
 
 - 自托管 JetBrains Mono NL + Symbols Nerd Font（含 Bold）
 - 完整的 PWA 图标 / 启动屏 / manifest，可安装到主屏幕全屏运行
-- Service Worker 缓存静态资源，支持离线打开
+- Service Worker 缓存静态资源；离线时可打开缓存界面，终端操作仍需要连接服务
+- 内置中英文界面与 Flexoki 深色、浅色主题
 
 ## 技术栈
 
@@ -56,32 +191,19 @@
 - **样式**:Tailwind CSS
 - **图标**：Remix Icon + Nerd Fonts
 
-## 快速开始
+## 服务管理与手机接入
 
-### macOS 桌面版
+### 常用命令与更新
 
-桌面版用于连接本机、局域网或公网中独立运行的 Termdock 服务。
-本机服务需先通过 CLI 启动；桌面版不安装 CLI，也不启动或接管服务。
-
-正式版可从 [GitHub Releases](https://github.com/Jovines/termdock/releases)
-下载 DMG；安装后的桌面版支持在应用菜单中检查并安装更新。
-
-构建、版本管理和签名说明见
-[Termdock for macOS](docs/macos-desktop.md)。
-
-### 一行命令启动
+全局安装后可使用：
 
 ```bash
-npx termdock
-```
-
-默认监听 `0.0.0.0:9834`，并在后台运行。常用变体：
-
-```bash
-npx termdock --host 127.0.0.1 --port 4000
+termdock --host 127.0.0.1 --port 4000
 termdock --foreground            # 前台运行
 termdock --status                # 查看后台状态
 termdock --stop                  # 停止后台服务
+termdock --restart               # 请求 supervisor 重启服务
+td --help                       # 完整 CLI 帮助
 td update                        # 从 npm 官方源升级全局 CLI
 ```
 
@@ -105,8 +227,8 @@ macOS 桌面版仍使用独立的签名更新机制，不运行 npm 自动更新
 # 交互式设置（输入隐藏）
 termdock --set-password
 
-# 通过管道设置（CI / 脚本场景）
-echo "my-secret" | termdock --set-password
+# 通过管道设置（CI / 脚本场景；先在环境中设置 TERMDOCK_SETUP_PASSWORD）
+printf '%s\n' "$TERMDOCK_SETUP_PASSWORD" | termdock --set-password
 
 # 关闭鉴权
 termdock --clear-password
@@ -137,7 +259,7 @@ https://<name>.termdock.local:9834
 termdock --set-password
 
 # 2. 自动准备本地 HTTPS 证书
-#    若未安装 mkcert，会自动通过 Homebrew 执行 brew install mkcert
+#    会检查 mkcert；macOS 可通过 Homebrew 自动安装
 termdock --setup-local-https
 
 # 3. 正常启动；如果 ~/.termdock/certs/ 下已有证书，会自动启用 HTTPS
@@ -180,6 +302,33 @@ https://<name>.termdock.local:9834
 ```
 
 注意：mDNS 依赖同一局域网的 `.local` 组播；访客 Wi‑Fi、客户端隔离、VPN 或部分企业网络可能会阻止解析。此时 `localhost` 访问仍然可用，但手机上的漂亮域名可能不可用。
+
+在 iPhone 的 Safari 中使用「分享 → 添加到主屏幕」；Android 使用浏览器的安装应用入口。首次连接需完成证书信任和登录。手机锁屏或后台时系统可能暂停客户端，服务机上的 tmux 会话继续运行，返回前台后重新连接。
+
+## AI 与协作
+
+### 在同一个终端继续 AI 工作
+
+在服务机上安装并登录你选择的 Agent CLI，然后在 Termdock 终端中启动，例如 `claude`、`codex` 或 `gemini`。项目内置多种 Agent 的识别与会话恢复适配，也支持通过插件添加适配。
+
+Termdock 不提供模型账户或 API 额度，调用费用与权限由对应 CLI 和提供商决定。普通 shell、Vim、htop 等终端程序也可以使用。
+
+### 工作组、任务与跨机器协作
+
+创建协作组并添加 Agent 会话后，可以发送消息、建立目标与子任务、回答问题、确认方案、审阅结果和验收交付。自动协作支持协调者拆分目标、独立执行目录与独立评审，具体流程见[协作指南](docs/collaboration.md)。
+
+在 Termdock 管理的终端内查看 CLI：
+
+```bash
+td collab --help
+td collab status
+td collab send <接收者会话ID> '请检查这次改动并回复结果'
+td collab inbox --json
+```
+
+协作以终端和明确回复为依据，不要求各家 Agent 安装专用 hook。跨服务协作完成身份登记后，由服务后台通过加密通道继续投递与重试，不依赖网页一直打开。**写入终端不等于 Agent 已读或任务已完成**；任务报告保留原文与时间，最终结果需要明确评审或验收。
+
+多个服务的授权、入口中继和网络路由配置见[加密连接与 CLI 中继](src/server/federation/README.md)。
 
 ### 分享和安装 Agent 插件
 
@@ -240,6 +389,8 @@ td plugin-create ./manifest.json
 
 插件作者和 Agent 可以运行 `td agent-plugin --json` 获取机器可读的当前协议、manifest schema、状态模型和全部公共命令。v1 manifest 会返回可直接交给 AI 修复的迁移说明。
 
+## 源码开发
+
 ### 从源码安装
 
 ```bash
@@ -291,6 +442,8 @@ npm run dev:server   # tsx watch 后端：9835
 npm run build
 ```
 
+类型检查使用 `npm run lint`，单次测试运行使用 `npm test -- --run`；贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 输出：
 
 - `dist/client/`：前端静态资源
@@ -306,10 +459,7 @@ npm start
 
 ## 系统依赖
 
-- **Node.js ≥ 18**
-- **tmux**：会话托管必需，请确保 `tmux` 在 PATH 中
-- **macOS**：需安装 Xcode Command Line Tools 以便 `node-pty` 编译 `spawn-helper`
-- **Linux**：通常需要 `build-essential`、`python3` 才能编译 `node-pty`
+依赖与安装要求见[运行环境](#运行环境)。开发前请准备 Node.js 22+、tmux 及所需的原生模块编译工具。
 
 ### tmux 焦点跟踪
 
@@ -321,80 +471,38 @@ set -g focus-events on
 
 ## 项目结构
 
-```
+```text
 termdock/
 ├── src/
-│   ├── main.tsx                          # 应用入口
-│   ├── App.tsx                           # 根组件
-│   ├── index.css                         # 全局样式
+│   ├── App.tsx / main.tsx       # Web 应用入口
+│   ├── index.css               # 主题与全局样式 token
 │   ├── lib/
-│   │   ├── terminal/                     # xterm 适配层、主题、API
-│   │   ├── stores/                       # Zustand store
-│   │   │   ├── useTerminalStore.ts
-│   │   │   └── useMultiSessionStore.ts
-│   │   ├── components/
-│   │   │   ├── MultiTerminalView.tsx     # 多会话 Swiper 主视图
-│   │   │   ├── auth/LoginScreen.tsx      # 登录页
-│   │   │   ├── terminal/                 # 终端视图、错误/加载、移动键盘
-│   │   │   ├── settings/                 # 调试面板、工具条预设
-│   │   │   ├── ui/ErrorBoundary.tsx
-│   │   │   └── views/TerminalView.tsx
-│   │   ├── hooks/                        # 字号、滚动、断连清理、视口高度等
-│   │   └── utils/                        # 错误处理、调试
+│   │   ├── terminal/           # xterm 适配、主题与终端 API
+│   │   ├── components/         # 终端、侧栏、设置和审阅界面
+│   │   ├── federation/         # 浏览器加密通信与多服务访问
+│   │   ├── stores/             # 状态管理
+│   │   └── i18n/               # 中英文界面
 │   └── server/
-│       ├── cli.ts                        # CLI 入口（前后台、密码管理）
-│       ├── entry.ts                      # Express + WebSocket 启动
-│       ├── config.ts                     # 端口配置（dev: 9833/9835，prod: 9834）
-│       ├── routes/
-│       │   ├── auth.ts                   # 登录 / 登出 / 状态
-│       │   └── terminal.ts               # 终端 + tmux 路由
-│       └── utils/
-│           ├── authProtection.ts         # scrypt 密码哈希、会话、限流
-│           ├── csrfProtection.ts
-│           └── pathValidator.ts
-├── public/                               # PWA 图标、字体、manifest
-├── install-local.sh / uninstall-local.sh
-├── package.json
-├── vite.config.ts
-└── tsconfig.json
+│       ├── cli.ts / entry.ts   # CLI 与服务入口
+│       ├── routes/             # 终端、文件与其他业务路由
+│       ├── agent/              # Agent 适配、协作与定时任务
+│       └── federation/         # 服务身份、加密传输与中继
+├── desktop/                    # Electron macOS 客户端
+├── public/                     # 图标、字体与 Service Worker
+├── docs/                       # 功能与开发文档
+├── scripts/                    # 构建与维护脚本
+└── package.json
 ```
 
-## 主要 API 端点
+### 程序化接入
 
-> 写入接口需要登录后获取 CSRF token，并通过 Cookie + token 一起调用。
+优先使用 `td collab`、`td automation`、`td notify` 和各命令的 `--help`，支持结构化 JSON 输出。页面业务请求必须使用应用的加密 `fetch` / `secureSocket`；直接 HTTP API 列表不能作为当前浏览器或远端接入方案。
 
-### 鉴权
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| GET  | `/api/auth/status` | 查询是否启用鉴权 / 当前 cookie 是否有效 |
-| POST | `/api/auth/login`  | 登录（限流） |
-| POST | `/api/auth/logout` | 登出 |
-| GET  | `/api/csrf-token`  | 获取 CSRF token（需登录） |
-
-### 终端 / tmux
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| POST | `/api/terminal/create` | 创建新会话 |
-| GET  | `/api/terminal/:sessionId/ws` *(WebSocket)* | 双向通信通道 |
-| POST | `/api/terminal/:sessionId/input` | 发送输入（HTTP 兜底） |
-| POST | `/api/terminal/:sessionId/resize` | 调整终端尺寸 |
-| POST | `/api/terminal/:sessionId/tmux` | 执行 tmux 控制命令 |
-| POST | `/api/terminal/:sessionId/restart` | 重启会话 |
-| POST | `/api/terminal/:sessionId/detach` | 断开 attach |
-| GET  | `/api/terminal/:sessionId/attach` | 重新 attach |
-| GET  | `/api/terminal/:sessionId/health` | 健康检查 |
-| DELETE | `/api/terminal/:sessionId` | 关闭会话 |
-| POST | `/api/terminal/force-kill` | 强制结束 |
-| GET  | `/api/terminal/tmux/sessions` | 列出所有 tmux 会话 |
-| DELETE | `/api/terminal/tmux/sessions/:name` | 销毁指定 tmux 会话 |
-| GET  | `/api/terminal/processes` | 进程列表 |
+本机自动化的认证示例见上文 `auth-login.sh`，传输与授权设计见[加密连接文档](src/server/federation/README.md)。
 
 ## 主题
 
-当前内置 **Flexoki Dark** —— 一套低对比度、暖色调的配色，长时间阅读更舒适。
-主题定义在 `src/lib/terminal/theme.ts`，可按需扩展。
+内置 **Flexoki 深色与浅色主题**。界面颜色 token 在 `src/index.css`，终端 ANSI 配色在 `src/lib/terminal/theme.ts`；修改时请遵守仓库的色板约定。
 
 ## 配置
 
@@ -405,6 +513,8 @@ termdock/
 --port <port>        监听端口（默认 9834）
 --foreground         前台运行
 --status             查看后台服务状态
+--restart            重启受监督的服务
+--setup-local-https  准备局域网 HTTPS 证书
 --stop               停止后台服务
 --set-password       设置 / 修改访问密码（交互式）
 --clear-password     清除密码并关闭鉴权
@@ -420,8 +530,10 @@ NODE_ENV=development           # 运行环境
 TERM=xterm-256color            # 终端类型
 SHELL=/bin/zsh                 # 默认 shell
 MAX_TERMINAL_SESSIONS=20       # 最大会话数
-TERMINAL_IDLE_TIMEOUT=1800000  # 空闲超时 (毫秒)
+TERMINAL_IDLE_TIMEOUT=21600000 # 空闲超时 (毫秒；生产默认 6 小时)
 ```
+
+完整配置项、加载顺序与公网模式见[配置说明](docs/configuration.md)，环境变量示例见 [.env.example](.env.example)。
 
 ### 状态目录
 
@@ -429,7 +541,10 @@ TERMINAL_IDLE_TIMEOUT=1800000  # 空闲超时 (毫秒)
 ~/.termdock/
 ├── auth.json        # 密码哈希（mode 0600，仅在启用鉴权时存在）
 ├── server.json      # 后台进程 PID / 端口
-└── server.log       # 后台运行日志
+├── server.log       # 后台运行日志
+├── crash.log        # 服务异常与 supervisor 记录
+├── certs/           # 局域网 HTTPS 证书
+└── federation/      # 服务身份、授权和路由配置
 ```
 
 ## 移动端控制
@@ -446,28 +561,75 @@ Esc / Tab / Ctrl / Alt / Cmd / ↑↓←→ / Enter / Backspace，并支持在�
 - **滑动**（边缘）：在多个会话之间翻页
 - **捏合缩放**：调整字号
 
-## 发布到 npm
+## 常见问题
 
-```bash
-npm publish
-```
+### 手机应该打开哪个地址？
 
-`prepublishOnly` 钩子会自动执行 `npm run build`。发布前请确认：
+打开 `td --status` 输出的局域网 HTTPS 地址，并确保手机和服务机网络可达。手机上的 `localhost` 指手机本身；首次接入使用日志提供的 onboarding 地址安装并信任 CA，再访问正式地址。
 
-- npm 包名可用
-- `repository` / `homepage` / `bugs` 字段已更新
-- README、版本号已同步
+### 关闭浏览器或 Mac 客户端会结束任务吗？
 
-## 浏览器支持
+tmux 模式下，关闭客户端或暂时断网不会结束终端里的程序。主动销毁会话、关机或结束进程会终止任务。持久会话不是运行结果的备份。
 
-- Chrome 88+
-- Firefox 79+
-- Safari 14+（含 iOS 14+）
-- Edge 88+
+### 安装成功，但创建终端失败？
 
-## 许可证
+先检查 `node --version`、`tmux -V` 与 `td --status`，再查看 `~/.termdock/server.log` 或前台运行输出。常见原因是 Node.js 版本过低、tmux 不在 PATH，或 `node-pty` 原生模块未正确安装。源码环境可在安装编译工具后运行 `npm rebuild node-pty --build-from-source`。
 
-MIT
+### HTTPS 证书已信任，`.termdock.local` 仍无法打开？
+
+检查是否同一局域网、是否开启访客网络或客户端隔离，以及 VPN 是否阻断 mDNS。不要跳过证书验证；如果改用 IP 或其他域名，证书也需要覆盖该地址。
+
+### 可以部署到公网吗？
+
+可以，需要正确配置 HTTPS、强密码和 `TERMDOCK_PUBLIC_ORIGIN`，详见[公网安全模式](docs/configuration.md#公网安全模式)。终端拥有服务账户权限；应用的认证和路径检查不提供多租户系统隔离。
+
+### 离线还能操作终端吗？
+
+不能。PWA 可以缓存界面，操作终端、访问文件和控制设备仍需要服务连接。手机系统可能暂停后台页面，返回前台后会尝试恢复连接。
+
+### 更新后仍看到旧界面？
+
+CLI 服务更新与 macOS 应用更新相互独立。安装新 CLI 后需确认服务已重启，再接受页面更新并重新加载。手机 PWA 如仍使用旧资源，可彻底关闭后重新打开；不要因此销毁 tmux 会话。
+
+### 浏览器和设备支持到什么程度？
+
+建议使用当前版本的 Chrome、Edge、Firefox 或 Safari。WebGL、剪贴板、PWA 安装和软键盘行为取决于浏览器与系统；macOS / iOS 的特定路径需要实机验收，不能用浏览器模拟结果代替。已知 macOS beta 问题见[本地网络权限记录](docs/macos-27-local-network.md)。
+
+## 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| [English README](README.en.md) | 英文介绍与上手指南 |
+| [配置说明](docs/configuration.md) | 环境变量、服务监督、公网安全模式 |
+| [macOS 桌面版](docs/macos-desktop.md) | 本机服务辅助、快捷键、打包、签名和升级 |
+| [协作指南](docs/collaboration.md) | 消息 CLI、跨服务投递、目标、评审和验收 |
+| [加密连接与中继](src/server/federation/README.md) | 密码证明、设备授权、入口路由与传输边界 |
+| [电子设计预览](docs/electronics-preview.md) | KiCad 预览依赖与位置引用 |
+| [模型特征](docs/model-features.md) | 3D 模型特征和坐标引用 |
+| [参与贡献](CONTRIBUTING.md) | 开发准备、验证与提交说明 |
+
+## 参与贡献
+
+欢迎通过 [Issues](https://github.com/Jovines/termdock/issues) 反馈问题或讨论功能，也欢迎提交 [Pull Request](https://github.com/Jovines/termdock/pulls)。中文和英文都可以。
+
+除了代码，文档修正、翻译、不同设备上的体验反馈、Agent 插件和真实使用案例都能帮助项目成长。开发流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+如果 Termdock 对你有用，欢迎给项目一个 Star，或把仓库链接分享给需要手机终端、自托管开发环境或多 Agent 协作的朋友。分享截图与复现日志时，请先隐藏密码、邀请链接、密钥与私人路径。
+
+## 许可证与致谢
+
+Termdock 使用 [MIT License](LICENSE)。打包的第三方组件和字体另有各自许可，见[第三方声明](public/third-party-notices.txt)。
+
+感谢 [xterm.js](https://github.com/xtermjs/xterm.js)、[tmux](https://github.com/tmux/tmux)、[node-pty](https://github.com/microsoft/node-pty)、[noVNC](https://github.com/novnc/noVNC) 及其他开源项目；界面配色来自 [Flexoki](https://stephango.com/flexoki)。
+
+<details>
+<summary>项目命名备注</summary>
+
+项目新名称暂定为 **Termcove**。目前仅记录改名意向，程序名称、CLI 命令和 npm 包名仍沿用 Termdock / `termdock`；未来正式决定后再统一迁移。
+
+</details>
+
+## CLI 使用示例
 
 ### AI 关键进展提醒
 
@@ -521,11 +683,9 @@ tmux 检测；无效 ID 由服务端拒绝，不回退到其他身份。现有�
 不提供这些进程之间的防冒充隔离。
 未指定时仍使用后端环境变量或明确的 `TMUX_PANE` 自动识别；缺少 pane 时不会猜测 tmux 的默认会话。
 
-### Scheduled tasks from the CLI
+### 定时任务
 
-`td automation --help` exposes the same scheduled tasks as the web UI. Commands
-return JSON by default (exit 0 on success, 1 on failure), so agents can retain the
-returned `automation.id` and manage their own reminders:
+`td automation --help` 提供与网页相同的定时任务管理功能。命令默认返回 JSON，成功退出码为 0，失败为 1；Agent 可以保存返回的 `automation.id`，继续管理自己的任务：
 
 ```bash
 td automation create --name 'Review team progress' --every 30 --self \
@@ -538,15 +698,6 @@ td automation run <automation-id>
 td automation delete <automation-id>
 ```
 
-`--self` identifies the current Termdock session, including tmux sessions surviving
-a service restart. Use `--session <full-session-id>` for another local session, or
-`--command '<agent launch command>'` to open a new session on each run. Existing
-session targets must have an Agent running when the task fires. New sessions use
-the CLI's working directory unless `--cwd` is specified. Prompts can also come
-from `--file <path>` or `--stdin` instead of `--prompt`.
+`--self` 选择当前 Termdock 会话，包括服务重启后继续运行的 tmux 会话。其他本机会话使用 `--session <full-session-id>`；每次新建会话使用 `--command '<agent launch command>'`。向既有会话投递时，触发时刻必须已有 Agent 运行。新会话默认使用 CLI 当前目录，可通过 `--cwd` 指定；提示词也可以用 `--file <path>` 或 `--stdin` 提供。
 
-Schedules support `--every <whole minutes>` (1–43200) or `--at HH:MM` with optional
-`--weekdays 1,2,3,4,5` (0=Sunday, 6=Saturday; omitted means every day), using the
-server's timezone. Tasks repeat while enabled and the service is running;
-`--disabled` creates a paused task. A successful run means the task was dispatched,
-not that the Agent has completed the work. Scheduling is local to this service.
+支持 `--every <整分钟>`（1–43200），或 `--at HH:MM` 配合可选的 `--weekdays 1,2,3,4,5`（0 为周日，6 为周六；不填则每天），按服务端时区执行。任务启用且服务运行时会重复触发，`--disabled` 创建暂停状态的任务。运行成功表示已分派，不代表 Agent 已完成工作；定时任务属于当前服务。

@@ -52,7 +52,7 @@ describe('toolbar preset desktop visibility', () => {
     expect(desktopPreset?.showOnDesktop).toBe(true);
   });
 
-  it('filters desktop preset menu options to desktop-visible presets', () => {
+  it('keeps the base preset available alongside desktop-visible presets', () => {
     const presets: ToolbarPresetDefinition[] = [
       {
         id: 'default',
@@ -76,6 +76,7 @@ describe('toolbar preset desktop visibility', () => {
 
     expect(buildDesktopToolbarPresetOptions(presets)).toEqual([
       { id: 'auto', label: 'Auto' },
+      { id: 'default', label: 'Base' },
       { id: 'claude', label: 'Claude' },
     ]);
   });

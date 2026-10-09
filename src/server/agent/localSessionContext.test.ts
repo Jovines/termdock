@@ -27,7 +27,7 @@ it('accepts a pane hint without TMUX and preserves a backend identity on tmux fa
 
 it.each([
   ['status'], ['inbox'], ['send', 'recipient', 'hello'], ['reply', 'message-id', 'ack'],
-  ['rebind', '--pane', '%173'], ['message', 'read', 'message-id'],
+  ['rebind', '--pane', '%173'], ['message', 'get', 'message-id'],
 ])('passes explicit sender independently of targets and pane: %j', async (...args) => {
   const command = parseCollaborationCommand([...args, '--session', 'sender']);
   const context = await resolveLocalCollaborationContext(command.options.session as string, {});

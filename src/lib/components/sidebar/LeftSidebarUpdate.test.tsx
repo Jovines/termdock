@@ -57,7 +57,7 @@ describe('LeftSidebar update reminder', () => {
     expect(moreButton.querySelector('span[aria-hidden="true"]')).not.toBeNull();
     fireEvent.click(moreButton);
     expect(screen.getByText('The update is installed and ready for a confirmed restart.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Restart and finish update' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Restart and finish update' }));
     expect(onConfirmUpdateRestart).toHaveBeenCalledOnce();
   });
 });

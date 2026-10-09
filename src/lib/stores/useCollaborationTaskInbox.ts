@@ -2,11 +2,11 @@ import { create } from 'zustand';
 import { listCollaborationTasks, type CollaborationTaskView } from '../terminal/api';
 import { collaborationTaskNeedsAttention } from '../collaboration/taskState';
 
-export const useCollaborationTaskInbox = create<{ tasks: CollaborationTaskView[]; error: string | null; refresh: () => Promise<void> }>((set) => {
+export const useCollaborationTaskInbox = create<{ tasks: CollaborationTaskView[]; allTasks: CollaborationTaskView[]; error: string | null; refresh: () => Promise<void> }>((set) => {
   let running = false;
-  return { tasks: [], error: null, refresh: async () => {
+  return { tasks: [], allTasks: [], error: null, refresh: async () => {
     if (running) return; running = true;
-    try { const { tasks } = await listCollaborationTasks(); set({ tasks: tasks.filter(collaborationTaskNeedsAttention), error: null }); }
+    try { const { tasks } = await listCollaborationTasks(); set({ tasks: tasks.filter(collaborationTaskNeedsAttention), allTasks: tasks, error: null }); }
     catch (error) { set({ error: error instanceof Error ? error.message : '协作待处理事项加载失败' }); }
     finally { running = false; }
   } };

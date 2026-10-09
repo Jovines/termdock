@@ -65,7 +65,7 @@ describe('review reference', () => {
     expect(result.onInsert).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Insert reference' }));
     await waitFor(() => expect(result.onInsert).toHaveBeenCalledOnce());
-    expect(result.onInsert.mock.calls[0][0]).toContain('审阅意见：Make this thinner');
+    expect(result.onInsert.mock.calls[0][0]).toBe('电子标注: /repo/board.kicad_pcb / J1 / (1,2)mm\nMake this thinner');
     expect(uploadMock).not.toHaveBeenCalled();
   });
   it('uploads only on confirmation and uses the returned collision-safe path', async () => {

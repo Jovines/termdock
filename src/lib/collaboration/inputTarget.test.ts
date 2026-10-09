@@ -58,3 +58,19 @@ it('docked composers receive inserts only while their pane is selected', () => {
   closeA(); closeB();
   useCollaborationPanelDock.getState().setActivePane(null);
 });
+
+it('routes to the selected task field within one dock and lets the main workspace take focus', () => {
+  const feedback = vi.fn(), answer = vi.fn(), main = vi.fn();
+  const offFeedback = registerCollaborationInput(feedback, 'field-feedback', true, 'group');
+  const offAnswer = registerCollaborationInput(answer, 'field-answer', true, 'group');
+  focusCollaborationInput('field-answer');
+  routeCollaborationInput('answer reference');
+  expect(answer).toHaveBeenCalledWith('answer reference');
+  expect(feedback).not.toHaveBeenCalled();
+  const offMain = registerCollaborationInput(main, 'main');
+  focusCollaborationInput('main');
+  routeCollaborationInput('main reference');
+  expect(main).toHaveBeenCalledWith('main reference');
+  expect(answer).toHaveBeenCalledTimes(1);
+  offMain(); offAnswer(); offFeedback();
+});

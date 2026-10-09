@@ -1,3 +1,4 @@
+import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
 import { assertPeerRegistrationAuthority } from '../agent/collaborationPeerTransport.js';
 import { progressRoutes } from '../notifications/progressRoutes.js';
@@ -5,6 +6,8 @@ import { ensureNodePty } from '../utils/ensureNodePty.js';
 import { PtySpawnBackoff, PtySpawnDeferredError } from '../utils/ptySpawnBackoff.js';
 import { collaborationGroupRoutes } from '../agent/collaborationGroupRoutes.js';
 import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
+import { SharedSessionSampler, SharedSnapshotCache, type SampleEvent } from '../utils/sharedSampling.js';
+import { batchTmuxOptions, TmuxMetadataWriter } from '../utils/tmuxMetadataWriter.js';
 import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
 import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
 import { TerminalOutputDelivery, resolveTerminalReplayCursor, type OutputFrame } from '../utils/terminalOutputDelivery.js';
@@ -90,7 +93,6 @@ import {
   normalizeProgramName,
   normalizeTmuxMetadataProgram,
   selectTmuxForegroundProgram,
-  tmuxMetadataChanged,
   type TmuxProcessRow,
 } from '../utils/tmuxProgramDetection.js';
 import {
@@ -118,6 +120,8 @@ import {
   type PersistedAgentResumeInfo,
 } from '../agent/resumePersistence.js';
 import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent/resumeHistory.js';
+import { completedExecution, ExecutionArchiveStore } from '../agent/executionArchives.js';
+import { archiveTaskWorkspace, restoreTaskWorkspace, snapshotTaskWorkspace } from '../agent/collaborationTaskWorkspace.js';
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
@@ -576,6 +580,8 @@ function generateFrontendSessionId(): string {
 const GLOBAL_SESSION_STATE_FILE = `${TERMDOCK_DIR}/global-session-state.json`;
 const CLIENT_STATES_FILE = `${TERMDOCK_DIR}/client-states.json`; // 保留用于迁移
 const agentResumeHistory = new AgentResumeHistoryStore(`${TERMDOCK_DIR}/agent-resume-history.json`);
+const executionArchives = new ExecutionArchiveStore(`${TERMDOCK_DIR}/execution-archives.json`);
+let executionArchiveMutation = Promise.resolve();
 const TMUX_RECOVERY_STATE_FILE = `${TERMDOCK_DIR}/tmux-recovery-state.json`;
 const tmuxLifecycle = new TmuxLifecycleCoordinator();
 const intentionallyDeletingTmuxSessions = new Set<string>();
@@ -595,6 +601,8 @@ let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
 const controlClients = new Map<string, WebSocket>();
 
 let latestSessionInventory: SessionInventory | null = null;
+// Only authoritative observations may remove persisted tmux sessions.
+const inventoryTmuxLiveness = new WeakMap<SessionInventory, Set<string>>();
 let latestSessionInventoryAt = 0;
 let sessionInventoryBuildPromise: Promise<SessionInventory> | null = null;
 let broadcastInventorySeq = 0;
@@ -608,12 +616,10 @@ const CONTROL_BROADCAST_COALESCE_MS = 50;
 const SESSION_INVENTORY_CACHE_TTL_MS = 1500;
 
 async function getSessionInventorySnapshot(options: { refresh?: boolean } = {}): Promise<SessionInventory> {
+  if (sessionInventoryBuildPromise) return sessionInventoryBuildPromise;
   const now = Date.now();
   if (!options.refresh && latestSessionInventory && now - latestSessionInventoryAt < SESSION_INVENTORY_CACHE_TTL_MS) {
     return latestSessionInventory;
-  }
-  if (!options.refresh && sessionInventoryBuildPromise) {
-    return sessionInventoryBuildPromise;
   }
   const promise = buildSessionInventory()
     .then((inventory) => {
@@ -1442,27 +1448,6 @@ function buildRuntimeTmuxMetadata(input: {
   return { program, cwd, label, rawArgs: input.rawArgs ?? null };
 }
 
-function maybeRepairTmuxOptions(sessionName: string, current: {
-  program: string | null;
-  cwd: string | null;
-  label: string | null;
-}, next: TmuxRuntimeMetadata): void {
-  const currentSnapshot = {
-    program: current.program ?? null,
-    cwd: current.cwd ?? null,
-    label: current.label ?? '',
-  };
-  if (!tmuxMetadataChanged(currentSnapshot, next)) {
-    return;
-  }
-  void setTmuxOptions(sessionName, {
-    '@termdock-label': next.label,
-    '@termdock-program': next.program ?? '',
-    '@termdock-cwd': next.cwd ?? '',
-    '@termdock-last-active-at': String(Date.now()),
-  });
-}
-
 function makeTerminalSessionPayload(
   backendSessionId: string,
   session: TerminalSession,
@@ -2254,7 +2239,7 @@ async function refreshCollaborationAgentIdentity(
 ): Promise<void> {
   let activeProgram: TerminalSession['activeProgram'] = null;
   if (session.mode === 'shell') {
-    activeProgram = await detectShellActiveProgram(session);
+    activeProgram = await getCachedShellActiveProgram(backendSessionId, session);
   } else if (session.tmuxSessionName) {
     const layout = await getCachedTmuxLayout(session.tmuxSessionName);
     const activePane = getActivePaneFromLayout(layout);
@@ -2277,6 +2262,7 @@ async function spawnCollaborationAgentSession(
   group: CollaborationGroup,
   sourceSessionId: string | null,
   input: { agentSlug?: unknown; name?: unknown; cwd?: unknown; task?: unknown; mode?: unknown },
+  bootstrapRole?: string,
 ): Promise<{ group: ReturnType<CollaborationStore['save']>; session: OrchestrationSessionSnapshot }> {
   const agentSlug = typeof input.agentSlug === 'string' ? input.agentSlug.trim().toLowerCase() : '';
   const launchers = await listDetectedAgentLaunchers();
@@ -2309,11 +2295,20 @@ async function spawnCollaborationAgentSession(
   const backend = terminalSessions.get(opened.terminalSession.sessionId);
   if (!backend) throw new HttpStatusError(500, 'Agent Session 创建失败', 'COLLAB_AGENT_SESSION_FAILED');
 
+  const latestGroup = collaborationStore.getGroup(group.id);
+  if (!latestGroup || latestGroup.deleted) {
+    const created = globalSessionState.sessions.find(record => record.sessionId === frontendSessionId);
+    if (created?.tmuxSessionName) await destroyTmuxSessionSafely(created.tmuxSessionName);
+    else { cleanupSession(opened.terminalSession.sessionId, { killProcess: true }); globalSessionState.sessions = globalSessionState.sessions.filter(record => record.sessionId !== frontendSessionId); }
+    await persistGlobalStateNow(); broadcastClientState();
+    throw new HttpStatusError(409, '协作组已删除，未启动 Agent', 'COLLAB_GROUP_CHANGED');
+  }
   const updatedGroup = collaborationStore.save({
-    id: group.id,
-    name: group.name,
-    sessionIds: [...group.sessionIds, frontendSessionId],
+    id: latestGroup.id,
+    name: latestGroup.name,
+    sessionIds: [...latestGroup.sessionIds, frontendSessionId],
   });
+  if (bootstrapRole) collaborationStore.setRole({ groupId: group.id, sessionId: frontendSessionId, role: bootstrapRole });
   writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: launcher.command })}\r`);
 
   const requestedTask = typeof input.task === 'string' ? input.task.trim().slice(0, 20_000) : '';
@@ -3013,9 +3008,11 @@ async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]
 async function buildSessionInventory(): Promise<SessionInventory> {
   const tmuxStatus = await getTmuxStatus();
   let liveTmuxSessions: TmuxInventoryMeta[] = [];
+  let authoritativeTmuxList = false;
   if (tmuxStatus.available) {
     try {
       liveTmuxSessions = await listLiveTmuxInventorySessions();
+      authoritativeTmuxList = true;
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       if (!isTmuxServerMissingMessage(errorMessage)) {
@@ -3032,12 +3029,12 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     }
 
     try {
-      const metadata = await resolveLiveTmuxMetadata(tmux.name);
+      const metadata = await resolveLiveTmuxMetadata(tmux.name, true);
       if (!metadata) {
         return tmux;
       }
       backfillAgentResumeFromTmuxProcess(tmux.name, metadata.rawArgs);
-      maybeRepairTmuxOptions(tmux.name, tmux, metadata);
+      syncDynamicTmuxMetadata({ tmuxSessionName: tmux.name, program: metadata.program, cwd: metadata.cwd });
       return {
         ...tmux,
         program: metadata.program,
@@ -3194,13 +3191,19 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     };
   });
 
-  return {
+  const inventory: SessionInventory = {
     clientSessions,
     tmuxSessions,
     tmuxStatus,
     tmuxRecovery: getTmuxRecoveryView(),
     updatedAt: Date.now(),
   };
+  if (authoritativeTmuxList) {
+    const names = new Set(liveTmuxSessions.map(session => session.name));
+    inventoryTmuxLiveness.set(inventory, names);
+    dynamicTmuxMetadata.retain(names);
+  }
+  return inventory;
 }
 
 // ── end tmux user-option helpers ──
@@ -4326,6 +4329,8 @@ interface TmuxProcessSnapshotRow extends TmuxProcessRow {
 
 let processSnapshot: { rows: TmuxProcessSnapshotRow[]; fetchedAt: number } | null = null;
 let processSnapshotPromise: Promise<TmuxProcessSnapshotRow[]> | null = null;
+const ttyProcessSnapshots = new SharedSnapshotCache<string, TmuxProcessRow[]>(PROCESS_SNAPSHOT_CACHE_TTL_MS);
+const shellProgramSnapshots = new SharedSnapshotCache<string, TerminalSession['activeProgram']>(ACTIVE_PROGRAM_POLL_INTERVAL);
 
 function parseProcessSnapshot(stdout: string): TmuxProcessSnapshotRow[] {
   return stdout
@@ -4401,25 +4406,27 @@ async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
       const psArgs = pane.tty
         ? ['-t', pane.tty.replace(/^\/dev\//, ''), '-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=']
         : ['-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args='];
-      const { stdout } = await execFileAsync('ps', psArgs, { timeout: 3000, maxBuffer: 512 * 1024 });
-      rows = stdout
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line): TmuxProcessRow | null => {
-          const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
-          if (!match) return null;
-          return {
-            pid: Number.parseInt(match[1] || '0', 10),
-            ppid: Number.parseInt(match[2] || '0', 10),
-            pgid: Number.parseInt(match[3] || '0', 10),
-            tpgid: Number.parseInt(match[4] || '0', 10),
-            stat: match[5] || '',
-            comm: match[6] || '',
-            args: match[7]?.trim() || '',
-          };
-        })
-        .filter((row): row is TmuxProcessRow => row !== null);
+      rows = await ttyProcessSnapshots.get(pane.tty || '*', async () => {
+        const result = await execFileAsync('ps', psArgs, { timeout: 3000, maxBuffer: 512 * 1024 });
+        return result.stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line): TmuxProcessRow | null => {
+            const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+            if (!match) return null;
+            return {
+              pid: Number.parseInt(match[1] || '0', 10),
+              ppid: Number.parseInt(match[2] || '0', 10),
+              pgid: Number.parseInt(match[3] || '0', 10),
+              tpgid: Number.parseInt(match[4] || '0', 10),
+              stat: match[5] || '',
+              comm: match[6] || '',
+              args: match[7]?.trim() || '',
+            };
+          })
+          .filter((row): row is TmuxProcessRow => row !== null);
+      });
     }
 
     const selected = selectTmuxForegroundProgram({
@@ -4484,8 +4491,8 @@ function getCwdFromTmuxLayout(layout: TmuxLayout): string | null {
   return activePane?.currentPath || null;
 }
 
-async function resolveLiveTmuxMetadata(tmuxSessionName: string): Promise<(TmuxRuntimeMetadata & { shellTitle: string | null }) | null> {
-  const layout = await getTmuxLayout(tmuxSessionName);
+async function resolveLiveTmuxMetadata(tmuxSessionName: string, cached = false): Promise<(TmuxRuntimeMetadata & { shellTitle: string | null }) | null> {
+  const layout = cached ? await getCachedTmuxLayout(tmuxSessionName) : await getTmuxLayout(tmuxSessionName);
   const activePane = getActivePaneFromLayout(layout);
   if (!activePane) {
     return null;
@@ -4559,40 +4566,98 @@ function findFriendlyNameForTmuxSession(tmuxSessionName: string): string | null 
   return null;
 }
 
-// Push the latest dynamic metadata (program / cwd / label / last-active-at)
-// onto the tmux session as user options. Caller passes the previous metadata
-// snapshot and last-active-write timestamp so repeated polls with no change
-// skip the tmux write entirely. Returns the new snapshot + write timestamp.
-const TERMDOCK_LAST_ACTIVE_REFRESH_MS = 30_000;
+// Metadata belongs to the tmux session, including writes from inventory scans.
+// Batch options into one tmux process rather than four parallel child processes.
+const dynamicTmuxMetadata = new TmuxMetadataWriter(async (name, options) => {
+  await runTmux(batchTmuxOptions(name, options));
+});
 
 function syncDynamicTmuxMetadata(input: {
   tmuxSessionName: string;
   program: string | null;
   cwd: string | null;
-  previousMetadata: TmuxRuntimeMetadata | null;
-  lastActiveWriteAt: number;
-}): TmuxRuntimeMetadata & { lastActiveWriteAt: number } {
-  const { tmuxSessionName, program, cwd, previousMetadata, lastActiveWriteAt } = input;
-  const metadata = buildRuntimeTmuxMetadata({ tmuxSessionName, program, cwd });
-  const now = Date.now();
-
-  if (!tmuxMetadataChanged(previousMetadata, metadata)) {
-    // Cheap path: refresh last-active-at at most every 30 s so external
-    // tools see the session as alive without flooding tmux every 500 ms.
-    if (now - lastActiveWriteAt >= TERMDOCK_LAST_ACTIVE_REFRESH_MS) {
-      void setTmuxOption(tmuxSessionName, '@termdock-last-active-at', String(now));
-      return { ...metadata, lastActiveWriteAt: now };
-    }
-    return { ...metadata, lastActiveWriteAt };
-  }
-
-  void setTmuxOptions(tmuxSessionName, {
-    '@termdock-label': metadata.label,
-    '@termdock-program': metadata.program ?? '',
-    '@termdock-cwd': metadata.cwd ?? '',
-    '@termdock-last-active-at': String(now),
+}): void {
+  const metadata = buildRuntimeTmuxMetadata(input);
+  void dynamicTmuxMetadata.sync(input.tmuxSessionName, {
+    program: metadata.program, cwd: metadata.cwd, label: metadata.label,
+  }).catch(error => {
+    console.warn(`[tmux] metadata write failed for ${input.tmuxSessionName}: ${getErrorMessage(error)}`);
   });
-  return { ...metadata, lastActiveWriteAt: now };
+}
+
+function getCachedShellActiveProgram(sessionId: string, session: TerminalSession): Promise<TerminalSession['activeProgram']> {
+  return shellProgramSnapshots.get(`${sessionId}:${session.ptyProcess.pid}`, () => detectShellActiveProgram(session));
+}
+
+const terminalSamplers = new Map<string, { session: TerminalSession; sampler: SharedSessionSampler }>();
+const sampledProgramSessions = new WeakSet<TerminalSession>();
+
+function subscribeTerminalSampling(
+  sessionId: string,
+  session: TerminalSession,
+  observer: (event: SampleEvent) => void,
+): () => void {
+  let shared = terminalSamplers.get(sessionId);
+  if (!shared || shared.session !== session) {
+    shared?.sampler.stop();
+    shared = {
+      session,
+      sampler: new SharedSessionSampler(
+        () => sampleTerminalSession(sessionId, session),
+        () => session.mode === 'tmux' ? TMUX_POLL_INTERVAL : ACTIVE_PROGRAM_POLL_INTERVAL,
+        error => console.warn(`[terminal-sampling] ${sessionId}: ${getErrorMessage(error)}`),
+      ),
+    };
+    terminalSamplers.set(sessionId, shared);
+  }
+  return shared.sampler.subscribe(observer);
+}
+
+async function sampleTerminalSession(sessionId: string, session: TerminalSession): Promise<SampleEvent[]> {
+  const tmuxName = session.tmuxSessionName;
+  const layout = session.mode === 'tmux' && tmuxName ? await getCachedTmuxLayout(tmuxName) : null;
+  const activePane = layout ? getActivePaneFromLayout(layout) : null;
+  const resolved = activePane ? await resolveTmuxPaneProgram(activePane) : null;
+  const activeProgram = layout
+    ? (resolved ? { ...resolved, updatedAt: Date.now() } : getActiveProgramFromTmuxLayout(layout))
+    : await getCachedShellActiveProgram(sessionId, session);
+  // A deletion or task switch during a slow subprocess invalidates its result.
+  if (terminalSessions.get(sessionId) !== session || session.tmuxSessionName !== tmuxName) return [];
+
+  const programSignature = (ap: TerminalSession['activeProgram']) => JSON.stringify(ap
+    ? { command: ap.command, source: ap.source, rawArgs: ap.rawArgs } : null);
+  const programChanged = programSignature(activeProgram) !== programSignature(session.activeProgram);
+  session.activeProgram = activeProgram;
+  if (programChanged) persistActiveProgramBinding(sessionId, activeProgram?.command);
+  if (programChanged || !sampledProgramSessions.has(session) || session.agentLeftAt !== null) syncAgentIdentity(sessionId, session);
+  sampledProgramSessions.add(session);
+
+  const events: SampleEvent[] = [{
+    type: 'active-program',
+    activeProgram: activeProgram?.command ?? null,
+    activeProgramRaw: activeProgram?.rawArgs ?? null,
+    activeProgramSource: activeProgram?.source ?? null,
+  }];
+  if (!layout) return events;
+
+  const cwd = getCwdFromTmuxLayout(layout);
+  if (cwd && cwd !== session.cwd) {
+    session.cwd = cwd;
+    if (updateGlobalBindingForBackendSession(sessionId, { cwd, lastActivity: session.lastActivity })) schedulePersistGlobalState();
+    refreshGitStatus(sessionId, session, { minIntervalMs: 0 });
+  }
+  if (activePane) {
+    if (activePane.title) session.lastOscTitle = activePane.title;
+    const state = activePane.command && !shellNamesBackend.has(activePane.command) ? 'running' : 'idle';
+    if (session.lastPromptState === 'running' && state === 'idle') refreshGitStatus(sessionId, session);
+    session.lastPromptState = state;
+  }
+  syncDynamicTmuxMetadata({ tmuxSessionName: tmuxName!, program: activeProgram?.command ?? null, cwd: session.cwd ?? null });
+  events.push({ type: 'cwd', cwd: session.cwd ?? null });
+  if (session.lastOscTitle) events.push({ type: 'shell-title', title: session.lastOscTitle });
+  if (session.lastPromptState) events.push({ type: 'prompt-state', state: session.lastPromptState });
+  events.push({ type: 'tmux-layout', layout });
+  return events;
 }
 
 async function detectShellActiveProgram(session: TerminalSession): Promise<{
@@ -5234,6 +5299,9 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
     return;
   }
 
+  const sampler = terminalSamplers.get(sessionId);
+  sampler?.sampler.stop();
+  terminalSamplers.delete(sessionId);
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
   cancelLongRunningAutoTitle(session);
@@ -6312,6 +6380,7 @@ async function destroyTmuxSessionSafely(rawName: string): Promise<{
 }> {
   return tmuxLifecycle.run(`destroy:${rawName}`, async () => {
     intentionallyDeletingTmuxSessions.add(rawName);
+    dynamicTmuxMetadata.forget(rawName);
     try {
       const affectedSessionIds: string[] = [];
       for (const [sessionId, session] of terminalSessions.entries()) {
@@ -6589,6 +6658,39 @@ function resolveGroupParam(id: string): { group: CollaborationGroup | null; ambi
 const ambiguousGroupResponse = (res: express.Response, count: number) =>
   res.status(409).json({ error: ambiguousIdMessage('协作组', count), code: 'GROUP_ID_AMBIGUOUS' });
 
+const preparingTeams = new Map<string, Promise<unknown>>();
+router.post('/operations/collaboration-groups/:groupId/team', async (req, res) => {
+  try {
+    assertPeerRegistrationAuthority(req);
+    const { group, ambiguous } = resolveGroupParam(req.params.groupId);
+    if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
+    if (!group || group.deleted) return res.status(404).json({ error: '协作组不存在' });
+    if (group.federated) throw new Error('跨服务组请先从成员设置添加 Agent');
+    const agentSlug = typeof req.body?.agentSlug === 'string' ? req.body.agentSlug : '';
+    if (!(await listDetectedAgentLaunchers()).some(agent => agent.slug === agentSlug)) throw new Error('所选 Agent 当前不可用');
+    if (typeof req.body?.cwd !== 'string' || !req.body.cwd.trim()) throw new Error('请选择工作目录');
+    const cwd = await resolveWorkingDirectory(req, req.body.cwd);
+    const previous = preparingTeams.get(group.id) ?? Promise.resolve();
+    const operation = previous.catch(() => {}).then(() => ensureTeam({ agentSlug, cwd,
+      members: () => {
+        const current = collaborationStore.getGroup(group.id);
+        if (!current || current.deleted) throw new Error('协作组已删除');
+        return globalSessionState.sessions.filter(record => current.sessionIds.includes(record.sessionId))
+          .map(record => ({ id: record.sessionId, cwd: record.cwd, role: current.roles?.[record.sessionId], agentSlug: orchestrationSessionSnapshot(record).agent?.slug }));
+      },
+      spawn: async role => {
+        const current = collaborationStore.getGroup(group.id);
+        if (!current || current.deleted) throw new Error('协作组已删除');
+        const result = await spawnCollaborationAgentSession(req, current, null, { agentSlug, cwd, mode: 'tmux', name: role.startsWith('自动协调者') ? `协调 ${group.name}` : `执行与评审 ${group.name}` }, role);
+        return result.session.sessionId;
+      },
+    }));
+    preparingTeams.set(group.id, operation);
+    try { res.json(await operation); }
+    finally { if (preparingTeams.get(group.id) === operation) preparingTeams.delete(group.id); }
+  } catch (error) { res.status(getErrorMessage(error) === 'AUTHORIZATION_DENIED' ? 403 : 409).json({ error: getErrorMessage(error) }); }
+});
+
 router.post('/operations/collaboration-groups/:groupId/spawn', async (req, res) => {
   const { group, ambiguous } = resolveGroupParam(req.params.groupId);
   if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
@@ -6687,7 +6789,7 @@ router.post('/operations/orchestration/members', (req, res) => {
   const nextSessionIds = action === 'add'
     ? Array.from(new Set([...group.sessionIds, targetSessionId]))
     : group.sessionIds.filter((sessionId) => sessionId !== targetSessionId);
-  if (nextSessionIds.length < 2) return res.status(400).json({ error: '协作组至少需要两个会话' });
+  if (group.federated && nextSessionIds.length < 2) return res.status(400).json({ error: '跨服务组仍需两个成员；移出操作未保存' });
   const updated = collaborationStore.save({ id: group.id, name: group.name, sessionIds: nextSessionIds });
   res.json({ ok: true, group: updated });
 });
@@ -6752,7 +6854,7 @@ router.post('/operations/orchestration/cleanup', async (req, res) => {
       const remaining = group.sessionIds.filter((member) => !requestedSet.has(member)).length;
       groupEffects.push({
         id: group.id, name: group.name ?? null, sizeBefore: group.sessionIds.length,
-        sizeAfter: remaining < 2 ? 0 : remaining, dissolves: remaining < 2,
+        sizeAfter: group.federated ? group.sessionIds.length : remaining, dissolves: false,
         includesCaller: group.sessionIds.includes(sourceSessionId),
       });
     }
@@ -6986,6 +7088,109 @@ router.post('/operations/session-search/prepare', async (req, res) => {
     res.status(400).json({ error: `无法恢复会话：${getErrorMessage(error)}` });
   }
 });
+
+router.get('/operations/execution-archives', (req, res) => {
+  try {
+    assertPeerRegistrationAuthority(req);
+    res.json({ entries: executionArchives.list().filter(entry => !globalSessionState.sessions.some(record => record.sessionId === entry.sessionId)).map(entry => entry.restoredAt ? { ...entry, cleanup: { ...entry.cleanup, state: 'retained', reason: '恢复后关闭的会话，执行目录保留' } } : entry) });
+  } catch (error) { res.status(403).json({ error: getErrorMessage(error) }); }
+});
+
+function executionArchiveAction(action: (req: express.Request) => Promise<unknown>) {
+  return async (req: express.Request, res: express.Response) => {
+    try {
+      assertPeerRegistrationAuthority(req);
+      const operation = executionArchiveMutation.then(() => action(req));
+      executionArchiveMutation = operation.then(() => undefined, () => undefined);
+      res.json(await operation);
+    } catch (error) { res.status(getErrorMessage(error) === 'AUTHORIZATION_DENIED' ? 403 : 409).json({ error: getErrorMessage(error) }); }
+  };
+}
+router.post('/operations/execution-archives/:sessionId/archive', executionArchiveAction(async req => {
+  const sessionId = req.params.sessionId;
+  const record = globalSessionState.sessions.find(record => record.sessionId === sessionId);
+  if (!record) {
+    const entry = executionArchives.get(sessionId);
+    if (entry && !entry.restoredAt) return { entry };
+    throw new Error('执行会话已变化，请刷新列表');
+  }
+  const service = req.app.locals.collaborationService as CollaborationService | undefined;
+  if (!service) throw new Error('协作服务正在启动');
+  const groups = collaborationStore.groupsForSession(sessionId);
+  const tasks = collaborationTaskStore.list(collaborationStore.list().map(group => group.id));
+  const completed = completedExecution(tasks, service.descriptor().serviceId, sessionId);
+  const workspace = completed.find(task => task.workspace?.cwd === record.cwd)?.workspace;
+  if (!workspace) throw new Error('执行目录与任务记录不符，终端已保留');
+  if (globalSessionState.sessions.some(other => other.sessionId !== sessionId && (other.cwd === workspace.cwd
+    || record.tmuxSessionName && other.tmuxSessionName === record.tmuxSessionName
+    || record.backendSessionId && other.backendSessionId === record.backendSessionId))) throw new Error('此执行目录或终端仍被其他会话使用，不能归档');
+  const observed = orchestrationSessionSnapshot(record);
+  const agent = normalizePersistedAgentResumeInfo({ slug: observed.agent?.slug, sessionId: observed.agentNativeSessionId,
+    launchArgv: record.agentResume && record.agentResume.slug === observed.agent?.slug ? record.agentResume.launchArgv : null, updatedAt: Date.now() });
+  if (!agent) throw new Error('尚未取得 Agent 原生会话 ID，无法保证恢复；终端已保留');
+  const launcher = agentBySlug(agent.slug);
+  if (!launcher || !buildResumeCommand(launcher, agent.sessionId!, agent.launchArgv)) throw new Error('此 Agent 没有可用的恢复命令，终端已保留');
+  const commit = await snapshotTaskWorkspace(workspace);
+  // Persist the conversation and branch before stopping anything. Pending
+  // cleanup can also reconstruct a removed directory after an interrupted save.
+  const entry = executionArchives.save({ sessionId, title: record.name, cwd: workspace.cwd, agent,
+    groups: groups.map(group => ({ id: group.id, role: group.roles?.[sessionId] })), taskIds: completed.map(task => task.id),
+    workspace, archivedAt: Date.now(), cleanup: { state: 'pending', commit } });
+  if (record.mode === 'tmux' && record.tmuxSessionName) await destroyTmuxSessionSafely(record.tmuxSessionName);
+  else {
+    if (record.backendSessionId) cleanupSession(record.backendSessionId, { killProcess: true });
+    globalSessionState = { sessions: globalSessionState.sessions.filter(item => item.sessionId !== sessionId), updatedAt: Date.now() };
+  }
+  collaborationStore.archiveSession(sessionId); collaborationRouting.remove(sessionId);
+  await persistGlobalStateNow(); broadcastClientState();
+  const cleanup = await archiveTaskWorkspace(workspace);
+  return { entry: executionArchives.save({ ...entry, cleanup: { ...cleanup, commit: cleanup.commit ?? commit } }) };
+}));
+function restoreArchivedMembership(entry: import('../agent/executionArchives.js').ExecutionArchive, sessionId: string) {
+  for (const saved of entry.groups) {
+    const group = collaborationStore.getGroup(saved.id);
+    if (!group || group.deleted) continue;
+    collaborationStore.save({ id: group.id, name: group.name, sessionIds: [...new Set([...group.sessionIds, sessionId])] });
+    if (saved.role) collaborationStore.setRole({ groupId: group.id, sessionId: sessionId, role: saved.role });
+  }
+}
+router.post('/operations/execution-archives/:sessionId/restore', executionArchiveAction(async req => {
+  const entry = executionArchives.get(req.params.sessionId);
+  if (!entry) throw new Error('执行归档不存在');
+  const existing = globalSessionState.sessions.find(record => record.sessionId === entry.sessionId);
+  if (existing) {
+    if (!entry.restoredAt) throw new Error('原会话仍在运行，请先完成归档');
+    restoreArchivedMembership(entry, existing.sessionId);
+    return { session: orchestrationSessionSnapshot(existing) };
+  }
+  // A newly reopened task may already have another active execution. Resume is
+  // an explicit conversation launch; it never reopens or reassigns the task.
+  const launcher = agentBySlug(entry.agent.slug);
+  const command = launcher ? buildResumeCommand(launcher, entry.agent.sessionId!, entry.agent.launchArgv) : null;
+  if (!command) throw new Error('此 Agent 当前没有可用的恢复命令，归档记录已保留');
+  const target = { slug: entry.agent.slug, nativeSessionId: entry.agent.sessionId!, command };
+  if (findActiveAgentResumeOwner('', target) || await findExternalCodexWriter(target)) throw new Error('此 Agent 会话已在其他终端打开，请切换到已有会话');
+  await restoreTaskWorkspace(entry.workspace, entry.cleanup);
+  await pathValidator.allowSessionCwd(entry.cwd);
+  const opened = await openInventorySession(req, { preferredFrontendSessionId: entry.sessionId, name: entry.title, customName: true, mode: 'tmux', cwd: entry.cwd });
+  const record = globalSessionState.sessions.find(record => record.sessionId === opened.session.sessionId)!;
+  const backend = terminalSessions.get(opened.terminalSession.sessionId);
+  if (!backend) throw new Error('恢复终端失败，归档记录已保留');
+  upsertGlobalSessionRecord({ ...record, agentResume: entry.agent });
+  // One serialized restore per native conversation. Never type into an existing Agent.
+  try { executionArchives.save({ ...entry, restoredAt: Date.now() }); }
+  catch (error) {
+    // The newly created shell has not received a resume command. Roll it back
+    // so the retained archive remains safely retryable after a disk failure.
+    if (record.tmuxSessionName) await destroyTmuxSessionSafely(record.tmuxSessionName);
+    else { cleanupSession(opened.terminalSession.sessionId, { killProcess: true }); globalSessionState.sessions = globalSessionState.sessions.filter(item => item.sessionId !== record.sessionId); }
+    collaborationStore.archiveSession(record.sessionId); await persistGlobalStateNow(); broadcastClientState(); throw error;
+  }
+  writeTerminalInput(backend, `${command}\r`);
+  restoreArchivedMembership(entry, record.sessionId);
+  await persistGlobalStateNow(); broadcastClientState();
+  return { session: orchestrationSessionSnapshot(globalSessionState.sessions.find(item => item.sessionId === record.sessionId)!) };
+}));
 
 router.get('/agent-resume-history', (_req, res) => {
   const entries = agentResumeHistory.list().flatMap((entry) => {
@@ -8097,7 +8302,7 @@ router.get('/:sessionId/stream', async (req, res) => {
   // 连接时立即检测一次 activeProgram，避免前端首次显示闪烁
   try {
     if (session.mode === 'shell') {
-      const ap = await detectShellActiveProgram(session);
+      const ap = await getCachedShellActiveProgram(sessionId, session);
       if (ap) session.activeProgram = ap;
     } else if (session.mode === 'tmux' && session.tmuxSessionName) {
       const layout = await getCachedTmuxLayout(session.tmuxSessionName);
@@ -8150,141 +8355,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     writeSse(res, { type: 'git-status', gitStatus: session.gitStatus });
   }
 
-  let tmuxInterval: ReturnType<typeof setInterval> | null = null;
-  let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
-  let lastTmuxLayoutSnapshot = '';
-  let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
-  let lastTmuxMetadata: TmuxRuntimeMetadata | null = null;
-  let lastTmuxMetaWriteAt = 0;
-
-  const maybeWriteActiveProgram = (activeProgram: TerminalSession['activeProgram']) => {
-    const snapshot = JSON.stringify(activeProgram ? { command: activeProgram.command, source: activeProgram.source } : null);
-    if (snapshot === lastActiveProgramSnapshot) {
-      return;
-    }
-
-    lastActiveProgramSnapshot = snapshot;
-    session.activeProgram = activeProgram;
-    persistActiveProgramBinding(sessionId, activeProgram?.command);
-
-    // Agent status: react to AI tool start/exit
-    syncAgentIdentity(sessionId, session);
-
-    console.log(
-      `[active-program][shell-sse] session=${sessionId} client=${clientId} cmd=${activeProgram?.command ?? null} source=${activeProgram?.source ?? null}`,
-    );
-    writeSse(res, {
-      type: 'active-program',
-      activeProgram: activeProgram?.command ?? null,
-      activeProgramRaw: activeProgram?.rawArgs ?? null,
-      activeProgramSource: activeProgram?.source ?? null,
-    });
-  };
-
-  const sendTmuxLayout = async () => {
-    if (session.mode !== 'tmux' || !session.tmuxSessionName) {
-      return;
-    }
-
-    try {
-      const layout = await getCachedTmuxLayout(session.tmuxSessionName);
-
-      // Resolve the active program — try ps-based detection for generic commands
-      const activePane = getActivePaneFromLayout(layout);
-      if (activePane) {
-        const resolved = await resolveTmuxPaneProgram(activePane);
-        if (resolved) {
-          maybeWriteActiveProgram({
-            command: resolved.command,
-            source: resolved.source,
-            rawArgs: resolved.rawArgs,
-            updatedAt: Date.now(),
-          });
-        } else {
-          maybeWriteActiveProgram(getActiveProgramFromTmuxLayout(layout));
-        }
-      } else {
-        maybeWriteActiveProgram(getActiveProgramFromTmuxLayout(layout));
-      }
-
-      const newCwd = getCwdFromTmuxLayout(layout);
-      if (newCwd && newCwd !== session.cwd) {
-        session.cwd = newCwd;
-        console.log(`[tmux-cwd][sse] session=${sessionId} cwd=${newCwd}`);
-        if (updateGlobalBindingForBackendSession(sessionId, { cwd: newCwd, lastActivity: session.lastActivity })) {
-          schedulePersistGlobalState();
-        }
-        writeSse(res, { type: 'cwd', cwd: newCwd });
-        refreshGitStatus(sessionId, session, { minIntervalMs: 0 });
-      }
-      // tmux 消费了 inner shell 发的 OSC 2/133，不透传到外层 PTY。
-      // 从 tmux layout 提取 active pane 的 title 和 command 来推导。
-      if (activePane) {
-        const paneTitle = activePane.title || '';
-        if (paneTitle && paneTitle !== session.lastOscTitle) {
-          session.lastOscTitle = paneTitle;
-          writeSse(res, { type: 'shell-title', title: paneTitle });
-        }
-        const paneCmd = activePane.command || '';
-        const inferredState: 'idle' | 'running' =
-          paneCmd && !shellNamesBackend.has(paneCmd) ? 'running' : 'idle';
-        if (inferredState !== session.lastPromptState) {
-          const wasRunning = session.lastPromptState === 'running';
-          session.lastPromptState = inferredState;
-          writeSse(res, { type: 'prompt-state', state: inferredState });
-          if (wasRunning && inferredState === 'idle') {
-            refreshGitStatus(sessionId, session);
-          }
-        }
-      }
-      // Mirror dynamic metadata onto tmux user options (cheap when nothing
-      // changed thanks to the full metadata snapshot cache).
-      const meta = syncDynamicTmuxMetadata({
-        tmuxSessionName: session.tmuxSessionName,
-        program: session.activeProgram?.command ?? null,
-        cwd: session.cwd ?? null,
-        previousMetadata: lastTmuxMetadata,
-        lastActiveWriteAt: lastTmuxMetaWriteAt,
-      });
-      lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label, rawArgs: null };
-      lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
-
-      const snapshot = JSON.stringify(layout);
-      if (snapshot === lastTmuxLayoutSnapshot) {
-        return;
-      }
-      lastTmuxLayoutSnapshot = snapshot;
-      writeSse(res, { type: 'tmux-layout', layout });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn(`Failed to fetch tmux layout for ${session.tmuxSessionName}: ${errorMessage}`);
-    }
-  };
-
-  const sendShellActiveProgram = async () => {
-    if (session.mode !== 'shell') {
-      return;
-    }
-
-    try {
-      maybeWriteActiveProgram(await detectShellActiveProgram(session));
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn(`Failed to detect active shell program for ${sessionId}: ${errorMessage}`);
-    }
-  };
-
-  if (session.mode === 'tmux' && session.tmuxSessionName) {
-    void sendTmuxLayout();
-    tmuxInterval = setInterval(() => {
-      void sendTmuxLayout();
-    }, TMUX_POLL_INTERVAL);
-  } else {
-    void sendShellActiveProgram();
-    activeProgramInterval = setInterval(() => {
-      void sendShellActiveProgram();
-    }, ACTIVE_PROGRAM_POLL_INTERVAL);
-  }
+  const stopSampling = subscribeTerminalSampling(sessionId, session, event => writeSse(res, event));
 
   const heartbeatInterval = setInterval(() => {
     if (!writeResponseChunk(res, ': heartbeat\n\n')) {
@@ -8303,12 +8374,7 @@ router.get('/:sessionId/stream', async (req, res) => {
 
   const cleanup = () => {
     clearInterval(heartbeatInterval);
-    if (tmuxInterval) {
-      clearInterval(tmuxInterval);
-    }
-    if (activeProgramInterval) {
-      clearInterval(activeProgramInterval);
-    }
+    stopSampling();
     closeClient(session, sessionId, clientId);
     console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
   };
@@ -8928,7 +8994,7 @@ export function handleTerminalWebSocket(
     // 连接时立即检测一次 activeProgram，避免前端首次显示闪烁
     try {
       if (session.mode === 'shell') {
-        const ap = await detectShellActiveProgram(session);
+        const ap = await getCachedShellActiveProgram(sessionId, session);
         if (ap) session.activeProgram = ap;
       } else if (session.mode === 'tmux' && session.tmuxSessionName) {
         const layout = await getCachedTmuxLayout(session.tmuxSessionName);
@@ -8954,7 +9020,7 @@ export function handleTerminalWebSocket(
     let replayOutOfWindow = false;
     if (attachment) {
       if (ws.readyState !== ws.OPEN) return;
-      delivery.setActive(outputWanted && !clientPaused);
+      delivery.setActive(outputWanted);
       if (delivery.active) {
         const screen = new TmuxInitialScreen();
         initialScreen = screen;
@@ -9063,137 +9129,9 @@ export function handleTerminalWebSocket(
   });
   void sendReplay();
 
-  // Tmux layout polling (per-client, like the SSE stream does)
-  let tmuxInterval: ReturnType<typeof setInterval> | null = null;
-  let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
-
-  if (session.mode === 'tmux' && session.tmuxSessionName) {
-    let lastTmuxLayoutSnapshot = '';
-    let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
-    let lastTmuxMetadata: TmuxRuntimeMetadata | null = null;
-    let lastTmuxMetaWriteAt = 0;
-
-    const sendTmuxLayout = async () => {
-      if (ws.readyState !== ws.OPEN) return;
-      try {
-        const layout = await getCachedTmuxLayout(session.tmuxSessionName!);
-        // Update active program — try ps-based detection for generic commands
-        const activePane = getActivePaneFromLayout(layout);
-        let ap: TerminalSession['activeProgram'] = null;
-        if (activePane) {
-          const resolved = await resolveTmuxPaneProgram(activePane);
-          if (resolved) {
-            ap = { command: resolved.command, source: resolved.source, rawArgs: resolved.rawArgs, updatedAt: Date.now() };
-          } else {
-            ap = getActiveProgramFromTmuxLayout(layout);
-          }
-        } else {
-          ap = getActiveProgramFromTmuxLayout(layout);
-        }
-        const apSnapshot = JSON.stringify(ap ? { command: ap.command, source: ap.source } : null);
-        if (apSnapshot !== lastActiveProgramSnapshot) {
-          lastActiveProgramSnapshot = apSnapshot;
-          session.activeProgram = ap;
-          persistActiveProgramBinding(sessionId, ap?.command);
-
-          // Agent status: react to AI tool start/exit
-          syncAgentIdentity(sessionId, session);
-
-          console.log(
-            `[active-program][ws] session=${sessionId} cmd=${ap?.command ?? null} source=${ap?.source ?? null}`,
-          );
-          ws.send(JSON.stringify({
-            type: 'active-program',
-            activeProgram: ap?.command ?? null,
-            activeProgramRaw: ap?.rawArgs ?? null,
-            activeProgramSource: ap?.source ?? null,
-          }));
-        }
-        // Update cwd from active pane
-        const newCwd = getCwdFromTmuxLayout(layout);
-        if (newCwd && newCwd !== session.cwd) {
-          session.cwd = newCwd;
-          console.log(`[tmux-cwd][ws] session=${sessionId} cwd=${newCwd}`);
-          if (updateGlobalBindingForBackendSession(sessionId, { cwd: newCwd, lastActivity: session.lastActivity })) {
-            schedulePersistGlobalState();
-          }
-          ws.send(JSON.stringify({ type: 'cwd', cwd: newCwd }));
-          refreshGitStatus(sessionId, session, { minIntervalMs: 0 });
-        }
-        // tmux 消费了 inner shell 发的 OSC 2（存入 pane_title）和 OSC 133，
-        // 不透传到外层 PTY。因此从 tmux layout 提取 active pane 的 title
-        // 和 command 来推导 shell-title / prompt-state。
-        if (activePane) {
-          const paneTitle = activePane.title || '';
-          if (paneTitle && paneTitle !== session.lastOscTitle) {
-            session.lastOscTitle = paneTitle;
-            ws.send(JSON.stringify({ type: 'shell-title', title: paneTitle }));
-          }
-          // prompt-state: command 是 shell 名 → idle；否则 → running
-          const paneCmd = activePane.command || '';
-        const inferredState: 'idle' | 'running' =
-          paneCmd && !shellNamesBackend.has(paneCmd) ? 'running' : 'idle';
-        if (inferredState !== session.lastPromptState) {
-          const wasRunning = session.lastPromptState === 'running';
-          session.lastPromptState = inferredState;
-          ws.send(JSON.stringify({ type: 'prompt-state', state: inferredState }));
-          if (wasRunning && inferredState === 'idle') {
-            refreshGitStatus(sessionId, session);
-          }
-          }
-        }
-        // Mirror dynamic metadata onto tmux user options.
-        const meta = syncDynamicTmuxMetadata({
-          tmuxSessionName: session.tmuxSessionName!,
-          program: session.activeProgram?.command ?? null,
-          cwd: session.cwd ?? null,
-          previousMetadata: lastTmuxMetadata,
-          lastActiveWriteAt: lastTmuxMetaWriteAt,
-        });
-        lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label, rawArgs: null };
-        lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
-
-        const snapshot = JSON.stringify(layout);
-        if (snapshot !== lastTmuxLayoutSnapshot) {
-          lastTmuxLayoutSnapshot = snapshot;
-          ws.send(JSON.stringify({ type: 'tmux-layout', layout }));
-        }
-      } catch { /* ignore polling errors */ }
-    };
-
-    sendTmuxLayout();
-    tmuxInterval = setInterval(sendTmuxLayout, TMUX_POLL_INTERVAL);
-  }
-
-  // Active program polling (shell mode)
-  if (session.mode === 'shell') {
-    let lastApSnapshot = JSON.stringify(session.activeProgram ? { command: session.activeProgram.command, source: session.activeProgram.source } : null);
-
-    const pollActiveProgram = async () => {
-      if (ws.readyState !== ws.OPEN) return;
-      try {
-        const ap = await detectShellActiveProgram(session);
-        const snapshot = JSON.stringify(ap ? { command: ap.command, source: ap.source } : null);
-        if (snapshot !== lastApSnapshot) {
-          lastApSnapshot = snapshot;
-          session.activeProgram = ap;
-          persistActiveProgramBinding(sessionId, ap?.command);
-
-          // Agent status: react to AI tool start/exit
-          syncAgentIdentity(sessionId, session);
-
-          ws.send(JSON.stringify({
-            type: 'active-program',
-            activeProgram: ap?.command ?? null,
-            activeProgramRaw: ap?.rawArgs ?? null,
-            activeProgramSource: ap?.source ?? null,
-          }));
-        }
-      } catch { /* ignore */ }
-    };
-
-    activeProgramInterval = setInterval(pollActiveProgram, ACTIVE_PROGRAM_POLL_INTERVAL);
-  }
+  const stopSampling = subscribeTerminalSampling(sessionId, session, event => {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(event));
+  });
 
   // Handle client → server messages
   ws.on('message', async (raw) => {
@@ -9330,7 +9268,7 @@ export function handleTerminalWebSocket(
         case 'output-subscription': {
           if (!options.flowControl || typeof msg.active !== 'boolean') break;
           outputWanted = msg.active;
-          const resumed = delivery.setActive(outputWanted && !clientPaused);
+          const resumed = delivery.setActive(outputWanted);
           if (!delivery.active) attachment?.close();
           if (resumed && delivery.active) {
             void sendReplay(typeof msg.since === 'number' ? msg.since : 0, typeof msg.epoch === 'string' ? msg.epoch : undefined);
@@ -9349,11 +9287,9 @@ export function handleTerminalWebSocket(
           if (typeof msg.paused === 'boolean') {
             const reason = typeof msg.reason === 'string' ? msg.reason : 'client-flow-control';
             if (options.flowControl) {
-              const wasPaused = clientPaused;
               clientPaused = msg.paused;
-              delivery.setActive(outputWanted && !clientPaused);
-              if (!delivery.active) attachment?.close();
-              if (wasPaused && delivery.active) void sendReplay(0);
+              delivery.setPaused(clientPaused);
+              if (!clientPaused && delivery.needsReplay && delivery.active) void sendReplay(0);
             } else setClientFlowPaused(sessionId, session, clientId, msg.paused, reason);
           }
           break;
@@ -9390,8 +9326,7 @@ export function handleTerminalWebSocket(
     initialScreen?.cancel();
     initialScreen = null;
     attachment?.close();
-    if (tmuxInterval) clearInterval(tmuxInterval);
-    if (activeProgramInterval) clearInterval(activeProgramInterval);
+    stopSampling();
     const clients = wsClients.get(sessionId);
     if (clients) {
       clients.delete(clientId);
@@ -9503,7 +9438,9 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
 // session/tmux server is no longer alive; broadcast the cleaned list.
 const CLIENT_STATE_RECONCILE_INTERVAL_MS = 30_000;
 const reconcileTimer: ReturnType<typeof setInterval> = setInterval(() => {
-  void reconcileClientState();
+  void reconcileClientState().catch(error => {
+    console.warn('[reconcile] failed:', getErrorMessage(error));
+  });
 }, CLIENT_STATE_RECONCILE_INTERVAL_MS);
 // Don't keep the event loop alive for housekeeping.
 reconcileTimer.unref?.();
@@ -9517,18 +9454,30 @@ const automationTimer: ReturnType<typeof setInterval> = setInterval(() => {
 }, 30_000);
 automationTimer.unref?.();
 
-async function reconcileClientState(): Promise<void> {
+let reconcileInFlight: Promise<void> | null = null;
+function reconcileClientState(): Promise<void> {
+  if (reconcileInFlight) return reconcileInFlight;
+  reconcileInFlight = reconcileClientStateOnce().finally(() => { reconcileInFlight = null; });
+  return reconcileInFlight;
+}
+
+async function reconcileClientStateOnce(): Promise<void> {
   if (globalSessionState.sessions.length === 0) return;
+  const observedEntries = new Map(globalSessionState.sessions.map(entry => [entry.sessionId, entry]));
 
   // Refresh first so a shared tmux crash is recorded before orphan cleanup
   // can discard the metadata needed to recover Agent conversations.
-  await getSessionInventorySnapshot({ refresh: true }).catch((error) => {
+  const inventory = await getSessionInventorySnapshot({ refresh: true }).catch((error) => {
     console.warn('[tmux-recovery] reconcile observation failed:', getErrorMessage(error));
+    return null;
   });
+  const liveTmuxNames = inventory ? inventoryTmuxLiveness.get(inventory) : undefined;
 
   const toRemove: string[] = [];
   const toDetach: string[] = [];
   for (const entry of globalSessionState.sessions) {
+    // Do not delete a session created/rebound while the inventory was loading.
+    if (observedEntries.get(entry.sessionId) !== entry) continue;
     if (entry.mode === 'shell') {
       // Shell wrapper: backendSessionId must map to a live terminal session.
       // A resumable Agent record survives with a detached backend so the tab
@@ -9545,18 +9494,13 @@ async function reconcileClientState(): Promise<void> {
       // own this session name. We deliberately do NOT require a live
       // terminal wrapper here — detaching from the wrapper doesn't kill
       // the tmux session.
-      try {
-        const alive = await tmuxSessionExists(entry.tmuxSessionName);
-        if (!alive) {
-          if (entry.cwd && entry.agentResume?.sessionId) {
-            if (entry.backendSessionId) toDetach.push(entry.sessionId);
-          } else {
-            toRemove.push(entry.sessionId);
-          }
+      // A failed list is unknown, never proof that every session disappeared.
+      if (liveTmuxNames && !liveTmuxNames.has(entry.tmuxSessionName)) {
+        if (entry.cwd && entry.agentResume?.sessionId) {
+          if (entry.backendSessionId) toDetach.push(entry.sessionId);
+        } else {
+          toRemove.push(entry.sessionId);
         }
-      } catch {
-        // tmux itself is down — leave the entry alone; the next tick (or
-        // boot-time prune) will clean it up once tmux is back.
       }
     }
   }

@@ -8,8 +8,8 @@ export async function executeTaskCommand(command: CollaborationCommand,
   const o = command.options, operation = command.operation!;
   const bodyOptions = ['content', 'file', 'stdin', 'idempotency-key'];
   const allowed: Record<string, string[]> = {
-    list: ['group'], get: [], create: [...bodyOptions, 'group', 'title', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'managed', 'reviewers', 'shared-directory', 'integration'],
-    assign: [...bodyOptions, 'assignee', 'revision'], report: [...bodyOptions, 'attempt', 'status', 'evidence'], ask: [...bodyOptions, 'attempt', 'options'],
+    list: ['group'], get: [], create: [...bodyOptions, 'group', 'title', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'managed', 'reviewers', 'shared-directory', 'integration', 'work-type'],
+    assign: [...bodyOptions, 'assignee', 'revision'], report: [...bodyOptions, 'attempt', 'status', 'evidence', 'summary'], ask: [...bodyOptions, 'attempt', 'options'],
     plan: [...bodyOptions, 'attempt', 'evidence'], review: [...bodyOptions, 'artifact', 'evidence', 'verdict'], comment: bodyOptions,
     'request-review': [...bodyOptions, 'artifact', 'assignee', 'revision'],
     revise: [...bodyOptions, 'revision'], close: [...bodyOptions, 'revision'], reopen: [...bodyOptions, 'revision'],
@@ -33,7 +33,7 @@ export async function executeTaskCommand(command: CollaborationCommand,
     return request('POST', '/tasks', { input: { idempotencyKey, groupId: o.group, title: o.title, spec: content,
       constraints: o.constraints, acceptance: o.acceptance, assigneeSessionId: o.assignee, coordinatorSessionId: o.coordinator,
       parentTaskId: o.parent, dependsOn: o['depends-on'] ? String(o['depends-on']).split(',').filter(Boolean) : undefined,
-      integration: o.integration === true, managed: o.managed === true, isolated: o['shared-directory'] !== true,
+      integration: o.integration === true, managed: o.managed === true, isolated: o['shared-directory'] !== true, workType: o['work-type'],
       reviewerSessionIds: o.reviewers ? String(o.reviewers).split(',').filter(Boolean) : undefined } });
   }
   const options = o.options ? JSON.parse(String(o.options)) : undefined;
@@ -41,6 +41,6 @@ export async function executeTaskCommand(command: CollaborationCommand,
   return request('POST', `/tasks/${encodeURIComponent(command.target!)}`, { input: {
     kind: operation === 'plan' ? 'submit-plan' : operation, idempotencyKey, expectedRevision, content,
     assigneeSessionId: o.assignee, attemptId: o.attempt, status: o.status, artifactId: o.artifact, options, verdict: o.verdict,
-    evidence: o.evidence ? JSON.parse(String(o.evidence)) : undefined,
+    evidence: o.evidence ? JSON.parse(String(o.evidence)) : undefined, summary: o.summary,
   } });
 }

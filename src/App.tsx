@@ -1,3 +1,5 @@
+import { CollaborationWorkspaceFrame } from './lib/components/CollaborationWorkspaceFrame';
+import { useCollaborationNavigation } from './lib/stores/useCollaborationNavigation';
 import { LoadingSpinner as RiLoaderLine, LoadingSpinner as RiLoaderCircle } from './lib/components/ui/Loading';
 import { MobileSetupGuide } from './lib/components/settings/MobileSetupGuide';
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
@@ -523,6 +525,8 @@ function reorderSessionsByIds<T extends { id: string }>(items: T[], orderedIds: 
   return [...reordered, ...remaining];
 }
 
+const CollaborationMainWorkspace = React.lazy(() => import('./lib/components/sidebar/CollaborationMainWorkspace'));
+
 function App() {
   const { t, locale, setLocale } = useI18n();
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
@@ -593,6 +597,12 @@ function App() {
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
   })));
+  const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
+  React.useEffect(() => {
+    const showTerminal = () => useCollaborationNavigation.getState().terminal();
+    window.addEventListener("switch-terminal-session", showTerminal);
+    return () => window.removeEventListener("switch-terminal-session", showTerminal);
+  }, []);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(initialSessionChrome.activeSessionId);
   // Cached chrome makes the tab/sidebar shell available immediately, but the
   // active xterm still needs to replay history and complete its first fit.
@@ -1819,7 +1829,7 @@ function App() {
   const [programRules, setProgramRules] = React.useState<ProgramLabelRule[]>(cachedProgramRules ?? []);
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
-  const terminalFocusAvailable = !activeHistoryOverlay
+  const terminalFocusAvailable = !mainCollaborationGroup && !activeHistoryOverlay
     && !isLocalAccessOpen
     && !isNotificationsOpen
     && !isToolbarPresetsOpen
@@ -2765,11 +2775,12 @@ function App() {
   const handleSidebarCloseSession = useCallback((
     sessionId: string,
     event?: Pick<React.MouseEvent, 'clientX' | 'clientY'>,
+    options?: { skipConfirmation?: boolean },
   ) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
     const terminalState = terminalSessions.get(sessionId);
-    if (!requiresSessionCloseConfirmation({
+    if (options?.skipConfirmation || !requiresSessionCloseConfirmation({
       mode: session.mode,
       activeProgram: terminalState?.activeProgram ?? null,
       promptState: terminalState?.promptState ?? null,
@@ -3150,7 +3161,7 @@ function App() {
   const body = (
     <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
-        <div className="relative flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
+        <CollaborationWorkspaceFrame rightInset={pinnedRightSidebarInset} workspace={mainCollaborationGroup && <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开协作工作区…</div>}><CollaborationMainWorkspace key={mainCollaborationGroup} groupId={mainCollaborationGroup} activeSessionId={activeSessionId} defaultSessionMode={newSessionMode} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} onToggleRightSidebar={handleToggleRightSidebar} rightSidebarOpen={sidebarRightOpen || showPinnedRight} /></React.Suspense>}>
           <div
             className={`${isDesktopViewport ? 'absolute inset-x-0 top-0 z-20' : 'relative'} shrink-0 items-center gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
               showPinnedLeft
@@ -3480,10 +3491,10 @@ function App() {
               />
             </div>
           </div>
-        </div>
+        </CollaborationWorkspaceFrame>
       </main>
 
-      <AgentFloatingSessionButtons
+      {!mainCollaborationGroup && <AgentFloatingSessionButtons
         reviewCount={agentTabCounts.review}
         runningSessions={runningSessionShortcuts}
         activeSessionId={activeSessionId}
@@ -3492,7 +3503,7 @@ function App() {
         isDesktopLayout={isDesktopViewport}
         containerElement={terminalAreaElement}
         occlusionInsets={{ right: pinnedRightSidebarInset }}
-      />
+      />}
 
       {/* Settings modal (single page) */}
       {isDrawerOpen && (

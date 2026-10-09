@@ -43,6 +43,7 @@ function setup(single = false) {
   const lid = new Mesh(new BoxGeometry(40, 2, 30), new MeshStandardMaterial()); lid.name = 'lid'; lid.position.y = 8;
   root.add(base); if (!single) root.add(lid);
   fixture.root = root; fixture.part = lid;
+  vi.stubGlobal('PointerEvent', MouseEvent);
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(1) })));
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
@@ -139,10 +140,12 @@ describe('assembly viewer controls', () => {
     const view = render(<ModelPreview blobUrl="blob:assembly" ext=".glb" fileName="assembly.glb" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Exploded view' }));
     const explodedY = lid.position.y;
+    let pickX = 1;
     const pick = () => {
-      const canvasContainer = view.container.querySelector('canvas')!.parentElement!;
-      fireEvent.pointerDown(canvasContainer, { clientX: 1, clientY: 1 });
-      fireEvent.pointerUp(canvasContainer, { clientX: 1, clientY: 1 });
+      pickX += 30;
+      const canvasContainer = view.container.querySelector('canvas')!;
+      fireEvent.pointerDown(canvasContainer, { button: 0, clientX: pickX, clientY: 1 });
+      fireEvent.pointerUp(canvasContainer, { button: 0, clientX: pickX, clientY: 1 });
     };
     pick();
     fireEvent.click(screen.getByRole('button', { name: 'Hide part' }));

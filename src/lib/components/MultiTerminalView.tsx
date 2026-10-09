@@ -89,6 +89,8 @@ export interface TerminalSessionInfo {
 }
 
 interface NewSessionEventDetail {
+  preferredFrontendSessionId?: string;
+  requireExisting?: boolean;
   mode?: TerminalMode;
   tmuxSessionName?: string;
   cwd?: string;
@@ -1602,6 +1604,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         : (typeof activeCwd === 'string' && activeCwd.trim().length > 0 ? activeCwd : undefined);
 
       const result = await openSession({
+        preferredFrontendSessionId: options?.preferredFrontendSessionId,
+        requireExisting: options?.requireExisting === true,
         mode,
         tmuxSessionName,
         cwd: effectiveCwd,

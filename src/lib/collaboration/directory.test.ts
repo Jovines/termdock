@@ -55,7 +55,7 @@ describe('collaboration directory ownership and discovery', () => {
     const read = vi.fn().mockResolvedValueOnce({ sessions: [remoteSession] }).mockReturnValueOnce(pending.promise).mockResolvedValue({ sessions: [] });
     const directory = create(read);
     await directory.load(); await vi.advanceTimersByTimeAsync(0);
-    directory.refreshPeers(true); await vi.advanceTimersByTimeAsync(5000);
+    directory.refreshPeers(true); await vi.advanceTimersByTimeAsync(20_000);
     expect(directory.snapshot()?.sessions[0]).toMatchObject({ serviceConnected: false });
     directory.refreshPeers(true); await vi.advanceTimersByTimeAsync(0);
     pending.resolve({ sessions: [remoteSession] }); await vi.advanceTimersByTimeAsync(0);

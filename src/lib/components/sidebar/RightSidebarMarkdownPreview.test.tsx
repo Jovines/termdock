@@ -994,7 +994,12 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(lightbox?.className).toContain(
       'pt-[var(--safe-top-inset,env(safe-area-inset-top,0px))]',
     );
-    fireEvent.click(stage as Element);
+    const image = screen.getByRole('img', { name: 'One' });
+    const viewport = image.closest('[data-image-zoom-viewport]') as HTMLElement;
+    Object.defineProperties(viewport, { clientWidth: { value: 400 }, clientHeight: { value: 300 } });
+    Object.defineProperties(image, { naturalWidth: { value: 200 }, naturalHeight: { value: 200 } });
+    fireEvent.load(image);
+    fireEvent.click(image);
     // tap-close waits 450ms so a double-tap's second tap can veto it
     vi.advanceTimersByTime(449);
     expect(onClose).not.toHaveBeenCalled();
@@ -1002,17 +1007,64 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
 
     onClose.mockClear();
-    const image = screen.getByRole('img', { name: 'One' });
-    fireEvent.click(stage as Element);
+    fireEvent.click(image);
     fireEvent.doubleClick(image, { clientX: 120, clientY: 120 });
     vi.advanceTimersByTime(500);
     expect(onClose).not.toHaveBeenCalled();
 
-    const imgStyle = image.getAttribute('style') ?? '';
-    expect(imgStyle).toContain('scale(2.5)');
+    expect((image as HTMLImageElement).style.width).toBe('500px');
+    expect((image as HTMLImageElement).style.transform).not.toContain('scale(');
     expect(screen.getByRole('button', { name: 'Previous image' }).closest('.flex')?.contains(image)).toBe(false);
 
     vi.useRealTimers();
+  });
+
+  it.each([false, true])('closes on empty-space clicks when the image is zoomed=%s', (zoomed) => {
+    vi.useFakeTimers();
+    const onClose = vi.fn();
+    const onChange = vi.fn();
+    render(
+      <MarkdownImageLightbox
+        images={[
+          { kind: 'image', src: '/one.png', alt: 'Empty-space image' },
+          { kind: 'image', src: '/two.png', alt: 'Second image' },
+        ]}
+        index={0}
+        onChange={onChange}
+        onClose={onClose}
+      />,
+    );
+
+    try {
+      const image = screen.getByRole('img', { name: 'Empty-space image' });
+      const viewport = image.closest('[data-image-zoom-viewport]') as HTMLElement;
+      Object.defineProperties(viewport, {
+        clientWidth: { configurable: true, value: 400 },
+        clientHeight: { configurable: true, value: 300 },
+      });
+      Object.defineProperties(image, {
+        naturalWidth: { configurable: true, value: 200 },
+        naturalHeight: { configurable: true, value: 200 },
+      });
+      fireEvent.load(image);
+      if (zoomed) fireEvent.doubleClick(image, { clientX: 120, clientY: 120 });
+      expect((image as HTMLImageElement).style.width).toBe(zoomed ? '500px' : '200px');
+      fireEvent.click(image);
+      vi.advanceTimersByTime(449);
+      expect(onClose).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
+      expect(onChange).toHaveBeenCalledWith(1);
+      expect(onClose).not.toHaveBeenCalled();
+
+      // Click the viewport beside the image, not the sibling backdrop that
+      // is covered by the full-screen viewer.
+      fireEvent.click(viewport);
+      expect(onClose).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(500);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('pans a zoomed image freely with two-axis trackpad wheel input', () => {
@@ -1027,7 +1079,7 @@ describe('right sidebar Markdown preview rendering', () => {
     );
 
     const image = screen.getByRole('img', { name: 'Trackpad image' }) as HTMLImageElement;
-    const viewport = image.parentElement as HTMLDivElement;
+    const viewport = image.closest('[data-image-zoom-viewport]') as HTMLDivElement;
     Object.defineProperties(viewport, {
       clientWidth: { configurable: true, value: 400 },
       clientHeight: { configurable: true, value: 300 },
@@ -1037,16 +1089,17 @@ describe('right sidebar Markdown preview rendering', () => {
       },
     });
     Object.defineProperties(image, {
-      clientWidth: { configurable: true, value: 400 },
-      clientHeight: { configurable: true, value: 300 },
+      naturalWidth: { configurable: true, value: 400 },
+      naturalHeight: { configurable: true, value: 300 },
     });
+    fireEvent.load(image);
 
     fireEvent.doubleClick(image, { clientX: 200, clientY: 150 });
     vi.advanceTimersByTime(250);
-    expect(image.style.transform).toContain('scale(2.5)');
+    expect(Number.parseFloat(image.style.width)).toBeGreaterThan(900);
 
     fireEvent.wheel(viewport, { deltaX: 48, deltaY: -32 });
-    expect(image.style.transform).toContain('translate3d(-48px, 32px, 0)');
+    expect((image.parentElement as HTMLElement).style.transform).toContain('translate3d(-48px, 32px, 0)');
 
     vi.useRealTimers();
   });
@@ -1080,7 +1133,7 @@ describe('right sidebar Markdown preview rendering', () => {
 
     expect(image.style.width).toBe('495px');
     expect(image.style.height).toBe('495px');
-    expect(image.style.transform).toBe('translate3d(-50%, -50%, 0)');
+    expect(image.style.transform).toBe('translate(-50%, -50%)');
     expect(image.style.willChange).toBe('');
     expect(document.body.querySelector('[data-vector-zoom-surface]')).toBeTruthy();
 

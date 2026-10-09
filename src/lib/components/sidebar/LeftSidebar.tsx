@@ -1,9 +1,13 @@
+import { Archive, RefreshCw } from 'lucide-react';
+import { CollaborationExecutionArchives } from './CollaborationExecutionArchives';
+import { completedTaskSessions } from '../../collaboration/completedSessions';
+import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
 import { collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useCollaborationTaskInbox, requestCollaborationTask } from '../../stores/useCollaborationTaskInbox';
 import { collaborationTaskStage } from '../../collaboration/taskState';
-import { collaborationGroupPreferences, openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
+import { openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { SessionNoticeUnreadBadge } from '../SessionNoticeUnreadBadge';
 import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { ServiceSwitcher } from '../ServiceSwitcher';
@@ -40,13 +44,13 @@ import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import {
+  archiveExecutionSession,
   getSettings,
   listAgentResumeHistory,
   listCollaborationGroups,
   subscribeCollaborationGroups,
   moveCollaborationMember,
   prepareAgentResumeHistory,
-  removeCollaborationGroup,
   removeAgentResumeHistory,
   saveCollaborationGroup,
   type CollaborationGroup,
@@ -58,6 +62,7 @@ import { NewSessionComposer } from './NewSessionComposer';
 import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
 import { AgentOperationsPanel } from './AgentOperationsPanel';
 import { SidebarUtilityActions } from './SidebarUtilityActions';
+import { SwipeToCloseSession } from './SwipeToCloseSession';
 
 
 interface LeftSidebarProps {
@@ -91,7 +96,7 @@ interface LeftSidebarProps {
   recoverableTmuxSessions?: TmuxSessionSummary[];
   recoverableTmuxSessionsLoading?: boolean;
   onRefreshRecoverableTmuxSessions?: () => void;
-  onCloseSession: (sessionId: string, event: React.MouseEvent) => void;
+  onCloseSession: (sessionId: string, event: React.MouseEvent, options?: { skipConfirmation?: boolean }) => void;
   onSplitSession: (sessionId: string) => void;
   onCloseSplit: (sessionId: string) => void;
   onRemoveFromSplit: (sessionId: string) => void;
@@ -169,7 +174,7 @@ function buildSidebarEntities(
   const allowedIds = new Set(orderedSessions.map((session) => session.id));
   for (const group of collaborationGroups) {
     const visibleIds = group.sessionIds.filter((id) => allowedIds.has(id));
-    if (visibleIds.length < (group.federated ? 1 : 2)) continue;
+    if (!visibleIds.length) continue;
     const visibleGroup = visibleIds.length === group.sessionIds.length
       ? group
       : { ...group, sessionIds: visibleIds };
@@ -274,6 +279,7 @@ export function LeftSidebar(
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
   const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
   const agentOperationsOpen = workbenchOpen || Object.keys(groupPanels).length > 0;
   const panelIntent = useRef(false);
@@ -297,6 +303,11 @@ export function LeftSidebar(
   const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
   const [collaborationActionError, setCollaborationActionError] = useState<string | null>(null);
   const taskInbox = useCollaborationTaskInbox(state => state.tasks);
+  const collaborationTasks = useCollaborationTaskInbox(state => state.allTasks);
+  const [archivesVersion, setArchivesVersion] = useState(0);
+  const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
+  const archivePending = useRef(false);
+  const [completedSessionsExpanded, setCompletedSessionsExpanded] = useState<Record<string, boolean>>({});
   const taskInboxError = useCollaborationTaskInbox(state => state.error);
   const [inboxExpanded, setInboxExpanded] = useState(false);
   useEffect(() => {
@@ -312,23 +323,11 @@ export function LeftSidebar(
       closeIfOverlay();
       return true;
     }
-    const group = useSessionOrderStore.getState().collaborationGroups.find(candidate => candidate.id === groupId);
-    const anchor = useCollaborationPanelDock.getState().docks[groupId]?.sessionId;
-    const target = sessions.find(session => session.id === activeSessionId && group?.sessionIds.includes(session.id))
-      ?? sessions.find(session => session.id === anchor)
-      ?? sessions.find(session => group?.sessionIds.includes(session.id));
-    if (target) window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
-    if (groupPanels[groupId]) { closeIfOverlay(); return true; }
-    try {
-      const settings = await getSettings();
-      const saved = collaborationGroupPreferences(settings.collaborationPanels?.[collaborationPanelClientId()], groupId);
-      const mode = saved.mode ?? 'docked';
-      await saveCollaborationPanel({ floatingGroupId: groupId, mode,
-        ...(mode === 'docked' && (target || activeSessionId) ? { dock: { sessionId: target?.id ?? activeSessionId!, side: saved.dock?.side ?? (window.innerWidth < 640 ? 'bottom' : 'right') } } : {}) }, groupId);
-      setGroupPanels(current => ({ ...current, [groupId]: true }));
-      closeIfOverlay();
-      return true;
-    } catch { setCollaborationActionError('协作面板打开失败，请重试'); return false; }
+    useCollaborationPanelDock.getState().setDock(groupId, null);
+    setGroupPanels(current => { const next = { ...current }; delete next[groupId]; return next; });
+    useCollaborationNavigation.getState().open(groupId);
+    closeIfOverlay();
+    return true;
   };
   const rawCollaborationGroups = useSessionOrderStore((state) => state.collaborationGroups);
   const setRawCollaborationGroups = useSessionOrderStore((state) => state.setCollaborationGroups);
@@ -810,13 +809,18 @@ export function LeftSidebar(
   // 触屏「超长按」不挂在按钮上（按钮在可拖拽行上是 dnd 拖拽手柄）：
   // 与顶栏 tab 一致，挂在行外层 wrapper 上，与 dnd 的 120ms 拖拽抬起共存。
   const bindSessionLongPress = useSuperLongPress();
+  const [swipedSessionId, setSwipedSessionId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isOpen) setSwipedSessionId(null);
+  }, [isOpen]);
   const renderSessionRowBody = useCallback((
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
     compact?: boolean,
     beforeActions?: React.ReactNode,
+    completionAction?: React.ReactNode,
   ) => {
-    const isActive = session.id === activeSessionId;
+    const isActive = !mainCollaborationGroup && session.id === activeSessionId;
     const isSplit = splitSessionIds.has(session.id);
     const removeSplitPane = Boolean(compact && isSplit);
     const ts = sessionStates.get(session.id);
@@ -843,7 +847,14 @@ export function LeftSidebar(
           ? 'bg-[var(--tmux)]'
           : 'bg-primary';
     return (
-      <>
+      <SwipeToCloseSession
+        open={swipedSessionId === session.id}
+        onOpenChange={(open) => setSwipedSessionId(current => open ? session.id : current === session.id ? null : current)}
+        onClose={(event) => onCloseSession(session.id, event, { skipConfirmation: true })}
+        closeLabel={t('common.close')}
+        closeTitle={t('sidebar.closeSession', { name: displayName })}
+        compact={compact}
+      >
         <button
           ref={isActive ? activeItemRef : null}
           type="button"
@@ -856,6 +867,7 @@ export function LeftSidebar(
             onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
           }}
           onClick={() => {
+            useCollaborationNavigation.getState().terminal();
             window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
             closeIfOverlay();
           }}
@@ -928,7 +940,7 @@ export function LeftSidebar(
             ? <RiUnlinkLine size={11} />
             : <RiSplitLine size={12} />}
         </button>
-        <button
+        {completionAction ?? (        <button
           type="button"
           onClick={(event) => {
             event.stopPropagation();
@@ -941,10 +953,10 @@ export function LeftSidebar(
           title={t('common.close')}
         >
           <RiCloseLine size={compact ? 11 : 12} />
-        </button>
-      </>
+        </button>)}
+      </SwipeToCloseSession>
     );
-  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t]);
+  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId]);
 
   // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
   // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
@@ -1027,7 +1039,7 @@ export function LeftSidebar(
       : [];
     setRawCollaborationGroups((current) => current.flatMap((group) => {
       if (group.id === sourceGroupId) {
-        return nextSourceIds.length >= 2 ? [{ ...group, sessionIds: nextSourceIds }] : [];
+        return [{ ...group, sessionIds: nextSourceIds }];
       }
       if (group.id === targetGroupId) return [{ ...group, sessionIds: nextTargetIds }];
       return [group];
@@ -1036,9 +1048,7 @@ export function LeftSidebar(
     const request = source && target
       ? moveCollaborationMember({ sourceGroupId: source.id, targetGroupId: target.id, sessionId,
         expectedSourceUpdatedAt: source.updatedAt, expectedTargetUpdatedAt: target.updatedAt })
-      : source ? (nextSourceIds.length >= 2
-        ? saveCollaborationGroup({ id: source.id, name: source.name, sessionIds: nextSourceIds, expectedUpdatedAt: source.updatedAt })
-        : removeCollaborationGroup(source.id, source.updatedAt))
+      : source ? saveCollaborationGroup({ id: source.id, name: source.name, sessionIds: nextSourceIds, expectedUpdatedAt: source.updatedAt })
       : target ? saveCollaborationGroup({ id: target.id, name: target.name, sessionIds: nextTargetIds, expectedUpdatedAt: target.updatedAt })
         : Promise.resolve();
     void request.then(
@@ -1051,14 +1061,21 @@ export function LeftSidebar(
     groupId: string,
     sourceIndex: number,
     destinationIndex: number,
+    visibleOnly = false,
   ) => {
     const group = rawCollaborationGroups.find((candidate) => candidate.id === groupId);
     if (!group || sourceIndex === destinationIndex) return;
     const localIds = group.sessionIds.filter((id) => !id.startsWith('remote:'));
-    const sessionIds = buildCollaborationSections(localIds, splitWorkspaces).flatMap((section) => section.sessionIds);
-    const [movedId] = sessionIds.splice(sourceIndex, 1);
+    const original = buildCollaborationSections(localIds, splitWorkspaces).flatMap((section) => section.sessionIds);
+    const completed = completedTaskSessions(collaborationTasks, group.id);
+    const visible = visibleOnly && !completedSessionsExpanded[group.id]
+      ? original.filter(id => !completed.has(id) || id === activeSessionId || splitSessionIds.has(id)) : original.slice();
+    const visibleSet = new Set(visible);
+    const [movedId] = visible.splice(sourceIndex, 1);
     if (!movedId) return;
-    sessionIds.splice(destinationIndex, 0, movedId);
+    visible.splice(destinationIndex, 0, movedId);
+    let visibleIndex = 0;
+    const sessionIds = original.map(id => visibleSet.has(id) ? visible[visibleIndex++]! : id);
     const workspace = splitWorkspaces.find((candidate) => candidate.sessionIds.includes(movedId));
     if (workspace && workspace.sessionIds.every((id) => group.sessionIds.includes(id))) {
       const orderedSplitIds = sessionIds.filter((id) => workspace.sessionIds.includes(id));
@@ -1073,7 +1090,7 @@ export function LeftSidebar(
       () => refreshCollaborationGroups(),
       (error) => { setCollaborationActionError(error instanceof Error ? error.message : '成员排序失败'); return refreshCollaborationGroups(); },
     );
-  }, [rawCollaborationGroups, refreshCollaborationGroups, splitWorkspaces, onReorderSplitWorkspace]);
+  }, [rawCollaborationGroups, refreshCollaborationGroups, splitWorkspaces, onReorderSplitWorkspace, collaborationTasks, completedSessionsExpanded, activeSessionId, splitSessionIds]);
 
   // Tabs expose individual sessions, but moving them must respect the sidebar's
   // entities: reorder members inside an entity, move the whole entity outside it.
@@ -1155,12 +1172,12 @@ export function LeftSidebar(
         const group = collaborationGroups.find((candidate) => candidate.id === sourceGroupId);
         const targetIndex = group ? buildCollaborationSections(group.sessionIds, splitWorkspaces)
           .flatMap((section) => section.sessionIds).indexOf(targetId) : -1;
-        if (targetIndex >= 0) reorderCollaborationMembers(sourceGroupId, result.source.index, targetIndex);
+        if (targetIndex >= 0 && group) reorderCollaborationMembers(sourceGroupId, buildCollaborationSections(group.sessionIds, splitWorkspaces).flatMap(section => section.sessionIds).indexOf(sessionId), targetIndex);
       } else if (sessionsById.has(targetId)) onCombineSplitSessions(targetId, sessionId);
       return true;
     }
     if (result.destination?.droppableId === result.source.droppableId) {
-      reorderCollaborationMembers(sourceGroupId, result.source.index, result.destination.index);
+      reorderCollaborationMembers(sourceGroupId, result.source.index, result.destination.index, true);
       return true;
     }
     // Dropping outside any supported target is a cancellation, not a membership edit.
@@ -1524,9 +1541,12 @@ export function LeftSidebar(
     isDragging = false,
     isCombineTarget = false,
   ): React.ReactNode => {
-    if (members.length < (collaboration.federated ? 1 : 2)) return null;
-    const hasActive = members.some((session) => session.id === activeSessionId);
-    const sections = buildCollaborationSections(collaboration.sessionIds, splitWorkspaces);
+    const hasActive = mainCollaborationGroup === collaboration.id || (!mainCollaborationGroup && members.some((session) => session.id === activeSessionId));
+    const completedIds = completedTaskSessions(collaborationTasks, collaboration.id);
+    const retiredIds = collaboration.sessionIds.filter(id => completedIds.has(id) && id !== activeSessionId && !splitSessionIds.has(id));
+    const expandedCompleted = completedSessionsExpanded[collaboration.id] === true;
+    const visibleIds = expandedCompleted ? collaboration.sessionIds : collaboration.sessionIds.filter(id => !retiredIds.includes(id));
+    const sections = buildCollaborationSections(visibleIds, splitWorkspaces);
     const orderedIds = sections.flatMap((section) => section.sessionIds);
     const unifiedSplit = sections.length === 1 ? sections[0]?.workspace : undefined;
     return (
@@ -1550,6 +1570,7 @@ export function LeftSidebar(
           className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-xs font-medium text-foreground transition hover:bg-surface-elevated md:min-h-8"
           title={`打开 ${collaboration.name} 的协作工作区`}
           aria-label={`打开协作工作区：${collaboration.name}`}
+          aria-current={mainCollaborationGroup === collaboration.id ? "page" : undefined}
           onClick={(event) => {
             event.stopPropagation();
             void openAgentOperations(collaboration.id);
@@ -1559,6 +1580,7 @@ export function LeftSidebar(
           <span className="min-w-0 flex-1 truncate">{collaboration.name}</span>
           <span className={`shrink-0 text-[10px] font-normal ${taskInbox.some(t => t.groupId === collaboration.id) ? 'text-primary' : 'text-muted-foreground'}`}>{taskInbox.filter(t => t.groupId === collaboration.id).length ? `${taskInbox.filter(t => t.groupId === collaboration.id).length} 待处理` : '协作'}</span>
         </button>
+        {retiredIds.length > 0 && <button type="button" aria-expanded={expandedCompleted} className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-[11px] text-muted-foreground hover:bg-surface-elevated md:min-h-8" title="展开后可查看或归档执行会话，任务结果保留。" onClick={() => setCompletedSessionsExpanded(state => ({ ...state, [collaboration.id]: !expandedCompleted }))}><RiChevronRightLine size={12} className={expandedCompleted ? 'rotate-90' : ''} />已完成的执行会话 · {retiredIds.length}</button>}
         <Droppable
           droppableId={`collaboration-members:${collaboration.id}`}
           type="collaboration-member"
@@ -1607,12 +1629,16 @@ export function LeftSidebar(
                               : 'text-muted-foreground hover:bg-surface-2')
                       }`}
                     >
-                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true, section.workspace && id === section.sessionIds[0] ? renderSplitLayoutControl(section.workspace) : undefined)}
+                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true, section.workspace && id === section.sessionIds[0] ? renderSplitLayoutControl(section.workspace) : undefined,
+                        completedIds.has(id) ? <button type="button" aria-label={`归档 ${session.name}`} title="保存 Agent 会话 ID 并停止终端；只回收干净的执行目录，结果和分支保留" disabled={archiveBusy !== null} className="sidebar-session-action inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-muted-foreground hover:bg-primary/15 hover:text-primary disabled:opacity-40 md:h-6 md:min-w-6 md:px-1" onClick={event => {
+                          event.stopPropagation(); if (archivePending.current) return; archivePending.current = true; setArchiveBusy(id); setCollaborationActionError(null);
+                          void archiveExecutionSession(id).then(async () => { setArchivesVersion(value => value + 1); await refreshCollaborationGroups(); }).catch(error => setCollaborationActionError(error instanceof Error ? error.message : '归档失败，终端已保留')).finally(() => { archivePending.current = false; setArchiveBusy(null); });
+                        }}>{archiveBusy === id ? <RefreshCw size={13} className="animate-spin" /> : <Archive size={13} />}<span className="text-[10px] md:sr-only">归档</span></button> : undefined)}
                       {!section.workspace && splitSessionIds.has(session.id) && (
                         <button type="button" className="shrink-0 px-1 text-[10px] text-primary"
                           title={`与 ${splitWorkspaces.find((workspace) => workspace.sessionIds.includes(session.id))?.sessionIds.filter((id) => id !== session.id).map((id) => sessionsById.get(id)?.name ?? id).join('、')} 分屏`}
                           aria-label={`查看 ${session.name} 的跨组分屏`}
-                          onClick={() => { window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id })); closeIfOverlay(); }}>
+                          onClick={() => { useCollaborationNavigation.getState().terminal(); window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id })); closeIfOverlay(); }}>
                           <RiSplitLine size={10} />
                         </button>
                       )}
@@ -1627,6 +1653,7 @@ export function LeftSidebar(
             </div>
           )}
         </Droppable>
+        <CollaborationExecutionArchives groupId={collaboration.id} version={archivesVersion} onRestore={async session => { window.dispatchEvent(new CustomEvent('new-terminal-session', { detail: { mode: 'tmux', cwd: session.cwd, preferredFrontendSessionId: session.sessionId, requireExisting: true } })); await refreshCollaborationGroups(); useCollaborationNavigation.getState().terminal(); closeIfOverlay(); }} />
         {collaboration.remoteSessions?.map((remote) => <button
           key={remote.sessionId} type="button" title={`${collaborationServiceLabel(remote)} · ${remote.serviceConnected === false ? '服务不可达，消息尚未送达' : remote.status}`}
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
@@ -1704,7 +1731,7 @@ export function LeftSidebar(
                               : snapshot.isDragging
                                 ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
                                 : getSessionStatusBackground(entity.session.id)
-                                  ?? (entity.session.id === activeSessionId
+                                  ?? (!mainCollaborationGroup && entity.session.id === activeSessionId
                                     ? 'bg-surface-elevated text-foreground'
                                     : 'text-muted-foreground hover:bg-surface-2')
                           } cursor-grab active:cursor-grabbing`}
@@ -1831,6 +1858,7 @@ export function LeftSidebar(
             </div>
           </section>
         )}
+        {collaborationGroups.filter(group => !group.sessionIds.length).map(group => <DragDropContext key={group.id} onDragEnd={() => {}}>{renderCollaborationGroupItem(group, [])}</DragDropContext>)}
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={26} className="mx-auto mb-2 text-muted-foreground" />
@@ -1960,7 +1988,7 @@ export function LeftSidebar(
                                                           : snapshot.isDragging
                                                             ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
                                                             : getSessionStatusBackground(entity.session.id)
-                                                              ?? (entity.session.id === activeSessionId
+                                                              ?? (!mainCollaborationGroup && entity.session.id === activeSessionId
                                                                 ? 'bg-surface-elevated text-foreground'
                                                                 : 'text-muted-foreground hover:bg-surface-2')
                                                       } cursor-grab active:cursor-grabbing`}
@@ -2100,7 +2128,7 @@ export function LeftSidebar(
 
       {workbenchOpen && <AgentOperationsPanel onEnterGroup={async id => { if (!await openAgentOperations(id)) throw new Error('协作组已保存，打开工作区失败，请重试'); setWorkbenchOpen(false); }} onFloatingChange={async id => { if (id) { if (!await openAgentOperations(id)) throw new Error('打开协作工作区失败'); setWorkbenchOpen(false); } }} activeSessionId={activeSessionId} defaultSessionMode={defaultSessionMode}
         onClose={() => setWorkbenchOpen(false)} onNewSession={options => onNewSession(options)} />}
-      {Object.entries(groupPanels).map(([groupId, floating]) => <AgentOperationsPanel key={groupId}
+      {!mainCollaborationGroup && Object.entries(groupPanels).map(([groupId, floating]) => <AgentOperationsPanel key={groupId}
         activeSessionId={activeSessionId} initialCollaborationGroupId={groupId} initialFloating={floating}
         onEnterGroup={async nextId => {
           if (nextId === groupId) return;

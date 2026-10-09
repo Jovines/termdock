@@ -3,6 +3,34 @@ import { describe, expect, it } from 'vitest';
 import { resolveTerminalReplayCursor, TerminalOutputDelivery, type OutputFrame } from './terminalOutputDelivery.js';
 
 describe('per-observer terminal output', () => {
+  it('retains ordered output across short flow pauses without requesting a replay', () => {
+    const sent: OutputFrame[] = [];
+    const delivery = new TerminalOutputDelivery(frame => sent.push(frame), true, 4, 16);
+    delivery.finishReplay(0);
+    delivery.enqueue({ type: 'data', data: '1234' });
+    delivery.setPaused(true);
+    delivery.enqueue({ type: 'data', data: '5678' });
+    delivery.acknowledge(sent[0].flowSeq!);
+    expect(sent.map(frame => frame.data)).toEqual(['1234']);
+    expect(delivery.active).toBe(true);
+    expect(delivery.needsReplay).toBe(false);
+    delivery.setPaused(false);
+    expect(sent.map(frame => frame.data)).toEqual(['1234', '5678']);
+  });
+
+  it('keeps paused output bounded and requests recovery if the budget is exceeded', () => {
+    let recoveries = 0;
+    const delivery = new TerminalOutputDelivery(() => {}, true, 4, 8, () => { recoveries++; });
+    delivery.finishReplay(0); delivery.setPaused(true);
+    delivery.enqueue({ type: 'data', data: '12345678' });
+    delivery.enqueue({ type: 'data', data: '9' });
+    expect(recoveries).toBe(1);
+    expect(delivery.needsReplay).toBe(true);
+    expect(delivery.pendingBytes).toBe(0);
+    delivery.setPaused(false);
+    expect(delivery.needsReplay).toBe(true);
+  });
+
   it('sends replay before newer live frames without duplicating captured frames', () => {
     const sent: OutputFrame[] = [];
     const delivery = new TerminalOutputDelivery((frame) => sent.push(frame), true);

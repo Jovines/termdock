@@ -270,19 +270,18 @@ export class CollaborationStore {
         { currentSourceUpdatedAt: source.updatedAt, currentTargetUpdatedAt: target.updatedAt });
     }
     const sourceIds = source.sessionIds.filter((id) => id !== input.sessionId);
-    const dissolved = sourceIds.length < 2;
+    if (source.federated && sourceIds.length < 2) throw new CollaborationError('INVALID_GROUP', '跨服务组仍需两个成员；移出操作未保存', 409);
     const now = Date.now();
     this.document = { ...this.document,
       groups: this.document.groups.flatMap((group) => {
         if (group.id === source.id) {
-          if (dissolved) return group.federated ? [{ ...group, deleted: true, updatedAt: Math.max(now, group.updatedAt + 1) }] : [];
           return [pruneRoles({ ...group, sessionIds: sourceIds,
             ...(group.remoteSessions ? { remoteSessions: group.remoteSessions.filter((session) => sourceIds.includes(session.sessionId)) } : {}),
             updatedAt: Math.max(now, group.updatedAt + 1) }, sourceIds)];
         }
         return group.id === target.id ? [{ ...group, sessionIds: [...new Set([...group.sessionIds, input.sessionId])], updatedAt: Math.max(now, group.updatedAt + 1) }] : [group];
       }),
-      messages: dissolved ? this.document.messages.filter((message) => message.groupId !== source.id) : this.document.messages,
+      messages: this.document.messages,
     };
     this.persist();
   }
@@ -336,23 +335,16 @@ export class CollaborationStore {
   }
 
   removeSession(sessionId: string): { updatedGroups: number; dissolvedGroups: number } {
-    const affected = this.document.groups.filter((group) => group.sessionIds.includes(sessionId));
-    if (affected.length === 0) return { updatedGroups: 0, dissolvedGroups: 0 };
-    const dissolvedIds = new Set(affected.filter((group) => group.sessionIds.length <= 2).map((group) => group.id));
-    const now = Date.now();
-    this.document.groups = this.document.groups.flatMap((group) => {
-      if (!group.sessionIds.includes(sessionId)) return [group];
-      if (dissolvedIds.has(group.id)) return group.federated ? [{ ...group, deleted: true, updatedAt: Math.max(now, group.updatedAt + 1) }] : [];
-      const remaining = group.sessionIds.filter((id) => id !== sessionId);
-      return [pruneRoles({ ...group, sessionIds: remaining, updatedAt: Math.max(now, group.updatedAt + 1) }, remaining)];
-    });
-    this.document.messages = this.document.messages.filter((message) =>
-      !dissolvedIds.has(message.groupId)
-      && message.fromSessionId !== sessionId
-      && message.toSessionId !== sessionId,
-    );
+    const count = this.document.groups.filter(group => group.sessionIds.includes(sessionId)).length;
+    if (count) this.archiveSession(sessionId);
+    return { updatedGroups: count, dissolvedGroups: 0 };
+  }
+
+  /** Archiving a terminal removes its active membership, never its discussions. */
+  archiveSession(sessionId: string): void {
+    this.document.groups = this.document.groups.map(group => !group.federated && group.sessionIds.includes(sessionId)
+      ? pruneRoles({ ...group, sessionIds: group.sessionIds.filter(id => id !== sessionId), updatedAt: Math.max(Date.now(), group.updatedAt + 1) }, group.sessionIds.filter(id => id !== sessionId)) : group);
     this.persist();
-    return { updatedGroups: affected.length - dissolvedIds.size, dissolvedGroups: dissolvedIds.size };
   }
 
   clear(): void {

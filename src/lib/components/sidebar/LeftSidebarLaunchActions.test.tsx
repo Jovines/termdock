@@ -76,7 +76,7 @@ describe('LeftSidebar launch actions', () => {
     await user.click(screen.getByRole('button', { name: 'New Codex' }));
     expect(onNewSession).toHaveBeenLastCalledWith({ mode: 'shell', command: 'codex' });
 
-    await user.click(screen.getByRole('button', { name: 'More launch options' }));
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
     expect(screen.getByRole('region', { name: 'Start a session' })).toBeTruthy();
     expect(onNewSession).toHaveBeenCalledTimes(2);
   });

@@ -18,6 +18,7 @@ import { ServiceSwitcher, OPEN_SAVED_SERVICE_EVENT } from '../components/Service
 import { activateServiceWorkspace, getWorkspaceHost, isWorkspaceActive, reportWorkspace, workspaceKey, WORKSPACE_VISIBILITY_EVENT, WORKSPACE_ACTIVATE_EVENT } from '../services/workspaceHost';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { StartupScreen } from '../components/StartupScreen';
+import { setConnectionRecovery } from './connectionRecovery';
 
 
 // Keep the invitation in memory and remove its secret from browser history immediately.
@@ -92,6 +93,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     setFullService(permissions.fullService);
     setCanManage(permissions.canManage);
     setReady(true); setChecking(false); setError(false);
+    setConnectionRecovery('ready');
     const selected = savedConnection();
     reportWorkspace({ phase: 'ready', ...(selected ? { service: { ...selected, id: selected.targetPeerId, label: selected.serviceName || location.host } } : {}) });
     if (isWorkspaceActive()) void preferDirectConnection();
@@ -103,6 +105,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       if (stopped || pending) return;
       if (failures && (document.hidden || !isWorkspaceActive())) return;
       if (!navigator.onLine) {
+        setConnectionRecovery('offline');
         setChecking(true); setError(true); setConnectionMessage('网络已断开，恢复后会自动连接'); reportWorkspace({ phase: 'offline' }); return;
       }
       pending = true; clearTimeout(retry);
@@ -128,6 +131,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       } catch (failure) {
         if (stopped) return;
         if (failure instanceof DeviceAuthorizationRequired) {
+          setConnectionRecovery('ready');
           setReady(false); setChecking(false); setOpen(false); setError(false); reportWorkspace({ phase: 'login' });
         } else {
           // Keep an already mounted terminal intact across sleep, Wi-Fi changes,
@@ -137,6 +141,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
           if (previous && currentSecureClient() === previous) invalidateSecureTransport();
           setError(true); setChecking(true); localPairing = undefined;
           setConnectionMessage('连接暂未恢复，正在重试…');
+          setConnectionRecovery(navigator.onLine ? 'reconnecting' : 'offline');
           reportWorkspace({ phase: 'reconnecting' });
           failures++;
           retry = setTimeout(() => void verify(), Math.min(5000, 300 * 2 ** Math.min(failures - 1, 5)));
@@ -159,6 +164,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     document.addEventListener('visibilitychange', visibilityChanged);
     window.addEventListener('focus', visible);
     window.addEventListener('online', online);
+    window.addEventListener('offline', visible);
+    window.addEventListener('pageshow', visible);
     const network = (navigator as Navigator & { connection?: EventTarget }).connection;
     network?.addEventListener('change', online);
     window.addEventListener('auth:unauthorized', visible);
@@ -171,6 +178,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       document.removeEventListener('visibilitychange', visibilityChanged);
       window.removeEventListener('focus', visible);
       window.removeEventListener('online', online);
+      window.removeEventListener('offline', visible);
+      window.removeEventListener('pageshow', visible);
       network?.removeEventListener('change', online);
       window.removeEventListener('auth:unauthorized', visible);
       window.removeEventListener(SECURE_STATE_EVENT, visible);

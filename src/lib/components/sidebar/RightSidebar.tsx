@@ -6,6 +6,7 @@ import { GitLoadingSkeleton } from './GitLoadingSkeleton';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { useInitialGitLoad, waitForGitPreferences } from './useInitialGitLoad';
 import { fetchPreviewResource } from '../../utils/previewResourceCache';
+import { downloadMarkdownImage } from './markdownImageDownload';
 import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, lazy, Suspense, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useGesture } from '@use-gesture/react';
@@ -22,6 +23,7 @@ import {
   ChevronDown as RiChevronDown,
   Folder as RiFolder,
   Smartphone as RiSmartphone,
+  Monitor as RiMonitor,
   Home as RiHome,
   GitCompare as RiGitCompare,
   Search as RiSearch,
@@ -101,7 +103,7 @@ import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
 import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
 import { VideoPreviewPlayer } from './VideoPreviewPlayer';
-import { useEncryptedMediaSource } from '../../federation/mediaSource';
+import { isBusinessResource, useEncryptedMediaSource } from '../../federation/mediaSource';
 import { EdaPreview } from './EdaPreview';
 import { SvgInspectionPreview } from './SvgInspectionPreview';
 import { CsvPreview } from './CsvPreview';
@@ -216,6 +218,7 @@ const FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS = 'termdock-file-preview-horizontal-s
 // three.js is heavy (~600 kB), so the 3D viewer loads on demand the first
 // time a .stl/.glb/.gltf file is previewed.
 const ModelPreview = lazy(() => import('./ModelPreview'));
+const ComputerControlView = lazy(() => import('../computer/ComputerControlView'));
 // 类型导入: 查看器的语义特征(来自 .features.json sidecar)
 import type { ModelFeature } from './ModelPreview';
 const MARKDOWN_TABLE_SCROLL_CLASS = `${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface`;
@@ -2835,13 +2838,56 @@ function LightboxZoomableImage({ src, alt, onZoomChange, onDoubleTap }: {
   onZoomChange?: (zoomed: boolean) => void;
   onDoubleTap?: () => void;
 }) {
+  const { t } = useI18n();
   const versionedSrc = useVersionedFsBlobSrc(src);
+  const business = isBusinessResource(versionedSrc);
+  const [resource, setResource] = useState<{ src: string; objectUrl?: string; failed?: boolean } | null>(null);
+  const [retry, setRetry] = useState(0);
+
+  useEffect(() => {
+    if (!business) return;
+    const controller = new AbortController();
+    let objectUrl: string | undefined;
+    setResource(null);
+    // A clicked image needs no worker-claim grace period: fetch through the
+    // page immediately and reuse the preview cache after server validation.
+    void fetchPreviewResource(versionedSrc, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setResource({ src: versionedSrc, objectUrl });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setResource({ src: versionedSrc, failed: true });
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [business, versionedSrc, retry]);
+
+  const current = resource?.src === versionedSrc ? resource : null;
+  if (business && !current?.objectUrl) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground" role={current?.failed ? 'alert' : 'status'}>
+        {current?.failed ? (
+          <div className="flex flex-col items-center gap-3" onClick={(event) => event.stopPropagation()}>
+            <span>{t('rightSidebar.imageLoadFailed')}</span>
+            <button type="button" className="rounded bg-surface-2 px-3 py-2 hover:bg-surface-elevated" onClick={() => setRetry((value) => value + 1)}>{t('common.retry')}</button>
+          </div>
+        ) : t('rightSidebar.loadingImage')}
+      </div>
+    );
+  }
   return (
     <ZoomableImage
-      src={versionedSrc}
+      src={business ? current!.objectUrl! : versionedSrc}
+      vector={isSvgImageSrc(src)}
       alt={alt}
       onLoad={() => undefined}
-      onError={() => undefined}
+      onError={() => { if (business) setResource({ src: versionedSrc, failed: true }); }}
       onZoomChange={onZoomChange}
       onDoubleTap={onDoubleTap}
     />
@@ -2866,6 +2912,25 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
   const [imageZoomed, setImageZoomed] = useState(false);
   const [dragOffsetY, setDragOffsetY] = useState(0);
   const [dragging, setDragging] = useState(false);
+
+  const [downloadPending, setDownloadPending] = useState(false);
+  const [downloadError, setDownloadError] = useState<{ image: MarkdownPreviewImage; message: string } | null>(null);
+  const downloadPendingRef = useRef(false);
+  const handleImageDownload = async () => {
+    if (!active || downloadPendingRef.current) return;
+    clearTapCloseTimer();
+    downloadPendingRef.current = true;
+    setDownloadPending(true);
+    setDownloadError(null);
+    try {
+      await downloadMarkdownImage(active);
+    } catch (error) {
+      setDownloadError({ image: active, message: error instanceof Error ? error.message : t('rightSidebar.downloadFailed') });
+    } finally {
+      downloadPendingRef.current = false;
+      setDownloadPending(false);
+    }
+  };
 
   const clearTapCloseTimer = useCallback(() => {
     if (closeTapTimerRef.current === null) return;
@@ -3011,6 +3076,17 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
             )}
             <button
               type="button"
+              onClick={() => void handleImageDownload()}
+              disabled={downloadPending}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:opacity-50 disabled:active:scale-100"
+              aria-label={t('rightSidebar.downloadFile')}
+              title={t('rightSidebar.downloadFile')}
+              aria-busy={downloadPending}
+            >
+              {downloadPending ? <RiLoader size={17} className="animate-spin" /> : <RiDownload size={17} />}
+            </button>
+            <button
+              type="button"
               onClick={onClose}
               className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
               aria-label={t('rightSidebar.closeImagePreview')}
@@ -3020,12 +3096,31 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
             </button>
           </div>
         </div>
+        {downloadError?.image === active && (
+          <div role="alert" className="flex shrink-0 items-center justify-between gap-3 bg-surface px-3 py-2 text-xs text-destructive">
+            <span className="min-w-0 break-words">{t('rightSidebar.downloadFailed')}: {downloadError.message}</span>
+            <button type="button" className="shrink-0 rounded bg-surface-2 px-3 py-1 text-foreground hover:bg-surface-elevated" onClick={() => void handleImageDownload()} disabled={downloadPending}>
+              {t('common.retry')}
+            </button>
+          </div>
+        )}
         <div
           ref={lightboxDragRef}
           className="relative min-h-0 flex-1 overflow-hidden"
           data-markdown-image-lightbox-stage
           data-sidebar-gesture-ignore
-          onClick={scheduleTapClose}
+          onClick={(event) => {
+            if (Date.now() < suppressTapCloseUntilRef.current) return;
+            // The zoom viewport fills the stage, including the empty space
+            // beside a fitted image. Keep image taps available for double-tap
+            // zoom, but let empty-space clicks close even while zoomed.
+            if (event.target instanceof Element && event.target.closest('img, [role="img"]')) {
+              scheduleTapClose();
+              return;
+            }
+            clearTapCloseTimer();
+            onClose();
+          }}
         >
           <div
             className="h-full w-full"
@@ -7547,6 +7642,7 @@ export function RightSidebar(
   const filesPaneActive = effectiveRightTab === 'files';
   const diffPaneActive = effectiveRightTab === 'diff';
   const androidPaneActive = effectiveRightTab === 'android';
+  const computerPaneActive = effectiveRightTab === 'computer';
   const pendingTabSwitchRef = useRef<{ from: string; to: string; startedAt: number; inputDelayMs: number | null } | null>(null);
   const handleTabClick = useCallback((tab: Parameters<typeof setRightTab>[0], event: MouseEvent<HTMLButtonElement>) => {
     const from = useSidebarStore.getState().rightTab;
@@ -11741,7 +11837,7 @@ export function RightSidebar(
             and Device so mirroring stays reachable everywhere. */}
         <div
           className="mt-2 grid gap-0.5 rounded-md bg-surface-2 p-0.5"
-          style={{ gridTemplateColumns: `repeat(${(gitKnownUnavailable ? 2 : 3) + (androidTabEnabled ? 1 : 0)}, minmax(0, 1fr))` }}
+          style={{ gridTemplateColumns: `repeat(${(gitKnownUnavailable ? 2 : 3) + (androidTabEnabled ? 1 : 0) + 1}, minmax(0, 1fr))` }}
         >
           {!gitKnownUnavailable && (
             <>
@@ -11785,6 +11881,16 @@ export function RightSidebar(
           >
             <RiFolder size={12} />
             {t('rightSidebar.tabFiles')}
+          </button>
+          <button
+            type="button"
+            onClick={(event) => handleTabClick('computer', event)}
+            className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+              computerPaneActive ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-2'
+            }`}
+          >
+            <RiMonitor size={12} />
+            {t('rightSidebar.tabComputer')}
           </button>
           {androidTabEnabled && (
             <button
@@ -12403,6 +12509,11 @@ export function RightSidebar(
           ))}
         </Pane>
 
+        <Pane active={computerPaneActive} mounted={isOpen && computerPaneActive}>
+          <Suspense fallback={<div className="p-3 text-xs text-muted-foreground">{t('computer.loading')}</div>}>
+            <ComputerControlView />
+          </Suspense>
+        </Pane>
         <Pane active={androidPaneActive} mounted={hasMountedAndroidPane && androidTabEnabled}>
           {androidDocked ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-[11px] text-muted-foreground">

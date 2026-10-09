@@ -5,6 +5,7 @@ import type {
   DesktopServiceActivity,
   DesktopSnapshot,
   DesktopStatusSnapshot,
+  LocalServiceSetup,
   ServiceProbe,
 } from './types.js';
 import { shouldUploadDroppedFiles, uploadClipboardImage, uploadDroppedFiles } from './fileDropUpload.js';
@@ -46,6 +47,14 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   collaborationFocus: (id: string) => ipcRenderer.invoke('desktop:collaboration-focus', id),
   notificationDeliveryConfirmation: true,
   snapshot: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:snapshot'),
+  prepareLocalService: (install = false): Promise<DesktopSnapshot> =>
+    ipcRenderer.invoke('desktop:prepare-local-service', install),
+  downloadNode: (): Promise<void> => ipcRenderer.invoke('desktop:download-node'),
+  onLocalServiceSetup: (callback: (status: LocalServiceSetup) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: LocalServiceSetup) => callback(status);
+    ipcRenderer.on('desktop:local-service-setup', listener);
+    return () => ipcRenderer.removeListener('desktop:local-service-setup', listener);
+  },
   probe: (url: string): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:probe', url),
   saveConnection: (url: string, label: string): Promise<DesktopSnapshot> =>
     ipcRenderer.invoke('desktop:save-connection', { url, label }),

@@ -4,7 +4,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
-import { useSidebarStore } from '../../stores/useSidebarStore';
+import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { FileTree } from './FileTree';
 
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
@@ -12,7 +12,7 @@ const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.proto
 const { deleteFileMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
   deleteFileMock: vi.fn(async () => undefined),
   getSettingsMock: vi.fn(async () => ({ fileSortModes: {} })),
-  listDirectoryMock: vi.fn(async () => ({ path: '/workspace/project', entries: [] })),
+  listDirectoryMock: vi.fn(async (path: string): Promise<{ path: string; entries: FileTreeNode[] }> => ({ path, entries: [] })),
   updateSettingsMock: vi.fn(async (settings: { fileSortMode?: { path: string; mode: 'name' | 'modified' } }) => ({
     fileSortModes: settings.fileSortMode?.mode === 'modified' ? { [settings.fileSortMode.path]: 'modified' } : {},
   })),
@@ -25,6 +25,15 @@ vi.mock('../../terminal/api', async (importOriginal) => ({
   listDirectory: listDirectoryMock,
   updateSettings: updateSettingsMock,
 }));
+
+async function renderFixture(ui: Parameters<typeof render>[0]) {
+  const entries = new Map(useSidebarStore.getState().directoryCache);
+  listDirectoryMock.mockImplementation(async (path: string) => ({ path, entries: entries.get(path) ?? [] }));
+  useSidebarStore.setState({ hideGitIgnoredRootsHydrated: true });
+  const view = render(ui);
+  await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull());
+  return view;
+}
 
 describe('FileTree file deletion', () => {
   beforeEach(() => {
@@ -66,7 +75,7 @@ describe('FileTree file deletion', () => {
       .mockReturnValueOnce(true);
     vi.stubGlobal('confirm', confirm);
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -105,7 +114,7 @@ describe('FileTree file deletion', () => {
       ]),
     });
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -140,7 +149,7 @@ describe('FileTree file deletion', () => {
       ]),
     });
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -172,7 +181,7 @@ describe('FileTree file deletion', () => {
       ]]]),
     });
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -200,7 +209,7 @@ describe('FileTree file deletion', () => {
       ]),
     });
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -231,7 +240,7 @@ describe('FileTree file deletion', () => {
       ]]]),
     });
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -257,7 +266,7 @@ describe('FileTree file deletion', () => {
       ]]]),
     });
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -316,7 +325,7 @@ describe('FileTree file deletion', () => {
       ]),
     });
 
-    render(
+    await renderFixture(
       <I18nProvider>
         <FileTree
           rootPath="/workspace"
@@ -342,6 +351,7 @@ describe('FileTree file deletion', () => {
       'expand_directory',
       'file-tree:/workspace/project',
       'modified',
+      '/workspace',
     ));
   });
 });

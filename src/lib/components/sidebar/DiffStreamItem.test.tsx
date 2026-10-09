@@ -26,6 +26,7 @@ describe('DiffStreamItem virtualization', () => {
   const originalResizeObserver = globalThis.ResizeObserver;
   const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
   let bodyRectHeight = 200;
+  let resizeContent = () => {};
 
   beforeEach(() => {
     bodyRectHeight = 200;
@@ -48,7 +49,7 @@ describe('DiffStreamItem virtualization', () => {
       });
     });
     globalThis.ResizeObserver = class {
-      constructor(private readonly callback: ResizeObserverCallback) {}
+      constructor(private readonly callback: ResizeObserverCallback) { resizeContent = () => callback([], this); }
       observe(target: Element) {
         this.callback([{ target, contentRect: target.getBoundingClientRect() } as ResizeObserverEntry], this);
       }
@@ -118,7 +119,7 @@ describe('DiffStreamItem virtualization', () => {
     expect((container.querySelector('[data-diff-stream-item]') as HTMLElement).style.height).toBe('');
   });
 
-  it('starts a new fixed-height measurement when supplied diff content changes', () => {
+  it('keeps ready content visible and remeasures when supplied diff content changes', () => {
     vi.useFakeTimers();
     const onHeightChange = vi.fn();
     const { container, rerender } = render(
@@ -135,11 +136,11 @@ describe('DiffStreamItem virtualization', () => {
     rerender(
       <DiffStreamItem {...baseProps} visible estimatedHeight={241} diffOverride="full" onHeightChange={onHeightChange} />,
     );
-    expect((container.querySelector('[data-diff-stream-item]') as HTMLElement).style.height).toBe('241px');
+    expect((container.querySelector('[data-diff-stream-item]') as HTMLElement).style.height).toBe('');
+    expect(container.querySelector('[data-diff-measuring-overlay]')).toBeNull();
     expect(onHeightChange).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(container.querySelector('[data-mocked-diff-viewer]') as HTMLElement);
-    act(() => vi.advanceTimersByTime(DIFF_SETTLE_TIME));
+    act(() => { resizeContent(); vi.advanceTimersByTime(DIFF_SETTLE_TIME); });
     expect(onHeightChange).toHaveBeenCalledTimes(2);
     expect(onHeightChange).toHaveBeenLastCalledWith(baseProps.selectionPath, 241, 641);
   });

@@ -19,7 +19,7 @@ beforeEach(() => {
   local = storage(); reload = vi.fn(); clients = new Map();
   vi.stubGlobal('localStorage', local); vi.stubGlobal('sessionStorage', storage());
   vi.stubGlobal('location', { origin: 'https://b.example', host: 'b.example', hostname: 'b.example', href: 'https://b.example/', reload });
-  vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+  vi.stubGlobal('window', { dispatchEvent: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), location });
   nativeFetch = vi.fn(async () => Response.json({ saltHex: 'salt' })); vi.stubGlobal('fetch', nativeFetch);
   vi.stubGlobal('indexedDB', { open() {
     const request: Record<string, unknown> = {};
@@ -35,6 +35,55 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it.each(['direct', 'relay'] as const)('reconnects concurrent complete collaboration reads over %s after a suspended channel closes', async mode => {
+    vi.stubGlobal('navigator', { onLine: true, serviceWorker: { controller: null } });
+    const base = mocks.connect.getMockImplementation()!;
+    const business = vi.fn(async () => Response.json({ tasks: [], messages: [] }));
+    mocks.connect.mockImplementation(async args => {
+      if (mode === 'relay' && args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('direct unavailable');
+      return Object.assign(await base(args), { fetch: business });
+    });
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://b.example', targetPeerId: 'B', routes: mode === 'relay' ? [{ url: 'https://a.example', targetPeerId: 'A' }] : [] };
+    mocks.saved.mockReturnValue(target);
+    const previous = await integration.connectDevice(target);
+    integration.installEncryptedFetch(); vi.stubGlobal('fetch', window.fetch);
+    const api = await import('../terminal/api');
+    const brokenBody = () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('Secure connection closed')); } }));
+    business.mockImplementationOnce(async () => brokenBody()).mockImplementationOnce(async () => brokenBody());
+    const connectedBefore = mocks.connect.mock.calls.length;
+    expect(await Promise.all([api.listCollaborationTasks('test'), api.listCollaborationMessages('test')])).toEqual([{ tasks: [], messages: [] }, { tasks: [], messages: [] }]);
+    expect(previous.close).toHaveBeenCalled();
+    expect(integration.currentSecureClient()).not.toBe(previous);
+    expect(mocks.connect.mock.calls.length - connectedBefore).toBe(mode === 'direct' ? 1 : 2);
+    expect(integration.currentConnectionPath()).toBe(mode);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(business).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['write', 'abort', 'switch', 'unavailable'] as const)('does not replay unsafe or unrecoverable collaboration operations: %s', async scenario => {
+    vi.stubGlobal('navigator', { onLine: true });
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://b.example', targetPeerId: 'B' };
+    mocks.saved.mockReturnValue(target);
+    const previous = await integration.connectDevice(target);
+    const business = vi.fn(async () => { throw new Error('Secure connection closed'); });
+    Object.assign(previous, { fetch: business });
+    integration.installEncryptedFetch(); vi.stubGlobal('fetch', window.fetch);
+    const api = await import('../terminal/api');
+    const controller = new AbortController();
+    const read = vi.fn(async () => {
+      if (scenario === 'abort') controller.abort();
+      if (scenario === 'switch') mocks.saved.mockReturnValue({ ...target, targetPeerId: 'C' });
+      throw new Error('Secure connection closed');
+    });
+    if (scenario === 'unavailable') mocks.connect.mockRejectedValue(new Error('network unavailable'));
+    await expect(scenario === 'write' ? api.updateCollaborationTask('task', { kind: 'revise', content: 'follow up', idempotencyKey: 'one' })
+      : integration.readWithSecureReconnect(read, controller.signal)).rejects.toThrow(scenario === 'unavailable' ? 'network unavailable' : 'Secure connection closed');
+    expect(scenario === 'write' ? business : read).toHaveBeenCalledOnce();
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
   it.each(['init', 'request', 'override', 'already-aborted'] as const)('honors %s cancellation while the first encrypted connection is pending', async mode => {
     const integration = await import('./browserIntegration');
     integration.installEncryptedFetch();

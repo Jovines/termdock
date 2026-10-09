@@ -6,7 +6,7 @@ const css = readFileSync(join(process.cwd(), 'src/index.css'), 'utf8');
 
 function ruleBody(selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+  return css.match(new RegExp(`${escaped}\\s*(?:,[^{]+)?\\{([^}]*)\\}`))?.[1] ?? '';
 }
 
 describe('diff layout styles', () => {

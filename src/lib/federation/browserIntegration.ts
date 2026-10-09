@@ -7,6 +7,7 @@ import { raceConnectionAttempts, preferredConnectionPath, rememberConnectionPath
 import { activateServiceWorkspace, getWorkspaceHost } from '../services/workspaceHost';
 import { BOOT_SERVICE_ID, ENTRY_KEY, selectedTarget, saveSelectedTarget, clearSelectedTarget, migrateLegacyServiceState } from './clientScope';
 import { getIdentity } from './deviceIdentity';
+import { isConnectionInterruption, setConnectionRecovery } from './connectionRecovery';
 export { getIdentity } from './deviceIdentity';
 
 export const SECURE_STATE_EVENT = 'termdock:secure-state';
@@ -29,6 +30,28 @@ export function currentEntryClient(): SecureClient | undefined { return entryCli
 /** Replace a suspended transport without changing saved identity or authorization. */
 export function invalidateSecureTransport(): void {
   active?.close(); entryClient?.close(); active = undefined; entryClient = undefined;
+}
+/** Retry a complete read (including its body) once on an interrupted encrypted
+ * channel. Writes and reads belonging to a changed service are never replayed. */
+export async function readWithSecureReconnect<T>(read: () => Promise<T>, signal?: AbortSignal | null): Promise<T> {
+  const targetPeerId = savedConnection()?.targetPeerId;
+  const previous = currentSecureClient();
+  try { return await read(); }
+  catch (error) {
+    if (signal?.aborted || error instanceof Error && error.name === 'AbortError'
+      || error && typeof error === 'object' && 'status' in error
+      || !targetPeerId || savedConnection()?.targetPeerId !== targetPeerId
+      || (!previous?.closed && !isConnectionInterruption(error))) throw error;
+    setConnectionRecovery(navigator.onLine === false ? 'offline' : 'reconnecting');
+    if (previous && currentSecureClient() === previous) invalidateSecureTransport();
+    window.dispatchEvent(new Event(SECURE_STATE_EVENT));
+    await waitForActiveClient(signal);
+    if (savedConnection()?.targetPeerId !== targetPeerId) throw error;
+    const result = await read();
+    if (savedConnection()?.targetPeerId !== targetPeerId) throw error;
+    setConnectionRecovery('ready');
+    return result;
+  }
 }
 export async function getDirectAuthStatus(): Promise<{ enabled: boolean; authenticated: boolean }> {
   const response = await nativeFetch('/api/auth/status', { signal: AbortSignal.timeout(5000) });

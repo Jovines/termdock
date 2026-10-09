@@ -51,7 +51,7 @@ describe('NewSessionComposer launcher choices', () => {
       </I18nProvider>,
     );
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Startup command' }), { target: { value: 'codex' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Codex' }));
     expect(onLaunchAgent).not.toHaveBeenCalled();
     expect(onSelectAgent).not.toHaveBeenCalled();
 

@@ -5,6 +5,7 @@ import { IMAGE_DIMENSIONS, VIDEO_DIMENSIONS, IMAGE_QUALITY, VIDEO_BITRATE, type 
 const STORAGE_KEY = 'termdock:mobile-media-compression-v1';
 
 export type MediaCompressionPreferences = {
+  showResultToast: boolean;
   imageEnabled: boolean;
   imageMaxDimension: ImageDimension;
   imageQuality: number;
@@ -14,6 +15,7 @@ export type MediaCompressionPreferences = {
 };
 
 const defaults: MediaCompressionPreferences = {
+  showResultToast: true,
   imageEnabled: false, imageMaxDimension: 2048, imageQuality: 0.8,
   videoEnabled: false, videoMaxHeight: 720, videoBitrate: 2_500_000,
 };
@@ -23,6 +25,7 @@ function readPreferences(): MediaCompressionPreferences {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
     if (!stored || typeof stored !== 'object') return defaults;
     return {
+      showResultToast: stored.showResultToast !== false,
       imageEnabled: stored.imageEnabled === true,
       imageMaxDimension: IMAGE_DIMENSIONS.includes(stored.imageMaxDimension) ? stored.imageMaxDimension : defaults.imageMaxDimension,
       imageQuality: typeof stored.imageQuality === 'number' && stored.imageQuality >= IMAGE_QUALITY.min && stored.imageQuality <= IMAGE_QUALITY.max ? stored.imageQuality : defaults.imageQuality,

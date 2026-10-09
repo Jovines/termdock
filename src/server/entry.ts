@@ -34,6 +34,7 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket, resolveStableFederationSessionId } from './routes/terminal.js';
 import androidRoutes, { handleAndroidWebSocket } from './routes/android.js';
+import computerRoutes, { handleComputerWebSocket, stopComputerBridges } from './routes/computer.js';
 import { exitWithStartupFailure } from './utils/startupFailure.js';
 import { androidRecordings } from './android/recording.js';
 import { stopAllScrcpySessions } from './android/scrcpy.js';
@@ -416,6 +417,10 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use('/api/android', csrfProtection.verifyMiddleware({ bypass: isTrustedLocalCliRequest }));
   app.use('/api/android', androidRoutes);
 
+  app.use('/api/computer', requireAuth({ bypass: isTrustedLocalCliRequest }));
+  app.use('/api/computer', csrfProtection.verifyMiddleware({ bypass: isTrustedLocalCliRequest }));
+  app.use('/api/computer', computerRoutes);
+
   if (fs.existsSync(bundledClientIndexPath)) {
     const clientPath = pinBundledRuntimeClientDist(bundledClientDistPath);
     const compression = createStaticCompressionMiddleware(clientPath);
@@ -564,8 +569,9 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   server.once('close', () => { clearInterval(desktopRoutesTimer); for (const target of dynamicDirectTargets.values()) target.close(); });
   server.once('close', () => relayRouter.close());
   server.once('close', () => { void stopAllScrcpySessions(); void androidRecordings.stopAll(); });
+  server.once('close', stopComputerBridges);
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
-    terminal: handleTerminalWebSocket, control: handleControlWebSocket, android: handleAndroidWebSocket,
+    terminal: handleTerminalWebSocket, control: handleControlWebSocket, android: handleAndroidWebSocket, computer: handleComputerWebSocket,
   }, {
     resolveSessionId: resolveStableFederationSessionId,
     collaborationConnected: (subjectId, rpc) => {

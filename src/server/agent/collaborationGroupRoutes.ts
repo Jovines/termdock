@@ -43,7 +43,6 @@ export function collaborationGroupRoutes(options: {
           { currentUpdatedAt: existing?.updatedAt });
       }
       const ids = [...new Set<string>(sessionIds)];
-      if (ids.length < 2) throw new CollaborationError('INVALID_GROUP', '协作组至少需要两个有效会话', 400);
       if (options.save) { res.json(await options.save(req, { id, name, sessionIds: ids, expectedUpdatedAt })); return; }
       const known = new Set([...options.sessions().map((session) => session.sessionId), ...(existing?.sessionIds ?? [])]);
       if (ids.some((value) => !known.has(value))) {

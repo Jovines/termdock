@@ -2645,6 +2645,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               <details className="mt-2"><summary className="cursor-pointer">错误详情</summary><p className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words">{mobileFileUploadError.detail}</p></details>
             </div>}
             {mediaCompressionSaveFailed && <p className="mt-2 text-[11px] text-destructive">本机未能保存设置，重新打开后可能恢复默认值。</p>}
+            <label className="mt-4 flex min-h-11 items-center justify-between rounded-xl bg-surface-elevated px-3 text-sm"><span>显示压缩结果提示</span><input type="checkbox" checked={mediaCompressionPreferences.showResultToast} onChange={event => updateMediaCompressionPreferences({ showResultToast: event.target.checked })} className="h-4 w-4 accent-primary" /></label>
             <label className="mt-4 flex min-h-11 items-center justify-between rounded-xl bg-surface-elevated px-3 text-sm"><span>压缩图片后上传</span><input type="checkbox" checked={mobileImageCompressionEnabled} onChange={event => updateMediaCompressionPreferences({ imageEnabled: event.target.checked })} className="h-4 w-4 accent-primary" /></label>
             {mobileImageCompressionEnabled && <div className="mt-3 space-y-3"><label className="block text-xs text-muted-foreground">图片最长边
               <select value={mobileImageMaxDimension} onChange={event => updateMediaCompressionPreferences({ imageMaxDimension: Number(event.target.value) as ImageDimension })} className="mt-1 block min-h-10 w-full rounded-lg bg-surface-2 px-3 text-sm text-foreground">

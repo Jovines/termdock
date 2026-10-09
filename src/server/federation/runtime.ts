@@ -26,6 +26,8 @@ interface SocketHandlers {
   control(socket: WebSocket, clientId: string): void;
   /** 本机 Android 投屏/控制。仅限全权服务授权:它直通本机 adb,与终端同级。 */
   android?(socket: WebSocket, serial: string, clientId: string, options?: { maxSize?: number; bitRate?: number; maxFps?: number }): void;
+  /** Desktop control is available only to full-service identities. */
+  computer?(socket: WebSocket, host: string, options?: { protocol?: string; port?: string }): void;
 }
 class LogicalSocket extends EventEmitter {
   readonly OPEN = 1;
@@ -141,7 +143,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
     const full = (subjectId: string) => open() || store.hasFullServiceAccess({ subjectId, serviceId });
     let channel: PacketChannel | undefined;
     const operations = new Map<string, HttpOperation>();
-    const sockets = new Map<string, { socket: LogicalSocket; sessionId?: string; android?: boolean }>();
+    const sockets = new Map<string, { socket: LogicalSocket; sessionId?: string; android?: boolean; computer?: boolean; computerProtocol?: string }>();
     let revokeTimer: ReturnType<typeof setInterval> | undefined;
     try {
       const secured = await secureConnection({ identity, duplex: socketDuplex(socket), initiator: false, signal: AbortSignal.timeout(15000) });
@@ -208,8 +210,8 @@ export async function createFederationRuntime(app: express.Express, directory: s
         finally { cancelHttp(operation); if (operations.get(id) === operation) operations.delete(id); }
       }
       revokeTimer = setInterval(() => {
-        for (const { socket: logical, sessionId, android } of sockets.values()) {
-          if (android) { if (!full(subjectId)) logical.close(4003, 'Authorization revoked'); continue; }
+        for (const { socket: logical, sessionId, android, computer } of sockets.values()) {
+          if (android || computer) { if (!full(subjectId)) logical.close(4003, 'Authorization revoked'); continue; }
           if (!allowed(subjectId, sessionId ? 'session.view' : 'service.view', sessionId)) logical.close(4003, 'Authorization revoked');
         }
         for (const [id, operation] of operations) try {
@@ -408,12 +410,14 @@ export async function createFederationRuntime(app: express.Express, directory: s
             const url = new URL(packet.path, 'http://inner');
             const match = /^\/api\/terminal\/([^/%]+)\/ws$/.exec(url.pathname);
             const androidMatch = /^\/api\/android\/([^/%]+)\/ws$/.exec(url.pathname);
+            const computer = url.pathname === '/api/computer/ws';
             if (match) check('session.view', match[1]);
             else if (url.pathname === '/api/control/ws') check('service.view');
-            else if (androidMatch) { if (!full(subjectId)) throw new Error('API_NOT_ALLOWED'); }
+            else if (androidMatch || computer) { if (!full(subjectId)) throw new Error('API_NOT_ALLOWED'); }
             else throw new Error('API_NOT_ALLOWED');
-            const logical = new LogicalSocket(channel, packet.id, () => androidMatch ? full(subjectId) : allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]));
-            sockets.set(packet.id, { socket: logical, sessionId: match?.[1], android: Boolean(androidMatch) });
+            const logical = new LogicalSocket(channel, packet.id, () => (androidMatch || computer) ? full(subjectId) : allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]));
+            sockets.set(packet.id, { socket: logical, sessionId: match?.[1], android: Boolean(androidMatch), computer,
+              computerProtocol: computer ? url.searchParams.get('protocol') ?? 'vnc' : undefined });
             logical.once('close', () => sockets.delete(packet.id));
             send({ type: 'ws-ready', id: packet.id });
             if (match) handlers.terminal(logical as unknown as WebSocket, match[1], randomUUID(), {
@@ -429,11 +433,22 @@ export async function createFederationRuntime(app: express.Express, directory: s
                 maxFps: Number(url.searchParams.get('max_fps')) || undefined,
               });
             }
+            else if (computer) {
+              if (!handlers.computer) { logical.close(4403, 'API_NOT_ALLOWED'); continue; }
+              handlers.computer(logical as unknown as WebSocket, url.searchParams.get('host') ?? '', {
+                protocol: url.searchParams.get('protocol') ?? undefined, port: url.searchParams.get('port') ?? undefined,
+              });
+            }
             else handlers.control(logical as unknown as WebSocket, randomUUID());
           } else if (packet.type === 'ws-data') {
             const item = sockets.get(packet.id); if (!item || typeof packet.data !== 'string') throw new Error('INVALID_STREAM');
             const data = JSON.parse(packet.data);
-            if (item.android) {
+            if (item.computer) {
+              if (!full(subjectId)) throw new Error('AUTHORIZATION_DENIED');
+              const types = item.computerProtocol === 'rdp' ? ['start', 'instruction', 'ack'] : ['data', 'ack'];
+              if (!types.includes(data?.type)) throw new Error('ACTION_NOT_ALLOWED');
+            }
+            else if (item.android) {
               if (!full(subjectId)) throw new Error('AUTHORIZATION_DENIED');
               if (!['control', 'ack', 'ping', 'bitrate'].includes(data?.type)) throw new Error('ACTION_NOT_ALLOWED');
             }

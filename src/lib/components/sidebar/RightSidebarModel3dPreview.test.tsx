@@ -107,6 +107,10 @@ vi.mock('three', () => {
     position = { set: () => {} };
   }
   class Mesh {
+    userData: Record<string, unknown> = {};
+    visible = true;
+    uuid = 'mesh-test';
+    isMesh = true;
     geometry: { dispose: () => void };
     material: { dispose: () => void };
     rotation = { x: 0, y: 0, z: 0 };

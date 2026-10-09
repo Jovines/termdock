@@ -2,6 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { I18nProvider } from '../../i18n';
 import { LeftSidebar, normalizeSidebarCollaborationGroups, reorderSessionIdsForSplitExit } from './LeftSidebar';
 
@@ -194,16 +195,15 @@ describe('LeftSidebar session density', () => {
     expect(workgroup.querySelectorAll('[data-collaboration-member]')).toHaveLength(2);
     expect(workgroup.querySelectorAll('[data-split-member="true"]')).toHaveLength(1);
     expect(workgroup.querySelector('[data-split-workspace]')).toBeNull();
-    const collaborationShortcut = screen.getByRole('button', { name: '打开 Agent 工作组消息：Release team' });
-    expect(collaborationShortcut.className).toContain('-right-1');
+    const collaborationShortcut = screen.getByRole('button', { name: '打开协作工作区：Release team' });
+    expect(workgroup.contains(collaborationShortcut)).toBe(true);
     expect(within(workgroup).getByRole('button', { name: 'Planner' })
       .getAttribute('data-rfd-drag-handle-draggable-id')).toBe('collaboration-member:one');
     expect(within(workgroup).getByRole('button', { name: 'Standalone' })
       .getAttribute('data-rfd-drag-handle-draggable-id')).toBe('collaboration-member:three');
 
     fireEvent.click(collaborationShortcut);
-    expect(await screen.findByRole('heading', { name: 'Release team · 协作消息' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '会话协作' }).className).toContain('text-primary');
+    expect(useCollaborationNavigation.getState().groupId).toBe('agent-group');
 
     fireEvent.click(within(workgroup).getByRole('button', { name: 'Remove from split Planner' }));
     expect(onRemoveFromSplit).toHaveBeenCalledWith('one');

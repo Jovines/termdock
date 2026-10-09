@@ -5,7 +5,7 @@ import { CollaborationDirectory, remoteSessionAddress, type CollaborationDirecto
 import { selectedTarget } from '../federation/clientScope';
 import { prepareEncryptedDownload } from './secureDownload';
 import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
-import { currentSecureClient, secureSocket } from '../federation/browserIntegration';
+import { currentSecureClient, readWithSecureReconnect, secureSocket } from '../federation/browserIntegration';
 import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from '../federation/transportLifecycle';
 import { clearPreviewResourceCache, fetchPreviewResource } from '../utils/previewResourceCache';
 import type {
@@ -2814,6 +2814,11 @@ export async function downloadFile(filePath: string): Promise<void> {
     ?? filePath.split('/').pop()?.split('\\').pop()
     ?? 'download';
 
+  await saveDownloadBlob(blob, filename);
+}
+
+/** Save bytes already fetched through the page, using the native save flow. */
+export async function saveDownloadBlob(blob: Blob, filename: string): Promise<void> {
   // Prefer the File System Access API when available.
   const showSaveFilePicker = (window as unknown as {
     showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<{
@@ -3875,12 +3880,15 @@ async function operationsRequest<T>(path: string, init?: RequestInit): Promise<T
   const headers = new Headers(init?.headers);
   if (method !== 'GET' && method !== 'HEAD') headers.set('X-XSRF-TOKEN', await getCsrfToken());
   if (init?.body) headers.set('Content-Type', 'application/json');
-  const response = await fetch(`/api/terminal/operations${path}`, { ...init, headers });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: '操作失败' }));
-    throw new TerminalApiError(body.error || '操作失败', response.status);
-  }
-  return (response.status === 204 ? undefined : await response.json()) as T;
+  const read = async () => {
+    const response = await fetch(`/api/terminal/operations${path}`, { ...init, headers });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ error: '操作失败' }));
+      throw new TerminalApiError(body.error || '操作失败', response.status);
+    }
+    return (response.status === 204 ? undefined : await response.json()) as T;
+  };
+  return method === 'GET' || method === 'HEAD' ? readWithSecureReconnect(read, init?.signal) : read();
 }
 
 export type { CollaborationTaskView, TaskOperation, TaskCreateInput, TaskMember } from '../../server/agent/collaborationTaskTypes';
@@ -3934,7 +3942,7 @@ export interface CollaborationGroupInput {
 let collaborationDirectory: CollaborationDirectory | null = null;
 let collaborationScope = '';
 const collaborationListeners = new Set<(data: CollaborationGroupsResponse) => void>();
-observeServiceConnections(() => collaborationDirectory?.refreshPeers(true));
+if (typeof window !== 'undefined') observeServiceConnections(() => collaborationDirectory?.refreshPeers(true));
 
 function readCurrentCollaborationGroups(): Promise<CollaborationGroupsResponse> {
   return operationsRequest('/collaboration-groups', { signal: AbortSignal.timeout(10_000) });
@@ -4015,7 +4023,7 @@ export async function saveCollaborationGroup(input: CollaborationGroupInput): Pr
     throw new TerminalApiError('协作组已被修改，请重新打开成员管理后再保存', 409);
   }
   const sessionIds = [...new Set(input.sessionIds)];
-  if (!input.name.trim() || sessionIds.length < 2) throw new TerminalApiError('协作组至少需要两个有效会话', 400);
+  if (!input.name.trim()) throw new TerminalApiError('请填写协作组名称', 400);
   const knownIds = new Set([...current.sessions.map((session) => session.sessionId), ...(existing?.sessionIds ?? [])]);
   const additions = sessionIds.filter((id) => !knownIds.has(id));
   if (additions.some((id) => !remoteSessionAddress(id))) {
@@ -4086,4 +4094,27 @@ export function searchTerminalSessions(query: string, limit = 50, signal?: Abort
 
 export function prepareSearchSession(nativeKey: string): Promise<{ sessionId?: string; command?: string; cwd?: string }> {
   return operationsRequest('/session-search/prepare', { method: 'POST', body: JSON.stringify({ nativeKey }) });
+}
+
+export type ExecutionArchive = import('../../server/agent/executionArchives').ExecutionArchive;
+let executionArchiveRead: { scope: string; at: number; pending: boolean; result: Promise<{ entries: ExecutionArchive[] }> } | null = null;
+export function listExecutionArchives(): Promise<{ entries: ExecutionArchive[] }> {
+  const scope = selectedTarget()?.targetPeerId ?? location.origin;
+  if (executionArchiveRead?.scope === scope && (executionArchiveRead.pending || Date.now() - executionArchiveRead.at < 5000)) return executionArchiveRead.result;
+  const read = { scope, at: Date.now(), pending: true, result: operationsRequest<{ entries: ExecutionArchive[] }>('/execution-archives') };
+  executionArchiveRead = read;
+  read.result.then(() => { read.pending = false; read.at = Date.now(); }, () => { if (executionArchiveRead === read) executionArchiveRead = null; });
+  return read.result;
+}
+export async function archiveExecutionSession(sessionId: string): Promise<{ entry: ExecutionArchive }> {
+  const result = await operationsRequest<{ entry: ExecutionArchive }>(`/execution-archives/${encodeURIComponent(sessionId)}/archive`, { method: 'POST' });
+  executionArchiveRead = null; currentCollaborationDirectory().invalidate(); return result;
+}
+export async function restoreExecutionSession(sessionId: string): Promise<{ session: OrchestrationSession }> {
+  const result = await operationsRequest<{ session: OrchestrationSession }>(`/execution-archives/${encodeURIComponent(sessionId)}/restore`, { method: 'POST' });
+  executionArchiveRead = null; currentCollaborationDirectory().invalidate(); return result;
+}
+export async function ensureCollaborationTeam(groupId: string, input: { agentSlug: string; cwd: string }): Promise<{ coordinatorSessionId: string; reviewerSessionIds: string[] }> {
+  const result = await operationsRequest<{ coordinatorSessionId: string; reviewerSessionIds: string[] }>(`/collaboration-groups/${encodeURIComponent(groupId)}/team`, { method: 'POST', body: JSON.stringify(input) });
+  currentCollaborationDirectory().invalidate(); return result;
 }

@@ -36,11 +36,11 @@ async function prepareBundle(task: CollaborationTask): Promise<BundleMetadata> {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     // Export the reviewed commit, even if the task branch has since moved.
     const ref = `refs/termdock/exports/${artifact.id}`;
-    await git(workspace.cwd, ['update-ref', ref, commit]);
+    await git(workspace.repository, ['update-ref', ref, commit]);
     const temporary = `${file}.${process.pid}.tmp`;
     if (commit === base) throw new Error('依赖未产生代码提交，无需传输；请检查项目基线是否一致');
     try {
-      await git(workspace.cwd, ['bundle', 'create', temporary, ref, `^${base}`]);
+      await git(workspace.repository, ['bundle', 'create', temporary, ref, `^${base}`]);
       const bytes = (await stat(temporary)).size;
       if (bytes > maxBytes) throw new Error('依赖提交包超过 128 MiB，请通过仓库远端同步后继续');
       const metadata = { bytes, digest: await digestFile(temporary), commit, base, ref };

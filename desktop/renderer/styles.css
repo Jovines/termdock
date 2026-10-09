@@ -2,6 +2,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html {
   scroll-behavior: smooth;
 }
@@ -417,6 +421,19 @@ p {
   animation: status-breathe 2.4s ease-in-out infinite;
 }
 
+.status.pending i {
+  background: var(--primary);
+  animation: status-breathe 1.2s ease-in-out infinite;
+}
+
+.status.error {
+  color: var(--destructive);
+}
+
+.status.error i {
+  background: var(--destructive);
+}
+
 .terminal-visual {
   margin-top: 22px;
   border: 1px solid var(--border);
@@ -519,6 +536,32 @@ p {
   line-height: 1.5;
   text-align: right;
   white-space: pre-line;
+  max-width: 420px;
+}
+
+.local-install-hint,
+.local-diagnostics {
+  margin-top: 14px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.local-diagnostics summary {
+  cursor: pointer;
+}
+
+.local-diagnostics pre {
+  max-height: 180px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--background);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .primary-actions {

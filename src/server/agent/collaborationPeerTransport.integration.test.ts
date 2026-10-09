@@ -76,7 +76,7 @@ it('uses real verified WSS and Noise without a page, rejects unregistered identi
   const reconnected = await connectCollaborationRpc(f.source, f.target); cleanups.push(() => reconnected.close());
   await reconnected.request(request); expect(f.deliveries()).toBe(1);
   f.store.markRead([f.message.id]);
-  expect(await reconnected.request({ type: 'collaboration-exchange', groupId: 'cross-wire', ids: [f.message.id] })).toMatchObject({ receipts: [{ status: 'read' }] });
+  expect(await reconnected.request({ type: 'collaboration-exchange', groupId: 'cross-wire', ids: [f.message.id] })).toMatchObject({ receipts: [{ status: 'delivered' }] });
   // A collaboration binding must never turn into full service access.
   expect(await reconnected.request({ type: 'permissions' })).toMatchObject({ fullService: false, grants: [] });
   f.store.getGroup('cross-wire')!.deleted = true;

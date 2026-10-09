@@ -10,7 +10,14 @@ export function collaborationServiceLabel(service: { serviceLabel?: string; serv
 }
 
 /** Repeated Agent names need a stable distinction inside their group. */
-export function collaborationMemberLabel<T extends { sessionId: string; name: string }>(session: T, members: T[]): string {
-  const peers = members.filter(member => member.name.trim() === session.name.trim());
-  return peers.length > 1 ? `${session.name} ${peers.findIndex(member => member.sessionId === session.sessionId) + 1}` : session.name;
+export function collaborationMemberLabel<T extends { sessionId: string; name: string; agent?: { displayName?: string } | null }>(session: T, members: T[]): string {
+  const humanName = (member: T) => {
+    const name = member.name.trim();
+    return !name || /^(?:tmux:|remote:|wt-)/i.test(name) || name === member.sessionId
+      ? member.agent?.displayName?.trim() || '成员'
+      : name;
+  };
+  const name = humanName(session);
+  const peers = members.filter(member => humanName(member) === name);
+  return peers.length > 1 ? `${name} ${peers.findIndex(member => member.sessionId === session.sessionId) + 1}` : name;
 }

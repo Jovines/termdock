@@ -59,9 +59,9 @@
             <p class="kicker">CONNECTION CENTER</p>
             <h1>选择工作空间</h1>
           </div>
-          <button id="refresh" class="icon-button" type="button" aria-label="刷新状态">
+          <button id="refresh" class="icon-button" type="button" aria-label="重新检测本机环境与服务">
             <span aria-hidden="true">↻</span>
-            <span>刷新</span>
+            <span>重新检测</span>
           </button>
         </header>
 
@@ -73,7 +73,7 @@
               <p class="section-label">本机服务</p>
               <h2 id="local-title">这台 Mac</h2>
             </div>
-            <span id="local-state" class="status"><i></i><span>检查中</span></span>
+            <span id="local-state" class="status" role="status"><i></i><span>检测中</span></span>
           </div>
 
           <div class="terminal-visual" aria-hidden="true">
@@ -82,8 +82,8 @@
               <p>termdock — local</p>
             </div>
             <div class="terminal-body">
-              <p><b>›</b> termdock status</p>
-              <p class="terminal-result"><span id="visual-status">checking</span><i class="cursor"></i></p>
+              <p><b>›</b> 环境检测 → 本机服务 → 工作空间</p>
+              <p class="terminal-result"><span id="visual-status">正在检测运行环境…</span><i class="cursor"></i></p>
             </div>
           </div>
 
@@ -92,14 +92,20 @@
               <span>服务地址</span>
               <strong id="local-address">localhost:9834</strong>
             </div>
-            <p id="local-detail" class="service-meta">正在读取 ~/.termdock/server.json</p>
+            <p id="local-detail" class="service-meta" aria-live="polite">正在检测本机服务和运行环境…</p>
           </div>
 
           <div class="primary-actions">
+            <button id="prepare-local" class="primary" type="button" disabled>正在检测…</button>
             <button id="connect-local" class="primary" type="button" hidden>
               <span>打开工作空间</span><i>↗</i>
             </button>
           </div>
+          <p id="local-install-hint" class="local-install-hint" hidden></p>
+          <details id="local-diagnostics" class="local-diagnostics" hidden>
+            <summary>查看环境与处理详情</summary>
+            <pre id="local-diagnostics-content"></pre>
+          </details>
         </section>
 
         <section id="remote" class="remote-section" aria-labelledby="remote-title">

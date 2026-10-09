@@ -31,6 +31,15 @@ export interface LocalServiceStatus {
   running: boolean;
   state: LocalServerState | null;
   probe: ServiceProbe | null;
+  setup?: LocalServiceSetup;
+}
+
+export interface LocalServiceSetup {
+  phase: 'checking' | 'starting' | 'installing' | 'ready' | 'needs-node' | 'needs-install' | 'error';
+  message: string;
+  nodeVersion?: string;
+  cliPath?: string;
+  details?: string;
 }
 
 export interface DesktopSnapshot {

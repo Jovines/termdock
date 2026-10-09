@@ -176,12 +176,12 @@ describe('MobileKeyboard desktop actions presentation', () => {
     expect(screen.queryByText('/')).toBeNull();
   });
 
-  it('does not render basic fallback keys when no custom action exists on desktop', () => {
+  it('renders base actions when no custom action exists on desktop', () => {
     render(<MobileKeyboard {...baseProps} presentation="desktop-actions" extraActions={[]} />);
 
-    expect(screen.queryByText('Home')).toBeNull();
-    expect(screen.queryByText('End')).toBeNull();
-    expect(screen.queryByText('Ctrl-D')).toBeNull();
+    expect(screen.getByText('Home')).toBeTruthy();
+    expect(screen.getByText('End')).toBeTruthy();
+    expect(screen.getByText('Ctrl-D')).toBeTruthy();
   });
 
   it('keeps action clicks wired to the existing text callback', () => {

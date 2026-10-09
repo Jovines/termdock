@@ -139,7 +139,7 @@ describe('connectTerminalStream reconnect policy', () => {
     disconnect();
   });
 
-  it('reconnects an unresponsive visible pane before the background probe expires', () => {
+  it('reconnects unresponsive visible and background panes within the resume deadline', () => {
     const closeVisible = connectTerminalStream('visible-dead', vi.fn());
     const closeBackground = connectTerminalStream('background-dead', vi.fn());
     for (const socket of FakeWebSocket.instances) {
@@ -149,10 +149,10 @@ describe('connectTerminalStream reconnect policy', () => {
     probeTerminalConnection('background-dead');
     probeTerminalConnection('visible-dead', undefined, { visible: true });
     vi.advanceTimersByTime(VISIBLE_WAKEUP_PROBE_TIMEOUT_MS + 1);
-    expect(FakeWebSocket.instances).toHaveLength(3);
-    expect(FakeWebSocket.instances[2].url).toContain('/visible-dead/');
-    vi.advanceTimersByTime(1_500);
-    expect(FakeWebSocket.instances[3].url).toContain('/background-dead/');
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    expect(FakeWebSocket.instances.slice(2).map(socket => socket.url)).toEqual(expect.arrayContaining([
+      expect.stringContaining('/visible-dead/'), expect.stringContaining('/background-dead/'),
+    ]));
     closeVisible();
     closeBackground();
   });

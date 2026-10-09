@@ -1,18 +1,30 @@
 # Termdock for macOS
 
 Termdock Desktop is a macOS client for independently running Termdock services.
-It connects to local, LAN, and public service URLs without installing a CLI,
-starting a server, taking over an existing process, or changing the shell environment.
+It connects to local, LAN, and public service URLs. On launch it detects the local
+environment and starts an installed standalone CLI when no service is running.
+The connection center can also assist with a missing CLI or Node.js installation.
 
 ## Service behavior
 
-- Start local services separately with the standalone `termdock` CLI.
-- The connection center detects an existing local service and can open it, or
-  save and connect to another Termdock URL.
+- An existing local service is reused. Otherwise Desktop locates Node.js 22+
+  and the standalone `termdock` CLI, including common Homebrew and version-manager
+  installations, and starts the CLI in its normal supervised daemon mode.
+- When the CLI is missing, **安装并启动** installs it from npm into
+  `~/.termdock/cli` without sudo or changing other global npm packages, then
+  starts it. Installation and startup failures expose details and a retry action.
+- When Node.js or npm is missing or too old, **下载 Node.js** opens the official
+  download page. Returning to the connection center resumes environment detection;
+  CLI installation still requires the installation button.
+- The connection center updates local status automatically and can open the
+  workspace, or save and connect to another Termdock URL. Startup assistance is
+  restricted to the app's connection center, not remote service pages.
 - Desktop-only bookmarks and UI preferences live in `~/.termdock/desktop.json`.
 - Direct connections load the service's frontend. Saved connections reachable
   only through an entry service use the app's bundled static frontend.
-- Closing or quitting Desktop leaves independently running services untouched.
+- Closing or quitting Desktop leaves standalone services running, including
+  services started through the connection center. Desktop never stops or
+  replaces an existing service process.
 - The app bundles static frontend resources for entry-service connections;
   Node.js, server dependencies, CLI launchers, and terminal tools are not bundled.
 

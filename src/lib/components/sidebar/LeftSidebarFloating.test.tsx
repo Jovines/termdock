@@ -14,12 +14,12 @@ vi.mock('../../terminal/api', async importOriginal => ({
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it('restores the server floating preference and persists closing it', async () => {
-  settings.get.mockResolvedValue({ collaborationPanels: { [collaborationPanelClientId()]: { floatingGroupId: 'release' } }, locale: 'en' });
+  settings.get.mockResolvedValue({ collaborationPanels: { [collaborationPanelClientId()]: { groups: { release: { floatingGroupId: 'release', mode: 'floating' } } } }, locale: 'en' });
   settings.update.mockResolvedValue({ collaborationFloatingGroupId: null });
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({
     locale: 'en', groups: [{ id: 'release', name: 'Release team', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 }],
-    sessions: [], messages: [], agents: [], automations: [], runs: [],
+    sessions: [], messages: [], tasks: [], agents: [], automations: [], runs: [],
   }) })));
   render(<I18nProvider><LeftSidebar isOpen pinned drawerWidthPx={280} onClose={vi.fn()}
     sessions={[{ id: 'one', name: 'Planner', mode: 'shell' }, { id: 'two', name: 'Reviewer', mode: 'shell' }]}
@@ -28,7 +28,7 @@ it('restores the server floating preference and persists closing it', async () =
     splitWorkspaces={[]} onRemoveFromSplit={vi.fn()} onSetSplitLayout={vi.fn()} onReorderSplitWorkspace={vi.fn()}
     onRenameSplitWorkspace={vi.fn()} onCombineSplitSessions={vi.fn()} onReorderSessions={vi.fn()} /></I18nProvider>);
   expect(await screen.findByRole('region', { name: '工作组消息浮窗' })).toBeTruthy();
-  expect(screen.getByRole('heading', { name: 'Release team · 协作消息' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Release team' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '关闭' }));
   await waitFor(() => expect(screen.queryByRole('region', { name: '工作组消息浮窗' })).toBeNull());
   expect(settings.update).toHaveBeenCalledWith({ collaborationPanel: { clientId: collaborationPanelClientId(), state: { groups: { release: { floatingGroupId: null } } } } });

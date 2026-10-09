@@ -5,7 +5,8 @@ export interface CollaborationTaskEvent {
   id: string; sequence: number; kind: string; actor: TaskMember | null;
   content: string; createdAt: number; attemptId: string | null;
   reportStatus?: TaskReportStatus; evidence?: unknown; artifactId?: string; target?: TaskMember;
-  source?: 'system';
+  source?: 'system' | 'user';
+  deliveryId?: string;
 }
 export interface CollaborationTaskDecision {
   id: string; attemptId: string; question: string; options: string[];
@@ -17,12 +18,14 @@ export interface CollaborationTaskArtifact {
   content: string; evidence?: unknown; createdAt: number; actor: TaskMember;
   reviewsArtifactId?: string;
   verdict?: 'pass' | 'changes' | 'blocked';
+  summary?: string;
 }
 export interface TaskWorkflow {
   kind: 'goal' | 'step'; rootTaskId?: string; reviewers: TaskMember[];
   isolated: boolean; paused: boolean; maxRevisions: number;
   integration?: boolean;
   maxParallel?: number;
+  workType?: 'auto' | 'code' | 'read-only';
 }
 export interface TaskWorkspace { cwd: string; repository: string; branch: string; base: string }
 export interface CollaborationTaskAttempt {
@@ -55,6 +58,7 @@ export interface TaskOperation {
   attemptId?: string; status?: TaskReportStatus; evidence?: unknown;
   decisionId?: string; artifactId?: string; options?: string[];
   verdict?: 'pass' | 'changes' | 'blocked';
+  summary?: string;
 }
 export interface TaskCreateInput {
   idempotencyKey: string; groupId: string; title: string; spec: string;
@@ -62,6 +66,7 @@ export interface TaskCreateInput {
   coordinator?: TaskMember | null; parentTaskId?: string | null; dependsOn?: string[];
   managed?: boolean; reviewers?: TaskMember[]; isolated?: boolean;
   integration?: boolean;
+  workType?: 'code' | 'read-only';
 }
 export interface CollaborationTaskView extends CollaborationTask {
   summaryOnly?: boolean; replica?: boolean;

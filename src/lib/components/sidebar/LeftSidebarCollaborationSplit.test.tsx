@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CollaborationTaskView } from '../../terminal/api';
+import { useCollaborationTaskInbox } from '../../stores/useCollaborationTaskInbox';
 import type { DragStart, DropResult } from '@hello-pangea/dnd';
 import { useState } from 'react';
 import { normalizeSplitWorkspaces, reorderSplitWorkspaceSessions, type SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import { I18nProvider } from '../../i18n';
+import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { LeftSidebar, buildCollaborationSections } from './LeftSidebar';
 
@@ -12,10 +15,12 @@ const mocks = vi.hoisted(() => ({
   start: null as null | ((start: DragStart) => void),
   capture: null as null | (() => void),
   end: null as null | ((result: DropResult) => void),
-  save: vi.fn(), remove: vi.fn(), list: vi.fn(), move: vi.fn(),
+  save: vi.fn(), remove: vi.fn(), list: vi.fn(), move: vi.fn(), archive: vi.fn().mockResolvedValue({entry:{}}),
 }));
 vi.mock('../../terminal/api', async (original) => ({
   ...await original<typeof import('../../terminal/api')>(),
+  archiveExecutionSession: mocks.archive,
+  listExecutionArchives: vi.fn().mockResolvedValue({ entries: [] }),
   listCollaborationGroups: mocks.list,
   saveCollaborationGroup: mocks.save,
   removeCollaborationGroup: mocks.remove,
@@ -63,7 +68,8 @@ function point(element: Element | null) {
   fireEvent.pointerMove(window, { clientX: 50, clientY: 50 });
 }
 beforeEach(() => {
-  vi.clearAllMocks();
+  useCollaborationTaskInbox.setState({ tasks: [], allTasks: [], error: null });
+  vi.clearAllMocks(); useCollaborationNavigation.setState({ groupId: null });
   mocks.save.mockResolvedValue({ group: baseGroup });
   mocks.remove.mockResolvedValue(undefined);
   mocks.move.mockResolvedValue(undefined);
@@ -74,6 +80,29 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Agent workgroup split navigation', () => {
+  it('collapses completed execution sessions and keeps their terminal controls accessible', async () => {
+    useCollaborationTaskInbox.setState({ allTasks: [{ id: 'done', groupId: 'team', status: 'accepted', activeAttemptId: 'attempt', attempts: [{ id: 'attempt', assignee: { serviceId: 'local', sessionId: 'c' } }], memberSessions: { 'local:c': 'c' }, workspace: { cwd: '/task' }, workflow: { kind: 'step', isolated: true, reviewers: [] } } as unknown as CollaborationTaskView] });
+    const handlers = await setup();
+    expect(document.querySelector('[data-collaboration-member="c"]')).toBeNull();
+    expect(document.querySelector('[data-collaboration-member="a"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '已完成的执行会话 · 1' }));
+    const row = document.querySelector('[data-collaboration-member="c"]') as HTMLElement;
+    expect(row).toBeTruthy();
+    fireEvent.click(within(row).getByRole('button', { name: '归档 C' }));
+    await waitFor(() => expect(mocks.archive).toHaveBeenCalledWith('c'));
+    expect(handlers.onCloseSession).not.toHaveBeenCalled();
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
+  });
+  it('reorders visible members without moving or losing a collapsed execution session', async () => {
+    useCollaborationTaskInbox.setState({ allTasks: [{ id: 'done', groupId: 'team', status: 'accepted', activeAttemptId: 'attempt', attempts: [{ id: 'attempt', assignee: { serviceId: 'local', sessionId: 'c' } }], memberSessions: { 'local:c': 'c' }, workspace: { cwd: '/task' }, workflow: { kind: 'step', isolated: true, reviewers: [] } } as unknown as CollaborationTaskView] });
+    await setup(false, ['a', 'c', 'b'], ['a', 'c', 'b', 'd'], true, []);
+    const source = { droppableId: 'collaboration-members:team', index: 1 };
+    const start: DragStart = { draggableId: 'collaboration-member:b', type: 'collaboration-member', source, mode: 'FLUID' };
+    act(() => mocks.start!(start));
+    act(() => mocks.end!({ ...start, reason: 'DROP', combine: null, destination: { ...source, index: 0 } }));
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ sessionIds: ['b', 'c', 'a'] })));
+  });
   it('groups contained splits in pane order and leaves cross-group splits as individual rows', () => {
     expect(buildCollaborationSections(['a', 'c', 'b'], [workspace])).toEqual([
       { sessionIds: ['a', 'b'], workspace }, { sessionIds: ['c'] },
@@ -96,7 +125,7 @@ describe('Agent workgroup split navigation', () => {
     await setup(false, ['a', 'b']);
     const inner = document.querySelector('[data-collaboration-split]')!;
     expect(inner.querySelector('[aria-haspopup="menu"]')).toBeTruthy();
-    expect(screen.queryByText('Release team')).toBeNull();
+    expect(screen.getByRole('button', { name: '打开协作工作区：Release team' })).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Split layout: Side by side' })).toHaveLength(1);
   });
   it('combines members by drag without changing workgroup membership', async () => {
@@ -236,7 +265,7 @@ describe('Agent workgroup split navigation', () => {
     const handlers = await setup(folders);
     const handle = screen.getByRole('button', { name: '移动工作组 Release team' });
     expect(handle.getAttribute('data-drag-id')).toBe('collaboration:team');
-    expect(screen.getByRole('button', { name: '打开 Agent 工作组消息：Release team' }).hasAttribute('data-drag-id')).toBe(false);
+    expect(screen.getByRole('button', { name: '打开协作工作区：Release team' }).hasAttribute('data-drag-id')).toBe(false);
     const start: DragStart = {
       draggableId: 'collaboration:team', type: 'session', mode: 'FLUID',
       source: { droppableId: folders ? 'group-sessions:' : 'sidebar-entities', index: 0 },
@@ -322,5 +351,25 @@ describe('Agent workgroup split navigation', () => {
     expect(handlers.onRemoveFromSplit).not.toHaveBeenCalled();
     expect(mocks.save).not.toHaveBeenCalled();
     expect(mocks.remove).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('primary workspace navigation', () => {
+  it('opens a group board without switching terminals or adding a dock', async () => {
+    await setup();
+    const switchSession = vi.fn(); window.addEventListener('switch-terminal-session', switchSession);
+    fireEvent.click(screen.getByRole('button', { name: '打开协作工作区：Release team' }));
+    expect(useCollaborationNavigation.getState().groupId).toBe('team');
+    expect(screen.getByRole('button', { name: '打开协作工作区：Release team' }).getAttribute('aria-current')).toBe('page');
+    expect(switchSession).not.toHaveBeenCalled();
+    window.removeEventListener('switch-terminal-session', switchSession);
+  });
+  it('chooses a member terminal independently of its group workspace', async () => {
+    await setup();
+    fireEvent.click(screen.getByRole('button', { name: '打开协作工作区：Release team' }));
+    const row = document.querySelector<HTMLElement>('[data-collaboration-member="b"]')!;
+    fireEvent.click(row.querySelector('.sidebar-session-primary')!);
+    expect(useCollaborationNavigation.getState().groupId).toBeNull();
   });
 });

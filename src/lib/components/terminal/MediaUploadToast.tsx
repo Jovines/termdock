@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, X } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useMediaCompressionPreferences } from '../../terminal/mediaCompressionPreferences';
 
 export type MediaUploadResult = {
   file: File;
@@ -71,18 +72,24 @@ function MediaUploadPreview({ result, message, onClose }: {
   </dialog>;
 }
 
-export function MediaUploadToast({ result: pendingResult, onDismiss }: {
+export function MediaUploadToast({ result: uploadedResult, onDismiss }: {
   result: MediaUploadResult | null;
   onDismiss: () => void;
 }) {
   const { locale } = useI18n();
   const chinese = locale === 'zh';
+  const showResultToast = useMediaCompressionPreferences(state => state.preferences.showResultToast);
+  const pendingResult = showResultToast ? uploadedResult : null;
   const [preview, setPreview] = useState<{ result: MediaUploadResult; message: string } | null>(null);
   useEffect(() => {
-    if (!pendingResult) return;
+    if (!uploadedResult) return;
+    if (!showResultToast) {
+      onDismiss();
+      return;
+    }
     const timer = window.setTimeout(onDismiss, 2000);
     return () => window.clearTimeout(timer);
-  }, [pendingResult, onDismiss]);
+  }, [uploadedResult, showResultToast, onDismiss]);
 
   const result = pendingResult ?? preview?.result;
   if (!result) return null;
