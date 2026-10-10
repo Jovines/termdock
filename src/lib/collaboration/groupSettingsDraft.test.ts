@@ -1,9 +1,20 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
-import { freshGroupSettingsDraft, readGroupSettingsDraft, writeGroupSettingsDraft } from './groupSettingsDraft';
+import { freshGroupSettingsDraft, readGroupSettingsDraft, rebaseGroupSettingsDraft, writeGroupSettingsDraft } from './groupSettingsDraft';
 const group = { id: 'storage-failure', name: '已保存名称', sessionIds: [], createdAt: 1, updatedAt: 1 };
 const otherGroup = { ...group, id: 'other-storage-group', name: '另一组已保存名称' };
 const key = (id: string) => `termdock-group-settings:${location.origin}:${id}`;
+it('rebases only explicit dirty fields and adopts the reviewed revision and member snapshot', () => {
+  const old = { ...group, sessionIds: ['removed'] };
+  const latest = { ...group, name: '最新已保存名称', sessionIds: ['new-member'], updatedAt: 20,
+    instructions: { text: '最新已保存群规', version: 'v20', updatedAt: 20, updatedBy: 'new-member' } };
+  const draft = { ...freshGroupSettingsDraft(old, 'removed'), rules: '我的未保存群规' };
+  expect(rebaseGroupSettingsDraft(draft, latest)).toEqual({ ...freshGroupSettingsDraft(latest),
+    rules: '我的未保存群规', sessionIds: ['new-member'] });
+  expect(rebaseGroupSettingsDraft({ ...draft, name: '我的未保存名称', rulesMemberId: 'new-member' }, latest))
+    .toMatchObject({ name: '我的未保存名称', rules: '我的未保存群规', savedName: latest.name,
+      savedRules: latest.instructions.text, updatedAt: 20, rulesVersion: 'v20', rulesMemberId: 'new-member' });
+});
 afterEach(() => {
   vi.restoreAllMocks();
   sessionStorage.clear();

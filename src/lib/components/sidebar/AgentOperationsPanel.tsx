@@ -1,5 +1,5 @@
 import { CollaborationTaskWorkbench } from './CollaborationTaskWorkbench';
-import { freshGroupSettingsDraft, groupSettingsDirty, readGroupSettingsDraft, writeGroupSettingsDraft, type GroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
+import { freshGroupSettingsDraft, groupSettingsDirty, readGroupSettingsDraft, rebaseGroupSettingsDraft, writeGroupSettingsDraft, type GroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
 import { collaborationMemberLabel, collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { collaborationGroupPreferences, collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
@@ -35,6 +35,7 @@ import {
   saveCollaborationGroup,
   setCollaborationMemberRole,
   setCollaborationGroupRules,
+  TerminalApiError,
   searchTerminalSessions,
   sendCollaborationMessage,
   spawnCollaborationAgent,
@@ -1229,6 +1230,7 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
   const localMembers = sessions.filter(session => group.sessionIds.includes(session.sessionId) && !remoteSessionAddress(session.sessionId));
   const [draft, setDraft] = useState(() => readGroupSettingsDraft(group, activeSessionId && localMembers.some(session => session.sessionId === activeSessionId) ? activeSessionId : ''));
   const draftRef = useRef(draft);
+  const [latest, setLatest] = useState<CollaborationGroup | null>(null);
   const updateDraft = (patch: Partial<GroupSettingsDraft>) => {
     const next = { ...draftRef.current, ...patch };
     draftRef.current = next;
@@ -1243,11 +1245,12 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
     if (busy || !name.trim()) return;
     setBusy('group-name'); setError(null); setNotice(null);
     try {
-      const result = await saveCollaborationGroup({ id: group.id, name: name.trim(), sessionIds: group.sessionIds, expectedUpdatedAt: draft.updatedAt });
-      updateDraft({ savedName: result.group.name, name: result.group.name, updatedAt: result.group.updatedAt,
+      const result = await saveCollaborationGroup({ id: group.id, name: name.trim(), sessionIds: draft.sessionIds ?? group.sessionIds, expectedUpdatedAt: draft.updatedAt });
+      setLatest(null);
+      updateDraft({ savedName: result.group.name, name: result.group.name, updatedAt: result.group.updatedAt, sessionIds: result.group.sessionIds,
         ...(rules === savedRules ? { rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' } : {}) });
       await refresh(); setNotice('协作组名称已更新');
-    } catch (error) { setError(error instanceof Error ? error.message : '改名失败'); }
+    } catch (error) { setLatest(null); setError(error instanceof TerminalApiError && error.status === 409 ? '组设置已被其他人修改。请查看最新状态并确认，名称与群规草稿仍保留。' : error instanceof Error ? error.message : '改名失败'); }
     finally { setBusy(null); }
   };
   const saveRules = async () => {
@@ -1255,14 +1258,26 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
     setBusy('group-rules'); setError(null); setNotice(null);
     try {
       const result = await setCollaborationGroupRules(group.id, { sessionId: rulesMemberId, text: rules, expectedVersion: rulesVersion });
+      setLatest(null);
       updateDraft({ savedName: result.group.name, ...(name === savedName ? { name: result.group.name } : {}),
-        updatedAt: result.group.updatedAt, rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' });
+        updatedAt: result.group.updatedAt, sessionIds: result.group.sessionIds, rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' });
       await refresh(); setNotice(rules.trim() ? '群规已保存，变更通知已入队' : '群规已清空，变更通知已入队');
-    } catch (error) { setError(error instanceof Error ? error.message : '群规保存失败'); }
+    } catch (error) { setLatest(null); setError(error instanceof TerminalApiError && error.status === 409 ? '群规已被其他人修改。请查看最新状态并确认，名称与群规草稿仍保留。' : error instanceof Error ? error.message : '群规保存失败'); }
     finally { setBusy(null); }
   };
   const reload = () => {
-    updateDraft(freshGroupSettingsDraft(group, rulesMemberId)); setError(null);
+    updateDraft(freshGroupSettingsDraft(group, rulesMemberId)); setLatest(null); setError(null);
+  };
+  const reviewLatest = async () => {
+    if (busy) return;
+    setBusy('group-latest'); setError(null); setNotice(null); setLatest(null);
+    try {
+      const current = await listCollaborationGroups();
+      const found = current.groups.find(item => item.id === group.id);
+      if (!found) throw new Error('协作组已删除；草稿仍保留，请返回看板查看。');
+      setLatest(found);
+    } catch (error) { setError(error instanceof Error ? error.message : '最新状态读取失败；草稿仍保留，请重试。'); }
+    finally { setBusy(null); }
   };
   return <section aria-label="协作组设置" onKeyDown={event => {
     if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
@@ -1271,11 +1286,20 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
   }} className="mt-3 rounded-xl border border-border/20 bg-surface-2 p-3">
     <div className="mb-3 flex items-center justify-between gap-2"><h4 className="text-[12px] font-medium text-foreground">组设置</h4><button type="button" disabled={Boolean(busy)} aria-label="关闭组设置" className="rounded-lg p-2 text-muted-foreground hover:bg-surface-elevated" onClick={onClose}><X size={14} /></button></div>
     <label className="block space-y-1 text-[10px] text-muted-foreground">协作组名称<input autoFocus className={inputClass} value={name} maxLength={240} disabled={Boolean(busy)} onChange={event => updateDraft({ name: event.target.value })} /></label>
-    <div className="mt-2 flex justify-end"><button type="button" disabled={Boolean(busy) || !name.trim() || name.trim() === savedName} className={`${buttonClass} min-h-9 bg-primary text-primary-foreground`} onClick={() => void rename()}>{busy === 'group-name' ? '保存中…' : '保存名称'}</button></div>
+    <div className="mt-2 flex justify-end"><button type="button" disabled={Boolean(busy) || Boolean(latest) || !name.trim() || name.trim() === savedName} className={`${buttonClass} min-h-9 bg-primary text-primary-foreground`} onClick={() => void rename()}>{busy === 'group-name' ? '保存中…' : '保存名称'}</button></div>
     <div className="mt-3 space-y-2 border-t border-border/15 pt-3"><label className="block space-y-1 text-[10px] text-muted-foreground">由本组成员发布群规变更<select className={inputClass} value={rulesMemberId} disabled={Boolean(busy) || !localMembers.length} onChange={event => updateDraft({ rulesMemberId: event.target.value })}><option value="">选择当前服务的一个成员</option>{!localMembers.some(session => session.sessionId === rulesMemberId) && rulesMemberId && <option value={rulesMemberId}>原成员已不在组内，请重新选择</option>}{localMembers.map(session => <option key={session.sessionId} value={session.sessionId}>{session.name}</option>)}</select></label><label className="block space-y-1 text-[10px] text-muted-foreground">群规与协作约定<textarea className={`${inputClass} min-h-24 resize-y`} value={rules} maxLength={8192} disabled={Boolean(busy)} onChange={event => updateDraft({ rules: event.target.value })} placeholder="例如：说明分工、交接要求和结果格式。清空后保存可移除群规。" /></label></div>
     {!canEditRules && <p className="mt-1 text-[10px] text-muted-foreground">{localMembers.length ? '选择发布变更的成员后即可保存，不需要关闭工作台。' : '当前服务没有本组成员，请先添加成员或切换到成员所在的服务。已有群规可在此查看。'}</p>}
-    <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-[9px] ${rulesBytes > 8192 ? 'text-destructive' : 'text-muted-foreground'}`}>{rulesBytes > 8192 ? '内容过长，请缩短群规' : '保存或清空群规会通知本组其他成员'}</p><button type="button" disabled={Boolean(busy) || !canEditRules || rulesBytes > 8192 || rules === savedRules} className={`${buttonClass} min-h-9 shrink-0 bg-primary text-primary-foreground`} onClick={() => void saveRules()}>{busy === 'group-rules' ? '保存中…' : rules.trim() ? '保存群规' : '清空群规'}</button></div>
+    <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-[9px] ${rulesBytes > 8192 ? 'text-destructive' : 'text-muted-foreground'}`}>{rulesBytes > 8192 ? '内容过长，请缩短群规' : '保存或清空群规会通知本组其他成员'}</p><button type="button" disabled={Boolean(busy) || Boolean(latest) || !canEditRules || rulesBytes > 8192 || rules === savedRules} className={`${buttonClass} min-h-9 shrink-0 bg-primary text-primary-foreground`} onClick={() => void saveRules()}>{busy === 'group-rules' ? '保存中…' : rules.trim() ? '保存群规' : '清空群规'}</button></div>
     {dirty && <p role="status" className="mt-3 text-[11px] leading-5 text-muted-foreground">有未保存修改。关闭、Escape 或切换组后，草稿仍保留在本标签页；名称与群规需分别保存。</p>}
+    {dirty && <button type="button" disabled={Boolean(busy)} className={`${buttonClass} mt-2 min-h-11 text-primary hover:bg-surface-elevated`} onClick={() => void reviewLatest()}>{busy === 'group-latest' ? '读取中…' : '查看最新状态并保留草稿'}</button>}
+    {latest && <section aria-label="最新组设置" className="mt-3 space-y-2 rounded-lg bg-surface p-3 text-[11px] leading-5">
+      <p className="font-medium text-foreground">确认最新状态后，再分别保存草稿</p>
+      <p className="break-words text-muted-foreground">当前名称：{latest.name}</p>
+      <p className="whitespace-pre-wrap break-words text-muted-foreground">当前群规：{latest.instructions?.text || '未设置'}</p>
+      <p className="break-words text-muted-foreground">当前成员（{latest.sessionIds.length}）：{latest.sessionIds.map(id => sessions.find(item => item.sessionId === id)?.name ?? shortId(id)).join('、') || '暂无成员'}</p>
+      <p className="text-muted-foreground">保留你的未保存内容；名称保存将保留以上成员，群规保存会通知当前成员。再次发生修改时仍会检查冲突。</p>
+      <div className="flex flex-wrap gap-2"><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-11 bg-primary text-primary-foreground`} onClick={() => { updateDraft(rebaseGroupSettingsDraft(draftRef.current, latest)); setLatest(null); setError(null); setNotice('已确认最新状态，草稿仍保留；请分别保存名称与群规。'); }}>确认最新状态，保留草稿</button><button type="button" className={`${buttonClass} min-h-11 text-muted-foreground`} onClick={() => setLatest(null)}>取消确认</button></div>
+    </section>}
     <div className="mt-3 flex justify-between gap-2 border-t border-border/15 pt-2"><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 text-muted-foreground hover:bg-surface-elevated`} onClick={reload}><RefreshCw size={12} />重新载入{dirty && '（放弃草稿）'}</button><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 bg-surface text-foreground`} onClick={onClose}>{dirty ? '关闭并保留草稿' : '关闭'}</button></div>
   </section>;
 }

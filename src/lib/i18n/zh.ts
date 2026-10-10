@@ -178,6 +178,7 @@ export const zh: TranslationDictionary = {
     domain: "域（可选）",
     rdpPasswordHint: "填写远程桌面设置中的 RDP 用户名和密码；Ubuntu 的远程登录凭据可能与系统账户不同。勾选记住登录后，成功连接时在服务端加密保存。",
     rdpBackendUnavailable: "当前服务的 RDP 支持不可用，请先完成服务端 RDP 配置。",
+    rdpBackendRecovery: "请在运行 Termdock 服务的电脑上启动 RDP 后台（guacd），然后刷新此页面重新检查。连接设置会保留；也可在高级设置中切换为 VNC。",
     rdpFailed: "远程桌面连接失败。请检查目标地址、端口和电脑上的远程桌面设置。",
     rdpLinuxStep1: "在 Ubuntu 打开「设置 → 系统 → 远程桌面」，启用「桌面共享」或「远程登录」，并设置 RDP 登录凭据。",
     rdpStep1: "在目标电脑启用 RDP 远程桌面。Windows 可在「设置 → 系统 → 远程桌面」中开启；Mac 内置屏幕共享请使用 VNC。",

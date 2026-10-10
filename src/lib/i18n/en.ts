@@ -178,6 +178,7 @@ export const en: TranslationDictionary = {
     domain: "Domain (optional)",
     rdpPasswordHint: "Use the RDP username and password configured in Remote Desktop settings. Ubuntu remote login credentials may differ from your system account. Remember login encrypts credentials on the service after a successful connection.",
     rdpBackendUnavailable: "RDP support is unavailable on this service. Complete the server-side RDP setup first.",
+    rdpBackendRecovery: "Start the RDP backend (guacd) on the computer running this Termdock service, then refresh this page to check again. Connection settings are kept; you can also switch to VNC in advanced settings.",
     rdpFailed: "RDP connection failed. Check Remote Desktop, the port, and credentials. For a self-signed certificate, verify the computer’s identity before enabling certificate trust.",
     rdpLinuxStep1: "On Ubuntu, open Settings → System → Remote Desktop. Enable Desktop Sharing or Remote Login and configure RDP credentials.",
     rdpStep1: "Enable RDP on the target computer. On Windows, use Settings → System → Remote Desktop. Use VNC for built-in Mac Screen Sharing.",
