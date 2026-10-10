@@ -93,7 +93,7 @@ interface UseSessionPersistenceReturn {
   inventory: SessionInventory | null;
   activeSessionId: string | null;
   isLoading: boolean;
-  openSession: (options: OpenSessionInventoryOptions) => Promise<OpenSessionInventoryResult>;
+  openSession: (options: OpenSessionInventoryOptions, activation?: { shouldActivate?: () => boolean }) => Promise<OpenSessionInventoryResult & { discarded: boolean }>;
   removeSession: (sessionId: string, preferredActiveSessionId?: string | null) => Promise<void>;
   updateSessionActivity: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
@@ -174,7 +174,11 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   );
   const [isLoading, setIsLoading] = useState<boolean>(initialCached === null);
   const initialized = useRef(false);
-  const activeSessionIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  const sessionsRef = useRef(sessions);
+  const inventoryRef = useRef<SessionInventory | null>(null);
+  const sessionSnapshotRevisionRef = useRef(0);
+  const selectionRevisionRef = useRef(0);
   const isLoadingRef = useRef<boolean>(initialCached === null);
   const lastSnapshotSeqRef = useRef(0);
   // A cached cold-start GET and control-WS snapshots can both arrive after a
@@ -200,6 +204,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
   const applySessionList = useCallback((sessionList: PersistedSession[], options?: { reconcileActive?: boolean }) => {
     const filteredSessionList = sessionList.filter((session) => !removedSessionIdsRef.current.has(session.sessionId));
+    sessionsRef.current = filteredSessionList;
+    ++sessionSnapshotRevisionRef.current;
     setSessions((prev) => (sessionListKey(prev) === sessionListKey(filteredSessionList) ? prev : filteredSessionList));
     writeSessionsCache(filteredSessionList);
     if (options?.reconcileActive) {
@@ -216,8 +222,13 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
             (session) => !removedSessionIdsRef.current.has(session.sessionId),
           ),
         };
+    inventoryRef.current = filteredInventory;
     setInventory(filteredInventory);
     applySessionList(normalizeInventorySessionList(filteredInventory.clientSessions), options);
+  }, [applySessionList]);
+
+  const mutateSessionList = useCallback((update: (previous: PersistedSession[]) => PersistedSession[]) => {
+    applySessionList(update(sessionsRef.current));
   }, [applySessionList]);
 
   const discardLegacyLocalState = useCallback((): PersistedSession[] => {
@@ -233,6 +244,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     localStorage.removeItem(LEGACY_STORAGE_KEY);
     clearSessionsCache();
     writeActiveSessionId(null);
+    sessionsRef.current = [];
+    activeSessionIdRef.current = null;
     setSessions([]);
     setActiveSessionIdState(null);
     console.info('[session-persist] discarded legacy local session cache');
@@ -273,22 +286,56 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     return [];
   }, [applyInventory, discardLegacyLocalState]);
 
-  const openSession = useCallback(async (options: OpenSessionInventoryOptions): Promise<OpenSessionInventoryResult> => {
+  const openSession = useCallback(async (
+    options: OpenSessionInventoryOptions,
+    activation?: { shouldActivate?: () => boolean },
+  ): Promise<OpenSessionInventoryResult & { discarded: boolean }> => {
     const mutationRevision = ++localMutationRevisionRef.current;
+    const selectionRevision = selectionRevisionRef.current;
+    const snapshotRevision = sessionSnapshotRevisionRef.current;
     const result = await openSessionInventoryEntry(options);
-    if (mutationRevision === localMutationRevisionRef.current) {
+    if (mutationRevision === localMutationRevisionRef.current && snapshotRevision === sessionSnapshotRevisionRef.current) {
       applyInventory(result.inventory);
+    } else {
+      // A full response may predate another creation, rename, reorder, delete,
+      // or control snapshot. Keep that newer list and add only the real result.
+      const currentInventory = inventoryRef.current;
+      const inventoryById = new Map(currentInventory?.clientSessions.map((session) => [session.sessionId, session]));
+      const clientSessions = sessionsRef.current.map((session) => ({
+        frontendSessionId: session.sessionId,
+        connected: false,
+        live: false,
+        restorable: false,
+        ...inventoryById.get(session.sessionId),
+        ...session,
+      }));
+      if (!clientSessions.some((session) => session.sessionId === result.session.sessionId)) {
+        clientSessions.push(result.session);
+      }
+      applyInventory({ ...(currentInventory ?? result.inventory), clientSessions });
+    }
+    if (
+      mutationRevision === localMutationRevisionRef.current
+      && selectionRevision === selectionRevisionRef.current
+      && !removedSessionIdsRef.current.has(result.session.sessionId)
+      && (activation?.shouldActivate?.() ?? true)
+    ) {
+      activeSessionIdRef.current = result.session.sessionId;
       setActiveSessionIdState(result.session.sessionId);
       writeActiveSessionId(result.session.sessionId);
     }
-    return result;
+    return {
+      ...result,
+      session: inventoryRef.current?.clientSessions.find(session => session.sessionId === result.session.sessionId) ?? result.session,
+      discarded: removedSessionIdsRef.current.has(result.session.sessionId),
+    };
   }, [applyInventory]);
 
   const removeSession = useCallback(async (sessionId: string, preferredActiveSessionId?: string | null) => {
     ++localMutationRevisionRef.current;
     removedSessionIdsRef.current.add(sessionId);
     removeSessionFontSize(sessionId);
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.filter(s => s.sessionId !== sessionId);
       const preferredSessionStillExists = preferredActiveSessionId != null
         && updated.some((session) => session.sessionId === preferredActiveSessionId);
@@ -298,6 +345,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
             : pickSessionAfterClose(prev, sessionId, (session) => session.sessionId))
         : activeSessionIdRef.current;
       setActiveSessionIdState(nextActiveSessionId);
+      activeSessionIdRef.current = nextActiveSessionId;
       writeActiveSessionId(nextActiveSessionId);
       writeSessionsCache(updated);
       return updated;
@@ -308,22 +356,24 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to remove session from inventory:', error);
     }
-  }, []);
+  }, [mutateSessionList]);
 
   // 更新会话活跃时间：当前只做本地缓存，服务端在 open / WS connect 时会更新 authority。
   const updateSessionActivity = useCallback((sessionId: string) => {
     const now = Date.now();
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, lastActivity: now } : s
       );
       writeSessionsCache(updated);
       return updated;
     });
-  }, []);
+  }, [mutateSessionList]);
 
   // 设置活跃会话（仅本地，不触发服务器持久化）
   const setActiveSession = useCallback((sessionId: string | null) => {
+    ++selectionRevisionRef.current;
+    activeSessionIdRef.current = sessionId;
     setActiveSessionIdState(sessionId);
     writeActiveSessionId(sessionId);
   }, []);
@@ -334,7 +384,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     if (!trimmed) return;
     const mutationRevision = ++localMutationRevisionRef.current;
 
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, name: trimmed, customName: true } : s
       );
@@ -348,12 +398,12 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to rename session in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 取消自定义名称,回退到默认显示规则
   const resetSessionCustomName = useCallback(async (sessionId: string) => {
     const mutationRevision = ++localMutationRevisionRef.current;
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, customName: false } : s
       );
@@ -367,12 +417,12 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to reset session name in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 重排会话顺序
   const reorderSessions = useCallback(async (orderedIds: string[]) => {
     const mutationRevision = ++localMutationRevisionRef.current;
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const idToSession = new Map(prev.map(s => [s.sessionId, s]));
       const reordered = orderedIds
         .map(id => idToSession.get(id))
@@ -390,15 +440,17 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to reorder sessions in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 清除所有会话
   const clearAllSessions = useCallback(async () => {
     ++localMutationRevisionRef.current;
-    for (const session of sessions) removedSessionIdsRef.current.add(session.sessionId);
-    setSessions([]);
+    for (const session of sessionsRef.current) removedSessionIdsRef.current.add(session.sessionId);
+    applySessionList([]);
+    inventoryRef.current = null;
     setInventory(null);
     setActiveSessionIdState(null);
+    activeSessionIdRef.current = null;
     writeActiveSessionId(null);
     clearSessionsCache();
     if (typeof window !== 'undefined') {
@@ -410,12 +462,12 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to clear session inventory:', error);
     }
-  }, [sessions]);
+  }, [applySessionList]);
 
   // 更新会话的 backendSessionId
   const updateSessionBackendId = useCallback(async (sessionId: string, backendSessionId: string) => {
     const mutationRevision = ++localMutationRevisionRef.current;
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, backendSessionId } : s
       );
@@ -429,7 +481,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to update session backend in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 初始化时恢复会话
   useEffect(() => {

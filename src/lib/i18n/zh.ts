@@ -1238,6 +1238,7 @@ export const zh: TranslationDictionary = {
     explorerTitle: '资源管理器',
     split: '分屏',
     splitTitle: '添加到分屏工作区',
+    closeFailed: ({ name }) => `未能关闭「${name}」。会话仍保留，请重试。`,
     splitNew: '新建会话并加入',
     splitNewHint: '沿用当前目录和默认会话类型；可连续加入多个会话',
     splitExisting: '选择已有会话或工作区',

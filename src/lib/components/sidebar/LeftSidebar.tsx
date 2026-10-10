@@ -278,11 +278,15 @@ export function LeftSidebar(
   const { t } = useI18n();
   const [, requestAttentionScroll] = useState(0);
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
-  const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
+  const [newSessionComposerOpen, setNewSessionComposerOpenState] = useState(false);
   const [sessionLaunchPending, setSessionLaunchPending] = useState(false);
   const [sessionLaunchError, setSessionLaunchError] = useState<NewSessionCreationError | null>(null);
   const sessionLaunchPendingRef = useRef(false);
   const composerGenerationRef = useRef(0);
+  const setNewSessionComposerOpen = useCallback((open: boolean) => {
+    if (!open) composerGenerationRef.current += 1;
+    setNewSessionComposerOpenState(open);
+  }, []);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
   const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
@@ -724,7 +728,9 @@ export function LeftSidebar(
     setSessionLaunchPending(true);
     setSessionLaunchError(null);
     const generation = composerGenerationRef.current;
-    onNewSession({ ...options, onResult: (result) => {
+    onNewSession({ ...options,
+      shouldActivate: () => generation === composerGenerationRef.current && (options.shouldActivate?.() ?? true),
+      onResult: (result) => {
       sessionLaunchPendingRef.current = false;
       setSessionLaunchPending(false);
       if (!result.ok) {

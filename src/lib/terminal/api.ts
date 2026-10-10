@@ -401,6 +401,7 @@ interface WsConnection {
   ws: WebSocket;
   onEvent: (event: TerminalStreamEvent) => void;
   onError?: (error: Error, fatal?: boolean) => void;
+  disconnect: () => void;
   reconnectNow: (options?: { silent?: boolean }) => void;
   suspendReconnect: () => void;
   retryState: {
@@ -697,6 +698,7 @@ export function connectTerminalStream(
       ws,
       onEvent,
       onError,
+      disconnect: cleanup,
       reconnectNow: (options?: { silent?: boolean }) => {
         if (retryState.isClosed) return;
         retryState.isSuspended = false;
@@ -1296,10 +1298,6 @@ export async function sendTmuxAction(
 // ---- Session management (HTTP) ----
 
 export async function closeTerminal(sessionId: string): Promise<void> {
-  // Clean up WebSocket first
-  const conn = wsConnections.get(sessionId);
-  if (conn) { conn.retryState.isClosed = true; try { conn.ws.close(); } catch { /* ignore */ } wsConnections.delete(sessionId); }
-
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${sessionId}`, {
     method: 'DELETE',
@@ -1308,13 +1306,16 @@ export async function closeTerminal(sessionId: string): Promise<void> {
   // Closing is idempotent from the UI perspective: after fast-restore or a
   // server-side cleanup race the backend session may already be gone, but the
   // local tab still needs to be removable.
-  if (response.status === 404) {
-    return;
-  }
-  if (!response.ok) {
+  if (!response.ok && response.status !== 404) {
     const error = await response.json().catch(() => ({ error: 'Failed to close terminal' }));
     throw new Error(error.error || 'Failed to close terminal');
   }
+
+  // Keep the attach usable until the server confirms deletion. A failed close
+  // leaves the tab in place, so it must retain input, output and reconnection.
+  // Look up the current connection after awaiting DELETE: it may have reconnected.
+  const conn = wsConnections.get(sessionId);
+  conn?.disconnect();
 }
 
 export async function restartTerminalSession(
