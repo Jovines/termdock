@@ -560,6 +560,7 @@ export type TranslationDictionary = {
     contextDraftResize: string;
     contextDraftAutoCollapseAfterSend: string;
     contextDraftInsertFailed: string;
+    contextDraftPending: string;
     contextDraftCharacterCount: (params: TranslatorParams) => string;
     selectFilePrompt: string;
     backToFileList: string;
@@ -574,6 +575,15 @@ export type TranslationDictionary = {
     closeFileSearch: string;
     downloadFile: string;
     downloadFailed: string;
+    downloadCanceled: string;
+    uploadPending: string;
+    uploadInserting: string;
+    uploadDone: (params: TranslatorParams) => string;
+    uploadReferenceDone: string;
+    uploadReferenceRejected: string;
+    uploadLimit: string;
+    uploadCanceled: string;
+    uploadFileCount: (params: TranslatorParams) => string;
     uploadFile: string;
     uploadFiles: string;
     insertLocalFile: string;

@@ -21,15 +21,25 @@ export type UploadFilesForTemporaryFile = (
 export async function uploadTemporaryFileAndInsertReference(
   file: File,
   upload: UploadFilesForTemporaryFile,
-  insertReference: (path: string) => void,
+  insertReference: (path: string) => boolean | Promise<boolean>,
 ): Promise<TemporaryFileUploadResult> {
   const result = await upload(TEMPORARY_FILE_UPLOAD_DIRECTORY, [file]);
   const uploaded = result.files[0];
   if (!uploaded?.path) {
     throw new Error('Upload did not return a file path');
   }
-  insertReference(uploaded.path);
+  let accepted: boolean;
+  try { accepted = await insertReference(uploaded.path); }
+  catch { throw new UploadedReferenceRejectedError(uploaded); }
+  if (!accepted) throw new UploadedReferenceRejectedError(uploaded);
   return uploaded;
+}
+
+export class UploadedReferenceRejectedError extends Error {
+  constructor(public readonly uploaded: TemporaryFileUploadResult) {
+    super('File uploaded, but its reference was not accepted');
+    this.name = 'UploadedReferenceRejectedError';
+  }
 }
 
 // Kept for the image-only picker in the file sidebar.

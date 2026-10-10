@@ -2801,40 +2801,79 @@ function isIOS(): boolean {
 //      PWAs. If share is unavailable, use the already decrypted blob.
 //   3. <a download> blob URL fallback — used everywhere else (Firefox, desktop
 //      Safari). Triggers the browser's native download in a normal tab.
-export async function downloadFile(filePath: string): Promise<void> {
+/** `saved` means the platform save/share handoff completed, not proof of disk persistence. */
+export type DownloadResult = 'saved' | 'canceled';
+
+export async function downloadFile(filePath: string, signal?: AbortSignal): Promise<DownloadResult> {
+  if (signal?.aborted) return 'canceled';
   const url = `/api/terminal/fs/download?path=${encodeURIComponent(filePath)}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to download file' }));
-    throw new Error(error.error || 'Failed to download file');
+  try {
+    const response = signal ? await fetch(url, { signal }) : await fetch(url);
+    if (signal?.aborted) return 'canceled';
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to download file' }));
+      if (signal?.aborted) return 'canceled';
+      throw new Error(error.error || 'Failed to download file');
+    }
+
+    const blob = await response.blob();
+    // Some transports/native bridges can settle after abort. Never start saving
+    // bytes from a canceled request, even if its fetch/body ignored the signal.
+    if (signal?.aborted) return 'canceled';
+    const filename = parseFilenameFromContentDisposition(response.headers.get('Content-Disposition') || '')
+      ?? filePath.split('/').pop()?.split('\\').pop()
+      ?? 'download';
+
+    return await saveDownloadBlob(blob, filename, signal);
+  } catch (error) {
+    if (signal?.aborted) return 'canceled';
+    throw error;
   }
-
-  const blob = await response.blob();
-  const filename = parseFilenameFromContentDisposition(response.headers.get('Content-Disposition') || '')
-    ?? filePath.split('/').pop()?.split('\\').pop()
-    ?? 'download';
-
-  await saveDownloadBlob(blob, filename);
 }
 
 /** Save bytes already fetched through the page, using the native save flow. */
-export async function saveDownloadBlob(blob: Blob, filename: string): Promise<void> {
+export async function saveDownloadBlob(blob: Blob, filename: string, signal?: AbortSignal): Promise<DownloadResult> {
+  if (signal?.aborted) return 'canceled';
   // Prefer the File System Access API when available.
   const showSaveFilePicker = (window as unknown as {
     showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<{
-      createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+      createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void>; abort?: () => Promise<void> }>;
     }>;
   }).showSaveFilePicker;
   if (typeof showSaveFilePicker === 'function') {
+    let handle;
     try {
-      const handle = await showSaveFilePicker({ suggestedName: filename });
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      return;
+      handle = await showSaveFilePicker({ suggestedName: filename });
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      // otherwise fall through
+      if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) return 'canceled';
+      // Picker unavailable: use the browser's download flow below.
+    }
+    if (signal?.aborted) return 'canceled';
+    if (handle) {
+      let writable;
+      try {
+        writable = await handle.createWritable();
+      } catch (error) {
+        if (signal?.aborted) return 'canceled';
+        throw error;
+      }
+      const abortWrite = () => { void writable.abort?.().catch(() => {}); };
+      signal?.addEventListener('abort', abortWrite, { once: true });
+      try {
+        if (signal?.aborted) { abortWrite(); return 'canceled'; }
+        await writable.write(blob);
+        if (signal?.aborted) return 'canceled';
+        await writable.close();
+        return 'saved';
+      } catch (error) {
+        if (signal?.aborted) return 'canceled';
+        abortWrite();
+        // A failed write must remain an error, rather than claim success by
+        // silently starting a second download to another destination.
+        throw error;
+      } finally {
+        signal?.removeEventListener('abort', abortWrite);
+      }
     }
   }
 
@@ -2849,20 +2888,23 @@ export async function saveDownloadBlob(blob: Blob, filename: string): Promise<vo
     if (canShare) {
       try {
         await navigator.share({ files: [file] });
-        return;
+        return 'saved';
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
+        if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) return 'canceled';
         // Share failed: keep using the already decrypted bytes below.
       }
     }
   }
 
   if (isIOS()) {
+    if (signal?.aborted) return 'canceled';
     const attachment = await prepareEncryptedDownload(blob, filename);
-    if (attachment) { window.location.assign(attachment); return; }
+    if (signal?.aborted) return 'canceled';
+    if (attachment) { window.location.assign(attachment); return 'saved'; }
   }
 
   // Fallback: anchor + blob URL.
+  if (signal?.aborted) return 'canceled';
   const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = objectUrl;
@@ -2875,6 +2917,7 @@ export async function saveDownloadBlob(blob: Blob, filename: string): Promise<vo
     URL.revokeObjectURL(objectUrl);
     anchor.remove();
   }, 4000);
+  return 'saved';
 }
 
 export async function deleteFile(filePath: string): Promise<void> {
@@ -2892,17 +2935,33 @@ export async function deleteFile(filePath: string): Promise<void> {
   }
 }
 
+export interface UploadedFile { name: string; path: string; size: number }
+export interface UploadItemResult { index: number; name: string; status: 'uploaded' | 'failed' | 'rejected'; path?: string; size?: number; error?: string; code?: string }
+export interface UploadFilesResponse { files: UploadedFile[]; results?: UploadItemResult[] }
+export class UploadFilesError extends Error {
+  constructor(message: string, public readonly result?: UploadFilesResponse, public readonly code?: string) {
+    super(message);
+    this.name = 'UploadFilesError';
+  }
+}
+export const MAX_UPLOAD_FILES = 50;
+
 export async function uploadFiles(
   dir: string,
   files: File[],
   signal?: AbortSignal,
   onProgress?: (percent: number) => void,
-): Promise<{ files: { name: string; path: string; size: number }[] }> {
+): Promise<UploadFilesResponse> {
+  if (files.length > MAX_UPLOAD_FILES) {
+    throw new UploadFilesError(`Choose up to ${MAX_UPLOAD_FILES} files per upload. None were uploaded.`, {
+      files: [], results: files.map((file, index) => ({ index, name: file.name, status: 'rejected', code: 'UPLOAD_LIMIT' })),
+    }, 'UPLOAD_LIMIT');
+  }
   const formData = new FormData();
   for (const file of files) {
     formData.append('files', file);
   }
-  const url = `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}`;
+  const url = `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}&fileCount=${files.length}`;
   const csrfTokenHeader = await getCsrfToken();
   // Use the encrypted fetch transport even before a Service Worker controls this
   // page. Native XHR would transmit file bytes outside the end-to-end channel.
@@ -2927,7 +2986,7 @@ export async function uploadFiles(
   );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Upload failed' }));
-    throw new Error(error.error || 'Upload failed');
+    throw new UploadFilesError(error.error || 'Upload failed', error, error.code);
   }
   const result = await response.json();
   onProgress?.(100);

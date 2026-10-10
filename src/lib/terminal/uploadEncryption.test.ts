@@ -48,7 +48,7 @@ describe('file upload encryption boundary', () => {
     const progress = vi.fn();
     await expect(uploadFiles('/work', [file], undefined, progress)).resolves.toMatchObject({ files: [{ name: 'secret.txt' }] });
     expect(xhr).not.toHaveBeenCalled();
-    expect(requests[1].input).toBe('/api/terminal/fs/upload?dir=%2Fwork');
+    expect(requests[1].input).toBe('/api/terminal/fs/upload?dir=%2Fwork&fileCount=1');
     expect(requests[1].init?.method).toBe('POST');
     const body = requests[1].init?.body as Blob;
     expect(body.type).toMatch(/multipart\/form-data;\s*boundary=/);
@@ -67,5 +67,16 @@ describe('file upload encryption boundary', () => {
     const progress = vi.fn();
     await expect(uploadFiles('/work', [new File(['private'], 'secret.txt')], undefined, progress)).rejects.toThrow('Encrypted service unavailable');
     expect(xhr).not.toHaveBeenCalled(); expect(progress.mock.calls).toEqual([[0]]);
+  });
+  it('rejects all 51 selected items before making a network request', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const files = Array.from({ length: 51 }, (_, index) => new File(['x'], `${index}.txt`));
+    await expect(uploadFiles('/work', files)).rejects.toMatchObject({ code: 'UPLOAD_LIMIT', result: { files: [], results: expect.arrayContaining([{ index: 50, name: '50.txt', status: 'rejected', code: 'UPLOAD_LIMIT' }]) } });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('retains server per-item failure results for exact retry instead of discarding them', async () => {
+    const response = { error: 'Write failed', code: 'UPLOAD_FAILED', files: [], results: [{ index: 0, name: 'secret.txt', status: 'failed' }] };
+    vi.stubGlobal('fetch', vi.fn(async input => input === '/api/csrf-token' ? Response.json({ csrfToken: 'secure-channel' }) : Response.json(response, { status: 500 })));
+    await expect(uploadFiles('/work', [new File(['private'], 'secret.txt')])).rejects.toMatchObject({ result: response, code: 'UPLOAD_FAILED' });
   });
 });

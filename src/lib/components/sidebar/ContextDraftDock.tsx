@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import {
   Check,
+  LoaderCircle,
   ChevronDown,
   CornerDownLeft,
   PenLine,
@@ -22,6 +23,7 @@ interface ContextDraftDockLabels {
   insertAndSend: string;
   inserted: string;
   sent: string;
+  pending?: string;
   send: string;
   appended: string;
   resize: string;
@@ -42,8 +44,8 @@ interface ContextDraftDockProps {
   onAutoCollapseAfterSendChange: (enabled: boolean) => void;
   onDisable: () => void;
   onClear: () => void;
-  onInsert: () => void;
-  onInsertAndSend: () => void;
+  onInsert: () => boolean | Promise<boolean>;
+  onInsertAndSend: () => boolean | Promise<boolean>;
 }
 
 const SEND_FEEDBACK_MS = 1400;
@@ -102,6 +104,9 @@ export function ContextDraftDock({
   onInsertAndSend,
 }: ContextDraftDockProps) {
   const [lastAction, setLastAction] = useState<'inserted' | 'sent' | null>(null);
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+  const mountedRef = useRef(true);
   const [appendFlash, setAppendFlash] = useState(false);
   const [manualHeight, setManualHeight] = useState<number | null>(() => readStoredHeight(draftDevice()));
   const manualHeightRef = useRef<number | null>(manualHeight);
@@ -114,9 +119,13 @@ export function ContextDraftDock({
   const firstLine = value.trim().split('\n')[0] ?? '';
   const sendShortcut = /Mac|iPhone|iPad/.test(window.navigator?.platform ?? '') ? '⌘↵' : 'Ctrl+↵';
 
-  useEffect(() => () => {
-    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
-    if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+      if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    };
   }, []);
 
   // 服务端存有手机/桌面各自的拖动手动高度：挂载后拉一次覆盖本地缓存
@@ -250,16 +259,23 @@ export function ContextDraftDock({
 
   // 插入/发送不再立即收起：父组件等终端 ack，成功才清空收起，
   // 失败（断联）保持编辑态并通过 insertError 提示
-  const handleInsert = () => {
-    onInsert();
-    markAction('inserted');
+  const runAction = async (action: 'inserted' | 'sent') => {
+    if (!hasDraft || pendingRef.current) return;
+    pendingRef.current = true;
+    setPending(true);
+    setLastAction(null);
+    try {
+      const accepted = await (action === 'sent' ? onInsertAndSend() : onInsert());
+      // The parent also guards the submitted snapshot before clearing it.
+      if (accepted && mountedRef.current) markAction(action);
+    } catch { /* Parent retains the draft and reports the failure. */ }
+    finally {
+      pendingRef.current = false;
+      if (mountedRef.current) setPending(false);
+    }
   };
-
-  const handleSend = () => {
-    if (!hasDraft) return;
-    onInsertAndSend();
-    markAction('sent');
-  };
+  const handleInsert = () => { void runAction('inserted'); };
+  const handleSend = () => { void runAction('sent'); };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Escape') {
@@ -267,7 +283,7 @@ export function ContextDraftDock({
       onCollapsedChange(true);
       return;
     }
-    if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+    if (event.nativeEvent.isComposing || event.keyCode === 229 || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
     event.preventDefault();
     handleSend();
   };
@@ -359,7 +375,8 @@ export function ContextDraftDock({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!hasDraft}
+            disabled={!hasDraft || pending}
+            aria-busy={pending}
             className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 disabled:opacity-30 ${
               hasDraft
                 ? 'bg-primary text-primary-foreground hover:bg-primary/90'
@@ -368,7 +385,7 @@ export function ContextDraftDock({
             aria-label={labels.send}
             title={labels.send}
           >
-            {lastAction === 'sent' ? <Check size={12} /> : <Send size={12} />}
+            {pending ? <LoaderCircle size={12} className="animate-spin" /> : lastAction === 'sent' ? <Check size={12} /> : <Send size={12} />}
           </button>
         </div>
       </section>
@@ -480,21 +497,23 @@ export function ContextDraftDock({
               type="button"
               onPointerDown={keepFocus}
               onClick={handleInsert}
-              disabled={!hasDraft}
+              disabled={!hasDraft || pending}
+              aria-busy={pending}
               className="inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[10px] font-medium text-foreground/75 transition hover:bg-surface-2 hover:text-foreground active:scale-[0.98] disabled:opacity-30"
             >
               <CornerDownLeft size={11} />
-              <span>{lastAction === 'inserted' ? labels.inserted : labels.insert}</span>
+              <span>{pending ? labels.pending ?? labels.insert : lastAction === 'inserted' ? labels.inserted : labels.insert}</span>
             </button>
             <button
               type="button"
               onPointerDown={keepFocus}
               onClick={handleSend}
-              disabled={!hasDraft}
+              disabled={!hasDraft || pending}
+              aria-busy={pending}
               className="inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md bg-primary px-2 text-[10px] font-semibold text-primary-foreground transition hover:bg-primary/90 active:scale-[0.98] disabled:opacity-30"
               title={`${labels.insertAndSend} · ${sendShortcut}`}
             >
-              {lastAction === 'sent' ? <Check size={11} /> : <Send size={11} />}
+              {pending ? <LoaderCircle size={11} className="animate-spin" /> : lastAction === 'sent' ? <Check size={11} /> : <Send size={11} />}
               <span>{lastAction === 'sent' ? labels.sent : labels.send}</span>
             </button>
           </div>

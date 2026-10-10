@@ -78,7 +78,7 @@ import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
-import { EDA_PREVIEW_REQUEST_TIMEOUT_MS, applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, listDirectory, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, getSettings, updateSettings, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
+import { EDA_PREVIEW_REQUEST_TIMEOUT_MS, applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, listDirectory, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, uploadFiles, getSettings, updateSettings, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { normalizeClientWatchRoots } from '../../terminal/fileWatchRoots';
 import { partitionFileWatchEvents } from '../../terminal/fileWatchEvents';
 import { useI18n } from '../../i18n';
@@ -105,8 +105,11 @@ import type { AndroidRecording } from '../../android/api';
 import { insertAndroidPath, useAndroidRecordingDelivery } from '../../android/captureDelivery';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useAndroidMirrorStore } from '../../stores/useAndroidMirrorStore';
-import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
-import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
+import { appendContextDraft } from './contextDraft';
+import { useSidebarUpload } from './useSidebarUpload';
+import { SidebarUploadStatus } from './SidebarUploadStatus';
+import { useContextDraftDelivery } from './useContextDraftDelivery';
+import { useFileDownload } from '../../hooks/useFileDownload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
 import { VideoPreviewPlayer } from './VideoPreviewPlayer';
 import { isBusinessResource, useEncryptedMediaSource } from '../../federation/mediaSource';
@@ -5370,7 +5373,7 @@ export function FilePreview({
   // content. `null` means "render plain text" (unknown language, too large, or
   // refractor not loaded yet).
   const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
-  const [downloadState, setDownloadState] = useState<{ status: 'idle' | 'pending' | 'error'; message?: string }>({ status: 'idle' });
+  const downloadState = useFileDownload(rootPath && filePath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath, active);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [fileSearchQuery, setFileSearchQuery] = useState('');
   const [fileSearchMatches, setFileSearchMatches] = useState<Range[]>([]);
@@ -5477,7 +5480,6 @@ export function FilePreview({
 
     if (isPathChange) {
       logFilePreviewLoadingEvent('start', { loadingId, filePath, fullPath, rootPath, mode: previewMode, externalVersion });
-      setDownloadState({ status: 'idle' });
       setPreviewState({ kind: 'loading', mode: previewMode });
       restoredReadingStateKeyRef.current = null;
       const savedReadingState = readFilePreviewReadingState(rootPath, filePath);
@@ -6032,16 +6034,9 @@ export function FilePreview({
     onInsertText(lineReferenceText, lineReferenceKey, event.currentTarget);
   };
 
-  const handleDownload = async () => {
-    if (!readablePath || downloadState.status === 'pending') return;
+  const handleDownload = () => {
     if (previewState.kind === 'loading' || previewState.kind === 'error') return;
-    setDownloadState({ status: 'pending' });
-    try {
-      await downloadFile(readablePath);
-      setDownloadState({ status: 'idle' });
-    } catch (err) {
-      setDownloadState({ status: 'error', message: err instanceof Error ? err.message : t('rightSidebar.downloadFailed') });
-    }
+    return downloadState.start();
   };
 
   return (
@@ -6191,13 +6186,18 @@ export function FilePreview({
               onClick={() => void handleDownload()}
               disabled={downloadState.status === 'pending' || previewState.kind === 'loading' || previewState.kind === 'error'}
               className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:opacity-50 disabled:active:scale-100"
-              title={downloadState.status === 'error' ? downloadState.message ?? t('rightSidebar.downloadFailed') : t('rightSidebar.downloadFile')}
+              title={downloadState.status === 'error' ? downloadState.error ?? t('rightSidebar.downloadFailed') : t('rightSidebar.downloadFile')}
               aria-label={t('rightSidebar.downloadFile')}
             >
               {downloadState.status === 'pending' ? <RiLoader size={13} className="animate-spin" /> : <RiDownload size={14} />}
             </button>
+            {downloadState.status === 'pending' && (
+              <button type="button" onClick={downloadState.cancel} className="inline-flex h-9 shrink-0 items-center rounded-full bg-surface-2 px-2 text-xs text-foreground hover:bg-surface-elevated">{t('common.cancel')}</button>
+            )}
           </div>
         </div>
+        {downloadState.status === 'error' && <div role="alert" className="mt-2 text-xs text-destructive">{t('rightSidebar.downloadFailed')}: {downloadState.error}</div>}
+        {downloadState.status === 'canceled' && <div role="status" className="mt-2 text-xs text-muted-foreground">{t('rightSidebar.downloadCanceled')}</div>}
         {fileSearchOpen && searchableFilePreview && (
           <div className="mt-2 flex min-w-0 items-center gap-1.5" data-file-preview-search>
             <div className="flex min-w-0 flex-1 items-center rounded-lg bg-surface-2 px-2 focus-within:bg-surface-elevated">
@@ -6665,7 +6665,7 @@ export function RightSidebar(
   const [pushRemote, setPushRemote] = useState('');
   const [pushBranch, setPushBranch] = useState('');
   const [fileWatchError, setFileWatchError] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
+
   const [dragOver, setDragOver] = useState(false);
   const [canOpenInFileBrowser, setCanOpenInFileBrowser] = useState(false);
   const [diffStreamScrollRequest, setDiffStreamScrollRequest] = useState<{ key: string | null; nonce: number }>({ key: null, nonce: 0 });
@@ -7912,20 +7912,13 @@ export function RightSidebar(
     }
   }, [isMobile, onOpenRightSidebarFilePreview, selectFile]);
 
+  const upload = useSidebarUpload((directory) => invalidateDirectoryCache(directory, false));
+  const uploading = upload.busy;
   const handleUploadFiles = useCallback(async (files: File[], directoryPath?: string) => {
     const targetDir = directoryPath || explorerRoot || rootPath;
-    if (!targetDir || files.length === 0) return;
-    setUploading(true);
-    try {
-      await uploadFiles(targetDir, files);
-      invalidateDirectoryCache(targetDir, false);
-    } catch (err) {
-      setGitActionError(err instanceof Error ? err.message : t('rightSidebar.uploadFailed'));
-      window.setTimeout(() => setGitActionError(null), 4000);
-    } finally {
-      setUploading(false);
-    }
-  }, [explorerRoot, rootPath, invalidateDirectoryCache, t]);
+    if (!targetDir || !files.length) return;
+    await upload.start(targetDir, files);
+  }, [explorerRoot, rootPath, upload.start]);
 
   const handleOpenInFileBrowser = useCallback(async (path: string) => {
     try {
@@ -8091,23 +8084,17 @@ export function RightSidebar(
     return routeReferenceText(buildReferenceInputText(absolutePath, rootPath), key ?? `path:${absolutePath}`, undefined, source);
   }, [rootPath, routeReferenceText]);
 
+  const uploadTargetRef = useRef({ sessionId, contextDraftEnabled, isOpen });
+  uploadTargetRef.current = { sessionId, contextDraftEnabled, isOpen };
   const handleTemporaryImageUpload = useCallback(async (file: File) => {
-    setUploading(true);
-    try {
-      await uploadTemporaryImageAndInsertReference(file, uploadFiles, (uploadedPath) => {
-        insertPathReference(uploadedPath, `path:${uploadedPath}`);
-      });
-      // On phones the sidebar is an overlay. Return to the terminal after the
-      // one-shot insert; when the context draft is enabled, keep it open so
-      // the user can see and continue editing the appended reference instead.
-      if (isMobile && !contextDraftEnabled) onClose();
-    } catch (err) {
-      setGitActionError(err instanceof Error ? err.message : t('rightSidebar.uploadFailed'));
-      window.setTimeout(() => setGitActionError(null), 4000);
-    } finally {
-      setUploading(false);
-    }
-  }, [contextDraftEnabled, insertPathReference, isMobile, onClose, t]);
+    const target = sessionId ?? useTerminalStore.getState().activeSessionId;
+    const isCurrent = () => referenceMountedRef.current && uploadTargetRef.current.isOpen
+      && (uploadTargetRef.current.sessionId ?? useTerminalStore.getState().activeSessionId) === target
+      && useTerminalStore.getState().activeSessionId === target
+      && uploadTargetRef.current.contextDraftEnabled === contextDraftEnabled;
+    const accepted = await upload.start('/tmp', [file], path => insertPathReference(path, `path:${path}`), isCurrent);
+    if (accepted && isCurrent() && isMobile && !contextDraftEnabled) onClose();
+  }, [contextDraftEnabled, insertPathReference, isMobile, onClose, sessionId, upload.start]);
 
   /** 投屏面板的截图/录屏产物：与临时图片上传同一条链路，只是文件已经在内存里。 */
   const mirrorDeliveryMounted = useRef(true);
@@ -8166,43 +8153,20 @@ export function RightSidebar(
     routeReferenceText(text.endsWith(' ') ? text : `${text} `, key ?? `context:${label}`, '\n');
   }, [routeReferenceText]);
 
-  const sendContextDraftToTerminal = useCallback((submit: boolean) => {
-    const payload = buildDraftTerminalPayload(contextDraftText, submit);
-    if (!payload) return;
-    // 多行草稿：告诉终端走 bracketed-paste 包裹，避免 \n 被 PTY 当
-    // 行分隔符，让整段草稿作为一条消息发送而不是拆成多条。
-    const paste = submit && contextDraftText.trim().includes('\n');
-    // 断联的 session 无法接收输入：终端侧会拒绝并回 ack。只有 ack 成功
-    // 才清空草稿；是否收起由用户偏好决定。失败（含超时无活跃终端）
-    // 保留草稿并展开提示。
-    const nonce = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    let settled = false;
-    const settle = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener('termdock-insert-reference-ack', handleAck);
-      window.clearTimeout(timeoutId);
-      if (ok) {
-        setDraftInsertFailed(false);
-        setContextDraftText('');
-        if (contextDraftAutoCollapse) setContextDraftCollapsed(true);
-      } else {
-        setDraftInsertFailed(true);
-        setContextDraftCollapsed(false);
-      }
-    };
-    const handleAck = (event: Event) => {
-      const detail = (event as CustomEvent<{ nonce?: string; ok?: boolean }>).detail;
-      if (detail?.nonce !== nonce) return;
-      settle(detail.ok === true);
-    };
-    const timeoutId = window.setTimeout(() => settle(false), 1500);
-    window.addEventListener('termdock-insert-reference-ack', handleAck);
-    setDraftInsertFailed(false);
-    window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: payload, focus: true, paste, nonce },
-    }));
-  }, [contextDraftAutoCollapse, contextDraftText]);
+  const sendContextDraftToTerminal = useContextDraftDelivery({
+    text: contextDraftText,
+    sessionId: sessionId ?? useTerminalStore.getState().activeSessionId,
+    active: isOpen && contextDraftEnabled,
+    onAccepted: () => {
+      setDraftInsertFailed(false);
+      setContextDraftText('');
+      if (contextDraftAutoCollapse) setContextDraftCollapsed(true);
+    },
+    onRejected: () => {
+      setDraftInsertFailed(true);
+      setContextDraftCollapsed(false);
+    },
+  });
 
   const rootName = useMemo(() => {
     if (!rootPath) return t('rightSidebar.workspace');
@@ -12625,6 +12589,18 @@ export function RightSidebar(
           )}
         </Pane>
       </div>
+      {isOpen && upload.task && (
+        <SidebarUploadStatus task={upload.task}
+          onCancel={upload.cancel} onRetry={() => void upload.retry()} onDismiss={upload.dismiss}
+          labels={{
+            uploading: t('rightSidebar.uploadPending'), inserting: t('rightSidebar.uploadInserting'),
+            done: t(upload.task.kind === 'image' ? 'rightSidebar.uploadReferenceDone' : 'rightSidebar.uploadDone', { count: upload.task.uploaded.length }),
+            failed: t('rightSidebar.uploadFailed'), canceled: t('rightSidebar.uploadCanceled'),
+            referenceRejected: t('rightSidebar.uploadReferenceRejected'), limit: t('rightSidebar.uploadLimit'),
+            cancel: t('common.cancel'), retry: t('common.retry'), dismiss: t('common.close'),
+            files: t('rightSidebar.uploadFileCount', { count: upload.task.files.length }),
+          }} />
+      )}
       {isOpen && contextDraftEnabled && (
         <ContextDraftDock
           value={contextDraftText}
@@ -12654,6 +12630,7 @@ export function RightSidebar(
             insertAndSend: t('rightSidebar.contextDraftInsertAndSend'),
             inserted: t('rightSidebar.contextDraftInserted'),
             sent: t('rightSidebar.contextDraftSent'),
+            pending: t('rightSidebar.contextDraftPending'),
             send: t('rightSidebar.contextDraftSend'),
             appended: t('rightSidebar.contextDraftAppended'),
             resize: t('rightSidebar.contextDraftResize'),

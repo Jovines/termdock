@@ -5,6 +5,7 @@ import { Router, type Request, type Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import type { Dirent } from 'fs';
+import type { Readable } from 'stream';
 import os from 'os';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -5411,6 +5412,16 @@ interface UploadedFile {
   size: number;
 }
 
+interface UploadResult {
+  index: number;
+  name: string;
+  status: 'uploaded' | 'failed';
+  path?: string;
+  size?: number;
+  error?: string;
+  code?: string;
+}
+
 function sanitizeUploadFilename(filename: string | undefined, fallback: string): string {
   const normalized = (filename ?? '').replace(/\\/g, '/');
   const basename = path.basename(normalized).trim();
@@ -5496,6 +5507,18 @@ router.post('/upload', async (req: Request, res: Response) => {
       return;
     }
 
+    // New clients can reject an oversized selection before sending any files.
+    // Older clients are still checked against the actual multipart contents.
+    const declaredCount = req.query.fileCount;
+    if (declaredCount !== undefined && (typeof declaredCount !== 'string' || !/^\d+$/.test(declaredCount))) {
+      res.status(400).json({ error: 'Invalid fileCount query parameter', code: 'INVALID_FILE_COUNT' });
+      return;
+    }
+    if (typeof declaredCount === 'string' && Number(declaredCount) > MAX_UPLOAD_FILES) {
+      res.status(413).json({ error: 'Upload limit exceeded', code: 'UPLOAD_LIMIT', files: [], results: [], maxFiles: MAX_UPLOAD_FILES });
+      return;
+    }
+
     const resolvedDir = await pathValidator.validatePathAsync(dir);
     const stat = await fs.promises.stat(resolvedDir);
     if (!stat.isDirectory()) {
@@ -5503,10 +5526,13 @@ router.post('/upload', async (req: Request, res: Response) => {
       return;
     }
 
-    const files: UploadedFile[] = [];
-    let fileCount = 0;
-    let aborted = false;
+    const results: UploadResult[] = [];
+    const createdPaths: string[] = [];
+    let failure: { error: string; code: string; status: number } | undefined;
     let totalSize = 0;
+    const fail = (error: string, code = 'UPLOAD_FAILED', status = 500) => {
+      failure ??= { error, code, status };
+    };
 
     const bb = busboy({
       headers: req.headers,
@@ -5514,86 +5540,100 @@ router.post('/upload', async (req: Request, res: Response) => {
       // multipart filename parameters to latin1. Without this, dropped files
       // named with CJK characters turn into mojibake like "æ¥è¯¢".
       defParamCharset: 'utf8',
-      limits: { fileSize: MAX_UPLOAD_SIZE, files: MAX_UPLOAD_FILES },
+      // Enforce the count in the file handler rather than Busboy's files limit:
+      // the latter silently omits the names of files beyond the limit.
+      // Busboy marks a stream truncated as soon as this boundary is reached;
+      // one extra byte lets an exactly-100MB file remain a valid upload.
+      limits: { fileSize: MAX_UPLOAD_SIZE + 1 },
     });
 
     const writePromises: Promise<void>[] = [];
 
-    bb.on('file', (_fieldname: string, fileStream: NodeJS.ReadableStream, info: { filename: string; encoding: string; mimeType: string }) => {
-      if (aborted) {
-        fileStream.resume();
-        return;
-      }
-
-      fileCount++;
-      if (fileCount > MAX_UPLOAD_FILES) {
-        aborted = true;
-        fileStream.resume();
-        return;
-      }
-
-      const { filename } = info;
-      const destName = sanitizeUploadFilename(filename, `file_${fileCount}`);
+    bb.on('file', (_fieldname: string, fileStream: Readable, info: { filename: string; encoding: string; mimeType: string }) => {
+      const index = results.length;
+      const destName = sanitizeUploadFilename(info.filename, `file_${index + 1}`);
+      const result: UploadResult = { index, name: destName, status: 'failed' };
+      results.push(result);
+      if (results.length > MAX_UPLOAD_FILES) fail('Upload limit exceeded', 'UPLOAD_LIMIT', 413);
       const baseDestPath = path.join(resolvedDir, destName);
+      fileStream.on('limit', () => fail('Upload limit exceeded', 'UPLOAD_LIMIT', 413));
+      // Parsing/cancellation can destroy this stream while exclusive open is
+      // pending. The async iterator below will still observe the same error.
+      fileStream.on('error', () => {});
 
-      // Resolve unique path asynchronously inside the write promise
       const writePromise = (async () => {
-        const destPath = await uniquePath(baseDestPath);
-        return new Promise<void>((resolve, reject) => {
-          const writeStream = fs.createWriteStream(destPath);
-          let fileSize = 0;
-
-          fileStream.on('data', (chunk: Buffer) => {
-            fileSize += chunk.length;
-            totalSize += chunk.length;
-            if (totalSize > MAX_UPLOAD_SIZE) {
-              aborted = true;
-              (fileStream as any).destroy?.(new Error('File too large'));
-              writeStream.destroy();
-              return;
+        let destination: Awaited<ReturnType<typeof createUniqueUploadFile>> | undefined;
+        let fileSize = 0;
+        try {
+          if (!failure) {
+            destination = await createUniqueUploadFile(baseDestPath);
+            createdPaths.push(destination.path);
+          }
+          // Keep draining rejected files so every multipart item can be
+          // reported, and Busboy can finish without a dangling write stream.
+          for await (const chunk of fileStream) {
+            const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            fileSize += data.length;
+            totalSize += data.length;
+            if (totalSize > MAX_UPLOAD_SIZE) fail('Upload limit exceeded', 'UPLOAD_LIMIT', 413);
+            if (destination && !failure) {
+              try {
+                await destination.handle.writeFile(data);
+              } catch (error) {
+                // Do not throw from the iterator body: that would destroy the
+                // multipart source before Busboy can drain the rest of it.
+                fail(error instanceof Error ? error.message : 'Upload failed');
+              }
             }
-          });
-
-          fileStream.pipe(writeStream);
-
-          writeStream.on('finish', () => {
-            files.push({ name: destName, path: destPath, size: fileSize });
-            resolve();
-          });
-
-          writeStream.on('error', (err) => {
-            fs.promises.unlink(destPath).catch(() => {});
-            reject(err);
-          });
-        });
+          }
+          if (destination && !failure) {
+            result.status = 'uploaded';
+            result.path = destination.path;
+            result.size = fileSize;
+          }
+        } catch (error) {
+          fail(error instanceof Error ? error.message : 'Upload failed');
+          fileStream.resume();
+        } finally {
+          try {
+            await destination?.handle.close();
+          } catch (error) {
+            fail(error instanceof Error ? error.message : 'Upload failed');
+          }
+        }
       })();
 
       writePromises.push(writePromise);
     });
 
-    bb.on('error', (_err: Error) => {
-      // Will be handled by the promise rejection below
-    });
-
-    bb.on('filesLimit', () => {
-      aborted = true;
-    });
-
-    bb.on('finish', async () => {
-      try {
-        await Promise.all(writePromises);
-        if (aborted && files.length === 0) {
-          res.status(413).json({ error: 'Upload limit exceeded', code: 'UPLOAD_LIMIT' });
-          return;
-        }
-        res.status(200).json({ files });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Upload failed';
-        res.status(500).json({ error: message, code: 'UPLOAD_FAILED' });
-      }
-    });
-
-    req.pipe(bb);
+    const onAborted = () => bb.destroy(new Error('Upload canceled'));
+    req.once('aborted', onAborted);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        bb.once('finish', resolve);
+        bb.once('error', reject);
+        req.pipe(bb);
+      });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : 'Upload failed');
+    } finally {
+      req.off('aborted', onAborted);
+    }
+    await Promise.all(writePromises);
+    if (res.destroyed) fail('Upload canceled');
+    if (failure) {
+      // Paths enter this list only after an exclusive create succeeded. Never
+      // remove an existing file or another concurrent request's destination.
+      await Promise.all(createdPaths.map(filePath => fs.promises.unlink(filePath).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      })));
+      const { error, code, status } = failure;
+      if (!res.destroyed) res.status(status).json({ error, code, files: [], maxFiles: MAX_UPLOAD_FILES,
+        results: results.map(result => ({ index: result.index, name: result.name, status: 'failed', error, code })) });
+      return;
+    }
+    const files: UploadedFile[] = results.map(result => ({ name: result.name, path: result.path!, size: result.size! }));
+    res.status(200).json({ files, results });
   } catch (error) {
     if (error instanceof Error && (error as any).code === 'PATH_NOT_ALLOWED') {
       res.status(403).json({ error: 'Path not allowed', code: 'PATH_NOT_ALLOWED' });
@@ -5604,31 +5644,16 @@ router.post('/upload', async (req: Request, res: Response) => {
   }
 });
 
-async function uniquePath(filePath: string): Promise<string> {
-  try {
-    await fs.promises.access(filePath);
-    // File exists — find a unique name
-    const ext = path.extname(filePath);
-    const base = filePath.slice(0, filePath.length - ext.length);
-    let counter = 1;
-    let candidate: string;
-    do {
-      candidate = `${base}_${counter}${ext}`;
-      counter++;
-    } while (await exists(candidate));
-    return candidate;
-  } catch {
-    // File doesn't exist — use as-is
-    return filePath;
-  }
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.promises.access(p);
-    return true;
-  } catch {
-    return false;
+async function createUniqueUploadFile(filePath: string) {
+  const ext = path.extname(filePath);
+  const base = filePath.slice(0, filePath.length - ext.length);
+  for (let counter = 0; ; counter++) {
+    const candidate = counter === 0 ? filePath : `${base}_${counter}${ext}`;
+    try {
+      return { path: candidate, handle: await fs.promises.open(candidate, 'wx') };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
   }
 }
 

@@ -50,7 +50,8 @@ import {
   isTransientBackendSessionMiss,
 } from '../../terminal/sessionRecovery';
 import { buildReferenceInputText } from '../sidebar/referencePaths';
-import { uploadTemporaryFileAndInsertReference } from '../sidebar/temporaryImageUpload';
+import { uploadTemporaryFileAndInsertReference, UploadedReferenceRejectedError } from '../sidebar/temporaryImageUpload';
+import { requestReferenceInsertion } from '../sidebar/requestReferenceInsertion';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { resolveTerminalPath, TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
 import { getSessionFontSize, type SessionFontSizeChangeDetail } from '../../terminal/sessionFontSize';
@@ -249,6 +250,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [mobileFileUploadState, setMobileFileUploadState] = React.useState<'idle' | 'uploading' | 'inserted' | 'failed'>('idle');
   const [mobileFileUploadProgress, setMobileFileUploadProgress] = React.useState(0);
   const [mobileFileUploadError, setMobileFileUploadError] = React.useState<{ stage: string; detail: string } | null>(null);
+  const [mobileUploadedReference, setMobileUploadedReference] = React.useState<{ path: string; sessionId: string } | null>(null);
   const [mediaUploadResult, setMediaUploadResult] = React.useState<MediaUploadResult | null>(null);
   const dismissMediaUploadToast = React.useCallback(() => setMediaUploadResult(null), []);
   const { preferences: mediaCompressionPreferences, update: updateMediaCompressionPreferences, saveFailed: mediaCompressionSaveFailed } = useMediaCompressionPreferences();
@@ -2384,6 +2386,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
     if (!file) return;
+    const originatingSessionId = sessionId;
+    setMobileUploadedReference(null);
     setMobileFileUploadError(null);
     setMediaUploadResult(null);
     setMobileFileUploadProgress(0);
@@ -2406,12 +2410,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         uploadFiles(directory, files, undefined, setMobileFileUploadProgress)
       ), (uploadedPath) => {
         stage = '插入终端';
-        if (!isActiveRef.current || isConnectionTransitionRef.current) {
-          throw new Error(`终端暂不可用，文件已上传至 ${uploadedPath}`);
-        }
-        window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-          detail: { text: buildReferenceInputText(uploadedPath, null), focus: true },
-        }));
+        return requestReferenceInsertion(buildReferenceInputText(uploadedPath, null), originatingSessionId,
+          () => isActiveRef.current && !isConnectionTransitionRef.current
+            && sessionIdRef.current === originatingSessionId
+            && useTerminalStore.getState().activeSessionId === originatingSessionId);
       });
       if (compression || imageCompression) {
         setMediaUploadResult({
@@ -2425,14 +2427,36 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     })().then(
       () => showMobileFileUploadState('inserted'),
       error => {
-        const detail = describeMediaCompressionError(error);
+        if (error instanceof UploadedReferenceRejectedError) {
+          setMobileUploadedReference({ path: error.uploaded.path, sessionId: originatingSessionId });
+        }
+        const detail = error instanceof UploadedReferenceRejectedError ? error.uploaded.path : describeMediaCompressionError(error);
         setMobileFileUploadError({ stage, detail });
         setMobileCompressionOpen(true);
         showMobileFileUploadState('failed');
         clientLog('warn', 'MOBILE_MEDIA_UPLOAD failed', { stage, detail });
       },
     );
-  }, [mobileCompressionBitrate, mobileCompressionEnabled, mobileCompressionHeight, mobileImageCompressionEnabled, mobileImageMaxDimension, mobileImageQuality, showMobileFileUploadState]);
+  }, [mobileCompressionBitrate, mobileCompressionEnabled, mobileCompressionHeight, mobileImageCompressionEnabled, mobileImageMaxDimension, mobileImageQuality, sessionId, showMobileFileUploadState]);
+
+  const retryMobileUploadedReference = React.useCallback(async () => {
+    const uploaded = mobileUploadedReference;
+    if (!uploaded || uploaded.sessionId !== sessionId) return;
+    setMobileCompressionOpen(false);
+    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()));
+    showMobileFileUploadState('uploading');
+    const accepted = await requestReferenceInsertion(buildReferenceInputText(uploaded.path, null), uploaded.sessionId,
+      () => isActiveRef.current && !isConnectionTransitionRef.current && sessionIdRef.current === uploaded.sessionId
+        && useTerminalStore.getState().activeSessionId === uploaded.sessionId);
+    if (accepted) {
+      setMobileUploadedReference(null);
+      setMobileFileUploadError(null);
+      showMobileFileUploadState('inserted');
+    } else {
+      setMobileCompressionOpen(true);
+      showMobileFileUploadState('failed');
+    }
+  }, [mobileUploadedReference, sessionId, showMobileFileUploadState]);
 
   React.useEffect(() => {
     // Restoring an enabled preference must not fetch WASM during page startup.
@@ -2670,6 +2694,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             {mobileFileUploadError && <div role="alert" className="mt-3 rounded-lg bg-destructive/10 p-3 text-xs text-destructive">
               <p>{mobileFileUploadError.stage}失败。{mobileFileUploadError.stage.endsWith('压缩') ? '原文件未上传。' : mobileFileUploadError.stage === '插入终端' ? '文件已上传，路径见详情。' : ''}</p>
               <details className="mt-2"><summary className="cursor-pointer">错误详情</summary><p className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words">{mobileFileUploadError.detail}</p></details>
+              {mobileUploadedReference && <button type="button" onClick={() => void retryMobileUploadedReference()} disabled={mobileFileUploadState === 'uploading' || mobileUploadedReference.sessionId !== sessionId} className="mt-2 rounded-lg bg-surface-2 px-3 py-2 text-foreground disabled:opacity-50">{t('common.retry')}</button>}
             </div>}
             {mediaCompressionSaveFailed && <p className="mt-2 text-[11px] text-destructive">本机未能保存设置，重新打开后可能恢复默认值。</p>}
             <label className="mt-4 flex min-h-11 items-center justify-between rounded-xl bg-surface-elevated px-3 text-sm"><span>显示压缩结果提示</span><input type="checkbox" checked={mediaCompressionPreferences.showResultToast} onChange={event => updateMediaCompressionPreferences({ showResultToast: event.target.checked })} className="h-4 w-4 accent-primary" /></label>

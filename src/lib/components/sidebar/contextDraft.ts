@@ -12,3 +12,12 @@ export function buildDraftTerminalPayload(draft: string, submit: boolean): strin
   if (submit) return `${text}\r`;
   return /\s$/.test(draft) ? draft : `${text} `;
 }
+import type { TerminalSequenceOptions } from '../../terminal/sequencePayload';
+
+
+export function buildDraftTerminalRequest(draft: string, submit: boolean): { text: string; options: TerminalSequenceOptions } {
+  return {
+    text: buildDraftTerminalPayload(draft, submit),
+    options: { paste: /[\r\n]/.test(draft), submitAfterPaste: submit },
+  };
+}
