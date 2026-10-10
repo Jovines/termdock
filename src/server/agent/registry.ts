@@ -273,7 +273,7 @@ function replayFlags(agent: AgentInfo, argv: string[]): string[] | null {
  */
 export function inferResumeSessionId(agent: AgentInfo, argv: string[]): string | null {
   const safeId = (value: string | undefined): string | null =>
-    value && /^[A-Za-z0-9._-]+$/.test(value) ? value : null;
+    value && !value.startsWith('-') && /^[A-Za-z0-9._-]+$/.test(value) ? value : null;
   let named = -1;
   for (let index = 0; index < argv.length; index += 1) {
     if (tokenNamesAgent(argv[index], agent)) {
@@ -283,6 +283,31 @@ export function inferResumeSessionId(agent: AgentInfo, argv: string[]): string |
   }
   if (named < 0) return null;
   const tail = argv.slice(named + 1);
+
+  if (agent.isPlugin) {
+    const template = getPluginResumeConfig(agent.slug)?.command.trim().split(/\s+/);
+    if (!template || !tokenNamesAgent(template[0], agent)) return null;
+    const pattern = template.slice(1);
+    if (pattern.join(' ').split('{sessionId}').length !== 2) return null;
+    const matches = new Set<string>();
+    // A positional resume command must start the argument tail. Flag-based
+    // templates may follow other launch flags, as for built-in --resume.
+    const starts = pattern[0]?.startsWith('-') ? tail.map((_, index) => index) : [0];
+    for (const start of starts) {
+      let id: string | null = null;
+      const matched = pattern.every((token, index) => {
+        const value = tail[start + index];
+        if (value === undefined) return false;
+        if (!token.includes('{sessionId}')) return token === value;
+        const [prefix, suffix] = token.split('{sessionId}');
+        if (!value.startsWith(prefix) || !value.endsWith(suffix)) return false;
+        id = safeId(value.slice(prefix.length, suffix ? -suffix.length : undefined));
+        return !!id;
+      });
+      if (matched && id) matches.add(id);
+    }
+    return matches.size === 1 ? [...matches][0] : null;
+  }
 
   if (agent.slug === 'codex') {
     const resume = tail.indexOf('resume');

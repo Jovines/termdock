@@ -7,6 +7,9 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { captureTmuxPaneText, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
 import { randomUUID } from 'node:crypto';
+import { clearPluginAgents, detectAgentFromCommand, inferResumeSessionId, registerPluginAgents } from './registry.js';
+import type { LoadedPlugin } from './plugins.js';
+import { selectTmuxForegroundProgram, type TmuxProcessRow } from '../utils/tmuxProgramDetection.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { IntegrationStore, validatePolicy, type IntegrationPolicy, type IntegrationPrincipal } from './integrationStore.js';
 import { IntegrationSessions, permittedCwd, integrationLaunchCommand, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
@@ -390,6 +393,66 @@ it('adds a startup guard to a legacy exact restore without changing its stored l
   expect(record.session_id).toBe(created.session_id);
   expect(record.agent_native_session_id).toBe('original-native');
 });
+it.skipIf(process.platform !== 'linux')('recovers the live plugin UUID after store restart and keeps exact-running restore a no-op in real tmux', async () => {
+  const exec = promisify(execFile), socket = `td-native-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const run = async (args: string[]) => (await exec('tmux', ['-L', socket, ...args], { timeout: 5000 })).stdout;
+  const executable = path.join(dir, 'fixture-agent'), nativeId = '01a12546-8000-72c0-b47b-5fcc4a0bf2a9';
+  // A native fixture blocks on a FIFO while retaining the declared resume
+  // argv. It exercises process identity without any Agent hook or rich state.
+  fs.copyFileSync('/bin/cat', executable); fs.chmodSync(executable, 0o700);
+  execFileSync('mkfifo', [path.join(dir, 'resume')]);
+  fs.writeFileSync(path.join(dir, nativeId), '');
+  registerPluginAgents([{ manifest: { slug: 'fixture-agent', displayName: 'Fixture', aliases: ['fixture-agent'], resume: { command: 'fixture-agent resume {sessionId}' } }, iconPath: null } as LoadedPlugin]);
+  const p = principal(); p.launchProfiles[0].agentSlug = 'fixture-agent';
+  let pane: NonNullable<IntegrationSession['terminal_binding']>;
+  const api: IntegrationSessionAdapter = {
+    create: async (_record, prepared) => {
+      await run(['new-session', '-d', '-s', 'native']);
+      const identity = (await run(['display-message', '-p', '-t', 'native', '#{pid}:#{session_id}:#{pane_id}:#{pane_pid}'])).trim().split(':');
+      pane = { serverPid: Number(identity[0]), sessionId: identity[1], paneId: identity[2], panePid: Number(identity[3]), agentSlug: 'fixture-agent', nativeSessionId: null };
+      prepared(pane);
+      await run(['send-keys', '-t', pane.paneId, '-l', `cd '${dir}' && '${executable}' resume ${nativeId}`]);
+      await run(['send-keys', '-t', pane.paneId, 'Enter']);
+      for (let i = 0; i < 50; i++) { if ((await api.inspect(_record)).nativeId === nativeId) break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    }, restore: vi.fn(async () => {}), subscribe: () => () => {},
+    inspect: async () => {
+      const tty = (await run(['display-message', '-p', '-t', pane.paneId, '#{pane_tty}'])).trim().replace(/^\/dev\//, '');
+      const stdout = (await exec('ps', ['-t', tty, '-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args='])).stdout;
+      const rows = stdout.trim().split('\n').map(line => {
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)$/)!;
+        return { pid: +match[1], ppid: +match[2], pgid: +match[3], tpgid: +match[4], stat: match[5], comm: match[6], args: match[7] } as TmuxProcessRow;
+      });
+      const program = selectTmuxForegroundProgram({ panePid: pane.panePid, rows, shellNames: new Set(['sh', 'bash', 'zsh']), genericProgramNames: new Set(['python3']), extractProgramLabel: () => 'fixture-agent' });
+      const agent = detectAgentFromCommand(program?.rawArgs ?? '');
+      return { exists: true, running: !!agent, shell: false, agentSlug: agent?.slug ?? null, nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, program.rawArgs.split(/\s+/)) : null };
+    },
+  };
+  const file = path.join(dir, 'live-plugin-sessions.json');
+  let sessions = new IntegrationSessions(file, api); resources.push(() => sessions.close());
+  try {
+    const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'live-plugin' });
+    for (let i = 0; i < 50; i++) { if ((await run(['display-message', '-p', '-t', pane!.paneId, '#{pane_current_command}'])).trim() === 'fixture-agent') break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    expect((await run(['display-message', '-p', '-t', pane!.paneId, '#{pane_current_command}'])).trim()).toBe('fixture-agent');
+    expect(created).toMatchObject({ state: 'ready', agent_native_session_id: nativeId });
+    sessions.close(); sessions = new IntegrationSessions(file, api, 1);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const reread = await sessions.get(p, created.session_id);
+    expect(reread).toMatchObject({ state: 'ready', error_code: null, agent_native_session_id: nativeId });
+    const restored = await sessions.restore(p, created.session_id, 'already-live');
+    expect(restored.operation_id).toBe(created.operation_id);
+    expect(restored.terminal_binding).toEqual(reread.terminal_binding);
+    expect(api.restore).not.toHaveBeenCalled();
+    await run(['send-keys', '-t', pane!.paneId, 'C-c']);
+    for (let i = 0; i < 50; i++) { if (!(await api.inspect(restored)).running) break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    await run(['send-keys', '-t', pane!.paneId, '-l', `'${executable}' resume another-native`]);
+    await run(['send-keys', '-t', pane!.paneId, 'Enter']);
+    for (let i = 0; i < 50; i++) { if ((await api.inspect(restored)).nativeId === 'another-native') break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    expect(await sessions.get(p, created.session_id)).toMatchObject({ state: 'failed', error_code: 'NATIVE_SESSION_ID_MISMATCH' });
+    await expect(sessions.restore(p, created.session_id, 'wrong-live-id')).rejects.toMatchObject({ code: 'SESSION_IDENTITY_MISMATCH' });
+    expect(api.restore).not.toHaveBeenCalled();
+  } finally { sessions.close(); clearPluginAgents(); await run(['kill-server']).catch(() => {}); }
+}, 15000);
+
 it.skipIf(process.platform === 'win32')('reproduces boot-time input loss in a real tmux pane and protects the first task write', async () => {
   const exec = promisify(execFile), socket = `td-startup-${process.pid}-${randomUUID().slice(0, 8)}`;
   const run = async (args: string[]) => (await exec('tmux', ['-L', socket, ...args], { timeout: 5000 })).stdout;

@@ -2,6 +2,8 @@
 
 最低 CLI / 运行服务版本：**termdock 1.4.300**，两者都必须升级并重启服务。
 启动输入条件与保留凭据的策略更新要求 **CLI / 实际运行服务均至少 1.4.301**；协议仍为 1。
+插件原生 ID 的前台 argv 回读及服务重启后的运行中 restore 核验修复要求
+**实际运行服务至少 1.4.302**；建议 CLI 与服务同步安装 1.4.302（CLI 最低仍为 1.4.301）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -79,12 +81,15 @@ CLI 使用当前运行服务的端口，默认 9834。每个端口的身份、�
 
 ```json
 "startupInput": {
-  "allOf": ["model: GPT-5.5 (MAX) xhigh", "❯"],
+  "allOf": ["GPT-5.5 (MAX) xhigh", "❯"],
   "noneOf": ["model: loading"],
   "stableMs": 1000,
   "timeoutMs": 120000
 }
 ```
+
+TraeX 的恢复画面可能仅在 footer 显示模型，没有 `model:` 标题；因此示例不要求
+该前缀。管理员须同时核对冷启动和恢复画面，条件不匹配时保持待投递。
 
 `allOf` 的每个字面文本都须出现，`noneOf` 的每个文本都须缺席；区分大小写，
 连续横向空白折叠为一个空格，不使用正则或终端历史。每组最多 16 项，每项
@@ -280,6 +285,13 @@ session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSI
 显式精确恢复可以重建承载终端；这本身不证明 Agent 原生会话恢复成功。新参数/profile
 不能覆盖原启动快照，尚未确定结果的恢复拒绝另一次恢复，防止重复 Agent。
 
+1.4.302 起，绑定核验会读取原 pane 的实际前台进程 argv，即使
+`pane_current_command` 已显示具体 Agent 程序名也不省略 argv。插件按已登记的
+`resume.command` 模板回读精确 ID，支持位置参数及独立/内联 ID 标志；不使用
+`--last`、缓存的 UUID 或画面内容替代进程证明。声明模板本身不证明恢复成功。
+服务重启后，原 pane 中精确 UUID 已在运行时 get 应回读 ready，restore 返回原
+operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒绝。
+
 常见失败码（每项都是完整字符串）：
 
 - 配置/权限：`LAUNCH_PROFILE_DENIED`, `LAUNCHER_UNAVAILABLE`, `COLLAB_AGENT_UNAVAILABLE`, `SESSION_CWD_MISSING`, `SESSION_CWD_DENIED`, `INTEGRATION_SESSION_NOT_FOUND`, `INTEGRATION_SESSION_LIMIT`。
@@ -296,8 +308,11 @@ session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSI
 维护机未安装 TraeX；已用真实 tmux/终端程序复现加载期间丢弃输入，并验证配置条件
 阻止早投、仅写一次，以及无原生 UUID 时仍可放行；这不冒充真实 TraeX 启动验收。
 使用方已报告 1.4.300 开发机真实 TraeX UUID 捕获与精确恢复通过，原对话记忆、
-原 UUID、TD ID、attempt 和 artifact 保持一致。**1.4.301 的冷启动门控及超时诊断
-仍须使用方升级 CLI/实际运行服务后实机复验**，维护机没有代替完成该项。
+原 UUID、TD ID、attempt 和 artifact 保持一致。使用方已报告 1.4.301 冷启动首条
+仅写一次并收到明确 complete，超时保持 pending/0 次写入，策略更新保持凭据。
+维护机另外用真实 tmux/native fixture 验证插件 argv 回读、记录重载后运行中恢复
+不重复启动、不同 UUID 拒绝；**1.4.302 的真实 TraeX 服务重启回读/精确恢复
+仍须使用方升级实际运行服务后实机复验**，维护机没有代替完成该项。
 回读 capabilities 后，应核对原 TD ID、真实 TraeX UUID 与原 argv/cwd/包装器快照，
 并验证 Agent 真正加载原对话。
 先完成测试环境的创建→追问→关联答复，再验重复键、追加咨询、断线重投和精确恢复。

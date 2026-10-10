@@ -2129,7 +2129,9 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
   const serverPid = Number((await runTmux(['display-message', '-p', '#{pid}'])).trim());
   if (!Number.isInteger(serverPid) || serverPid <= 0) throw new Error('TMUX_SERVER_IDENTITY_UNAVAILABLE');
   const panes: CollaborationPaneCandidate[] = await Promise.all(layout.windows.flatMap((window) => window.panes).map(async (pane) => {
-    const program = await resolveTmuxPaneProgram(pane);
+    // Native identity needs the foreground argv even for a named binary;
+    // pane_current_command alone cannot prove an exact resumed conversation.
+    const program = await resolveTmuxPaneProgram(pane, true);
     const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
     const nativeSessionId = agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null;
     return { serverPid, sessionId: layout.sessionId, paneId: pane.id, panePid: pane.pid,
@@ -4516,7 +4518,7 @@ async function getProcessSnapshot(): Promise<TmuxProcessSnapshotRow[]> {
   return processSnapshotPromise;
 }
 
-async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
+async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false): Promise<{
   command: string | null;
   source: 'tmux-pane' | 'tmux-tty';
   rawArgs: string | null;
@@ -4528,7 +4530,7 @@ async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   // If pane command is NOT a shell but also too generic (e.g. "node"), also try
   const isGeneric = commandKey ? genericProgramNames.has(commandKey) : false;
 
-  if (!isShell && !isGeneric) {
+  if (!isShell && !isGeneric && !requireArgs) {
     // Non-shell, non-generic command — pane_current_command is good enough
     return { command, source: 'tmux-pane', rawArgs: null };
   }

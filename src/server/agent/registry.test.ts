@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { LoadedPlugin } from './plugins.js';
 import {
   agentBySlug,
   buildResumeCommand,
   detectAgentFromArgv,
   detectAgentFromCommand,
   inferResumeSessionId,
+  registerPluginAgents,
+  clearPluginAgents,
 } from './registry.js';
 
 describe('detectAgentFromArgv', () => {
@@ -88,6 +91,29 @@ describe('detectAgentFromArgv', () => {
 });
 
 describe('inferResumeSessionId', () => {
+  afterEach(() => clearPluginAgents());
+  function plugin(command = 'fixture-agent resume {sessionId}') {
+    registerPluginAgents([{ manifest: { slug: 'fixture-agent', displayName: 'Fixture', aliases: ['fixture-agent', 'fixture-alias'], resume: { command } }, iconPath: null } as LoadedPlugin]);
+    return agentBySlug('fixture-agent')!;
+  }
+  it('recovers a plugin UUID from its declared positional template and live binary alias without hooks', () => {
+    const agent = plugin();
+    expect(inferResumeSessionId(agent, ['/home/user/.local/bin/fixture-alias', 'resume', '01a12546-8000-72c0-b47b-5fcc4a0bf2a9', '-m', 'model', '-c', 'reasoning=high']))
+      .toBe('01a12546-8000-72c0-b47b-5fcc4a0bf2a9');
+    expect(inferResumeSessionId(agent, ['fixture-agent', '-m', 'resume', 'old-id'])).toBeNull();
+    expect(inferResumeSessionId(agent, ['fixture-agent', 'resume', '--last'])).toBeNull();
+    expect(inferResumeSessionId(agent, ['fixture-agent', 'resume', '$(unsafe)'])).toBeNull();
+    expect(inferResumeSessionId(agent, ['unrelated-wrapper', 'resume', 'id'])).toBeNull();
+  });
+  it('honors separate and inline plugin flag templates and rejects conflicting UUIDs', () => {
+    const inline = plugin('fixture-agent --conversation={sessionId}');
+    expect(inferResumeSessionId(inline, ['fixture-agent', '--model', 'test', '--conversation=native-id'])).toBe('native-id');
+    expect(inferResumeSessionId(inline, ['fixture-agent', '--conversation=one', '--conversation=two'])).toBeNull();
+    clearPluginAgents();
+    const separate = plugin('fixture-agent threads continue {sessionId}');
+    expect(inferResumeSessionId(separate, ['fixture-agent', 'threads', 'continue', 'native-id', '--model', 'test'])).toBe('native-id');
+    expect(inferResumeSessionId(separate, ['fixture-agent', 'threads', 'resume', 'native-id'])).toBeNull();
+  });
   it('recovers ids from resumed Agent argv after Termdock reattaches', () => {
     expect(inferResumeSessionId(agentBySlug('codex')!, [
       'node', '/opt/codex/bin/codex', '--dangerously-bypass-approvals-and-sandbox',
@@ -102,6 +128,7 @@ describe('inferResumeSessionId', () => {
   it('rejects unsafe, missing, and fresh-session ids', () => {
     expect(inferResumeSessionId(agentBySlug('codex')!, ['codex'])).toBeNull();
     expect(inferResumeSessionId(agentBySlug('codex')!, ['codex', 'resume', '$(bad)'])).toBeNull();
+    expect(inferResumeSessionId(agentBySlug('codex')!, ['codex', 'resume', '--last'])).toBeNull();
     expect(inferResumeSessionId(agentBySlug('claude')!, ['wrapper', '--resume', 'abc'])).toBeNull();
   });
 });
