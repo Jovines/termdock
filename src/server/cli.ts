@@ -3729,7 +3729,7 @@ async function main(): Promise<void> {
 
   if (options.integration) {
     const argv = options.integration;
-    if (!argv.length || ['help', '--help'].includes(argv[0])) { console.log(INTEGRATION_HELP); return; }
+    if (!argv.length || argv.includes('--help') || argv[0] === 'help') { console.log(INTEGRATION_HELP); return; }
     const state = getRunningState();
     if (!state?.localApiToken) { console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running' })); process.exitCode = 1; return; }
     process.exitCode = argv[0] === 'revoke' && argv.length === 2

@@ -409,3 +409,14 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('来自:开发 Agent · task · message-1');
   });
 });
+
+it('always identifies nonterminal principals and teaches correlated stored replies, including large-message retrieval', () => {
+  const incoming = message({ kind: 'message', integrationOrigin: { integrationId: 'report-bridge', source: 'external' } });
+  const prompt = render([incoming], { showRoutingHelp: false });
+  expect(prompt).toContain('来自:后台接入 report-bridge');
+  expect(prompt).toContain('td collab --session reviewer-id reply message-1');
+  expect(prompt).toContain('--response-kind result'); expect(prompt).toContain('stored');
+  expect(prompt).not.toContain('来自:用户');
+  const large = render([{ ...incoming, content: 'x'.repeat(5000) }], { showRoutingHelp: false });
+  expect(large).toContain('message get message-1 --text'); expect(large).toContain('reply message-1');
+});

@@ -60,12 +60,27 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
 ── 后台集成（独立凭据；本机 Unix socket） ──
   td integration help（管理授权与启动配置）
   td collab --principal <id> capabilities
+  send <成员id> "执行正文" --idempotency-key <key>（权限 message.send；普通消息，不创建看板任务）
+  reply <原消息id> "追问正文" --idempotency-key <key>（回到原成员、原话题）
+  message get <id> | message list [--thread <id>] [--after-id <id>] [--limit 1..200]
+    （权限 message.read；list 返回保留记录，next_after_id/has_more 用于分页）
+  以上命令均需前缀 td collab --principal <id>；send/reply 支持 --file/--stdin。
+  来源可附 --source <name> --external-actor '<JSON object>' --external-message-id <id>。
+  Agent 在终端收到消息后：td collab --session <自己的TD成员id> reply <原消息id> "答复" --response-kind result --idempotency-key <key>
+    ack=明确回复收到；progress=原文进展；result=原文结果。后台回复 status=stored，仅表示持久保存。
+    回复通过 message.reply 事件主动推送；payload.reply_to 关联原消息，response_kind 标记回复类型。
   events subscribe --consumer <name> --jsonl（主动推送，默认持续运行）
   events ack <cursor> --consumer <name>（仅声明已持久接收）
+    events 需权限 events.read；按 event_id 去重，落盘后 ACK 连续前缀；订阅读到不等于 ACK。
+    断线自动重连，同 consumer 从已 ACK 处重放；保留缺口 EVENT_RETENTION_GAP 停止，需对账后换 consumer。
+    消息历史只覆盖仍保留记录；不存在的 after-id 返回 MESSAGE_NOT_FOUND，不能据此声称历史完整。
   session create --group <id> --launch-profile <id> --cwd <absolute-path> --idempotency-key <key>
   session get <id> | session restore <id> --idempotency-key <key>
   task respond <task-id> --attempt <attempt-id> --to-event <comment-event-id> --content <答复>
   凭据通过 TERMDOCK_INTEGRATION_CREDENTIAL_FILE 注入，不通过命令行传 token。
+  消息接入最低 CLI/实际服务均为 1.4.308；capabilities 回读双方版本与 integration_message_send/reply/history。
+  principal 只操作获授权本机组；不能冒充用户/成员或用户验收。普通消息不需要 task/accepted。
+  任务命令适用于需要任务闭环的流程；message.send/read 与 task 权限独立。
   已验收任务可追加纯咨询；respond 保留当前结果与验收，revise 是修改要求。
 ── 常用 ──
   status (who is in my groups, their names, roles, observed activity.
@@ -153,11 +168,11 @@ Message limit: ${COLLAB_LIMITS.message_bytes} UTF-8 bytes; metadata: ${COLLAB_LI
 Idempotency retention: 7 days. Terminal delivery, ACK and result never imply each other.
 Delivery semantics: delivered = written to the terminal — never proof of
 reading or task completion; a timeout stops waiting, it does not cancel delivery.
-The service cannot see whether the recipient's agent consumed a message. To
-judge for yourself, use --wait-until delivered and read the recipient-screen
-snapshot in the receipt: if your message is not visible on that screen, send it
-again (a fresh send is a new message and will be written again); if it is
-visible but unanswered, the recipient may simply not have started yet.`;
+The service cannot see whether the recipient's agent consumed a message.
+Use explicit replies as evidence. A screen snapshot is only an observation;
+do not automatically resend a delivered message because it is absent from a snapshot.
+stored = durable reply to a nonterminal principal; terminal delivery waits do not apply.
+Idempotent retries reuse the same key and payload; a fresh key creates a new message.`;
 
 /** One roster row: prefer the member's human name, keep the full session id
  * reachable for role set/unset targeting, mark unset members explicitly. */
@@ -227,6 +242,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     command.target = positional.shift(); command.message = positional.join(' ');
     if (!command.target || (!command.message && !options.file && !options.stdin)) throw new Error(`${action} requires a target and message`);
     if ([Boolean(command.message), Boolean(options.file), Boolean(options.stdin)].filter(Boolean).length !== 1) throw new Error('Choose inline body, --file, or --stdin');
+    if (options.principal && !options['idempotency-key']) throw new Error('Integration message mutation requires an explicit --idempotency-key');
   } else if (action === 'rules') {
     command.operation = positional.shift(); command.groupId = positional.shift(); command.message = positional.join(' ');
     if (!command.groupId || !['get', 'set', 'clear'].includes(command.operation ?? '')) throw new Error('Usage: td collab rules get|set|clear <group-id>');
@@ -246,7 +262,10 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
       : !options.origin || (command.operation === 'accept' ? !options.file : options.file))) throw new Error('transport invite needs --origin; accept needs --origin and --file');
   } else if (action === 'message') {
     command.operation = positional.shift(); command.target = positional.shift();
-    if (!['get', 'watch', 'confirm-shell'].includes(command.operation ?? '') || !command.target || positional.length) throw new Error('Usage: td collab message get|watch|confirm-shell <id>');
+    if (!['get', 'watch', 'confirm-shell', 'list'].includes(command.operation ?? '') || (command.operation === 'list' ? !options.principal || Boolean(command.target) : !command.target) || positional.length) throw new Error('Usage: td collab message get|watch|confirm-shell <id>; --principal <id> message list');
+    if (command.operation === 'list') {
+      for (const flag of Object.keys(options)) if (!['principal', 'json', 'jsonl', 'text', 'group', 'thread', 'after-id', 'limit'].includes(flag)) throw new Error(`--${flag} is not supported by message list`);
+    } else if (['group', 'thread', 'after-id', 'limit'].some(flag => options[flag] !== undefined)) throw new Error('History filters apply to --principal message list only');
   } else if (action === 'cursor') {
     command.operation = positional.shift(); command.target = positional.shift();
     if (command.operation !== 'commit' || !command.target || !options.consumer || positional.length) throw new Error('Usage: td collab cursor commit <token> --consumer <name>');
@@ -295,10 +314,11 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     inbox: ['raw', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
-    message: ['raw', 'receipt-only', 'no-rules', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
+    message: ['raw', 'receipt-only', 'no-rules', 'follow', 'wait-until', 'timeout', 'expect-reply', 'group', 'thread', 'after-id', 'limit'], cursor: ['consumer'],
     add: [], remove: [], spawn: ['launch-profile', 'name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: ['lines', 'raw'],
   };
   for (const option of byAction[action]) allowed.add(option);
+  if (options.principal && ['send', 'reply'].includes(action)) for (const option of ['source', 'external-actor', 'external-message-id']) allowed.add(option);
   for (const option of Object.keys(options)) if (!allowed.has(option)) throw new Error(`--${option} is not supported by ${action}`);
   if (options.lines && (!/^\d+$/.test(String(options.lines)) || Number(options.lines) < 1 || Number(options.lines) > 10000)) throw new Error('--lines must be 1..10000 history rows');
   if (action === 'drive' && command.operation !== 'capture' && (options.lines || options.raw)) throw new Error('--lines/--raw only apply to capture');
@@ -328,7 +348,7 @@ export function waitSatisfied(receipt: Json, stage: string, reply?: string): boo
  *  machine reasons onto what the sender should do next, so a settled-but-
  *  unconsumed message is not mistaken for a lost one (or a good one). */
 const DELIVERY_DIAGNOSTICS: Record<string, string> = {
-  AGENT_CONSUME_UNCONFIRMED: '消息已写入对方终端，但未确认被对方消费；它可能尚未开始处理，可用 capture 查看当前屏幕或重发',
+  AGENT_CONSUME_UNCONFIRMED: '消息已写入对方终端，但未确认被对方消费；等待明确回复，不从终端快照推断消费或自动重发',
   SHELL_CONFIRMATION_REQUIRED: '目标当前是 shell，消息可能被当命令执行；确认请运行 message confirm-shell <id>',
   DELIVERY_IN_PROGRESS: '投递进行中（写入前的中间标记，正常会在数秒内推进为 delivered 或带原因的重试）',
   TERMINAL_WRITE_FAILED: '写入对方终端失败，会按重试间隔继续尝试',
@@ -357,14 +377,18 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
   const output = (value: Json) => {
     if (o.text) {
       let diagnosed = false;
-      if (Array.isArray(value.messages)) for (const message of value.messages) {
-        const fanIds = Array.isArray(message.fanOutIds) ? (message.fanOutIds as string[]) : [];
-        const names = (value.names as Record<string, string | null> | undefined) ?? {};
-        io.write(`[${message.responseKind ?? message.kind}] ${canonicalShortId(message.id)} from ${message.fromSessionId ?? 'user'}${fanIds.length ? ' · 群发' : ''}`);
-        // A fan-out dispatch names its sibling recipients so a broadcast is
-        // never read as a one-to-one assignment; unknown ids stay raw.
-        if (fanIds.length) io.write(`同时发给了:${fanIds.map((id) => names[id] ?? id).join('、')}`);
-        io.write(message.content);
+      if (Array.isArray(value.messages)) {
+        for (const message of value.messages) {
+          const fanIds = Array.isArray(message.fanOutIds) ? (message.fanOutIds as string[]) : [];
+          const names = (value.names as Record<string, string | null> | undefined) ?? {};
+          io.write(`[${message.responseKind ?? message.kind}] ${canonicalShortId(message.id)} from ${message.fromSessionId ?? (message.integrationOrigin ? `principal:${message.integrationOrigin.integrationId}` : 'user')}${fanIds.length ? ' · 群发' : ''}`);
+          // A fan-out dispatch names its sibling recipients so a broadcast is
+          // never read as a one-to-one assignment; unknown ids stay raw.
+          if (fanIds.length) io.write(`同时发给了:${fanIds.map((id) => names[id] ?? id).join('、')}`);
+          io.write(message.content);
+          if (message.status === 'stored') io.write('答复已持久保存；接收方是后台程序，不是终端。');
+        }
+        if (value.next_after_id !== undefined) io.write(`next_after_id=${value.next_after_id ?? ''} has_more=${value.has_more === true}（仅保留记录）`);
       }
       else if (value.message) {
         // One line instead of the full rules text — the CLI is stateless so it
@@ -523,9 +547,15 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     }
     if (command.action === 'cursor') { output(await request('POST', '/cursor/commit', { cursor: command.target, consumer: o.consumer })); return 0; }
     if (command.action === 'message') {
+      if (command.operation === 'list') {
+        const params = new URLSearchParams();
+        for (const key of ['group', 'thread', 'after-id', 'limit']) if (o[key]) params.set(key, String(o[key]));
+        output(await request('GET', `/message?${params}`)); return 0;
+      }
       const route = `/message/${encodeURIComponent(command.target!)}`;
       if (command.operation === 'confirm-shell') { output(await request('POST', `${route}/${command.operation}`)); return 0; }
       receipt = await request('GET', `${route}?receipt_only=${Boolean(o['receipt-only'] || command.operation === 'watch')}&raw=${Boolean(o.raw)}`);
+      if (receipt.status === 'stored') { output(receipt); return 0; }
       if (command.operation === 'get' && !o.follow && !o['wait-until'] && !o['expect-reply']) { output(receipt); return 0; }
     } else if (['send', 'reply', 'handoff'].includes(command.action)) {
       let content = command.message ?? '';
@@ -554,7 +584,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       // CLI receipts stay small even when the message is a large evidence package.
       delete receipt.messages;
       receipt.idempotency_key = idempotencyKey;
-      if (receipt.task_recorded) { output(receipt); return 0; }
+      if (receipt.task_recorded || receipt.integration_recorded) { output(receipt); return 0; }
     } else if (command.action === 'role') {
       if (command.operation === 'list') {
         const body = await request('GET', `/role?group=${encodeURIComponent(command.groupId!)}`);

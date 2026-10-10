@@ -72,9 +72,14 @@ export interface CollaborationRemoteSession {
 }
 
 export type CollaborationMessageKind = 'message' | 'ask' | 'reply' | 'task' | 'handoff' | 'done';
-export type CollaborationMessageStatus = 'pending' | 'delivered' | 'read' | 'failed' | 'expired';
+export type CollaborationMessageStatus = 'pending' | 'delivered' | 'read' | 'failed' | 'expired' | 'stored';
 
 export interface CollaborationMessage extends MessageExtras {
+  /** Server-authenticated source; never inferred from caller metadata. */
+  integrationOrigin?: import('./collaborationTaskTypes.js').TaskOrigin;
+  /** A nonterminal reply destination; never registered as an Agent or queued for PTY delivery. */
+  toPrincipalId?: string;
+  storedAt?: number;
   instructions?: CollaborationRules;
   sequence?: number;
   shellConfirmed?: boolean;
@@ -381,6 +386,7 @@ export class CollaborationStore {
   }
 
   send(input: MessageExtras & {
+    integrationOrigin?: import('./collaborationTaskTypes.js').TaskOrigin;
     groupId: string;
     fromSessionId: string | null;
     toSessionIds: string[];
@@ -394,6 +400,7 @@ export class CollaborationStore {
     if (!MESSAGE_KINDS.has(input.kind)) throw new Error('消息类型无效');
     const extras = validateExtras(input);
     const content = input.content;
+    if (typeof content !== 'string') throw new CollaborationError('INVALID_MESSAGE', 'Message content must be text');
     if (Buffer.byteLength(content) > COLLAB_LIMITS.message_bytes) throw new CollaborationError('MESSAGE_TOO_LARGE', `Message exceeds ${COLLAB_LIMITS.message_bytes} UTF-8 bytes`, 413);
     if (!content.trim()) throw new Error('消息不能为空');
     const recipients = Array.from(new Set(input.toSessionIds)).filter((id) =>
@@ -401,8 +408,13 @@ export class CollaborationStore {
     );
     if (recipients.length === 0) throw new Error('没有有效的接收会话');
     const now = Date.now();
-    const key = input.idempotencyKey ? JSON.stringify([input.groupId, input.fromSessionId, input.idempotencyKey]) : null;
-    const hash = crypto.createHash('sha256').update(stableJson([recipients.slice().sort(), input.kind, content, input.threadId ?? null, input.replyTo ?? null, extras.responseKind, extras.metadata, extras.task, extras.expiresAt])).digest('hex');
+    const key = input.idempotencyKey ? JSON.stringify([input.groupId, input.integrationOrigin ? `principal:${input.integrationOrigin.integrationId}` : input.fromSessionId, input.idempotencyKey]) : null;
+    const payload: unknown[] = [recipients.slice().sort(), input.kind, content, input.threadId ?? null, input.replyTo ?? null, extras.responseKind, extras.metadata, extras.task, extras.expiresAt];
+    if (input.integrationOrigin) {
+      if (input.fromSessionId !== null || group.federated || !/^[a-zA-Z0-9._-]{1,80}$/.test(input.integrationOrigin.integrationId)) throw new CollaborationError('INVALID_INTEGRATION_MESSAGE', 'Integration messages require an authenticated local nonterminal source');
+      payload.push(input.integrationOrigin);
+    }
+    const hash = crypto.createHash('sha256').update(stableJson(payload)).digest('hex');
     const previous = key ? this.document.idempotency?.[key] : null;
     if (previous && previous.expiresAt > now) {
       if (previous.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', 'This key was already used with a different payload', 409);
@@ -413,6 +425,7 @@ export class CollaborationStore {
     const taken = this.takenIds();
     const threadId = input.threadId?.trim() || newCollaborationId(taken, this.drawId);
     const messages = recipients.map((toSessionId): CollaborationMessage => ({
+      ...(input.integrationOrigin ? { integrationOrigin: structuredClone(input.integrationOrigin) } : {}),
       idempotencyKey: input.idempotencyKey, responseKind: extras.responseKind, metadata: extras.metadata, task: extras.task, expiresAt: extras.expiresAt,
       sequence: this.nextSequence(),
       id: newCollaborationId(taken, this.drawId), groupId: group.id, fromSessionId: input.fromSessionId,
@@ -424,9 +437,41 @@ export class CollaborationStore {
     if (messages.some((message) => Buffer.byteLength(JSON.stringify(message)) > COLLAB_LIMITS.wire_bytes)) throw new CollaborationError('MESSAGE_WIRE_TOO_LARGE', `Encoded message exceeds ${COLLAB_LIMITS.wire_bytes} JSON bytes`, 413);
     this.document.messages.push(...messages);
     if (key) (this.document.idempotency ??= {})[key] = { hash, ids: messages.map((message) => message.id), expiresAt: now + COLLAB_LIMITS.idempotency_retention_ms };
-    this.persist();
+    this.persist(!!input.integrationOrigin);
     queueMicrotask(() => this.onMessageQueued?.());
     return messages;
+  }
+
+  /** An original recipient can persist a reply to a nonterminal integration.
+   * This is a stored fact, not a fake terminal write or a new task. */
+  storeIntegrationReply(originalId: string, sessionId: string, content: string, input: MessageExtras): CollaborationMessage {
+    const original = this.getMessage(originalId), group = original && this.getGroup(original.groupId);
+    if (!original?.integrationOrigin || original.fromSessionId !== null || original.toSessionId !== sessionId
+      || !group || group.deleted || group.federated || !group.sessionIds.includes(sessionId)) throw new CollaborationError('NOT_MESSAGE_RECIPIENT', 'Only the original local recipient can reply to this integration message', 403);
+    const extras = validateExtras(input);
+    if (extras.task || extras.metadata?.termdockTask) throw new CollaborationError('INVALID_INTEGRATION_REPLY', 'Ordinary integration replies cannot carry task envelopes');
+    if (!extras.idempotencyKey) throw new CollaborationError('INVALID_IDEMPOTENCY_KEY', 'Integration replies require an idempotency key');
+    if (typeof content !== 'string' || !content.trim()) throw new CollaborationError('INVALID_MESSAGE', 'Reply content must not be empty');
+    if (Buffer.byteLength(content) > COLLAB_LIMITS.message_bytes) throw new CollaborationError('MESSAGE_TOO_LARGE', 'Reply exceeds 1 MiB', 413);
+    if (extras.expiresAt !== undefined && extras.expiresAt !== null) throw new CollaborationError('STORED_REPLY_CANNOT_EXPIRE', 'A persisted reply is not a pending delivery and cannot expire');
+    const principalId = original.integrationOrigin.integrationId;
+    const key = JSON.stringify([original.groupId, `integration-reply:${principalId}:${sessionId}`, extras.idempotencyKey]);
+    const hash = crypto.createHash('sha256').update(stableJson([original.id, content, extras.responseKind, extras.metadata, extras.task])).digest('hex');
+    const previous = this.document.idempotency?.[key];
+    if (previous && previous.expiresAt > Date.now()) {
+      if (previous.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', 'Reply key was already used with different content', 409);
+      const reply = this.getMessage(previous.ids[0]);
+      if (!reply) throw new CollaborationError('IDEMPOTENCY_RECORD_GONE', 'Original reply is no longer retained', 409);
+      return reply;
+    }
+    const now = Date.now();
+    const reply: CollaborationMessage = { ...extras, id: newCollaborationId(this.takenIds(), this.drawId), sequence: this.nextSequence(),
+      groupId: original.groupId, fromSessionId: sessionId, toSessionId: `principal:${principalId}`, toPrincipalId: principalId,
+      kind: 'reply', content, threadId: original.threadId, replyTo: original.id, status: 'stored', createdAt: now, storedAt: now, deliveredAt: null, readAt: null };
+    if (Buffer.byteLength(JSON.stringify(reply)) > COLLAB_LIMITS.wire_bytes) throw new CollaborationError('MESSAGE_WIRE_TOO_LARGE', 'Encoded reply exceeds the wire limit', 413);
+    this.document.messages.push(reply);
+    (this.document.idempotency ??= {})[key] = { hash, ids: [reply.id], expiresAt: now + COLLAB_LIMITS.idempotency_retention_ms };
+    this.persist(true); return reply;
   }
 
   listMessages(groupId: string, limit = 200): CollaborationMessage[] {
@@ -494,7 +539,7 @@ export class CollaborationStore {
     const now = Date.now();
     const changed: CollaborationMessage[] = [];
     this.document.messages = this.document.messages.map((message) => {
-      if (!ids.has(message.id) || message.status === 'expired' || message.status === 'failed' || message.status === 'read') return message;
+      if (!ids.has(message.id) || message.status === 'stored' || message.status === 'expired' || message.status === 'failed' || message.status === 'read') return message;
       const updated: CollaborationMessage = status === 'read'
         ? { ...message, status, deliveredAt: message.deliveredAt ?? now, readAt: now, readSource, deliverySource: message.deliverySource ?? (message.deliveredAt === null ? 'consumer_read' : 'legacy_or_unspecified') }
         : message.status === 'pending' ? { ...message, status, deliveredAt: now, deliverySource: 'pty_written' } : message;
@@ -572,7 +617,7 @@ export class CollaborationStore {
     for (const message of messages) {
       if (!message || typeof message !== 'object') continue;
       const group = this.getGroup(message.groupId);
-      if (!group?.federated || group.deleted || !group.sessionIds.includes(message.toSessionId)
+      if (!group?.federated || group.deleted || message.status === 'stored' || message.integrationOrigin || message.toPrincipalId || !group.sessionIds.includes(message.toSessionId)
         || (message.fromSessionId !== null && !group.sessionIds.includes(message.fromSessionId))
         || typeof message.id !== 'string' || typeof message.threadId !== 'string' || !Number.isFinite(message.createdAt)
         || typeof message.content !== 'string'
@@ -638,15 +683,18 @@ export class CollaborationStore {
   receipt(id: string, raw = false) {
     const message = this.getMessage(id);
     if (!message) throw new CollaborationError('MESSAGE_NOT_FOUND', 'Message not found or no longer retained', 404);
-    const replies = this.document.messages.filter((reply) => reply.replyTo === id && reply.fromSessionId === message.toSessionId && reply.toSessionId === message.fromSessionId);
+    const replies = this.document.messages.filter(reply => reply.replyTo === id
+      && (message.toPrincipalId ? reply.integrationOrigin?.integrationId === message.toPrincipalId : reply.fromSessionId === message.toSessionId)
+      && (message.integrationOrigin ? reply.toPrincipalId === message.integrationOrigin.integrationId : reply.toSessionId === message.fromSessionId));
     const diagnostic = this.diagnostic(id);
     const facts = terminalMessage(message, raw);
-    return { message_id: id, thread_id: message.threadId, status: facts.status, queued_at: message.createdAt,
+    return { message_id: id, thread_id: message.threadId, status: facts.status, queued_at: message.status === 'stored' ? null : message.createdAt, stored_at: message.storedAt ?? null,
+      from_principal_id: message.integrationOrigin?.integrationId ?? null, to_principal_id: message.toPrincipalId ?? null,
       delivered_at: facts.deliveredAt, expires_at: message.expiresAt ?? null,
-      failure_reason: message.failureReason ?? null, delivery_semantics: facts.deliverySource ?? (facts.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'),
+      failure_reason: message.failureReason ?? null, delivery_semantics: message.status === 'stored' ? 'durable_storage' : facts.deliverySource ?? (facts.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'),
       snapshot: message.snapshot ? (raw ? message.snapshot : plainCollaborationSnapshot(message.snapshot)) : null,
       delivery: { status: facts.status,
-        stage: facts.deliveredAt !== null ? 'terminal_written' : diagnostic?.remote_received_at ? 'remote_received' : 'queued',
+        stage: message.status === 'stored' ? 'stored' : facts.deliveredAt !== null ? 'terminal_written' : diagnostic?.remote_received_at ? 'remote_received' : 'queued',
         remote_received_at: diagnostic?.remote_received_at ?? null, delivered_at: facts.deliveredAt, error: message.failureReason ?? diagnostic?.last_error ?? null },
       reply: { status: replies.length ? 'received' : 'pending', ack_at: replies.find(reply => reply.responseKind === 'ack')?.createdAt ?? null, reply_ids: replies.map(reply => reply.id) },
       idempotency_key: message.idempotencyKey ?? null,
@@ -761,7 +809,7 @@ export class CollaborationStore {
     return { message_id: fragment.message_id, received, total: state.total, complete: received === state.total };
   }
 
-  private persist(): void {
+  private persist(durable = false): void {
     const now = Date.now();
     for (const [key, record] of Object.entries(this.document.idempotency ?? {})) if (record.expiresAt <= now) delete this.document.idempotency![key];
     const protectedIds = new Set(Object.values(this.document.idempotency ?? {}).flatMap((record) => record.ids));
@@ -777,9 +825,14 @@ export class CollaborationStore {
     try {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
       const serialized = JSON.stringify(this.document);
-      fs.writeFileSync(temporaryPath, serialized, { mode: 0o600 });
+      const descriptor = fs.openSync(temporaryPath, 'w', 0o600);
+      try { fs.writeFileSync(descriptor, serialized); if (durable) fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
       fs.renameSync(temporaryPath, this.filePath);
       this.persistedDocument = serialized;
+      if (durable) {
+        const directory = fs.openSync(path.dirname(this.filePath), 'r');
+        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      }
       for (const listener of this.changeListeners) { try { listener(); } catch { /* Journal retries from durable source records. */ } }
     } catch (error) { this.document = JSON.parse(this.persistedDocument) as CollaborationDocument; throw error; }
   }

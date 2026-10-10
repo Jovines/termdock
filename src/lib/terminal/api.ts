@@ -3895,7 +3895,10 @@ export interface CollaborationMessage {
   content: string;
   threadId: string;
   replyTo: string | null;
-  status: 'pending' | 'delivered' | 'read' | 'failed' | 'expired';
+  status: 'pending' | 'delivered' | 'read' | 'failed' | 'expired' | 'stored';
+  integrationOrigin?: { integrationId: string; source: string; externalActor?: Record<string, unknown>; externalMessageId?: string; metadata?: Record<string, unknown> };
+  toPrincipalId?: string;
+  storedAt?: number;
   responseKind?: 'ack' | 'progress' | 'result';
   failureReason?: string | null;
   metadata?: Record<string, unknown>;

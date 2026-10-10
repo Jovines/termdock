@@ -4,7 +4,7 @@ import http from 'node:http';
 import { INTEGRATION_PROTOCOL } from './integrationStore.js';
 import { integrationSocketPath } from './integrationServer.js';
 import { CollaborationError } from './collaborationProtocol.js';
-import { executeCollaborationCommand, duration, type CollaborationCommand } from './collaborationCli.js';
+import { COLLAB_HELP, executeCollaborationCommand, duration, type CollaborationCommand } from './collaborationCli.js';
 import { getTermdockVersion } from '../utils/version.js';
 
 export const INTEGRATION_HELP = `td integration — local scoped integration administration
@@ -15,6 +15,9 @@ export const INTEGRATION_HELP = `td integration — local scoped integration adm
   revoke <principal-id>
 Credentials are saved as a private file and never printed. Workers set
 TERMDOCK_INTEGRATION_CREDENTIAL_FILE, then use td collab --principal <id> …
+Ordinary messages: permissions message.send, message.read, events.read;
+td collab --principal <id> --help lists send/reply/history and event examples.
+No task or user acceptance is required for a message-driven integration.
 Only the local administrator can provision/revoke grants. See docs/integrations.md.`;
 export interface IntegrationCredential { id: string; token: string; protocol: number }
 export function readIntegrationCredential(file: string, principalId: string): IntegrationCredential {
@@ -50,7 +53,7 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
   let reserved: string | undefined;
   try {
     const action = argv[0] ?? 'help', options: Record<string, string> = {};
-    if (action === 'help' || action === '--help') { write(INTEGRATION_HELP); return 0; }
+    if (action === 'help' || argv.includes('--help')) { write(INTEGRATION_HELP); return 0; }
     const socketPath = integrationSocketPath(port);
     if (action === 'diagnostics') {
       if (argv.length !== 2 || !/^[a-zA-Z0-9._-]{1,80}$/.test(argv[1])) throw new Error('diagnostics requires one TD session id');
@@ -97,6 +100,7 @@ export async function revokeIntegration(id: string, port: number, adminToken: st
 }
 export async function runIntegrationCollab(command: CollaborationCommand, port: number, io: { write(line: string): void; stdin(): Promise<string> }): Promise<number> {
   try {
+    if (command.action === 'help') { io.write(COLLAB_HELP); return 0; }
     const principalId = String(command.options.principal), file = process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE;
     if (!file) throw new CollaborationError('INTEGRATION_CREDENTIAL_REQUIRED', 'Set TERMDOCK_INTEGRATION_CREDENTIAL_FILE to a private credential file', 401);
     const credential = readIntegrationCredential(file, principalId), socketPath = integrationSocketPath(port);
@@ -115,7 +119,10 @@ export async function runIntegrationCollab(command: CollaborationCommand, port: 
         : command.operation === 'restore' ? { idempotency_key: command.options['idempotency-key'] } : undefined;
       io.write(JSON.stringify(parsed(await request(socketPath, command.operation === 'get' ? 'GET' : 'POST', route, body, headers(credential))))); return 0;
     }
-    if (!['task', 'message', 'help'].includes(command.action) || command.action === 'message' && command.operation !== 'get') throw new CollaborationError('INTEGRATION_OPERATION_DENIED', 'Command is not exposed to integration identities', 403);
+    const messageCapability = command.action === 'send' ? 'integration_message_send' : command.action === 'reply' ? 'integration_message_reply'
+      : command.action === 'message' && command.operation === 'list' ? 'integration_message_history' : null;
+    if (messageCapability && capability[messageCapability] !== true) throw new CollaborationError('INTEGRATION_MESSAGING_UNSUPPORTED', 'CLI and running service must support integration messaging (minimum 1.4.308); upgrade both and read capabilities', 409);
+    if (!['task', 'message', 'send', 'reply'].includes(command.action) || command.action === 'message' && !['get', 'list'].includes(command.operation!)) throw new CollaborationError('INTEGRATION_OPERATION_DENIED', 'Command is not exposed to integration identities; see td collab --principal <id> --help', 403);
     return executeCollaborationCommand(command, {}, { ...io, request: async (method, endpoint, body, timeout) => {
       const origin = { source: command.options.source, externalActor: command.options['external-actor'] ? JSON.parse(String(command.options['external-actor'])) : undefined,
         externalMessageId: command.options['external-message-id'], metadata: command.options.metadata ? JSON.parse(String(command.options.metadata)) : undefined };

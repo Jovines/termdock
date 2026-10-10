@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { timingSafeEqual } from 'node:crypto';
-import { CollaborationError } from './collaborationProtocol.js';
+import { CollaborationError, resolveIdPrefix } from './collaborationProtocol.js';
 import { terminalMessage, type CollaborationStore } from './collaborationStore.js';
 import type { CollaborationTaskStore } from './collaborationTaskStore.js';
 import type { CollaborationTaskService } from './collaborationTaskService.js';
@@ -21,6 +21,12 @@ export interface IntegrationRuntimeOptions {
   tasks: CollaborationTaskService; peers: CollaborationService; sessions: IntegrationSessionAdapter;
 }
 type Update = { sourceKey: string; sourceVersion: string; eventId?: string; event: Omit<IntegrationEvent, 'event_id' | 'sequence' | 'cursor'> };
+function scopedId(input: string, ids: string[], type: string): string {
+  if (typeof input !== 'string') integrationError(`INVALID_${type}_ID`, 'A message or member id is required');
+  const result = resolveIdPrefix([...new Set(ids)], input);
+  if (result.status !== 'ok') integrationError(`${type}_${result.status === 'ambiguous' ? 'ID_AMBIGUOUS' : 'NOT_FOUND'}`, `No unique ${type.toLowerCase()} in this integration group`, result.status === 'ambiguous' ? 409 : 404);
+  return result.id;
+}
 /** A local authenticated API and push stream. It is never mounted on the
  * public HTTP application and does not reuse an integration's admin token. */
 export class IntegrationRuntime {
@@ -37,7 +43,7 @@ export class IntegrationRuntime {
     this.sessions = new IntegrationSessions(path.join(options.directory, 'integration-sessions.json'), options.sessions);
     const changed = () => { try { this.sync(); } catch (error) { this.failStreams(error); this.scheduleRetry(); } };
     this.stops.push(options.messages.subscribe(changed), options.taskStore.subscribe(changed), this.sessions.subscribe(changed));
-    const app = express(); app.use(express.json({ limit: '1mb' }));
+    const app = express(); app.use(express.json({ limit: '2mb' }));
     app.use((req, res, next) => {
       if (req.headers['x-termdock-integration-protocol'] !== String(INTEGRATION_PROTOCOL)) { res.status(409).json({ ...this.error(new CollaborationError('INCOMPATIBLE_INTEGRATION_PROTOCOL', 'Unsupported integration protocol', 409)), protocol: INTEGRATION_PROTOCOL }); return; }
       next();
@@ -82,10 +88,48 @@ export class IntegrationRuntime {
       const event = options.taskStore.integrationRequestEvent(p.id, input.idempotencyKey, task.id);
       return { task, event_id: event?.id ?? null, attempt_id: event?.attemptId ?? null, delivery_id: event?.deliveryId ?? null };
     }));
+    app.post('/send', run(req => {
+      const p = principal(req); this.authorize(p, 'message.send', req.body?.group_id);
+      const group = this.group(p.groupId), raw = req.body ?? {};
+      if (raw.kind && raw.kind !== 'message') integrationError('INTEGRATION_OPERATION_DENIED', 'Integration send uses ordinary messages only', 403);
+      const targets = Array.isArray(raw.toSessionIds) ? raw.toSessionIds : [raw.targetSessionId];
+      if (!targets.length || targets.some((id: unknown) => typeof id !== 'string')) integrationError('INVALID_MESSAGE_TARGET', 'Specify a local group member');
+      const recipients = targets.map((id: string) => scopedId(id, group.sessionIds, 'SESSION'));
+      let thread: string | undefined;
+      if (raw.thread_id) thread = scopedId(raw.thread_id, options.messages.snapshotMessages().filter(m => m.groupId === p.groupId).map(m => m.threadId), 'THREAD');
+      const messages = options.messages.send({ ...this.messageExtras(raw), groupId: p.groupId, fromSessionId: null,
+        integrationOrigin: this.origin(p, raw.origin), toSessionIds: recipients, kind: 'message', content: raw.message, threadId: thread });
+      this.sync(); return { ok: true, message_ids: messages.map(m => m.id), receipts: messages.map(m => options.messages.receipt(m.id)), ...options.messages.receipt(messages[0].id) };
+    }));
+    app.post('/reply', run(req => {
+      const p = principal(req); this.authorize(p, 'message.send', req.body?.group_id);
+      const raw = req.body ?? {}, original = this.message(p, raw.messageId);
+      const target = original.toPrincipalId === p.id ? original.fromSessionId
+        : original.integrationOrigin?.integrationId === p.id ? original.toSessionId : null;
+      if (!target || !this.group(p.groupId).sessionIds.includes(target)) integrationError('NO_REPLY_TARGET', 'Reply requires your own message and its original live group member', 409);
+      const messages = options.messages.send({ ...this.messageExtras(raw), groupId: p.groupId, fromSessionId: null,
+        integrationOrigin: this.origin(p, raw.origin), toSessionIds: [target], kind: 'reply', content: raw.content, threadId: original.threadId, replyTo: original.id });
+      this.sync(); return { ok: true, ...options.messages.receipt(messages[0].id) };
+    }));
+    app.get('/message', run(req => {
+      const p = principal(req); this.authorize(p, 'message.read', req.query.group);
+      const messages = options.messages.snapshotMessages().filter(m => m.groupId === p.groupId).sort((a, b) => a.sequence! - b.sequence!);
+      const after = req.query['after-id'] ? this.message(p, String(req.query['after-id'])) : null;
+      const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) integrationError('INVALID_MESSAGE_LIMIT', 'limit must be 1..200');
+      const thread = req.query.thread ? scopedId(String(req.query.thread), messages.map(m => m.threadId), 'THREAD') : null;
+      const filtered = messages.filter(m => (!after || m.sequence! > after.sequence!) && (!thread || m.threadId === thread));
+      const page = []; let bytes = 0;
+      for (const message of filtered.slice(0, limit)) {
+        const size = Buffer.byteLength(JSON.stringify(message));
+        if (page.length && bytes + size > 2 * 1024 * 1024) break;
+        page.push(message); bytes += size;
+      }
+      return { messages: page.map(m => terminalMessage(m)), next_after_id: page.at(-1)?.id ?? after?.id ?? null, has_more: filtered.length > page.length, retention: 'retained_messages_only' };
+    }));
     app.get('/message/:id', run(req => {
-      const p = principal(req), message = options.messages.getMessage(req.params.id);
-      if (!message) integrationError('MESSAGE_NOT_FOUND', 'Message does not exist', 404);
-      this.authorize(p, 'task.read', message.groupId);
+      const p = principal(req); this.authorize(p, p.permissions.includes('message.read') ? 'message.read' : 'task.read');
+      const message = this.message(p, req.params.id);
       const receipt = options.messages.receipt(message.id); const { snapshot: _, ...diagnostic } = receipt;
       return { ok: true, ...diagnostic, ...(req.query.receipt_only === 'true' ? {} : { message: terminalMessage(message) }) };
     }));
@@ -120,6 +164,7 @@ export class IntegrationRuntime {
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',
       background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true,
+      integration_message_send: true, integration_message_reply: true, integration_message_history: true,
       permissions: INTEGRATION_OPERATIONS };
   }
   private error(error: unknown) {
@@ -137,6 +182,16 @@ export class IntegrationRuntime {
     const task = this.options.taskStore.get(id);
     if (!task || task.groupId !== p.groupId) integrationError('TASK_NOT_FOUND', 'Task does not exist within this integration grant', 404);
     this.authorize(p, operation, task.groupId);
+  }
+  private message(p: IntegrationPrincipal, id: string) {
+    const scoped = this.options.messages.snapshotMessages().filter(m => m.groupId === p.groupId);
+    const resolved = scopedId(id, scoped.map(m => m.id), 'MESSAGE');
+    return this.options.messages.getMessage(resolved)!;
+  }
+  private messageExtras(raw: Record<string, any>) {
+    if (typeof raw.idempotency_key !== 'string' || !raw.idempotency_key.trim()) integrationError('IDEMPOTENCY_KEY_REQUIRED', 'Integration message mutations require an explicit idempotency key');
+    if (raw.task || raw.task_envelope || raw.metadata?.termdockTask) integrationError('INTEGRATION_OPERATION_DENIED', 'Ordinary messages cannot forge task envelopes', 403);
+    return { idempotencyKey: raw.idempotency_key, responseKind: raw.response_kind, metadata: raw.metadata, expiresAt: raw.expires_at };
   }
   private origin(p: IntegrationPrincipal, input: unknown): TaskOrigin {
     const value = input && typeof input === 'object' ? input as Record<string, unknown> : {};
@@ -168,11 +223,16 @@ export class IntegrationRuntime {
       for (const message of this.options.messages.snapshotMessages()) if (groups.has(message.groupId)) {
         const link = message.metadata?.termdockTask as { taskId?: string; attemptId?: string; replyToEventId?: string } | undefined;
         const context = { group_id: message.groupId, task_id: link?.taskId ?? null, attempt_id: link?.attemptId ?? null,
-          reply_to_event_id: link?.replyToEventId ?? null, message_id: message.id, source: message.fromSessionId ? 'member' : 'system' };
+          reply_to_event_id: link?.replyToEventId ?? null, message_id: message.id, source: message.integrationOrigin ? 'integration' : message.fromSessionId ? 'member' : 'system',
+          actor: message.integrationOrigin ? { integration_id: message.integrationOrigin.integrationId } : message.fromSessionId ? { session_id: message.fromSessionId } : null,
+          external_actor: message.integrationOrigin?.externalActor ?? null };
         updates.push({ sourceKey: `message:${message.id}`, sourceVersion: '1', event: { ...context,
           kind: message.kind === 'reply' ? 'message.reply' : 'message.queued', created_at: message.createdAt,
           payload: { message_id: message.id, thread_id: message.threadId, reply_to: message.replyTo ?? null,
-            from_session_id: message.fromSessionId, to_session_id: message.toSessionId, content: message.content, metadata: message.metadata ?? null } } });
+            from_session_id: message.fromSessionId, to_session_id: message.toPrincipalId ? null : message.toSessionId,
+            to_principal_id: message.toPrincipalId ?? null, integration_origin: message.integrationOrigin ?? null,
+            response_kind: message.responseKind ?? null, stored_at: message.storedAt ?? null,
+            content: message.content, metadata: message.metadata ?? null } } });
         const { snapshot: _, ...receipt } = this.options.messages.receipt(message.id);
         updates.push({ sourceKey: `message-status:${message.id}`, sourceVersion: JSON.stringify(receipt), event: {
           ...context, kind: 'message.delivery', created_at: message.deliveredAt ?? message.createdAt, payload: { receipt } } });

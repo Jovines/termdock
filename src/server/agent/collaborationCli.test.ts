@@ -345,3 +345,13 @@ it('exposes historical capture, explicit consumption and distinct delivery/reply
   expect(parseCollaborationCommand(['traits', 'set', 'group', 'peer', '不接急单'])).toMatchObject({ action: 'role', role: '不接急单' });
   expect(parseCollaborationCommand(['rules', 'set', 'group', '--file', 'rules.md'])).toMatchObject({ action: 'rules', operation: 'set' });
 });
+
+it('requires principal message keys, exposes history pagination, and returns stored replies without terminal polling', async () => {
+  expect(() => parseCollaborationCommand(['--principal', 'bridge', 'send', 'worker', 'Run'])).toThrow(/idempotency/);
+  const f = fixture([{ ok: true, integration_recorded: true, message_id: 'reply', status: 'stored', stored_at: 1 }]);
+  expect(await executeCollaborationCommand(parseCollaborationCommand(['reply', 'original', 'Result', '--response-kind', 'result', '--wait-until', 'delivered']), {}, f.io)).toBe(0);
+  expect(f.calls).toHaveLength(1); expect(JSON.parse(f.output[0]).status).toBe('stored');
+  const history = fixture([{ messages: [], next_after_id: null, has_more: false }]);
+  expect(await executeCollaborationCommand(parseCollaborationCommand(['--principal', 'bridge', 'message', 'list', '--thread', 'thread', '--limit', '10']), {}, history.io)).toBe(0);
+  expect(history.calls[0][1]).toContain('/message?thread=thread&limit=10');
+});

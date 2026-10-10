@@ -164,8 +164,9 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true,
       task_reply: 'Replies to task-linked user messages are stored in the task; status=stored is not a terminal delivery receipt' },
     routing: { background_recovery: true, explicit_rebind: Boolean(rebind), fixed_tmux_pane: true },
-    statuses: ['pending', 'delivered', 'failed', 'expired'], queued_status: 'pending',
+    statuses: ['pending', 'delivered', 'failed', 'expired', 'stored'], queued_status: 'pending',
     semantics: { delivered: 'written to terminal; no application acknowledgement implied',
+      stored: 'durable reply to a nonterminal integration principal; never a terminal write',
       ack: 'explicit response_kind=ack', result: 'explicit response_kind=result; inspect task.status and evidence',
       snapshot: 'terminal observation, never proof of reading or task completion',
       timeout: 'stops waiting, does not cancel delivery',
@@ -207,6 +208,10 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
   }));
   router.post('/reply', run(async (req, res, sessionId) => {
     const original = ownMessage(String(req.body.messageId ?? ''), sessionId, true);
+    if (original.integrationOrigin) {
+      const reply = store.storeIntegrationReply(original.id, sessionId, req.body.content, extrasFromBody(req.body));
+      res.json({ ok: true, ...store.receipt(reply.id), integration_recorded: true }); return;
+    }
     if (!original.fromSessionId) {
       const link = original.metadata?.termdockTask as { taskId?: string; attemptId?: string; replyToEventId?: string } | undefined;
       if (link?.taskId && req.app.locals.collaborationTasks) {

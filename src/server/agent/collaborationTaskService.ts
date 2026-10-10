@@ -209,6 +209,7 @@ export class CollaborationTaskService {
   }
   private receipt(messageId: string) {
     const receipt = this.messages.receipt(messageId);
+    if (receipt.status === 'stored') throw new CollaborationError('INVALID_TASK_DELIVERY', 'A nonterminal reply cannot be a task delivery');
     return { messageId, status: receipt.status, deliveredAt: receipt.delivered_at, error: receipt.delivery.error };
   }
   start() { this.timer = setInterval(() => void this.flush(), 1500); this.timer.unref(); void this.flush(); }

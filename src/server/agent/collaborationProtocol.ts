@@ -160,4 +160,4 @@ export interface MessageFragment {
   sha256: string;
   data: string;
 }
-export const STATUS_RANK = { pending: 0, failed: 1, expired: 1, delivered: 2, read: 3 } as const;
+export const STATUS_RANK = { pending: 0, failed: 1, expired: 1, delivered: 2, read: 3, stored: 4 } as const;

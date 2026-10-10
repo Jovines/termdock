@@ -8,7 +8,8 @@
 **实际运行服务至少 1.4.304**。管理员恢复诊断要求 **CLI / 实际服务均至少 1.4.305**；
 直接 exec 为 pane PID 的原生 argv 核验及可选 Linux 持锁身份要求 **实际服务至少 1.4.306**；
 后台执行记录与用途迁移要求 **CLI / 实际服务均至少 1.4.307**；
-建议 CLI 与服务同步安装 1.4.307（既有接入命令的 CLI 最低仍为 1.4.301，诊断 CLI 最低为 1.4.305）。
+普通消息身份发送、持久回复及消息历史要求 **CLI / 实际服务均至少 1.4.308**；
+建议 CLI 与服务同步安装 1.4.308（既有接入命令的 CLI 最低仍为 1.4.301，诊断 CLI 最低为 1.4.305）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -16,6 +17,90 @@ TD 提供受限身份、持久事件推送、关联咨询回复，以及会话�
 机器人、定时器、外部用户授权、业务幂等键、外部 inbox/outbox、业务校验由接入方实现。
 `complete` 是执行成员的明确交付，`accepted` 是用户明确验收；投递成功、终端快照、
 事件 ACK 都不表示已读、任务完成或业务校验通过。
+
+## 普通消息接入（1.4.308，推荐用于机器人与报表）
+
+触发 Agent、追问和回帖可使用普通消息：**无需创建 task，不产生任务看板或逐期用户验收**。
+消息负责可靠投递与关联回复；业务周期、结果版本、机器校验、外部发布状态由接入方记录。
+只有需要 TD 任务分派、交付物、评审或人工验收时才使用后文 task；1.4.307 的 automation
+purpose 是可选任务能力，不是机器人接入的前置要求。已有 task/attempt/session 和外部根帖
+保持原记录，不自动迁移、重建、重投或重跑。
+
+管理员为现有身份补权限后用 `td integration update --file /private/policy.json`：
+
+```json
+"permissions": ["message.send", "message.read", "events.read", "session.create", "session.read", "session.restore"]
+```
+
+更新保留同一身份、组和凭据；保留实际需要的既有 task 权限以及原 launchProfiles。
+`message.send` 授权 send/reply，`message.read` 授权组内 message get/list；它们不授予任务操作
+或用户验收。events.read 可订阅授权组内事件。只允许该身份授权的一个本机组，拒绝跨服务目标、
+组外成员、未授权操作与 task envelope。组中其他 principal 的消息可以按组授权读取，但不能
+借其原消息 reply 或冒充其身份；只能向本组成员 send 新消息。
+
+先回读实际运行服务，再检查三个能力均为 true：
+
+```sh
+export TERMDOCK_INTEGRATION_CREDENTIAL_FILE=/private/bridge-credential.json
+td collab --principal report-bridge capabilities
+# cli_version / server_version >= 1.4.308, integration_protocol = 1
+# integration_message_send / integration_message_reply / integration_message_history = true
+
+td collab --principal report-bridge send <TD成员ID> --file /private/prompt.txt --idempotency-key run:2026-10-10
+# 保存输出 message_id、thread_id；status=pending 表示已持久入队
+# 可附 --source feishu --external-actor '{"id":"external-user"}' --external-message-id <external-id>
+
+td collab --principal report-bridge events subscribe --consumer bridge-inbox --jsonl
+# 按 event_id 去重；先将事件落盘，再 ACK 已连续持久接收的位置
+td collab --principal report-bridge events ack <cursor> --consumer bridge-inbox
+```
+
+CLI 在发送前检查运行服务 capability；旧服务返回 `INTEGRATION_MESSAGING_UNSUPPORTED`，
+不会降级成用户或终端成员发送。凭据只通过私有文件注入；`--principal <id> --help` 不需要
+凭据或运行服务。建议 CLI 与实际服务保持同一版本，版本号本身不能替代能力检测。
+
+接收 Agent 在**原终端**使用明确回复（投递提示每次都附原消息 ID 与此用法）：
+
+```sh
+td collab --session <自己的TD成员ID> reply <原消息ID> "收到" --response-kind ack --idempotency-key run:ack
+td collab --session <自己的TD成员ID> reply <原消息ID> --file /private/result.txt --response-kind result --idempotency-key run:result
+# 进展也可 --response-kind progress；不推断 Agent 内部进度或整个会话忙闲
+```
+
+回复保存到同一消息历史，`status=stored`、`stored_at`、`delivery.stage=stored`、
+`delivery_semantics=durable_storage`、`delivered_at=null`、`attempt_count=0`；
+不进终端投递队列，不伪造“写入终端”。原 message get/list 记录的 toSessionId 使用内部保留
+地址 principal:<id> 以兼容历史结构，实际接收方由 toPrincipalId 标识；不要把这个地址当作成员 ID。Agent CLI 立即返回这个保存事实，不等待不存在的接收终端。
+原发送的 receipt.result_ids/reply_ids/ack_at 来自明确的关联回复，原消息投递状态独立保留。
+原生会话、结果正文及外部校验仍由实际 Agent/业务方负责；result 不表示用户验收或外部发布成功。
+
+`message.reply` 的 payload 包含 `message_id`、`thread_id`、`reply_to`（原消息 ID）、
+`from_session_id`、`to_session_id`（后台回复为 null）、`to_principal_id`、
+`integration_origin`、`response_kind`、`stored_at`、`content`、`metadata`。
+普通消息没有 task_id/attempt_id；不要套用 task 的 to-event/respond。外部话题和结果版本
+用 message_id/thread_id 与 reply_to 关联。外部追问可以回复自己的原发送或收到的 Agent 回复：
+
+```sh
+td collab --principal report-bridge reply <原发送ID或Agent回复ID> "解释一下" --idempotency-key followup:external-id
+td collab --principal report-bridge message get <消息ID> --text
+td collab --principal report-bridge message list --thread <话题ID> --limit 50
+td collab --principal report-bridge message list --thread <话题ID> --after-id <上一页next_after_id> --limit 50
+```
+
+追问固定回原成员及原 thread，原成员不在授权组时返回 NO_REPLY_TARGET，不悄悄新建会话。
+需要恢复时显式 session restore，仍保留原 native UUID、argv/cwd/包装器与 startupInput 条件。
+命令变更必须给稳定 idempotency-key；同身份/组/key 且相同正文与参数返回同一消息 ID，
+不同 payload 返回 IDEMPOTENCY_CONFLICT。原 Agent 回复另按 principal/成员/key 隔离。
+
+消息/回复在成功返回前完成文件 fsync、原子替换和目录 fsync，事件从这些源记录持久生成。
+订阅自动断线重连，从同 consumer 已 ACK 的连续位置重放；收到事件不自动 ACK，也不表示业务
+已经处理。业务 inbox/outbox 按自身持久处理状态重试。事件保留缺口返回 EVENT_RETENTION_GAP
+并停止；需结合仍保留的消息与业务数据库对账后建立新 consumer，不能声称任意历史均可重放。
+message list 按本组 sequence 升序分页，返回 next_after_id/has_more，页还受 2 MiB 字节预算限制；
+只覆盖仍保留的消息（常规历史最多保留 2000 条，pending 和未过期幂等记录另外保护，幂等保留 7 天）。
+after-id 不在本组保留记录中返回 MESSAGE_NOT_FOUND；前缀不唯一返回 MESSAGE_ID_AMBIGUOUS。
+鉴权撤销与权限更新沿用下文错误和重连契约。普通消息 delivered 仍只表示写入终端，不能从快照
+缺少正文推断未消费，更不能因此自动重投已 delivered 消息。
 
 ## 管理员配置身份
 
@@ -49,7 +134,7 @@ td integration list
 }
 ```
 
-`launchProfiles` 可为空（只操作已有任务）。创建会话时只能选择预配 profile 和
+`launchProfiles` 可为空（只操作已有消息或任务）。创建会话时只能选择预配 profile 和
 目录，不能传任意命令/参数。`cwd` 必须已存在，真实路径须位于 `cwdRoots` 内；
 符号链接不能逃出目录边界。参数按独立 token 引号转义，控制字符禁止。
 `{cwd}`、`{sessionId}`、`{launchArgs}` 必须是独立参数；恢复模板必须各包含一次
@@ -302,8 +387,8 @@ task 事件 `event_id` 与任务内事件 ID 一致，`respond.reply_to_event_id
 | `task.close/reopen/coordinate/pause/resume/retry/child-update/automation-blocked/review-passed/review-blocked` | `{event}`：保留服务事件的 source 与原文 |
 | `task.result` | `{artifact}`：结果 id、attemptId、actor、content、summary、evidence、createdAt |
 | `task.delivery` | `{delivery}`：任务投递 id、attemptId、messageId、status、deliveredAt、error |
-| `message.queued/message.reply` | `{message_id,thread_id,reply_to,from_session_id,to_session_id,content,metadata}` |
-| `message.delivery` | `{receipt}`：实际入队/远端接收/终端写入阶段、失败、重试计数与时间，及明确回复 ID；不含快照或已读字段 |
+| `message.queued/message.reply` | `{message_id,thread_id,reply_to,from_session_id,to_session_id,to_principal_id,integration_origin,response_kind,stored_at,content,metadata}` |
+| `message.delivery` | `{receipt}`：实际入队/远端接收/终端写入/后台回复保存阶段、失败、重试计数与时间，及明确回复 ID；不含快照或已读字段 |
 | `session.starting/binding_pending/ready/restoring/failed` | `{session}`：下节公开会话记录，失败包含 error_code |
 
 TD 在源记录提交后触发 journal 及订阅，journal 中的同一事件 ID 在重连重放时保持不变。

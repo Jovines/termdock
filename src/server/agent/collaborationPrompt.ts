@@ -115,7 +115,7 @@ export function formatCollaborationDelivery(input: {
     const sourceSession = message.fromSessionId ? sessionsById.get(message.fromSessionId) : null;
     const source = message.fromSessionId
       ? sanitizeCollaborationName(sourceSession?.name ?? message.fromSessionId)
-      : '用户';
+      : message.integrationOrigin ? `后台接入 ${sanitizeCollaborationName(message.integrationOrigin.integrationId, 80)}` : '用户';
     const token = tokens.get(message.id) ?? message.id;
     const bytes = Buffer.byteLength(message.content);
     // A remote recipient's CLI cannot detect its identity (the session is not
@@ -129,6 +129,7 @@ export function formatCollaborationDelivery(input: {
     const fannedNames = (message.fanOutIds ?? [])
       .map((sessionId) => sanitizeCollaborationName(sessionsById.get(sessionId)?.name ?? sessionId));
     blocks.push(formatCollaborationMessage({ ...message, content: body }, source, fannedNames, fence, token));
+    if (message.integrationOrigin) blocks.push(`此消息来自后台程序，使用原消息 id 回复：td collab --session ${input.targetSessionId} reply ${token} "答复正文" --response-kind result --idempotency-key <稳定唯一key> --text\n需要时用 --response-kind ack|progress 明确回复收到或进展；result 提交结果。回复持久保存为 stored 并主动推送给后台，不创建看板任务，不代表用户验收。`);
   }
 
   // The shell header names the group only when every block belongs to one;

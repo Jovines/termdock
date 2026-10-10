@@ -25,6 +25,20 @@ describe('collaboration API with arbitrary pull consumers', () => {
     server = await new Promise<Server>((resolve) => { const running = app.listen(0, '127.0.0.1', () => resolve(running)); });
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   });
+  it('persists Agent replies to an integration without terminal delivery, including idempotent retries and exact original correlation', async () => {
+    const group = store.list()[0];
+    const original = store.send({ groupId: group.id, fromSessionId: null, toSessionIds: ['b'], kind: 'message', content: 'Execute', integrationOrigin: { integrationId: 'bridge', source: 'integration' } })[0];
+    const input = { session: 'b', messageId: original.id, content: 'Result', response_kind: 'result', idempotency_key: 'result' };
+    const result = await post('/reply', input);
+    expect(result).toMatchObject({ status: 200, body: { status: 'stored', integration_recorded: true, delivered_at: null, attempt_count: 0 } });
+    expect((await post('/reply', input)).body.message_id).toBe(result.body.message_id);
+    expect(store.receipt(original.id).result_ids).toEqual([result.body.message_id]);
+    expect((await post('/reply', { ...input, content: 'Changed' })).status).toBe(409);
+    expect((await post('/reply', { ...input, session: 'a' })).status).toBe(404);
+    expect(store.pendingRecipients()).toEqual(['b']);
+    store.markDelivered([result.body.message_id]);
+    expect(store.getMessage(result.body.message_id)?.status).toBe('stored');
+  });
   afterEach(async () => { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); fs.rmSync(directory, { recursive: true, force: true }); });
   const post = async (route: string, body: Record<string, unknown>) => {
     const response = await fetch(url + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

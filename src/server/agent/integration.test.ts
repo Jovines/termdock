@@ -15,7 +15,7 @@ import { IntegrationStore, validatePolicy, type IntegrationPolicy, type Integrat
 import { IntegrationSessions, permittedCwd, integrationLaunchCommand, publicIntegrationSession, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
 import { IntegrationRuntime } from './integrationServer.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates } from './nativeResumeOwner.js';
-import { readIntegrationCredential, runIntegrationAdmin } from './integrationCli.js';
+import { readIntegrationCredential, runIntegrationAdmin, runIntegrationCollab } from './integrationCli.js';
 import { CollaborationDeliveryWorker } from './collaborationDeliveryWorker.js';
 import { CollaborationTaskStore } from './collaborationTaskStore.js';
 import { CollaborationTaskService } from './collaborationTaskService.js';
@@ -633,3 +633,117 @@ it.skipIf(process.platform === 'win32')('reproduces boot-time input loss in a re
     expect((await sessions.get(p, created.session_id)).agent_native_session_id).toBeNull();
   } finally { await run(['kill-server']).catch(() => {}); }
 }, 15000);
+
+it('sends scoped principal messages, stores correlated results without a task and replays replies until durable ACK', async () => {
+  const f = await runtimeFixture();
+  const updated = policy(f.group.id); updated.permissions.push('message.send', 'message.read'); f.runtime.store.update(updated);
+  const body = { targetSessionId: 'worker', message: 'Execute once', idempotency_key: 'run', origin: { source: 'bridge', externalActor: { id: 'human' } } };
+  const subscription = f.stream();
+  const sent = await f.request('POST', '/send', body);
+  expect(sent).toMatchObject({ status: 200, body: { status: 'pending', attempt_count: 0 } });
+  const original = f.messages.getMessage(sent.body.message_id)!;
+  expect(original).toMatchObject({ fromSessionId: null, toSessionId: 'worker', integrationOrigin: { integrationId: 'bridge', source: 'bridge' } });
+  expect((await f.request('POST', '/send', body)).body.message_id).toBe(original.id);
+  expect(await f.request('POST', '/send', { ...body, message: 'Changed' })).toMatchObject({ status: 409, body: { code: 'IDEMPOTENCY_CONFLICT' } });
+  const reply = f.messages.storeIntegrationReply(original.id, 'worker', 'Explicit result', { idempotencyKey: 'result', responseKind: 'result' });
+  expect(f.messages.storeIntegrationReply(original.id, 'worker', 'Explicit result', { idempotencyKey: 'result', responseKind: 'result' }).id).toBe(reply.id);
+  expect(f.messages.receipt(reply.id)).toMatchObject({ status: 'stored', queued_at: null, delivered_at: null, delivery_semantics: 'durable_storage', delivery: { stage: 'stored' }, attempt_count: 0 });
+  expect(f.messages.receipt(original.id)).toMatchObject({ status: 'pending', result_ids: [reply.id] });
+  expect(f.messages.pendingRecipients()).toEqual(['worker']);
+  expect(f.taskStore.snapshot()).toEqual([]);
+  let event: any;
+  for (let i = 0; i < 20; i++) { event = await subscription.next(); if (event.kind === 'message.reply') break; }
+  expect(event).toMatchObject({ kind: 'message.reply', payload: { message_id: reply.id, reply_to: original.id, to_session_id: null, to_principal_id: 'bridge', response_kind: 'result', content: 'Explicit result' } });
+  expect((await f.request('GET', `/message/${reply.id.slice(0, 4)}`)).body.message.id).toBe(reply.id);
+  const first = await f.request('GET', '/message?limit=1');
+  expect(first.body).toMatchObject({ next_after_id: original.id, has_more: true });
+  expect((await f.request('GET', `/message?after-id=${first.body.next_after_id}`)).body.messages.map((m: any) => m.id)).toEqual([reply.id]);
+  subscription.req.destroy();
+  const replay = f.stream(); let repeated: any;
+  for (let i = 0; i < 20; i++) { repeated = await replay.next(); if (repeated.event_id === event.event_id) break; }
+  expect(repeated).toEqual(event);
+  expect(await f.request('POST', '/events/ack', { consumer: 'inbox', cursor: event.cursor })).toMatchObject({ status: 200 });
+  expect(new CollaborationStore(path.join(dir, 'groups.json')).getMessage(reply.id)).toMatchObject({ status: 'stored', toPrincipalId: 'bridge', content: 'Explicit result' });
+  const followup = await f.request('POST', '/reply', { messageId: reply.id, content: 'Explain', idempotency_key: 'followup' });
+  expect(f.messages.getMessage(followup.body.message_id)).toMatchObject({ kind: 'reply', threadId: original.threadId, replyTo: reply.id, toSessionId: 'worker', integrationOrigin: { integrationId: 'bridge' } });
+  expect(f.taskStore.snapshot()).toEqual([]);
+});
+it('fails closed on principal scope, operation grants, forged task envelopes and reply ownership', async () => {
+  const f = await runtimeFixture();
+  const body = { targetSessionId: 'worker', message: 'Execute', idempotency_key: 'run' };
+  expect(await f.request('POST', '/send', body)).toMatchObject({ status: 403, body: { code: 'INTEGRATION_PERMISSION_DENIED' } });
+  const updated = policy(f.group.id); updated.permissions = ['message.send', 'message.read', 'events.read']; f.runtime.store.update(updated);
+  expect(await f.request('POST', '/send', { ...body, group_id: 'other' })).toMatchObject({ status: 403 });
+  expect(await f.request('POST', '/send', { ...body, toSessionIds: ['worker', 'outsider'] })).toMatchObject({ status: 404 });
+  expect(f.messages.snapshotMessages()).toEqual([]);
+  expect(await f.request('POST', '/send', { ...body, metadata: { termdockTask: { taskId: 'fake' } } })).toMatchObject({ status: 403 });
+  expect(await f.request('POST', '/send', { ...body, kind: 'task' })).toMatchObject({ status: 403 });
+  expect(await f.request('POST', '/send', { ...body, idempotency_key: undefined })).toMatchObject({ status: 400, body: { code: 'IDEMPOTENCY_KEY_REQUIRED' } });
+  const message = (await f.request('POST', '/send', body)).body.message_id;
+  expect(() => f.messages.storeIntegrationReply(message, 'outsider', 'Forged', { idempotencyKey: 'fake' })).toThrow();
+  const other = f.messages.save({ name: 'Other', sessionIds: ['outside'] });
+  const foreign = f.messages.send({ groupId: other.id, fromSessionId: null, toSessionIds: ['outside'], kind: 'message', content: 'Private' })[0];
+  expect(await f.request('GET', `/message/${foreign.id}`)).toMatchObject({ status: 404 });
+  const human = f.messages.send({ groupId: f.group.id, fromSessionId: null, toSessionIds: ['worker'], kind: 'message', content: 'Human' })[0];
+  expect(await f.request('POST', '/reply', { messageId: human.id, content: 'Forged', idempotency_key: 'fake' })).toMatchObject({ status: 409, body: { code: 'NO_REPLY_TARGET' } });
+  expect((await f.request('GET', '/message')).body.messages).toHaveLength(2);
+  expect(await f.request('GET', '/tasks')).toMatchObject({ status: 403 });
+  expect(await f.request('GET', '/message?after-id=missing')).toMatchObject({ status: 404, body: { code: 'MESSAGE_NOT_FOUND' } });
+  const second = f.runtime.store.provision({ ...updated, id: 'second' });
+  const headers = { 'x-termdock-integration-protocol': '1', 'x-termdock-integration-id': 'second', authorization: `Bearer ${second.token}`, 'Content-Type': 'application/json' };
+  expect(await f.request('POST', '/reply', { messageId: message, content: 'Wrong identity', idempotency_key: 'wrong' }, headers)).toMatchObject({ status: 409, body: { code: 'NO_REPLY_TARGET' } });
+  const separate = await f.request('POST', '/send', { ...body, origin: { integrationId: 'bridge' } }, headers);
+  expect(separate.body.message_id).not.toBe(message);
+  expect(f.messages.getMessage(separate.body.message_id)?.integrationOrigin?.integrationId).toBe('second');
+  const removed = { ...updated, permissions: ['message.read'] as IntegrationPolicy['permissions'] }; f.runtime.store.update(removed);
+  expect(await f.request('POST', '/send', body)).toMatchObject({ status: 403 });
+});
+
+it('keeps principal CLI help offline and preflights old services before sending, then executes the documented send route', async () => {
+  const oldFile = process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE;
+  resources.push(() => { if (oldFile === undefined) delete process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE; else process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE = oldFile; });
+  delete process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE;
+  const output: string[] = [], io = { write: (line: string) => output.push(line), stdin: async () => 'stdin prompt' };
+  expect(await runIntegrationCollab(parseCollaborationCommand(['--principal', 'bridge', 'send', '--help']), 59999, io)).toBe(0);
+  expect(output.join('')).toContain('message.send'); expect(output.join('')).toContain('response-kind result');
+  expect(output.join('')).toContain('integration_message_send/reply/history');
+  const file = path.join(dir, 'cli-credential.json'); fs.writeFileSync(file, JSON.stringify({ id: 'bridge', token: 'private-test-token', protocol: 1 }), { mode: 0o600 });
+  process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE = file;
+  let supported = false; const requests: string[] = [];
+  const server = http.createServer((req, res) => {
+    requests.push(req.url!); expect(req.headers.authorization).toBe('Bearer private-test-token');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.url === '/capabilities') { res.end(JSON.stringify({ integration_protocol: 1, integration_message_send: supported })); return; }
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
+      expect(JSON.parse(raw)).toMatchObject({ targetSessionId: 'worker', message: 'Run', idempotency_key: 'run', origin: { source: 'test' } });
+      res.end(JSON.stringify({ ok: true, status: 'pending', message_id: 'original', thread_id: 'thread' }));
+    });
+  });
+  const port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const command = parseCollaborationCommand(['--principal', 'bridge', 'send', 'worker', 'Run', '--idempotency-key', 'run', '--source', 'test']);
+  output.length = 0;
+  expect(await runIntegrationCollab(command, port, io)).toBe(1);
+  expect(JSON.parse(output.pop()!)).toMatchObject({ code: 'INTEGRATION_MESSAGING_UNSUPPORTED' });
+  expect(requests).toEqual(['/capabilities']);
+  supported = true;
+  expect(await runIntegrationCollab(command, port, io)).toBe(0);
+  expect(requests).toEqual(['/capabilities', '/capabilities', '/send']);
+  expect(output.join('')).not.toContain('private-test-token');
+});
+
+it('recovers integration replies committed while the event runtime is offline without generating duplicate tasks or events', async () => {
+  const f = await runtimeFixture(); const p = policy(f.group.id); p.permissions.push('message.send', 'message.read'); f.runtime.store.update(p);
+  const original = (await f.request('POST', '/send', { targetSessionId: 'worker', message: 'Run', idempotency_key: 'run' })).body.message_id;
+  await f.runtime.close();
+  const reply = f.messages.storeIntegrationReply(original, 'worker', 'Offline result', { responseKind: 'result', idempotencyKey: 'offline' });
+  const source = new CollaborationStore(path.join(dir, 'groups.json'));
+  let restarted = new IntegrationRuntime({ ...f.options, messages: source }); await restarted.listen(); resources.push(() => restarted.close());
+  const p2 = restarted.store.authenticate('bridge', f.issued.token);
+  const event = restarted.store.page(p2, 'replay').events.find(e => e.kind === 'message.reply')!;
+  expect(event.payload).toMatchObject({ message_id: reply.id, reply_to: original });
+  await restarted.close(); restarted = new IntegrationRuntime({ ...f.options, messages: source }); await restarted.listen();
+  const recovered = restarted.store.page(p2, 'replay').events.filter(e => e.kind === 'message.reply');
+  expect(recovered).toHaveLength(1); expect(recovered[0].event_id).toBe(event.event_id);
+  expect(f.taskStore.snapshot()).toEqual([]);
+});

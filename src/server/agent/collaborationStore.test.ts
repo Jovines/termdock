@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CollaborationStore } from './collaborationStore.js';
 
 describe('CollaborationStore', () => {
@@ -13,6 +13,17 @@ describe('CollaborationStore', () => {
   });
   afterEach(() => fs.rmSync(directory, { recursive: true, force: true }));
 
+  it('rejects reply success on a failed durable write and permits an idempotent retry after recovery', () => {
+    const store = new CollaborationStore(filePath), group = store.save({ name: 'Bridge', sessionIds: ['worker'] });
+    const incoming = store.send({ groupId: group.id, fromSessionId: null, toSessionIds: ['worker'], kind: 'message', content: 'Run', integrationOrigin: { integrationId: 'bridge', source: 'integration' } })[0];
+    const fsync = vi.spyOn(fs, 'fsyncSync').mockImplementationOnce(() => { throw new Error('disk unavailable'); });
+    try { expect(() => store.storeIntegrationReply(incoming.id, 'worker', 'Result', { idempotencyKey: 'result', responseKind: 'result' })).toThrow('disk unavailable'); }
+    finally { fsync.mockRestore(); }
+    expect(store.receipt(incoming.id).result_ids).toEqual([]);
+    expect(new CollaborationStore(filePath).receipt(incoming.id).result_ids).toEqual([]);
+    const reply = store.storeIntegrationReply(incoming.id, 'worker', 'Result', { idempotencyKey: 'result', responseKind: 'result' });
+    expect(new CollaborationStore(filePath).getMessage(reply.id)?.status).toBe('stored');
+  });
   it('fans out durable group messages and preserves them across restarts', () => {
     const store = new CollaborationStore(filePath);
     const group = store.save({ name: 'Release', sessionIds: ['manager', 'coder', 'reviewer'] });

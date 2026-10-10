@@ -930,3 +930,18 @@ it('opens settings for a different group from the launcher and returns to its gr
   expect(screen.getByRole('button', { name: '成员消息：beta' })).toBeTruthy();
   expect(apiMocks.saveCollaborationGroup).not.toHaveBeenCalled();
 });
+
+it('labels integration messages and stored replies as background facts rather than terminal deliveries', async () => {
+  const user = userEvent.setup();
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [{ id: 'background-messages', name: '后台消息', sessionIds: ['one'], createdAt: 1, updatedAt: 1 }], sessions: [] });
+  apiMocks.listCollaborationMessages.mockResolvedValue({ messages: [
+    { id: 'request', kind: 'message', content: '后台普通正文', threadId: 'thread', createdAt: 1, fromSessionId: null, integrationOrigin: { integrationId: 'bridge', source: 'integration' }, toSessionId: 'one', status: 'pending' },
+    { id: 'reply', kind: 'reply', responseKind: 'result', content: '后台结果正文', threadId: 'thread', createdAt: 2, fromSessionId: 'one', toSessionId: 'principal:bridge', toPrincipalId: 'bridge', status: 'stored' },
+  ] });
+  render(<AgentOperationsPanel activeSessionId="one" initialCollaborationGroupId="background-messages" onClose={() => undefined} onNewSession={() => undefined} />);
+  await user.click(await screen.findByRole('button', { name: '成员与消息' }));
+  expect(await screen.findByText('后台结果正文')).toBeTruthy();
+  expect(screen.getAllByText('后台接入 bridge')).toHaveLength(2);
+  expect(screen.getByText('答复已持久保存 · 供后台接收')).toBeTruthy();
+  expect(screen.queryByText('已写入接收方终端 · 等待接手确认')).toBeNull();
+});
