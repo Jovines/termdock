@@ -688,6 +688,7 @@ export type TranslationDictionary = {
     kicadInsertSetting: string;
     markdownPreview: string;
     markdownSource: string;
+    markdownParseFailed: string;
     markdownPreviewHint: string;
     htmlPreview: string;
     htmlSource: string;

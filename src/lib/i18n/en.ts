@@ -671,6 +671,7 @@ export const en: TranslationDictionary = {
     kicadInsertSetting: 'Insert setting',
     markdownPreview: 'Preview',
     markdownSource: 'Source',
+    markdownParseFailed: 'Markdown preview parsing failed or exceeded its limits. Showing the source text.',
     markdownPreviewHint: 'Tap a line/section to reference, tap another to extend; drag the left rail to select a range',
     htmlPreview: 'Preview',
     htmlSource: 'Source',

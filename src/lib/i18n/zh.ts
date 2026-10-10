@@ -671,6 +671,7 @@ export const zh: TranslationDictionary = {
     kicadInsertSetting: '引用配置',
     markdownPreview: '预览',
     markdownSource: '源码',
+    markdownParseFailed: 'Markdown 预览解析失败或超过限制，已显示原文。',
     markdownPreviewHint: '点按行/段落引用，再点一行扩选；拖左侧竖条可连续框选',
     htmlPreview: '预览',
     htmlSource: '源码',

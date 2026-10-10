@@ -1,3 +1,5 @@
+import { MarkdownParseBudget } from './markdownParseBudget';
+import { scanMarkdownInlineTokens } from './markdownInlineTokens';
 import { LoadingSpinner as RiLoader, LoadingStatus } from '../ui/Loading';
 import { ChangesToolbar } from './ChangesToolbar';
 import { RetainedPane as Pane } from './RetainedPane';
@@ -582,6 +584,7 @@ type MarkdownPreviewImage = {
 const MarkdownMermaidOpenContext = createContext<((svg: string) => void) | null>(null);
 
 interface MarkdownRenderContext {
+  budget: MarkdownParseBudget;
   markdownFilePath: string | null;
   rootPath: string | null;
   referenceDefinitions: MarkdownReferenceDefinitions;
@@ -1502,16 +1505,22 @@ function renderMarkdownInline(
   wrapLongTokens = true,
   context: MarkdownRenderContext,
 ): ReactNode[] {
+  return context.budget.nested(() => renderMarkdownInlineContent(text, keyPrefix, wrapLongTokens, context));
+}
+
+function renderMarkdownInlineContent(
+  text: string,
+  keyPrefix: string,
+  wrapLongTokens = true,
+  context: MarkdownRenderContext,
+): ReactNode[] {
+  context.budget.validateInline(text);
   const maskedText = maskMarkdownEscapes(text);
-  const pattern = /(\\\([^)]*\\\)|\$[^$\n]+\$|<br\s*\/?>|<\s*img\b[^>]*>|<\s*video\b[^>]*>[\s\S]*?<\/video\s*>|<(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)\b[\s\S]*?<\/(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)>|!?\[[^\]]*\]\((?:<[^>]+>|(?:[^\s()]+|\([^()\s]*\))+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)|!?\[[^\]]+\]\[[^\]]*\]|!?\[[^\]]+\]|\[\^[^\]]+\]|(`+)([\s\S]*?)\2|~~[^~]+~~|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_|<https?:\/\/[^>\s]+>|<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>|https?:\/\/[^\s<]+|www\.[^\s<]+|[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+)/gi;
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(maskedText)) !== null) {
-    if (match.index > lastIndex) nodes.push(unmaskMarkdownEscapes(maskedText.slice(lastIndex, match.index)));
-    const token = match[0];
-    const key = `${keyPrefix}-${match.index}`;
+  for (const { index, token } of scanMarkdownInlineTokens(maskedText, context.budget)) {
+    if (index > lastIndex) nodes.push(unmaskMarkdownEscapes(maskedText.slice(lastIndex, index)));
+    const key = `${keyPrefix}-${index}`;
 
     const htmlInline = token.startsWith('<') ? renderMarkdownHtmlInline(token, key, context) : null;
     if (htmlInline) {
@@ -1602,7 +1611,7 @@ function renderMarkdownInline(
       ) : token);
     }
 
-    lastIndex = pattern.lastIndex;
+    lastIndex = index + token.length;
   }
 
   if (lastIndex < maskedText.length) nodes.push(unmaskMarkdownEscapes(maskedText.slice(lastIndex)));
@@ -1857,6 +1866,15 @@ function buildMarkdownListItemRenders(
   context: MarkdownRenderContext,
   lineOffset = 0,
 ): MarkdownListItemRender[] {
+  return context.budget.nested(() => buildMarkdownListItemRenderContent(items, keyPrefix, context, lineOffset));
+}
+
+function buildMarkdownListItemRenderContent(
+  items: MarkdownListItem[],
+  keyPrefix: string,
+  context: MarkdownRenderContext,
+  lineOffset = 0,
+): MarkdownListItemRender[] {
   return items.map((item, itemIndex) => {
     const taskMatch = item.content.match(/^\[([ xX])\]\s+(.+)$/);
     return {
@@ -1974,6 +1992,7 @@ function buildMarkdownQuoteNodeRenders(lines: string[], keyPrefix: string, conte
   const lineAt = (quoteIndex: number) => lineNums?.[quoteIndex] ?? quoteIndex + 1;
 
   while (index < lines.length) {
+    context.budget.check();
     const line = lines[index];
     const trimmed = line.trim();
     if (!trimmed) {
@@ -2382,11 +2401,14 @@ export function buildMarkdownPreviewRenderResult(
   onImageOpen?: (index: number) => void,
   labels?: { footnotes: string; backToFootnote: (index: number) => string },
 ): MarkdownPreviewRenderResult {
+  const budget = new MarkdownParseBudget();
+  budget.validateLines(lines);
   lines = maskMarkdownHiddenLines(lines);
   const referenceDefinitions = collectMarkdownReferenceDefinitions(lines);
   const footnoteDefinitionLines = collectMarkdownFootnoteDefinitionLineIndexes(lines);
   const images: MarkdownPreviewImage[] = [];
   const context: MarkdownRenderContext = {
+    budget,
     markdownFilePath,
     rootPath,
     referenceDefinitions,
@@ -2401,6 +2423,7 @@ export function buildMarkdownPreviewRenderResult(
   let index = 0;
 
   while (index < lines.length) {
+    context.budget.check();
     const line = lines[index];
     const trimmed = line.trim();
 
@@ -2756,6 +2779,7 @@ export function buildMarkdownPreviewRenderResult(
     });
   }
 
+  budget.check();
   return { blocks, images };
 }
 
@@ -3188,23 +3212,30 @@ export function MarkdownPreview({
   const [outlineDesktopPos, setOutlineDesktopPos] = useState<{ top: number; right: number } | null>(null);
   const previewRootRef = useRef<HTMLDivElement | null>(null);
   const outlineToggleRef = useRef<HTMLButtonElement | null>(null);
-  const { blocks, images } = useMemo(
-    () => buildMarkdownPreviewRenderResult(
-      content.split('\n'),
-      filePath,
-      rootPath,
-      (index) => {
-        setMermaidLightboxImage(null);
-        setLightboxIndex(index);
-        onLightboxOpen?.();
-      },
-      {
-        footnotes: t('rightSidebar.footnotes'),
-        backToFootnote: (index) => t('rightSidebar.backToFootnote', { index }),
-      },
-    ),
-    [content, filePath, rootPath, onLightboxOpen, t],
-  );
+  const { blocks, images, parseError } = useMemo(() => {
+    try {
+      return { ...buildMarkdownPreviewRenderResult(
+        content.split('\n'),
+        filePath,
+        rootPath,
+        (index) => {
+          setMermaidLightboxImage(null);
+          setLightboxIndex(index);
+          onLightboxOpen?.();
+        },
+        {
+          footnotes: t('rightSidebar.footnotes'),
+          backToFootnote: (index) => t('rightSidebar.backToFootnote', { index }),
+        },
+      ), parseError: null };
+    } catch (error) {
+      return { blocks: [], images: [], parseError: error instanceof Error ? error.message : String(error) };
+    }
+  }, [content, filePath, rootPath, onLightboxOpen, t]);
+
+  useEffect(() => {
+    if (parseError) logFilePreviewLoadingEvent('markdown_error', { filePath, rootPath, error: parseError, fallback: 'plain_text' });
+  }, [parseError, filePath, rootPath]);
   const lightboxImages = useMemo(
     () => mermaidLightboxImage ? [...images, mermaidLightboxImage] : images,
     [images, mermaidLightboxImage],
@@ -3438,6 +3469,13 @@ export function MarkdownPreview({
     railDragSuppressClickRef.current = false;
     return true;
   };
+
+  if (parseError) {
+    return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground" data-markdown-preview-fallback>
+      <p role="alert" className="mb-3 text-destructive">{t('rightSidebar.markdownParseFailed')}</p>
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs">{content}</pre>
+    </div>;
+  }
 
   if (blocks.length === 0) {
     return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground"><p className="text-muted-foreground">{t('rightSidebar.emptyFile')}</p></div>;
