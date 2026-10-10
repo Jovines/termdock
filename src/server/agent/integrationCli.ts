@@ -9,6 +9,7 @@ import { getTermdockVersion } from '../utils/version.js';
 
 export const INTEGRATION_HELP = `td integration — local scoped integration administration
   groups | list
+  diagnostics <TD-session-id> (read the last restore check; administrator only)
   create --file <policy.json> --credential-file <private-output.json>
   update --file <policy.json> (same identity/group; preserves the credential)
   revoke <principal-id>
@@ -50,10 +51,16 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
   try {
     const action = argv[0] ?? 'help', options: Record<string, string> = {};
     if (action === 'help' || action === '--help') { write(INTEGRATION_HELP); return 0; }
+    const socketPath = integrationSocketPath(port);
+    if (action === 'diagnostics') {
+      if (argv.length !== 2 || !/^[a-zA-Z0-9._-]{1,80}$/.test(argv[1])) throw new Error('diagnostics requires one TD session id');
+      const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (capabilities.session_restore_diagnostics !== true) throw new CollaborationError('SESSION_RESTORE_DIAGNOSTICS_UNSUPPORTED', 'Running service does not support stored restore diagnostics', 409);
+      write(JSON.stringify(parsed(await request(socketPath, 'GET', `/admin/sessions/${encodeURIComponent(argv[1])}/restore-diagnostics`, undefined, headers(undefined, adminToken))))); return 0;
+    }
     for (let index = 1; index < argv.length; index += 2) {
       const flag = argv[index]; if (!['--file', '--credential-file'].includes(flag) || !argv[index + 1] || options[flag]) throw new Error('Invalid integration arguments'); options[flag] = argv[index + 1];
     }
-    const socketPath = integrationSocketPath(port);
     if (action === 'groups' || action === 'list') {
       if (argv.length !== 1) throw new Error('Unexpected arguments');
       write(JSON.stringify(parsed(await request(socketPath, 'GET', action === 'groups' ? '/admin/groups' : '/admin/principals', undefined, headers(undefined, adminToken))))); return 0;

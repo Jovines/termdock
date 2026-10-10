@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { atomicJson, integrationError, type IntegrationPrincipal, type LaunchProfile, type StartupInputCondition } from './integrationStore.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
+import { NativeResumeOwnerError, type NativeOwnerCheck } from './nativeResumeOwner.js';
 
 export interface IntegrationSession {
   terminal_binding?: CollaborationPaneBinding;
@@ -14,6 +15,8 @@ export interface IntegrationSession {
   startup_input?: { state: 'pending' | 'observed' | 'timed_out'; deadline: number; matched_since: number | null; observed_at: number | null };
   /** Safety condition attached to a legacy session at explicit restore, never new argv/cwd. */
   startup_condition?: StartupInputCondition;
+  /** Administrator-only locators from the last rejected restore check. */
+  restore_diagnostics?: NativeOwnerCheck & { operation_id: string };
 }
 /** Quote each configured argument as literal shell data, including paths. */
 export function integrationLaunchCommand(record: IntegrationSession, restore: boolean): string {
@@ -38,8 +41,8 @@ function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_cond
 }
 interface Document { version: 1; sessions: IntegrationSession[]; requests: Record<string, { hash: string; sessionId: string }> }
 export function publicIntegrationSession(record: IntegrationSession) {
-  const { profile: _, deadline: _deadline, launch_submitted: _submitted, startup_condition: _condition, ...publicRecord } = record;
-  return publicRecord;
+  const { profile: _, deadline: _deadline, launch_submitted: _submitted, startup_condition: _condition, restore_diagnostics: diagnostics, ...publicRecord } = record;
+  return { ...publicRecord, ...(diagnostics ? { restore_diagnostics_available: true } : {}) };
 }
 export function permittedCwd(profile: LaunchProfile, cwd: string): string {
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || /[\x00-\x1f\x7f]/.test(cwd)) integrationError('SESSION_CWD_DENIED', 'cwd must be absolute', 403);
@@ -127,13 +130,22 @@ export class IntegrationSessions {
       } catch (error) {
         const current = this.doc.sessions.find(s => s.session_id === record.session_id)!;
         const code = (error as { code?: unknown }).code;
-        this.saveRecord({ ...current, state: 'failed', error_code: typeof code === 'string' ? code : 'SESSION_LAUNCH_FAILED', updated_at: Date.now() });
+        this.saveRecord({ ...current, state: 'failed', error_code: typeof code === 'string' ? code : 'SESSION_LAUNCH_FAILED',
+          restore_diagnostics: error instanceof NativeResumeOwnerError ? { ...structuredClone(error.diagnostics), operation_id: current.operation_id } : undefined,
+          updated_at: Date.now() });
       }
       return structuredClone(this.doc.sessions.find(s => s.session_id === record.session_id)!);
     })().finally(() => this.pending.delete(record.session_id));
     this.pending.set(record.session_id, promise); return promise;
   }
   async get(principal: IntegrationPrincipal, id: string): Promise<IntegrationSession> { this.lookup(principal, id); await this.refresh(id); return this.lookup(principal, id); }
+  /** Read the stored check only: no process probe, PTY attachment, or new launch. */
+  restoreDiagnostics(id: string) {
+    const record = this.doc.sessions.find(session => session.session_id === id);
+    if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Integration session does not exist', 404);
+    return structuredClone({ session_id: record.session_id, operation_id: record.operation_id,
+      state: record.state, error_code: record.error_code, diagnostics: record.restore_diagnostics ?? null });
+  }
   async restore(principal: IntegrationPrincipal, id: string, idempotencyKey: string): Promise<IntegrationSession> {
     const request = this.request(principal, idempotencyKey, ['restore', id]);
     if (request.previous) return this.pending.get(id) ?? this.get(principal, id);
@@ -156,6 +168,7 @@ export class IntegrationSessions {
       if (['starting', 'restoring', 'binding_pending'].includes(record.state)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Prior launch outcome is not yet resolved; inspect the original session', 409);
       if (observed.exists && !observed.shell) integrationError('SESSION_TARGET_NOT_SHELL', 'Original pane is not a verified shell', 409);
       record.state = 'restoring'; record.error_code = null; record.operation_id = randomUUID(); record.deadline = Date.now() + this.bindingTimeout; record.updated_at = Date.now();
+      record.restore_diagnostics = undefined;
       if (!record.profile.startupInput && !record.startup_condition) record.startup_condition = structuredClone(principal.launchProfiles.find(profile => profile.id === record.launch_profile)?.startupInput);
       record.startup_input = startupInput(record, Date.now());
       this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id };

@@ -53,6 +53,7 @@ export class IntegrationRuntime {
     };
     app.get('/admin/groups', run(req => { admin(req); return { groups: options.messages.list().filter(g => !g.federated).map(g => ({ id: g.id, name: g.name })) }; }));
     app.get('/admin/capabilities', run(req => { admin(req); return this.capabilities(); }));
+    app.get('/admin/sessions/:id/restore-diagnostics', run(req => { admin(req); return this.sessions.restoreDiagnostics(req.params.id); }));
     app.get('/admin/principals', run(req => { admin(req); return { integrations: this.store.policies() }; }));
     app.post('/admin/principals', run(req => { admin(req); this.group(req.body?.groupId); const provisioned = this.store.provision(req.body); try { this.sync(); } catch { this.scheduleRetry(); } return { id: provisioned.principal.id, token: provisioned.token, protocol: INTEGRATION_PROTOCOL }; }));
     app.post('/admin/principals/:id/policy', run(req => { admin(req); if (req.body?.id !== req.params.id) integrationError('INVALID_INTEGRATION_POLICY', 'Policy identity must match the requested identity'); this.group(req.body?.groupId); this.store.update(req.body); return { ok: true, id: req.params.id }; }));
@@ -116,6 +117,7 @@ export class IntegrationRuntime {
       idempotent_session_create: true, exact_session_restore: true, external_validation: false,
       startup_input_conditions: true,
       integration_policy_update: true,
+      session_restore_diagnostics: true,
       permissions: ['task.read', 'task.create', 'task.assign', 'task.comment', 'task.revise', 'task.answer', 'events.read', 'session.create', 'session.read', 'session.restore'] };
   }
   private error(error: unknown) {

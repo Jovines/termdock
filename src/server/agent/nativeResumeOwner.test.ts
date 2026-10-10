@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { expect, it, vi } from 'vitest';
-import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type NativeResumeOwnerCandidate, type NativeResumeProcess } from './nativeResumeOwner.js';
+import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, NativeResumeOwnerError, type NativeResumeOwnerCandidate, type NativeResumeProcess } from './nativeResumeOwner.js';
 
 const target = { slug: 'fixture', nativeSessionId: 'original-uuid' };
 const candidate: NativeResumeOwnerCandidate = { backendSessionId: 'other', cachedSlug: target.slug, cachedNativeId: target.nativeSessionId };
@@ -63,4 +63,48 @@ it('does not treat old UUID C as proof of absence when the current process canno
     .rejects.toMatchObject({ code: 'NATIVE_SESSION_OWNER_UNCONFIRMED' });
   await expect(assertNativeResumeAvailable(target, 'own', [old], async () => { throw new Error('observation unavailable'); }))
     .rejects.toMatchObject({ code: 'NATIVE_SESSION_OWNER_UNCONFIRMED' });
+});
+it('identifies all blocking panes and distinguishes shell proof failure from a live Agent without native argv', async () => {
+  const candidates = [{ ...candidate, sessionId: 'shell-td', tmuxSessionName: 'shell', backendAttached: false },
+    { ...candidate, backendSessionId: 'cold', sessionId: 'cold-td', tmuxSessionName: 'cold' }];
+  try {
+    await assertNativeResumeAvailable(target, 'own', candidates, async item => item.backendSessionId === 'cold'
+      ? [{ confirmed: true, agentSlug: target.slug, nativeId: null, paneId: '%113', panePid: 113, program: 'fixture', argumentsObserved: true }]
+      : [{ confirmed: false, agentSlug: null, nativeId: null, paneId: '%115', panePid: 115, program: 'zsh',
+        shellFailure: 'SHELL_FOREGROUND_MISMATCH', pgid: 115, tpgid: -1 }]);
+    throw new Error('expected blocked restore');
+  } catch (error) {
+    expect(error).toBeInstanceOf(NativeResumeOwnerError);
+    expect((error as NativeResumeOwnerError).diagnostics).toMatchObject({ code: 'NATIVE_SESSION_OWNER_UNCONFIRMED', total_blockers: 2, truncated: false,
+      candidates: [{ session_id: 'shell-td', backend_session_id: 'other', backend_attached: false, pane_id: '%115', reason: 'SHELL_FOREGROUND_MISMATCH', pgid: 115, tpgid: -1 },
+        { session_id: 'cold-td', pane_id: '%113', reason: 'NATIVE_SESSION_ID_MISSING', arguments_observed: true }] });
+  }
+});
+it('stores no callback exception or extra argv/credential fields in diagnostics', async () => {
+  const secret = 'PRIVATE_ARGV_AND_CREDENTIAL';
+  try {
+    await assertNativeResumeAvailable(target, 'own', [candidate], async () => { throw new Error(secret); });
+  } catch (error) {
+    expect((error as NativeResumeOwnerError).diagnostics.candidates[0].reason).toBe('TERMINAL_OBSERVATION_FAILED');
+    expect(JSON.stringify((error as NativeResumeOwnerError).diagnostics)).not.toContain(secret);
+  }
+  const extra = { confirmed: false, agentSlug: null, nativeId: null, rawArgs: secret, credential: secret, argumentsObserved: false };
+  await expect(assertNativeResumeAvailable(target, 'own', [candidate], observe([extra])))
+    .rejects.toMatchObject({ diagnostics: { candidates: [{ reason: 'PROCESS_ARGUMENTS_UNAVAILABLE' }] } });
+  try { await assertNativeResumeAvailable(target, 'own', [candidate], observe([extra])); }
+  catch (error) { expect(JSON.stringify((error as NativeResumeOwnerError).diagnostics)).not.toContain(secret); }
+});
+it('bounds stored blockers while retaining a later proven owner and scanning all candidates', async () => {
+  const candidates = Array.from({ length: 130 }, (_, index) => ({ ...candidate, backendSessionId: `backend-${index}` }));
+  try {
+    await assertNativeResumeAvailable(target, 'own', candidates, async item => item.backendSessionId === 'backend-129'
+      ? [{ confirmed: true, agentSlug: target.slug, nativeId: target.nativeSessionId }]
+      : [{ confirmed: false, agentSlug: null, nativeId: null }]);
+    throw new Error('expected blocked restore');
+  } catch (error) {
+    const report = (error as NativeResumeOwnerError).diagnostics;
+    expect(report).toMatchObject({ code: 'NATIVE_SESSION_ALREADY_RUNNING', truncated: true, total_blockers: 130 });
+    expect(report.candidates).toHaveLength(128);
+    expect(report.candidates[0]).toMatchObject({ backend_session_id: 'backend-129', reason: 'NATIVE_SESSION_MATCH' });
+  }
 });

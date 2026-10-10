@@ -1,6 +1,6 @@
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
-import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates } from '../agent/nativeResumeOwner.js';
+import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type ShellVerificationFailure } from '../agent/nativeResumeOwner.js';
 import { integrationLaunchCommand, type IntegrationDeliveryReadiness, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
 import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
@@ -2349,15 +2349,23 @@ async function spawnCollaborationAgentSession(
 /** Restricted session adapter: only preconfigured argv and the exact owned
  * terminal can be launched; no remote drive or arbitrary shell commands. */
 async function integrationPaneIsIdleShell(pane: Pick<CollaborationPaneCandidate, 'isShell' | 'panePid'>): Promise<boolean> {
-  if (!pane.isShell) return false;
+  return (await inspectIntegrationShell(pane)).confirmed;
+}
+async function inspectIntegrationShell(pane: Pick<CollaborationPaneCandidate, 'isShell' | 'panePid'>): Promise<{
+  confirmed: boolean; failure: ShellVerificationFailure | null; pgid: number | null; tpgid: number | null;
+}> {
+  if (!pane.isShell) return { confirmed: false, failure: null, pgid: null, tpgid: null };
   try {
     const { stdout } = await execFileAsync('ps', ['-p', String(pane.panePid), '-o', 'pgid=,tpgid=,args='], { timeout: 3000, maxBuffer: 16384 });
-    const row = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-    if (!row || row[1] !== row[2]) return false;
+    const row = stdout.trim().match(/^(-?\d+)\s+(-?\d+)\s+(.+)$/);
+    if (!row) return { confirmed: false, failure: 'SHELL_PROCESS_NOT_FOUND', pgid: null, tpgid: null };
+    const pgid = Number(row[1]), tpgid = Number(row[2]);
+    if (pgid <= 0 || pgid !== tpgid) return { confirmed: false, failure: 'SHELL_FOREGROUND_MISMATCH', pgid, tpgid };
     const argv = splitCommandToArgv(row[3]);
     const command = normalizeProgramName(argv[0]?.replace(/^-/, ''))?.toLowerCase();
-    return !!command && shellNamesBackend.has(command) && argv.slice(1).every(arg => ['-l', '-i', '-il', '-li', '--login', '--interactive'].includes(arg));
-  } catch { return false; }
+    const confirmed = !!command && shellNamesBackend.has(command) && argv.slice(1).every(arg => ['-l', '-i', '-il', '-li', '--login', '--interactive'].includes(arg));
+    return { confirmed, failure: confirmed ? null : 'SHELL_ARGUMENTS_UNSUPPORTED', pgid, tpgid };
+  } catch { return { confirmed: false, failure: 'SHELL_OBSERVATION_FAILED', pgid: null, tpgid: null }; }
 }
 function integrationTerminalRecord(record: IntegrationSession) {
   const terminal = globalSessionState.sessions.find(s => s.sessionId === record.session_id);
@@ -2435,18 +2443,22 @@ async function assertIntegrationNativeResumeAvailable(record: IntegrationSession
         return Promise.all(layout.windows.flatMap(window => window.panes).map(async pane => {
           const program = await resolveTmuxPaneProgram(pane, true, true);
           const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
-          const shell = !agent && await integrationPaneIsIdleShell({ panePid: pane.pid,
-            isShell: shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') });
-          return { confirmed: shell || program?.source === 'tmux-tty' && Boolean(program.rawArgs),
+          const shell = await inspectIntegrationShell({ panePid: pane.pid,
+            isShell: !agent && shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') });
+          return { confirmed: shell.confirmed || program?.source === 'tmux-tty' && Boolean(program.rawArgs),
             agentSlug: agent?.slug ?? null,
-            nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null };
+            nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null,
+            paneId: pane.id, panePid: pane.pid, tmuxSessionId: layout.sessionId, program: program?.command ?? null,
+            processSource: program?.source, argumentsObserved: !!program?.rawArgs,
+            shellFailure: shell.failure, pgid: shell.pgid, tpgid: shell.tpgid };
         }));
       }
       if (!backend) return [];
       const program = await detectShellActiveProgram(backend);
       const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
       return [{ confirmed: !!program && program.source !== 'unknown', agentSlug: agent?.slug ?? null,
-        nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null }];
+        nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null,
+        program: program?.command ?? null, processSource: program?.source, argumentsObserved: !!program?.rawArgs }];
     });
 }
 async function launchIntegrationTerminal(record: IntegrationSession, restoring: boolean, prepared: (binding: CollaborationPaneBinding) => void) {

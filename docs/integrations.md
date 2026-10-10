@@ -5,7 +5,8 @@
 插件原生 ID 的前台 argv 回读及服务重启后的运行中 restore 核验修复要求
 **实际运行服务至少 1.4.302**。退出后的重复原生会话检查修复要求
 **实际运行服务至少 1.4.303**。没有 PTY 附着的已登记 tmux 的重复保护修复要求
-**实际运行服务至少 1.4.304**；建议 CLI 与服务同步安装 1.4.304（CLI 最低仍为 1.4.301）。
+**实际运行服务至少 1.4.304**。管理员恢复诊断要求 **CLI / 实际服务均至少 1.4.305**；
+建议 CLI 与服务同步安装 1.4.305（既有接入命令的 CLI 最低仍为 1.4.301）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -310,9 +311,55 @@ operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒
 仅在确认 tmux 已消失或当前进程排除冲突时继续；未知进程、同 Agent 缺少精确 UUID、
 观察失败均返回 `NATIVE_SESSION_OWNER_UNCONFIRMED`，不以旧 UUID 证明没有冲突。
 
+### 管理员恢复诊断（1.4.305）
+
+`capabilities.session_restore_diagnostics=true` 表示服务支持持久恢复诊断。
+遇到 `NATIVE_SESSION_OWNER_UNCONFIRMED` 或 `NATIVE_SESSION_ALREADY_RUNNING` 后，
+本机管理员执行：
+
+```sh
+td integration diagnostics <TD-session-id>
+```
+
+命令经原私有 Unix socket 和本机管理员凭据读取报告，不使用 `--principal`。
+服务能力缺失时返回 `SESSION_RESTORE_DIAGNOSTICS_UNSUPPORTED`，不会假装诊断成功。
+命令仅读取已存记录，不重新扫描进程、不挂接 PTY、不试键、不创建恢复意图。
+304 及更早的失败没有此报告；升级后应使用新的 restore 幂等键执行一次明确检查，
+再读报告。旧键不会执行一次新检查。
+
+响应包含当前 `session_id / operation_id / state / error_code`，以及可为空的
+`diagnostics`。报告含其自身 `operation_id / checked_at / code`、`candidates`、
+`total_blockers / truncated`；它是该次检查的历史事实，不能代表读取时的当前进程。
+只有上一次**实际发起**的恢复检查会保存报告；下一次实际恢复清除旧报告，运行中
+no-op restore 不创建新检查。报告跟随会话保存并可在服务重启后回读。
+
+每个阻塞候选含 `session_id / backend_session_id / backend_attached`、
+`tmux_session_name / tmux_session_id / pane_id / pane_pid`、`program / process_source`、
+`arguments_observed / agent_slug / last_known_native_id / observed_native_id`、
+`pgid / tpgid / reason / observed_at`；无法观测的值为 null。backend 不存在或仅有旧
+登记仍可通过 tmux 核验；`pane_pid` 是承载 pane 的 PID，不冒充 Agent 前台 PID。
+报告最多保存 128 个阻塞候选；`total_blockers` 保留总数，确定的同 UUID 所有者优先展示。
+
+| reason | 实际证据缺口或冲突 |
+| --- | --- |
+| NATIVE_SESSION_MATCH | 当前前台进程明确携带目标 UUID |
+| NATIVE_SESSION_ID_MISSING | 当前同 Agent 的进程已观测，但没有可回读的精确 UUID |
+| PROCESS_ARGUMENTS_UNAVAILABLE | 无法取得可靠的当前进程 argv |
+| FOREGROUND_PROCESS_UNCONFIRMED | 无法可靠核验前台进程 |
+| SHELL_PROCESS_NOT_FOUND | shell 的 ps 输出未形成可解析记录 |
+| SHELL_FOREGROUND_MISMATCH | shell 未持有有效前台进程组；记录 pgid/tpgid |
+| SHELL_ARGUMENTS_UNSUPPORTED | 当前 shell 命令或启动参数未满足既有安全检查 |
+| SHELL_OBSERVATION_FAILED | shell 的进程观察失败 |
+| TERMINAL_OBSERVATION_FAILED | tmux 或终端观察失败，无法排除该候选 |
+
+完整候选可能来自其他组，因此仅管理员接口返回；principal 的 session 响应与推送
+事件只增加 `restore_diagnostics_available=true`，不含候选标识/UUID。报告不保存或
+返回原始 argv、cwd、终端正文、包装器异常、凭据。诊断不自动放宽任何拒绝条件，
+不能把旧 UUID、native ready 或 Agent 忙闲推测当作消除冲突的证据。
+
 常见失败码（每项都是完整字符串）：
 
-- 配置/权限：`LAUNCH_PROFILE_DENIED`, `LAUNCHER_UNAVAILABLE`, `COLLAB_AGENT_UNAVAILABLE`, `SESSION_CWD_MISSING`, `SESSION_CWD_DENIED`, `INTEGRATION_SESSION_NOT_FOUND`, `INTEGRATION_SESSION_LIMIT`。
+- 配置/权限：`LAUNCH_PROFILE_DENIED`, `LAUNCHER_UNAVAILABLE`, `COLLAB_AGENT_UNAVAILABLE`, `SESSION_CWD_MISSING`, `SESSION_CWD_DENIED`, `INTEGRATION_SESSION_NOT_FOUND`, `INTEGRATION_SESSION_LIMIT`, `SESSION_RESTORE_DIAGNOSTICS_UNSUPPORTED`。
 - 终端/身份：`SESSION_BACKEND_UNAVAILABLE`, `SESSION_TARGET_NOT_SHELL`, `SESSION_IDENTITY_MISMATCH`, `NATIVE_SESSION_ID_MISMATCH`, `NATIVE_SESSION_ID_INVALID`, `NATIVE_SESSION_ID_MISSING`。
 - 启动/恢复：`SESSION_CREATE_OUTCOME_UNKNOWN`, `SESSION_OPERATION_IN_PROGRESS`, `SESSION_BINDING_TIMEOUT`, `EXACT_RESUME_UNSUPPORTED`, `NATIVE_SESSION_ALREADY_RUNNING`, `NATIVE_SESSION_OWNER_UNCONFIRMED`, `AGENT_NOT_RUNNING`。
 - 未分类异常：`SESSION_LAUNCH_FAILED`, `SESSION_OBSERVATION_FAILED`；错误不包含包装器输出、密钥或原始堆栈。
@@ -335,7 +382,10 @@ operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒
 使用方已报告 1.4.303 退出后精确恢复通过，也发现未挂接 PTY 的已登记 tmux 重复保护
 遗漏；维护机已用“旧 UUID C、实际运行 UUID A、无 PTY 附着”的真实隔离 tmux 复现，
 并验证 1.4.304 编译后检查在该状态下拒绝再次启动。
-**1.4.304 的真实 TraeX 重复保护与稳定输入条件仍须使用方实机复验**。
+使用方已报告 1.4.304 在未挂接网页/PTY、旧登记 UUID C 而实际运行 A 的场景下，
+正确拒绝同 UUID 恢复且没有第二个进程。所有者退出后仍有未确认候选，不能仅凭
+错误码判断是哪一个 pane；1.4.305 提供管理员持久诊断，并保持原拒绝条件。
+**1.4.305 的真实 TraeX 阻塞候选诊断与稳定输入条件仍须使用方实机复验**。
 回读 capabilities 后，应核对原 TD ID、真实 TraeX UUID 与原 argv/cwd/包装器快照，
 并验证 Agent 真正加载原对话。
 先完成测试环境的创建→追问→关联答复，再验重复键、追加咨询、断线重投和精确恢复。

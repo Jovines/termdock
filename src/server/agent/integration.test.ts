@@ -12,7 +12,7 @@ import type { LoadedPlugin } from './plugins.js';
 import { selectTmuxForegroundProgram, type TmuxProcessRow } from '../utils/tmuxProgramDetection.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { IntegrationStore, validatePolicy, type IntegrationPolicy, type IntegrationPrincipal } from './integrationStore.js';
-import { IntegrationSessions, permittedCwd, integrationLaunchCommand, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
+import { IntegrationSessions, permittedCwd, integrationLaunchCommand, publicIntegrationSession, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
 import { IntegrationRuntime } from './integrationServer.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates } from './nativeResumeOwner.js';
 import { readIntegrationCredential, runIntegrationAdmin } from './integrationCli.js';
@@ -106,6 +106,35 @@ it('keeps startup failure durable and makes retries observe the failed intent wi
   expect((await restarted.create(p, input)).session_id).toBe(result.session_id); expect(fake.api.create).toHaveBeenCalledTimes(1);
   expect(fs.readFileSync(file, 'utf8')).not.toContain('secret wrapper output');
 });
+it('persists private restore evidence across restart without leaking it in public sessions, and clears it on a new launch', async () => {
+  const fake = adapter(), file = path.join(dir, 'diagnostic-sessions.json'), p = principal();
+  fake.set({ exists: true, running: true, agentSlug: 'fixture', nativeId: 'original-native' });
+  let sessions = new IntegrationSessions(file, fake.api); resources.push(() => sessions.close());
+  const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'initial' });
+  fake.set({ running: false, shell: true, nativeId: null });
+  fake.api.restore = vi.fn(async () => assertNativeResumeAvailable({ slug: 'fixture', nativeSessionId: 'original-native' }, 'own',
+    [{ backendSessionId: 'outside-backend', sessionId: 'outside-td', tmuxSessionName: 'outside-tmux', cachedSlug: 'fixture', cachedNativeId: 'other-native' }],
+    async () => [{ confirmed: true, agentSlug: 'fixture', nativeId: null, paneId: '%115', panePid: 115, argumentsObserved: true }]));
+  const failed = await sessions.restore(p, created.session_id, 'blocked');
+  expect(failed).toMatchObject({ state: 'failed', error_code: 'NATIVE_SESSION_OWNER_UNCONFIRMED' });
+  const stored = sessions.restoreDiagnostics(created.session_id);
+  expect(stored.diagnostics).toMatchObject({ operation_id: failed.operation_id, code: failed.error_code,
+    candidates: [{ session_id: 'outside-td', pane_id: '%115', reason: 'NATIVE_SESSION_ID_MISSING' }] });
+  expect(publicIntegrationSession(failed)).toHaveProperty('restore_diagnostics_available', true);
+  expect(JSON.stringify(publicIntegrationSession(failed))).not.toContain('outside-td');
+  expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  const probes = (fake.api.inspect as ReturnType<typeof vi.fn>).mock.calls.length;
+  sessions.restoreDiagnostics(created.session_id);
+  expect((fake.api.inspect as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(probes);
+  sessions.close(); sessions = new IntegrationSessions(file, fake.api);
+  expect(sessions.restoreDiagnostics(created.session_id)).toEqual(stored);
+  await sessions.restore(p, created.session_id, 'blocked'); expect(fake.api.restore).toHaveBeenCalledTimes(1);
+  fake.api.restore = vi.fn(async () => { fake.set({ running: true, shell: false, nativeId: 'original-native' }); });
+  const restored = await sessions.restore(p, created.session_id, 'new-real-restore');
+  expect(restored).toMatchObject({ state: 'ready', session_id: created.session_id, agent_native_session_id: 'original-native' });
+  expect(sessions.restoreDiagnostics(created.session_id).diagnostics).toBeNull();
+  expect(publicIntegrationSession(restored)).not.toHaveProperty('restore_diagnostics_available');
+});
 it('preserves acceptance, result and original attempt for consultation; only the original assignee can respond', () => {
   vi.useFakeTimers(); vi.setSystemTime(100000);
   const file = path.join(dir, 'tasks.json'); let store = new CollaborationTaskStore(file);
@@ -145,12 +174,12 @@ it('retains the old --integration switch and exposes independent principal / cor
   expect(() => parseCollaborationCommand(['--principal', 'bridge', 'session', 'restore', 's', '--idempotency-key', 'k', '--launch-profile', 'other'])).toThrow();
 });
 
-async function runtimeFixture() {
+async function runtimeFixture(sessionAdapter?: IntegrationSessionAdapter) {
   const messages = new CollaborationStore(path.join(dir, 'groups.json')), group = messages.save({ name: 'Local fixture', sessionIds: ['worker'] });
   const taskStore = new CollaborationTaskStore(path.join(dir, 'tasks.json'));
   const peers = { descriptor: () => ({ serviceId }), taskMember: (sessionId: string) => ({ serviceId, sessionId }), taskSession: (m: typeof worker) => m.sessionId } as unknown as CollaborationService;
   const tasks = new CollaborationTaskService(taskStore, messages, peers, () => {});
-  const options = { directory: dir, socketPath: path.join(dir, 'api.sock'), adminToken: 'local-admin', messages, taskStore, tasks, peers, sessions: adapter().api };
+  const options = { directory: dir, socketPath: path.join(dir, 'api.sock'), adminToken: 'local-admin', messages, taskStore, tasks, peers, sessions: sessionAdapter ?? adapter().api };
   const runtime = new IntegrationRuntime(options); await runtime.listen(); resources.push(() => runtime.close());
   const issued = runtime.store.provision(policy(group.id));
   const headers = { 'x-termdock-integration-protocol': '1', 'x-termdock-integration-id': 'bridge', authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' };
@@ -168,6 +197,29 @@ async function runtimeFixture() {
   };
   return { runtime, messages, group, taskStore, request, stream, options, issued };
 }
+it('restricts cross-terminal restore diagnostics to the real administrator socket, excluding principal responses and events', async () => {
+  const fake = adapter(); fake.set({ exists: true, running: true, agentSlug: 'fixture', nativeId: 'native' });
+  fake.api.restore = async () => assertNativeResumeAvailable({ slug: 'fixture', nativeSessionId: 'native' }, 'own',
+    [{ backendSessionId: 'outside-backend', sessionId: 'outside-td', cachedSlug: 'fixture', cachedNativeId: null }],
+    async () => [{ confirmed: true, agentSlug: 'fixture', nativeId: null, paneId: '%115', panePid: 115 }]);
+  const f = await runtimeFixture(fake.api);
+  const created = await f.request('POST', '/sessions', { group_id: f.group.id, launch_profile: 'agent', cwd: dir, idempotency_key: 'initial' });
+  const id = created.body.session.session_id;
+  fake.set({ running: false, shell: true, nativeId: null });
+  const failed = await f.request('POST', `/sessions/${id}/restore`, { idempotency_key: 'blocked' });
+  expect(failed.body.session).toMatchObject({ error_code: 'NATIVE_SESSION_OWNER_UNCONFIRMED', restore_diagnostics_available: true });
+  expect(JSON.stringify(failed.body)).not.toContain('outside-td');
+  expect(await f.request('GET', `/admin/sessions/${id}/restore-diagnostics`)).toMatchObject({ status: 401 });
+  const headers = { 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  const probes = (fake.api.inspect as ReturnType<typeof vi.fn>).mock.calls.length;
+  expect(await f.request('GET', `/admin/sessions/${id}/restore-diagnostics`, undefined, headers)).toMatchObject({ status: 200,
+    body: { session_id: id, diagnostics: { candidates: [{ session_id: 'outside-td', pane_id: '%115', reason: 'NATIVE_SESSION_ID_MISSING' }] } } });
+  expect((fake.api.inspect as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(probes);
+  expect(await f.request('GET', '/admin/sessions/missing/restore-diagnostics', undefined, headers)).toMatchObject({ status: 404 });
+  expect(await f.request('GET', '/capabilities')).toMatchObject({ body: { session_restore_diagnostics: true } });
+  expect(JSON.stringify((await f.request('GET', `/sessions/${id}`)).body)).not.toContain('outside-td');
+  expect(fs.readFileSync(path.join(dir, 'integrations.json'), 'utf8')).not.toContain('outside-td');
+});
 it('pushes from durable task changes through an actual socket; read is not ACK, reconnect replays, revocation closes', async () => {
   const f = await runtimeFixture(), subscription = f.stream();
   const response = await f.request('POST', '/tasks', { input: { groupId: f.group.id, title: 'Bridge task', spec: 'Read only', idempotencyKey: 'run' }, origin: { source: 'fixture', externalActor: { id: 'user' } } });
@@ -364,6 +416,25 @@ it('refuses to provision startup conditions against an older running service bef
   expect(await runIntegrationAdmin(['create', '--file', policyFile, '--credential-file', credentialFile], port, 'admin', line => output.push(line))).toBe(1);
   expect(fs.existsSync(credentialFile)).toBe(false);
   expect(output.join('')).toContain('NOT_FOUND');
+});
+it('preflights administrator diagnostic capability and reads without posting or attaching a terminal', async () => {
+  let supported = false; const requests: string[] = [];
+  const report = { session_id: 'target', operation_id: 'last-operation', diagnostics: { candidates: [{ pane_id: '%115', reason: 'NATIVE_SESSION_ID_MISSING' }] } };
+  const server = http.createServer((req, res) => {
+    expect(req.method).toBe('GET'); expect(req.headers['x-termdock-local-token']).toBe('private-admin'); requests.push(req.url!);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(req.url === '/admin/capabilities' ? { session_restore_diagnostics: supported } : report));
+  });
+  const port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const output: string[] = [];
+  expect(await runIntegrationAdmin(['diagnostics', 'target'], port, 'private-admin', line => output.push(line))).toBe(1);
+  expect(JSON.parse(output.pop()!)).toMatchObject({ code: 'SESSION_RESTORE_DIAGNOSTICS_UNSUPPORTED' });
+  expect(requests).toEqual(['/admin/capabilities']);
+  supported = true;
+  expect(await runIntegrationAdmin(['diagnostics', 'target'], port, 'private-admin', line => output.push(line))).toBe(0);
+  expect(JSON.parse(output.pop()!)).toEqual(report);
+  expect(requests).toEqual(['/admin/capabilities', '/admin/capabilities', '/admin/sessions/target/restore-diagnostics']);
 });
 
 it('updates a policy without rotating credentials or moving the existing identity to another group', () => {
