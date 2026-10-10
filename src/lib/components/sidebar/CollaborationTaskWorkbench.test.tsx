@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
+import { SECURE_READY_EVENT } from '../../federation/connectionRecovery';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CollaborationTaskView, OrchestrationSession } from '../../terminal/api';
 import { useCollaborationTaskWorkspace } from '../../stores/useCollaborationTaskWorkspace';
@@ -8,6 +12,11 @@ import { CollaborationTaskWorkbench } from './CollaborationTaskWorkbench';
 const api = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), upload: vi.fn(), team: vi.fn() }));
 vi.mock('../../terminal/api', () => ({ listCollaborationTasks: api.list, getCollaborationTask: api.get, createCollaborationTask: api.create, updateCollaborationTask: api.update, uploadFiles: api.upload, ensureCollaborationTeam: api.team }));
 vi.mock('./CollaborationTaskContent', () => ({ default: ({ content }: { content: string }) => <p>{content}</p> }));
+vi.mock('./DirectoryPickerDialog', () => ({ DirectoryPickerDialog: ({ onCancel }: { onCancel: () => void }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  useKeyboardLayer(ref, true, onCancel);
+  return createPortal(<div ref={ref} role="dialog" aria-label="选择协作项目目录"><button onClick={onCancel}>关闭目录</button></div>, document.body);
+} }));
 const member = { serviceId: 'local', sessionId: 'lead' };
 const group = { id: 'team', name: '发布准备', sessionIds: ['lead', 'worker'], createdAt: 1, updatedAt: 1 };
 const sessions: OrchestrationSession[] = group.sessionIds.map((id, i) => ({ sessionId: id, backendSessionId: id, name: i ? '执行成员' : '协调者', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'ready', capability: 'terminal', currentTask: '', updatedAt: 1 }));
@@ -483,16 +492,150 @@ it('shows a reported prerequisite, keeps detailed logs folded, and sends clarifi
 it('starts a goal from an empty group and keeps the provisioned team on a task-save retry', async () => {
  const team={coordinatorSessionId:'new-lead',reviewerSessionIds:['new-worker']};api.team.mockResolvedValue(team);
  const result=task({title:'改善移动端体验'});api.create.mockRejectedValueOnce(Error('保存失败')).mockResolvedValueOnce({task:result});
- setup([], { group:{...group,sessionIds:[]},sessions:[],agents:[{slug:'codex',displayName:'Codex',command:'codex',accentColor:'var(--primary)',icon:null}],defaultCwd:'/project' });
+ const {onManageMembers}=setup([], { group:{...group,sessionIds:[]},sessions:[],agents:[{slug:'codex',displayName:'Codex',command:'codex',accentColor:'var(--primary)',icon:null}],defaultCwd:'/project' });
  fireEvent.change(await screen.findByRole('textbox',{name:'协作目标'}),{target:{value:'改善移动端体验'}});
  const start=screen.getByRole('button',{name:'开始协作'});expect((start as HTMLButtonElement).disabled).toBe(false);
  fireEvent.click(start);await screen.findAllByText(/保存失败/);
  expect(api.team).toHaveBeenCalledWith('team',{agentSlug:'codex',cwd:'/project'});
  expect(screen.getByRole('textbox',{name:'协作目标'})).toHaveProperty('value','改善移动端体验');
- fireEvent.click(start);await screen.findByRole('heading',{name:'改善移动端体验'});
+ expect(screen.getByRole('status',{name:'目标提交阶段'}).textContent).toContain('成员已准备，目标尚未提交');
+ expect(screen.getByRole('status',{name:'目标提交阶段'}).textContent).toContain('暂时锁定');
+ expect(screen.getByRole('combobox',{name:'协作 Agent'}).closest('fieldset')?.disabled).toBe(true);
+ expect(screen.getByRole('textbox',{name:'工作目录'}).closest('fieldset')?.disabled).toBe(true);
+ fireEvent.click(screen.getByRole('button',{name:'查看已准备的成员'}));expect(onManageMembers).toHaveBeenCalledOnce();
+ fireEvent.click(screen.getByRole('button',{name:'重试提交目标'}));await screen.findByRole('heading',{name:'改善移动端体验'});
  expect(api.team).toHaveBeenCalledTimes(1);expect(api.create).toHaveBeenCalledTimes(2);
  expect(api.create.mock.calls[0][0]).toEqual(api.create.mock.calls[1][0]);
  expect(api.create.mock.calls[1][0]).toMatchObject({coordinatorSessionId:'new-lead',reviewerSessionIds:['new-worker']});
+});
+
+it('retains prepared members and its draft through cancel/reopen, even after the group roster refreshes', async () => {
+  const team = { coordinatorSessionId: 'lead', reviewerSessionIds: ['worker'] };
+  api.team.mockResolvedValue(team); api.create.mockRejectedValueOnce(Error('目标未提交'));
+  const options = { board: true, group: { ...group, sessionIds: [] }, sessions: [], agents: [{ slug: 'codex', displayName: 'Codex', command: 'codex', accentColor: 'var(--primary)', icon: null }], defaultCwd: '/project' };
+  const { rerender } = setup([], options);
+  fireEvent.click(await screen.findByRole('button', { name: '新目标' }));
+  fireEvent.change(screen.getByRole('textbox', { name: '协作目标' }), { target: { value: '仍需提交的目标' } });
+  fireEvent.click(screen.getByRole('button', { name: '开始协作' }));
+  await screen.findByRole('button', { name: '重试提交目标' });
+  fireEvent.click(screen.getByRole('button', { name: '取消创建，保留草稿' }));
+  rerender(<CollaborationTaskWorkbench {...options} group={group} sessions={sessions} active onOpenSession={vi.fn()} onManageMembers={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: '新目标' }));
+  expect(screen.getByRole('textbox', { name: '协作目标' })).toHaveProperty('value', '仍需提交的目标');
+  expect(screen.getByRole('status', { name: '目标提交阶段' })).toBeTruthy();
+  api.create.mockResolvedValue({ task: task({ title: '仍需提交的目标' }) });
+  fireEvent.click(screen.getByRole('button', { name: '重试提交目标' }));
+  await screen.findByRole('heading', { name: '仍需提交的目标' });
+  expect(api.team).toHaveBeenCalledOnce();
+  expect(api.create.mock.calls[1][0]).toEqual(api.create.mock.calls[0][0]);
+});
+
+it.each(['answer', 'approve-plan'] as const)('saves %s under a paused ancestor and offers explicit root navigation without resuming', async kind => {
+  const root = task({ workflow: { ...task().workflow!, paused: true } });
+  const parent = task({ id: 'parent', title: '中间步骤', parentTaskId: root.id, workflow: { ...task().workflow!, kind: 'step', rootTaskId: root.id } });
+  const plan = { ...result, id: 'plan', kind: 'plan' as const };
+  const child = task({ id: 'child', title: '需要决定的子步骤', parentTaskId: parent.id, workflow: { ...task().workflow!, kind: 'step', rootTaskId: root.id },
+    decisions: kind === 'answer' ? [{ id: 'q', attemptId: 'attempt', question: '选择布局？', options: ['保留终端'], status: 'pending', createdAt: 5 }] : [], artifacts: kind === 'approve-plan' ? [plan] : [] });
+  setup([root, parent, child], { board: true });
+  act(() => window.dispatchEvent(new CustomEvent('open-collaboration-task', { detail: { groupId: group.id, taskId: child.id } })));
+  await screen.findByRole('heading', { name: child.title });
+  expect(screen.getByRole('status', { name: '安排暂停说明' }).textContent).toContain('恢复目标后才能投递');
+  if (kind === 'answer') fireEvent.click(screen.getByRole('button', { name: '保留终端' }));
+  const updated = { ...child, revision: 3, decisions: child.decisions.map(q => ({ ...q, status: 'answered' as const, answer: '保留终端' })), approvedPlanArtifactId: kind === 'approve-plan' ? plan.id : undefined, outbox: [{ id: 'pending', attemptId: 'attempt' }] };
+  api.update.mockResolvedValue({ task: updated });
+  fireEvent.click(screen.getByRole('button', { name: kind === 'answer' ? '保存回答' : '确认方案' }));
+  await screen.findByText(kind === 'answer' ? '回答已保存，目标仍暂停；恢复目标后才能投递。' : '方案确认已保存，目标仍暂停；恢复目标后才能投递。');
+  expect(api.update).toHaveBeenCalledOnce();
+  expect(api.update.mock.calls[0][1].kind).toBe(kind);
+  fireEvent.click(screen.getByRole('button', { name: '查看目标并恢复安排' }));
+  await screen.findByRole('heading', { name: root.title });
+  expect(screen.getAllByRole('button', { name: '继续安排' }).length).toBeGreaterThan(0);
+  expect(api.update).toHaveBeenCalledOnce();
+  expect(root.workflow?.paused).toBe(true);
+});
+
+it('uses the returned paused goal state after saving instead of promising delivery', async () => {
+  const record = task({ decisions: [{ id: 'q', attemptId: 'attempt', question: '选择布局？', options: ['保留终端'], status: 'pending', createdAt: 5 }] });
+  setup([record]); await choose();
+  api.update.mockResolvedValue({ task: { ...record, revision: 3, workflow: { ...record.workflow!, paused: true }, decisions: [{ ...record.decisions[0], status: 'answered', answer: '保留终端' }] } });
+  fireEvent.click(screen.getByRole('button', { name: '保留终端' }));
+  fireEvent.click(screen.getByRole('button', { name: '回复并继续' }));
+  await screen.findByText('回答已保存，目标仍暂停；恢复目标后才能投递。');
+  expect(screen.getAllByRole('button', { name: '继续安排' }).length).toBeGreaterThan(0);
+  expect(api.update.mock.calls.every(([, op]) => op.kind === 'answer')).toBe(true);
+});
+
+it.each([true, false])('uses a newly observed ancestor pause state while an answer save is pending (initially paused: %s)', async initiallyPaused => {
+  const root = task({ workflow: { ...task().workflow!, paused: initiallyPaused } });
+  const child = task({ id: 'child', title: '待保存的子任务', parentTaskId: root.id, workflow: { ...task().workflow!, kind: 'step', rootTaskId: root.id },
+    decisions: [{ id: 'q', attemptId: 'attempt', question: '选择布局？', options: ['保留终端'], status: 'pending', createdAt: 5 }] });
+  setup([root, child], { board: true });
+  act(() => window.dispatchEvent(new CustomEvent('open-collaboration-task', { detail: { groupId: group.id, taskId: child.id } })));
+  await screen.findByRole('heading', { name: child.title });
+  fireEvent.click(screen.getByRole('button', { name: '保留终端' }));
+  let resolve!: (value: { task: CollaborationTaskView }) => void;
+  api.update.mockImplementation(() => new Promise(done => { resolve = done; }));
+  fireEvent.click(screen.getByRole('button', { name: initiallyPaused ? '保存回答' : '回复并继续' }));
+  const observedRoot = { ...root, revision: 4, workflow: { ...root.workflow!, paused: !initiallyPaused } };
+  api.list.mockResolvedValue({ tasks: [observedRoot, child] });
+  api.get.mockImplementation(async (id: string) => ({ task: id === root.id ? observedRoot : child }));
+  act(() => window.dispatchEvent(new Event(SECURE_READY_EVENT)));
+  await waitFor(() => expect(!!screen.queryByRole('status', { name: '安排暂停说明' })).toBe(!initiallyPaused));
+  await act(async () => resolve({ task: { ...child, revision: 3, decisions: [{ ...child.decisions[0], status: 'answered', answer: '保留终端' }] } }));
+  await screen.findByText(initiallyPaused ? '回答已保存，投递状态请查看任务记录。' : '回答已保存，目标仍暂停；恢复目标后才能投递。');
+  expect(api.update).toHaveBeenCalledOnce();
+  if (!initiallyPaused) fireEvent.click(screen.getByRole('button', { name: '查看目标并恢复安排' }));
+  else fireEvent.click(screen.getByRole('button', { name: `查看目标：${root.title}` }));
+  await screen.findByRole('heading', { name: root.title });
+  expect(!!screen.queryByRole('status', { name: '安排暂停说明' })).toBe(!initiallyPaused);
+});
+
+it('keeps a newer polled root pause when an older answer response arrives', async () => {
+  const record = task({ decisions: [{ id: 'q', attemptId: 'attempt', question: '选择布局？', options: ['保留终端'], status: 'pending', createdAt: 5 }] });
+  setup([record]); await choose();
+  fireEvent.click(screen.getByRole('button', { name: '保留终端' }));
+  let resolve!: (value: { task: CollaborationTaskView }) => void;
+  api.update.mockImplementation(() => new Promise(done => { resolve = done; }));
+  fireEvent.click(screen.getByRole('button', { name: '回复并继续' }));
+  const saved = { ...record, revision: 3, decisions: [{ ...record.decisions[0], status: 'answered' as const, answer: '保留终端' }] };
+  const observed = { ...saved, revision: 4, workflow: { ...record.workflow!, paused: true } };
+  api.list.mockResolvedValue({ tasks: [observed] }); api.get.mockResolvedValue({ task: observed });
+  act(() => window.dispatchEvent(new Event(SECURE_READY_EVENT)));
+  await screen.findByRole('status', { name: '安排暂停说明' });
+  await act(async () => resolve({ task: saved }));
+  await screen.findByText('回答已保存，目标仍暂停；恢复目标后才能投递。');
+  expect(screen.getByRole('status', { name: '安排暂停说明' })).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: '你的回答' })).toBeNull();
+  expect(api.update).toHaveBeenCalledOnce();
+});
+
+it('protects composing and consumed Escape, gives a nested keyboard owner first close, and preserves normal cancel/refocus', async () => {
+  setup([], { board: true, group: { ...group, sessionIds: [] }, sessions: [], agents: [{ slug: 'codex', displayName: 'Codex', command: 'codex', accentColor: 'var(--primary)', icon: null }], defaultCwd: '/project' });
+  fireEvent.click(await screen.findByRole('button', { name: '新目标' }));
+  const field = screen.getByRole('textbox', { name: '协作目标' });
+  fireEvent.change(field, { target: { value: '中文输入草稿' } }); field.focus();
+  const composing = new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true, cancelable: true });
+  fireEvent(field, composing);
+  expect(composing.defaultPrevented).toBe(false); expect(document.activeElement).toBe(field);
+  const consumed = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }); consumed.preventDefault();
+  fireEvent(field, consumed);
+  expect(screen.getByRole('textbox', { name: '协作目标' })).toBe(field);
+  fireEvent.click(screen.getByRole('button', { name: '浏览目录' }));
+  const dialog = await screen.findByRole('dialog', { name: '选择协作项目目录' });
+  fireEvent.keyDown(within(dialog).getByRole('button', { name: '关闭目录' }), { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(screen.getByRole('textbox', { name: '协作目标' })).toBe(field);
+  // A synthetic event from the background form must not cancel it while another owner is topmost.
+  fireEvent.click(screen.getByRole('button', { name: '浏览目录' })); await screen.findByRole('dialog');
+  fireEvent.keyDown(field, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(screen.getByRole('textbox', { name: '协作目标' })).toHaveProperty('value', '中文输入草稿');
+  fireEvent.keyDown(field, { key: 'Escape' });
+  await screen.findByRole('heading', { name: '任务看板' });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '新目标' })));
+  fireEvent.click(screen.getByRole('button', { name: '新目标' }));
+  expect(screen.getByRole('textbox', { name: '协作目标' })).toHaveProperty('value', '中文输入草稿');
+  expect(api.create).not.toHaveBeenCalled(); expect(api.team).not.toHaveBeenCalled();
 });
 
 it('shows member conditions and independent delivery errors together, keeping original report time after a paused retry with no outbox', async () => {

@@ -3,15 +3,15 @@ import { useState } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CollaborationTab } from './AgentOperationsPanel';
-import type { CollaborationGroup } from '../../terminal/api';
+import { TerminalApiError, type CollaborationGroup } from '../../terminal/api';
 import { freshGroupSettingsDraft, writeGroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
 
-const api = vi.hoisted(() => ({ rename: vi.fn(), rules: vi.fn() }));
+const api = vi.hoisted(() => ({ rename: vi.fn(), rules: vi.fn(), latest: vi.fn() }));
 vi.mock('../../terminal/api', async original => ({
   ...await original<typeof import('../../terminal/api')>(),
   updateSettings: vi.fn().mockResolvedValue({}),
   listCollaborationMessages: vi.fn().mockResolvedValue({ messages: [] }),
-  saveCollaborationGroup: api.rename, setCollaborationGroupRules: api.rules,
+  saveCollaborationGroup: api.rename, setCollaborationGroupRules: api.rules, listCollaborationGroups: api.latest,
 }));
 vi.mock('./CollaborationTaskWorkbench', () => ({ CollaborationTaskWorkbench: ({ boardSettings }: { boardSettings: React.ReactNode }) => <section aria-label="看板">{boardSettings}</section> }));
 const alpha: CollaborationGroup = { id: 'alpha-draft', name: 'Alpha', sessionIds: ['member'], createdAt: 1, updatedAt: 1 };
@@ -38,7 +38,7 @@ function failDraftStorage(method: 'setItem' | 'removeItem' | 'getItem', group: C
     return method === 'setItem' ? (original as Storage['setItem']).call(this, key, value!) : (original as Storage['getItem']).call(this, key);
   });
 }
-beforeEach(() => { sessionStorage.clear(); localStorage.clear(); vi.clearAllMocks(); api.rename.mockReset(); api.rules.mockReset(); });
+beforeEach(() => { sessionStorage.clear(); localStorage.clear(); vi.clearAllMocks(); api.rename.mockReset(); api.rules.mockReset(); api.latest.mockReset(); });
 afterEach(() => {
   cleanup(); vi.restoreAllMocks(); sessionStorage.clear();
   for (const group of [alpha, beta]) writeGroupSettingsDraft(group.id, freshGroupSettingsDraft(group));
@@ -56,6 +56,58 @@ it('keeps both drafts on close, Escape and a complete unmount without publishing
   view.unmount(); render(<Harness />); open();
   expect(nameInput().value).toBe('名称草稿'); expect(rulesInput().value).toBe('群规草稿');
   expect(api.rename).not.toHaveBeenCalled(); expect(api.rules).not.toHaveBeenCalled();
+});
+
+it.each(['name', 'rules'] as const)('confirms current members before retrying %s and retains both drafts through storage failure and reopening', async first => {
+  const changed: CollaborationGroup = { ...alpha, name: '其他人保存的名称', sessionIds: ['second-member'], updatedAt: 20,
+    instructions: { text: '其他人保存的群规', version: 'v20', updatedAt: 20, updatedBy: 'second-member' } };
+  api.latest.mockResolvedValue({ groups: [changed], sessions: [secondMember] });
+  api.rename.mockRejectedValueOnce(new TerminalApiError('旧成员管理提示', 409));
+  api.rename.mockResolvedValue({ group: { ...changed, name: '名称草稿', updatedAt: 21 } });
+  api.rules.mockResolvedValue({ group: { ...changed, name: '名称草稿', updatedAt: 22, instructions: { text: '群规草稿', version: 'v22' } } });
+  let view = render(<Harness />); open(); edit();
+  fireEvent.click(screen.getByRole('button', { name: '保存名称' }));
+  await screen.findByText(/组设置已被其他人修改/);
+  failDraftStorage('setItem', alpha);
+  fireEvent.click(screen.getByRole('button', { name: '查看最新状态并保留草稿' }));
+  const review = await screen.findByRole('region', { name: '最新组设置' });
+  expect(within(review).getByText('当前成员（1）：第二成员')).toBeTruthy();
+  expect(nameInput().value).toBe('名称草稿'); expect(rulesInput().value).toBe('群规草稿');
+  expect(api.rename).toHaveBeenCalledOnce(); expect(api.rules).not.toHaveBeenCalled();
+  fireEvent.click(within(review).getByRole('button', { name: '确认最新状态，保留草稿' }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭并保留草稿' })); view.unmount();
+  // Even before the parent directory renders the new group, the confirmed snapshot survives.
+  view = render(<Harness />); open();
+  expect(nameInput().value).toBe('名称草稿'); expect(rulesInput().value).toBe('群规草稿');
+  expect((screen.getByRole('combobox', { name: '由本组成员发布群规变更' }) as HTMLSelectElement).value).toBe('');
+  view.rerender(<Harness group={changed} />);
+  fireEvent.change(screen.getByRole('combobox', { name: '由本组成员发布群规变更' }), { target: { value: 'second-member' } });
+  if (first === 'rules') {
+    api.rules.mockResolvedValueOnce({ group: { ...changed, updatedAt: 21, instructions: { text: '群规草稿', version: 'v21' } } });
+    api.rename.mockResolvedValue({ group: { ...changed, name: '名称草稿', updatedAt: 22, instructions: { text: '群规草稿', version: 'v21' } } });
+  }
+  fireEvent.click(screen.getByRole('button', { name: first === 'name' ? '保存名称' : '保存群规' }));
+  await waitFor(() => expect((screen.getByRole('button', { name: first === 'name' ? '保存名称' : '保存群规' }) as HTMLButtonElement).disabled).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: first === 'name' ? '保存群规' : '保存名称' }));
+  await waitFor(() => expect(screen.queryByText(/有未保存修改/)).toBeNull());
+  expect(api.rename).toHaveBeenLastCalledWith({ id: alpha.id, name: '名称草稿', sessionIds: ['second-member'], expectedUpdatedAt: first === 'name' ? 20 : 21 });
+  expect(api.rules).toHaveBeenCalledWith(alpha.id, { sessionId: 'second-member', text: '群规草稿', expectedVersion: 'v20' });
+});
+
+it('keeps drafts and old guards on cancelled or failed latest-state review and rechecks a second conflict', async () => {
+  api.latest.mockRejectedValueOnce(new Error('读取中断')).mockResolvedValue({ groups: [{ ...alpha, updatedAt: 2, name: '新名称' }], sessions: [member] });
+  api.rename.mockRejectedValue(new TerminalApiError('冲突', 409));
+  render(<Harness />); open(); edit();
+  fireEvent.click(screen.getByRole('button', { name: '查看最新状态并保留草稿' })); await screen.findByText('读取中断');
+  fireEvent.click(screen.getByRole('button', { name: '查看最新状态并保留草稿' })); await screen.findByRole('region', { name: '最新组设置' });
+  fireEvent.click(screen.getByRole('button', { name: '取消确认' }));
+  fireEvent.click(screen.getByRole('button', { name: '保存名称' })); await screen.findByText(/组设置已被其他人修改/);
+  expect(api.rename).toHaveBeenLastCalledWith(expect.objectContaining({ expectedUpdatedAt: 1 }));
+  fireEvent.click(screen.getByRole('button', { name: '查看最新状态并保留草稿' })); await screen.findByRole('region', { name: '最新组设置' });
+  fireEvent.click(screen.getByRole('button', { name: '确认最新状态，保留草稿' }));
+  fireEvent.click(screen.getByRole('button', { name: '保存名称' })); await screen.findByText(/组设置已被其他人修改/);
+  expect(api.rename).toHaveBeenLastCalledWith(expect.objectContaining({ expectedUpdatedAt: 2 }));
+  expect(nameInput().value).toBe('名称草稿'); expect(rulesInput().value).toBe('群规草稿');
 });
 
 it('isolates drafts by group, including switching while settings are open', () => {

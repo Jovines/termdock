@@ -2,6 +2,7 @@ import { taskRetryFeedback } from '../../collaboration/taskActionFeedback';
 import { CollaborationReportMeta } from './CollaborationReportMeta';
 import { collaborationResultPresentation } from '../../collaboration/resultPresentation';
 import { CollaborationInput } from './CollaborationInput';
+import { isKeyboardLayerSource } from '../../hooks/useKeyboardLayer';
 import { CollaborationKanban } from './CollaborationKanban';
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, ArrowUpRight, Check, ChevronRight, Circle, CircleCheck, ExternalLink, MessageCircle, Plus, RefreshCw, Search, Send, X } from 'lucide-react';
@@ -39,6 +40,22 @@ function savedDraft(key: string): Draft {
   return { ...draft, mode: draft.mode === 'task' ? 'task' : 'goal', isolated: draft.isolated !== false };
 }
 
+function pausedArrangement(task: CollaborationTaskView, tasks: CollaborationTaskView[]): CollaborationTaskView | null {
+  const root = task.workflow?.rootTaskId ? tasks.find(candidate => candidate.id === task.workflow?.rootTaskId) : null;
+  if (root?.workflow?.paused) return root;
+  // Older records can omit rootTaskId; follow the recorded parent chain.
+  const seen = new Set([task.id]);
+  let parentId = task.parentTaskId;
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = tasks.find(candidate => candidate.id === parentId);
+    if (!parent) break;
+    if (parent.workflow?.kind === 'goal' && parent.workflow.paused) return parent;
+    parentId = parent.parentTaskId;
+  }
+  return task.workflow?.paused ? task : null;
+}
+
 export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSession, onAttentionChange, onManageMembers, board = false, boardNavigation, boardSettings, paneKey, agents = [], defaultCwd, onTeamReady }: {
   agents?: AgentLauncherInfo[]; defaultCwd?: string; onTeamReady?: () => Promise<void>;
   paneKey?: string; board?: boolean; boardNavigation?: ReactNode; boardSettings?: ReactNode;
@@ -47,6 +64,8 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
 }) {
   const storage = `termdock:tasks:${location.origin}:${group.id}`;
   const [tasks, setTasks] = useState<CollaborationTaskView[]>([]);
+  const tasksRef = useRef(tasks);
+  tasksRef.current = tasks;
   const [detail, setDetail] = useState<CollaborationTaskView | null>(null);
   const [initialWorkspace] = useState(() => useCollaborationTaskWorkspace.getState().ensure(storage, {
     draft: savedDraft(`${storage}:draft`), selectedId: saved(`${storage}:selected`, null), creating: false, mobileDetail: false,
@@ -96,8 +115,8 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
   const [teamCwd, setTeamCwd] = useState(() => saved<string>(`${storage}:cwd`, members[0]?.cwd ?? defaultCwd ?? ''));
   useEffect(() => { if (!agentSlug && agents[0]) setAgentSlug(agents[0].slug); }, [agents, agentSlug]);
   const needsTeam = !members.find(s => s.sessionId === lead)?.agent || !workers.length;
-  const goalReady = !!draft.spec.trim() && (needsTeam ? !group.federated && !!agents.find(agent => agent.slug === agentSlug) && !!teamCwd.trim() : true);
   const [provisioned, setProvisioned] = useState<{ coordinatorSessionId: string; reviewerSessionIds: string[] } | null>(null);
+  const goalReady = !!draft.spec.trim() && (!!provisioned || !needsTeam || !group.federated && !!agents.find(agent => agent.slug === agentSlug) && !!teamCwd.trim());
 
   const selectedSummary = tasks.find(t => t.id === selectedId) ?? null;
   const selected = detail?.id === selectedId ? detail : null;
@@ -169,9 +188,14 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
       finishRequest([task.id, payload]);
       void useCollaborationTaskInbox.getState().refresh();
       if (alive.current) {
-        setTasks(list => list.map(t => t.id === result.task.id ? result.task : t));
-        setDetail(result.task);
-        setNotice(['comment', 'revise'].includes(operation.kind) ? '' : operation.kind === 'retry' ? taskRetryFeedback(task, result.task) : operation.kind === 'answer' ? '回答已保存，服务端继续投递。' : operation.kind === 'accept' ? '已验收此版本结果。' : '记录已保存。');
+        // Polling may already have observed a later pause/resume while saving.
+        const observed = tasksRef.current.find(t => t.id === result.task.id);
+        const noticeTask = observed && observed.revision > result.task.revision ? observed : result.task;
+        setTasks(list => list.map(t => t.id === result.task.id && t.revision <= result.task.revision ? result.task : t));
+        setDetail(previous => previous?.id === result.task.id && previous.revision > result.task.revision ? previous : result.task);
+        const paused = pausedArrangement(noticeTask, tasksRef.current);
+        const decisionNotice = `${operation.kind === 'answer' ? '回答已保存' : '方案确认已保存'}，${paused ? paused.workflow?.kind === 'goal' ? '目标仍暂停；恢复目标后才能投递。' : '任务仍暂停；继续安排后才能投递。' : '投递状态请查看任务记录。'}`;
+        setNotice(['comment', 'revise'].includes(operation.kind) ? '' : operation.kind === 'retry' ? taskRetryFeedback(task, result.task) : ['answer', 'approve-plan'].includes(operation.kind) ? decisionNotice : operation.kind === 'accept' ? '已验收此版本结果。' : '记录已保存。');
       }
       return { ok: true };
     } catch (e) {
@@ -191,7 +215,7 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
       parentTaskId: managed ? undefined : draft.parent || undefined, dependsOn: managed ? [] : draft.dependencies,
       managed, isolated: draft.isolated, reviewerSessionIds: managed ? workers : undefined };
     try {
-      if (managed && needsTeam) {
+      if (managed && (needsTeam || provisioned)) {
         setPreparingTeam(true);
         const team = provisioned ?? await ensureCollaborationTeam(group.id, { agentSlug, cwd: teamCwd.trim() });
         setPreparingTeam(false); setProvisioned(team); payload.coordinatorSessionId = team.coordinatorSessionId; payload.reviewerSessionIds = team.reviewerSessionIds;
@@ -263,17 +287,18 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
     {(error || loadError && connection === 'ready' && !isConnectionInterruption(loadError)) && <div role="alert" className="flex items-center gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive"><span className="min-w-0 flex-1 break-words">{error || loadError}{!error && loaded ? ' · 显示最近保存的记录' : ''}</span><button type="button" className={button} onClick={() => error ? setError(null) : void refresh()}><RefreshCw size={14} />{error ? '关闭提示' : '重试'}</button></div>}
     {loadError && isConnectionInterruption(loadError) && !board && <p role="status" className="text-xs text-muted-foreground">正在恢复任务同步，现有记录和草稿已保留</p>}
     {notice && <p role="status" className="rounded-lg bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">{notice}</p>}
-    {composerVisible ? <form onSubmit={event => void create(event)} className={`mx-auto w-full max-w-xl space-y-4 ${board ? "overflow-auto px-1 py-5" : ""}`} onKeyDown={event => { if (event.key === 'Escape' && creating) { event.preventDefault(); event.stopPropagation(); if (!busy) closeDraft(); } }}>
+    {composerVisible ? <form onSubmit={event => void create(event)} className={`mx-auto w-full max-w-xl space-y-4 ${board ? "overflow-auto px-1 py-5" : ""}`} onKeyDown={event => { if (event.key === 'Escape' && creating && !event.defaultPrevented && !event.nativeEvent.isComposing && isKeyboardLayerSource(event.currentTarget)) { event.preventDefault(); event.stopPropagation(); if (!busy) closeDraft(); } }}>
       <header className="flex items-start gap-2">
         <div className="min-w-0 flex-1"><h3 className="text-lg font-semibold text-foreground">{draft.mode === 'goal' ? '一起完成什么？' : '新建手动任务'}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{draft.mode === 'goal' ? '交给协调者拆分，你在这里看交付、回答问题。' : '选择负责人，保留分派和验收记录。'}</p></div>
         {(tasks.length > 0 || board) && <button type="button" aria-label="取消创建，保留草稿" className={`${button} shrink-0 px-2 text-muted-foreground hover:bg-surface-2`} disabled={busy} onClick={closeDraft}><X size={16} /></button>}
       </header>
       {draft.mode === 'task' && <Field label="任务标题"><input className={input} required maxLength={200} value={draft.title} onChange={e => setDraft(d => ({ ...d, title: e.target.value }))} placeholder="要完成什么？" /></Field>}
       <CollaborationInput paneKey={paneKey} inputKey={`${storage}:spec`} active={active && composerVisible} label={draft.mode === 'goal' ? '协作目标' : '目标与交付要求'} className={`${input} ${needsTeam && draft.mode === 'goal' ? 'min-h-24' : 'min-h-32'} resize-y text-sm leading-6`} autoFocus={creating} required disabled={busy} value={draft.spec} onUploadChange={uploadChange} onChange={value => setDraft(d => ({ ...d, spec: typeof value === 'function' ? value(d.spec) : value }))} placeholder="例如：完善附件预览体验，交付实现和评审结果，保留现有快捷键。" />
-      {draft.mode === 'goal' && needsTeam ? <fieldset disabled={busy || !!provisioned} className="space-y-3"><legend className="mb-2 text-xs text-muted-foreground">首次开始时配置 Agent</legend>
+      {draft.mode === 'goal' && provisioned && <section role="status" aria-label="目标提交阶段" className="space-y-2 rounded-lg bg-primary/10 px-3 py-2 text-xs leading-5"><p className="text-primary">成员已准备，目标尚未提交。重试会复用这些成员。</p><p className="text-muted-foreground">Agent 和工作目录已用于准备成员，因此暂时锁定；目标正文仍可修改。</p>{onManageMembers && <button type="button" className={secondary} disabled={busy} onClick={() => { void onTeamReady?.(); onManageMembers(); }}>查看已准备的成员</button>}</section>}
+      {draft.mode === 'goal' && (needsTeam || provisioned) ? <fieldset disabled={busy || !!provisioned} className="space-y-3"><legend className="mb-2 text-xs text-muted-foreground">{provisioned ? '已用于准备成员的配置' : '首次开始时配置 Agent'}</legend>
         <Field label="Agent"><select aria-label="协作 Agent" className={input} value={agentSlug} onChange={e => setAgentSlug(e.target.value)}><option value="" disabled>选择已安装的 Agent</option>{agents.map(agent => <option key={agent.slug} value={agent.slug}>{agent.displayName}</option>)}</select></Field>
         <Field label="工作目录"><div className="flex gap-2"><input aria-label="工作目录" className={`${input} min-w-0 flex-1`} value={teamCwd} onChange={e => setTeamCwd(e.target.value)} placeholder="选择项目所在的目录" /><button type="button" className={secondary} onClick={() => setDirectoryPickerOpen(true)}>浏览目录</button></div>{directoryPickerOpen && <Suspense fallback={<p className="text-xs">正在打开目录…</p>}><DirectoryPicker open initialPath={teamCwd.trim() || defaultCwd || "/"} title="选择协作项目目录" onCancel={() => setDirectoryPickerOpen(false)} onConfirm={path => { setTeamCwd(path); setDirectoryPickerOpen(false); }} /></Suspense>}</Field>
-        <p className="text-xs leading-5 text-muted-foreground">开始时配置协调者与执行/评审成员，后续目标复用。</p>
+        {!provisioned && <p className="text-xs leading-5 text-muted-foreground">开始时配置协调者与执行/评审成员，后续目标复用。</p>}
         {group.federated && <p role="alert" className="text-xs text-muted-foreground">跨服务组请从成员设置添加 Agent。{onManageMembers && <button type="button" className={secondary} onClick={onManageMembers}>管理成员</button>}</p>}
         {!agents.length && <p role="alert" className="text-xs text-muted-foreground">尚未检测到可启动的 Agent。安装后刷新，或从成员设置复用现有 Agent。{onManageMembers && <button type="button" className={secondary} onClick={onManageMembers}>管理成员</button>}</p>}
       </fieldset> : draft.mode === 'goal' ? <div className="flex items-center gap-3"><span className="shrink-0 text-xs text-muted-foreground">协调者</span><select aria-label="协调者" className={`${input} min-w-0 flex-1`} value={lead} onChange={e => setDraft(d => ({ ...d, coordinator: e.target.value }))}>{members.map(m => <option key={m.sessionId} value={m.sessionId} disabled={!m.agent}>{m.name}{!m.agent ? '（需要启动 Agent）' : ''}</option>)}</select></div> : <Field label="分派给"><select className={input} value={draft.assignee} onChange={e => setDraft(d => ({ ...d, assignee: e.target.value }))}><option value="">先保存，稍后分派</option>{members.map(m => <option key={m.sessionId} value={m.sessionId}>{m.name}</option>)}</select></Field>}
@@ -283,7 +308,7 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
         {draft.mode === 'goal' ? <label className="flex min-h-11 items-start gap-2 text-xs leading-5 text-muted-foreground"><input type="checkbox" className="mt-1" checked={draft.isolated} onChange={e => setDraft(d => ({ ...d, isolated: e.target.checked }))} /><span>代码任务使用独立目录<br /><span className="text-[11px]">协调者自动区分查询与代码任务；查询复用成员会话，只有代码需要目录与集成。</span></span></label> : <><Field label="协调者"><select className={input} value={draft.coordinator} onChange={e => setDraft(d => ({ ...d, coordinator: e.target.value }))}><option value="">由用户协调</option>{members.map(m => <option key={m.sessionId} value={m.sessionId}>{m.name}</option>)}</select></Field><Field label="父任务"><select className={input} value={draft.parent} onChange={e => setDraft(d => ({ ...d, parent: e.target.value }))}><option value="">独立任务</option>{tasks.filter(t => !t.workflow).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></Field><fieldset className="space-y-1"><legend className="text-xs text-muted-foreground">需先验收的依赖任务</legend>{tasks.filter(t => t.status !== 'closed').map(t => <label key={t.id} className="flex min-h-11 items-center gap-2 text-xs text-foreground"><input type="checkbox" checked={draft.dependencies.includes(t.id)} onChange={e => setDraft(d => ({ ...d, dependencies: e.target.checked ? [...d.dependencies, t.id] : d.dependencies.filter(id => id !== t.id) }))} />{t.title}</label>)}</fieldset></>}
         <button type="button" className={`${button} text-muted-foreground hover:bg-surface-2`} onClick={() => setDraft(d => ({ ...d, mode: d.mode === 'goal' ? 'task' : 'goal' }))}>{draft.mode === 'goal' ? '改为手动分派任务' : '改为自动协作目标'}</button>
       </div></details>
-      <button className={`${primary} w-full`} disabled={busy || uploads > 0 || (draft.mode === 'goal' ? !goalReady : !draft.title.trim() || !draft.spec.trim())}>{busy ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} />}{busy ? preparingTeam ? '正在准备成员…' : '提交中…' : draft.mode === 'goal' ? '开始协作' : draft.assignee ? '创建并分派' : '保存任务'}</button>
+      <button className={`${primary} w-full`} disabled={busy || uploads > 0 || (draft.mode === 'goal' ? !goalReady : !draft.title.trim() || !draft.spec.trim())}>{busy ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} />}{busy ? preparingTeam ? '正在准备成员…' : '提交中…' : draft.mode === 'goal' ? provisioned ? '重试提交目标' : '开始协作' : draft.assignee ? '创建并分派' : '保存任务'}</button>
       <p className="text-center text-[11px] leading-5 text-muted-foreground">{draft.mode === 'goal' ? '拆分任务 → 执行与独立评审 → 你验收结果' : '草稿自动保存，分派后保留投递与回复记录。'}</p>
     </form> : board && loaded ? <>
       <h3 className="sr-only">任务看板</h3>
@@ -358,6 +383,7 @@ function TaskDetail({ reader = false, active, paneKey, task, tasks, members, nam
   useEffect(() => persist(`${storage}:${task.id}:answers`, answers), [storage, task.id, answers]);
   useEffect(() => persist(`${storage}:${task.id}:feedback`, feedback), [storage, task.id, feedback]);
   const current = task.attempts.find(a => a.id === task.activeAttemptId), open = task.status === 'open';
+  const paused = pausedArrangement(task, tasks);
   const latestResult = task.artifacts.filter(a => a.kind === 'result' && a.attemptId === task.activeAttemptId).at(-1);
   useEffect(() => { if (feedbackStatus?.state === 'saved' && latestResult?.id !== feedbackStatus.resultId) setFeedbackStatus(null); }, [latestResult?.id, feedbackStatus]);
   const latestPlan = task.artifacts.filter(a => a.kind === 'plan' && a.attemptId === task.activeAttemptId).at(-1);
@@ -406,7 +432,7 @@ function TaskDetail({ reader = false, active, paneKey, task, tasks, members, nam
     {artifact.evidence !== undefined && <details className="text-xs text-muted-foreground"><summary className="min-h-11 cursor-pointer py-3">交付证据</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-surface-2 p-3 text-[11px]">{JSON.stringify(artifact.evidence, null, 2)}</pre></details>}
     {open && artifact.attemptId === task.activeAttemptId && artifact.kind !== 'review' && (!reader || artifact.kind === 'plan' || !task.workflow) && <div className="space-y-2 border-t border-border/15 pt-3">
       {!reader && latestResult?.id === artifact.id && task.workflow?.kind !== 'step' && <><button type="button" className={`${primary} w-full`} disabled={busy || !!acceptBlocker} onClick={() => void act({ kind: 'accept', artifactId: artifact.id })}><Check size={14} />验收此结果</button>{acceptBlocker && <p className="text-xs leading-5 text-muted-foreground">{acceptBlocker}</p>}</>}
-      {latestPlan?.id === artifact.id && task.approvedPlanArtifactId !== artifact.id && <button type="button" className={`${primary} w-full`} disabled={busy} onClick={() => void act({ kind: 'approve-plan', artifactId: artifact.id })}><Check size={14} />确认方案并继续</button>}
+      {latestPlan?.id === artifact.id && task.approvedPlanArtifactId !== artifact.id && <button type="button" className={`${primary} w-full`} disabled={busy} onClick={() => void act({ kind: 'approve-plan', artifactId: artifact.id })}><Check size={14} />{paused ? '确认方案' : '确认方案并继续'}</button>}
       {!task.workflow && <details><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted-foreground">请其他成员评审此版本</summary><div className="space-y-2"><select aria-label="独立评审成员" className={input} value={reviewer} onChange={e => setReviewer(e.target.value)}><option value="">选择独立评审成员</option>{members.filter(m => m.sessionId !== task.memberSessions[memberKey(artifact.actor)]).map(m => <option key={m.sessionId} value={m.sessionId}>{m.name}</option>)}</select><button type="button" className={secondary} disabled={busy || !reviewer || reviewer === task.memberSessions[memberKey(artifact.actor)]} onClick={() => void act({ kind: 'request-review', artifactId: artifact.id, assigneeSessionId: reviewer })}>请求评审</button></div></details>}
     </div>}
   </section>; };
@@ -422,11 +448,12 @@ function TaskDetail({ reader = false, active, paneKey, task, tasks, members, nam
       <CollaborationReportMeta task={task} />
       {task.replica && <p className="text-[11px] leading-5 text-muted-foreground">此记录由来源服务同步，回答与决定会送回来源服务。</p>}
     </header>
+    {paused && open && <section role="status" aria-label="安排暂停说明" className="space-y-2 rounded-xl bg-surface-2 p-3"><p className="text-xs leading-5 text-muted-foreground">{paused.workflow?.kind === 'goal' ? '目标仍暂停。回答和方案确认会保存，恢复目标后才能投递；已投递的终端工作继续保留。' : '任务仍暂停。回答和方案确认会保存，继续安排后才能投递；已投递的终端工作继续保留。'}</p>{paused.id !== task.id && <button type="button" className={secondary} onClick={() => onSelectTask(paused.id)}>查看目标并恢复安排</button>}</section>}
     <nav aria-label="任务详情" className="flex gap-4 border-b border-border/20">{([['overview', reader && latestResult ? '结果' : '概览'], ['results', reader ? '历史交付' : `交付${task.artifacts.length ? ` ${task.artifacts.length}` : ''}`], ['activity', '动态']] as const).map(([id, label]) => <button type="button" key={id} aria-pressed={view === id} className={`min-h-11 border-b-2 px-1 text-xs font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${view === id ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setView(id)}>{label}</button>)}</nav>
     {view === 'overview' && <>
       {(() => { const followup = task.events.filter(e => e.kind === 'revise' && e.source === 'user' && e.attemptId === task.activeAttemptId).at(-1); if (!followup) return null; const receipt = task.deliveries.find(d => d.id === followup.deliveryId); const queued = task.outbox.find(d => d.id === followup.deliveryId); const updated = latestResult && latestResult.createdAt > followup.createdAt; return <section aria-label="最近跟进" className="space-y-1 rounded-lg bg-primary/10 px-3 py-2 text-xs leading-5"><p className="font-medium text-primary">{updated ? reviewPassed ? '新结果已通过独立评审' : '新结果已交付，等待独立评审' : '已要求继续跟进，等待新结果'}</p><p className="whitespace-pre-wrap break-words text-foreground">{followup.content}</p><p className="text-muted-foreground">{stamp(followup.createdAt)}{receipt?.status === 'delivered' ? ` · 已写入${followup.target ? name(followup.target) : '成员'}终端${receipt.deliveredAt ? ` · ${stamp(receipt.deliveredAt)}` : ''}` : ['failed', 'expired'].includes(receipt?.status ?? '') || receipt?.error || queued?.lastError ? ' · 投递未成功，服务端继续重试' : followup.deliveryId ? ' · 等待写入终端' : ' · 要求已保存'}</p></section>; })()}
 
-      {questions.map(q => <form key={q.id} className="space-y-3 rounded-xl border border-border/30 bg-surface-2/40 p-4" onSubmit={e => { e.preventDefault(); if (!busy && !uploads && answers[q.id]?.trim()) void act({ kind: 'answer', decisionId: q.id, content: answers[q.id] }); }}><div className="flex items-center gap-2 text-xs font-medium text-primary"><MessageCircle size={14} />需要你的决定</div><p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{q.question}</p>{!!q.options.length && <div className="flex flex-col gap-2">{q.options.map((option, index) => <button type="button" key={index} aria-pressed={answers[q.id] === option} disabled={busy} className={`${button} justify-start text-left ${answers[q.id] === option ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-foreground'}`} onClick={() => setAnswers(a => ({ ...a, [q.id]: option }))}>{answers[q.id] === option ? <Check size={14} className="shrink-0" /> : <Circle size={14} className="shrink-0" />}<span className="break-words">{option}</span></button>)}</div>}<CollaborationInput paneKey={paneKey} inputKey={`${editKey}:answer:${q.id}`} active={active} label="你的回答" className={`${input} min-h-20 resize-y`} required disabled={busy} value={answers[q.id] ?? ''} onUploadChange={uploadChange} onChange={value => setAnswers(a => ({ ...a, [q.id]: typeof value === 'function' ? value(a[q.id] ?? '') : value }))} placeholder="选择建议，或写下你的决定…" /><button className={`${primary} w-full`} disabled={busy || uploads > 0 || !answers[q.id]?.trim()}><Send size={14} />回复并继续</button><p className="text-[11px] text-muted-foreground">{stamp(q.createdAt)} · 回答会保存在任务记录中</p></form>)}
+      {questions.map(q => <form key={q.id} className="space-y-3 rounded-xl border border-border/30 bg-surface-2/40 p-4" onSubmit={e => { e.preventDefault(); if (!busy && !uploads && answers[q.id]?.trim()) void act({ kind: 'answer', decisionId: q.id, content: answers[q.id] }); }}><div className="flex items-center gap-2 text-xs font-medium text-primary"><MessageCircle size={14} />需要你的决定</div><p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{q.question}</p>{!!q.options.length && <div className="flex flex-col gap-2">{q.options.map((option, index) => <button type="button" key={index} aria-pressed={answers[q.id] === option} disabled={busy} className={`${button} justify-start text-left ${answers[q.id] === option ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-foreground'}`} onClick={() => setAnswers(a => ({ ...a, [q.id]: option }))}>{answers[q.id] === option ? <Check size={14} className="shrink-0" /> : <Circle size={14} className="shrink-0" />}<span className="break-words">{option}</span></button>)}</div>}<CollaborationInput paneKey={paneKey} inputKey={`${editKey}:answer:${q.id}`} active={active} label="你的回答" className={`${input} min-h-20 resize-y`} required disabled={busy} value={answers[q.id] ?? ''} onUploadChange={uploadChange} onChange={value => setAnswers(a => ({ ...a, [q.id]: typeof value === 'function' ? value(a[q.id] ?? '') : value }))} placeholder="选择建议，或写下你的决定…" /><button className={`${primary} w-full`} disabled={busy || uploads > 0 || !answers[q.id]?.trim()}><Send size={14} />{paused ? '保存回答' : '回复并继续'}</button><p className="text-[11px] text-muted-foreground">{stamp(q.createdAt)} · 回答会保存在任务记录中</p></form>)}
       {blockers.map(entry => <section key={entry.source} aria-label={entry.source === 'member' ? '成员阻塞报告' : entry.source === 'unknown' ? '待核对服务记录' : '服务异常'} role={entry.source === 'system' ? 'alert' : 'status'} className={`space-y-3 rounded-xl p-4 ${entry.source === 'member' ? 'bg-primary/10' : entry.source === 'unknown' ? 'bg-surface-2' : 'bg-destructive/10'}`}>
         <h4 className={`text-sm font-medium ${entry.source === 'member' ? 'text-primary' : entry.source === 'unknown' ? 'text-muted-foreground' : 'text-destructive'}`}>{entry.label}</h4>
         <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{entry.summary}</p>

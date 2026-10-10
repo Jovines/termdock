@@ -195,6 +195,7 @@ export type TranslationDictionary = {
     domain: string;
     rdpPasswordHint: string;
     rdpBackendUnavailable: string;
+    rdpBackendRecovery: string;
     rdpFailed: string;
     rdpLinuxStep1: string;
     rdpStep1: string;

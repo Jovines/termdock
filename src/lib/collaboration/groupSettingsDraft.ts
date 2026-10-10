@@ -8,6 +8,8 @@ export interface GroupSettingsDraft {
   updatedAt: number;
   rulesVersion: string;
   rulesMemberId: string;
+  // The explicitly confirmed member snapshot must survive closing/reopening.
+  sessionIds?: string[];
 }
 
 // null records a failed removal so an older stored draft cannot reappear.
@@ -23,6 +25,13 @@ export function freshGroupSettingsDraft(group: CollaborationGroup, rulesMemberId
     rulesVersion: group.instructions?.version ?? '', rulesMemberId };
 }
 
+export function rebaseGroupSettingsDraft(draft: GroupSettingsDraft, group: CollaborationGroup): GroupSettingsDraft {
+  return { ...freshGroupSettingsDraft(group, group.sessionIds.includes(draft.rulesMemberId) ? draft.rulesMemberId : ''),
+    name: draft.name !== draft.savedName ? draft.name : group.name,
+    rules: draft.rules !== draft.savedRules ? draft.rules : group.instructions?.text ?? '',
+    sessionIds: [...group.sessionIds] };
+}
+
 export function readGroupSettingsDraft(group: CollaborationGroup, memberId: string): GroupSettingsDraft {
   const fresh = freshGroupSettingsDraft(group, memberId);
   const key = storageKey(group.id);
@@ -32,7 +41,8 @@ export function readGroupSettingsDraft(group: CollaborationGroup, memberId: stri
     if (!raw) return fresh;
     const draft = JSON.parse(raw) as GroupSettingsDraft;
     if (typeof draft.updatedAt !== 'number' || !Number.isFinite(draft.updatedAt)
-      || ['name', 'rules', 'savedName', 'savedRules', 'rulesVersion', 'rulesMemberId'].some(key => typeof draft[key as keyof GroupSettingsDraft] !== 'string')) return fresh;
+      || ['name', 'rules', 'savedName', 'savedRules', 'rulesVersion', 'rulesMemberId'].some(key => typeof draft[key as keyof GroupSettingsDraft] !== 'string')
+      || (draft.sessionIds !== undefined && (!Array.isArray(draft.sessionIds) || draft.sessionIds.some(id => typeof id !== 'string')))) return fresh;
     return groupSettingsDirty(draft) ? draft : fresh;
   } catch { return fresh; }
 }
