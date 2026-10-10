@@ -319,7 +319,7 @@ export class CollaborationTaskStore {
         }
         attempt!.report = { status: input.status!, content, evidence: input.evidence, createdAt: Date.now() };
         const event = this.event(task, 'report', actor, content, attempt!.id); event.reportStatus = input.status; event.evidence = input.evidence;
-        if (input.status === 'complete' && task.status === 'accepted') { task.status = 'open'; delete task.acceptedArtifactId; delete task.completionMode; }
+        if (input.status === 'complete' && attempt!.id === task.activeAttemptId && task.status === 'accepted') { task.status = 'open'; delete task.acceptedArtifactId; delete task.completionMode; }
         if (input.status === 'complete') {
           event.artifactId = id();
           task.artifacts.push({ id: event.artifactId, attemptId: attempt!.id, kind: 'result', content, ...(summary ? { summary } : {}), evidence: input.evidence, actor: actor!, createdAt: event.createdAt });
