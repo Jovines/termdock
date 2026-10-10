@@ -16,6 +16,22 @@ function extract(args: string): string | null {
 }
 
 describe('tmux program detection helpers', () => {
+  it('reads a foreground program execd as the pane PID only for an explicit identity probe', () => {
+    const row: TmuxProcessRow = { pid: 115, ppid: 10, pgid: 115, tpgid: 115, stat: 'Ss+', comm: 'fixture-agent', args: 'fixture-agent resume original-native' };
+    const input = { panePid: 115, rows: [row], shellNames, genericProgramNames, extractProgramLabel: extract };
+    expect(selectTmuxForegroundProgram(input)).toBeNull();
+    expect(selectTmuxForegroundProgram({ ...input, includePaneProcess: true }))
+      .toEqual({ command: 'fixture-agent', rawArgs: row.args, processPid: 115, processComm: 'fixture-agent' });
+    expect(selectTmuxForegroundProgram({ ...input, includePaneProcess: true, rows: [{ ...row, tpgid: 999 }] })).toBeNull();
+    expect(selectTmuxForegroundProgram({ ...input, includePaneProcess: true, rows: [{ ...row, stat: 'Z+' }] })).toBeNull();
+  });
+
+  it('keeps the pane shell excluded even when its foreground argv is visible', () => {
+    const row: TmuxProcessRow = { pid: 115, ppid: 10, pgid: 115, tpgid: 115, stat: 'Ss+', comm: 'zsh', args: '-zsh' };
+    expect(selectTmuxForegroundProgram({ panePid: 115, rows: [row], shellNames, genericProgramNames,
+      includePaneProcess: true, extractProgramLabel: extract })).toBeNull();
+  });
+
   it('prefers the real Claude process over node wrapper and caffeinate helper', () => {
     const rows: TmuxProcessRow[] = [
       { pid: 95690, ppid: 69188, pgid: 95690, tpgid: 36657, stat: 'Ss', comm: '-zsh', args: '-zsh' },

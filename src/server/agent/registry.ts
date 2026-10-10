@@ -1,5 +1,6 @@
 import type { LoadedPlugin } from './plugins.js';
 import type { AgentStatusDefinition } from './session.js';
+import type { NativeProcessIdentityConfig } from './nativeProcessIdentity.js';
 
 /**
  * Third-party CLI coding-agent registry + detection.
@@ -366,6 +367,7 @@ export function buildResumeCommand(
 
 /** Plugin-defined resume configs, keyed by slug. */
 const pluginResumeConfigs = new Map<string, { command: string; staleFlags: string[] }>();
+const pluginNativeIdentityConfigs = new Map<string, NativeProcessIdentityConfig>();
 
 /**
  * Register plugin agents into the lookup maps. Plugins whose slug or aliases
@@ -414,6 +416,7 @@ export function registerPluginAgents(plugins: LoadedPlugin[]): { registered: num
         staleFlags: manifest.resume.staleFlags ?? [],
       });
     }
+    if (manifest.nativeIdentity) pluginNativeIdentityConfigs.set(manifest.slug, { ...manifest.nativeIdentity });
     registered++;
   }
   return { registered, skipped };
@@ -427,6 +430,12 @@ export function clearPluginAgents(): void {
     if (info.isPlugin) BY_ALIAS.delete(alias);
   }
   pluginResumeConfigs.clear();
+  pluginNativeIdentityConfigs.clear();
+}
+
+export function getPluginNativeIdentityConfig(slug: string): NativeProcessIdentityConfig | undefined {
+  const config = pluginNativeIdentityConfigs.get(slug);
+  return config ? { ...config } : undefined;
 }
 
 export function getPluginResumeConfig(slug: string): { command: string; staleFlags: string[] } | undefined {

@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { nativeIdentityDirectory, type NativeProcessIdentityConfig } from './nativeProcessIdentity.js';
 import type {
   AgentEventKind,
   AgentSessionStatus,
@@ -88,6 +89,8 @@ export interface AgentPluginManifest {
   statuses?: AgentStatusDefinition[];
   hooks?: PluginHookConfig;
   resume?: PluginResumeConfig;
+  /** Optional current-process native identity proof, independently of hooks. */
+  nativeIdentity?: NativeProcessIdentityConfig;
   /** Make this Agent available as an automatic-title provider. */
   titleNamer?: PluginTitleNamerConfig;
 }
@@ -446,6 +449,12 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
     }
   }
 
+  let nativeIdentity: NativeProcessIdentityConfig | undefined;
+  if (m.nativeIdentity !== undefined) {
+    if (!nativeIdentityDirectory(m.nativeIdentity)) errors.push('nativeIdentity must declare linux-flock-owner with a directory under home');
+    else nativeIdentity = { kind: 'linux-flock-owner', directory: (m.nativeIdentity as NativeProcessIdentityConfig).directory };
+  }
+
   // Optional automatic-title provider. Commands are argv arrays rather than
   // shell snippets so a UI-installed manifest cannot gain accidental shell
   // interpolation beyond the executable it explicitly declares.
@@ -534,6 +543,7 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
       statuses,
       hooks,
       resume: resumeConfig,
+      nativeIdentity,
       titleNamer,
     },
   };

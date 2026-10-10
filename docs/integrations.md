@@ -6,7 +6,8 @@
 **实际运行服务至少 1.4.302**。退出后的重复原生会话检查修复要求
 **实际运行服务至少 1.4.303**。没有 PTY 附着的已登记 tmux 的重复保护修复要求
 **实际运行服务至少 1.4.304**。管理员恢复诊断要求 **CLI / 实际服务均至少 1.4.305**；
-建议 CLI 与服务同步安装 1.4.305（既有接入命令的 CLI 最低仍为 1.4.301）。
+直接 exec 为 pane PID 的原生 argv 核验及可选 Linux 持锁身份要求 **实际服务至少 1.4.306**；
+建议 CLI 与服务同步安装 1.4.306（既有接入命令的 CLI 最低仍为 1.4.301，诊断 CLI 最低为 1.4.305）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -311,6 +312,48 @@ operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒
 仅在确认 tmux 已消失或当前进程排除冲突时继续；未知进程、同 Agent 缺少精确 UUID、
 观察失败均返回 `NATIVE_SESSION_OWNER_UNCONFIRMED`，不以旧 UUID 证明没有冲突。
 
+### 可选的当前进程原生身份（1.4.306）
+
+某些 Agent 首次启动的 argv 没有 UUID。支持以下所有权协议的 Agent 插件可以在
+原 `manifest.json` 中增加一个可选字段；现有别名、恢复命令和其他配置保持原样：
+
+```json
+"nativeIdentity": {
+  "kind": "linux-flock-owner",
+  "directory": "~/.my-agent/native-writer-locks"
+}
+```
+
+这是通用协议声明，TD 没有内置任何私有 Agent 名称或路径。锁目录须是当前用户
+home 内的绝对目录或 `~/` 路径；运行时目录、文件须由当前 UID 拥有，且不能被
+组或其他用户写入。目录/文件本身不能为软链接；目录的真实路径仍须在 home 内。
+锁是 `<native-id>.lock` 普通文件，配套 `<native-id>.owner.json` 至少含
+`{"pid":123,"process_start_id":"linux:456"}`；其他字段不用来证明身份。
+
+插件配置在服务启动时载入。升级、保留原配置并加入声明后，重启实际服务一次；
+Linux 服务 `capabilities.native_identity_linux_flock_owner=true` 表示支持此证据类型，
+不能替代核验插件声明与真实持锁情况。其他平台返回 false，继续使用原 argv 证据。
+不需要改 integration policy、凭据、原启动 argv/model/cwd/包装器或业务任务。
+
+TD 从当前终端的真实前台进程取得 PID（包括直接 exec 后就是 pane PID 的进程），
+再只读核验：该 PID 的 UID、前台进程组、当前 `/proc/<pid>/stat` 启动时间、owner
+文件中的 PID/start_id、它实际打开的 FD 与目录内锁文件的 dev/inode、以及
+`/proc/locks` 的同 PID 独占整文件 `FLOCK ADVISORY WRITE`。读取前后复核进程实例及 argv、
+相关 FD 集合、inode、owner 和内核持锁，任一无法成立都不推导身份。
+owner JSON 读取限 4096 字节、argv 比对限 16384 字节、进程 FD 数量限 4096；不会读会话正文/环境或尝试取得写锁。
+
+仅一个完整匹配的原生 ID 才可用于当前身份：明确持有目标 ID 拒绝重复启动；明确
+持有其他 ID 可以排除该进程。多个持锁 ID、argv 与锁身份矛盾、检查间进程变化
+均继续拒绝。owner 文件存在、PID 存活、旧登记或 hook 历史均不能单独确认身份。
+尚未建立可证明身份、协议不符或读权限不足时仍保留未确认保护；没有声明此字段的
+旧插件继续使用原有 argv 路径。此证据仅支持本机 Linux tmux 进程，不宣称能覆盖
+未登记外部进程、远端 Agent 或其他操作系统。
+
+维护机已用真实隔离 tmux/内核 flock 验证首次启动的 UUID 捕获、直接 exec 的 pane
+PID、同 ID 拒绝/不同 ID 排除、遗留 owner、错误 start_id/PID、inode 替换、没有真实
+持锁、多个 ID 和 argv 冲突。**私有 TraeX 的 1.4.306 身份接入仍需使用方实机复验**。
+原 `startupInput` 仍独立控制首次写入；核验 native ID 不表示输入初始化完成。
+
 ### 管理员恢复诊断（1.4.305）
 
 `capabilities.session_restore_diagnostics=true` 表示服务支持持久恢复诊断。
@@ -336,13 +379,18 @@ no-op restore 不创建新检查。报告跟随会话保存并可在服务重启
 每个阻塞候选含 `session_id / backend_session_id / backend_attached`、
 `tmux_session_name / tmux_session_id / pane_id / pane_pid`、`program / process_source`、
 `arguments_observed / agent_slug / last_known_native_id / observed_native_id`、
-`pgid / tpgid / reason / observed_at`；无法观测的值为 null。backend 不存在或仅有旧
+`pgid / tpgid / reason / observed_at`；306 另含真实前台 `process_pid` 及
+`native_identity_source`（argv / linux-flock-owner / null）。无法观测的值为 null。backend 不存在或仅有旧
 登记仍可通过 tmux 核验；`pane_pid` 是承载 pane 的 PID，不冒充 Agent 前台 PID。
 报告最多保存 128 个阻塞候选；`total_blockers` 保留总数，确定的同 UUID 所有者优先展示。
 
 | reason | 实际证据缺口或冲突 |
 | --- | --- |
-| NATIVE_SESSION_MATCH | 当前前台进程明确携带目标 UUID |
+| NATIVE_SESSION_MATCH | 当前前台进程的 argv 或完整持锁证据明确证明目标 UUID |
+| NATIVE_SESSION_IDENTITY_CONFLICT | argv 与完整持锁证据指向不同 UUID |
+| NATIVE_SESSION_IDENTITY_AMBIGUOUS | 当前进程持有多个可证明的原生 UUID |
+| NATIVE_SESSION_PROCESS_CHANGED | 持锁检查间进程实例或所有权证据变化 |
+| NATIVE_SESSION_OWNERSHIP_UNCONFIRMED | 当前打开了原生锁文件，但持锁/owner/inode 证据不能完整成立 |
 | NATIVE_SESSION_ID_MISSING | 当前同 Agent 的进程已观测，但没有可回读的精确 UUID |
 | PROCESS_ARGUMENTS_UNAVAILABLE | 无法取得可靠的当前进程 argv |
 | FOREGROUND_PROCESS_UNCONFIRMED | 无法可靠核验前台进程 |
@@ -383,9 +431,11 @@ no-op restore 不创建新检查。报告跟随会话保存并可在服务重启
 遗漏；维护机已用“旧 UUID C、实际运行 UUID A、无 PTY 附着”的真实隔离 tmux 复现，
 并验证 1.4.304 编译后检查在该状态下拒绝再次启动。
 使用方已报告 1.4.304 在未挂接网页/PTY、旧登记 UUID C 而实际运行 A 的场景下，
-正确拒绝同 UUID 恢复且没有第二个进程。所有者退出后仍有未确认候选，不能仅凭
-错误码判断是哪一个 pane；1.4.305 提供管理员持久诊断，并保持原拒绝条件。
-**1.4.305 的真实 TraeX 阻塞候选诊断与稳定输入条件仍须使用方实机复验**。
+正确拒绝同 UUID 恢复且没有第二个进程。1.4.305 实机诊断已定位四个同 Agent
+无 argv UUID 的候选，另一个候选主进程直接 exec 为 pane PID。使用方提供了当前
+PID/start_id、实际 FD/inode 与内核 flock 一致的私有原生所有权证据；1.4.306 提供
+上述可选通用插件声明，未修改私有 Agent 或放宽未确认保护。
+**1.4.306 的私有 TraeX 持锁身份接入与稳定输入条件仍须使用方实机复验**。
 回读 capabilities 后，应核对原 TD ID、真实 TraeX UUID 与原 argv/cwd/包装器快照，
 并验证 Agent 真正加载原对话。
 先完成测试环境的创建→追问→关联答复，再验重复键、追加咨询、断线重投和精确恢复。

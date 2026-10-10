@@ -54,6 +54,9 @@ export interface NativeResumeProcess {
   nativeId: string | null;
   paneId?: string;
   panePid?: number;
+  processPid?: number;
+  nativeIdentitySource?: 'argv' | 'linux-flock-owner' | null;
+  nativeIdentityFailure?: 'NATIVE_SESSION_IDENTITY_CONFLICT' | 'NATIVE_SESSION_IDENTITY_AMBIGUOUS' | 'NATIVE_SESSION_PROCESS_CHANGED' | 'NATIVE_SESSION_OWNERSHIP_UNCONFIRMED' | null;
   tmuxSessionId?: string;
   program?: string | null;
   processSource?: string;
@@ -65,10 +68,12 @@ export interface NativeResumeProcess {
 export type ShellVerificationFailure = 'SHELL_PROCESS_NOT_FOUND' | 'SHELL_FOREGROUND_MISMATCH'
   | 'SHELL_ARGUMENTS_UNSUPPORTED' | 'SHELL_OBSERVATION_FAILED';
 export type NativeOwnerDiagnosticReason = ShellVerificationFailure | 'TERMINAL_OBSERVATION_FAILED'
-  | 'PROCESS_ARGUMENTS_UNAVAILABLE' | 'FOREGROUND_PROCESS_UNCONFIRMED' | 'NATIVE_SESSION_ID_MISSING' | 'NATIVE_SESSION_MATCH';
+  | 'PROCESS_ARGUMENTS_UNAVAILABLE' | 'FOREGROUND_PROCESS_UNCONFIRMED' | 'NATIVE_SESSION_ID_MISSING' | 'NATIVE_SESSION_MATCH'
+  | 'NATIVE_SESSION_IDENTITY_CONFLICT' | 'NATIVE_SESSION_IDENTITY_AMBIGUOUS' | 'NATIVE_SESSION_PROCESS_CHANGED' | 'NATIVE_SESSION_OWNERSHIP_UNCONFIRMED';
 export interface NativeOwnerDiagnostic {
   session_id: string | null; backend_session_id: string | null; backend_attached: boolean | null;
   tmux_session_name: string | null; tmux_session_id: string | null; pane_id: string | null; pane_pid: number | null;
+  process_pid: number | null; native_identity_source: 'argv' | 'linux-flock-owner' | null;
   program: string | null; process_source: string | null; arguments_observed: boolean;
   agent_slug: string | null; last_known_native_id: string | null; observed_native_id: string | null;
   pgid: number | null; tpgid: number | null; reason: NativeOwnerDiagnosticReason; observed_at: number;
@@ -96,6 +101,8 @@ function diagnostic(candidate: NativeResumeOwnerCandidate, process: NativeResume
   return { session_id: text(candidate.sessionId), backend_session_id: candidate.backendSessionId.startsWith('inventory:') ? null : text(candidate.backendSessionId),
     backend_attached: candidate.backendAttached ?? null, tmux_session_name: text(candidate.tmuxSessionName),
     tmux_session_id: text(process?.tmuxSessionId), pane_id: text(process?.paneId), pane_pid: pid(process?.panePid),
+    process_pid: pid(process?.processPid), native_identity_source: process?.nativeIdentitySource === 'argv'
+      || process?.nativeIdentitySource === 'linux-flock-owner' ? process.nativeIdentitySource : null,
     program: text(process?.program), process_source: text(process?.processSource), arguments_observed: process?.argumentsObserved === true,
     agent_slug: text(process?.agentSlug), last_known_native_id: text(candidate.cachedNativeId), observed_native_id: text(process?.nativeId),
     pgid: Number.isInteger(process?.pgid) ? process!.pgid! : null,
@@ -121,7 +128,7 @@ export async function assertNativeResumeAvailable(
         blockers.push(diagnostic(candidate, process, 'NATIVE_SESSION_MATCH'));
         throw new NativeResumeOwnerError('NATIVE_SESSION_ALREADY_RUNNING', blockers);
       }
-      if (!process.confirmed) blockers.push(diagnostic(candidate, process, process.shellFailure
+      if (!process.confirmed) blockers.push(diagnostic(candidate, process, process.nativeIdentityFailure ?? process.shellFailure
         ?? (process.argumentsObserved === false ? 'PROCESS_ARGUMENTS_UNAVAILABLE' : 'FOREGROUND_PROCESS_UNCONFIRMED')));
       else if (process.agentSlug === target.slug && !process.nativeId) blockers.push(diagnostic(candidate, process, 'NATIVE_SESSION_ID_MISSING'));
     }

@@ -118,6 +118,7 @@ export class IntegrationRuntime {
       startup_input_conditions: true,
       integration_policy_update: true,
       session_restore_diagnostics: true,
+      native_identity_linux_flock_owner: process.platform === 'linux',
       permissions: ['task.read', 'task.create', 'task.assign', 'task.comment', 'task.revise', 'task.answer', 'events.read', 'session.create', 'session.read', 'session.restore'] };
   }
   private error(error: unknown) {

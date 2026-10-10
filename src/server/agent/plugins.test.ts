@@ -7,6 +7,7 @@ import {
   detectAgentFromArgv,
   listAgents,
   registerPluginAgents,
+  getPluginNativeIdentityConfig,
 } from './registry.js';
 import { applyAgentEvent, buildHookSequence, defaultAgentSessionState, parseAgentEvent } from './session.js';
 
@@ -45,6 +46,16 @@ function makePlugin(manifest: AgentPluginManifest): LoadedPlugin {
 }
 
 describe('plugin validation', () => {
+  it('keeps optional current-process ownership configuration without assuming it for old plugins', () => {
+    const nativeIdentity = { kind: 'linux-flock-owner' as const, directory: '~/.test-agent/locks' };
+    const result = validateManifest({ ...TEST_PLUGIN, nativeIdentity }, '/tmp/test');
+    expect(result).toMatchObject({ manifest: { nativeIdentity } });
+    expect(validateManifest({ ...TEST_PLUGIN, nativeIdentity: { ...nativeIdentity, directory: '/tmp/locks' } }, '/tmp/test')).toHaveProperty('error');
+    clearPluginAgents(); registerPluginAgents([makePlugin({ ...TEST_PLUGIN, nativeIdentity })]);
+    expect(getPluginNativeIdentityConfig(TEST_PLUGIN.slug)).toEqual(nativeIdentity);
+    clearPluginAgents(); registerPluginAgents([makePlugin(TEST_PLUGIN)]);
+    expect(getPluginNativeIdentityConfig(TEST_PLUGIN.slug)).toBeUndefined(); clearPluginAgents();
+  });
   it('accepts a valid manifest', () => {
     const plugins = loadPlugins();
     // Built-in registry should not be affected

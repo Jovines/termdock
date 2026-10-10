@@ -1,6 +1,7 @@
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type ShellVerificationFailure } from '../agent/nativeResumeOwner.js';
+import { readNativeProcessIdentity } from '../agent/nativeProcessIdentity.js';
 import { integrationLaunchCommand, type IntegrationDeliveryReadiness, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
 import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
@@ -104,6 +105,7 @@ import {
   buildResumeCommand,
   detectAgentFromCommand,
   inferResumeSessionId,
+  getPluginNativeIdentityConfig,
   listAgents,
   type AgentInfo,
 } from '../agent/registry.js';
@@ -2115,7 +2117,7 @@ function formatLocalCollaborationMessages(frontendSessionId: string, messages: C
  *  agent-keyed selector can never reach it. Delivery still needs an agent (the
  *  confirm gate and prompt formatting assume a TUI); driving a terminal —
  *  run/capture — is a shell operation and works on any pane. */
-async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false): Promise<ReturnType<typeof selectCollaborationPane>> {
+async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false): Promise<ReturnType<typeof selectCollaborationPane>> {
   if (!binding.tmuxSessionName) return { state: 'offline', reason: 'TMUX_BINDING_MISSING' };
   const name = `=${binding.tmuxSessionName}`;
   try { await runTmux(['has-session', '-t', name]); }
@@ -2129,12 +2131,17 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
   if (layout.sessionName !== binding.tmuxSessionName) throw new Error('TMUX_SESSION_IDENTITY_CHANGED');
   const serverPid = Number((await runTmux(['display-message', '-p', '#{pid}'])).trim());
   if (!Number.isInteger(serverPid) || serverPid <= 0) throw new Error('TMUX_SERVER_IDENTITY_UNAVAILABLE');
+  if (nativeProcessIdentity && process.platform === 'linux') await getProcessSnapshot(true);
   const panes: CollaborationPaneCandidate[] = await Promise.all(layout.windows.flatMap((window) => window.panes).map(async (pane) => {
     // Native identity needs the foreground argv even for a named binary;
     // pane_current_command alone cannot prove an exact resumed conversation.
     const program = await resolveTmuxPaneProgram(pane, true);
     const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
-    const nativeSessionId = agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null;
+    const identity = nativeProcessIdentity ? await observeProgramNativeIdentity(agent, program)
+      : { nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null, failure: null };
+    if (identity.failure) integrationError(identity.failure === 'NATIVE_SESSION_IDENTITY_CONFLICT'
+      ? 'NATIVE_SESSION_ID_MISMATCH' : 'NATIVE_SESSION_OWNER_UNCONFIRMED', 'Current process native identity evidence conflicts or cannot be uniquely verified', 409);
+    const nativeSessionId = identity.nativeId;
     return { serverPid, sessionId: layout.sessionId, paneId: pane.id, panePid: pane.pid,
       agentSlug: agent?.slug ?? '', nativeSessionId, cwd: pane.currentPath,
       isShell: shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') };
@@ -2389,7 +2396,7 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
     const binding: CollaborationBinding = { sessionId: record.session_id, backendSessionId: terminal.backendSessionId,
       mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug,
       nativeSessionId: record.agent_native_session_id, pane: record.terminal_binding ?? null };
-    const inspected = await inspectCollaborationTmux(binding);
+    const inspected = await inspectCollaborationTmux(binding, undefined, false, true);
     if (inspected.state === 'offline') return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
     if (inspected.state !== 'ready' || !inspected.pane) integrationError('SESSION_IDENTITY_MISMATCH', 'Owned tmux pane cannot be uniquely verified', 409);
     const pane = inspected.pane;
@@ -2443,11 +2450,13 @@ async function assertIntegrationNativeResumeAvailable(record: IntegrationSession
         return Promise.all(layout.windows.flatMap(window => window.panes).map(async pane => {
           const program = await resolveTmuxPaneProgram(pane, true, true);
           const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
+          const identity = await observeProgramNativeIdentity(agent, program);
           const shell = await inspectIntegrationShell({ panePid: pane.pid,
             isShell: !agent && shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') });
-          return { confirmed: shell.confirmed || program?.source === 'tmux-tty' && Boolean(program.rawArgs),
+          return { confirmed: !identity.failure && (shell.confirmed || program?.source === 'tmux-tty' && Boolean(program.rawArgs)),
             agentSlug: agent?.slug ?? null,
-            nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null,
+            nativeId: identity.nativeId, nativeIdentityFailure: identity.failure, nativeIdentitySource: identity.source,
+            processPid: program?.processPid,
             paneId: pane.id, panePid: pane.pid, tmuxSessionId: layout.sessionId, program: program?.command ?? null,
             processSource: program?.source, argumentsObserved: !!program?.rawArgs,
             shellFailure: shell.failure, pgid: shell.pgid, tpgid: shell.tpgid };
@@ -4572,6 +4581,8 @@ async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false, refre
   command: string | null;
   source: 'tmux-pane' | 'tmux-tty';
   rawArgs: string | null;
+  processPid?: number;
+  processComm?: string;
 } | null> {
   // If pane command is a known shell, try to find a child foreground process
   const command = normalizeProgramName(pane.command);
@@ -4623,6 +4634,7 @@ async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false, refre
 
     const selected = selectTmuxForegroundProgram({
       panePid: pane.pid,
+      includePaneProcess: requireArgs,
       rows,
       shellNames: shellNamesBackend,
       genericProgramNames,
@@ -4630,13 +4642,33 @@ async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false, refre
     });
 
     if (selected) {
-      return { command: selected.command, source: 'tmux-tty', rawArgs: selected.rawArgs };
+      return { command: selected.command, source: 'tmux-tty', rawArgs: selected.rawArgs,
+        ...(selected.processPid ? { processPid: selected.processPid, processComm: selected.processComm } : {}) };
     }
   } catch {
     // Fall through to pane_current_command fallback
   }
 
   return { command, source: 'tmux-pane', rawArgs: null };
+}
+
+async function observeProgramNativeIdentity(agent: AgentInfo | null, program: {
+  rawArgs: string | null; processPid?: number; processComm?: string;
+} | null): Promise<{ nativeId: string | null; source: 'argv' | 'linux-flock-owner' | null;
+  failure: 'NATIVE_SESSION_IDENTITY_CONFLICT' | 'NATIVE_SESSION_IDENTITY_AMBIGUOUS' | 'NATIVE_SESSION_PROCESS_CHANGED' | 'NATIVE_SESSION_OWNERSHIP_UNCONFIRMED' | null }> {
+  const fromArgs = agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null;
+  const config = agent ? getPluginNativeIdentityConfig(agent.slug) : undefined;
+  if (config && program?.processPid) {
+    const proof = await readNativeProcessIdentity(program.processPid, config, program.processComm, program.rawArgs ?? undefined);
+    if (proof.outcome === 'ambiguous' || proof.outcome === 'process_changed' || proof.outcome === 'unconfirmed') return { nativeId: null, source: null,
+      failure: proof.outcome === 'ambiguous' ? 'NATIVE_SESSION_IDENTITY_AMBIGUOUS'
+        : proof.outcome === 'unconfirmed' ? 'NATIVE_SESSION_OWNERSHIP_UNCONFIRMED' : 'NATIVE_SESSION_PROCESS_CHANGED' };
+    if (proof.nativeId) {
+      if (fromArgs && fromArgs !== proof.nativeId) return { nativeId: null, source: null, failure: 'NATIVE_SESSION_IDENTITY_CONFLICT' };
+      return { nativeId: proof.nativeId, source: 'linux-flock-owner', failure: null };
+    }
+  }
+  return { nativeId: fromArgs, source: fromArgs ? 'argv' : null, failure: null };
 }
 
 /**

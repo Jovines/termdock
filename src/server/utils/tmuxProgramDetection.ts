@@ -11,6 +11,8 @@ export interface TmuxProcessRow {
 export interface TmuxProgramSelection {
   command: string | null;
   rawArgs: string | null;
+  processPid?: number;
+  processComm?: string;
 }
 
 export const DEFAULT_TMUX_HELPER_PROGRAM_NAMES = new Set([
@@ -119,6 +121,8 @@ function isDirectProgramMatch(row: TmuxProcessRow, command: string | null): bool
 
 export function selectTmuxForegroundProgram(input: {
   panePid: number;
+  /** Exact identity probes also cover a program exec'd directly as pane PID. */
+  includePaneProcess?: boolean;
   rows: TmuxProcessRow[];
   shellNames: ReadonlySet<string>;
   genericProgramNames: ReadonlySet<string>;
@@ -128,7 +132,10 @@ export function selectTmuxForegroundProgram(input: {
   const helperProgramNames = input.helperProgramNames ?? DEFAULT_TMUX_HELPER_PROGRAM_NAMES;
   const rowsByPid = new Map(input.rows.map((row) => [row.pid, row]));
   const foregroundRows = input.rows.filter(
-    (row) => row.pid !== input.panePid && row.tpgid > 0 && row.pgid === row.tpgid && !row.stat.startsWith('Z'),
+    (row) => (row.pid !== input.panePid || input.includePaneProcess === true
+      && !input.shellNames.has(lowerProgramName(row.comm)?.replace(/^-/, '') ?? '')
+      && !input.shellNames.has(lowerProgramName(input.extractProgramLabel(row.args) ?? row.comm)?.replace(/^-/, '') ?? ''))
+      && row.tpgid > 0 && row.pgid === row.tpgid && !row.stat.startsWith('Z'),
   );
 
   if (foregroundRows.length === 0) {
@@ -173,6 +180,7 @@ export function selectTmuxForegroundProgram(input: {
   return {
     command: selected.command,
     rawArgs: selected.row.args,
+    ...(input.includePaneProcess ? { processPid: selected.row.pid, processComm: selected.row.comm } : {}),
   };
 }
 
