@@ -499,7 +499,11 @@ session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSI
 
 `observed` 只表示本次启动的画面条件已观测；后续咨询保留通常的追加投递方式，
 不以 Agent 忙闲门控。真正执行 restore 时重新等待启动条件。写入后的 `delivered`
-仍只表示终端写入；`AGENT_CONSUME_UNCONFIRMED` 也不能解释为已消费或应自动重投。
+仍只表示终端写入。1.4.311 起，普通消息统一粘贴一次，间隔 50ms 后发送一次
+不带括号粘贴包装的 CR（回车），适用于 tmux 与直接 PTY；不识别 Agent 粘贴提示、
+不自动补回车、不根据终端文字确认消费。`delivered`/`pty_written` 是现有回执字段，
+仅记录终端写入调用完成，不保证对方收到、提交、消费或执行。快照只作观测，明确回复单独关联。
+旧回执中的 `AGENT_CONSUME_UNCONFIRMED` 保留历史，不触发补键或重投。
 任务完成继续以负责人明确 `report complete` 为准。
 
 恢复保留原 TD ID、原生 ID、argv/model/cwd/包装器配置。原会话已经精确运行时直接

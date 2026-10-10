@@ -133,7 +133,7 @@ import { completedExecution, ExecutionArchiveStore } from '../agent/executionArc
 import { archiveTaskWorkspace, restoreTaskWorkspace, snapshotTaskWorkspace } from '../agent/collaborationTaskWorkspace.js';
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
-import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
+import { writeBracketedPrompt, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { prepareSupervisionEnable } from '../utils/enableSupervision.js';
 import { buildServerHealthState, dismissServerHealth } from '../utils/serverHealth.js';
 import { collaborationRoutes } from '../agent/collaborationRoutes.js';
@@ -149,7 +149,7 @@ import { CollaborationError } from '../agent/collaborationProtocol.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, type CollaborationBinding, type CollaborationPaneBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
-import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, recoverStuckPaste, sendTmuxPaneKey, writeCollaborationTmuxPane,
+import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane,
   type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
 import {
   listAllHookAgents,
@@ -2001,7 +2001,7 @@ function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: stri
   const session = terminalSessions.get(backendSessionId);
   if (!session) return;
   if (canDeliverPromptToAgent(session) || attempt >= 60) {
-    session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
+    void writeBracketedPrompt(session.ptyProcess, prompt).catch((error) => console.error('[automation] terminal write failed:', getErrorMessage(error)));
     return;
   }
   setTimeout(() => deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1), 250);
@@ -2019,7 +2019,7 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       frontendSessionId = record.sessionId;
       const message = automation.prompt || automation.command;
       if (!message) throw new Error('自动任务没有可发送的内容');
-      backend.ptyProcess.write(buildBracketedSubmitBytes(message));
+      await writeBracketedPrompt(backend.ptyProcess, message);
     } else {
       const request = req ?? ({} as express.Request);
       const opened = await openInventorySession(request, {
@@ -2034,7 +2034,7 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       if (automation.command) writeTerminalInput(backend, `${automation.command}\r`);
       if (automation.prompt) {
         if (automation.command) deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, automation.prompt);
-        else backend.ptyProcess.write(buildBracketedSubmitBytes(automation.prompt));
+        else await writeBracketedPrompt(backend.ptyProcess, automation.prompt);
       }
     }
     automationStore.finishRun(run.id, 'success', frontendSessionId, '任务已投递');
@@ -2241,11 +2241,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
       await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin);
       backend!.lastActivity = Date.now();
-      // First-delivery confirm: history proves the agent rendered our
-      // message (boot sequences clear only the screen, never the history a
-      // live TUI writes into). Terminal-state only — no agent hooks.
-      }, confirm: async () => captureTmuxPaneHistory(runTmux, pinned), approve: async () => approveCollaborationDialog(runTmux, pinned),
-        recoverStuck: async (baseline) => recoverStuckPaste(runTmux, pinned, baseline) };
+    } };
   }
   if (!backend || !binding.backendSessionId) return { state: 'offline', reason: 'SHELL_BACKEND_NOT_RUNNING' };
   await refreshCollaborationAgentIdentity(binding.backendSessionId, backend);
@@ -2256,7 +2252,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     write: async (messages) => {
     if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
     if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('SHELL_BACKEND_CHANGED');
-    target.ptyProcess.write(buildBracketedSubmitBytes(formatLocalCollaborationMessages(frontendSessionId, messages)));
+    await writeBracketedPrompt(target.ptyProcess, formatLocalCollaborationMessages(frontendSessionId, messages));
     target.lastActivity = Date.now();
   } };
 }
@@ -8789,7 +8785,7 @@ router.post('/:sessionId/agent-resume', async (req, res) => {
   }
 
   try {
-    session.ptyProcess.write(buildBracketedSubmitBytes(target.command));
+    await writeBracketedPrompt(session.ptyProcess, target.command);
     session.lastActivity = Date.now();
     res.json({ success: true, command: target.command });
   } catch (error) {

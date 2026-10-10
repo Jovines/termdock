@@ -180,8 +180,10 @@ cleanup without --confirm prints the plan and refuses (also 1);
 2 wait timeout (message may still deliver); 3 failed/expired.
 Message limit: ${COLLAB_LIMITS.message_bytes} UTF-8 bytes; metadata: ${COLLAB_LIMITS.metadata_bytes} bytes.
 Idempotency retention: 7 days. Terminal delivery, ACK and result never imply each other.
-Delivery semantics: delivered = written to the terminal — never proof of
-reading or task completion; a timeout stops waiting, it does not cancel delivery.
+Delivery semantics: delivered records completion of terminal write calls;
+it does not guarantee receipt, submission, consumption or task completion; a timeout stops waiting, it does not cancel delivery.
+Terminal input: paste once, wait 50ms, send one unbracketed CR (Enter).
+No paste-marker recognition, automatic extra Enter or consumption checks.
 The service cannot see whether the recipient's agent consumed a message.
 Use explicit replies as evidence. A screen snapshot is only an observation;
 do not automatically resend a delivered message because it is absent from a snapshot.
@@ -363,7 +365,7 @@ export function waitSatisfied(receipt: Json, stage: string, reply?: string): boo
  *  machine reasons onto what the sender should do next, so a settled-but-
  *  unconsumed message is not mistaken for a lost one (or a good one). */
 const DELIVERY_DIAGNOSTICS: Record<string, string> = {
-  AGENT_CONSUME_UNCONFIRMED: '消息已写入对方终端，但未确认被对方消费；等待明确回复，不从终端快照推断消费或自动重发',
+  AGENT_CONSUME_UNCONFIRMED: '旧版本诊断，仅表示消息已写入终端；不证明消费，当前版本不再检查消费或自动补回车',
   SHELL_CONFIRMATION_REQUIRED: '目标当前是 shell，消息可能被当命令执行；确认请运行 message confirm-shell <id>',
   DELIVERY_IN_PROGRESS: '投递进行中（写入前的中间标记，正常会在数秒内推进为 delivered 或带原因的重试）',
   TERMINAL_WRITE_FAILED: '写入对方终端失败，会按重试间隔继续尝试',
@@ -430,7 +432,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         // observes terminal writes, never reading, so this capture is the only
         // evidence the message actually landed. Kept visible in --text, but
         // fenced and labelled so it cannot be mistaken for delivery state.
-        if (value.snapshot) io.write(`\n对方终端当前屏幕（凭证：确认你的消息已写入；不代表已读或任务完成）：\n───\n${value.snapshot}\n───`);
+        if (value.snapshot) io.write(`\n对方终端快照（仅为观测；不证明已读、消费或任务完成）：\n───\n${value.snapshot}\n───`);
       }
       else io.write(JSON.stringify(value, null, 2));
       if (value.last_error && !diagnosed) io.write(`诊断：${deliveryDiagnosticText(value.last_error)}`);

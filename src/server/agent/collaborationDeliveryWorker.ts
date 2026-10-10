@@ -1,4 +1,3 @@
-import { collaborationMessageAnchorTokens } from './collaborationPrompt.js';
 import type { CollaborationStore, CollaborationMessage } from './collaborationStore.js';
 import type { CollaborationRouteState } from './collaborationRouting.js';
 
@@ -9,19 +8,6 @@ export interface CollaborationRoute {
   write?: (messages: CollaborationMessage[]) => Promise<void>;
   /** Best-effort capture of the recipient terminal after a successful write. */
   capture?: () => Promise<string>;
-  /** History-inclusive capture used to confirm the agent actually rendered a
-   *  first delivery (its transcript contains our message) instead of a boot
-   *  sequence wiping it. Absent on routes without terminal access. */
-  confirm?: () => Promise<string | null>;
-  /** Dismiss an interactive approval dialog on the recipient pane (Enter on
-   *  the highlighted option). Returns false when no dialog is showing. */
-  approve?: () => Promise<boolean>;
-  /** Submit a paste that arrived during the agent's turn handover and still
-   *  sits unsubmitted in its input box. Only acts on differential evidence —
-   *  a paste marker that appeared since the write-time baseline — so stale
-   *  markers or foreign drafts are never submitted. Returns whether Enter
-   *  was sent. */
-  recoverStuck?: (baseline: string) => Promise<boolean>;
 }
 
 export class CollaborationDeliveryWorker {
@@ -29,14 +15,6 @@ export class CollaborationDeliveryWorker {
   private states = new Map<string, { state: CollaborationRouteState; reason: string | null; checkedAt: number }>();
   private failures = new Map<string, number>();
   private submitted = new Set<string>();
-  /** Sessions whose latest delivery was confirmed rendered in this process,
-   *  mapped to the timestamp until which confirmations are skipped. A recent
-   *  confirmed delivery means the agent is actively consuming input, so
-   *  follow-up messages settle immediately; once the cooldown lapses the
-   *  agent's state is unknown again (it may be mid-turn, or finishing one)
-   *  and the gate re-engages. Settled-but-unconfirmed deliveries never grant
-   *  cooldown — that would re-open the turn-handover hole the gate closes. */
-  private confirmedUntil = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking: Promise<void> | null = null;
 
@@ -46,20 +24,8 @@ export class CollaborationDeliveryWorker {
     isLocal: (id: string) => boolean;
     resolve: (id: string) => Promise<CollaborationRoute>;
     onError: (error: unknown) => void;
-    /** Confirmation delay: after writing to a session outside its confirm
-     *  cooldown, wait this long and check the recipient's terminal history
-     *  for our message before marking it delivered. 0 disables the gate;
-     *  routes without `confirm` (no terminal access) are unaffected. */
-    firstDeliveryConfirmMs?: number;
-    /** How long one confirmed delivery exempts the session from the gate.
-     *  Follow-up messages inside the cooldown ride the confirmed delivery's
-     *  assumption that the agent is consuming; after it lapses the gate
-     *  re-engages for the next delivery. */
-    confirmCooldownMs?: number;
-    /** Delay between the write and the delivery snapshot. An immediate capture
-     *  catches the input box mid-paste (`[Pasted text #N …]`), which says
-     *  nothing about what landed; a short delay lets the recipient's TUI
-     *  render first so the sender's receipt reflects the post-write screen. */
+    /** Optional delay before the best-effort post-write terminal snapshot.
+     *  Snapshot content never determines delivery or triggers input. */
     snapshotDelayMs?: number;
   }) {}
 
@@ -162,29 +128,6 @@ export class CollaborationDeliveryWorker {
       return;
     }
     const attempts = store.diagnostic(message.id)?.attempt_count ?? 0;
-    // Confirm gate: the route becoming ready only proves the agent process is
-    // up, not that its TUI is consuming — a write landing while the agent
-    // finishes another turn can sit unsubmitted in its input box. When the
-    // route can read terminal history, watch for our message to appear there
-    // (the agent rendered it) and, while it is missing, try the recovery
-    // ladder: submit a paste left unsubmitted in the input box, dismiss a
-    // blocking approval dialog.
-    //
-    // The gate never re-writes the body. A successful write already put the
-    // bytes in the pty; a busy agent that has not echoed them yet is a
-    // diagnosis, not a lost message, and re-writing would deliver the body
-    // again the moment it does catch up (that is how one user message arrived
-    // as three copies). Only a write that throws is treated as a failed
-    // delivery and retried — that path is unchanged.
-    const confirmMs = this.options.firstDeliveryConfirmMs ?? 1_500;
-    const gateActive = !route.isShell && Boolean(route.confirm) && confirmMs > 0
-      && Date.now() >= (this.confirmedUntil.get(id) ?? 0);
-    // Differential baseline for stuck-paste recovery: captured before the
-    // write so a later screen diff can tell our paste apart from stale ones.
-    let baseline = '';
-    if (gateActive && route.recoverStuck && !this.submitted.has(message.id) && route.capture) {
-      try { baseline = (await route.capture()) ?? ''; } catch { baseline = ''; }
-    }
     if (!this.submitted.has(message.id)) {
       store.recordTransport(message.id, {
         relay_online: null, peer_reachable: true,
@@ -211,70 +154,19 @@ export class CollaborationDeliveryWorker {
         } catch { /* best-effort */ }
       }
     }
-    if (gateActive) {
-      const confirmed = await this.confirmConsumed(pending, route, confirmMs, baseline, collaborationMessageAnchorTokens(pending));
-      // Confirmed rendered: refresh the exemption window so follow-ups in the
-      // agent's active turn settle immediately.
-      if (confirmed) this.confirmedUntil.set(id, Date.now() + (this.options.confirmCooldownMs ?? 30_000));
-      // Either way the delivery settles here: the bytes are in the pty, and an
-      // unconfirmed one keeps that diagnosis for the sender instead of
-      // re-queuing a body that already arrived.
-      this.complete(id, message, confirmed ? null : 'AGENT_CONSUME_UNCONFIRMED');
-      return;
-    }
     // If persistence fails after writing, the in-process guard avoids a
     // second write on retry. Across a crash, transport is at-least-once.
     this.complete(id, message);
   }
 
-  /** Wait out the confirm window, then look for the written messages in the
-   *  recipient's terminal history. A message found there was rendered by the
-   *  agent and counts as consumed. While the agent is blocked on an approval
-   *  dialog (its Bash call needs permission) dismiss it once per cycle, and
-   *  on the first cycle submit a paste that arrived during turn handover and
-   *  is still sitting unsubmitted (differential baseline evidence only, at
-   *  most once per delivery). Each recovery sends Enter on evidence, never
-   *  blind. */
-  private async confirmConsumed(
-    messages: CollaborationMessage[],
-    route: CollaborationRoute,
-    delayMs: number,
-    baseline: string,
-    tokens: Map<string, string>,
-  ): Promise<boolean> {
-    let recovered = false;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? delayMs : Math.min(1_200, delayMs)));
-      let content: string | null = null;
-      try { content = await route.confirm!(); } catch { content = null; }
-      // Search the same token the formatter wrote into the delivered text:
-      // short ids in the terminal, full ids in `messages`. Deriving it here
-      // rather than reusing a literal is what keeps the two sides from
-      // drifting apart — a text that carries a token the gate does not search
-      // can never confirm, and the delivery is re-written to the bound.
-      if (content && messages.some((message) => content.includes(tokens.get(message.id) ?? message.id))) return true;
-      if (!recovered && route.recoverStuck && baseline) {
-        try { recovered = await route.recoverStuck(baseline); } catch { /* a failed submit must not settle delivery */ }
-      }
-      if (content && route.approve) {
-        try { await route.approve(); } catch { /* a failed dismiss must not settle delivery */ }
-      }
-    }
-    return false;
-  }
-
-  /** Settle a delivery as delivered. `unconfirmedReason`, when set, is a
-   *  diagnosis that survives the settle: the write reached the pty (there is
-   *  nothing more a retry may do) but the recipient never showed it, so the
-   *  sender can still see why. Never re-queues — that is what would wedge the
-   *  queue and duplicate the body. */
-  private complete(id: string, message: CollaborationMessage, unconfirmedReason: string | null = null): void {
+  /** Delivery records terminal writes only; Agent replies are separate. */
+  private complete(id: string, message: CollaborationMessage): void {
     const { store } = this.options;
     store.markDelivered([message.id]);
     this.submitted.delete(message.id);
     store.recordTransport(message.id, {
       relay_online: null, peer_reachable: true, attempt_count: store.diagnostic(message.id)?.attempt_count ?? 1,
-      next_retry_at: null, last_error: unconfirmedReason, checked_at: Date.now(),
+      next_retry_at: null, last_error: null, checked_at: Date.now(),
     });
     this.failures.delete(id);
   }

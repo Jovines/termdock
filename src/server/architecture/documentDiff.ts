@@ -3,6 +3,10 @@ export interface ArchitectureChange { perspective: string; node?: string; title:
 /** Compare semantic document content, excluding timestamps and update counters. */
 export function diffArchitecture(before: ArchitectureDocument | null, after: ArchitectureDocument): ArchitectureChange[] {
   const changes: ArchitectureChange[] = [];
+  if (before) {
+    const changed = ['summary', 'analysis', 'details', 'origin'].filter(key => JSON.stringify(before[key as keyof ArchitectureDocument]) !== JSON.stringify(after[key as keyof ArchitectureDocument]));
+    if (changed.length) changes.push({ perspective: '', title: 'Project overview', kind: 'changed', fields: changed });
+  }
   const oldViews = new Map(before?.perspectives.map(view => [view.id, view]) ?? []);
   for (const view of after.perspectives) {
     const previous = oldViews.get(view.id);

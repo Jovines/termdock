@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { updateArchitectureField } from './fieldMutation.js';
-import { ARCHITECTURE_FIELDS, ARCHITECTURE_FILE,  analysisFile, architectureSourceDiagram, buildArchitecturePrompt, buildOmmScanPrompt, parseArchitecture, type ArchitectureDocument, type ArchitectureField, type ArchitectureNode } from './document.js';
+import { ARCHITECTURE_FIELDS, ARCHITECTURE_FILE,  analysisFile, architectureSourceDiagram, buildArchitecturePrompt, buildOmmScanPrompt, parseArchitecture, type ArchitectureDocument, type ArchitectureField, type ArchitectureNode, type ArchitecturePerspective } from './document.js';
 import { ArchitectureStore } from './store.js';
 import { parseFlowchart } from './flowchart.js';
 import { diffMermaid } from './mermaidDiff.js';
@@ -32,6 +32,17 @@ Examples: td architecture prompt --project .
           td architecture save --file .termdock/architecture.json -`;
 
 export interface ArchitectureCliIo { write: (value: string) => void; stdin: () => Promise<string> }
+function elementPath(view: ArchitecturePerspective, node?: ArchitectureNode): string {
+  if (!node) return view.id;
+  if (node.documentPath) return node.documentPath;
+  const parts = [node.id];
+  let parent = node.parentId;
+  while (parent) {
+    parts.unshift(parent);
+    parent = view.nodes.find(item => item.id === parent)?.parentId;
+  }
+  return [view.id, ...parts].join('/');
+}
 function target(document: ArchitectureDocument, element: string) {
   const [perspective, ...parts] = element.split('/');
   const view = document.perspectives.find(view => view.id === perspective);
@@ -63,9 +74,13 @@ export async function runArchitectureCli(args: string[], io: ArchitectureCliIo =
     const omm = options.format === 'omm' || options.file === '.omm';
     if (options.format && !['native', 'omm'].includes(options.format)) throw new Error('Format must be native or omm');
     const file = options.file ?? (omm ? '.omm' : ARCHITECTURE_FILE);
+    const instructions = async () => {
+      const language = options.language ?? (omm ? (await store.config()).language : 'en');
+      return omm ? buildOmmScanPrompt(root, language) : buildArchitecturePrompt(root, language === 'zh' ? 'zh' : 'en');
+    };
     const input = async (values: string[]) => values[0] === '-' ? io.stdin() : values.join(' ');
     const json = (value: unknown) => io.write(JSON.stringify(value, null, 2));
-    if (command === 'prompt' || command === 'scan') { io.write(omm ? buildOmmScanPrompt(root, options.language === 'zh' ? 'zh' : 'en') : buildArchitecturePrompt(root, options.language === 'zh' ? 'zh' : 'en')); return 0; }
+    if (command === 'prompt' || command === 'scan') { io.write(await instructions()); return 0; }
     if (command === 'setup') {
       const platforms: Record<string, string> = { claude: '.claude/skills', codex: '.agents/skills', cursor: '.cursor/skills', openclaw: '.openclaw/skills', antigravity: '.agent/skills' };
       if (options.list) { json(Object.keys(platforms)); return 0; }
@@ -77,7 +92,7 @@ export async function runArchitectureCli(args: string[], io: ArchitectureCliIo =
         let existing = ''; try { existing = await fs.readFile(destination, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         if (existing && !existing.includes(marker)) throw new Error(`Refusing to overwrite an unrelated skill: ${relative}`);
         if (options.teardown) { if (existing.includes(marker)) await fs.unlink(destination); io.write(`Removed ${relative}`); continue; }
-        const prompt = omm ? buildOmmScanPrompt(root, options.language === 'zh' ? 'zh' : 'en') : buildArchitecturePrompt(root, options.language === 'zh' ? 'zh' : 'en');
+        const prompt = await instructions();
         await fs.writeFile(destination, `---\nname: termdock-architecture\ndescription: Recursively analyze or update this project's Termdock code architecture.\n---\n${marker}\n\n${prompt}\n`, { mode: 0o600 });
         io.write(`Installed ${relative}`);
       }
@@ -113,10 +128,11 @@ export async function runArchitectureCli(args: string[], io: ArchitectureCliIo =
     }
     if (command === 'validate') {
       const issues: { element: string; message: string }[] = [];
+      if (element) target(document, element);
       for (const view of document.perspectives) {
         for (const item of [view, ...view.nodes]) {
-          const key = `${view.id}${item === view ? '' : `/${item.id}`}`;
-          if (element && !key.startsWith(element)) continue;
+          const key = elementPath(view, item === view ? undefined : item as ArchitectureNode);
+          if (element && key !== element && !key.startsWith(`${element}/`)) continue;
           if (!item.description && !item.summary) issues.push({ element: key, message: 'Missing description' });
           if (item.diagram) {
             const diagram = parseFlowchart(item.diagram);
@@ -151,7 +167,13 @@ export async function runArchitectureCli(args: string[], io: ArchitectureCliIo =
       await store.save(file, updated, loaded.revision); io.write(`Updated ${element}/${field}`); return 0;
     }
     if (command === 'refs') {
-      json({ outgoing: selected.node?.references ?? [], incoming: document.perspectives.flatMap(view => view.nodes.filter(node => node.references?.some(ref => ref.perspective === selected.view.id && (!ref.node || ref.node === selected.node?.id))).map(node => ({ perspective: view.id, node: node.id }))), connections: selected.node ? selected.view.edges.filter(edge => edge.from === selected.node!.id || edge.to === selected.node!.id) : selected.view.edges }); return 0;
+      const reference = (perspective: string, id?: string) => {
+        const view = document.perspectives.find(view => view.id === perspective)!;
+        const node = id ? view.nodes.find(node => node.id === id) : undefined;
+        return { perspective, ...(id ? { node: id } : {}), element: elementPath(view, node), title: node?.title ?? view.title };
+      };
+      const connections = (selected.node ? selected.view.edges.filter(edge => edge.from === selected.node!.id || edge.to === selected.node!.id) : selected.view.edges).map(edge => ({ ...edge, fromElement: elementPath(selected.view, selected.view.nodes.find(node => node.id === edge.from)), toElement: elementPath(selected.view, selected.view.nodes.find(node => node.id === edge.to)) }));
+      json({ outgoing: (selected.node?.references ?? []).map(ref => reference(ref.perspective, ref.node)), incoming: document.perspectives.flatMap(view => view.nodes.filter(node => node.references?.some(ref => ref.perspective === selected.view.id && (!ref.node || ref.node === selected.node?.id))).map(node => reference(view.id, node.id))), connections }); return 0;
     }
     if (command === 'diff') {
       if (selected.value.meta?.previousDiagram && selected.value.diagram) json(diffMermaid(selected.value.meta.previousDiagram, selected.value.diagram));

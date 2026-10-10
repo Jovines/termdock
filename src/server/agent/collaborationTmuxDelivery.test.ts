@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { captureTmuxPaneHistory, captureTmuxPaneText, detectApprovalDialog, extractPasteMarkerNumbers, hasNewPasteMarker, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { captureTmuxPaneHistory, captureTmuxPaneText, detectApprovalDialog, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
 
 const PANE = { serverPid: 1, sessionId: '$0', paneId: '%0', panePid: 2, agentSlug: '', nativeSessionId: null };
 const IDENTITY = '1:$0:%0:2';
@@ -49,43 +49,42 @@ describe('approval dialog screen detection', () => {
   });
 });
 
-describe('paste-marker diffing', () => {
-  it('extracts the session-unique sequence numbers of collapsed paste markers', () => {
-    expect(extractPasteMarkerNumbers('[Pasted text #2 +31 lines]')).toEqual(new Set([2]));
-    expect(extractPasteMarkerNumbers('')).toEqual(new Set());
-  });
-
-  it('detects a marker that appeared since the write-time baseline', () => {
-    expect(hasNewPasteMarker(
-      'header\n[Pasted text #3 +8 lines]\n❯ ',
-      'header\n[Pasted text #1 +13 lines]\n[Pasted text #2 +5 lines]\n❯ ',
-    )).toBe(true);
-  });
-
-  it('ignores pre-existing stale markers and foreign drafts', () => {
-    // Same markers before and after (no new one from this delivery).
-    expect(hasNewPasteMarker(
-      '[Pasted text #1 +13 lines]\n❯ ',
-      '[Pasted text #1 +13 lines]\n❯ ',
-    )).toBe(false);
-    // Markers are only on screen after this delivery landed, but the
-    // diff is against a baseline that already showed them.
-    expect(hasNewPasteMarker(
-      '[Pasted text #2 +5 lines]',
-      '[Pasted text #1 +13 lines]\n[Pasted text #2 +5 lines]',
-    )).toBe(false);
-    // Empty baseline with markers after: every marker is new.
-    expect(hasNewPasteMarker('[Pasted text #1 +13 lines]', '')).toBe(true);
-  });
-});
-
 describe('buffer-channel delivery', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('sends exactly one CR only after the 50ms paste interval', async () => {
+    vi.useFakeTimers();
+    const { run, stdin, calls } = recorder();
+    const delivery = writeCollaborationTmuxPane(run, PANE, 'body', stdin);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stdin).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(49);
+    expect(calls.filter(args => args[0] === 'set-buffer')).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await delivery;
+    expect(calls.filter(args => args[0] === 'set-buffer')).toHaveLength(1);
+    expect(calls.some(args => args[0] === 'capture-pane' || args[0] === 'send-keys')).toBe(false);
+  });
+
+  it('keeps concurrent TD messages together as paste/CR pairs', async () => {
+    vi.useFakeTimers();
+    const { run, stdin, calls, bodies } = recorder();
+    const one = writeCollaborationTmuxPane(run, PANE, 'one', stdin);
+    const two = writeCollaborationTmuxPane(run, PANE, 'two', stdin);
+    await vi.advanceTimersByTimeAsync(49);
+    expect(bodies).toEqual(['one']);
+    await vi.advanceTimersByTimeAsync(51);
+    await Promise.all([one, two]);
+    expect(calls.filter(args => ['load-buffer', 'set-buffer'].includes(args[0]!)).map(args => args[0]))
+      .toEqual(['load-buffer', 'set-buffer', 'load-buffer', 'set-buffer']);
+  });
+
   it('loads the body on stdin and pipes it once through load-buffer + paste-buffer', async () => {
     const { run, calls, stdin, bodies } = recorder();
     await writeCollaborationTmuxPane(run, PANE, 'collab-message', stdin);
-    expect(calls.map((args) => args[0])).toEqual(['display-message', 'load-buffer', 'delete-buffer']);
+    expect(calls.map((args) => args[0])).toEqual(['display-message', 'load-buffer', 'display-message', 'set-buffer', 'delete-buffer']);
     // The joined invocation, split into the commands tmux will run in order.
-    const commands = splitCommands(calls[1]!);
+    const commands = [...splitCommands(calls[1]!), ...splitCommands(calls[3]!)];
     const name = commands[0]![2]!;
     expect(name).toMatch(/^termdock-collab-\d+-\d+$/);
     expect(commands).toEqual([

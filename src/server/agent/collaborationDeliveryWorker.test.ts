@@ -4,7 +4,6 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CollaborationStore, type CollaborationMessage } from './collaborationStore.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from './collaborationDeliveryWorker.js';
-import { collaborationMessageAnchorTokens, formatCollaborationDelivery } from './collaborationPrompt.js';
 
 describe('background collaboration delivery', () => {
   let directory: string;
@@ -182,240 +181,31 @@ describe('background collaboration delivery', () => {
     expect(write.mock.calls.map(([messages]) => (messages[0] as { id: string }).id)).toEqual([first.id, second.id]);
   });
 
-  describe('first-delivery confirm gate', () => {
-    function makeWorkerWith(overrides?: Partial<ConstructorParameters<typeof CollaborationDeliveryWorker>[0]>) {
-      return new CollaborationDeliveryWorker({ store, peers: () => ['a', 'b', 'c'], isLocal: (id) => !id.startsWith('remote:'),
-        resolve, onError: () => undefined, snapshotDelayMs: 0, ...overrides });
-    }
+  it('settles terminal writes even if snapshots show a paste or approval prompt', async () => {
+    const capture = vi.fn(async () => '[Pasted text #2 +13 lines]\nThis command requires approval\n1. Yes');
+    resolve.mockResolvedValue({ state: 'ready', write, capture });
+    const message = send();
+    await worker.run('b');
+    expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: null,
+      delivery_semantics: 'pty_written', ack_at: null, reply_ids: [], result_ids: [] });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await worker.run('b');
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
 
-    it('delays the delivery snapshot so it shows the rendered paste, not the input box mid-write', async () => {
-      const message = send();
-      const capture = vi.fn(async () => 'rendered screen');
-      resolve.mockResolvedValue({ state: 'ready', write, capture });
-      worker = makeWorkerWith({ snapshotDelayMs: 200 });
-      const pending = worker.run('b');
-      // The write has happened but the capture waits for the render window.
-      await vi.advanceTimersByTimeAsync(100);
-      expect(capture).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(150);
-      await pending;
-      expect(capture).toHaveBeenCalledTimes(1);
-      expect(store.receipt(message.id).snapshot).toBe('rendered screen');
-    });
-
-    it('holds the first delivery until the message id appears in terminal history, then completes once', async () => {
-      const message = send();
-      const history: string[] = [];
-      const confirm = vi.fn(async () => history.join('\n'));
-      resolve.mockResolvedValue({ state: 'ready', write, confirm, capture: async () => '' });
-      const delivery = worker.run('b');
-      // After the first confirm window the message is still not marked delivered —
-      // a boot clear may have wiped the write; the gate waits for evidence
-      // (last_error stays DELIVERY_IN_PROGRESS while the delivery is unsettled).
-      await vi.advanceTimersByTimeAsync(1_500);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'pending', last_error: 'DELIVERY_IN_PROGRESS' });
-      history.push(`transcript shows message ${message.id} rendered`);
-      await vi.advanceTimersByTimeAsync(1_200);
-      await delivery;
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: null });
-      expect(write).toHaveBeenCalledTimes(1);
-    });
-
-    it('dismisses an actually-showing approval dialog each cycle, then settles without rewriting', async () => {
-      const message = send();
-      const approve = vi.fn(async () => true);
-      resolve.mockResolvedValue({ state: 'ready', write,
-        confirm: async () => 'This command requires approval\n1. Yes\n2. Yes, and don\'t ask again\n3. No', approve, capture: async () => '' });
-      const first = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
-      await first;
-      // Dialog evidence was on screen every cycle -> Enter was pressed every cycle.
-      expect(approve).toHaveBeenCalledTimes(3);
-      // The body was written once. A still-busy agent is a diagnosis, not a
-      // lost message: re-writing would deliver it again once the agent reads
-      // its input, which is how one message became three.
-      expect(write).toHaveBeenCalledTimes(1);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
-      // Nothing is queued behind it either.
-      await vi.advanceTimersByTimeAsync(10_000);
-      await worker.run('b');
-      expect(write).toHaveBeenCalledTimes(1);
-    });
-
-    it('never presses keys when no dialog evidence is captured, and settles unconfirmed exactly once', async () => {
-      const message = send();
-      const approve = vi.fn(async () => true);
-      resolve.mockResolvedValue({ state: 'ready', write, confirm: async () => null, approve, capture: async () => '' });
-      const first = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
-      await first;
-      expect(approve).not.toHaveBeenCalled();
-      expect(write).toHaveBeenCalledTimes(1);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
-    });
-
-    it('gates only the first delivery per session; later deliveries settle immediately', async () => {
-      const firstMessage = send();
-      const history: string[] = [];
-      const confirm = vi.fn(async () => history.join('\n'));
-      resolve.mockResolvedValue({ state: 'ready', write, confirm });
-      const delivery = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500);
-      history.push(firstMessage.id);
-      await vi.advanceTimersByTimeAsync(1_200);
-      await delivery;
-      expect(store.receipt(firstMessage.id).status).toBe('delivered');
-      const secondMessage = send();
-      await worker.run('b');
-      expect(write).toHaveBeenCalledTimes(2);
-      expect(store.receipt(secondMessage.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
-    });
-
-    it('firstDeliveryConfirmMs: 0 disables the gate entirely', async () => {
-      const message = send();
-      const confirm = vi.fn(async () => '');
-      resolve.mockResolvedValue({ state: 'ready', write, confirm });
-      worker = makeWorkerWith({ firstDeliveryConfirmMs: 0 });
-      await worker.run('b');
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
-      expect(confirm).not.toHaveBeenCalled();
-    });
-
-    it('re-engages the gate after the confirm cooldown lapses', async () => {
-      const firstMessage = send();
-      const history: string[] = [];
-      const confirm = vi.fn(async () => history.join('\n'));
-      resolve.mockResolvedValue({ state: 'ready', write, confirm });
-      const delivery = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500);
-      history.push(firstMessage.id);
-      await vi.advanceTimersByTimeAsync(1_200);
-      await delivery;
-      expect(store.receipt(firstMessage.id).status).toBe('delivered');
-      // Inside the cooldown a follow-up settles immediately, gate untouched:
-      // the follow-up adds no confirm probes on top of the first delivery's.
-      const callsAfterFirst = confirm.mock.calls.length;
-      const quick = send();
-      await worker.run('b');
-      expect(store.receipt(quick.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
-      expect(confirm.mock.calls.length).toBe(callsAfterFirst);
-      const confirmCallsAfterQuick = confirm.mock.calls.length;
-      // Cooldown over (30s): the next delivery is gated again — an agent may
-      // be mid-turn or finishing one, so silence means it stays pending.
-      await vi.advanceTimersByTimeAsync(30_000);
-      const late = send();
-      const gated = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500);
-      expect(store.receipt(late.id)).toMatchObject({ status: 'pending', last_error: 'DELIVERY_IN_PROGRESS' });
-      history.push(late.id);
-      await vi.advanceTimersByTimeAsync(1_200);
-      await gated;
-      expect(store.receipt(late.id)).toMatchObject({ status: 'delivered' });
-      expect(confirm.mock.calls.length).toBeGreaterThan(confirmCallsAfterQuick);
-    });
-
-    it('a busy (unconfirmed) delivery still settles, and grants no cooldown for the next one', async () => {
-      const confirm = vi.fn(async () => null);
-      resolve.mockResolvedValue({ state: 'ready', write, confirm, approve: async () => true, capture: async () => 'screen' });
-      const first = send();
-      const attempt = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
-      await attempt;
-      // Unconfirmed settles immediately with the diagnosis; the body is never
-      // written a second time.
-      expect(store.receipt(first.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' });
-      expect(write).toHaveBeenCalledTimes(1);
-      const callsAtSettle = confirm.mock.calls.length;
-      // A settled-but-unconfirmed session must not be trusted: the next
-      // delivery checks the terminal again instead of riding the cooldown.
-      const second = send();
-      const next = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
-      await next;
-      expect(store.receipt(second.id)).toMatchObject({ status: 'delivered', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
-      expect(confirm.mock.calls.length).toBeGreaterThan(callsAtSettle);
-      expect(write).toHaveBeenCalledTimes(2); // one write per message, ever
-    });
-
-    it('submits a stuck paste once on differential evidence and completes without rewriting', async () => {
-      const message = send();
-      const confirm = vi.fn()
-        .mockResolvedValueOnce('')            // first cycle: history silent
-        .mockResolvedValueOnce(message.id);   // after recovery Enter: rendered
-      const recoverStuck = vi.fn(async () => true);
-      const capture = vi.fn(async () => 'prompt $'); // write-time baseline + post-write snapshot
-      resolve.mockResolvedValue({ state: 'ready', write, confirm, capture, recoverStuck });
-      const delivery = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500);
-      await vi.advanceTimersByTimeAsync(1_200);
-      await delivery;
-      expect(recoverStuck).toHaveBeenCalledTimes(1);
-      expect(capture).toHaveBeenCalledTimes(2); // baseline before the write, snapshot after
-      expect(write).toHaveBeenCalledTimes(1); // Enter submitted the paste; no rewrite
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
-    });
-
-    it('attempts stuck recovery at most once per delivery even while the history stays silent', async () => {
-      const message = send();
-      const confirm = vi.fn(async () => '');
-      const recoverStuck = vi.fn(async () => true);
-      resolve.mockResolvedValue({ state: 'ready', write, confirm, capture: async () => 'prompt $', recoverStuck });
-      const delivery = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500 + 1_200 + 1_200);
-      await delivery;
-      // Recovery is the remedy (submit what is sitting in the input box), so
-      // it runs once — but it never escalates into a second body write.
-      expect(recoverStuck).toHaveBeenCalledTimes(1);
-      expect(write).toHaveBeenCalledTimes(1);
-      expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', last_error: 'AGENT_CONSUME_UNCONFIRMED' });
-    });
-
-    it('confirms every message source: the delivered text the formatter builds must contain the token the gate searches for', async () => {
-      // The gate's only evidence is `terminal history includes the anchor
-      // token`, so the formatter and the gate have to agree on how the id
-      // reaches the terminal. Wire the real formatter into confirm() — if a
-      // source ever stops carrying its token, or the two sides pick different
-      // forms of the id, this delivery can never confirm and the write repeats
-      // (the exact shape of the "one message arrived three times" report), so
-      // the assertion below fails instead of silently regressing.
-      const userMessage = store.send({ groupId, fromSessionId: null, toSessionIds: ['b'], kind: 'message', content: '请确认构建' })[0]!;
-      const rendered = formatCollaborationDelivery({
-        targetSessionId: 'b', messages: [userMessage], groups: store.groupsForSession('b'),
-        sessions: [{ sessionId: 'b', agentNativeSessionId: null, name: '测试 Agent', status: 'working' }],
-      });
-      // The rendered text carries the short form a terminal can show without
-      // wrapping; the gate searches that same form.
-      const token = collaborationMessageAnchorTokens([userMessage]).get(userMessage.id)!;
-      expect(token).toBe(userMessage.id.slice(0, 10));
-      expect(rendered).toContain(token);
-      let shown = '';
-      resolve.mockResolvedValue({ state: 'ready', write, confirm: async () => shown, capture: async () => '' });
-      // The write is what would put `rendered` on the recipient's screen.
-      write.mockImplementation(async () => { shown = rendered; });
-      const delivery = worker.run('b');
-      await vi.advanceTimersByTimeAsync(1_500);
-      await delivery;
-      expect(write).toHaveBeenCalledTimes(1);
-      expect(store.receipt(userMessage.id)).toMatchObject({ status: 'delivered', attempt_count: 1, last_error: null });
-    });
-
-    it('falls back to full ids when one delivery holds two messages sharing a short id', async () => {
-      // The gate's `includes` search cannot tell two blocks apart, so a shared
-      // shortened form must never be what either block shows: a search for it
-      // would match the sibling's line and settle the wrong message. The two
-      // ids share their whole first uuid group and the character after the
-      // hyphen, which is what the current length shortens to.
-      const leftId = 'abcdef01-1111-4111-8111-111111111111';
-      const rightId = 'abcdef01-1222-4222-8222-222222222222';
-      const prefix = leftId.slice(0, 10);
-      expect(prefix).toBe(rightId.slice(0, 10));
-      const left = { ...store.inbox('b', { limit: 1 })[0], id: leftId } as CollaborationMessage;
-      const right = { ...left, id: rightId };
-      const tokens = collaborationMessageAnchorTokens([left, right]);
-      expect(tokens.get(left.id)).toBe(left.id);
-      expect(tokens.get(right.id)).toBe(right.id);
-      // Alone, the same id shortens again — the collision is per delivery.
-      expect(collaborationMessageAnchorTokens([left]).get(left.id)).toBe(prefix);
-    });
+  it('captures a delayed snapshot only as an observation', async () => {
+    const message = send();
+    const capture = vi.fn(async () => 'input box');
+    resolve.mockResolvedValue({ state: 'ready', write, capture });
+    worker = new CollaborationDeliveryWorker({ store, peers: () => [], isLocal: () => true,
+      resolve, onError: () => undefined, snapshotDelayMs: 200 });
+    const delivery = worker.run('b');
+    await vi.advanceTimersByTimeAsync(199);
+    expect(capture).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await delivery;
+    expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', snapshot: 'input box', last_error: null });
+    expect(write).toHaveBeenCalledTimes(1);
   });
 });

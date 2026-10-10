@@ -301,20 +301,20 @@ export function buildArchitecturePrompt(root: string, language: 'zh' | 'en', ana
     'Source paths must be existing files relative to the project root, with no absolute paths, URLs, backslashes or dot/parent segments. Add a positive integer line when verified. Omit uncertain connections and explain uncertainties in summaries.',
     `Write titles, summaries and edge labels in ${language === 'zh' ? 'Chinese' : 'English'}. Set generatedAt to the actual current ISO timestamp. The sample paths are illustrative; use this project's real paths.`,
     'Read the selected output document if it already exists. Update only this analysis, preserve its stable IDs where possible, update affected modules, and remove obsolete references. Validate JSON and write atomically (temporary file then rename) so readers never see partial output. Summarize what was analyzed and any limitations after writing.',
-    `Prefer saving via: td architecture save --project ${JSON.stringify(root)} --file ${JSON.stringify(output)} - (pass the complete JSON on stdin). This validates the document, archives the previous version, and records the update count and Git revision. If the CLI is unavailable, use the atomic file write above and disclose that history metadata was not recorded.`,
+    `Prefer invoking executable td with this argument array: ${JSON.stringify(['architecture', 'save', '--project', root, '--file', output, '-'])}. Pass the complete JSON on stdin. Pass arguments separately; JSON string quoting is not shell escaping. This validates the document, archives the previous version, and records the update count and Git revision. If the CLI is unavailable, use the atomic file write above and disclose that history metadata was not recorded.`,
     JSON.stringify(example, null, 2),
   ].join('\n\n');
 }
 
 /** Adapted scanner workflow from oh-my-mermaid, MIT; see THIRD_PARTY_NOTICES.md. */
-export function buildOmmScanPrompt(root: string, language: 'zh' | 'en'): string {
+export function buildOmmScanPrompt(root: string, language: string): string {
   return [
-    language === 'zh' ? '分析当前项目并递归更新 .omm 架构文档。' : 'Recursively analyze this project and update its .omm architecture documents.',
-    `Project root (literal path): ${JSON.stringify(root)}. Write document content in ${language === 'zh' ? 'Chinese' : 'English'}.`,
+    language.startsWith('zh') ? '分析当前项目并递归更新 .omm 架构文档。' : 'Recursively analyze this project and update its .omm architecture documents.',
+    `Project root (literal path): ${JSON.stringify(root)}. Write document content in language ${JSON.stringify(language)}.`,
     'Read project instructions, manifests, entry points and existing .omm documentation. Select relevant perspectives: overall-architecture, request-lifecycle, data-flow, dependency-map, external-integrations, state-transitions, route-page-map, command-surface, extension-points, pipeline, orchestration, storage.',
     'For each perspective, write a graph LR or graph TD diagram whose node IDs match child directory names (English kebab-case). Every edge must have a meaningful label. Node labels use name plus verified source path separated by \\n. Write description for EVERY node, inspect its actual source, and recursively create child diagrams wherever distinct internal components exist. Leaves still need descriptions. Do not stop at the top-level diagram.',
     'Each element supports description, diagram, context, constraint, concern, todo, note. Use Markdown for text fields. Record real constraints and concerns without inventing them. Existing @perspective references can link between perspectives. Do not rewrite unchanged elements. Remove obsolete references after confirming them. Never modify business source files or include secrets.',
-    `Use the native CLI: td architecture write --project ${JSON.stringify(root)} --format omm <perspective/child/path> <field> - . Supply that field on stdin. Use read, tree, refs and diff to inspect existing documents. Finish with td architecture validate --project ${JSON.stringify(root)} --format omm.`,
+    `Invoke executable td with this argument array: ${JSON.stringify(['architecture', 'write', '--project', root, '--format', 'omm', '<perspective/child/path>', '<field>', '-'])}, replacing the two placeholders with the element path and field. Supply that field on stdin. Pass arguments separately; JSON string quoting is not shell escaping. Use read, tree, refs and diff to inspect existing documents. Finish by invoking td with argument array ${JSON.stringify(['architecture', 'validate', '--project', root, '--format', 'omm'])}.`,
     'Report the inspected sources, updated perspectives, recursion coverage and unresolved limitations. The Termdock architecture viewer reads .omm directly; no separate viewer server is required.',
   ].join('\n\n');
 }

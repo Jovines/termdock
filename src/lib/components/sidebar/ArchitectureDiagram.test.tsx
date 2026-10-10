@@ -21,6 +21,22 @@ afterEach(() => {
   else delete (SVGElement.prototype as { getBBox?: unknown }).getBBox;
 });
 describe('interactive architecture SVG', () => {
+  it('reveals a selected graph clipped above the outer reading pane without altering zoom', async () => {
+    const content = <ArchitectureDiagram view={view} selectedId={null} onSelect={vi.fn()} />;
+    const component = render(<div data-architecture-content>{content}</div>);
+    const node = await screen.findByRole('button', { name: 'Server' });
+    const clip = component.container.querySelector<HTMLElement>('[data-architecture-content]')!;
+    const viewport = component.container.querySelector<HTMLElement>('.termdock-architecture-viewport')!;
+    clip.scrollTop = 100;
+    clip.getBoundingClientRect = () => new DOMRect(0, 150, 800, 450);
+    viewport.getBoundingClientRect = () => new DOMRect(0, 200 - clip.scrollTop, 800, 300);
+    node.getBoundingClientRect = () => new DOMRect(100, 232 - clip.scrollTop - viewport.scrollTop, 200, 60);
+    const zoom = screen.getByRole('button', { name: 'Reset diagram zoom' }).textContent;
+    component.rerender(<div data-architecture-content><ArchitectureDiagram view={view} selectedId="server" onSelect={vi.fn()} /></div>);
+    expect(clip.scrollTop).toBe(50);
+    expect(node.getBoundingClientRect().top).toBeGreaterThanOrEqual(clip.getBoundingClientRect().top);
+    expect(screen.getByRole('button', { name: 'Reset diagram zoom' }).textContent).toBe(zoom);
+  });
   it('keeps an ordinary graph selection inside its reduced canvas without shrinking the chosen zoom', async () => {
     const callbacks: Array<() => void> = [];
     vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { callbacks.push(callback); } observe() {} disconnect() {} });
@@ -82,7 +98,7 @@ describe('interactive architecture SVG', () => {
     expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
     screen.getByRole('button', { name: 'Server' }).focus();
     fireEvent.keyDown(document, { key: 'Tab' });
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Zoom out diagram' }));
+    expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Expand levels' }));
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Server' }));
     fireEvent.keyDown(document, { key: 'Escape' });

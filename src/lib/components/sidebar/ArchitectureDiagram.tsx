@@ -161,15 +161,14 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
     const clip = container.closest<HTMLElement>('[data-architecture-content]');
     if (!expanded && clip && canvas.width > 24 && canvas.height > 24) {
       const boundary = clip.getBoundingClientRect();
-      // An expanded reading pane may leave the inline graph below the fold.
-      // Reveal only enough graph to retain context, without resetting the page.
-      const visibleHeight = Math.min(canvas.height, Math.max(160, boundary.height - 136));
-      if (boundary.height > 160 && Math.min(canvas.bottom, boundary.bottom) - Math.max(canvas.top, boundary.top) < visibleHeight) {
-        clip.scrollTop += Math.max(0, canvas.top - boundary.bottom + visibleHeight);
+      // Reveal the selected node's canvas when it is clipped by the outer
+      // reading pane. Inline controls scroll normally, so they cannot cover it.
+      if (boundary.height > 160 && canvas.height <= boundary.height) {
+        if (canvas.top < boundary.top) clip.scrollTop += canvas.top - boundary.top;
+        else if (canvas.bottom > boundary.bottom) clip.scrollTop += canvas.bottom - boundary.bottom;
         canvas = container.getBoundingClientRect();
       }
-      // The perspective selector and diagram toolbar stay above the graph.
-      const top = Math.max(canvas.top, boundary.top + 136), bottom = Math.min(canvas.bottom, boundary.bottom);
+      const top = Math.max(canvas.top, boundary.top), bottom = Math.min(canvas.bottom, boundary.bottom);
       canvas = new DOMRect(canvas.left, top, canvas.width, Math.max(0, bottom - top));
     }
     const box = node.getBoundingClientRect();
@@ -200,19 +199,22 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
       setDownloadError(false);
       void saveDownloadBlob(new Blob([svg], { type: 'image/svg+xml' }), `architecture-${view.id}.svg`).catch(() => setDownloadError(true));
     }}><Download size={17} /></button>
-    {expanded && <button ref={close} type="button" className={control} aria-label={t('architecture.closeFullscreen')} onClick={() => setExpanded(false)}><X size={18} /></button>}
   </>;
   const title = view.nodes.find(node => node.id === parentId)?.title ?? view.title;
   const contents = <>
-    {expanded ? <header className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border/15 px-2 py-1">
-      <div className="min-w-0 basis-full px-1 min-[360px]:basis-0 min-[360px]:flex-1">{heading ?? <h2 className="truncate text-xs font-semibold" title={title}>{title}</h2>}</div>
-      <div className="flex w-full shrink-0 items-center justify-between gap-1 min-[360px]:w-auto" title={t('architecture.panHint')}>{controls}</div>
-    </header> : <div className="sticky top-[60px] z-10 shrink-0 border-b border-border/15 bg-surface-2 px-2 py-1">
+    {expanded ? <header className="shrink-0 border-b border-border/15 px-2 py-1">
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1 px-1">{heading ?? <h2 className="truncate text-xs font-semibold" title={title}>{title}</h2>}</div>
+        <label className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">{locale === 'zh' ? '展开' : 'Levels'}<select aria-label={locale === 'zh' ? '展开层级' : 'Expand levels'} className="h-11 max-w-20 rounded bg-surface px-1 text-foreground" value={nesting} onChange={event => setNesting(Number(event.target.value))}>{[0, 1, 2, 6].map(level => <option key={level} value={level}>{level === 0 ? (locale === 'zh' ? '当前层' : 'Current') : level === 6 ? (locale === 'zh' ? '全部' : 'All') : `${level}`}</option>)}</select></label>
+        <button ref={close} type="button" className={control} aria-label={t('architecture.closeFullscreen')} onClick={() => setExpanded(false)}><X size={18} /></button>
+      </div>
+      <div className="flex items-center justify-between gap-1" title={t('architecture.panHint')}>{controls}</div>
+    </header> : <div className="shrink-0 border-b border-border/15 bg-surface-2 px-2 py-1">
       <div className="flex items-center justify-between gap-1">{controls}</div>
       <div className="flex flex-wrap items-center justify-between gap-1 px-1 text-xs text-muted-foreground"><span>{t('architecture.panHint')}</span><label className="flex items-center gap-2 text-xs text-muted-foreground">{locale === 'zh' ? '展开层级' : 'Expand levels'}<select aria-label={locale === 'zh' ? '展开层级' : 'Expand levels'} className="min-h-8 rounded bg-surface-2 px-2 text-foreground" value={nesting} onChange={event => setNesting(Number(event.target.value))}>{[0, 1, 2, 6].map(level => <option key={level} value={level}>{level === 0 ? (locale === 'zh' ? '当前层' : 'Current level') : level === 6 ? (locale === 'zh' ? '全部' : 'All') : `${level}`}</option>)}</select></label></div>
     </div>}
 
-    {expanded && <div className="flex shrink-0 items-center justify-between gap-2 px-2">{navigation}<label className="flex items-center gap-2 text-xs text-muted-foreground">{locale === 'zh' ? '展开层级' : 'Expand levels'}<select aria-label={locale === 'zh' ? '展开层级' : 'Expand levels'} className="min-h-8 rounded bg-surface-2 px-2 text-foreground" value={nesting} onChange={event => setNesting(Number(event.target.value))}>{[0, 1, 2, 6].map(level => <option key={level} value={level}>{level === 0 ? (locale === 'zh' ? '当前层' : 'Current level') : level === 6 ? (locale === 'zh' ? '全部' : 'All') : `${level}`}</option>)}</select></label></div>}
+    {expanded && navigation && <div className="shrink-0 px-2">{navigation}</div>}
     {downloadError && <p role="alert" className="px-3 py-2 text-xs text-destructive">{t('architecture.downloadFailed')}</p>}
     <div className={expanded ? 'relative flex min-h-0 flex-1 flex-col overflow-hidden min-[768px]:flex-row' : 'relative'}>
     {failed ? <p role="alert" className="p-4 text-sm text-muted-foreground">{diagram.nodes.length > 300 ? (locale === 'zh' ? '图中模块较多，请减少展开层级或选择单个视角。' : 'This graph has many modules. Expand fewer levels or select one perspective.') : t('architecture.diagramFailed')}</p>

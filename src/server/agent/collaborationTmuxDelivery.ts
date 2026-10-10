@@ -1,6 +1,6 @@
 import { plainCollaborationSnapshot } from './collaborationText.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
-import { normalizePromptForPaste } from './promptDelivery.js';
+import { normalizePromptForPaste, waitForPromptSubmit } from './promptDelivery.js';
 
 /** Terminal-level keys a caller may inject into a member pane. Kept
  * enumerated (never freeform): driving another session's keyboard is strong
@@ -28,28 +28,8 @@ const APPROVAL_DIALOG_PATTERNS = [
   /允许.*执行|确认.*执行/i,
 ];
 
-/** Agent TUIs collapse pasted input in the input box to a marker line like
- * "[Pasted text #3 +42 lines]". While the paste sits unsubmitted the marker
- * stays on screen; a submitted paste clears the box and only the transcript
- * holds the content. Session-unique #N lets us diff screen captures. */
-const PASTE_MARKER_PATTERN = /\[Pasted text #(\d+)/g;
-
 export function detectApprovalDialog(content: string): boolean {
   return APPROVAL_DIALOG_PATTERNS.some((pattern) => pattern.test(content));
-}
-
-/** Paste marker sequence numbers visible in a screen capture. */
-export function extractPasteMarkerNumbers(content: string): Set<number> {
-  return new Set([...content.matchAll(PASTE_MARKER_PATTERN)].map((match) => Number(match[1])));
-}
-
-/** True when `after` shows a paste marker that was not in `before`. Diffing
- * prevents a recovery Enter from submitting a stale paste that predates this
- * delivery (or someone else's draft): we only ever submit what we just put
- * there, at most once per delivery. */
-export function hasNewPasteMarker(after: string, before: string): boolean {
-  const beforeNumbers = extractPasteMarkerNumbers(before);
-  return [...extractPasteMarkerNumbers(after)].some((number) => !beforeNumbers.has(number));
 }
 
 async function assertSamePane(
@@ -64,19 +44,28 @@ async function assertSamePane(
 /** Unique-per-process buffer name so concurrent deliveries to different panes
  *  never share (or clobber) a buffer. */
 let bufferSequence = 0;
+const paneWrites = new Map<string, Promise<void>>();
 
-export async function writeCollaborationTmuxPane(
+/** Serialize TD paste/submit pairs for this exact runtime pane. */
+export function writeCollaborationTmuxPane(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
   prompt: string,
-  /** Sends `input` to the tmux client's stdin. The steps below are one `\;`
-   *  chain (see the comment inside), and a chain is argv, so the body must not
-   *  ride in argv: tmux treats an element that is exactly `;` as a separator
-   *  even after `--`, and its backslash unescaping is version-dependent
-   *  (`\\` survives verbatim while `\;` collapses to `;`). Reading the body
-   *  from stdin sidesteps both — every byte round-trips unchanged. Required,
-   *  not optional: a run() that ignored the payload would load an empty buffer
-   *  and fail the delivery rather than deliver the wrong thing. */
+  stdin: (args: string[], input: string) => Promise<string>,
+): Promise<void> {
+  const key = `${pane.serverPid}:${pane.sessionId}:${pane.paneId}:${pane.panePid}`;
+  const previous = paneWrites.get(key) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(() => writeTmuxPrompt(run, pane, prompt, stdin))
+    .finally(() => { if (paneWrites.get(key) === operation) paneWrites.delete(key); });
+  paneWrites.set(key, operation);
+  return operation;
+}
+
+async function writeTmuxPrompt(
+  run: (args: string[]) => Promise<string>,
+  pane: CollaborationPaneBinding,
+  prompt: string,
+  /** Body travels on stdin so tmux cannot parse its semicolons/backslashes. */
   stdin: (args: string[], input: string) => Promise<string>,
 ): Promise<void> {
   await assertSamePane(run, pane);
@@ -98,13 +87,8 @@ export async function writeCollaborationTmuxPane(
   // every tmux version.
   const buffer = `termdock-collab-${process.pid}-${bufferSequence++}`;
   try {
-    // The four steps ride one client invocation joined by tmux's `\;`: the
-    // server runs them back to back in a single queue item, so no other
-    // client's paste can interleave between our text and our submit CR
-    // (measured: one contiguous block, 0ms apart, versus two invocations
-    // ~14ms apart). A failing step stops the rest — verified on 3.4 and 3.7 —
-    // which is the safe direction: a failed text paste is never followed by a
-    // bare CR into whatever the input box already held.
+    // Paste once, then send one unbracketed CR after 50ms. No screen parsing,
+    // Agent-specific recovery, consumption confirmation or additional Enter.
     await stdin([
       // The body arrives on stdin, not argv: it is user content, and in a
       // `\;` chain argv is a language where `;` and `\` mean something.
@@ -112,13 +96,17 @@ export async function writeCollaborationTmuxPane(
       // -r keeps LF as LF rather than the separator default of CR. The
       // normalizer already folded every line break to CR, so no LF is left
       // for it to rewrite — the flag is insurance, not the mechanism.
-      'paste-buffer', '-p', '-r', '-d', '-b', buffer, '-t', pane.paneId, ';',
+      'paste-buffer', '-p', '-r', '-d', '-b', buffer, '-t', pane.paneId,
+    ], normalizePromptForPaste(prompt));
+    await waitForPromptSubmit();
+    await assertSamePane(run, pane);
+    await run([
       // The submit key rides outside the paste block: inside it, an editor
       // inserts a pasted CR as text instead of acting on it. Pasting the bare
       // CR (no -p) keeps the key in the same mode-proof channel as the text.
       'set-buffer', '-b', buffer, '--', '\r', ';',
       'paste-buffer', '-d', '-b', buffer, '-t', pane.paneId,
-    ], normalizePromptForPaste(prompt));
+    ]);
   } finally {
     // -d consumed the buffer on the happy path; this sweeps up after a failed
     // paste so no stray buffer is left on the server.
@@ -176,25 +164,7 @@ export async function approveCollaborationDialog(
   return true;
 }
 
-/** Submit a paste that arrived while the agent was finishing its previous
- *  turn and is still sitting unsubmitted in the input box. Only acts on
- *  differential evidence — a paste marker that appeared after the write —
- *  never on pre-existing stale markers, and returns whether Enter was sent.
- *  Committing the whole input buffer is safe: each delivery is written once,
- *  so each marker's content enters the transcript exactly once. */
-export async function recoverStuckPaste(
-  run: (args: string[]) => Promise<string>,
-  pane: CollaborationPaneBinding,
-  baseline: string,
-): Promise<boolean> {
-  const viewport = await captureTmuxPaneText(run, pane);
-  if (!hasNewPasteMarker(viewport, baseline)) return false;
-  await sendTmuxPaneKey(run, pane, 'enter');
-  return true;
-}
-
-/** History-inclusive pane text (scrollback + viewport) used to confirm a
- *  delivery was actually rendered by the agent, not wiped by a boot clear. */
+/** History-inclusive terminal observation, without inferring consumption. */
 export async function captureTmuxPaneHistory(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,

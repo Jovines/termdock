@@ -34,6 +34,10 @@ describe('architecture persistence and upstream interchange', () => {
     expect(history).toHaveLength(1);
     expect(history[0].changes).toEqual(expect.arrayContaining([expect.objectContaining({ node: 'server', fields: expect.arrayContaining(['description']) })]));
     expect((await store.historical('.termdock/architecture.json', history[0].id)).perspectives[0].nodes[0].description).toContain('API and worker');
+    await store.save('.termdock/architecture.json', { ...second.document!, summary: 'Updated project overview' }, second.revision);
+    const overviewHistory = await store.history('.termdock/architecture.json');
+    expect(overviewHistory[0].changes).toContainEqual({ perspective: '', title: 'Project overview', kind: 'changed', fields: ['summary'] });
+    expect((await store.read()).document!.perspectives[0].meta).toEqual(second.document!.perspectives[0].meta);
   });
   it('does not create revisions, change update counts or rewrite fields for unchanged content', async () => {
     const first = await store.save('.termdock/architecture.json', sample());
@@ -91,8 +95,18 @@ describe('architecture persistence and upstream interchange', () => {
     expect(await run('write', 'overall/server', 'context', 'Updated', '--format', 'omm')).toBe(0);
     expect(await run('show', 'overall/server', '--format', 'omm')).toBe(0); expect(JSON.parse(output.at(-1)!).context).toBe('Updated');
     expect(await run('refs', 'overall', '--format', 'omm')).toBe(0);
+    expect(await run('refs', 'security', '--format', 'omm')).toBe(0);
+    expect(JSON.parse(output.at(-1)!).incoming).toContainEqual(expect.objectContaining({ element: 'overall/ui' }));
+    await store.writeOmmField('overall/server/api/auth', 'description', '');
+    expect(await run('validate', 'overall/server', '--format', 'omm')).toBe(1);
+    expect(JSON.parse(output.at(-1)!).issues).toContainEqual({ element: 'overall/server/api/auth', message: 'Missing description' });
+    expect(await run('validate', 'overall/nonexistent', '--format', 'omm')).toBe(1);
+    await store.writeOmmField('overall/server/api/auth', 'description', 'Access check');
     expect(await run('diff', 'overall/server', '--format', 'omm')).toBe(0);
-    expect(await run('history', '--format', 'omm')).toBe(0); expect(JSON.parse(output.at(-1)!)).toHaveLength(1);
+    expect(await run('history', '--format', 'omm')).toBe(0); expect(JSON.parse(output.at(-1)!)).toHaveLength(3);
+    await store.config('zh');
+    expect(await run('prompt', '--format', 'omm')).toBe(0);
+    expect(output.at(-1)).toContain('分析当前项目并递归更新');
     expect(await run('setup', 'codex')).toBe(0);
     expect(await fs.readFile(path.join(root, '.agents/skills/termdock-architecture/SKILL.md'), 'utf8')).toContain('inspect the actual code for EVERY node');
     expect(await run('setup', 'codex', '--teardown')).toBe(0);

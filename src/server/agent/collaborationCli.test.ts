@@ -274,10 +274,10 @@ describe('collaboration CLI contract', () => {
     expect(capture.output[0]).toBe('just this screen');
   });
 
-  it('explains a settled-but-unconsumed delivery instead of leaving a bare code', async () => {
+  it('explains legacy consumption diagnostics without claiming current consumption checks', async () => {
     const f = fixture([{ ok: true, message: { content: 'body' }, status: 'delivered', attempt_count: 1, last_error: 'AGENT_CONSUME_UNCONFIRMED' }]);
     expect(await executeCollaborationCommand(parseCollaborationCommand(['message', 'get', 'm', '--text']), {}, f.io)).toBe(0);
-    expect(f.output.join('\n')).toContain('AGENT_CONSUME_UNCONFIRMED：消息已写入对方终端，但未确认被对方消费');
+    expect(f.output.join('\n')).toContain('AGENT_CONSUME_UNCONFIRMED：旧版本诊断，仅表示消息已写入终端');
   });
 
   it('surfaces pending retry diagnostics once, without repeating the reason', async () => {

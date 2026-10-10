@@ -9,13 +9,28 @@ export function normalizePromptForPaste(prompt: string): string {
   return prompt.replace(/\r\n|\r|\n/g, '\r').replace(/\x1b/g, '␛');
 }
 
-/**
- * Encode a prompt as one bracketed-paste block followed by one real Enter.
- * Agent TUIs then keep embedded newlines inside the editor instead of treating
- * each line as a separate submission.
- */
-export function buildBracketedSubmitBytes(prompt: string): string {
-  return `\x1b[200~${normalizePromptForPaste(prompt)}\x1b[201~\r`;
+/** Separate the paste and its single unbracketed CR by 50ms. */
+export const PROMPT_SUBMIT_DELAY_MS = 50;
+export function waitForPromptSubmit(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, PROMPT_SUBMIT_DELAY_MS));
+}
+
+export function buildBracketedPasteBytes(prompt: string): string {
+  return `\x1b[200~${normalizePromptForPaste(prompt)}\x1b[201~`;
+}
+
+const promptWrites = new WeakMap<object, Promise<void>>();
+
+/** Serialize TD prompt pairs per PTY. Success only records terminal writes. */
+export function writeBracketedPrompt(target: { write: (data: string) => void }, prompt: string): Promise<void> {
+  const previous = promptWrites.get(target) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(async () => {
+    target.write(buildBracketedPasteBytes(prompt));
+    await waitForPromptSubmit();
+    target.write('\r');
+  }).finally(() => { if (promptWrites.get(target) === operation) promptWrites.delete(target); });
+  promptWrites.set(target, operation);
+  return operation;
 }
 
 /**
