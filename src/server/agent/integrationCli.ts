@@ -9,6 +9,17 @@ import { getTermdockVersion } from '../utils/version.js';
 
 export const INTEGRATION_HELP = `td integration — local scoped integration administration
   groups | list
+  clear-startup-input <TD-session-id> --generation <N>
+    Administrator removes this session's saved screen conditions and disables
+    inheritance on later restores; original identity/launch/history are preserved.
+    Pending messages may then use the ordinary delivery worker; delivered bodies
+    are never replayed. No Agent restart, resize, RPC or readiness claim.
+    The generation increments once; read session get for the new generation and
+    startup_input_disabled=true. Repeating with the old generation is rejected.
+    Minimum CLI/running service 1.4.310; session_startup_input_clear=true.
+    Errors: SESSION_STARTUP_INPUT_CLEAR_UNSUPPORTED, INVALID_SESSION_GENERATION,
+    SESSION_GENERATION_MISMATCH, SESSION_OPERATION_IN_PROGRESS,
+    INTEGRATION_SESSION_NOT_FOUND. Profile policy update alone keeps old snapshots.
   resume-configuration <TD-session-id> (read current/recorded fingerprints; no mutation)
   confirm-resume <TD-session-id> --generation <N> --fingerprint <sha256>
     Administrator explicitly authorizes the current launcher/plugin recovery semantics.
@@ -64,6 +75,18 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
     const action = argv[0] ?? 'help', options: Record<string, string> = {};
     if (action === 'help' || argv.includes('--help')) { write(INTEGRATION_HELP); return 0; }
     const socketPath = integrationSocketPath(port);
+    if (action === 'clear-startup-input') {
+      const id = argv[1];
+      if (argv.length !== 4 || !id || !/^[a-zA-Z0-9._-]{1,80}$/.test(id) || argv[2] !== '--generation'
+        || !/^[1-9][0-9]*$/.test(argv[3]) || !Number.isSafeInteger(Number(argv[3]))) {
+        throw new Error('Usage: td integration clear-startup-input <TD-session-id> --generation <positive integer>');
+      }
+      const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (capabilities.session_startup_input_clear !== true) throw new CollaborationError('SESSION_STARTUP_INPUT_CLEAR_UNSUPPORTED', 'CLI and running service must be at least 1.4.310', 409);
+      write(JSON.stringify(parsed(await request(socketPath, 'POST', `/admin/sessions/${encodeURIComponent(id)}/startup-input/clear`,
+        { generation: Number(argv[3]) }, headers(undefined, adminToken)))));
+      return 0;
+    }
     if (action === 'resume-configuration' || action === 'confirm-resume') {
       const id = argv[1];
       if (!id || !/^[a-zA-Z0-9._-]{1,80}$/.test(id)) throw new Error('A full TD session id is required');

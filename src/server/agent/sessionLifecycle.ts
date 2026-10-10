@@ -40,8 +40,8 @@ export class SessionLifecycleCoordinator {
   }
 }
 export function assertReleaseGeneration(record: SessionLifecycleDescriptor, generation: unknown): void {
-  if (!Number.isSafeInteger(generation) || Number(generation) < 1) fail('INVALID_SESSION_GENERATION', 'release requires the generation returned by session get');
-  if (generation !== (record.generation ?? 1)) fail('SESSION_GENERATION_MISMATCH', 'Session generation changed; read its current state before releasing');
+  if (!Number.isSafeInteger(generation) || Number(generation) < 1) fail('INVALID_SESSION_GENERATION', 'Operation requires the generation returned by session get');
+  if (generation !== (record.generation ?? 1)) fail('SESSION_GENERATION_MISMATCH', 'Session generation changed; read its current state before retrying');
 }
 export function assertReleaseFacts(record: SessionLifecycleDescriptor, facts: SessionRuntimeFacts): void {
   if (!record.agent_native_session_id) fail('NATIVE_SESSION_ID_MISSING', 'Release requires a durable exact native identity');

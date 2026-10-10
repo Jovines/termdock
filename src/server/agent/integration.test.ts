@@ -793,3 +793,129 @@ it('exposes release grants, durable lifecycle events and exact old-message repli
   expect(reply.status).toBe(200);
   expect(f.messages.getMessage(reply.body.message_id)).toMatchObject({ toSessionId: id, replyTo: original.body.message_id });
 });
+
+it('clears saved startup conditions durably while preserving exact recovery configuration and identity', async () => {
+  const fake = adapter(), p = principal(), file = path.join(dir, 'clear-startup.json');
+  fake.api.resumeConfiguration = async () => ({ resume: 'exact-v1' });
+  fake.set({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: 'same-native' });
+  p.launchProfiles[0].startupInput = { allOf: ['NEVER VISIBLE'] };
+  let sessions = new IntegrationSessions(file, fake.api); resources.push(() => sessions.close());
+  const original = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'initial' });
+  expect(await sessions.deliveryReadiness(original.session_id)).toMatchObject({ allowed: false });
+  const cleared = await sessions.clearStartupInput(original.session_id, original.generation!);
+  expect(cleared).toMatchObject({ session_id: original.session_id, agent_native_session_id: 'same-native',
+    operation_id: original.operation_id, generation: 2, startup_input_disabled: true,
+    resume_configuration_fingerprint: original.resume_configuration_fingerprint });
+  expect(cleared.startup_input).toBeUndefined(); expect(cleared.profile.startupInput).toBeUndefined();
+  expect(await sessions.deliveryReadiness(original.session_id)).toBeNull();
+  const { startupInput: _, ...launch } = original.profile;
+  expect(cleared.profile).toEqual(launch);
+  expect(fake.api.create).toHaveBeenCalledTimes(1); expect(fake.api.restore).not.toHaveBeenCalled();
+  await expect(sessions.clearStartupInput(original.session_id, 1)).rejects.toMatchObject({ code: 'SESSION_GENERATION_MISMATCH' });
+  expect((await sessions.clearStartupInput(original.session_id, 2)).generation).toBe(2);
+  sessions.close(); sessions = new IntegrationSessions(file, fake.api); resources.push(() => sessions.close());
+  fake.set({ running: false, shell: true, agentSlug: null, nativeId: null });
+  p.launchProfiles[0].argv = ['new-profile-must-not-replace-original'];
+  fake.api.restore = vi.fn(async () => fake.set({ running: true, shell: false, agentSlug: 'fixture', nativeId: 'same-native' }));
+  const restored = await sessions.restore(p, original.session_id, 'restore-after-clear');
+  expect(restored).toMatchObject({ generation: 3, startup_input_disabled: true, agent_native_session_id: 'same-native' });
+  expect(restored.profile).toEqual(launch); expect(restored.startup_input).toBeUndefined();
+  expect((await sessions.resumeConfiguration(original.session_id)).current_fingerprint).toBe(original.resume_configuration_fingerprint);
+  expect(await sessions.deliveryReadiness(original.session_id)).toBeNull();
+});
+
+it('removes legacy inherited startup conditions and rejects clearing while a restore is in flight', async () => {
+  const fake = adapter(), p = principal(), sessions = new IntegrationSessions(path.join(dir, 'legacy-clear.json'), fake.api);
+  resources.push(() => sessions.close());
+  fake.set({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: 'native' });
+  const original = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'legacy' });
+  fake.set({ running: false, shell: true, agentSlug: null, nativeId: null });
+  p.launchProfiles[0].startupInput = { allOf: ['NEW GUARD'] };
+  let finish!: () => void;
+  fake.api.restore = vi.fn(async () => { await new Promise<void>(resolve => { finish = resolve; }); fake.set({ running: true, shell: false, agentSlug: 'fixture', nativeId: 'native' }); });
+  const restoring = sessions.restore(p, original.session_id, 'restore-legacy');
+  await vi.waitFor(() => expect(fake.api.restore).toHaveBeenCalledOnce());
+  const during = sessions.snapshot()[0];
+  await expect(sessions.clearStartupInput(original.session_id, during.generation!)).rejects.toMatchObject({ code: 'SESSION_OPERATION_IN_PROGRESS' });
+  finish(); const restored = await restoring;
+  expect(restored.startup_condition).toEqual(p.launchProfiles[0].startupInput);
+  const cleared = await sessions.clearStartupInput(original.session_id, restored.generation!);
+  expect(cleared.startup_condition).toBeUndefined(); expect(cleared.startup_input).toBeUndefined();
+  expect(cleared.startup_input_disabled).toBe(true);
+});
+
+it('keeps the guard closed after a failed clear commit and cannot resurrect it from a stale observation', async () => {
+  const fake = adapter(), p = principal(), file = path.join(dir, 'atomic-clear.json');
+  fake.set({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: 'native' });
+  p.launchProfiles[0].startupInput = { allOf: ['NEVER'] };
+  const sessions = new IntegrationSessions(file, fake.api); resources.push(() => sessions.close());
+  const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'initial' });
+  const before = sessions.snapshot();
+  const fail = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => { throw new Error('cannot commit'); });
+  await expect(sessions.clearStartupInput(created.session_id, 1)).rejects.toThrow('cannot commit'); fail.mockRestore();
+  expect(sessions.snapshot()).toEqual(before);
+  expect(await sessions.deliveryReadiness(created.session_id)).toMatchObject({ allowed: false });
+  let observe!: (value: Awaited<ReturnType<IntegrationSessionAdapter['inspect']>>) => void;
+  fake.api.inspect = vi.fn(() => new Promise<Awaited<ReturnType<IntegrationSessionAdapter['inspect']>>>(resolve => { observe = resolve; }));
+  const observing = sessions.get(p, created.session_id);
+  await Promise.resolve();
+  await sessions.clearStartupInput(created.session_id, 1);
+  observe({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: 'native' });
+  const latest = await observing;
+  expect(latest.startup_input_disabled).toBe(true); expect(latest.startup_input).toBeUndefined(); expect(latest.generation).toBe(2);
+});
+
+it('requires admin and generation over Unix API, releases pending delivery once and preserves old replies/events', async () => {
+  const fake = adapter(); fake.set({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: 'native' });
+  const f = await runtimeFixture(fake.api), p = policy(f.group.id);
+  p.permissions.push('message.send', 'message.read'); p.launchProfiles[0].startupInput = { allOf: ['NEVER'] }; f.runtime.store.update(p);
+  const created = (await f.request('POST', '/sessions', { launch_profile: 'agent', cwd: dir, idempotency_key: 'create' })).body.session;
+  f.messages.save({ id: f.group.id, name: f.group.name, sessionIds: ['worker', created.session_id] });
+  const old = f.messages.send({ groupId: f.group.id, fromSessionId: 'worker', toSessionIds: [created.session_id], kind: 'message', content: 'old' })[0];
+  f.messages.markDelivered([old.id]);
+  const pending = (await f.request('POST', '/send', { targetSessionId: created.session_id, message: 'new', idempotency_key: 'pending' })).body.message_id;
+  const write = vi.fn(async () => {}), worker = new CollaborationDeliveryWorker({ store: f.messages, peers: () => [], isLocal: () => true, onError: () => {},
+    resolve: async id => { const guard = await f.runtime.sessions.deliveryReadiness(id); return guard && !guard.allowed ? { state: 'recovering', reason: guard.reason! } : { state: 'ready', write }; } });
+  resources.push(() => worker.stop());
+  await worker.run(created.session_id); expect(write).not.toHaveBeenCalled();
+  const route = `/admin/sessions/${created.session_id}/startup-input/clear`, admin = { 'Content-Type': 'application/json', 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  expect(await f.request('POST', route, { generation: 1 })).toMatchObject({ status: 401, body: { code: 'INTEGRATION_ADMIN_REQUIRED' } });
+  expect(await f.request('POST', route, {}, admin)).toMatchObject({ status: 409, body: { code: 'INVALID_SESSION_GENERATION' } });
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ session_startup_input_clear: true, session_startup_input_clear_min_version: '1.4.310' });
+  expect(await f.request('POST', route, { generation: 1 }, admin)).toMatchObject({ status: 200, body: { session: { generation: 2, startup_input_disabled: true } } });
+  expect(await f.request('POST', route, { generation: 1 }, admin)).toMatchObject({ status: 409, body: { code: 'SESSION_GENERATION_MISMATCH' } });
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2100);
+  resources.push(() => clock.mockRestore());
+  await worker.run(created.session_id); await worker.run(created.session_id);
+  clock.mockRestore();
+  expect(write).toHaveBeenCalledOnce(); expect(f.messages.receipt(pending)).toMatchObject({ status: 'delivered', attempt_count: 1 });
+  expect(f.messages.getMessage(old.id)?.content).toBe('old'); expect(f.messages.receipt(old.id).status).toBe('delivered');
+  expect(f.runtime.store.page(f.runtime.store.authenticate('bridge', f.issued.token), 'clear-events').events)
+    .toContainEqual(expect.objectContaining({ kind: 'session.ready', payload: { session: expect.objectContaining({ generation: 2, startup_input_disabled: true }) } }));
+  expect(await f.request('POST', '/reply', { messageId: pending, content: 'follow up', idempotency_key: 'followup' })).toMatchObject({ status: 200 });
+  expect(f.taskStore.snapshot()).toEqual([]);
+});
+
+it('documents the clear command offline and refuses an old service before mutation', async () => {
+  const output: string[] = [];
+  expect(await runIntegrationAdmin(['--help'], 59999, 'local-admin', line => output.push(line))).toBe(0);
+  expect(output.join('')).toContain('clear-startup-input'); expect(output.join('')).toContain('startup_input_disabled=true');
+  const calls: string[] = [], port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  let supported = false;
+  const server = http.createServer((req, res) => {
+    calls.push(req.url!); res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.url === '/admin/capabilities') { res.end(JSON.stringify({ session_startup_input_clear: supported })); return; }
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => { expect(JSON.parse(raw)).toEqual({ generation: 8 }); res.end(JSON.stringify({ session: { generation: 9, startup_input_disabled: true } })); });
+  });
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  for (const argv of [['clear-startup-input', 'id', '--generation', '0'], ['clear-startup-input', 'id', '--generation', '8', '--extra']]) {
+    expect(await runIntegrationAdmin(argv, port, 'local-admin', line => output.push(line))).toBe(1);
+  }
+  expect(calls).toEqual([]);
+  const args = ['clear-startup-input', 'id', '--generation', '8'];
+  expect(await runIntegrationAdmin(args, port, 'local-admin', line => output.push(line))).toBe(1);
+  expect(JSON.parse(output.at(-1)!)).toMatchObject({ code: 'SESSION_STARTUP_INPUT_CLEAR_UNSUPPORTED' });
+  expect(calls).toEqual(['/admin/capabilities']); supported = true;
+  expect(await runIntegrationAdmin(args, port, 'local-admin', line => output.push(line))).toBe(0);
+  expect(calls).toEqual(['/admin/capabilities', '/admin/capabilities', '/admin/sessions/id/startup-input/clear']);
+});

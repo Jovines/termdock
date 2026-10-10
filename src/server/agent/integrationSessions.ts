@@ -18,6 +18,8 @@ export interface IntegrationSession extends SessionLifecycleDescriptor {
   startup_input?: { state: 'pending' | 'observed' | 'timed_out'; deadline: number; matched_since: number | null; observed_at: number | null };
   /** Safety condition attached to a legacy session at explicit restore, never new argv/cwd. */
   startup_condition?: StartupInputCondition;
+  /** Explicit administrator opt-out; prevents restore inheriting a profile condition. */
+  startup_input_disabled?: boolean;
   /** Administrator-only locators from the last rejected restore check. */
   restore_diagnostics?: NativeOwnerCheck & { operation_id: string };
 }
@@ -44,7 +46,8 @@ export interface IntegrationSessionAdapter {
   registerDeliveryGuard?(guard: (id: string) => Promise<IntegrationDeliveryReadiness | null>): () => void;
 }
 export interface IntegrationDeliveryReadiness { allowed: boolean; reason: string | null }
-function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_condition'>, now: number): IntegrationSession['startup_input'] {
+function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_condition' | 'startup_input_disabled'>, now: number): IntegrationSession['startup_input'] {
+  if (record.startup_input_disabled) return undefined;
   const condition = record.startup_condition ?? record.profile.startupInput;
   return condition ? { state: 'pending', deadline: now + (condition.timeoutMs ?? 120000), matched_since: null, observed_at: null } : undefined;
 }
@@ -229,7 +232,7 @@ export class IntegrationSessions {
       record.runtime_present = observed.exists;
       record.state = 'restoring'; record.error_code = null; record.operation_id = randomUUID(); record.deadline = Date.now() + this.bindingTimeout; record.updated_at = Date.now();
       record.restore_diagnostics = undefined;
-      if (!record.profile.startupInput && !record.startup_condition) record.startup_condition = structuredClone(principal.launchProfiles.find(profile => profile.id === record.launch_profile)?.startupInput);
+      if (!record.startup_input_disabled && !record.profile.startupInput && !record.startup_condition) record.startup_condition = structuredClone(principal.launchProfiles.find(profile => profile.id === record.launch_profile)?.startupInput);
       record.startup_input = startupInput(record, Date.now());
       this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
       try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
@@ -241,6 +244,25 @@ export class IntegrationSessions {
     if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Recovery record does not exist', 404);
     return { session_id: id, generation: record.generation ?? 1, recorded_fingerprint: record.resume_configuration_fingerprint ?? null,
       current_fingerprint: await resumeConfigurationFingerprint(record, this.adapter), confirmation_required: !record.resume_configuration_fingerprint };
+  }
+  async clearStartupInput(id: string, generation: number): Promise<IntegrationSession> {
+    return this.lifecycle.run(id, async () => {
+      const record = structuredClone(this.doc.sessions.find(s => s.session_id === id));
+      if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Recovery record does not exist', 404);
+      assertReleaseGeneration(record, generation);
+      if (this.pending.has(id) || record.operation_uncertain || ['starting', 'restoring', 'binding_pending', 'releasing'].includes(record.state)) {
+        integrationError('SESSION_OPERATION_IN_PROGRESS', 'Resolve the current lifecycle operation before clearing startup input conditions', 409);
+      }
+      if (record.startup_input_disabled && !record.profile.startupInput && !record.startup_condition && !record.startup_input) return record;
+      delete record.profile.startupInput;
+      delete record.startup_condition;
+      delete record.startup_input;
+      record.startup_input_disabled = true;
+      record.generation = generation + 1;
+      record.updated_at = Date.now();
+      this.saveRecord(record);
+      return record;
+    });
   }
   async confirmResumeConfiguration(id: string, generation: number, fingerprint: string): Promise<IntegrationSession> {
     return this.lifecycle.run(id, async () => {

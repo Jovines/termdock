@@ -209,6 +209,46 @@ td integration update --file /private/policy.json
 未配置 `startupInput` 的旧 profile 保留原投递方式；TD 不猜测各家 TUI 的加载画面。
 管理员 CLI 会先读取运行服务能力，旧服务缺接口或能力时失败，不会忽略条件后继续配置。
 
+### 清除既有会话的屏幕启动条件（1.4.310）
+
+从策略中删除 `startupInput` 只影响新会话，既有会话仍保留原启动快照。需要让指定
+旧会话使用普通终端投递时，由本机管理员通过正式入口显式解除：
+
+```sh
+# 先由持有该会话的身份回读当前 generation
+td collab --principal report-bridge session get <TD-session-id>
+# 本机管理员执行，不使用 principal 凭据；generation 必须取当前实际值
+td integration clear-startup-input <TD-session-id> --generation <N>
+td collab --principal report-bridge session get <TD-session-id>
+```
+
+最低 CLI / 实际服务版本均为 **1.4.310**；先回读能力
+`session_startup_input_clear=true`、`session_startup_input_clear_min_version=1.4.310`。
+CLI 在旧服务上返回 `SESSION_STARTUP_INPUT_CLEAR_UNSUPPORTED`，不尝试修改私有文件。
+本机认证接口为 `POST /admin/sessions/:id/startup-input/clear`，请求仅含
+`{"generation":N}`，回复 `{session: …}`；集成 principal 无权调用这个管理员入口。
+
+操作原子持久化删除该记录的 `profile.startupInput`、`startup_condition` 和
+`startup_input`，设置公开字段 **`startup_input_disabled=true`**，generation 增加 1。
+以后对该逻辑会话执行实际 restore 也不重新继承 profile 的屏幕条件；新创建的其它
+会话仍按各自策略启动。此入口只支持显式禁用，不提供重新启用或更换启动配置。
+原逻辑 ID / 原生 UUID / argv / model / cwd / 包装器 / 配置指纹 / operation ID /
+终端绑定 / 消息历史及 reply 关联保持原状，不启动、退出或重建 Agent。
+会话事件仍使用现有 `session.<state>`，payload 带更新后的 session / generation /
+`startup_input_disabled`，沿原持久订阅与 ACK 机制推送。
+
+管理员解除条件后，**已经 pending 的消息可能随下一次投递继续发送**；不重发
+`delivered` 正文。它解除的是额外画面限制，不证明 Agent 输入已初始化、已读、空闲
+或已消费，`delivered` 仍只表示终端写入，结果仍看明确回复。运行中亦可执行，
+不需要修改窗口尺寸或等待模型/footer 文案。
+
+原子保存失败不解除条件。代次不匹配返回 `SESSION_GENERATION_MISMATCH`，缺失或
+非法代次返回 `INVALID_SESSION_GENERATION`；有启动/恢复/释放进行中或结果不明时
+返回 `SESSION_OPERATION_IN_PROGRESS`；记录不存在返回 `INTEGRATION_SESSION_NOT_FOUND`。
+用新 generation 对已禁用会话重复清除是 no-op，不再增加代次；旧 generation 仍
+拒绝。若命令回执丢失，先 get 查证新代次与禁用字段，不盲重试旧参数。既有 release /
+restore 幂等键的历史结果保持不变，以 get 为当前状态依据。
+
 ## 版本与能力核验
 
 ```sh

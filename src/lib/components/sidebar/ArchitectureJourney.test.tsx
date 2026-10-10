@@ -6,7 +6,7 @@ import type { ArchitectureDocument } from '../../architecture/model';
 const { read, list, renderSvg } = vi.hoisted(() => ({ read: vi.fn(), list: vi.fn(), renderSvg: vi.fn() }));
 vi.mock('../../architecture/api', () => ({ readArchitecture: read, listArchitectures: list }));
 vi.mock('mermaid', () => ({ default: { initialize: vi.fn(), render: renderSvg } }));
-vi.mock('../../terminal/api', () => ({ saveDownloadBlob: vi.fn() }));
+vi.mock('../../terminal/api', () => ({ saveDownloadBlob: vi.fn(), watchFileSystem: vi.fn(async () => {}) }));
 const map: ArchitectureDocument = {
   version: 1, generatedAt: '2026-10-09T09:00:00Z', summary: 'A project',
   perspectives: [{ id: 'overview', title: 'Overview', summary: 'Responsibilities', nodes: [
@@ -21,7 +21,7 @@ const getBBox = Object.getOwnPropertyDescriptor(SVGElement.prototype, 'getBBox')
 beforeEach(() => {
   sessionStorage.clear(); read.mockReset(); list.mockReset(); renderSvg.mockReset();
   read.mockResolvedValue(map); list.mockResolvedValue([]);
-  renderSvg.mockImplementation(async (id: string, code: string) => ({ svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 1600"><g>${[...code.matchAll(/^n(\d+)\["([^"]+)"\]/gm)].map(([, index, title]) => `<g class="node" id="${id}-flowchart-n${index}-0"><rect width="180" height="60"/><text>${title}</text></g>`).join('')}</g></svg>` }));
+  renderSvg.mockImplementation(async (id: string, code: string) => ({ svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 1600"><g>${[...code.matchAll(/^(?:subgraph )?n(\d+)\["([^"]+)"\]/gm)].map(([, index, title]) => `<g class="node" id="${id}-flowchart-n${index}-0"><rect width="180" height="60"/><text>${title}</text></g>`).join('')}</g></svg>` }));
   Object.defineProperty(SVGElement.prototype, 'getBBox', { configurable: true, value: () => ({ x: 0, y: 0, width: 2000, height: 1600 }) });
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 });

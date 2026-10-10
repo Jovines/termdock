@@ -27,6 +27,12 @@ describe('encrypted tunnel access policy', () => {
     expect(resolveAccessRequest('PUT', '/api/terminal/settings')).toEqual({ action: 'service.configure' });
     expect(resolveAccessRequest('GET', '/api/terminal/fs/new-operation')).toBeNull();
   });
+  it('separates native architecture reads from mutations and reserves the service namespace', () => {
+    for (const op of ['documents', 'document', 'history', 'version', 'bundle']) expect(resolveAccessRequest('GET', `/api/terminal/architecture/${op}?root=/project`)).toEqual({ action: 'file.read' });
+    for (const op of ['document', 'field', 'bundle']) expect(resolveAccessRequest('PUT', `/api/terminal/architecture/${op}`)).toEqual({ action: 'file.write' });
+    expect(resolveAccessRequest('GET', '/api/terminal/architecture/unknown')).toBeNull();
+    expect(resolveAccessRequest('DELETE', '/api/terminal/architecture')).toBeNull();
+  });
   it('denies unknown mappings while allowing explicit full-service business fallback', () => {
     expect(resolveAccessRequest('POST', '/api/future/new-capability')).toBeNull();
     expect(isBusinessApiPath('POST', '/api/future/new-capability')).toBe(true);

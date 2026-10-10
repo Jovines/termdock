@@ -1,3 +1,5 @@
+import { readBrowserServices } from './lib/services/serviceDirectory';
+import { parseArchitectureLink, consumeArchitectureLink, queueArchitectureLink } from './lib/architecture/link';
 import { sessionCreationErrorKey, type NewSessionCreationResult, type NewSessionRequestOptions } from './lib/terminal/newSessionRequest';
 import { isKeyboardLayerOpen } from './lib/hooks/useKeyboardLayer';
 import { CollaborationWorkspaceFrame } from './lib/components/CollaborationWorkspaceFrame';
@@ -7,7 +9,7 @@ import { MobileSetupGuide } from './lib/components/settings/MobileSetupGuide';
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
 import { ViewportDiagnostics } from './lib/components/terminal/ViewportDiagnostics';
 import { savedConnection } from './lib/federation/browserIntegration';
-import { consumeWorkspaceSession, getWorkspaceHost, reportWorkspace } from './lib/services/workspaceHost';
+import { consumeWorkspaceSession, getWorkspaceHost, reportWorkspace, activateServiceWorkspace } from './lib/services/workspaceHost';
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
@@ -1024,6 +1026,35 @@ function App() {
       }
     });
   }, [activeSplitWorkspaceId, sidebarSessionId]);
+
+  const architectureLink = React.useRef(parseArchitectureLink(window.location.search) ?? consumeArchitectureLink(savedConnection()?.targetPeerId));
+  const [architectureLinkError, setArchitectureLinkError] = React.useState('');
+  React.useEffect(() => {
+    const target = architectureLink.current; if (!target) return;
+    if (target.peerId && target.peerId !== savedConnection()?.targetPeerId) {
+      const service = readBrowserServices().find(service => service.targetPeerId === target.peerId);
+      if (service && getWorkspaceHost()) {
+        try { queueArchitectureLink(target); } catch { setArchitectureLinkError(locale === 'zh' ? '无法在此浏览器打开架构链接。' : 'Cannot open this architecture link in this browser.'); return; }
+        if (activateServiceWorkspace(service)) {
+          architectureLink.current = null;
+          const url = new URL(window.location.href); url.searchParams.delete('architecture'); window.history.replaceState(window.history.state, '', url);
+          return;
+        }
+      }
+      setArchitectureLinkError(locale === 'zh' ? `此架构属于 ${target.serviceName ?? target.peerId}。请先连接该 Termdock 服务，再打开链接。` : `This architecture belongs to ${target.serviceName ?? target.peerId}. Connect to that Termdock service, then open this link.`);
+      return;
+    }
+    setArchitectureLinkError('');
+    try { sessionStorage.setItem(`termdock.architecture.selection:${target.root}`, target.file); } catch { /* Browsing works without persistent storage. */ }
+    const sidebar = useSidebarStore.getState();
+    sidebar.setRootPath(target.root, sidebarSessionId, activeSplitWorkspaceId);
+    sidebar.setRightTab('architecture'); sidebar.openRight();
+    const url = new URL(window.location.href); url.searchParams.delete('architecture');
+    window.history.replaceState(window.history.state, '', url);
+    // A cold load can establish its active terminal after the sidebar first
+    // mounts. Apply the requested project once more when that context arrives.
+    if (sidebarSessionId) architectureLink.current = null;
+  }, [sidebarSessionId, activeSplitWorkspaceId, locale]);
 
   // Sidebar drawer dimensions — overlays on both mobile & desktop, so we
   // never cause the terminal column to resize when toggling the sidebar.
@@ -3177,6 +3208,7 @@ function App() {
 
   const body = (
     <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
+      {architectureLinkError && <div role="alert" className="flex shrink-0 items-center gap-2 bg-surface-2 px-3 py-2 text-xs"><p className="min-w-0 flex-1 break-words">{architectureLinkError}</p><button type="button" className="min-h-11 px-2 text-primary" onClick={() => setArchitectureLinkError('')}>{t('common.close')}</button></div>}
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <CollaborationWorkspaceFrame rightInset={pinnedRightSidebarInset} workspace={mainCollaborationGroup && <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开协作工作区…</div>}><CollaborationMainWorkspace key={mainCollaborationGroup} groupId={mainCollaborationGroup} activeSessionId={activeSessionId} defaultSessionMode={newSessionMode} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} onToggleRightSidebar={handleToggleRightSidebar} rightSidebarOpen={sidebarRightOpen || showPinnedRight} /></React.Suspense>}>
           <div

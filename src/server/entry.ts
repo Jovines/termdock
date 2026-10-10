@@ -40,6 +40,7 @@ import { exitWithStartupFailure } from './utils/startupFailure.js';
 import { androidRecordings } from './android/recording.js';
 import { stopAllScrcpySessions } from './android/scrcpy.js';
 import filesystemRoutes from './routes/filesystem.js';
+import { architectureRoutes } from './architecture/routes.js';
 import authRoutes from './routes/auth.js';
 import notificationRoutes from './routes/notifications.js';
 import { createOnboardingRouter } from './routes/onboarding.js';
@@ -411,6 +412,7 @@ export function createApp(options: AppOptions = {}): express.Express {
 
   // 文件系统路由（继承 /api/terminal 上的 auth + CSRF 保护）
   app.use('/api/terminal/fs', filesystemRoutes);
+  app.use('/api/terminal/architecture', architectureRoutes());
 
   // 本机 Android 设备桥接（adb/scrcpy）。经加密隧道时按业务 API 处理，
   // 仅全权服务授权可达；投屏 WS 在 federation runtime 中按 full-service 校验。

@@ -23,7 +23,8 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   navigation?: ReactNode;
   heading?: ReactNode;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const [nesting, setNesting] = useState(1);
   const key = useId().replace(/[^a-zA-Z0-9]/g, '');
   const root = useRef<HTMLDivElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
@@ -44,7 +45,7 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   const pointers = useRef(new Map<number, { x: number; y: number; nodeId?: string }>());
   const dragged = useRef(false);
   const dragDistance = useRef(0);
-  const diagram = useMemo(() => architectureDiagram(view, parentId), [view, parentId]);
+  const diagram = useMemo(() => architectureDiagram(view, parentId, nesting), [view, parentId, nesting]);
   const connections = useMemo(() => architectureScope(view, parentId).edges, [view, parentId]);
   const geometry = useMemo(() => {
     const box = svg.match(/viewBox="([^"]+)"/)?.[1].split(/\s+/).map(Number);
@@ -80,6 +81,7 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   useEffect(() => {
     let cancelled = false;
     setSvg(''); setFailed(false); resetZoom(); setDownloadError(false); pointers.current.clear();
+    if (diagram.nodes.length > 300) { setFailed(true); return () => { cancelled = true; }; }
     void loadMermaid().then(async mermaid => {
       initializeMermaid(mermaid);
       const rendered = await mermaid.render(`td-architecture-${key}`, diagram.code);
@@ -135,14 +137,19 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   }, [svg, expanded]);
 
   useLayoutEffect(() => {
-    root.current?.querySelectorAll<SVGGElement>('g.node').forEach(node => {
-      const index = Number(node.id.match(/flowchart-n(\d+)-/)?.[1]);
+    root.current?.querySelectorAll<SVGGElement>('g.node, g.cluster').forEach(node => {
+      const index = Number(node.id.match(/(?:^|-)n(\d+)(?:-|$)/)?.[1]);
       const item = diagram.nodes[index];
       if (!item) return;
+      node.dataset.architectureRole = item.role;
       node.dataset.architectureNode = item.id;
       node.dataset.architectureRelated = String(!!selectedId && connections.some(edge => (edge.from === selectedId && edge.to === item.id) || (edge.to === selectedId && edge.from === item.id)));
-      node.setAttribute('role', 'button'); node.setAttribute('tabindex', '0');
-      node.setAttribute('aria-label', item.title); node.setAttribute('aria-pressed', String(selectedId === item.id));
+      const control = node.matches('g.cluster') ? node.querySelector<SVGGElement>('g.cluster-label') ?? node : node;
+      if (control !== node) { node.removeAttribute('role'); node.removeAttribute('tabindex'); }
+      control.dataset.architectureNode = item.id;
+      control.setAttribute('role', 'button'); control.setAttribute('tabindex', '0');
+      control.setAttribute('aria-label', item.title); control.setAttribute('aria-pressed', String(selectedId === item.id));
+      node.setAttribute('aria-pressed', String(selectedId === item.id));
     });
   });
   useLayoutEffect(() => {
@@ -202,12 +209,13 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
       <div className="flex w-full shrink-0 items-center justify-between gap-1 min-[360px]:w-auto" title={t('architecture.panHint')}>{controls}</div>
     </header> : <div className="sticky top-[60px] z-10 shrink-0 border-b border-border/15 bg-surface-2 px-2 py-1">
       <div className="flex items-center justify-between gap-1">{controls}</div>
-      <p className="px-1 pb-1 text-xs text-muted-foreground">{t('architecture.panHint')}</p>
+      <div className="flex flex-wrap items-center justify-between gap-1 px-1 text-xs text-muted-foreground"><span>{t('architecture.panHint')}</span><label className="flex items-center gap-2 text-xs text-muted-foreground">{locale === 'zh' ? '展开层级' : 'Expand levels'}<select aria-label={locale === 'zh' ? '展开层级' : 'Expand levels'} className="min-h-8 rounded bg-surface-2 px-2 text-foreground" value={nesting} onChange={event => setNesting(Number(event.target.value))}>{[0, 1, 2, 6].map(level => <option key={level} value={level}>{level === 0 ? (locale === 'zh' ? '当前层' : 'Current level') : level === 6 ? (locale === 'zh' ? '全部' : 'All') : `${level}`}</option>)}</select></label></div>
     </div>}
-    {expanded && navigation}
+
+    {expanded && <div className="flex shrink-0 items-center justify-between gap-2 px-2">{navigation}<label className="flex items-center gap-2 text-xs text-muted-foreground">{locale === 'zh' ? '展开层级' : 'Expand levels'}<select aria-label={locale === 'zh' ? '展开层级' : 'Expand levels'} className="min-h-8 rounded bg-surface-2 px-2 text-foreground" value={nesting} onChange={event => setNesting(Number(event.target.value))}>{[0, 1, 2, 6].map(level => <option key={level} value={level}>{level === 0 ? (locale === 'zh' ? '当前层' : 'Current level') : level === 6 ? (locale === 'zh' ? '全部' : 'All') : `${level}`}</option>)}</select></label></div>}
     {downloadError && <p role="alert" className="px-3 py-2 text-xs text-destructive">{t('architecture.downloadFailed')}</p>}
     <div className={expanded ? 'relative flex min-h-0 flex-1 flex-col overflow-hidden min-[768px]:flex-row' : 'relative'}>
-    {failed ? <p role="alert" className="p-4 text-sm text-muted-foreground">{t('architecture.diagramFailed')}</p>
+    {failed ? <p role="alert" className="p-4 text-sm text-muted-foreground">{diagram.nodes.length > 300 ? (locale === 'zh' ? '图中模块较多，请减少展开层级或选择单个视角。' : 'This graph has many modules. Expand fewer levels or select one perspective.') : t('architecture.diagramFailed')}</p>
       : !svg ? <p role="status" className="p-4 text-sm text-muted-foreground">{t('architecture.rendering')}</p>
       : <div ref={viewport} data-sidebar-gesture-ignore className={`termdock-architecture-viewport overflow-auto overscroll-contain p-3 ${expanded ? 'min-h-0 min-w-0 flex-1' : 'h-[min(50dvh,26rem)]'}`} style={{ touchAction: 'none', maxHeight: !expanded && viewportSize.clipHeight ? Math.max(160, viewportSize.clipHeight - 150) : undefined }}
         onPointerDown={event => {

@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.309",
+  "version": "1.4.310",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -12,6 +12,7 @@
     ".": "./dist/server/entry.js"
   },
   "files": [
+    "THIRD_PARTY_NOTICES.md",
     "dist",
     "runtime-manifest.json",
     "README.md",
@@ -101,6 +102,7 @@
     "uuid": "^13.0.0",
     "web-push": "^3.6.7",
     "ws": "^8.21.0",
+    "yaml": "^2.9.1",
     "zustand": "^4.5.0"
   },
   "devDependencies": {

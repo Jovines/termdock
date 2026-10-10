@@ -359,7 +359,7 @@ if (typeof window !== 'undefined' && !(window as any).__termdockFetchPatched) {
   };
 }
 
-async function getCsrfToken(): Promise<string> {
+export async function getCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
   const response = await fetchWithTimeout(
     '/api/csrf-token',

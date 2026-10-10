@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Network, Plus, RefreshCw, Sparkles } from 'lucide-react';
-import { ARCHITECTURE_FILE, DEFAULT_ANALYSIS, architectureFileLabel, architectureScope, isArchitectureFile, ArchitectureFormatError, type ArchitectureAnalysis, type ArchitectureDocument, type ArchitectureFile, type ArchitectureNode } from '../../architecture/model';
+import { ARCHITECTURE_FILE, DEFAULT_ANALYSIS, architectureFileLabel, architectureScope, isArchitectureFile, ArchitectureFormatError, type ArchitectureField, type ArchitectureReference, type ArchitectureAnalysis, type ArchitectureDocument, type ArchitectureFile, type ArchitectureNode } from '../../architecture/model';
+import { watchFileSystem } from '../../terminal/api';
+import { architectureOverview } from '../../architecture/overview';
+import { ArchitectureDocumentEditor } from './ArchitectureDocumentEditor';
+import { ArchitectureDocumentFields } from './ArchitectureDocumentFields';
+import { ArchitectureLibraryTools } from './ArchitectureLibraryTools';
 import { listArchitectures, readArchitecture } from '../../architecture/api';
 import { useI18n } from '../../i18n';
 import { ArchitectureDiagram } from './ArchitectureDiagram';
@@ -40,10 +45,13 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<'format' | 'load' | null>(null);
   const [refresh, setRefresh] = useState(0);
+  const [perspectiveDocumentOpen, setPerspectiveDocumentOpen] = useState(false);
+  const [allPerspectives, setAllPerspectives] = useState(false);
   const [perspectiveId, setPerspectiveId] = useState('');
   const [trail, setTrail] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nodeHistory, setNodeHistory] = useState<string[]>([]);
+  const [editor, setEditor] = useState<{ node?: string; field: ArchitectureField } | null>(null);
   const [sourceFile, setSourceFile] = useState<ArchitectureFile | null>(null);
   const [moduleGeneration, setModuleGeneration] = useState<ArchitectureAnalysis | null>(null);
   const [preparedModuleFile, setPreparedModuleFile] = useState<string | null>(null);
@@ -81,14 +89,14 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
 
   useEffect(() => {
     setDocument(null); setError(null); setLoading(true);
-    setPerspectiveId(''); setTrail([]); closeDetail(); setGeneration(null);
+    setAllPerspectives(false); setPerspectiveId(''); setTrail([]); closeDetail(); setGeneration(null);
     setFile(savedSelection(rootPath)); setLibrary([]); setLibraryError(false); setPreparedAnalysis(DEFAULT_ANALYSIS);
     selectionChosen.current = hasSelection(rootPath);
   }, [rootPath]);
 
   useEffect(() => {
     setDocument(null); setError(null); setLoading(true);
-    setPerspectiveId(''); setTrail([]); closeDetail();
+    setAllPerspectives(false); setPerspectiveId(''); setTrail([]); closeDetail();
   }, [file]);
 
   useEffect(() => {
@@ -130,7 +138,24 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
     return () => { disposed = true; ++request.current; current?.abort(); clearTimeout(timer); };
   }, [rootPath, active, refresh, file]);
 
+  const watchRoots = JSON.stringify(rootPath ? [...new Set([
+    `${rootPath}/.termdock`, `${rootPath}/.termdock/architectures`, `${rootPath}/.omm`,
+    ...(file === '.omm' ? document?.perspectives.flatMap(view => [`${rootPath}/.omm/${view.id}`, ...view.nodes.flatMap(node => node.documentPath ? [`${rootPath}/.omm/${node.documentPath}`] : [])]) ?? [] : []),
+  ])].slice(0, 128).sort() : []);
+  useEffect(() => {
+    if (!active || !rootPath) return;
+    const controller = new AbortController(); let debounce: ReturnType<typeof setTimeout> | undefined;
+    void watchFileSystem(JSON.parse(watchRoots) as string[], events => {
+      if (events.some(event => event.type === 'rescan-required' || event.path?.includes('/.omm/') || event.path?.includes('/.termdock/'))) {
+        clearTimeout(debounce); debounce = setTimeout(() => setRefresh(value => value + 1), 300);
+      }
+    }, controller.signal).catch(() => { /* Saved-document polling remains active through watcher disconnections. */ });
+    return () => { controller.abort(); clearTimeout(debounce); };
+  }, [rootPath, active, watchRoots]);
+
   const view = document?.perspectives.find(view => view.id === perspectiveId) ?? document?.perspectives[0];
+  const overview = useMemo(() => document ? architectureOverview(document, locale === 'zh' ? '全部视角' : 'All perspectives') : null, [document, locale]);
+  const selectPerspective = (value: string) => { if (value === 'all-perspectives') { setAllPerspectives(true); navigate([]); } else { setAllPerspectives(false); setPerspectiveId(value); navigate([]); } };
   const validTrail = useMemo(() => {
     const valid: string[] = [];
     for (const id of trail) {
@@ -141,45 +166,49 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
   }, [trail, view]);
   const parentId = validTrail[validTrail.length - 1];
   const scope = useMemo(() => view ? architectureScope(view, parentId) : null, [view, parentId]);
-  const selected = scope?.nodes.find(node => node.id === selectedId);
+  const selected = view?.nodes.find(node => node.id === selectedId);
   const parent = view?.nodes.find(node => node.id === parentId);
   const availableFiles = [...new Set([ARCHITECTURE_FILE, ...library, file])];
-  const currentAnalysis = document?.analysis ?? (file === ARCHITECTURE_FILE ? DEFAULT_ANALYSIS : preparedAnalysis.kind === 'project' ? null : preparedAnalysis);
-  const closeDetail = () => { setSelectedId(null); setDetailExpanded(false); setNodeHistory([]); setSourceFile(null); setModuleGeneration(null); setPreparedModuleFile(null); };
+  const currentAnalysis = document?.analysis ?? (file === ARCHITECTURE_FILE || file === '.omm' ? DEFAULT_ANALYSIS : preparedAnalysis.kind === 'project' ? null : preparedAnalysis);
+  const closeDetail = () => { setPerspectiveDocumentOpen(false); setEditor(null); setSelectedId(null); setDetailExpanded(false); setNodeHistory([]); setSourceFile(null); setModuleGeneration(null); setPreparedModuleFile(null); };
   const selectNode = (id: string, linked = false) => {
     setNodeHistory(history => linked && selectedId ? [...history, selectedId] : []);
     setDetailExpanded(linked);
-    setSourceFile(null); setModuleGeneration(null); setPreparedModuleFile(null); setSelectedId(id);
+    setPerspectiveDocumentOpen(false); setEditor(null); setSourceFile(null); setModuleGeneration(null); setPreparedModuleFile(null); setSelectedId(id);
   };
-  const navigate = (next: string[]) => { setTrail(next); closeDetail(); if (content.current) content.current.scrollTop = 0; };
+  const navigate = (next: string[]) => { if (next.length) setAllPerspectives(false); setTrail(next); closeDetail(); if (content.current) content.current.scrollTop = 0; };
   const openSource = (file: ArchitectureFile) => { if (renderSource) { setDetailExpanded(true); setSourceFile(file); } else onOpenFile(file); };
   const prepareModule = (node: ArchitectureNode) => {
     setModuleGeneration({ ...DEFAULT_ANALYSIS, kind: 'module', paths: [...new Set(node.files.map(source => source.path))].slice(0, 20) });
     setPreparedModuleFile(null);
   };
-  const backDetail = sourceFile ? () => setSourceFile(null) : moduleGeneration ? () => setModuleGeneration(null) : nodeHistory.length ? () => {
+  const backDetail = editor ? () => setEditor(null) : sourceFile ? () => setSourceFile(null) : moduleGeneration ? () => setModuleGeneration(null) : nodeHistory.length ? () => {
     setSelectedId(nodeHistory[nodeHistory.length - 1]); setNodeHistory(history => history.slice(0, -1));
   } : undefined;
-  const backLabel = sourceFile || moduleGeneration ? t('architecture.backToModule') : t('architecture.previousModule');
+  const backLabel = sourceFile || moduleGeneration || editor ? t('architecture.backToModule') : t('architecture.previousModule');
   // Use the available workspace, rather than the device width, to choose a
   // reading layout. A narrow desktop sidebar needs the same room as a phone.
   const sideDetail = diagramExpanded ? wideViewport : panelWidth >= 900;
-  const previewDetail = !sideDetail && !detailExpanded && !sourceFile && !moduleGeneration;
-  const readingOnly = !diagramExpanded && !!selected && (!!sourceFile || !!moduleGeneration || mode === 'outline');
+  const previewDetail = !sideDetail && !detailExpanded && !sourceFile && !moduleGeneration && !editor;
+  const readingOnly = !diagramExpanded && (!!selected || perspectiveDocumentOpen) && (!!sourceFile || !!moduleGeneration || !!editor || mode === 'outline');
+  const ancestry = (id: string): string[] => { const ids: string[] = []; let node = view?.nodes.find(node => node.id === id); while (node?.parentId) { ids.unshift(node.parentId); node = view?.nodes.find(item => item.id === node!.parentId); } return ids; };
+  const referenceSelect = (reference: ArchitectureReference) => { const next = document?.perspectives.find(view => view.id === reference.perspective); if (!next) return; closeDetail(); setPerspectiveId(next.id); if (reference.node) { const ids: string[] = []; let node = next.nodes.find(node => node.id === reference.node); while (node?.parentId) { ids.unshift(node.parentId); node = next.nodes.find(item => item.id === node!.parentId); } setTrail(ids); setSelectedId(reference.node); setDetailExpanded(true); } else { setTrail([]); setPerspectiveDocumentOpen(true); } };
   const button = 'inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-medium transition hover:bg-surface-elevated focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40';
   const dismissDetail = previewDetail ? closeDetail : backDetail ?? (!sideDetail && mode === 'graph' ? () => setDetailExpanded(false) : closeDetail);
-  const inspector = (inGraph: boolean) => selected && ((inGraph || mode === 'graph') && previewDetail
+  const inspector = (inGraph: boolean) => perspectiveDocumentOpen && view ? <ArchitectureInspector active={active} docked title={view.title} stageKey={`${view.id}:${editor ? 'edit' : 'view-document'}`} source={false} fullHeight={readingOnly || !!editor} inGraph={inGraph} side={sideDetail} onBack={editor ? () => setEditor(null) : undefined} backLabel={t('architecture.backToModule')} onClose={closeDetail} onDismiss={editor ? () => setEditor(null) : closeDetail}>
+    {editor ? <ArchitectureDocumentEditor root={rootPath!} file={file} perspective={view.id} initialField={editor.field} onSaved={updated => { ++request.current; setDocument(updated); setEditor(null); setRefresh(value => value + 1); }} onCancel={() => setEditor(null)} /> : <><ArchitectureDocumentFields value={view} rootPath={rootPath} onEdit={field => setEditor({ field })} onOpenFile={onOpenFile} /><button type="button" className={`${button} text-primary`} onClick={() => { setAllPerspectives(false); navigate([]); }}>{locale === 'zh' ? '进入此视角' : 'Explore this perspective'}</button></>}
+  </ArchitectureInspector> : selected && ((inGraph || mode === 'graph') && previewDetail
     ? <ArchitectureNodePreview node={selected} onExpand={() => setDetailExpanded(true)} onClose={closeDetail} />
-    : <ArchitectureInspector active={active && !moduleGeneration} docked={!inGraph || (!sourceFile && !moduleGeneration)} title={selected.title} stageKey={`${selected.id}:${sourceFile ? `${sourceFile.path}:${sourceFile.line}` : moduleGeneration ? 'analysis' : 'details'}`} source={!!sourceFile} fullHeight={inGraph ? !!moduleGeneration : readingOnly} inGraph={inGraph} side={sideDetail} onBack={backDetail} backLabel={backLabel} onClose={closeDetail} onDismiss={dismissDetail} onCollapse={!sideDetail && !readingOnly && !sourceFile && !moduleGeneration ? () => setDetailExpanded(false) : undefined}>
-    {sourceFile && renderSource ? renderSource(sourceFile) : moduleGeneration ? <>
+    : <ArchitectureInspector active={active && !moduleGeneration} docked={!inGraph || (!sourceFile && !moduleGeneration)} title={selected.title} stageKey={`${selected.id}:${sourceFile ? `${sourceFile.path}:${sourceFile.line}` : moduleGeneration ? 'analysis' : editor ? `edit:${editor.field}` : 'details'}`} source={!!sourceFile} fullHeight={inGraph ? !!moduleGeneration || !!editor : readingOnly} inGraph={inGraph} side={sideDetail} onBack={backDetail} backLabel={backLabel} onClose={closeDetail} onDismiss={dismissDetail} onCollapse={!sideDetail && !readingOnly && !sourceFile && !moduleGeneration && !editor ? () => setDetailExpanded(false) : undefined}>
+    {editor ? <ArchitectureDocumentEditor key={`${file}:${view!.id}:${editor.node ?? "view"}:${editor.field}`} root={rootPath!} file={file} perspective={view!.id} node={editor.node} initialField={editor.field} onSaved={updated => { ++request.current; setDocument(updated); setEditor(null); setRefresh(value => value + 1); }} onCancel={() => setEditor(null)} /> : sourceFile && renderSource ? renderSource(sourceFile) : moduleGeneration ? <>
       <ArchitectureGenerationForm active={active} key={selected.id} rootPath={rootPath!} currentFile={currentFile} currentDirectory={currentDirectory} initial={moduleGeneration} onInsertPrompt={onInsertPrompt} onPrepared={setPreparedModuleFile} onClose={() => setModuleGeneration(null)} />
       {preparedModuleFile && <button type="button" className={`${button} mt-3 bg-primary/15 text-primary`} onClick={() => { setPreparedAnalysis(moduleGeneration); selectFile(preparedModuleFile); closeDetail(); }}>{t('architecture.viewPrepared')}</button>}
-    </> : <ArchitectureNodeDetail embedded node={selected} view={view!} parentId={parentId} onSelect={id => selectNode(id, true)} onExplore={() => navigate([...validTrail, selected.id])} onAnalyze={() => prepareModule(selected)} onOpenFile={openSource} onClose={closeDetail} />}
+    </> : <ArchitectureNodeDetail embedded document={document!} rootPath={rootPath} onReference={referenceSelect} onEdit={field => { setDetailExpanded(true); setEditor({ node: selected.id, field }); }} node={selected} view={view!} parentId={selected.parentId} onSelect={id => selectNode(id, true)} onExplore={() => navigate([...ancestry(selected.id), selected.id])} onAnalyze={() => prepareModule(selected)} onOpenFile={openSource} onClose={closeDetail} />}
   </ArchitectureInspector>);
 
   if (!rootPath) return <p className="p-5 text-sm text-muted-foreground">{t('fileTree.noWorkingDir')}</p>;
   return <div ref={panel} className="relative flex h-full min-h-0 flex-col" onKeyDown={event => {
-    if (!diagramExpanded && selected && event.key === 'Escape' && !event.defaultPrevented && !event.nativeEvent.isComposing) {
+    if (!diagramExpanded && (selected || perspectiveDocumentOpen) && event.key === 'Escape' && !event.defaultPrevented && !event.nativeEvent.isComposing) {
       event.preventDefault(); event.stopPropagation(); dismissDetail();
     }
   }}>
@@ -193,8 +222,8 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
     </div>
     <div className={`relative flex min-h-0 flex-1 ${sideDetail && !readingOnly ? 'flex-row' : 'flex-col'}`} data-architecture-workspace>
     <div ref={content} hidden={readingOnly} data-architecture-content className={`min-h-0 min-w-0 flex-1 overflow-y-auto p-3 [overflow-anchor:none] ${generation ? 'flex flex-col' : ''}`}>
-      {generation ? <ArchitectureGenerationForm active={active} key={`${generation.outputFile ?? 'new'}:${JSON.stringify(generation.initial)}`} rootPath={rootPath} currentFile={currentFile} currentDirectory={currentDirectory} initial={generation.initial} outputFile={generation.outputFile} onInsertPrompt={onInsertPrompt} onPrepared={(nextFile, analysis) => { setPreparedAnalysis(analysis); selectFile(nextFile); }} onClose={closeGeneration} /> : <>
-        <label className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">{t('architecture.savedAnalyses')}<select aria-label={t('architecture.savedAnalyses')} value={file} onChange={event => { setPreparedAnalysis(DEFAULT_ANALYSIS); selectFile(event.target.value); }} className="min-h-10 min-w-0 flex-1 rounded-lg border border-border/20 bg-surface-2 px-2 text-sm text-foreground">{availableFiles.map(path => <option key={path} value={path}>{path === ARCHITECTURE_FILE ? t('architecture.projectRange') : `${t(path.includes('/module-') ? 'architecture.moduleRange' : 'architecture.featureRange')}: ${path === file && document?.analysis ? document.analysis.target.replace(/\n/g, ', ') : architectureFileLabel(path)}`}</option>)}</select></label>
+      {editor && !selected && !perspectiveDocumentOpen ? <div className="flex min-h-full flex-col gap-3"><h2 className="text-sm font-semibold">{view?.title}</h2><ArchitectureDocumentEditor key={`${file}:${view?.id}:${editor.field}`} root={rootPath} file={file} perspective={view!.id} initialField={editor.field} onSaved={updated => { ++request.current; setDocument(updated); setEditor(null); setRefresh(value => value + 1); }} onCancel={() => setEditor(null)} /></div> : generation ? <ArchitectureGenerationForm active={active} key={`${generation.outputFile ?? 'new'}:${JSON.stringify(generation.initial)}`} rootPath={rootPath} currentFile={currentFile} currentDirectory={currentDirectory} initial={generation.initial} outputFile={generation.outputFile} onInsertPrompt={onInsertPrompt} onPrepared={(nextFile, analysis) => { setPreparedAnalysis(analysis); selectFile(nextFile); }} onClose={closeGeneration} /> : <>
+        <label className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">{t('architecture.savedAnalyses')}<select aria-label={t('architecture.savedAnalyses')} value={file} onChange={event => { setPreparedAnalysis(DEFAULT_ANALYSIS); selectFile(event.target.value); }} className="min-h-10 min-w-0 flex-1 rounded-lg border border-border/20 bg-surface-2 px-2 text-sm text-foreground">{availableFiles.map(path => <option key={path} value={path}>{path === '.omm' ? '.omm · oh-my-mermaid' : path === ARCHITECTURE_FILE ? t('architecture.projectRange') : `${t(path.includes('/module-') ? 'architecture.moduleRange' : 'architecture.featureRange')}: ${path === file && document?.analysis ? document.analysis.target.replace(/\n/g, ', ') : architectureFileLabel(path)}`}</option>)}</select></label>
         {libraryError && <p role="alert" className="mb-3 text-xs text-muted-foreground">{t('architecture.libraryFailed')}</p>}
 
         {loading && !document && <p role="status" className="py-4 text-sm text-muted-foreground">{t('architecture.loading')}</p>}
@@ -205,15 +234,18 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
           {document.analysis && <p className="break-words text-xs text-muted-foreground">{t(`architecture.${document.analysis.kind}Range`)}{document.analysis.target ? ` · ${document.analysis.target.replace(/\n/g, ', ')}` : ''} · {t(document.analysis.depth === 'boundary' ? 'architecture.boundaryDepth' : 'architecture.followDepth')}</p>}
           {document.summary.length <= 240 && <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">{document.summary}</p>}
           {/* Cover the scroll container's padding without a space-y gap above the sticky background. */}
-          <label className="sticky -top-3 z-10 !mt-0 -mx-3 flex items-center gap-2 bg-surface px-3 py-2 text-xs text-muted-foreground">{t('architecture.perspective')}<select aria-label={t('architecture.perspective')} value={view.id} onChange={event => { setPerspectiveId(event.target.value); navigate([]); }} className="min-h-11 min-w-0 flex-1 rounded-lg border border-border/20 bg-surface-2 px-2 text-sm text-foreground">{document.perspectives.map(view => <option key={view.id} value={view.id}>{view.title}</option>)}</select></label>
+          <label className="sticky -top-3 z-10 !mt-0 -mx-3 flex items-center gap-2 bg-surface px-3 py-2 text-xs text-muted-foreground">{t('architecture.perspective')}<select aria-label={t('architecture.perspective')} value={allPerspectives ? 'all-perspectives' : view.id} onChange={event => selectPerspective(event.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg border border-border/20 bg-surface-2 px-2 text-sm text-foreground"><option value="all-perspectives">{locale === 'zh' ? '全部视角' : 'All perspectives'}</option>{document.perspectives.map(view => <option key={view.id} value={view.id}>{view.title}</option>)}</select></label>
           {validTrail.length > 0 && <nav className="flex flex-wrap items-center gap-1 text-xs" aria-label={t('architecture.breadcrumb')}><button type="button" className={`${button} px-2`} onClick={() => navigate([])}>{view.title}</button>{validTrail.map((id, index) => <span key={id} className="inline-flex items-center gap-1"><ChevronRight size={12} /><button type="button" className={`${button} px-2`} onClick={() => navigate(validTrail.slice(0, index + 1))}>{view.nodes.find(node => node.id === id)?.title}</button></span>)}</nav>}
-          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">{parent?.summary ?? view.summary}</p>
+          <p className="line-clamp-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">{parent?.summary ?? view.summary}</p>
+          <details><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted-foreground">{locale === 'zh' ? '视角文档与模块目录' : 'Perspective documents and module tree'}</summary><ArchitectureDocumentFields value={parent ?? view} rootPath={rootPath} onOpenFile={openSource} onEdit={field => { if (parent) { setSelectedId(parent.id); setDetailExpanded(true); setEditor({ node: parent.id, field }); } else setEditor({ field }); }} />
+            <nav aria-label={locale === 'zh' ? '模块目录' : 'Module tree'} className="my-2 border-l border-border/20">{view.nodes.map(node => <button type="button" key={node.id} aria-label={`${locale === 'zh' ? '定位模块' : 'Go to module'}: ${node.title}`} className={`${button} flex w-full justify-start text-left ${selectedId === node.id ? 'text-primary' : ''}`} style={{ paddingInlineStart: 12 + ancestry(node.id).length * 16 }} onClick={() => { setTrail(ancestry(node.id)); selectNode(node.id); setDetailExpanded(true); }}>{node.title}</button>)}</nav>
+          </details>
           <div role="group" aria-label={t('architecture.browseMode')} className="flex gap-1 rounded-lg bg-surface-2 p-1">{(['outline', 'graph'] as const).map(value => <button type="button" key={value} aria-pressed={mode === value} className={`${button} flex-1 ${mode === value ? 'bg-surface text-primary' : 'text-muted-foreground'}`} onClick={() => setDisplayMode(value)}>{t(value === 'outline' ? 'architecture.outlineMode' : 'architecture.graphMode')}</button>)}</div>
           {mode === 'graph' ? <>
-            <ArchitectureDiagram view={view} parentId={parentId} selectedId={selectedId} onSelect={selectNode} active={active} referenceWidth={panelWidth} inspector={inspector(true)} inspectorStage={sourceFile ? 'source' : moduleGeneration ? 'analysis' : previewDetail ? 'preview' : 'details'} onDismissInspector={dismissDetail} onExpandedChange={expanded => { setDiagramExpanded(expanded); if (!expanded) closeDetail(); }} heading={<div className="relative"><select aria-label={t('architecture.perspective')} title={view.title} value={view.id} onChange={event => { setPerspectiveId(event.target.value); navigate([]); }} className="h-11 w-full min-w-0 appearance-none truncate bg-surface pr-4 text-xs font-semibold focus-visible:ring-2 focus-visible:ring-ring">{document.perspectives.map(view => <option key={view.id} value={view.id}>{view.title}</option>)}</select><ChevronDown size={12} className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-muted-foreground" /></div>} navigation={validTrail.length > 0 ? <nav aria-label={t('architecture.breadcrumb')} className="flex items-center gap-1 px-2"><button type="button" className={`${button} shrink-0 px-2`} onClick={() => navigate(validTrail.slice(0, -1))}>{t('architecture.parentModule')}</button><span className="truncate text-xs text-muted-foreground">{view.title} / {parent?.title}</span></nav> : undefined} />
+            <ArchitectureDiagram view={allPerspectives && overview ? overview.view : view} parentId={allPerspectives ? undefined : parentId} selectedId={allPerspectives && overview ? [...overview.references].find(([, reference]) => reference.perspective === view.id && reference.node === selectedId)?.[0] ?? null : selectedId} onSelect={id => { if (allPerspectives && overview) { const reference = overview.references.get(id); if (reference) { referenceSelect(reference);  } } else selectNode(id); }} active={active} referenceWidth={panelWidth} inspector={inspector(true)} inspectorStage={sourceFile ? 'source' : moduleGeneration || editor ? 'analysis' : previewDetail ? 'preview' : 'details'} onDismissInspector={perspectiveDocumentOpen ? editor ? () => setEditor(null) : closeDetail : dismissDetail} onExpandedChange={expanded => { setDiagramExpanded(expanded); if (!expanded && diagramExpanded) closeDetail(); }} heading={<div className="relative"><select aria-label={t('architecture.perspective')} title={view.title} value={allPerspectives ? 'all-perspectives' : view.id} onChange={event => selectPerspective(event.target.value)} className="h-11 w-full min-w-0 appearance-none truncate bg-surface pr-4 text-xs font-semibold focus-visible:ring-2 focus-visible:ring-ring"><option value="all-perspectives">{locale === 'zh' ? '全部视角' : 'All perspectives'}</option>{document.perspectives.map(view => <option key={view.id} value={view.id}>{view.title}</option>)}</select><ChevronDown size={12} className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-muted-foreground" /></div>} navigation={validTrail.length > 0 ? <nav aria-label={t('architecture.breadcrumb')} className="flex items-center gap-1 px-2"><button type="button" className={`${button} shrink-0 px-2`} onClick={() => navigate(validTrail.slice(0, -1))}>{t('architecture.parentModule')}</button><span className="truncate text-xs text-muted-foreground">{view.title} / {parent?.title}</span></nav> : undefined} />
             <details><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted-foreground">{t('architecture.modules')} ({scope.nodes.length})</summary><div className="flex flex-wrap gap-2">{scope.nodes.map(node => <button type="button" key={node.id} aria-pressed={selected?.id === node.id} className={`${button} bg-surface-2`} onClick={() => selectNode(node.id)}>{node.title}</button>)}</div></details>
           </> : <div className="space-y-2" role="group" aria-label={t('architecture.modules')}>
-            {scope.nodes.map(node => <div key={node.id}><button type="button" aria-label={node.title} aria-expanded={selected?.id === node.id} className="block min-h-16 w-full rounded-xl border border-border/20 bg-surface-2 p-3 text-left transition hover:bg-surface-elevated focus-visible:ring-2 focus-visible:ring-ring" onClick={() => selectNode(node.id)}>
+            {allPerspectives ? document.perspectives.map(perspective => <button key={perspective.id} type="button" className="block min-h-16 w-full rounded-xl bg-surface-2 p-3 text-left" onClick={() => selectPerspective(perspective.id)}><span className="text-sm font-medium">{perspective.title}</span><span className="mt-1 block text-xs text-muted-foreground">{perspective.summary}</span></button>) : scope.nodes.map(node => <div key={node.id}><button type="button" aria-label={node.title} aria-expanded={selected?.id === node.id} className="block min-h-16 w-full rounded-xl border border-border/20 bg-surface-2 p-3 text-left transition hover:bg-surface-elevated focus-visible:ring-2 focus-visible:ring-ring" onClick={() => selectNode(node.id)}>
               <span className="flex items-center justify-between gap-2"><span className="text-sm font-medium">{node.title}</span><ChevronRight size={16} className="shrink-0 text-muted-foreground" /></span>
               <span className="mt-1.5 line-clamp-2 break-words text-xs leading-relaxed text-muted-foreground">{node.summary}</span>
             </button></div>)}
@@ -227,6 +259,7 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
           </details>
           {parent && parent.files.length > 0 && <details><summary className="cursor-pointer py-2 text-xs text-muted-foreground">{t('architecture.sourceFiles')}</summary>{parent.files.map(file => <button type="button" key={`${file.path}:${file.line ?? ''}`} className="block min-h-10 w-full break-all rounded px-2 py-2 text-left font-mono text-xs text-primary hover:bg-surface-2" onClick={() => onOpenFile(file)}>{file.path}{file.line ? `:${file.line}` : ''}</button>)}</details>}
         </div>}
+        <ArchitectureLibraryTools root={rootPath} file={file} document={document} onLoaded={(next, document) => { selectFile(next); setDocument(document); setRefresh(value => value + 1); }} />
       </>}
     </div>
     {active && !diagramExpanded && inspector(false)}

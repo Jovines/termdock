@@ -2812,6 +2812,8 @@ export function getMarkdownHeadingOutline(blocks: MarkdownPreviewBlock[]): Markd
 }
 
 interface MarkdownPreviewProps {
+  /** Architecture documents reuse rendering without file-line selection controls. */
+  referenceLines?: boolean;
   content: string;
   filePath: string | null;
   rootPath: string | null;
@@ -3191,6 +3193,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
 }
 
 export function MarkdownPreview({
+  referenceLines = true,
   content,
   filePath,
   rootPath,
@@ -3500,7 +3503,7 @@ export function MarkdownPreview({
           onLocalLinkOpen(target);
         }}
       >
-        {activeHeadingPath.length > 0 && (
+        {referenceLines && activeHeadingPath.length > 0 && (
           <div className="sticky top-0 z-10 border-b border-border/15 bg-surface px-2 py-1 shadow-sm sm:px-3" data-markdown-heading-sticky>
             <div className="flex min-w-0 items-center gap-2 overflow-hidden" title={activeHeadingPath.map((heading) => heading.text).join(' / ')}>
               <span className="h-4 w-0.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
@@ -3627,6 +3630,7 @@ export function MarkdownPreview({
             );
           }
           const renderedContent = typeof block.content === 'function' ? block.content(lineRange) : block.content;
+          if (!referenceLines) return <div key={block.key} data-markdown-preview-block-start={block.startLine} className="min-w-0 cursor-text select-text py-0.5">{renderedContent}</div>;
           const lineLabel = block.startLine === block.endLine ? String(block.startLine) : `${block.startLine}-${block.endLine}`;
           const blockContent = (
             <>

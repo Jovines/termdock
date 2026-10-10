@@ -14,6 +14,11 @@ import { resolve } from 'path';
 loadDotenv({ path: resolve(os.homedir(), '.termdock', '.env'), quiet: true });
 loadDotenv({ path: resolve(process.cwd(), '.env'), quiet: true });
 
+if (['architecture', 'arch'].includes(process.argv[2] ?? '')) {
+  const { runArchitectureCli } = await import('./architecture/cli.js');
+  process.exit(await runArchitectureCli(process.argv.slice(3)));
+}
+
 // Federation commands run before normal server/terminal CLI initialization.
 if (process.argv.slice(2).some(arg => arg === '--federation-pairing' || arg === '--federation-relay')) {
   const { runFederationCli } = await import('./federation/cli.js');
@@ -291,6 +296,8 @@ Options:
   -h, --help         Show this help message
 
 Short commands:
+  architecture       Analyze, browse and edit recursive project architecture
+                     (see td architecture --help)
   agent-plugin [--json]
                      Explain how an Agent integrates itself. JSON mode is
                      machine-readable and intended for Agent consumption.
@@ -2247,7 +2254,7 @@ function runPluginInitJson(): void {
     collaboration: {
       capabilities: 'Optional routing hints shown beside this Agent in collaboration groups.',
       universalTransport: 'Every detected Agent receives durable inbox messages through its PTY and can use td collab when it has shell access.',
-      hooks: 'Hooks add busy/idle awareness so Termdock can defer delivery until a turn finishes; they are not required for collaboration.',
+      hooks: 'Hooks publish declared lifecycle/status events; collaboration does not wait for an idle phase and does not require hooks.',
     },
     security: {
       source: 'Only public HTTPS repository roots on approved Git hosts or explicit local paths are accepted; URL credentials are rejected.',

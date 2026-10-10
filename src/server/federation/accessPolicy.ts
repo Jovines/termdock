@@ -40,7 +40,7 @@ const fileReads = new Set(['list', 'watch', 'search', 'read', 'git-blob', 'eda-p
 const filePosts = new Set(['git-action', 'apply-hunk', 'upload', 'open-in-file-browser']);
 const settings = new Set(['settings', 'toolbar-presets', 'program-detection', 'context-draft']);
 const serviceReads = new Set(['update', 'auto-title/catalog', 'agent-hooks', 'agent-launchers', 'agent-plugins', 'quota', 'tmux/status', 'tmux/sessions', 'agent-resume-history']);
-const reservedSessionIds = new Set(['fs', 'settings', 'client-state', 'session-inventory', 'operations', 'tmux', 'create', 'force-kill', 'serialize-state', 'agent-resume-history', 'toolbar-presets', 'context-draft', 'program-detection', 'update', 'quota', 'agent-hooks', 'agent-launchers', 'agent-plugins', 'agent-plugin-icon', 'auto-title', 'directory-suggestions']);
+const reservedSessionIds = new Set(['architecture', 'fs', 'settings', 'client-state', 'session-inventory', 'operations', 'tmux', 'create', 'force-kill', 'serialize-state', 'agent-resume-history', 'toolbar-presets', 'context-draft', 'program-detection', 'update', 'quota', 'agent-hooks', 'agent-launchers', 'agent-plugins', 'agent-plugin-icon', 'auto-title', 'directory-suggestions']);
 export function resolveAccessRequest(method: string, path: string): ResolvedAccessRequest | null {
   if (!isBusinessApiPath(method, path)) return null;
   const pathname = pathOnly(path)!;
@@ -53,6 +53,12 @@ export function resolveAccessRequest(method: string, path: string): ResolvedAcce
   const prefix = '/api/terminal/';
   if (!pathname.startsWith(prefix)) return null;
   const route = pathname.slice(prefix.length);
+  if (route.startsWith('architecture/')) {
+    const op = route.slice('architecture/'.length);
+    if (read && ['documents', 'document', 'history', 'version', 'bundle'].includes(op)) return { action: 'file.read' };
+    if (method === 'PUT' && ['document', 'field', 'bundle'].includes(op)) return { action: 'file.write' };
+    return null;
+  }
   if (route.startsWith('fs/')) {
     const op = route.slice(3);
     if (read && (fileReads.has(op) || /^preview\/.+/.test(op))) return { action: 'file.read' };

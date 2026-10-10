@@ -92,6 +92,34 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
 }
 
 describe('federation runtime over real encrypted WebSocket', () => {
+  it('reads and edits native architecture through the encrypted channel with separate file grants', async () => {
+    const f = await fixture();
+    const { architectureRoutes } = await import('../architecture/routes.js');
+    f.app.use('/api/terminal/architecture', architectureRoutes());
+    const { ArchitectureStore } = await import('../architecture/store.js');
+    await new ArchitectureStore(f.directory).save('.termdock/architecture.json', { version: 1, generatedAt: '2026-10-09T09:00:00Z', summary: 'encrypted-architecture-private-content', perspectives: [{ id: 'overall', title: 'Overall', summary: 'Structure', nodes: [{ id: 'server', title: 'Server', summary: 'Server description', files: [] }], edges: [] }] });
+    const owner = await f.connect(), reader = await f.connect();
+    const route = `/api/terminal/architecture/document?root=${encodeURIComponent(f.directory)}`;
+    expect((await reader.http('unpaired-map', 'GET', route))[0]).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    await owner.pair();
+    owner.channel.send({ type: 'grant', id: 'map-read-grant', grant: { subjectId: reader.identity.peerId, scope: { kind: 'service' }, actions: ['file.read'] } }); await owner.take('map-read-grant');
+    const response = await reader.http('map-read', 'GET', route);
+    expect(response[0]).toMatchObject({ type: 'head', status: 200 });
+    const body = JSON.parse(response.filter(packet => packet.type === 'chunk').map(packet => new TextDecoder().decode(fromBase64(String(packet.data)))).join(''));
+    expect(body.document.summary).toBe('encrypted-architecture-private-content');
+    reader.channel.send({ type: 'http', id: 'map-write-denied', method: 'PUT', path: '/api/terminal/architecture/field' });
+    expect(await reader.take('map-write-denied')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    owner.channel.send({ type: 'http', id: 'map-write', method: 'PUT', path: '/api/terminal/architecture/field', headers: { 'content-type': 'application/json' } });
+    owner.channel.send({ type: 'upload', id: 'map-write', data: toBase64(new TextEncoder().encode(JSON.stringify({ root: f.directory, perspective: 'overall', node: 'server', field: 'description', value: 'architecture-private-node-document', revision: body.revision }))) });
+    await owner.take('map-write', 'upload-ack'); owner.channel.send({ type: 'upload-end', id: 'map-write' });
+    expect(await owner.take('map-write', 'head')).toMatchObject({ status: 200 });
+    const updated = await owner.take('map-write', 'chunk'); owner.channel.send({ type: 'ack', id: 'map-write' }); await owner.take('map-write', 'end');
+    expect(JSON.parse(new TextDecoder().decode(fromBase64(String(updated.data)))).document.perspectives[0].nodes[0].description).toBe('architecture-private-node-document');
+    for (const wire of [...owner.wire, ...reader.wire]) expect(new TextDecoder().decode(wire)).not.toContain('architecture-private');
+    owner.channel.send({ type: 'logout', id: 'map-logout' }); await owner.take('map-logout');
+    expect((await owner.http('map-revoked', 'GET', route))[0]).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  });
+
   it('loads password-protected HTML and assets without cookies and binds preview tokens to the encrypted device', async () => {
     const spy = vi.spyOn(authProtection, 'isAuthEnabled').mockReturnValue(true);
     cleanup.push(() => spy.mockRestore());

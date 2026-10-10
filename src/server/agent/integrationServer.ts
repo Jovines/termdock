@@ -63,6 +63,12 @@ export class IntegrationRuntime {
     app.get('/admin/sessions/:id/restore-diagnostics', run(req => { admin(req); return this.sessions.restoreDiagnostics(req.params.id); }));
     app.get('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return this.sessions.resumeConfiguration(req.params.id); }));
     app.post('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return { session: publicIntegrationSession(await this.sessions.confirmResumeConfiguration(req.params.id, req.body?.generation, req.body?.fingerprint)) }; }));
+    app.post('/admin/sessions/:id/startup-input/clear', run(async req => {
+      admin(req);
+      const session = await this.sessions.clearStartupInput(req.params.id, req.body?.generation);
+      this.sync();
+      return { session: publicIntegrationSession(session) };
+    }));
     app.get('/admin/principals', run(req => { admin(req); return { integrations: this.store.policies() }; }));
     app.post('/admin/principals', run(req => { admin(req); this.group(req.body?.groupId); const provisioned = this.store.provision(req.body); try { this.sync(); } catch { this.scheduleRetry(); } return { id: provisioned.principal.id, token: provisioned.token, protocol: INTEGRATION_PROTOCOL }; }));
     app.post('/admin/principals/:id/policy', run(req => { admin(req); if (req.body?.id !== req.params.id) integrationError('INVALID_INTEGRATION_POLICY', 'Policy identity must match the requested identity'); this.group(req.body?.groupId); this.store.update(req.body); return { ok: true, id: req.params.id }; }));
@@ -171,6 +177,7 @@ export class IntegrationRuntime {
       idempotent_session_create: true, exact_session_restore: true, external_validation: false,
       startup_input_conditions: true, session_runtime_release: true, stable_session_identity: true, session_lifecycle_generation: true,
       session_resume_configuration: true, session_lifecycle_min_version: '1.4.309',
+      session_startup_input_clear: true, session_startup_input_clear_min_version: '1.4.310',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',

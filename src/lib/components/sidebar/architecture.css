@@ -15,3 +15,14 @@
 .termdock-architecture-diagram .edgeLabel rect { fill: var(--surface-2) !important; }
 .termdock-architecture-diagram .flowchart-link { stroke: var(--muted-foreground) !important; }
 .termdock-architecture-diagram marker path { fill: var(--muted-foreground) !important; stroke: var(--muted-foreground) !important; }
+
+.termdock-architecture-diagram .cluster { cursor: pointer; }
+.termdock-architecture-diagram .cluster > rect { fill: var(--surface-2) !important; stroke: var(--border) !important; }
+.termdock-architecture-diagram .cluster[aria-pressed='true'] > rect,
+.termdock-architecture-diagram .cluster:focus > rect { stroke: var(--primary) !important; stroke-width: 2px !important; }
+.termdock-architecture-diagram .flowchart-link,
+.termdock-architecture-diagram .edgeLabel,
+.termdock-architecture-diagram marker { pointer-events: none; }
+.termdock-architecture-diagram .node[data-architecture-role='external'] rect { stroke-dasharray: 5 3; }
+.termdock-architecture-diagram .node[data-architecture-role='concern'] rect { stroke: var(--destructive) !important; }
+.termdock-architecture-diagram .node[data-architecture-role='entry'] rect { stroke: var(--primary) !important; }
