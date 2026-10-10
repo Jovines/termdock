@@ -1,5 +1,6 @@
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
+import { assertNativeResumeAvailable } from '../agent/nativeResumeOwner.js';
 import { integrationLaunchCommand, type IntegrationDeliveryReadiness, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
 import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
@@ -2347,7 +2348,7 @@ async function spawnCollaborationAgentSession(
 
 /** Restricted session adapter: only preconfigured argv and the exact owned
  * terminal can be launched; no remote drive or arbitrary shell commands. */
-async function integrationPaneIsIdleShell(pane: CollaborationPaneCandidate): Promise<boolean> {
+async function integrationPaneIsIdleShell(pane: Pick<CollaborationPaneCandidate, 'isShell' | 'panePid'>): Promise<boolean> {
   if (!pane.isShell) return false;
   try {
     const { stdout } = await execFileAsync('ps', ['-p', String(pane.panePid), '-o', 'pgid=,tpgid=,args='], { timeout: 3000, maxBuffer: 16384 });
@@ -2407,10 +2408,50 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
     await listDetectedAgentLaunchers();
     const agent = agentBySlug(record.agent_slug);
     if (!record.agent_native_session_id || !agent || !buildResumeCommand(agent, record.agent_native_session_id, null)) integrationError('EXACT_RESUME_UNSUPPORTED', 'Agent plugin must support exact native resume');
-    if (findActiveAgentResumeOwner('', { slug: record.agent_slug, nativeSessionId: record.agent_native_session_id, command: '' })) integrationError('NATIVE_SESSION_ALREADY_RUNNING', 'Native Agent conversation is already running', 409);
+    await assertIntegrationNativeResumeAvailable(record);
     await launchIntegrationTerminal(record, true, prepared);
   },
 };
+async function assertIntegrationNativeResumeAvailable(record: IntegrationSession): Promise<void> {
+  const own = integrationTerminalRecord(record);
+  // Refresh the shared Linux process snapshot once for this restore decision.
+  // Never use a recovered hook or the last-known UUID as live-owner proof.
+  if (process.platform === 'linux') await getProcessSnapshot(true);
+  const candidates = [...terminalSessions].map(([backendSessionId, backend]) => {
+    const persisted = globalSessionState.sessions.find(entry => entry.backendSessionId === backendSessionId)?.agentResume;
+    return { backendSessionId, cachedSlug: backend.agent?.slug ?? persisted?.slug ?? null,
+      cachedNativeId: backend.agentSession?.sessionId ?? persisted?.sessionId ?? null };
+  });
+  await assertNativeResumeAvailable({ slug: record.agent_slug, nativeSessionId: record.agent_native_session_id! },
+    own?.backendSessionId ?? null, candidates, async candidate => {
+      const backend = terminalSessions.get(candidate.backendSessionId);
+      if (!backend) return [];
+      // Duplicate inventory attachments to the original owned pane are not
+      // another process; launchIntegrationTerminal verifies that pane again.
+      if (backend.mode === 'tmux' && backend.tmuxSessionName === own?.tmuxSessionName) return [];
+      if (backend.mode === 'tmux' && backend.tmuxSessionName) {
+        try { await runTmux(['has-session', '-t', `=${backend.tmuxSessionName}`]); }
+        catch (error) {
+          if (/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) return [];
+          throw error;
+        }
+        const layout = await getTmuxLayout(backend.tmuxSessionName);
+        return Promise.all(layout.windows.flatMap(window => window.panes).map(async pane => {
+          const program = await resolveTmuxPaneProgram(pane, true, true);
+          const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
+          const shell = !agent && await integrationPaneIsIdleShell({ panePid: pane.pid,
+            isShell: shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') });
+          return { confirmed: shell || program?.source === 'tmux-tty' && Boolean(program.rawArgs),
+            agentSlug: agent?.slug ?? null,
+            nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null };
+        }));
+      }
+      const program = await detectShellActiveProgram(backend);
+      const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
+      return [{ confirmed: !!program && program.source !== 'unknown', agentSlug: agent?.slug ?? null,
+        nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null }];
+    });
+}
 async function launchIntegrationTerminal(record: IntegrationSession, restoring: boolean, prepared: (binding: CollaborationPaneBinding) => void) {
   await collaborationDeliveryWorker.reconfigure(record.session_id, async () => {
     const group = collaborationStore.getGroup(record.group_id);
@@ -4497,9 +4538,9 @@ function parseProcessSnapshot(stdout: string): TmuxProcessSnapshotRow[] {
     .filter((row): row is TmuxProcessSnapshotRow => row !== null);
 }
 
-async function getProcessSnapshot(): Promise<TmuxProcessSnapshotRow[]> {
+async function getProcessSnapshot(refresh = false): Promise<TmuxProcessSnapshotRow[]> {
   const now = Date.now();
-  if (processSnapshot && now - processSnapshot.fetchedAt < PROCESS_SNAPSHOT_CACHE_TTL_MS) {
+  if (!refresh && processSnapshot && now - processSnapshot.fetchedAt < PROCESS_SNAPSHOT_CACHE_TTL_MS) {
     return processSnapshot.rows;
   }
   if (processSnapshotPromise) return processSnapshotPromise;
@@ -4518,7 +4559,7 @@ async function getProcessSnapshot(): Promise<TmuxProcessSnapshotRow[]> {
   return processSnapshotPromise;
 }
 
-async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false): Promise<{
+async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false, refreshTty = false): Promise<{
   command: string | null;
   source: 'tmux-pane' | 'tmux-tty';
   rawArgs: string | null;
@@ -4568,7 +4609,7 @@ async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false): Prom
             };
           })
           .filter((row): row is TmuxProcessRow => row !== null);
-      });
+      }, refreshTty);
     }
 
     const selected = selectTmuxForegroundProgram({

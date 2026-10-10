@@ -3,7 +3,8 @@
 最低 CLI / 运行服务版本：**termdock 1.4.300**，两者都必须升级并重启服务。
 启动输入条件与保留凭据的策略更新要求 **CLI / 实际运行服务均至少 1.4.301**；协议仍为 1。
 插件原生 ID 的前台 argv 回读及服务重启后的运行中 restore 核验修复要求
-**实际运行服务至少 1.4.302**；建议 CLI 与服务同步安装 1.4.302（CLI 最低仍为 1.4.301）。
+**实际运行服务至少 1.4.302**。退出后的重复原生会话检查修复要求
+**实际运行服务至少 1.4.303**；建议 CLI 与服务同步安装 1.4.303（CLI 最低仍为 1.4.301）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -90,6 +91,9 @@ CLI 使用当前运行服务的端口，默认 9834。每个端口的身份、�
 
 TraeX 的恢复画面可能仅在 footer 显示模型，没有 `model:` 标题；因此示例不要求
 该前缀。管理员须同时核对冷启动和恢复画面，条件不匹配时保持待投递。
+模型 footer 可能被 Git 错误或键盘提示替换，此时含模型文字的 `allOf` 条件不会
+匹配。请选择实际画面中稳定且能区分加载阶段的文字；TD 不用原生 UUID ready、
+历史模型文字或推测的忙闲状态代替配置条件，超时也不会自动放宽。
 
 `allOf` 的每个字面文本都须出现，`noneOf` 的每个文本都须缺席；区分大小写，
 连续横向空白折叠为一个空格，不使用正则或终端历史。每组最多 16 项，每项
@@ -292,11 +296,18 @@ session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSI
 服务重启后，原 pane 中精确 UUID 已在运行时 get 应回读 ready，restore 返回原
 operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒绝。
 
+1.4.303 起，集成 restore 排除自己的已核验终端；其他已登记终端须用当前前台
+进程证明同一个 UUID 才返回 `NATIVE_SESSION_ALREADY_RUNNING`。已退出到 shell、
+已消失或实际运行另一 UUID 的终端，其缓存/last-known 记录不算运行中所有者。
+可能持有原 UUID 的终端无法核验、或相同 Agent 正在运行但没有精确 ID 证据时，
+返回 `NATIVE_SESSION_OWNER_UNCONFIRMED` 并停止恢复；应检查该终端，不绕过保护。
+此检查覆盖服务已登记终端，不声称枚举其他应用中全部原生会话。
+
 常见失败码（每项都是完整字符串）：
 
 - 配置/权限：`LAUNCH_PROFILE_DENIED`, `LAUNCHER_UNAVAILABLE`, `COLLAB_AGENT_UNAVAILABLE`, `SESSION_CWD_MISSING`, `SESSION_CWD_DENIED`, `INTEGRATION_SESSION_NOT_FOUND`, `INTEGRATION_SESSION_LIMIT`。
 - 终端/身份：`SESSION_BACKEND_UNAVAILABLE`, `SESSION_TARGET_NOT_SHELL`, `SESSION_IDENTITY_MISMATCH`, `NATIVE_SESSION_ID_MISMATCH`, `NATIVE_SESSION_ID_INVALID`, `NATIVE_SESSION_ID_MISSING`。
-- 启动/恢复：`SESSION_CREATE_OUTCOME_UNKNOWN`, `SESSION_OPERATION_IN_PROGRESS`, `SESSION_BINDING_TIMEOUT`, `EXACT_RESUME_UNSUPPORTED`, `NATIVE_SESSION_ALREADY_RUNNING`, `AGENT_NOT_RUNNING`。
+- 启动/恢复：`SESSION_CREATE_OUTCOME_UNKNOWN`, `SESSION_OPERATION_IN_PROGRESS`, `SESSION_BINDING_TIMEOUT`, `EXACT_RESUME_UNSUPPORTED`, `NATIVE_SESSION_ALREADY_RUNNING`, `NATIVE_SESSION_OWNER_UNCONFIRMED`, `AGENT_NOT_RUNNING`。
 - 未分类异常：`SESSION_LAUNCH_FAILED`, `SESSION_OBSERVATION_FAILED`；错误不包含包装器输出、密钥或原始堆栈。
 
 ## 验收边界
@@ -311,8 +322,10 @@ operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒
 原 UUID、TD ID、attempt 和 artifact 保持一致。使用方已报告 1.4.301 冷启动首条
 仅写一次并收到明确 complete，超时保持 pending/0 次写入，策略更新保持凭据。
 维护机另外用真实 tmux/native fixture 验证插件 argv 回读、记录重载后运行中恢复
-不重复启动、不同 UUID 拒绝；**1.4.302 的真实 TraeX 服务重启回读/精确恢复
-仍须使用方升级实际运行服务后实机复验**，维护机没有代替完成该项。
+不重复启动、不同 UUID 拒绝，以及进程退出后缓存 UUID 不再阻挡恢复。使用方已报告
+1.4.302 真实 TraeX 服务重启回读、运行中恢复不重启、不同 UUID 拒绝通过；显式恢复
+原 UUID 也已回读 ready，但配置的模型 footer 条件被暂态提示替换，输入仍保持待投递。
+**1.4.303 的真实 TraeX 退出后恢复与稳定输入条件仍须使用方实机复验**。
 回读 capabilities 后，应核对原 TD ID、真实 TraeX UUID 与原 argv/cwd/包装器快照，
 并验证 Agent 真正加载原对话。
 先完成测试环境的创建→追问→关联答复，再验重复键、追加咨询、断线重投和精确恢复。

@@ -14,6 +14,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { IntegrationStore, validatePolicy, type IntegrationPolicy, type IntegrationPrincipal } from './integrationStore.js';
 import { IntegrationSessions, permittedCwd, integrationLaunchCommand, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
 import { IntegrationRuntime } from './integrationServer.js';
+import { assertNativeResumeAvailable } from './nativeResumeOwner.js';
 import { readIntegrationCredential, runIntegrationAdmin } from './integrationCli.js';
 import { CollaborationDeliveryWorker } from './collaborationDeliveryWorker.js';
 import { CollaborationTaskStore } from './collaborationTaskStore.js';
@@ -434,6 +435,11 @@ it.skipIf(process.platform !== 'linux')('recovers the live plugin UUID after sto
     for (let i = 0; i < 50; i++) { if ((await run(['display-message', '-p', '-t', pane!.paneId, '#{pane_current_command}'])).trim() === 'fixture-agent') break; await new Promise(resolve => setTimeout(resolve, 20)); }
     expect((await run(['display-message', '-p', '-t', pane!.paneId, '#{pane_current_command}'])).trim()).toBe('fixture-agent');
     expect(created).toMatchObject({ state: 'ready', agent_native_session_id: nativeId });
+    const cachedOwner = { backendSessionId: 'fixture-backend', cachedSlug: 'fixture-agent', cachedNativeId: nativeId };
+    const verifyOwner = (excluded: string) => assertNativeResumeAvailable({ slug: 'fixture-agent', nativeSessionId: nativeId }, excluded,
+      [cachedOwner], async () => { const live = await api.inspect(created); return [{ confirmed: true, agentSlug: live.agentSlug, nativeId: live.nativeId }]; });
+    await expect(verifyOwner('another-backend')).rejects.toMatchObject({ code: 'NATIVE_SESSION_ALREADY_RUNNING' });
+    await verifyOwner('fixture-backend');
     sessions.close(); sessions = new IntegrationSessions(file, api, 1);
     await new Promise(resolve => setTimeout(resolve, 5));
     const reread = await sessions.get(p, created.session_id);
@@ -444,9 +450,12 @@ it.skipIf(process.platform !== 'linux')('recovers the live plugin UUID after sto
     expect(api.restore).not.toHaveBeenCalled();
     await run(['send-keys', '-t', pane!.paneId, 'C-c']);
     for (let i = 0; i < 50; i++) { if (!(await api.inspect(restored)).running) break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    // The same cached binding must no longer claim ownership after real exit.
+    await verifyOwner('another-backend');
     await run(['send-keys', '-t', pane!.paneId, '-l', `'${executable}' resume another-native`]);
     await run(['send-keys', '-t', pane!.paneId, 'Enter']);
     for (let i = 0; i < 50; i++) { if ((await api.inspect(restored)).nativeId === 'another-native') break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    await verifyOwner('another-backend');
     expect(await sessions.get(p, created.session_id)).toMatchObject({ state: 'failed', error_code: 'NATIVE_SESSION_ID_MISMATCH' });
     await expect(sessions.restore(p, created.session_id, 'wrong-live-id')).rejects.toMatchObject({ code: 'SESSION_IDENTITY_MISMATCH' });
     expect(api.restore).not.toHaveBeenCalled();
