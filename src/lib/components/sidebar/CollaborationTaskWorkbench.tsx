@@ -4,7 +4,7 @@ import { collaborationResultPresentation } from '../../collaboration/resultPrese
 import { CollaborationInput } from './CollaborationInput';
 import { isKeyboardLayerSource } from '../../hooks/useKeyboardLayer';
 import { CollaborationKanban } from './CollaborationKanban';
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, ArrowUpRight, Check, ChevronRight, Circle, CircleCheck, ExternalLink, MessageCircle, Plus, RefreshCw, Search, Send, X } from 'lucide-react';
 import { collaborationTaskBlockers, collaborationTaskStage as taskStage, collaborationTaskNeedsAttention as needsAttention, taskReportLabels as labels } from '../../collaboration/taskState';
 import { useCollaborationTaskInbox } from '../../stores/useCollaborationTaskInbox';
@@ -78,7 +78,18 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
   const [wide, setWide] = useState(false);
   const [searching, setSearching] = useState(false);
   const sectionRef = useRef<HTMLElement>(null);
-  const newTaskRef = useRef<HTMLButtonElement>(null);
+  const newTaskRef = useRef<HTMLButtonElement | null>(null);
+  const restoreNewTaskFocus = useRef(false);
+  const setNewTaskButton = useCallback((node: HTMLButtonElement | null) => {
+    // The board measures its width after mounting and may replace its toolbar.
+    // Keep focus on the corresponding action if that replacement removes it.
+    if (!node && newTaskRef.current === document.activeElement) restoreNewTaskFocus.current = true;
+    newTaskRef.current = node;
+    if (node && restoreNewTaskFocus.current) {
+      restoreNewTaskFocus.current = false;
+      node.focus();
+    }
+  }, []);
   useEffect(() => {
     const node = sectionRef.current;
     if (!node) return;
@@ -312,7 +323,7 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
       <p className="text-center text-[11px] leading-5 text-muted-foreground">{draft.mode === 'goal' ? '拆分任务 → 执行与独立评审 → 你验收结果' : '草稿自动保存，分派后保留投递与回复记录。'}</p>
     </form> : board && loaded ? <>
       <h3 className="sr-only">任务看板</h3>
-      <div className="flex min-h-0 min-w-0 flex-1 gap-5"><div hidden={showDetail} className={`${showDetail ? "hidden" : "flex"} min-h-0 min-w-0 flex-1`}><CollaborationKanban navigation={boardNavigation} settings={boardSettings} action={<button ref={newTaskRef} type="button" className={primary} disabled={busy} onClick={() => setCreating(true)}><Plus size={14} />新目标</button>} storage={storage} tasks={tasks} selectedId={showDetail ? selectedId : null} name={name} onSelect={chooseTask} /></div>
+      <div className="flex min-h-0 min-w-0 flex-1 gap-5"><div hidden={showDetail} className={`${showDetail ? "hidden" : "flex"} min-h-0 min-w-0 flex-1`}><CollaborationKanban navigation={boardNavigation} settings={boardSettings} action={<button ref={setNewTaskButton} type="button" className={primary} disabled={busy} onClick={() => setCreating(true)}><Plus size={14} />新目标</button>} storage={storage} tasks={tasks} selectedId={showDetail ? selectedId : null} name={name} onSelect={chooseTask} /></div>
         {showDetail && <aside aria-label="任务详情" className="mx-auto flex min-h-0 min-w-0 w-full max-w-[1040px] flex-col"><nav aria-label="任务位置" className="mb-2 shrink-0"><ol className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
           <li className="shrink-0"><button type="button" aria-label="返回看板" title="查看此协作组的任务看板" className={`${button} px-2 hover:bg-surface-2`} onClick={returnToBoard}>看板</button></li>
           {ancestors.map(parent => <li key={parent.id} className="flex min-w-0 flex-1 items-center gap-1 sm:max-w-xs sm:flex-none"><ChevronRight aria-hidden="true" size={12} className="shrink-0" /><button type="button" aria-label={`查看${parent.workflow?.kind === 'goal' ? '目标' : '父任务'}：${parent.title}`} title={`查看${parent.workflow?.kind === 'goal' ? '目标' : '父任务'}：${parent.title}`} className={`${button} min-w-0 px-2 hover:bg-surface-2`} onClick={() => chooseTask(parent.id)}><span className="truncate">{parent.workflow?.kind === 'goal' ? '目标' : '父任务'}：{parent.title}</span></button></li>)}
@@ -324,7 +335,7 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
         }} /> : <p role="status" className="py-8 text-center text-xs text-muted-foreground">正在加载任务详情…</p>}</div></aside>}
       </div>
     </> : !loaded && !tasks.length ? <div role="status" className="space-y-3 py-8"><p className="text-center text-xs text-muted-foreground">{loadError ? '任务暂时无法加载，请重试。' : '正在加载目标…'}</p>{!loadError && [0, 1, 2].map(i => <div key={i} className="h-14 animate-pulse rounded-lg bg-surface-2" />)}</div> : <>
-      {(!showDetail || wide) && <header className="flex items-center justify-between gap-2"><div><h3 className="text-base font-semibold text-foreground">协作目标</h3><p className="mt-1 text-[11px] text-muted-foreground">{tasks.filter(t => t.status === 'open' && t.workflow?.kind !== 'step').length} 个进行中 · {tasks.filter(t => t.status === 'accepted' && t.workflow?.kind !== 'step').length} 个已验收</p></div><button ref={newTaskRef} type="button" className={primary} disabled={busy} onClick={() => setCreating(true)}><Plus size={14} />新目标</button></header>}
+      {(!showDetail || wide) && <header className="flex items-center justify-between gap-2"><div><h3 className="text-base font-semibold text-foreground">协作目标</h3><p className="mt-1 text-[11px] text-muted-foreground">{tasks.filter(t => t.status === 'open' && t.workflow?.kind !== 'step').length} 个进行中 · {tasks.filter(t => t.status === 'accepted' && t.workflow?.kind !== 'step').length} 个已验收</p></div><button ref={setNewTaskButton} type="button" className={primary} disabled={busy} onClick={() => setCreating(true)}><Plus size={14} />新目标</button></header>}
       <div className={wide && showDetail ? 'grid items-start gap-6 grid-cols-[260px_minmax(0,1fr)]' : ''}>
         {(!showDetail || wide) && <div className="min-w-0 space-y-5">
           <div className="flex items-center gap-2"><select aria-label="任务筛选" className={`${input} min-w-0 flex-1 border-transparent bg-transparent`} value={filter} onChange={e => setFilter(e.target.value)}><option value="open">进行中的目标</option><option value="attention">需要你处理（{attention}）</option><option value="archive">已归档</option><option value="all">全部任务</option></select><button type="button" aria-label="搜索任务" aria-expanded={searching} className={`${button} shrink-0 px-3 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSearching(v => !v); setQuery(''); }}><Search size={16} /></button></div>

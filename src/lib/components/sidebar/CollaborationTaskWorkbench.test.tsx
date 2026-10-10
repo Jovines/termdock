@@ -638,6 +638,24 @@ it('protects composing and consumed Escape, gives a nested keyboard owner first 
   expect(api.create).not.toHaveBeenCalled(); expect(api.team).not.toHaveBeenCalled();
 });
 
+it('keeps cancel focus when the remounted board measures its desktop toolbar', async () => {
+  const observers: Array<(entries: Array<{ contentRect: { width: number } }>) => void> = [];
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: typeof resize) { observers.push(callback); }
+    observe() { this.callback([{ contentRect: { width: 360 } }]); }
+    disconnect() {}
+  });
+  setup([], { board: true, group: { ...group, sessionIds: [] }, sessions: [] });
+  fireEvent.click(await screen.findByRole('button', { name: '新目标' }));
+  fireEvent.keyDown(screen.getByRole('textbox', { name: '协作目标' }), { key: 'Escape' });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '新目标' })));
+  const mobileAction = document.activeElement;
+  act(() => observers.at(-1)!([{ contentRect: { width: 1000 } }]));
+  const desktopAction = screen.getByRole('button', { name: '新目标' });
+  expect(desktopAction).not.toBe(mobileAction);
+  expect(document.activeElement).toBe(desktopAction);
+});
+
 it('shows member conditions and independent delivery errors together, keeping original report time after a paused retry with no outbox', async () => {
   const reportAt = Date.parse('2026-10-09T14:30:00Z'), updatedAt = Date.parse('2026-10-09T14:37:00Z');
   const record = task({ updatedAt, automationIssue: '消息投递失败：成员连接未恢复',
