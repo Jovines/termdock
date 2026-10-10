@@ -4,6 +4,8 @@ import { legacySplitTree } from '../terminal/freeSplitLayout';
 import { FreeSplitLayout } from './FreeSplitLayout';
 import { useSessionOrderStore } from '../stores/useSessionOrderStore';
 import { useSettledViewportWindow } from '../hooks/useSettledViewportWindow';
+import { isKeyboardLayerOpen, useKeyboardLayer } from '../hooks/useKeyboardLayer';
+import { canHandleSplitShortcut } from '../terminal/splitKeyboardShortcut';
 import React, { useEffect, useLayoutEffect, useCallback, useState, useRef, useMemo } from 'react';
 import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
@@ -434,7 +436,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const debugSession = useMemo(() => createDebugLogger('session'), []);
   const debugTerminal = useMemo(() => createDebugLogger('terminal'), []);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null);
+  const navigationRevisionRef = useRef(0);
+  const creationRevisionRef = useRef(0);
   const selectedPaneId = useCollaborationPanelDock(state => state.activePaneId);
   useEffect(() => { useCollaborationPanelDock.getState().setActivePane(activeSessionId); }, [activeSessionId]);
   const [pendingSwitchSessionId, setPendingSwitchSessionId] = useState<string | null>(null);
@@ -458,8 +462,18 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
   const [splitWorkspaces, setSplitWorkspaces] = useState<SplitWorkspace[]>(() => readSplitWorkspaces());
-  const [splitChooserOpen, setSplitChooserOpen] = useState(false);
+  const [splitChooserOpen, setSplitChooserOpenState] = useState(false);
+  const setSplitChooserOpen = useCallback((open: boolean) => {
+    navigationRevisionRef.current += 1;
+    setSplitChooserOpenState(open);
+  }, []);
+  const splitChooserRef = useRef<HTMLElement>(null);
+  const splitChooserOpenRef = useRef(splitChooserOpen);
+  splitChooserOpenRef.current = splitChooserOpen;
+  useKeyboardLayer(splitChooserRef, splitChooserOpen && !!activeSessionId, () => setSplitChooserOpen(false));
   const [splitNotice, setSplitNotice] = useState<string | null>(null);
+  const [closeFailure, setCloseFailure] = useState<CloseSessionEventDetail | null>(null);
+  const closingSessionIdsRef = useRef(new Set<string>());
   const [tmuxRecoveryPending, setTmuxRecoveryPending] = useState<'restore' | 'dismiss' | null>(null);
   const [tmuxRecoveryError, setTmuxRecoveryError] = useState<string | null>(null);
   const [isCreatingSplitSession, setIsCreatingSplitSession] = useState(false);
@@ -474,6 +488,16 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const swiperDrivenActiveSessionIdRef = useRef<string | null>(null);
   const isMobileRef = useRef(isMobileLayout);
   const activeSessionIdRef = useRef<string | null>(null);
+  const setActiveSessionId = useCallback((next: string | null) => {
+    if (next !== activeSessionIdRef.current) navigationRevisionRef.current += 1;
+    activeSessionIdRef.current = next;
+    setActiveSessionIdState(next);
+  }, []);
+  useEffect(() => useSidebarStore.subscribe((next, previous) => {
+    if (next.rightOpen !== previous.rightOpen || next.rightTab !== previous.rightTab) {
+      navigationRevisionRef.current += 1;
+    }
+  }), []);
   const resumeRequestTokenRef = useRef(0);
   const sessionsRef = useRef<TerminalSession[]>([]);
   const activeSessionIndexRef = useRef(0);
@@ -1578,6 +1602,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
+    const creationRevision = ++creationRevisionRef.current;
+    const navigationRevision = navigationRevisionRef.current;
+    const shouldActivate = () => creationRevision === creationRevisionRef.current
+      && navigationRevision === navigationRevisionRef.current
+      && (options?.shouldActivate?.() ?? true);
     try {
       // Capture the selected session's layout before the asynchronous request.
       const sidebar = useSidebarStore.getState();
@@ -1612,7 +1641,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         cwd: effectiveCwd,
         termType: 'xterm-256color',
         createIfEmpty: options?.createIfEmpty === true,
-      });
+      }, { shouldActivate });
+      // An explicitly closed frontend ID must not be resurrected by a pending
+      // reopen/reuse response, even in the runtime list or startup queue.
+      if (result.discarded) {
+        options?.onResult?.({ ok: false, error: 'unknown' });
+        return null;
+      }
       const canonical = result.session;
       const terminalSession = result.terminalSession;
       if (!result.reused && initialSidebarState) {
@@ -1641,7 +1676,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
       setSessions((prev) => upsertRuntimeSession(prev, nextSession));
 
-      setActiveSessionId(nextSession.id);
+      if (shouldActivate()) setActiveSessionId(nextSession.id);
 
       const store = useTerminalStore.getState();
       store.setTerminalSession(nextSession.id, {
@@ -1677,6 +1712,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     sessionId: string,
     options: { preserveMobileKeyboard?: boolean } = {},
   ) => {
+    navigationRevisionRef.current += 1;
     useCollaborationPanelDock.getState().setActivePane(sessionId);
     const previousSessionId = activeSessionIdRef.current;
     const shouldKeepKeyboardOpen = !!previousSessionId &&
@@ -1723,17 +1759,21 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const createSessionInSplit = useCallback(async () => {
     const primaryId = activeSessionIdRef.current;
     if (!primaryId || isCreatingSplitSession) return;
+    const navigationRevision = navigationRevisionRef.current;
     setIsCreatingSplitSession(true);
     const cwd = useTerminalStore.getState().sessions.get(primaryId)?.cwd ?? undefined;
     const secondaryId = await handleNewSession({
       cwd: cwd || undefined,
       mode: defaultSessionMode,
+      shouldActivate: () => false,
     });
     setIsCreatingSplitSession(false);
     if (!secondaryId) {
       setSplitNotice(t('common.error'));
       return;
     }
+    if (!splitChooserOpenRef.current || navigationRevision !== navigationRevisionRef.current
+      || !sessionsRef.current.some(session => session.id === primaryId)) return;
     setSplitWorkspaces((current) => combineSplitWorkspaces(current, primaryId, secondaryId));
     setSplitChooserOpen(false);
     activateSplitPane(primaryId, { preserveMobileKeyboard: false });
@@ -1755,6 +1795,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const handleSwitchSession = useCallback((sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
+      navigationRevisionRef.current += 1;
       useCollaborationPanelDock.getState().setActivePane(sessionId);
       if (sessionId === activeSessionIdRef.current) return;
       // A sidebar selection always changes the visible slide immediately.
@@ -1830,7 +1871,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const sessionId = typeof detail === 'string' ? detail : detail.sessionId;
     const closeMode = typeof detail === 'string' ? 'auto' : (detail.closeMode ?? 'auto');
     const session = sessions.find(s => s.id === sessionId);
-    if (!session) return;
+    if (!session || closingSessionIdsRef.current.has(sessionId)) return;
+    closingSessionIdsRef.current.add(sessionId);
+    navigationRevisionRef.current += 1;
     const nextActiveSessionId = pickSessionAfterClose(arranged, sessionId, (candidate) => candidate.id);
 
     try {
@@ -1852,18 +1895,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       }
     } catch (error) {
       console.error('[Session] Failed to close backend terminal:', error);
+      setCloseFailure({ sessionId, closeMode });
       return;
+    } finally {
+      closingSessionIdsRef.current.delete(sessionId);
     }
+    setCloseFailure(current => current?.sessionId === sessionId ? null : current);
 
-    // Remove from local state
-    setSessions(prev => {
-      const updated = prev.filter(s => s.id !== sessionId);
-      setActiveSessionId(nextActiveSessionId);
-      return updated;
-    });
+    const remaining = sessionsRef.current.filter(s => s.id !== sessionId);
+    const validNextSessionId = remaining.some(s => s.id === nextActiveSessionId)
+      ? nextActiveSessionId
+      : pickSessionAfterClose(sessionsRef.current, sessionId, candidate => candidate.id);
+    if (activeSessionIdRef.current === sessionId) setActiveSessionId(validNextSessionId);
+    setSessions(prev => prev.filter(s => s.id !== sessionId));
 
     // Remove from persistence
-    void removePersistedSession(sessionId, nextActiveSessionId);
+    void removePersistedSession(sessionId, validNextSessionId);
     delete keyboardOpenBySessionRef.current[sessionId];
 
     debugSession('[Session] Closed session:', { sessionId, closeMode });
@@ -2058,6 +2105,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   useEffect(() => {
     if (!activeSplitWorkspace || isMobileLayout) return;
     const handleSplitShortcut = (event: KeyboardEvent) => {
+      if (!canHandleSplitShortcut(event, isKeyboardLayerOpen())) return;
       if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return;
 
       const directionMatches =
@@ -2085,6 +2133,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         closeSplitWorkspace(activeSessionIdRef.current ?? undefined);
       }
     };
+    // Claim workspace keys before the terminal encodes them for the PTY, but
+    // only after the keyboard owner/editing/composition checks above.
     window.addEventListener('keydown', handleSplitShortcut, true);
     return () => window.removeEventListener('keydown', handleSplitShortcut, true);
   }, [activateSplitPane, activeSplitWorkspace, closeSplitWorkspace, isMobileLayout]);
@@ -2221,6 +2271,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   return (
     <div className="relative h-full flex flex-col">
+      {closeFailure && sessions.some(session => session.id === closeFailure.sessionId) && (
+        <div role="alert" className="fixed inset-x-3 top-[calc(var(--safe-top-inset)+0.75rem)] z-toast mx-auto flex max-w-lg items-center gap-3 rounded-xl border border-destructive/30 bg-surface-elevated px-4 py-3 text-[12px] text-foreground shadow-lg">
+          <span className="min-w-0 flex-1">{t('tab.closeFailed', { name: sessions.find(session => session.id === closeFailure.sessionId)!.name })}</span>
+          <button type="button" className="shrink-0 rounded-lg px-2 py-1 text-primary hover:bg-surface-2" onClick={() => void handleCloseSession(closeFailure)}>{t('common.retry')}</button>
+          <button type="button" className="shrink-0 rounded-lg p-1 hover:bg-surface-2" aria-label={t('common.close')} onClick={() => setCloseFailure(null)}><X size={16} /></button>
+        </div>
+      )}
       {tmuxRecovery && (
         <section
           className="fixed inset-x-3 top-[calc(var(--safe-top-inset)+0.75rem)] z-toast mx-auto max-w-lg rounded-2xl border border-warning/30 bg-surface-elevated px-4 py-3.5 shadow-[0_20px_60px_var(--app-shadow-strong)]"
@@ -2425,6 +2482,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             aria-label={t('common.close')}
           />
           <section
+            ref={splitChooserRef}
+            tabIndex={-1}
             className="fixed inset-x-3 bottom-3 z-modal-panel mx-auto max-h-[min(78svh,620px)] max-w-md overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-[0_24px_70px_var(--app-shadow-strong)] sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2"
             style={{ paddingBottom: 'var(--safe-bottom-inset)' }}
             role="dialog"

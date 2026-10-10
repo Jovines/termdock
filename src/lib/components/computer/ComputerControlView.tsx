@@ -45,6 +45,7 @@ export default function ComputerControlView() {
   const localTarget = preferences.target === 'local';
   const profile = preferences[preferences.target];
   const { host, platform, protocol, port, domain, ignoreCert, username } = profile;
+  const rdpBackendUnavailable = protocol === 'rdp' && service?.rdpAvailable === false;
   const { viewOnly, fit } = preferences;
   const hasSavedLogin = profile.rememberLogin && credentialKeys.includes(computerLoginKey(profile));
   const updateProfile = (patch: Partial<ComputerProfile>) => change(value => ({ ...value, [value.target]: { ...value[value.target], ...patch } }));
@@ -151,7 +152,9 @@ export default function ComputerControlView() {
     dispose(); setState('idle'); setPassword(''); setExpanded(false); setPanel(null); setClipboardSent(false);
   };
   const connect = async (event?: FormEvent) => {
-    event?.preventDefault(); autoAttempt.current = true;
+    event?.preventDefault();
+    if (rdpBackendUnavailable) return;
+    autoAttempt.current = true;
     if (state === 'credentials' && rfbRef.current && 'sendCredentials' in rfbRef.current) {
       loginPassword.current = password;
       rfbRef.current.sendCredentials({ username, password });
@@ -241,8 +244,8 @@ export default function ComputerControlView() {
   };
   connectRef.current = () => { void connect(); };
   useEffect(() => {
-    if (visible && loaded && service && preferences.autoConnect && hasSavedLogin && state === 'idle' && !autoAttempt.current) connectRef.current();
-  }, [visible, loaded, service, preferences.autoConnect, hasSavedLogin, state]);
+    if (visible && loaded && service && !rdpBackendUnavailable && preferences.autoConnect && hasSavedLogin && state === 'idle' && !autoAttempt.current) connectRef.current();
+  }, [visible, loaded, service, rdpBackendUnavailable, preferences.autoConnect, hasSavedLogin, state]);
   const forgetLogin = () => { autoAttempt.current = true; void credentialRequest('forget', profile).catch(() => {}); };
   const togglePanel = (next: 'tools' | 'clipboard' | 'keyboard') => { releaseTouchpad.current(); setPanel(value => value === next ? null : next); };
   const sendText = (value: string) => {
@@ -300,13 +303,13 @@ export default function ComputerControlView() {
             {hasSavedLogin && <button type="button" className="min-h-11 text-muted-foreground underline" disabled={busy || loginState === 'saving'} onClick={forgetLogin}>{t('computer.forgetLogin')}</button>}
           </div>
           {loginState === 'error' && !error && <p role="alert" className="text-xs text-destructive">{t('computer.loginSaveFailed')}</p>}
-          {protocol === 'rdp' && service?.rdpAvailable === false && <p role="status" className="text-xs text-muted-foreground">{t('computer.rdpBackendUnavailable')}</p>}
+          {rdpBackendUnavailable && <div role="status" className="space-y-1 text-xs leading-relaxed text-muted-foreground"><p>{t('computer.rdpBackendUnavailable')}</p><p>{t('computer.rdpBackendRecovery')}</p></div>}
           {state === 'credentials' && <p className="text-xs text-primary">{t('computer.credentials')}</p>}
           {error && <div role="alert" className="rounded-md bg-surface-2 p-3 text-xs leading-relaxed text-destructive">{t(error)}
             {error === 'computer.rdpCertificate' && <label className="mt-1 flex min-h-11 items-center gap-2 text-foreground"><input type="checkbox" checked={ignoreCert} onChange={event => setIgnoreCert(event.target.checked)} />{t('computer.trustCertificateHere')}</label>}
             {state === 'error' && error !== 'computer.rdpCertificate' && <button type="button" className="mt-1 block min-h-9 text-foreground underline" onClick={() => { setAdvanced(true); requestAnimationFrame(() => advancedRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })); }} >{t('computer.checkSettings')}</button>}
           </div>}
-          <button type="submit" className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground disabled:opacity-40" disabled={!loaded || state === 'connecting' || loginState === 'saving' || (localTarget && !service) || !host.trim() || (!password && (!hasSavedLogin || state === 'credentials')) || (protocol === 'rdp' && (!username.trim() || !Number.isInteger(Number(port)) || Number(port) < 1 || Number(port) > 65535))}>
+          <button type="submit" className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground disabled:opacity-40" disabled={!loaded || rdpBackendUnavailable || state === 'connecting' || loginState === 'saving' || (localTarget && !service) || !host.trim() || (!password && (!hasSavedLogin || state === 'credentials')) || (protocol === 'rdp' && (!username.trim() || !Number.isInteger(Number(port)) || Number(port) < 1 || Number(port) > 65535))}>
             {state === 'connecting' && <Loader2 size={16} className="animate-spin" />}{t(state === 'connecting' ? 'computer.connecting' : state === 'credentials' ? 'computer.authenticate' : state === 'error' ? 'computer.retryConnect' : 'computer.connect')}
           </button>
           <details ref={advancedRef} className="border-b border-border text-xs" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>

@@ -2,7 +2,7 @@
 import { useEffect } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); return { request, fetch, connect: vi.fn(), invalidate: vi.fn(), saved: vi.fn(), client: { request, fetch, targetPeerId: 'service' } }; });
+const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); return { request, fetch, connect: vi.fn(), invalidate: vi.fn(), saved: vi.fn(), accessProps: {} as Record<string, any>, client: { request, fetch, targetPeerId: 'service' } }; });
 vi.mock('./browserIntegration', () => ({
   SECURE_STATE_EVENT: 'termdock:secure-state',
   preferDirectConnection: vi.fn(), currentConnectionPath: () => 'direct', connectionRoutes: () => [],
@@ -16,9 +16,9 @@ vi.mock('./deviceAuthorization', async importOriginal => {
   const original = await importOriginal<typeof import('./deviceAuthorization')>();
   return { ...original, readDeviceAuthorization: (client: Parameters<typeof original.readDeviceAuthorization>[0], options: Parameters<typeof original.readDeviceAuthorization>[1]) => original.readDeviceAuthorization(client, { ...options, maxAgeMs: 0 }) };
 });
-vi.mock('../../components/FederationAccess', () => ({ default: () => <div>Service management</div> }));
+vi.mock('../../components/FederationAccess', () => ({ default: (props: Record<string, any>) => { mocks.accessProps = props; return <div>Service management<button onClick={props.onClose}>Close management</button></div>; } }));
 vi.mock('./SessionAccessView', () => ({ SessionAccessView: () => <div>Shared terminal</div> }));
-vi.mock('../components/auth/LoginScreen', () => ({ LoginScreen: () => <div>Password login</div> }));
+vi.mock('../components/auth/LoginScreen', () => ({ LoginScreen: (props: Record<string, any>) => <div>Password login<span>{props.serviceOrigin}</span><button disabled={!props.focusEnabled} onClick={props.onManageServices}>Manage before login</button></div> }));
 import { SecureAccessGate } from './SecureAccessGate';
 import { setConnectionRecovery, useConnectionRecovery } from './connectionRecovery';
 import { consumeWorkspaceSession, installWorkspaceHost } from '../services/workspaceHost';
@@ -181,5 +181,40 @@ describe('device authorization lifecycle', () => {
     mocks.request.mockResolvedValue({ type: 'result', id: 'permissions', fullService: false, grants: [] });
     fireEvent.focus(window);
     await screen.findByText('Password login'); expect(screen.queryByText('Active terminal')).toBeNull();
+  });
+});
+
+describe('entry recovery and invitation address contract', () => {
+  it('offers management before first single-service login and returns without authorization', async () => {
+    mocks.saved.mockReturnValue(undefined);
+    render(<SecureAccessGate><div>Active terminal</div></SecureAccessGate>);
+    await screen.findByText('Password login');
+    expect(screen.getByText(location.origin)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage before login' }));
+    await screen.findByText('Service management');
+    expect((screen.getByRole('button', { name: 'Manage before login' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText('Active terminal')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close management' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Manage before login' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByText('Active terminal')).toBeNull();
+  });
+  it.each(['loopback-only', 'disabled', 'conflict', 'error', 'active'])('keeps current invite origin and recommends only published domain for %s', async status => {
+    mocks.saved.mockReturnValue({ url: 'https://localhost:9881', serviceOrigin: 'https://localhost:9881', targetPeerId: 'service' });
+    mocks.fetch.mockResolvedValue(Response.json({ localAccess: { status, url: 'https://computer.termdock.local:9881', interfaces: [] } }));
+    mocks.request.mockImplementation(async (input: { type: string }) => input.type === 'invite-create' ? { code: 'b'.repeat(32), expiresAt: Date.now() + 600000 } : permitted);
+    // A valid service ID is needed for the invitation format.
+    mocks.client.targetPeerId = `12D3KooW${'a'.repeat(44)}`;
+    render(<SecureAccessGate><div>Active terminal</div></SecureAccessGate>);
+    await screen.findByText('Active terminal');
+    fireEvent(window, new Event('termdock:open-services'));
+    await screen.findByText('Service management');
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.accessProps.inviteAddresses).toEqual(status === 'active' ? [{ url: 'https://computer.termdock.local:9881', label: '服务域名' }] : []));
+    const { parseInviteLink } = await import('./inviteLink');
+    const generated = await mocks.accessProps.onCreateInvite({ scope: { kind: 'service' }, actions: ['session.view'] });
+    expect(parseInviteLink(generated.url).serviceOrigin).toBe('https://localhost:9881');
+    const custom = await mocks.accessProps.onCreateInvite({ entryAddress: 'https://[::1]:9881', scope: { kind: 'service' }, actions: ['session.view'] });
+    expect(parseInviteLink(custom.url).serviceOrigin).toBe('https://[::1]:9881');
+    expect(mocks.fetch.mock.calls).toHaveLength(1); // No silent origin substitution request.
   });
 });

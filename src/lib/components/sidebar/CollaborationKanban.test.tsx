@@ -29,7 +29,7 @@ describe('mobile kanban navigation', () => {
   fireEvent.click(screen.getByRole('button', { name: '筛选任务' }));
   fireEvent.click(screen.getByRole('checkbox', { name: '显示执行子任务' }));
   expect(container.querySelectorAll('[data-task-id]')).toHaveLength(2);
-  expect(screen.getByRole('button', { name: /内部执行步骤/ }).textContent).toContain('执行交付已评审');
+  expect(container.querySelector('[data-task-id="child"]')?.textContent).toContain('执行交付已评审');
  });
  it('routes a hidden execution exception through its goal card into the task that needs attention', () => {
   const child = { ...base, id: 'child', parentTaskId: base.id, title: '检查访问条件', automationIssue: '测试错误：执行目录不可用' };
@@ -77,4 +77,30 @@ describe('mobile kanban navigation', () => {
   expect(settings).toHaveBeenCalledOnce(); expect(select).not.toHaveBeenCalled();
   expect(screen.queryByLabelText('看板更多操作')).toBeNull();
  });
+});
+
+it('surfaces unfinished execution first and opens a step directly without opening the goal', () => {
+  const children = Array.from({ length: 5 }, (_, i) => ({ ...base, id: `step-${i}`, parentTaskId: base.id, title: i === 4 ? '统一集成并验证部署' : `已交付事项 ${i}`, status: i === 4 ? 'open' as const : 'accepted' as const, updatedAt: i + 10, completionMode: i === 4 ? undefined : 'reviewed' as const }));
+  const { container, select } = setup([base, ...children]);
+  expect(container.querySelectorAll('[data-task-id]')).toHaveLength(1);
+  const preview = screen.getByRole('region', { name: '执行事项' });
+  expect(within(preview).getByText('4/5 项已完成')).toBeTruthy();
+  const rows = within(preview).getAllByRole('button').filter(row => !row.closest('details'));
+  expect(rows[0].textContent).toContain('统一集成并验证部署');
+  expect(rows[0].textContent).toContain('等待投递');
+  expect(rows).toHaveLength(3);
+  fireEvent.click(rows[0]);
+  expect(select).toHaveBeenCalledExactlyOnceWith('step-4');
+  expect(within(preview).getByText('展开其余 2 项')).toBeTruthy();
+  expect(container.querySelector('button button')).toBeNull();
+});
+it('keeps available execution summaries visible when full child records are absent', () => {
+  const root = { ...base, children: [{ id: 'missing', title: '等待完整执行报告', revision: 1, status: 'open' as const }, { id: 'closed', title: '已关闭步骤', revision: 1, status: 'closed' as const }] };
+  const { select } = setup([root]);
+  const preview = screen.getByRole('region', { name: '执行事项' });
+  expect(within(preview).getByText('0/1 项已完成')).toBeTruthy();
+  const row = within(preview).getByRole('button', { name: /等待完整执行报告/ });
+  expect(row.textContent).toContain('等待报告');
+  expect(screen.queryByText('已关闭步骤')).toBeNull();
+  fireEvent.click(row); expect(select).toHaveBeenCalledExactlyOnceWith('missing');
 });

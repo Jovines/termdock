@@ -1,4 +1,5 @@
 import { collaborationBoardStatus, collaborationBoardTasks } from '../../collaboration/boardTasks';
+import { CollaborationExecutionPreview } from './CollaborationExecutionPreview';
 import { CollaborationReportMeta } from './CollaborationReportMeta';
 import { collaborationResultPresentation } from '../../collaboration/resultPresentation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
@@ -143,7 +144,7 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
         {filtersOpen && filterPanel}
       </>}
     </div>
-    <p className="px-1 text-[11px] leading-5 text-muted-foreground">{showSteps ? '包含执行子任务，可在筛选中切回目标视图。' : '每张卡片是一件你要完成的事；执行过程保留在目标详情中。'}</p>
+    <p className="px-1 text-[11px] leading-5 text-muted-foreground">{showSteps ? '包含执行子任务，可在筛选中切回目标视图。' : '每张卡片对应一个目标，待完成事项和最近交付直接显示在卡片中。'}</p>
     <nav hidden={desktop} aria-label="看板阶段" className={`${desktop ? "hidden" : "grid"} shrink-0 grid-cols-4 gap-1`}>{lanes.map(l => <button key={l.id} type="button" aria-pressed={lane === l.id} className={`min-h-11 rounded-lg px-1 text-xs ${lane === l.id ? 'bg-surface-2 text-foreground' : 'text-muted-foreground'}`} onClick={() => selectLane(l.id)}>{l.label}<span className="ml-1 tabular-nums">{scoped.filter(t => boardLane(t) === l.id).length}</span></button>)}</nav>
     <div ref={desktop ? undefined : laneScroll} data-kanban-scroll onPointerDown={() => { scrollingToLane.current = null; }} onWheel={() => { scrollingToLane.current = null; }} aria-label={desktop ? undefined : '可左右滑动的任务看板'} onScroll={desktop ? undefined : event => {
       if (event.target !== event.currentTarget || !event.currentTarget.clientWidth) return;
@@ -179,9 +180,8 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
               const followup = actionable.events.filter(e => e.kind === 'revise' && e.source === 'user' && e.attemptId === actionable.activeAttemptId && (!result || e.createdAt >= result.createdAt)).at(-1);
               const preview = question ? question.question || '成员提出了一个问题，打开后可查看并回答。' : blocker?.summary || followup?.content || (result?.summary || (attempt?.report?.content ? collaborationResultPresentation(attempt.report.content).summary : attempt?.report?.summary || ''));
               const parent = tasks.find(t => t.id === task.parentTaskId);
-              const done = row.children.length ? row.children.filter(t => t.status === 'accepted').length : task.children?.filter(t => t.status === 'accepted').length ?? 0;
-              const total = row.children.length || task.children?.filter(t => t.status !== 'closed').length || 0;
-              return <button type="button" key={task.id} data-task-id={task.id} aria-pressed={selectedId === task.id} className={`block w-full rounded-xl border bg-surface p-4 text-left shadow-sm transition hover:border-primary/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${selectedId === task.id ? 'border-primary/60' : issue ? 'border-destructive/35' : 'border-border/20'}`} onClick={() => onSelect(actionable.id)}>
+              return <article key={task.id} aria-label={task.title} className={`overflow-hidden rounded-xl border bg-surface text-left shadow-sm ${selectedId === task.id ? 'border-primary/60' : issue ? 'border-destructive/35' : 'border-border/20'}`}>
+              <button type="button" data-task-id={task.id} aria-pressed={selectedId === task.id} className="block w-full rounded-xl p-4 text-left transition hover:bg-surface-2/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" onClick={() => onSelect(actionable.id)}>
                 {parent && <span className="mb-2 block truncate text-[10px] text-muted-foreground">{parent.title}</span>}
                 <span title={task.title} className="block line-clamp-3 break-words text-sm font-medium leading-6 text-foreground">{task.title}</span>
                 <span className={`mt-3 flex items-center gap-1.5 text-xs ${issue && blocker?.source !== 'member' ? 'text-destructive' : attention ? 'text-primary' : 'text-muted-foreground'}`}>{issue && blocker?.source !== 'member' && <AlertTriangle size={13} className="shrink-0" />}{displayStage}</span>
@@ -191,10 +191,11 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
                 {systemBlocker && blocker?.source === 'member' && <span className="mt-2 block line-clamp-2 break-words text-xs leading-5 text-destructive">{systemBlocker.label}：{systemBlocker.summary}</span>}
                 {unknownRecord && <span className="mt-2 block line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{unknownRecord.label}：{unknownRecord.summary}</span>}
                 {attention && <span className={`mt-4 flex min-h-9 items-center justify-between rounded-lg px-2.5 text-xs font-medium ${issue ? 'bg-destructive/10 text-destructive' : 'bg-primary/10 text-primary'}`}>{actionLabel}<ArrowUpRight size={14} /></span>}
-                {total > 0 && <span className="mt-3 block text-[11px] text-muted-foreground">{done}/{total} 项执行交付已评审 · 过程见详情</span>}
-                {!attention && (task.status === 'accepted' || task.artifacts.some(a => a.kind === 'result' && a.attemptId === task.activeAttemptId)) && <span className="mt-3 flex min-h-9 items-center justify-between text-xs font-medium text-primary">查看结果<ArrowUpRight size={14} /></span>}
-                <span className="mt-4 block border-t border-border/10 pt-3 text-[11px] text-muted-foreground"><span className="block truncate">{row.attention ? '待处理任务负责人：' : task.workflow?.kind === 'goal' ? '协调者：' : '负责人：'}{attempt ? name(actionable, attempt.assignee) : actionable.scheduledAssignee ? name(actionable, actionable.scheduledAssignee) : '未分派'}</span><CollaborationReportMeta task={actionable} now={now} /></span>
-              </button>;
+                {!attention && (task.status === 'accepted' || task.artifacts.some(a => a.kind === 'result' && a.attemptId === task.activeAttemptId)) && <span className="mt-3 flex min-h-9 items-center justify-between text-xs font-medium text-primary">{followup ? "查看跟进" : "查看结果"}<ArrowUpRight size={14} /></span>}
+              </button>
+              <CollaborationExecutionPreview task={task} children={row.children} onSelect={onSelect} />
+              <div className="mx-4 border-t border-border/10 py-3 text-[11px] text-muted-foreground"><span className="block truncate">{row.attention ? '待处理任务负责人：' : task.workflow?.kind === 'goal' ? '协调者：' : '负责人：'}{attempt ? name(actionable, attempt.assignee) : actionable.scheduledAssignee ? name(actionable, actionable.scheduledAssignee) : '未分派'}</span><CollaborationReportMeta task={actionable} now={now} compact /></div>
+              </article>;
             })}{!records.length && <p className="px-2 py-3 text-xs leading-6 text-muted-foreground/70">{query || scope !== 'all' ? '没有匹配的任务' : tasks.length ? '暂无任务' : l.hint}</p>}</div>
           </section>;
         })}

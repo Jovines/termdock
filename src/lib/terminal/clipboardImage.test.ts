@@ -103,7 +103,7 @@ describe('terminal clipboard image', () => {
     const requests: RequestInit[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {
       if (url === '/api/csrf-token') return Response.json({ csrfToken: 'encrypted' });
-      expect(url).toBe('/api/terminal/fs/upload?dir=%2Ftmp');
+      expect(url).toBe('/api/terminal/fs/upload?dir=%2Ftmp&fileCount=1');
       requests.push(init);
       return Response.json({ files: [{ path: '/tmp/collision-safe.png' }] });
     }));

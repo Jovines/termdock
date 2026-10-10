@@ -8,6 +8,7 @@ import { activateServiceWorkspace, getWorkspaceHost } from '../services/workspac
 import { BOOT_SERVICE_ID, ENTRY_KEY, selectedTarget, saveSelectedTarget, clearSelectedTarget, migrateLegacyServiceState } from './clientScope';
 import { getIdentity } from './deviceIdentity';
 import { isConnectionInterruption, setConnectionRecovery } from './connectionRecovery';
+import { PasswordLoginFailure, passwordLoginFailure } from './passwordLoginFailure';
 export { getIdentity } from './deviceIdentity';
 
 export const SECURE_STATE_EVENT = 'termdock:secure-state';
@@ -73,7 +74,11 @@ async function authenticateServicePasswordDirect(url: string, password: string):
   const endpoint = (path: string) => url === location.origin ? path : new URL(path, url).href;
   const request = async (path: string, body?: unknown) => {
     const response = await nativeFetch(endpoint(path), { credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15_000), ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
-    if (!response.ok) throw new Error(response.status === 429 ? '尝试次数较多，请稍后再试。' : response.status === 401 ? '密码不正确，请重新输入。' : '暂时无法登录这台服务，请稍后重试。');
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      const retryAfterMs = typeof data?.retryAfterMs === 'number' && Number.isFinite(data.retryAfterMs) && data.retryAfterMs >= 0 ? data.retryAfterMs : undefined;
+      throw new PasswordLoginFailure(response.status === 429 ? 'RATE_LIMITED' : response.status === 401 ? 'INVALID_PASSWORD' : 'LOGIN_UNAVAILABLE', retryAfterMs);
+    }
     return response.json();
   };
   const { saltHex } = await request('/api/auth/password/parameters');
@@ -81,9 +86,7 @@ async function authenticateServicePasswordDirect(url: string, password: string):
   const state = await startPasswordBootstrap(password, saltHex);
   try {
     const started = await request('/api/auth/password/start', { startLoginRequest: state.startLoginRequest, clientIdentity: identity.peerId });
-    let verified;
-    try { verified = await finishPasswordBootstrap(state, started, { clientIdentity: identity.peerId, origin: location.origin }); }
-    catch { throw new Error('密码不正确，或服务身份无法验证。请检查后重试。'); }
+    const verified = await finishPasswordBootstrap(state, started, { clientIdentity: identity.peerId, origin: location.origin });
     await request('/api/auth/password/finish', { attemptId: verified.attemptId, finishLoginRequest: verified.finishLoginRequest });
     return { url, targetPeerId: verified.serverIdentity, serviceName: new URL(url).host, serviceOrigin: url };
   } finally { state.passwordKey = ''; }
@@ -98,7 +101,7 @@ async function authenticateServicePassword(url: string, password: string): Promi
   catch (error) {
     if (!(error instanceof TypeError) && !(error instanceof DOMException)) throw error;
     const known = (await listServiceConnections()).find(item => item.targetPeerId && (item.serviceOrigin || item.url) === url);
-    if (!known?.targetPeerId) throw new Error('暂时连不上这台服务，请检查地址和网络。');
+    if (!known?.targetPeerId) throw passwordLoginFailure(error);
     const intent = { ...known, targetPeerId: known.targetPeerId, serviceName: known.label };
     await authenticatePinnedPassword(intent, password);
     return intent;
@@ -113,9 +116,9 @@ async function authenticatePinnedPassword(intent: ConnectionIntent, password: st
     state = await startPasswordBootstrap(password, String(params.saltHex));
     const response = await client.request({ type: 'password-start', startLoginRequest: state.startLoginRequest, origin: location.origin });
     const verified = await finishPasswordBootstrap(state, response as unknown as Parameters<typeof finishPasswordBootstrap>[1], { clientIdentity: (await getIdentity()).peerId, origin: location.origin });
-    if (verified.serverIdentity !== intent.targetPeerId) throw new Error('服务身份发生变化。');
+    if (verified.serverIdentity !== intent.targetPeerId) throw new PasswordLoginFailure('IDENTITY_MISMATCH');
     await client.request({ type: 'password-finish', attemptId: verified.attemptId, finishLoginRequest: verified.finishLoginRequest });
-  } catch { throw new Error('暂时无法登录，请检查目标服务密码与入口授权后重试。'); }
+  } catch (error) { throw passwordLoginFailure(error); }
   finally { if (state) state.passwordKey = ''; client.close(); }
 }
 
@@ -128,7 +131,8 @@ async function passwordLogin(password: string): Promise<Response> {
     await connectDevice({ ...intent, routes: selected?.routes, serviceName: selected?.serviceName || intent.serviceName });
     return Response.json({ ok: true });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : '暂时无法登录，请重试。', code: 'INVALID_PASSWORD' }, { status: 401 });
+    const failure = passwordLoginFailure(error);
+    return Response.json({ error: failure.message, code: failure.code, retryAfterMs: failure.retryAfterMs }, { status: failure.status });
   }
 }
 /** An address is sufficient for one's own service; an invitation is optional. */

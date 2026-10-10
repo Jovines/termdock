@@ -1,5 +1,7 @@
+import { CollaborationGroupLauncher } from './CollaborationGroupLauncher';
+import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { CollaborationTaskWorkbench } from './CollaborationTaskWorkbench';
-import { freshGroupSettingsDraft, groupSettingsDirty, readGroupSettingsDraft, writeGroupSettingsDraft, type GroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
+import { freshGroupSettingsDraft, groupSettingsDirty, readGroupSettingsDraft, rebaseGroupSettingsDraft, writeGroupSettingsDraft, type GroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
 import { collaborationMemberLabel, collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { collaborationGroupPreferences, collaborationPanelClientId, relativePanelPosition, saveCollaborationPanel } from '../../collaboration/panelPreferences';
@@ -35,6 +37,7 @@ import {
   saveCollaborationGroup,
   setCollaborationMemberRole,
   setCollaborationGroupRules,
+  TerminalApiError,
   searchTerminalSessions,
   sendCollaborationMessage,
   spawnCollaborationAgent,
@@ -69,6 +72,7 @@ function initialWorkbenchTab(): Tab {
 
 interface AgentOperationsPanelProps {
   initialFloating?: boolean;
+  visible?: boolean;
   onFloatingChange?: (groupId: string | null) => Promise<void>;
   onEnterGroup?: (groupId: string) => Promise<void>;
   activeSessionId: string | null;
@@ -89,14 +93,17 @@ const sharedDraftOrigins = new WeakMap<object, object>();
 export function AgentOperationsPanel(props: AgentOperationsPanelProps) {
   const [overlay, setOverlay] = useState<'floating' | 'full' | null>(null);
   const [residentClosed, setResidentClosed] = useState(false);
-  const [drafts, setDrafts] = useState<PanelDrafts>({});
-  const loadDrafts = useCallback((saved: PanelDrafts) => setDrafts(current => ({ ...saved, ...current })), []);
-  const updateDraft = useCallback((id: string, draft: PanelDrafts[string], origin?: object) => setDrafts(current => {
-    if (JSON.stringify(current[id]) === JSON.stringify(draft)) return current;
+  const drafts = useCollaborationNavigation(state => state.drafts);
+  const loadDrafts = useCallback((saved: PanelDrafts) => {
+    const navigation = useCollaborationNavigation.getState();
+    for (const [id, draft] of Object.entries(saved)) if (!navigation.drafts[id]) navigation.setDraft(id, draft);
+  }, []);
+  const updateDraft = useCallback((id: string, draft: PanelDrafts[string], origin?: object) => {
+    if (JSON.stringify(useCollaborationNavigation.getState().drafts[id]) === JSON.stringify(draft)) return;
     const shared = { ...draft };
     if (origin) sharedDraftOrigins.set(shared, origin);
-    return { ...current, [id]: shared };
-  }), []);
+    useCollaborationNavigation.getState().setDraft(id, shared);
+  }, []);
   const shared = { drafts, loadDrafts, updateDraft };
   return <>
     {!residentClosed && <AgentOperationsPanelView {...props} {...shared} overlayObscured={!!overlay} onOpenOverlay={setOverlay}
@@ -107,7 +114,7 @@ export function AgentOperationsPanel(props: AgentOperationsPanelProps) {
   </>;
 }
 
-function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId = null, initialFloating = false, onFloatingChange, onEnterGroup, defaultSessionMode = 'shell', onClose, onNewSession,
+function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId = null, initialFloating = false, onFloatingChange, onEnterGroup, visible = true, defaultSessionMode = 'shell', onClose, onNewSession,
   overlayOnly = false, overlayObscured = false, onOpenOverlay, drafts, loadDrafts, updateDraft,
 }: AgentOperationsPanelProps & {
   overlayOnly?: boolean;
@@ -269,7 +276,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
   const panelPreferencesReady = !!panelState || !!preferenceError;
   const waitingForDockHost = !overlayOnly && floating && panelMode === 'docked'
     && !!(dock ?? panelState?.dock) && !dockHost;
-  const floatingVisible = panelPreferencesReady && !waitingForDockHost && !!activeSessionId
+  const floatingVisible = visible && panelPreferencesReady && !waitingForDockHost && !!activeSessionId
     && (!initialCollaborationGroupId || !!dockHost || !!selectedGroup?.sessionIds.includes(activeSessionId)
       || !!initialCollaborationGroupId && (sessionsState !== 'loading' && !directCollaborationGroup || !!preferenceError));
   useLayoutEffect(() => {
@@ -397,6 +404,17 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
     await openCollaborationSession(session);
   };
 
+  const compactHub = !floating && !groupWorkspace && tab === 'collaboration';
+  const enterGroupView = async (id: string, view: 'tasks' | 'messages') => {
+    if (busy) return;
+    setBusy(`open-group:${id}`); setError(null);
+    try {
+      await onEnterGroup?.(id);
+      useCollaborationNavigation.getState().open(id, view);
+      onClose();
+    } catch (error) { setError(error instanceof Error ? error.message : '无法打开协作组，请重试'); }
+    finally { setBusy(null); }
+  };
   return createPortal(
     <>
       {!floating && <button
@@ -405,7 +423,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
         onClick={onClose}
         aria-label="关闭 Agent 工作台"
       />}
-      <section onPointerDown={event => { if (docked) event.stopPropagation(); }} ref={panelRef} role={overlayOnly && !floating ? 'dialog' : undefined} aria-modal={overlayOnly && !floating ? true : undefined} aria-hidden={overlayObscured || undefined} aria-label={docked ? '工作组消息分屏' : floating ? '工作组消息浮窗' : 'Agent 工作台'} style={floating && !docked ? { display: floatingVisible ? undefined : 'none', left: position.x, top: position.y, ...(panelSize ? { width: `min(calc(100vw - 24px), max(280px, ${panelSize.width * 100}vw))`, height: `min(calc(100dvh - 24px), max(220px, ${panelSize.height * 100}dvh))` } : {}), maxHeight: viewportHeight ? viewportHeight - 24 : 'calc(100dvh - 24px)' } : undefined} className={docked ? 'flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface' : floating ? 'fixed z-menu-panel flex w-[min(400px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-xl' : `fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,var(--app-vv-offset-top,0px),env(safe-area-inset-top,0px))] h-[calc(var(--app-visible-vh,100dvh)-max(1.5rem,var(--app-vv-offset-top,0px),env(safe-area-inset-top,0px))-max(1.5rem,env(safe-area-inset-bottom,0px)))] z-modal-panel mx-auto flex ${groupWorkspace ? 'max-w-6xl' : 'max-w-3xl'} flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[calc(var(--app-visible-vh,100dvh)*0.08)] sm:h-[calc(var(--app-visible-vh,100dvh)*0.84)]`}>
+      <section data-sidebar-gesture-ignore onPointerDown={event => { if (docked) event.stopPropagation(); }} ref={panelRef} role={overlayOnly && !floating ? 'dialog' : undefined} aria-modal={overlayOnly && !floating ? true : undefined} aria-hidden={overlayObscured || undefined} aria-label={docked ? '工作组消息分屏' : floating ? '工作组消息浮窗' : 'Agent 工作台'} style={!visible ? { display: 'none' } : floating && !docked ? { display: floatingVisible ? undefined : 'none', left: position.x, top: position.y, ...(panelSize ? { width: `min(calc(100vw - 24px), max(280px, ${panelSize.width * 100}vw))`, height: `min(calc(100dvh - 24px), max(220px, ${panelSize.height * 100}dvh))` } : {}), maxHeight: viewportHeight ? viewportHeight - 24 : 'calc(100dvh - 24px)' } : undefined} className={docked ? 'flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface' : floating ? 'fixed z-menu-panel flex w-[min(400px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-xl' : `fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,var(--app-vv-offset-top,0px),env(safe-area-inset-top,0px))] ${compactHub ? 'max-h' : 'h'}-[calc(var(--app-visible-vh,100dvh)-max(1.5rem,var(--app-vv-offset-top,0px),env(safe-area-inset-top,0px))-max(1.5rem,env(safe-area-inset-bottom,0px)))] z-modal-panel mx-auto flex ${groupWorkspace ? 'max-w-6xl' : 'max-w-3xl'} flex-col overflow-hidden rounded-2xl border border-border/15 bg-surface shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[calc(var(--app-visible-vh,100dvh)*0.08)] ${compactHub ? 'sm:max-h-[calc(var(--app-visible-vh,100dvh)*0.84)]' : 'sm:h-[calc(var(--app-visible-vh,100dvh)*0.84)]'}`}>
         <header data-pane-titlebar={docked ? "true" : undefined} data-panel-drag-title={docked ? "true" : undefined} onDragStart={event => event.preventDefault()} className={`flex items-center gap-2 border-b border-border/15 ${docked ? 'min-h-9 shrink-0 cursor-grab select-none bg-[var(--chrome-bg)] px-3 active:cursor-grabbing' : floating ? 'px-3 py-2 cursor-move touch-none select-none' : 'px-4 py-3'}`}
           onPointerDown={event => {
             if (!floating || docked || event.button !== 0 || (event.target as Element).closest('button, summary')) return;
@@ -428,9 +446,9 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
             <h2 className={`${floating ? 'truncate text-[12px]' : 'text-[14px]'} font-semibold text-foreground`} title={docked ? '拖动标题移动面板；放在边缘拆分，中央交换' : directCollaborationGroup?.name}>{directCollaborationGroup ? directCollaborationGroup.name : initialCollaborationGroupId ? '协作工作区' : 'Agent 工作台'}</h2>
             {!docked && !groupWorkspace && <p className="text-[10px] text-muted-foreground">{floating ? '引用、文件路径和粘贴优先加入此处' : directCollaborationGroup ? '分派任务、回答问题、审阅与验收结果' : '自动任务、会话协作与历史搜索'}</p>}
           </div>
-          {!docked && !overlayOnly && tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '展开' : '放到终端旁'}</button>}
+          {!docked && !overlayOnly && groupWorkspace && tab === 'collaboration' && groups.length > 0 && <button className={`${buttonClass} shrink-0 text-primary hover:bg-primary/10`} disabled={savingFloating} onClick={() => void changeFloating(!floating)}>{floating ? '展开' : '放到终端旁'}</button>}
           {groupWorkspace && directCollaborationGroup && <span className="shrink-0 text-[11px] text-muted-foreground">{directCollaborationGroup.sessionIds.length} 人</span>}
-          {docked && <button type="button" aria-label="展开协作工作区" title="展开查看目标与交付" disabled={savingFloating} className="flex min-h-11 shrink-0 items-center justify-center rounded-lg px-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => onOpenOverlay('full')}><Maximize2 size={15} /></button>}
+          {docked && !onEnterGroup && <button type="button" aria-label="展开协作工作区" title="展开查看目标与交付" disabled={savingFloating} className="flex min-h-11 shrink-0 items-center justify-center rounded-lg px-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={() => onOpenOverlay('full')}><Maximize2 size={15} /></button>}
           {docked && <details className="relative z-20 shrink-0">
             <summary aria-label="面板布局" title="面板布局" className="flex min-h-8 cursor-pointer list-none items-center rounded px-2 text-muted-foreground hover:bg-surface-2 [&::-webkit-details-marker]:hidden"><MoreHorizontal size={16} /></summary>
             <div className="absolute right-0 top-full z-30 w-36 rounded-lg border border-border/20 bg-surface-2 p-1 shadow-lg">
@@ -463,15 +481,15 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
           {visitedTabs.has('automation') && <div id="workbench-automation" className={tab === 'automation' ? 'h-full min-h-0 p-4' : 'hidden'}>
             <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions.filter(session => !remoteSessionAddress(session.sessionId))} activeSessionId={activeSessionId} loading={automationsState === 'loading'} loadError={automationsError} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />
           </div>}
-          {visitedTabs.has('collaboration') && <div id="workbench-collaboration" className={tab === 'collaboration' ? `h-full min-h-0 overflow-x-hidden overflow-y-auto overscroll-y-contain ${floating ? 'p-3' : 'p-4'}` : 'hidden'}>
+          {visitedTabs.has('collaboration') && <div id="workbench-collaboration" className={tab === 'collaboration' ? `${compactHub ? '' : 'h-full'} min-h-0 overflow-x-hidden overflow-y-auto overscroll-y-contain ${floating ? 'p-3' : 'p-4'}` : 'hidden'}>
           {!panelState && !preferenceError && <p role="status" className="text-[11px] text-muted-foreground">正在恢复消息面板…</p>}
           {initialCollaborationGroupId && !directCollaborationGroup && <div role="status" className="space-y-2 text-[11px] text-muted-foreground">
             <p>{sessionsState === 'loading' ? '正在加载协作组…' : sessionsState === 'error' ? '协作组加载失败，恢复连接后可重试。' : '此协作组暂不可用，已释放分屏位置。草稿和布局偏好仍保留。'}</p>
             {sessionsState !== 'loading' && <button className={buttonClass} onClick={() => void refresh()}>重新加载</button>}
           </div>}
           {preferenceError && <p role="alert" className="text-[11px] text-destructive">{preferenceError}</p>}
-          {panelState && (!initialCollaborationGroupId || directCollaborationGroup) && <CollaborationTab active={tab === 'collaboration'} notice={notice} initialDrafts={drafts} onDraftChange={updateDraft} docked={docked} inputKeySuffix={overlayOnly ? ':overlay' : ''} selectedGroupId={selectedGroupId} setSelectedGroupId={chooseGroup} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} onOpenSession={async session => { await openMemberSession(session); if (!floating) onClose(); }} onOpenTaskSession={openMemberSession} onEnterGroup={onEnterGroup} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
-          {!groupWorkspace && peerState && <CollaborationServiceManager peers={peerState} currentGroupId={selectedGroup?.id} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} onSelectGroup={chooseGroup} />}
+          {panelState && (!initialCollaborationGroupId || directCollaborationGroup) && <CollaborationTab active={tab === 'collaboration'} notice={notice} initialDrafts={drafts} onDraftChange={updateDraft} docked={docked} inputKeySuffix={overlayOnly ? ':overlay' : ''} selectedGroupId={selectedGroupId} setSelectedGroupId={chooseGroup} floatingVisible={floatingVisible} floating={floating} sessionsState={sessionsState} groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} onOpenSession={async session => { await openMemberSession(session); if (!floating) onClose(); }} onOpenTaskSession={openMemberSession} onEnterGroup={onEnterGroup} onOpenGroup={enterGroupView} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {!groupWorkspace && peerState && <CollaborationServiceManager peers={peerState} currentGroupId={selectedGroupId === 'new' ? undefined : selectedGroup?.id} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} onSelectGroup={id => { void enterGroupView(id, 'messages'); }} />}
           </div>}
           {visitedTabs.has('search') && <div id="workbench-search" className={tab === 'search' ? 'h-full min-h-0 overflow-y-auto overscroll-y-contain p-4' : 'hidden'}>
             <SearchTab active={tab === 'search'} onClose={onClose} onNewSession={onNewSession} setError={setError} />
@@ -763,13 +781,16 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-export function CollaborationTab({ fullWorkspace = false, active, notice, initialDrafts, onDraftChange, docked, inputKeySuffix, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, onOpenSession, onOpenTaskSession, onEnterGroup, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+export function CollaborationTab({ fullWorkspace = false, initialView = 'tasks', onOpenGroup, active, notice, initialDrafts, onDraftChange, docked, inputKeySuffix, selectedGroupId, setSelectedGroupId, floatingVisible, floating, sessionsState, groups, sessions, agents, activeSessionId, initialGroupId, onOpenSession, onOpenTaskSession, onEnterGroup, onDockMessages, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
   fullWorkspace?: boolean;
+  initialView?: 'tasks' | 'messages';
+  onOpenGroup?: (id: string, view: 'tasks' | 'messages') => Promise<void>;
   active: boolean;
   notice: string | null;
   onOpenSession: (session: OrchestrationSession) => Promise<void>;
   onOpenTaskSession: (session: OrchestrationSession) => Promise<void>;
   onEnterGroup?: (groupId: string) => Promise<void>;
+  onDockMessages?: () => Promise<void>;
   selectedGroupId: string | null;
   setSelectedGroupId: (id: string | null) => void;
   floatingVisible: boolean;
@@ -782,7 +803,10 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; defaultSessionMode: 'shell' | 'tmux'; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
 }) {
-  const [workspaceView, setWorkspaceView] = useState<'tasks' | 'messages'>('tasks');
+  const messagePanel = floating && !!initialGroupId && !!onEnterGroup && !fullWorkspace;
+  const [workspaceView, setWorkspaceView] = useState<'tasks' | 'messages'>(() => messagePanel ? 'messages' : initialView);
+  useEffect(() => { if (fullWorkspace) setWorkspaceView(initialView); }, [initialView, fullWorkspace]);
+  const [messageMembersOpen, setMessageMembersOpen] = useState(false);
   const [taskAttention, setTaskAttention] = useState(0);
   useEffect(() => setTaskAttention(0), [selectedGroupId]);
   const [name, setName] = useState('');
@@ -795,21 +819,20 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const connection = useConnectionRecovery();
-  const [responseFilter, setResponseFilter] = useState('all');
-  const [onlyNew, setOnlyNew] = useState(false);
-  const [seenMessages, setSeenMessages] = useState<Set<string>>(new Set());
   const [targetSessionIds, setTargetSessionIds] = useState<string[] | null>(null);
   const [content, setContent] = useState('');
   const [editingMembers, setEditingMembers] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsContainer = useRef<HTMLDivElement | null>(null);
   const settingsTrigger = useRef<HTMLButtonElement | null>(null);
+  const requestedSettingsGroup = useRef<string | null>(null);
   const closeSettings = () => {
+    requestedSettingsGroup.current = null;
     setSettingsOpen(false);
     // The hidden board measures as narrow; allow its responsive toolbar to return first.
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (settingsTrigger.current?.isConnected && settingsTrigger.current.getClientRects().length) settingsTrigger.current.focus();
-      else Array.from(settingsContainer.current?.querySelectorAll<HTMLElement>('button[aria-label="组设置"], button[aria-label="更多看板操作"]') ?? []).find(button => button.getClientRects().length)?.focus();
+      else Array.from(settingsContainer.current?.querySelectorAll<HTMLElement>('button[aria-label="组设置"], button[aria-label="更多看板操作"], summary[aria-label="更多协作操作"]') ?? []).find(button => button.getClientRects().length)?.focus();
     }));
   };
   const [confirmRemoveMemberId, setConfirmRemoveMemberId] = useState<string | null>(null);
@@ -928,7 +951,7 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
   const unavailableSelectedIds = [...selected].filter((id) => !availableSessionIds.has(id));
   const memberOptions = collaborationMemberOptions(selectedGroup, sessions);
   const normalizedSessionQuery = sessionQuery.trim().toLocaleLowerCase();
-  const filteredSessions = sessions.filter((session) => !normalizedSessionQuery || [session.name, session.serviceLabel ?? '', session.cwd, friendlyCurrentTask(session.currentTask)]
+  const filteredSessions = sessions.filter((session) => !normalizedSessionQuery || [collaborationMemberLabel(session, sessions), session.name, session.serviceLabel ?? '', session.cwd, friendlyCurrentTask(session.currentTask)]
     .some((value) => value.toLocaleLowerCase().includes(normalizedSessionQuery)));
   const createServiceGroups = groupSessionsByService(filteredSessions);
   const memberServiceGroups = groupSessionsByService(memberOptions);
@@ -937,12 +960,12 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
 
   useEffect(() => {
     setEditingMembers(false);
-    setSettingsOpen(false);
+    if (requestedSettingsGroup.current !== selectedGroup?.id) setSettingsOpen(false);
+    requestedSettingsGroup.current = null;
+    setMessageMembersOpen(false);
     setSpawnOpen(false);
     setConfirmDelete(false);
     setRoleDrafts({});
-    try { setSeenMessages(new Set(JSON.parse(localStorage.getItem(`collab-seen:${selectedGroup?.id}`) ?? '[]'))); }
-    catch { setSeenMessages(new Set()); }
     setMemberSelection(new Set(selectedGroup?.sessionIds ?? []));
   }, [selectedGroup?.id]);
 
@@ -989,8 +1012,9 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
       if (unavailableSelectedIds.length) throw new Error('所选会话已变化，请先清除不可用选择');
       const result = await saveCollaborationGroup({ name, sessionIds: [...selected] });
       setName(''); setSessionQuery(''); setSelectedGroupId(result.group.id); await refresh();
-      setNotice(`“${result.group.name}”已创建，可以添加第一个目标。`);
-      if (onEnterGroup) await onEnterGroup(result.group.id);
+      setNotice(`“${result.group.name}”已创建。`);
+      if (onOpenGroup) await onOpenGroup(result.group.id, 'messages');
+      else if (onEnterGroup) await onEnterGroup(result.group.id);
     } catch (error) { setError(error instanceof Error ? error.message : '创建失败'); }
     finally { setBusy(null); }
   };
@@ -1100,19 +1124,12 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
     } catch (error) { setError(error instanceof Error ? error.message : 'Agent Session 创建失败'); }
     finally { setBusy(null); }
   };
-  const visibleMessages = messages.filter((message) => (!onlyNew || !seenMessages.has(message.id))
-    && (responseFilter === 'all' || message.responseKind === responseFilter));
-  const activities = collapseCollaborationMessages(visibleMessages, sessions);
-  const markVisibleSeen = () => {
-    const next = new Set([...seenMessages, ...visibleMessages.map((message) => message.id)].slice(-10_000));
-    try { localStorage.setItem(`collab-seen:${selectedGroup?.id}`, JSON.stringify([...next])); }
-    catch { setError('无法保存已看记录，请检查浏览器存储空间'); return; }
-    setSeenMessages(next);
-  };
-  const renderSessionOptionRow = (session: OrchestrationSession) => <label key={session.sessionId} className="flex cursor-pointer items-start gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input className="mt-0.5" type="checkbox" disabled={!canAddCollaborationSession(session)} checked={selected.has(session.sessionId)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-[12px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="shrink-0 text-[9px] text-muted-foreground">{collaborationSessionStatus(session)}</span></span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{session.currentTask ? `${friendlyCurrentTask(session.currentTask)} · ${session.cwd}` : session.cwd || session.capability || "终端会话"}</span></span></label>;
+  const activities = collapseCollaborationMessages(messages, sessions);
+  const renderSessionOptionRow = (session: OrchestrationSession) => <label key={session.sessionId} className="flex cursor-pointer items-start gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input className="mt-0.5" type="checkbox" disabled={!canAddCollaborationSession(session)} checked={selected.has(session.sessionId)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-[12px] text-foreground">{collaborationMemberLabel(session, sessions)}</span><ServiceBadge session={session} /><span className="shrink-0 text-[9px] text-muted-foreground">{collaborationSessionStatus(session)}</span></span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{session.currentTask ? `${friendlyCurrentTask(session.currentTask)} · ${session.cwd}` : session.cwd || session.capability || "终端会话"}</span></span></label>;
   const renderMemberOptionRow = (session: OrchestrationSession) => { const draft = roleDrafts[session.sessionId] ?? ''; const savedRole = selectedGroup?.roles?.[session.sessionId] ?? ''; return <div key={session.sessionId} className="px-2 py-2 transition hover:bg-surface-2"><label className="flex cursor-pointer items-center gap-3"><input type="checkbox" disabled={!selectedGroup?.sessionIds.includes(session.sessionId) && !canAddCollaborationSession(session)} checked={memberSelection.has(session.sessionId)} onChange={() => setMemberSelection((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="block truncate text-[11px] text-foreground">{session.name}</span><ServiceBadge session={session} /><span className="block truncate text-[9px] text-muted-foreground">{collaborationSessionStatus(session)} · {session.cwd}</span></span></label><div className="mt-2 flex items-center gap-2 pl-7"><span className="shrink-0 text-[9px] text-muted-foreground">定位</span><input aria-label={`${session.name} 的定位`} className={`${inputClass} min-h-8 py-1 text-[10px]`} value={draft} maxLength={200} placeholder="成员收到的定位；清空后保存可移除" onChange={(event) => setRoleDrafts((current) => ({ ...current, [session.sessionId]: event.target.value }))} /><button aria-label={`保存 ${session.name} 的定位`} title={draft.trim() === savedRole ? '定位未变化' : '保存此成员的定位'} disabled={busy !== null || draft.trim() === savedRole} className={`${buttonClass} min-h-8 shrink-0 px-2 text-muted-foreground`} onClick={() => void saveMemberRole(session.sessionId)}>{busy === `role:${session.sessionId}` ? <RefreshCw size={12} className="animate-spin" /> : <Check size={12} />}</button></div></div>; };
 
-  const workspaceNavigation = <nav aria-label="协作工作区" className="flex shrink-0 items-center gap-1">{([['tasks', fullWorkspace ? '看板' : '目标'], ['messages', '成员与消息']] as const).map(([id, label]) => <button type="button" key={id} aria-label={label} aria-pressed={workspaceView === id} className={`${buttonClass} min-h-11 ${workspaceView === id ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={event => {
+  const workspaceNavigation = <nav aria-label="协作工作区" className="flex shrink-0 items-center gap-1">{([['tasks', fullWorkspace || messagePanel ? '看板' : '目标'], ['messages', '成员与消息']] as const).map(([id, label]) => <button type="button" key={id} aria-label={label} aria-pressed={workspaceView === id} className={`${buttonClass} min-h-11 ${workspaceView === id ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={event => {
+      if (messagePanel && id === 'tasks') { void onEnterGroup?.(selectedGroup!.id).catch(error => setError(error instanceof Error ? error.message : '无法打开看板')); return; }
       const root = event.currentTarget.closest('[data-collaboration-views]');
       const trigger = event.currentTarget;
       setWorkspaceView(id);
@@ -1124,24 +1141,21 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
       });
     }}>{fullWorkspace && id === 'messages' ? <><span className="sm:hidden">成员</span><span className="hidden sm:inline">{label}</span></> : label}{!fullWorkspace && id === 'tasks' && taskAttention > 0 && <span className="rounded bg-primary/15 px-1.5 text-[11px] text-primary">{taskAttention} 待处理</span>}</button>)}</nav>;
   const workspaceSettings = <button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={event => { settingsTrigger.current = event.currentTarget; setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} />{fullWorkspace && <span className="sm:sr-only">组设置</span>}</button>;
-  return <div ref={settingsContainer} className={fullWorkspace ? "flex min-h-0 flex-1 flex-col gap-3" : "space-y-3"}>
+  return <div ref={settingsContainer} className={fullWorkspace ? "flex min-h-0 flex-1 flex-col gap-3" : messagePanel ? undefined : "space-y-3"}>
     {messagesError && connection === 'ready' && !isConnectionInterruption(messagesError) && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">消息同步暂时失败，正在自动重试：{messagesError}</p>}
     {messagesError && isConnectionInterruption(messagesError) && !fullWorkspace && <p role="status" className="text-[11px] text-muted-foreground">正在恢复消息同步，现有记录已保留</p>}
     <div className={fullWorkspace ? settingsOpen ? "min-h-0 flex-1 overflow-auto" : "contents" : undefined}>
-      {(!initialGroupId || !selectedGroup) && <div className="flex items-center gap-2">
-        {groups.length > 0 ? <label className="min-w-0 flex-1"><span className="sr-only">选择协作组</span><select className={inputClass} value={selectedGroup?.id ?? 'new'} onChange={event => setSelectedGroupId(event.target.value)}>
-          {!selectedGroup && <option value="new">新建协作组</option>}
-          {groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.sessionIds.length} 个成员</option>)}
-        </select></label> : <h3 className="min-w-0 flex-1 text-sm font-medium text-foreground">建立协作组</h3>}
-        {selectedGroup && <>
-          <button type="button" aria-label="组设置" title="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={event => { settingsTrigger.current = event.currentTarget; setSettingsOpen(value => !value); setError(null); setNotice(null); }}><Pencil size={14} /></button>
-          <button type="button" aria-label="新建协作组" title="新建协作组" className={`${buttonClass} min-h-11 shrink-0 text-muted-foreground hover:bg-surface-2`} onClick={() => { setSelectedGroupId('new'); setConfirmDelete(false); setNotice(null); }}><Plus size={14} /></button>
-        </>}
-      </div>}
+      {!initialGroupId && selectedGroupId !== 'new' && groups.length > 0 && <div hidden={settingsOpen}><CollaborationGroupLauncher groups={groups} sessions={sessions} busy={busy !== null}
+        onOpen={(id, view) => { void onOpenGroup?.(id, view); }}
+        onSettings={(id, trigger) => { requestedSettingsGroup.current = id; setSelectedGroupId(id); settingsTrigger.current = trigger; setSettingsOpen(true); setError(null); setNotice(null); }}
+        onCreate={() => { setSelectedGroupId('new'); setConfirmDelete(false); setNotice(null); }} /></div>}
+      {!initialGroupId && (selectedGroupId === 'new' || settingsOpen) && groups.length > 0 && <button type="button" className={`${buttonClass} min-h-11 text-muted-foreground hover:bg-surface-2`} onClick={() => { if (settingsOpen) closeSettings(); else setSelectedGroupId(groups[0].id); }}>返回协作组</button>}
+
 
     {settingsOpen && selectedGroup && <CollaborationGroupSettings key={selectedGroup.id} group={selectedGroup} activeSessionId={activeSessionId} sessions={sessions} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={closeSettings} />}
-    {!selectedGroup && <section className="border-y border-border/15 py-4">
-      <div className="flex items-start justify-between gap-3"><div><h4 className="text-[12px] font-medium text-foreground">创建协作组</h4><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">先建立项目或目标空间，再写下目标。开始协作时配置 Agent；也可以复用已有会话。</p></div><span className={`shrink-0 text-[10px] ${selectedCount >= 2 ? 'text-primary' : 'text-muted-foreground'}`}>已选 {selectedCount} 个</span></div>
+    {!initialGroupId && sessionsState !== 'loaded' && !groups.length && <p role="status" className="py-5 text-xs text-muted-foreground">{sessionsState === 'loading' ? '正在加载协作组与会话…' : '会话加载失败，请重试'}</p>}
+    {!selectedGroup && (initialGroupId || sessionsState === 'loaded') && <section className="border-y border-border/15 py-4">
+      <div className="flex items-start justify-between gap-3"><div><h4 className="text-[12px] font-medium text-foreground">创建协作组</h4><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">先给协作组命名。成员可以现在选择，也可以以后添加；消息和看板都能独立使用。</p></div><span className={`shrink-0 text-[10px] ${selectedCount >= 2 ? 'text-primary' : 'text-muted-foreground'}`}>已选 {selectedCount} 个</span></div>
       <label className="mt-4 block space-y-1 text-[10px] text-muted-foreground">协作组名称<input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：发布准备" /></label>
       <details className="mt-3"><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted-foreground">复用已有会话（选填） · 已选 {selectedCount} 个</summary>
       {sessions.length > 5 && <label className="relative mt-3 block"><span className="sr-only">筛选会话</span><Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><input className={`${inputClass} pl-8`} value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="按名称、目录或当前任务筛选" /></label>}
@@ -1152,15 +1166,15 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
       </div>
       </details>
       {unavailableSelectedIds.length > 0 && <div role="alert" className="mt-2 text-[11px] text-destructive">有 {unavailableSelectedIds.length} 个所选会话暂不可用。<button className={buttonClass} onClick={() => setSelected((current) => new Set([...current].filter((id) => availableSessionIds.has(id))))}>清除不可用选择</button></div>}
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><p className={`min-w-0 flex-1 text-[10px] ${selectedCount < 2 ? 'text-muted-foreground' : 'text-primary'}`}>{!name.trim() ? '请填写协作组名称' : '创建后进入看板，添加第一个目标'}</p><div className="flex justify-end gap-2">{groups.length > 0 && <button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSelectedGroupId(groups[0]?.id ?? null)}>取消</button>}<button disabled={busy !== null || !name.trim() || unavailableSelectedIds.length > 0} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void createGroup()}>{busy === 'create-group' ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}创建协作组</button></div></div>
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><p className={`min-w-0 flex-1 text-[10px] ${selectedCount < 2 ? 'text-muted-foreground' : 'text-primary'}`}>{!name.trim() ? '请填写协作组名称' : '创建后进入成员消息，看板可随时使用'}</p><div className="flex justify-end gap-2">{groups.length > 0 && <button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSelectedGroupId(groups[0]?.id ?? null)}>取消</button>}<button disabled={busy !== null || !name.trim() || unavailableSelectedIds.length > 0} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void createGroup()}>{busy === 'create-group' ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}创建协作组</button></div></div>
     </section>}
 
     </div>
-    {selectedGroup && !initialGroupId && <div className="space-y-3 py-3"><p className="text-xs leading-relaxed text-muted-foreground">进入工作组看板，查看任务、处理问题和验收交付。</p><button type="button" className={`${buttonClass} min-h-11 bg-primary text-primary-foreground`} onClick={() => void onEnterGroup?.(selectedGroup.id).catch(error => setError(error instanceof Error ? error.message : '无法打开协作区'))}>打开 {selectedGroup.name}</button></div>}
-    {selectedGroup && initialGroupId && <div data-collaboration-views hidden={settingsOpen} className={fullWorkspace ? `${settingsOpen ? "hidden" : "flex"} min-h-0 flex-1 flex-col gap-3` : "space-y-3"}>
-      {(!fullWorkspace || workspaceView === 'messages') && <div className="flex shrink-0 items-center gap-1 border-b border-border/15 pb-2">{workspaceNavigation}<div className="ml-auto">{workspaceSettings}</div></div>}
-      {workspaceView === 'messages' && <div className="flex gap-1 overflow-x-auto" aria-label="工作组终端">{workspaceMembers.map(session => <button type="button" key={session.sessionId} aria-pressed={session.sessionId === activeSessionId} title={`${session.name} · ${session.cwd || '终端会话'}`} className={`${buttonClass} min-h-9 shrink-0 ${session.sessionId === activeSessionId ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={() => void onOpenTaskSession(session).catch(error => setError(error instanceof Error ? error.message : '无法打开终端'))}>{collaborationMemberLabel(session, workspaceMembers)}</button>)}</div>}
-      <div hidden={workspaceView !== 'tasks'} className={fullWorkspace ? `${workspaceView === 'tasks' ? "flex" : "hidden"} min-h-0 flex-1 flex-col` : undefined}><CollaborationTaskWorkbench paneKey={docked ? inputKey : undefined} boardNavigation={fullWorkspace ? workspaceNavigation : undefined} boardSettings={fullWorkspace ? workspaceSettings : undefined} board={fullWorkspace} key={selectedGroup.id} group={selectedGroup} sessions={sessions} agents={agents} defaultCwd={sessions.find(session => session.sessionId === activeSessionId)?.cwd ?? undefined} onTeamReady={refresh} active={active && !settingsOpen && workspaceView === 'tasks' && (!floating || floatingVisible)} onAttentionChange={setTaskAttention} onManageMembers={() => setWorkspaceView('messages')} onOpenSession={onOpenTaskSession} /></div>
+
+    {selectedGroup && initialGroupId && <div data-collaboration-views hidden={settingsOpen} className={fullWorkspace ? `${settingsOpen ? "hidden" : "flex"} min-h-0 flex-1 flex-col gap-3` : messagePanel ? undefined : "space-y-3"}>
+      {!messagePanel && (!fullWorkspace || workspaceView === 'messages') && <div className="flex shrink-0 items-center gap-1 border-b border-border/15 pb-2">{workspaceNavigation}<div className="ml-auto flex items-center gap-1">{fullWorkspace && workspaceView === 'messages' && <button type="button" aria-label="放到终端旁" title={onDockMessages ? '在当前终端分屏中使用成员与消息' : '先打开一个终端，再嵌入消息面板'} disabled={!onDockMessages || busy !== null} className={`${buttonClass} min-h-11 text-muted-foreground hover:bg-surface-2`} onClick={() => { setBusy('dock-messages'); setError(null); void onDockMessages?.().catch(error => setError(error instanceof Error ? error.message : '消息面板打开失败，草稿已保留')).finally(() => setBusy(null)); }}><ExternalLink size={14} /><span className="hidden sm:inline">放到终端旁</span></button>}{workspaceSettings}</div></div>}
+      {!messagePanel && workspaceView === 'messages' && <div className="flex gap-1 overflow-x-auto" aria-label="工作组终端">{workspaceMembers.map(session => <button type="button" key={session.sessionId} aria-pressed={session.sessionId === activeSessionId} title={`${session.name} · ${session.cwd || '终端会话'}`} className={`${buttonClass} min-h-9 shrink-0 ${session.sessionId === activeSessionId ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={() => void onOpenTaskSession(session).catch(error => setError(error instanceof Error ? error.message : '无法打开终端'))}>{collaborationMemberLabel(session, workspaceMembers)}</button>)}</div>}
+      {!messagePanel && <div hidden={workspaceView !== 'tasks'} className={fullWorkspace ? `${workspaceView === 'tasks' ? "flex" : "hidden"} min-h-0 flex-1 flex-col` : undefined}><CollaborationTaskWorkbench paneKey={docked ? inputKey : undefined} boardNavigation={fullWorkspace ? workspaceNavigation : undefined} boardSettings={fullWorkspace ? workspaceSettings : undefined} board={fullWorkspace} key={selectedGroup.id} group={selectedGroup} sessions={sessions} agents={agents} defaultCwd={sessions.find(session => session.sessionId === activeSessionId)?.cwd ?? undefined} onTeamReady={refresh} active={active && !settingsOpen && workspaceView === 'tasks' && (!floating || floatingVisible)} onAttentionChange={setTaskAttention} onManageMembers={() => setWorkspaceView('messages')} onOpenSession={onOpenTaskSession} /></div>}
       <div hidden={workspaceView !== 'messages'} className={fullWorkspace ? "min-h-0 flex-1 overflow-auto" : undefined}>
       <section onFocusCapture={() => focusCollaborationInput(inputKey)} onPointerDownCapture={() => focusCollaborationInput(inputKey)} data-termdock-terminal-dropzone={floating ? activeSessionId ?? "collaboration-composer" : undefined} onDragOver={event => { if (floating) event.preventDefault(); }} onDrop={event => {
         if (!floating) return;
@@ -1170,7 +1184,18 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
         if (files.length) void insertFiles(files);
         else { const text = event.dataTransfer.getData("text/plain") || event.dataTransfer.getData("text/uri-list"); if (text) setContent(current => current + (current ? "\n" : "") + text); }
       }} ref={messageComposerRef} className={floating ? '' : 'rounded-xl border border-primary/20 bg-primary/5 px-3 py-3'}>{!floating && <h4 className="truncate text-[12px] font-medium text-foreground">{selectedGroup.name} · 发送给成员</h4>}<div className={floating ? 'space-y-2' : 'mt-2 space-y-2'}>
-          <fieldset className="min-w-0"><legend className="mb-1 text-[10px] text-muted-foreground">接收人（可多选）</legend><div className="flex flex-wrap gap-1">
+          {messagePanel && <div className="relative z-20 flex items-center justify-between gap-2">
+            <span className="text-[11px] text-muted-foreground">发送给 <span className="text-[9px]">· 可多选</span></span>
+            <details className="relative" onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); event.stopPropagation(); } }}>
+              <summary aria-label="更多协作操作" className="flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center rounded text-muted-foreground hover:bg-surface-2 sm:min-h-8 sm:min-w-8 [&::-webkit-details-marker]:hidden"><MoreHorizontal size={16} /></summary>
+              <div className="absolute right-0 top-full z-30 w-44 rounded-lg border border-border/20 bg-surface-2 p-1 shadow-lg">
+                <button type="button" className={`${buttonClass} min-h-11 w-full justify-start text-foreground hover:bg-surface-elevated`} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); void onEnterGroup?.(selectedGroup.id).catch(error => setError(error instanceof Error ? error.message : '无法打开看板')); }}><ExternalLink size={14} />看板</button>
+                <button type="button" aria-expanded={messageMembersOpen} className={`${buttonClass} min-h-11 w-full justify-start text-foreground hover:bg-surface-elevated`} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); setMessageMembersOpen(value => !value); }}>成员管理</button>
+                <button type="button" aria-label="组设置" aria-expanded={settingsOpen} className={`${buttonClass} min-h-11 w-full justify-start text-foreground hover:bg-surface-elevated`} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); settingsTrigger.current = event.currentTarget; setSettingsOpen(true); setError(null); setNotice(null); }}><Pencil size={14} />组设置</button>
+              </div>
+            </details>
+          </div>}
+          <fieldset className="min-w-0"><legend className={messagePanel ? "sr-only" : "mb-1 text-[10px] text-muted-foreground"}>接收人（可多选）</legend><div className="flex flex-wrap gap-1">
             {[{ id: '*', label: '全组成员' }, ...selectedGroup.sessionIds.map(id => ({ id, label: (() => { const member = workspaceMembers.find(session => session.sessionId === id); return member ? collaborationMemberLabel(member, workspaceMembers) : undefined; })() ?? `${id.slice(0, 8)}（离线）` }))].map(({ id, label }) => {
               const selected = id === '*' ? targetSessionIds === null : targetSessionIds?.includes(id) ?? false;
               const session = sessions.find(session => session.sessionId === id);
@@ -1181,7 +1206,7 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
             })}
           </div></fieldset>
         </div>
-        <label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">内容<textarea onKeyDown={event => {
+        <label className="mt-2 block space-y-1 text-[9px] text-muted-foreground"><span className={messagePanel ? "sr-only" : undefined}>内容</span><textarea onKeyDown={event => {
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing && event.keyCode !== 229) {
             event.preventDefault(); void send();
           }
@@ -1189,7 +1214,7 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
         <div className="mt-2 flex items-center justify-between gap-3"><p role="status" aria-live="polite" title={floating && notice ? notice : undefined} className={`min-w-0 flex-1 text-[9px] leading-relaxed ${floating ? 'truncate' : ''} ${floating && notice ? 'text-primary' : 'text-muted-foreground'}`}>{uploadingFiles > 0 ? '正在准备文件路径…' : floating && notice ? notice : selectedGroup.federated ? '消息由服务端后台投递，可查看送达结果；无需保持客户端在线。' : '在线成员立即入队；离线成员上线后送达。'}</p><button disabled={busy !== null || uploadingFiles > 0 || !content.trim() || !recipients.length} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} title="发送（⌘ / Ctrl + Enter）" onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
       </section>
       <div>
-      <details key={selectedGroup.id} className="mt-4 rounded-xl border border-border/15"><summary className="cursor-pointer px-3 py-3 text-[11px] font-medium text-foreground">管理成员、角色与删除 · {selectedGroup.sessionIds.length} 个成员</summary>
+      <details key={selectedGroup.id} hidden={messagePanel && !messageMembersOpen} open={messagePanel ? messageMembersOpen : undefined} onToggle={event => { if (messagePanel) setMessageMembersOpen(event.currentTarget.open); }} className="mt-4 rounded-xl border border-border/15"><summary className="cursor-pointer px-3 py-3 text-[11px] font-medium text-foreground">管理成员、角色与删除 · {selectedGroup.sessionIds.length} 个成员</summary>
       <section className="border-t border-border/15 p-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0"><h4 className="text-[13px] font-medium text-foreground">{selectedGroup.name}</h4><p className="mt-1 text-[10px] text-muted-foreground">{selectedGroup.sessionIds.length} 个成员 · 组 ID：<span className="break-all font-mono">{shortId(selectedGroup.id)}</span></p></div>
@@ -1203,15 +1228,11 @@ export function CollaborationTab({ fullWorkspace = false, active, notice, initia
       </section></details>
 
       <section className="mt-4"><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h4 className="text-[11px] font-medium text-foreground">协作记录</h4><span className="text-[9px] text-muted-foreground">{activities.length} 条</span></div>
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <select aria-label="筛选回复类型" className={`${inputClass} w-auto`} value={responseFilter} onChange={(event) => setResponseFilter(event.target.value)}><option value="all">全部类型</option><option value="ack">收到确认</option><option value="progress">进展</option><option value="result">结果与证据</option></select>
-          <label className="flex min-h-9 items-center gap-2 text-[11px] text-muted-foreground"><input type="checkbox" checked={onlyNew} onChange={(event) => setOnlyNew(event.target.checked)} />只看新记录</label>
-          <button className={`${buttonClass} min-h-9 text-muted-foreground`} disabled={!visibleMessages.length} onClick={markVisibleSeen}>标记当前记录已看</button>
-        </div><div className="divide-y divide-border/10 border-y border-border/10 [overflow-wrap:anywhere]">
+        <div className="divide-y divide-border/10 border-y border-border/10 [overflow-wrap:anywhere]">
         {activities.map((activity) => <div key={activity.key} className="px-2 py-3"><div className="flex items-center gap-2 text-[9px] text-muted-foreground"><span className="font-medium text-primary">{activity.responseKind === 'ack' ? '收到确认' : activity.responseKind === 'progress' ? '进展' : activity.responseKind === 'result' ? '结果' : messageKindLabel(activity.kind)}</span><span>{activity.fromName}</span><span>→</span><span className="truncate">{activity.toNames.join('、')}</span><span className="ml-auto shrink-0">{new Date(activity.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div><p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">{activity.content}</p><p className="mt-1 text-[9px] text-muted-foreground">{activity.status === 'pending' ? '已入队 · 等待投递' : activity.status === 'failed' ? '投递失败' : activity.status === 'expired' ? '消息已过期，未继续投递' : '已写入接收方终端 · 等待接手确认'}</p>
           {(activity.task || activity.failureReason) && <details className="mt-2 text-[10px] text-muted-foreground"><summary className="cursor-pointer">任务详情与证据</summary><pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(activity.task ?? { failure_reason: activity.failureReason }, null, 2)}</pre></details>}
         </div>)}
-        {activities.length === 0 && <Empty text={messagesLoading ? "正在加载协作记录…" : messages.length ? "没有符合筛选条件的新记录。可切换类型或取消“只看新记录”。" : "还没有消息。可以先发一个任务或问题。"} />}
+        {activities.length === 0 && <Empty text={messagesLoading ? "正在加载协作记录…" : "还没有消息。可以直接给成员发送说明或问题。"} />}
       </div></section>
 
       </div>
@@ -1229,6 +1250,7 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
   const localMembers = sessions.filter(session => group.sessionIds.includes(session.sessionId) && !remoteSessionAddress(session.sessionId));
   const [draft, setDraft] = useState(() => readGroupSettingsDraft(group, activeSessionId && localMembers.some(session => session.sessionId === activeSessionId) ? activeSessionId : ''));
   const draftRef = useRef(draft);
+  const [latest, setLatest] = useState<CollaborationGroup | null>(null);
   const updateDraft = (patch: Partial<GroupSettingsDraft>) => {
     const next = { ...draftRef.current, ...patch };
     draftRef.current = next;
@@ -1243,11 +1265,12 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
     if (busy || !name.trim()) return;
     setBusy('group-name'); setError(null); setNotice(null);
     try {
-      const result = await saveCollaborationGroup({ id: group.id, name: name.trim(), sessionIds: group.sessionIds, expectedUpdatedAt: draft.updatedAt });
-      updateDraft({ savedName: result.group.name, name: result.group.name, updatedAt: result.group.updatedAt,
+      const result = await saveCollaborationGroup({ id: group.id, name: name.trim(), sessionIds: draft.sessionIds ?? group.sessionIds, expectedUpdatedAt: draft.updatedAt });
+      setLatest(null);
+      updateDraft({ savedName: result.group.name, name: result.group.name, updatedAt: result.group.updatedAt, sessionIds: result.group.sessionIds,
         ...(rules === savedRules ? { rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' } : {}) });
       await refresh(); setNotice('协作组名称已更新');
-    } catch (error) { setError(error instanceof Error ? error.message : '改名失败'); }
+    } catch (error) { setLatest(null); setError(error instanceof TerminalApiError && error.status === 409 ? '组设置已被其他人修改。请查看最新状态并确认，名称与群规草稿仍保留。' : error instanceof Error ? error.message : '改名失败'); }
     finally { setBusy(null); }
   };
   const saveRules = async () => {
@@ -1255,14 +1278,26 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
     setBusy('group-rules'); setError(null); setNotice(null);
     try {
       const result = await setCollaborationGroupRules(group.id, { sessionId: rulesMemberId, text: rules, expectedVersion: rulesVersion });
+      setLatest(null);
       updateDraft({ savedName: result.group.name, ...(name === savedName ? { name: result.group.name } : {}),
-        updatedAt: result.group.updatedAt, rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' });
+        updatedAt: result.group.updatedAt, sessionIds: result.group.sessionIds, rules: result.group.instructions?.text ?? '', savedRules: result.group.instructions?.text ?? '', rulesVersion: result.group.instructions?.version ?? '' });
       await refresh(); setNotice(rules.trim() ? '群规已保存，变更通知已入队' : '群规已清空，变更通知已入队');
-    } catch (error) { setError(error instanceof Error ? error.message : '群规保存失败'); }
+    } catch (error) { setLatest(null); setError(error instanceof TerminalApiError && error.status === 409 ? '群规已被其他人修改。请查看最新状态并确认，名称与群规草稿仍保留。' : error instanceof Error ? error.message : '群规保存失败'); }
     finally { setBusy(null); }
   };
   const reload = () => {
-    updateDraft(freshGroupSettingsDraft(group, rulesMemberId)); setError(null);
+    updateDraft(freshGroupSettingsDraft(group, rulesMemberId)); setLatest(null); setError(null);
+  };
+  const reviewLatest = async () => {
+    if (busy) return;
+    setBusy('group-latest'); setError(null); setNotice(null); setLatest(null);
+    try {
+      const current = await listCollaborationGroups();
+      const found = current.groups.find(item => item.id === group.id);
+      if (!found) throw new Error('协作组已删除；草稿仍保留，请返回看板查看。');
+      setLatest(found);
+    } catch (error) { setError(error instanceof Error ? error.message : '最新状态读取失败；草稿仍保留，请重试。'); }
+    finally { setBusy(null); }
   };
   return <section aria-label="协作组设置" onKeyDown={event => {
     if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
@@ -1271,11 +1306,20 @@ function CollaborationGroupSettings({ group, activeSessionId, sessions, busy, se
   }} className="mt-3 rounded-xl border border-border/20 bg-surface-2 p-3">
     <div className="mb-3 flex items-center justify-between gap-2"><h4 className="text-[12px] font-medium text-foreground">组设置</h4><button type="button" disabled={Boolean(busy)} aria-label="关闭组设置" className="rounded-lg p-2 text-muted-foreground hover:bg-surface-elevated" onClick={onClose}><X size={14} /></button></div>
     <label className="block space-y-1 text-[10px] text-muted-foreground">协作组名称<input autoFocus className={inputClass} value={name} maxLength={240} disabled={Boolean(busy)} onChange={event => updateDraft({ name: event.target.value })} /></label>
-    <div className="mt-2 flex justify-end"><button type="button" disabled={Boolean(busy) || !name.trim() || name.trim() === savedName} className={`${buttonClass} min-h-9 bg-primary text-primary-foreground`} onClick={() => void rename()}>{busy === 'group-name' ? '保存中…' : '保存名称'}</button></div>
+    <div className="mt-2 flex justify-end"><button type="button" disabled={Boolean(busy) || Boolean(latest) || !name.trim() || name.trim() === savedName} className={`${buttonClass} min-h-9 bg-primary text-primary-foreground`} onClick={() => void rename()}>{busy === 'group-name' ? '保存中…' : '保存名称'}</button></div>
     <div className="mt-3 space-y-2 border-t border-border/15 pt-3"><label className="block space-y-1 text-[10px] text-muted-foreground">由本组成员发布群规变更<select className={inputClass} value={rulesMemberId} disabled={Boolean(busy) || !localMembers.length} onChange={event => updateDraft({ rulesMemberId: event.target.value })}><option value="">选择当前服务的一个成员</option>{!localMembers.some(session => session.sessionId === rulesMemberId) && rulesMemberId && <option value={rulesMemberId}>原成员已不在组内，请重新选择</option>}{localMembers.map(session => <option key={session.sessionId} value={session.sessionId}>{session.name}</option>)}</select></label><label className="block space-y-1 text-[10px] text-muted-foreground">群规与协作约定<textarea className={`${inputClass} min-h-24 resize-y`} value={rules} maxLength={8192} disabled={Boolean(busy)} onChange={event => updateDraft({ rules: event.target.value })} placeholder="例如：说明分工、交接要求和结果格式。清空后保存可移除群规。" /></label></div>
     {!canEditRules && <p className="mt-1 text-[10px] text-muted-foreground">{localMembers.length ? '选择发布变更的成员后即可保存，不需要关闭工作台。' : '当前服务没有本组成员，请先添加成员或切换到成员所在的服务。已有群规可在此查看。'}</p>}
-    <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-[9px] ${rulesBytes > 8192 ? 'text-destructive' : 'text-muted-foreground'}`}>{rulesBytes > 8192 ? '内容过长，请缩短群规' : '保存或清空群规会通知本组其他成员'}</p><button type="button" disabled={Boolean(busy) || !canEditRules || rulesBytes > 8192 || rules === savedRules} className={`${buttonClass} min-h-9 shrink-0 bg-primary text-primary-foreground`} onClick={() => void saveRules()}>{busy === 'group-rules' ? '保存中…' : rules.trim() ? '保存群规' : '清空群规'}</button></div>
+    <div className="mt-2 flex items-center justify-between gap-2"><p className={`text-[9px] ${rulesBytes > 8192 ? 'text-destructive' : 'text-muted-foreground'}`}>{rulesBytes > 8192 ? '内容过长，请缩短群规' : '保存或清空群规会通知本组其他成员'}</p><button type="button" disabled={Boolean(busy) || Boolean(latest) || !canEditRules || rulesBytes > 8192 || rules === savedRules} className={`${buttonClass} min-h-9 shrink-0 bg-primary text-primary-foreground`} onClick={() => void saveRules()}>{busy === 'group-rules' ? '保存中…' : rules.trim() ? '保存群规' : '清空群规'}</button></div>
     {dirty && <p role="status" className="mt-3 text-[11px] leading-5 text-muted-foreground">有未保存修改。关闭、Escape 或切换组后，草稿仍保留在本标签页；名称与群规需分别保存。</p>}
+    {dirty && <button type="button" disabled={Boolean(busy)} className={`${buttonClass} mt-2 min-h-11 text-primary hover:bg-surface-elevated`} onClick={() => void reviewLatest()}>{busy === 'group-latest' ? '读取中…' : '查看最新状态并保留草稿'}</button>}
+    {latest && <section aria-label="最新组设置" className="mt-3 space-y-2 rounded-lg bg-surface p-3 text-[11px] leading-5">
+      <p className="font-medium text-foreground">确认最新状态后，再分别保存草稿</p>
+      <p className="break-words text-muted-foreground">当前名称：{latest.name}</p>
+      <p className="whitespace-pre-wrap break-words text-muted-foreground">当前群规：{latest.instructions?.text || '未设置'}</p>
+      <p className="break-words text-muted-foreground">当前成员（{latest.sessionIds.length}）：{latest.sessionIds.map(id => sessions.find(item => item.sessionId === id)?.name ?? shortId(id)).join('、') || '暂无成员'}</p>
+      <p className="text-muted-foreground">保留你的未保存内容；名称保存将保留以上成员，群规保存会通知当前成员。再次发生修改时仍会检查冲突。</p>
+      <div className="flex flex-wrap gap-2"><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-11 bg-primary text-primary-foreground`} onClick={() => { updateDraft(rebaseGroupSettingsDraft(draftRef.current, latest)); setLatest(null); setError(null); setNotice('已确认最新状态，草稿仍保留；请分别保存名称与群规。'); }}>确认最新状态，保留草稿</button><button type="button" className={`${buttonClass} min-h-11 text-muted-foreground`} onClick={() => setLatest(null)}>取消确认</button></div>
+    </section>}
     <div className="mt-3 flex justify-between gap-2 border-t border-border/15 pt-2"><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 text-muted-foreground hover:bg-surface-elevated`} onClick={reload}><RefreshCw size={12} />重新载入{dirty && '（放弃草稿）'}</button><button type="button" disabled={Boolean(busy)} className={`${buttonClass} min-h-9 bg-surface text-foreground`} onClick={onClose}>{dirty ? '关闭并保留草稿' : '关闭'}</button></div>
   </section>;
 }

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   TEMPORARY_FILE_UPLOAD_DIRECTORY,
   uploadTemporaryFileAndInsertReference,
+  UploadedReferenceRejectedError,
 } from './temporaryImageUpload';
 
 describe('temporary file upload', () => {
@@ -14,7 +15,7 @@ describe('temporary file upload', () => {
     const upload = vi.fn().mockResolvedValue({
       files: [{ name: file.name, path: `/tmp/${file.name}`, size: file.size }],
     });
-    const insertReference = vi.fn();
+    const insertReference = vi.fn().mockResolvedValue(true);
 
     const uploaded = await uploadTemporaryFileAndInsertReference(file, upload, insertReference);
 
@@ -32,5 +33,21 @@ describe('temporary file upload', () => {
     await expect(uploadTemporaryFileAndInsertReference(image, upload, insertReference))
       .rejects.toThrow('Upload did not return a file path');
     expect(insertReference).not.toHaveBeenCalled();
+  });
+
+  it('waits for reference ACK and preserves the already uploaded path on rejection', async () => {
+    const file = new File(['image'], 'photo.png');
+    const uploaded = { name: file.name, path: '/tmp/photo_1.png', size: file.size };
+    const upload = vi.fn().mockResolvedValue({ files: [uploaded] });
+    let finish!: (ok: boolean) => void;
+    let settled = false;
+    const result = uploadTemporaryFileAndInsertReference(file, upload, () => new Promise<boolean>(resolve => { finish = resolve; }));
+    result.then(() => { settled = true; }, () => { settled = true; });
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    expect(settled).toBe(false);
+    finish(false);
+    await expect(result).rejects.toBeInstanceOf(UploadedReferenceRejectedError);
+    await expect(result).rejects.toMatchObject({ uploaded });
+    expect(upload).toHaveBeenCalledOnce();
   });
 });

@@ -1,6 +1,7 @@
 import { createElement, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
+import { getActiveKeyboardLayer } from '../../hooks/useKeyboardLayer';
 
 const LONG_PRESS_COPY_MS = 450;
 const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
@@ -106,7 +107,7 @@ export function copyReferenceText(text: string): Promise<void> {
   return copyTextToClipboard(text);
 }
 
-export function useReferenceLongPressCopy(onCopied?: (key: string) => void) {
+export function useReferenceLongPressCopy(onCopied?: (key: string) => void, withinKeyboardLayer = false) {
   const timerRef = useRef<number | null>(null);
   const stateRef = useRef<LongPressState | null>(null);
   const readyRef = useRef(false);
@@ -231,10 +232,13 @@ export function useReferenceLongPressCopy(onCopied?: (key: string) => void) {
         {
           type: 'button',
           'data-reference-copy-popover': 'true',
+          'data-sidebar-composer-popover': withinKeyboardLayer ? getActiveKeyboardLayer()?.element.id : undefined,
+          // 普通文件引用使用 z-modal-backdrop(100)；独立范围选择任务跟随其键盘层，
+          // 使用 z-popover 并登记 portal，让手机确认按钮可见且可聚焦。
           // z-modal-backdrop(100)：触发它的「引用」按钮在侧栏抽屉(panel 50)内部，
           // chip 走 portal 到 body，必须高于抽屉才可见；但低于 lightbox/modal
           // panel(110)，全屏浮层打开时不会浮在上面（曾经用 z-popover(200) 会）。
-          className: 'fixed z-modal-backdrop inline-flex h-9 w-[88px] select-none items-center justify-center gap-1.5 rounded-full border border-white/15 bg-[rgb(28_28_30_/_0.92)] px-3 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgb(0_0_0_/_0.32),0_2px_8px_rgb(0_0_0_/_0.18)] backdrop-blur-xl transition-transform duration-100 ease-out active:scale-[0.96]',
+          className: `fixed ${withinKeyboardLayer ? 'z-popover' : 'z-modal-backdrop'} inline-flex h-9 w-[88px] select-none items-center justify-center gap-1.5 rounded-full border border-white/15 bg-[rgb(28_28_30_/_0.92)] px-3 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgb(0_0_0_/_0.32),0_2px_8px_rgb(0_0_0_/_0.18)] backdrop-blur-xl transition-transform duration-100 ease-out active:scale-[0.96]`,
           style: {
             left: popover.left,
             top: popover.top,

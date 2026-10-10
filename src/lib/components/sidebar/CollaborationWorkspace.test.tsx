@@ -118,7 +118,7 @@ describe('primary collaboration workspace', () => {
     useCollaborationNavigation.getState().open('team');
     const switchSession = vi.fn(); window.addEventListener('switch-terminal-session', switchSession);
     main(); await screen.findByRole('region', { name: '目标编辑' });
-    fireEvent.click(screen.getByRole('button', { name: '返回终端' }));
+    fireEvent.click(screen.getByRole('button', { name: '打开终端：协调者' }));
     expect(useCollaborationNavigation.getState().groupId).toBeNull();
     expect(switchSession).not.toHaveBeenCalled();
     window.removeEventListener('switch-terminal-session', switchSession);
@@ -132,4 +132,31 @@ describe('primary collaboration workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开会话侧栏' }));
     expect(open).toHaveBeenCalledOnce();
   });
+});
+
+it('uses the resident split for messages only, shares drafts with the standalone page, and opens the board separately', async () => {
+  const host = document.createElement('div'); host.dataset.workspaceHost = 'true'; document.body.append(host);
+  useCollaborationPanelDock.getState().setHost('team', host);
+  const enter = vi.fn().mockResolvedValue(undefined);
+  render(<AgentOperationsPanel initialFloating initialCollaborationGroupId="team" activeSessionId="lead" onEnterGroup={enter} onClose={vi.fn()} onNewSession={vi.fn()} />);
+  const panel = await screen.findByRole('region', { name: '工作组消息分屏' });
+  expect(within(panel).queryByRole('region', { name: '目标编辑' })).toBeNull();
+  const field = within(panel).getByRole('textbox', { name: '内容' });
+  fireEvent.change(field, { target: { value: '终端旁的消息草稿' } });
+  expect(useCollaborationNavigation.getState().drafts.team.content).toBe('终端旁的消息草稿');
+  act(() => useCollaborationNavigation.getState().setDraft('team', { content: '独立页面的新草稿', targets: null }));
+  expect(field).toHaveProperty('value', '独立页面的新草稿');
+  expect(within(panel).queryByRole('navigation', { name: '协作工作区' })).toBeNull();
+  expect(within(panel).queryByLabelText('工作组终端')).toBeNull();
+  expect(within(panel).getByText(/管理成员、角色与删除/).closest('details')?.hidden).toBe(true);
+  fireEvent.click(within(panel).getByRole('button', { name: '执行成员' }));
+  expect(useCollaborationNavigation.getState().drafts.team.targets).toEqual(['worker']);
+  fireEvent.click(within(panel).getByLabelText('更多协作操作'));
+  fireEvent.click(within(panel).getByRole('button', { name: '成员管理' }));
+  expect(within(panel).getByText(/管理成员、角色与删除/)).toBeTruthy();
+  expect(field).toHaveProperty('value', '独立页面的新草稿');
+  fireEvent.click(within(panel).getByLabelText('更多协作操作'));
+  fireEvent.click(within(panel).getByRole('button', { name: '看板' }));
+  expect(enter).toHaveBeenCalledWith('team');
+  expect(panel.hasAttribute('data-sidebar-gesture-ignore')).toBe(true);
 });

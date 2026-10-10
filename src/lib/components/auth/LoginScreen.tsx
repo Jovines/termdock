@@ -3,10 +3,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArrowRight as RiArrowRightLine} from 'lucide-react';
 import { loginWithPassword } from '../../terminal/api';
 import { useI18n } from '../../i18n';
+import type { TranslationKey } from '../../i18n';
 
 interface LoginScreenProps {
   onLoginSuccess: () => void;
   focusEnabled?: boolean;
+  serviceOrigin?: string;
+  onManageServices?: () => void;
 }
 
 // ASCII banner for the brand mark. Kept as a single string so the monospace
@@ -22,11 +25,11 @@ const ASCII_LOGO = String.raw`
 
 // Renders a fullscreen password form. Stays mounted for the lifetime of the
 // "logged out" state — the parent App swaps it in/out based on auth status.
-export function LoginScreen({ onLoginSuccess, focusEnabled = true }: LoginScreenProps) {
+export function LoginScreen({ onLoginSuccess, focusEnabled = true, serviceOrigin, onManageServices }: LoginScreenProps) {
   const { t } = useI18n();
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<'login.invalidPassword' | 'login.rateLimited' | 'login.failed' | null>(null);
+  const [error, setError] = useState<TranslationKey | null>(null);
   const [retrySecondsLeft, setRetrySecondsLeft] = useState<number>(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -59,7 +62,12 @@ export function LoginScreen({ onLoginSuccess, focusEnabled = true }: LoginScreen
         onLoginSuccess();
         return;
       }
-      setError(result.rateLimited ? 'login.rateLimited' : 'login.invalidPassword');
+      setError(result.rateLimited || result.reason === 'rateLimited' ? 'login.rateLimited'
+        : result.reason === 'connectionFailed' ? 'login.failed'
+        : result.reason === 'identityMismatch' ? 'login.identityMismatch'
+        : result.reason === 'unavailable' ? 'login.unavailable'
+        : result.reason === 'authorizationRequired' ? 'login.authorizationRequired'
+        : 'login.invalidPassword');
       if (result.rateLimited && typeof result.retryAfterMs === 'number') {
         setRetrySecondsLeft(Math.max(1, Math.ceil(result.retryAfterMs / 1000)));
       }
@@ -150,6 +158,11 @@ export function LoginScreen({ onLoginSuccess, focusEnabled = true }: LoginScreen
           <div role="alert" className="mt-3 text-center text-xs text-destructive">{t(error)}</div>
         ) : null}
       </form>
+
+      {serviceOrigin && <div className="w-full max-w-xs text-center text-xs leading-5 text-muted-foreground">
+        <p className="break-all" title={serviceOrigin}>{t('login.currentTarget', { address: new URL(serviceOrigin).host })}</p>
+        {onManageServices && <button type="button" disabled={!focusEnabled || submitting} className="mt-1 min-h-11 rounded-lg px-3 text-xs underline underline-offset-4 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50" onClick={onManageServices}>{t('login.manageServices')}</button>}
+      </div>}
 
       {/* Blinking cursor keyframes scoped via a class on this page */}
       <style>{`

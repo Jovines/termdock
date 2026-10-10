@@ -6,7 +6,7 @@ import { CollaborationError } from './collaborationProtocol.js';
 import { CollaborationTaskStore } from './collaborationTaskStore.js';
 import { captureTaskCommit } from './collaborationTaskWorkspace.js';
 import { taskBundleChunk } from './collaborationTaskBundles.js';
-import { taskMemberKey, type CollaborationTask, type CollaborationTaskView, type TaskCreateInput, type TaskMember, type TaskOperation, type TaskWorkspace } from './collaborationTaskTypes.js';
+import { taskMemberKey, type CollaborationTask, type CollaborationTaskView, type TaskCreateInput, type TaskMember, type TaskOperation, type TaskWorkspace, type TaskOrigin } from './collaborationTaskTypes.js';
 
 export type PrepareTaskWorker = (task: CollaborationTask, template: TaskMember, dependencies: CollaborationTask[]) => Promise<{ sessionId: string; workspace: TaskWorkspace }>;
 
@@ -59,7 +59,7 @@ export class CollaborationTaskService {
     this.group(task.groupId, actor);
     return this.view(task);
   }
-  async create(input: TaskCreateInput, actor: TaskMember | null) {
+  async create(input: TaskCreateInput, actor: TaskMember | null, origin?: TaskOrigin) {
     this.group(input.groupId, actor); this.validateMembers(input.groupId, input);
     const dependencies = [...(input.dependsOn ?? []), ...(input.parentTaskId ? [input.parentTaskId] : [])];
     const authority = dependencies.length ? this.tasks.get(dependencies[0])?.ownerServiceId : this.self;
@@ -67,16 +67,18 @@ export class CollaborationTaskService {
     for (const dependency of [...(input.dependsOn ?? []), ...(input.parentTaskId ? [input.parentTaskId] : [])]) {
       if (this.tasks.get(dependency)?.ownerServiceId !== authority) throw new CollaborationError('DEPENDENCY_AUTHORITY_REQUIRED', '依赖与父任务需在同一来源服务创建', 409);
     }
+    if (origin && authority !== this.self) throw new CollaborationError('INTEGRATION_LOCAL_ONLY', '首版集成任务须由本机服务保存', 409);
     if (authority !== this.self) {
       const result = await this.peers.requestTasks(authority, { op: 'create', input, actorSessionId: actor?.sessionId ?? null });
       const task = result.task as CollaborationTask; this.tasks.merge(task, authority); return this.view(task);
     }
-    const task = this.tasks.create(this.self, input, actor); void this.flush(); return this.view(task);
+    const task = this.tasks.create(this.self, input, actor, origin); void this.flush(); return this.view(task);
   }
-  async apply(taskId: string, input: TaskOperation, actor: TaskMember | null) {
+  async apply(taskId: string, input: TaskOperation, actor: TaskMember | null, origin?: TaskOrigin) {
     const task = this.tasks.get(taskId);
     if (!task) throw new CollaborationError('TASK_NOT_FOUND', '任务不存在', 404);
     this.group(task.groupId, actor); this.validateMembers(task.groupId, input);
+    if (origin && task.ownerServiceId !== this.self) throw new CollaborationError('INTEGRATION_LOCAL_ONLY', '首版集成任务须由本机服务保存', 409);
     if (task.ownerServiceId !== this.self) {
       const result = await this.peers.requestTasks(task.ownerServiceId, { op: 'apply', taskId, input, actorSessionId: actor?.sessionId ?? null });
       this.tasks.merge(result.task as CollaborationTask, task.ownerServiceId); return this.view(this.tasks.get(taskId)!);
@@ -102,7 +104,7 @@ export class CollaborationTaskService {
         artifactId: child.acceptedArtifactId, integration: child.workflow?.integration === true,
         commit: (child.artifacts.find(a => a.id === child.acceptedArtifactId)?.evidence as { commit?: string } | undefined)?.commit })) } };
     }
-    const updated = this.tasks.apply(taskId, input, actor); void this.flush(); return this.view(updated);
+    const updated = this.tasks.apply(taskId, input, actor, origin); void this.flush(); return this.view(updated);
   }
   heads(groupIds: string[]) { return this.tasks.heads(groupIds, this.self); }
   async dependencyChunk(taskId: string, dependencyId: string, offset: unknown, targetService = this.self): Promise<Record<string, any>> {
@@ -155,7 +157,7 @@ export class CollaborationTaskService {
       const queued = this.messages.send({ groupId: group.id, fromSessionId: null, toSessionIds: [recipient.sessionId],
         kind: packet.kind === 'task' ? 'task' : 'message', content: String(packet.content ?? ''), threadId: attempt?.threadId ?? task.id,
         idempotencyKey: `task:${peer.serviceId}:${String(packet.outboxId)}`,
-        metadata: { taskOutboxId: packet.outboxId, termdockTask: { taskId: task.id, attemptId: attempt?.id ?? null, ownerServiceId: peer.serviceId } } });
+        metadata: { taskOutboxId: packet.outboxId, termdockTask: { taskId: task.id, attemptId: attempt?.id ?? null, ownerServiceId: peer.serviceId, replyToEventId: task.events.find(e => e.deliveryId === packet.outboxId && e.attemptId === attempt?.id && e.kind === 'comment')?.id } } });
       this.deliver(recipient.sessionId);
       return { receipt: this.receipt(queued[0].id) };
     }
@@ -242,20 +244,22 @@ export class CollaborationTaskService {
       const ready = this.tasks.pending(undefined, true).filter(outbox => {
         const task = this.tasks.get(outbox.taskId); if (!task?.workflow) return true;
         const root = task.workflow.rootTaskId ? this.tasks.get(task.workflow.rootTaskId) : task;
-        return !task.workflow.paused && !root?.workflow?.paused && root?.status === 'open';
+        const consultation = outbox.replyToEventId && task.events.some(e => e.id === outbox.replyToEventId && e.kind === 'comment');
+        return consultation || !task.workflow.paused && !root?.workflow?.paused && root?.status === 'open';
       }).slice(0, 16);
       for (const outbox of ready) {
         try {
           const task = this.tasks.get(outbox.taskId)!; this.group(task.groupId, outbox.target);
           const root = task.workflow?.rootTaskId ? this.tasks.get(task.workflow.rootTaskId) : task;
-          if (task.workflow && (task.workflow.paused || root?.workflow?.paused || root?.status !== 'open')) continue;
+          const consultation = outbox.replyToEventId && task.events.some(e => e.id === outbox.replyToEventId && e.kind === 'comment');
+          if (task.workflow && !consultation && (task.workflow.paused || root?.workflow?.paused || root?.status !== 'open')) continue;
           if (outbox.target.serviceId === this.self) {
             if (outbox.messageId && this.messages.getMessage(outbox.messageId)) {
               this.deliver(outbox.target.sessionId); this.tasks.delivered(outbox.id, this.receipt(outbox.messageId)); continue;
             }
             const queued = this.messages.send({ groupId: task.groupId, fromSessionId: null, toSessionIds: [outbox.target.sessionId],
               kind: outbox.kind, content: outbox.content, threadId: outbox.threadId, idempotencyKey: `task:${this.self}:${outbox.id}`,
-              metadata: { termdockTask: { taskId: task.id, attemptId: outbox.attemptId, ownerServiceId: this.self } } });
+              metadata: { termdockTask: { taskId: task.id, attemptId: outbox.attemptId, ownerServiceId: this.self, replyToEventId: outbox.replyToEventId } } });
             this.deliver(outbox.target.sessionId); this.tasks.delivered(outbox.id, this.receipt(queued[0].id));
           } else {
             const result = await this.peers.requestTasks(outbox.target.serviceId, { op: 'deliver', task, target: outbox.target.sessionId,

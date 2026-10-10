@@ -7,15 +7,18 @@ export async function executeTaskCommand(command: CollaborationCommand,
   io: CollaborationCliIO): Promise<Record<string, unknown>> {
   const o = command.options, operation = command.operation!;
   const bodyOptions = ['content', 'file', 'stdin', 'idempotency-key'];
+  const originOptions = ['source', 'external-actor', 'external-message-id', 'metadata'];
+  if (originOptions.some(key => o[key]) && !o.principal) throw new Error('External source metadata requires --principal');
   const allowed: Record<string, string[]> = {
     list: ['group'], get: [], create: [...bodyOptions, 'group', 'title', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'managed', 'reviewers', 'shared-directory', 'integration', 'work-type'],
+    answer: [...bodyOptions, 'decision'], respond: [...bodyOptions, 'attempt', 'to-event', 'evidence'],
     assign: [...bodyOptions, 'assignee', 'revision'], report: [...bodyOptions, 'attempt', 'status', 'evidence', 'summary'], ask: [...bodyOptions, 'attempt', 'options'],
     plan: [...bodyOptions, 'attempt', 'evidence'], review: [...bodyOptions, 'artifact', 'evidence', 'verdict'], comment: bodyOptions,
     'request-review': [...bodyOptions, 'artifact', 'assignee', 'revision'],
     revise: [...bodyOptions, 'revision'], close: [...bodyOptions, 'revision'], reopen: [...bodyOptions, 'revision'],
     coordinate: [...bodyOptions, 'revision'], pause: [...bodyOptions, 'revision'], resume: [...bodyOptions, 'revision'], retry: [...bodyOptions, 'revision'],
   };
-  for (const flag of Object.keys(o)) if (![...allowed[operation], 'session', 'json', 'jsonl', 'text', 'help'].includes(flag)) throw new Error(`--${flag} is not supported by task ${operation}`);
+  for (const flag of Object.keys(o)) if (![...allowed[operation], ...(o.principal ? originOptions : []), 'principal', 'session', 'json', 'jsonl', 'text', 'help'].includes(flag)) throw new Error(`--${flag} is not supported by task ${operation}`);
   if (operation === 'list') return request('GET', `/tasks${o.group ? `?group=${encodeURIComponent(String(o.group))}` : ''}`);
   if (operation === 'get') return request('GET', `/tasks/${encodeURIComponent(command.target!)}`);
   const contentSources = [o.content, o.file, o.stdin].filter(Boolean).length;
@@ -27,7 +30,9 @@ export async function executeTaskCommand(command: CollaborationCommand,
   if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) throw new Error('--revision must be a positive integer');
   if (['assign', 'revise', 'close', 'reopen', 'request-review', 'coordinate', 'pause', 'resume', 'retry'].includes(operation) && expectedRevision === undefined) throw new Error('Read task get first, then supply --revision to avoid overwriting another decision');
   if (['assign', 'request-review'].includes(operation) && !o.assignee) throw new Error('This task operation requires --assignee');
-  if (['report', 'ask', 'plan'].includes(operation) && !o.attempt) throw new Error('Use --attempt from the dispatch message; never guess the current attempt');
+  if (['report', 'respond', 'ask', 'plan'].includes(operation) && !o.attempt) throw new Error('Use --attempt from the dispatch message; never guess the current attempt');
+  if (operation === 'respond' && !o['to-event']) throw new Error('respond requires --to-event <comment-event-id>');
+  if (operation === 'answer' && !o.decision) throw new Error('answer requires --decision <question-id>');
   if (operation === 'create') {
     if (!o.title || !o.group) throw new Error('task create requires --title and --group');
     return request('POST', '/tasks', { input: { idempotencyKey, groupId: o.group, title: o.title, spec: content,
@@ -39,7 +44,7 @@ export async function executeTaskCommand(command: CollaborationCommand,
   const options = o.options ? JSON.parse(String(o.options)) : undefined;
   if (options !== undefined && (!Array.isArray(options) || options.some(v => typeof v !== 'string'))) throw new Error('--options must be a JSON array of strings');
   return request('POST', `/tasks/${encodeURIComponent(command.target!)}`, { input: {
-    kind: operation === 'plan' ? 'submit-plan' : operation, idempotencyKey, expectedRevision, content,
+    replyToEventId: o['to-event'], decisionId: o.decision, kind: operation === 'plan' ? 'submit-plan' : operation, idempotencyKey, expectedRevision, content,
     assigneeSessionId: o.assignee, attemptId: o.attempt, status: o.status, artifactId: o.artifact, options, verdict: o.verdict,
     evidence: o.evidence ? JSON.parse(String(o.evidence)) : undefined, summary: o.summary,
   } });

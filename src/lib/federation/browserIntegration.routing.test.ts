@@ -35,6 +35,103 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it.each(['identity-first', 'identity-last'] as const)('retains an observed pin mismatch when every address fails (%s)', async order => {
+    mocks.saved.mockReturnValue({ url: location.origin, targetPeerId: 'B', routes: [{ url: 'https://alternate.example', targetPeerId: 'B' }] });
+    const mismatch = Object.assign(new Error('private-mismatched-identities'), { name: 'UnexpectedPeerError' });
+    const unreachable = new Error('Secure transport unavailable');
+    mocks.connect.mockRejectedValueOnce(order === 'identity-first' ? mismatch : unreachable)
+      .mockRejectedValueOnce(order === 'identity-first' ? unreachable : mismatch);
+    const integration = await import('./browserIntegration'); integration.installEncryptedFetch();
+    vi.stubGlobal('fetch', window.fetch);
+    const { loginWithPassword } = await import('../terminal/api');
+    const result = await loginWithPassword('existing-password');
+    expect(result).toMatchObject({ ok: false, reason: 'identityMismatch' });
+    expect(JSON.stringify(result)).not.toContain('private-');
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
+    expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId === 'B')).toBe(true);
+    expect(mocks.save).not.toHaveBeenCalled(); expect(nativeFetch).not.toHaveBeenCalled();
+  });
+  it('uses a successful alternate with the same pin after another address mismatches', async () => {
+    mocks.saved.mockReturnValue({ url: location.origin, targetPeerId: 'B', routes: [{ url: 'https://alternate.example', targetPeerId: 'B' }] });
+    const dial = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      if (args.url.includes('b.example')) throw Object.assign(new Error('private-wrong-server'), { name: 'UnexpectedPeerError' });
+      return dial(args);
+    });
+    const integration = await import('./browserIntegration'); integration.installEncryptedFetch();
+    vi.stubGlobal('fetch', window.fetch);
+    const { loginWithPassword } = await import('../terminal/api');
+    expect(await loginWithPassword('existing-password')).toEqual({ ok: true });
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ targetPeerId: 'B' }));
+    expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId === 'B')).toBe(true);
+    expect(mocks.connect.mock.calls.some(([args]) => args.url === 'wss://alternate.example/api/federation/secure')).toBe(true);
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+  it.each([
+    new TypeError('private-endpoint connection refused'),
+    new DOMException('private-timeout-details', 'TimeoutError'),
+  ])('preserves a parameters connection failure and allows an explicit retry after recovery (%s)', async error => {
+    vi.stubGlobal('navigator', { serviceWorker: { controller: null } });
+    nativeFetch.mockRejectedValueOnce(error);
+    const integration = await import('./browserIntegration'); integration.installEncryptedFetch();
+    vi.stubGlobal('fetch', window.fetch);
+    const { loginWithPassword } = await import('../terminal/api');
+    expect(await loginWithPassword('existing-password')).toMatchObject({ ok: false, reason: 'connectionFailed' });
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
+    expect(nativeFetch).toHaveBeenCalledOnce();
+    expect(await loginWithPassword('existing-password')).toEqual({ ok: true });
+    expect(nativeFetch.mock.calls.map(call => call[0])).toEqual(['/api/auth/password/parameters', '/api/auth/password/parameters', '/api/auth/password/start', '/api/auth/password/finish']);
+    expect(JSON.stringify(nativeFetch.mock.calls)).not.toContain('existing-password');
+  });
+  it.each([
+    [401, { code: 'INVALID_PASSWORD', error: 'private-proof-details' }, 'invalidPassword'],
+    [503, { error: 'private-server-stack' }, 'unavailable'],
+    [429, { code: 'RATE_LIMITED', retryAfterMs: 12345, error: 'private-rate-details' }, 'rateLimited'],
+  ] as const)('keeps public bootstrap status %s distinct without exposing upstream details', async (status, body, reason) => {
+    nativeFetch.mockResolvedValueOnce(Response.json(body, { status }));
+    const integration = await import('./browserIntegration'); integration.installEncryptedFetch();
+    vi.stubGlobal('fetch', window.fetch);
+    const { loginWithPassword } = await import('../terminal/api');
+    const result = await loginWithPassword('existing-password');
+    expect(result).toMatchObject({ ok: false, reason });
+    expect(JSON.stringify(result)).not.toContain('private-');
+    if (status === 429) expect(result).toMatchObject({ rateLimited: true, retryAfterMs: 12345 });
+    expect(nativeFetch).toHaveBeenCalledOnce(); expect(mocks.save).not.toHaveBeenCalled();
+  });
+  it.each([
+    [new Error('Secure connection timed out'), 'connectionFailed'],
+    [Object.assign(new Error('private-peer-identities'), { name: 'UnexpectedPeerError' }), 'identityMismatch'],
+  ] as const)('keeps pinned transport failure distinct (%s) without public HTTP fallback', async (error, reason) => {
+    mocks.saved.mockReturnValue({ url: location.origin, targetPeerId: 'B' });
+    mocks.connect.mockRejectedValueOnce(error);
+    const integration = await import('./browserIntegration'); integration.installEncryptedFetch();
+    vi.stubGlobal('fetch', window.fetch);
+    const { loginWithPassword } = await import('../terminal/api');
+    const result = await loginWithPassword('existing-password');
+    expect(result).toMatchObject({ ok: false, reason });
+    expect(JSON.stringify(result)).not.toContain('private-');
+    expect(nativeFetch).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.connect.mock.calls[0][0].targetPeerId).toBe('B');
+  });
+  it.each(['direct', 'relay'] as const)('keeps secure rate limits over %s and closes the password transport', async mode => {
+    mocks.saved.mockReturnValue({ url: location.origin, targetPeerId: 'B', routes: mode === 'relay' ? [{ url: 'https://a.example', targetPeerId: 'A' }] : [] });
+    const dial = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      if (mode === 'relay' && args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('direct unavailable');
+      const client = await dial(args);
+      if (args.targetPeerId === 'B') client.request.mockImplementation(async (packet: { type: string }) => {
+        if (packet.type === 'password-start') throw new Error('LOGIN_RATE_LIMIT');
+        return { saltHex: 'salt' };
+      });
+      return client;
+    });
+    const integration = await import('./browserIntegration'); integration.installEncryptedFetch();
+    vi.stubGlobal('fetch', window.fetch);
+    const { loginWithPassword } = await import('../terminal/api');
+    expect(await loginWithPassword('existing-password')).toMatchObject({ ok: false, reason: 'rateLimited', rateLimited: true });
+    expect(clients.get('B')!.close).toHaveBeenCalled();
+    expect(nativeFetch).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
+  });
   it.each(['direct', 'relay'] as const)('reads native architecture over %s on first load and rejects disconnects without native fallback', async mode => {
     vi.stubGlobal('navigator', { serviceWorker: { controller: null } });
     const base = mocks.connect.getMockImplementation()!;

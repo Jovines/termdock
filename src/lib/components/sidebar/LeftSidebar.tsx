@@ -1,10 +1,11 @@
 import { sessionCreationErrorKey, type NewSessionRequestOptions, type NewSessionCreationError } from '../../terminal/newSessionRequest';
-import { Archive, RefreshCw } from 'lucide-react';
+import { Archive, RefreshCw, MessageCircle } from 'lucide-react';
 import { CollaborationExecutionArchives } from './CollaborationExecutionArchives';
 import { completedTaskSessions } from '../../collaboration/completedSessions';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
 import { collaborationServiceLabel } from '../../collaboration/display';
+import { openCollaborationMessagesPanel } from '../../collaboration/panelPreferences';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useCollaborationTaskInbox, requestCollaborationTask } from '../../stores/useCollaborationTaskInbox';
 import { collaborationTaskStage } from '../../collaboration/taskState';
@@ -30,7 +31,6 @@ import {
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
   Workflow as RiWorkflowLine,
-  History as RiHistoryLine,
   GripVertical as RiDragHandle,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -64,6 +64,7 @@ import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPref
 import { AgentOperationsPanel } from './AgentOperationsPanel';
 import { SidebarUtilityActions } from './SidebarUtilityActions';
 import { SwipeToCloseSession } from './SwipeToCloseSession';
+import { RecoverableSessions } from './RecoverableSessions';
 
 
 interface LeftSidebarProps {
@@ -97,6 +98,7 @@ interface LeftSidebarProps {
   recoverableTmuxSessions?: TmuxSessionSummary[];
   recoverableTmuxSessionsLoading?: boolean;
   onRefreshRecoverableTmuxSessions?: () => void;
+  onCloseRecoverableTmuxSession?: (name: string) => Promise<void>;
   onCloseSession: (sessionId: string, event: React.MouseEvent, options?: { skipConfirmation?: boolean }) => void;
   onSplitSession: (sessionId: string) => void;
   onCloseSplit: (sessionId: string) => void;
@@ -273,21 +275,28 @@ export function LeftSidebar(
     recoverableTmuxSessions = [],
     recoverableTmuxSessionsLoading = false,
     onRefreshRecoverableTmuxSessions,
+    onCloseRecoverableTmuxSession,
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
   const [, requestAttentionScroll] = useState(0);
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
-  const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
+  const [newSessionComposerOpen, setNewSessionComposerOpenState] = useState(false);
   const [sessionLaunchPending, setSessionLaunchPending] = useState(false);
   const [sessionLaunchError, setSessionLaunchError] = useState<NewSessionCreationError | null>(null);
   const sessionLaunchPendingRef = useRef(false);
   const composerGenerationRef = useRef(0);
+  const setNewSessionComposerOpen = useCallback((open: boolean) => {
+    if (!open) composerGenerationRef.current += 1;
+    setNewSessionComposerOpenState(open);
+  }, []);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
   const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
   const agentOperationsOpen = workbenchOpen || Object.keys(groupPanels).length > 0;
   const panelIntent = useRef(false);
+  const messagePanelPending = useRef(false);
+  const [messagePanelBusy, setMessagePanelBusy] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void getSettings().then(settings => {
@@ -322,14 +331,13 @@ export function LeftSidebar(
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', refresh); };
   }, []);
   const openAgentOperations = async (groupId: string | null): Promise<boolean> => {
+    setNewSessionComposerOpen(false);
     panelIntent.current = true;
     if (!groupId) {
       setWorkbenchOpen(true);
       closeIfOverlay();
       return true;
     }
-    useCollaborationPanelDock.getState().setDock(groupId, null);
-    setGroupPanels(current => { const next = { ...current }; delete next[groupId]; return next; });
     useCollaborationNavigation.getState().open(groupId);
     closeIfOverlay();
     return true;
@@ -717,6 +725,19 @@ export function LeftSidebar(
   const closeIfOverlay = () => {
     if (!push && !pinned) onClose();
   };
+  useEffect(() => {
+    const openMessages = (event: Event) => {
+      setNewSessionComposerOpen(false);
+      const { groupId, dock } = (event as CustomEvent<{ groupId: string; dock: { sessionId: string; side: 'right' | 'bottom' } }>).detail;
+      panelIntent.current = true;
+      useCollaborationPanelDock.getState().setDock(groupId, { ...dock, preferredWidth: 360 });
+      setGroupPanels(current => ({ ...current, [groupId]: true }));
+      useCollaborationNavigation.getState().terminal();
+      closeIfOverlay();
+    };
+    window.addEventListener('termdock:open-collaboration-messages', openMessages);
+    return () => window.removeEventListener('termdock:open-collaboration-messages', openMessages);
+  }, [closeIfOverlay]);
   const quickLaunchMode = defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' as const : defaultSessionMode;
   const launchSession = (options: NewSessionRequestOptions, fromComposer = false) => {
     if (sessionLaunchPendingRef.current) return;
@@ -724,7 +745,9 @@ export function LeftSidebar(
     setSessionLaunchPending(true);
     setSessionLaunchError(null);
     const generation = composerGenerationRef.current;
-    onNewSession({ ...options, onResult: (result) => {
+    onNewSession({ ...options,
+      shouldActivate: () => generation === composerGenerationRef.current && (options.shouldActivate?.() ?? true),
+      onResult: (result) => {
       sessionLaunchPendingRef.current = false;
       setSessionLaunchPending(false);
       if (!result.ok) {
@@ -745,6 +768,7 @@ export function LeftSidebar(
   };
 
   const handleRestoreTmuxSession = (session: TmuxSessionSummary) => {
+    setNewSessionComposerOpen(false);
     setAttachingTmuxName(session.name);
     onNewSession({ mode: 'tmux', tmuxSessionName: session.name, cwd: session.cwd ?? undefined });
     closeIfOverlay();
@@ -887,6 +911,7 @@ export function LeftSidebar(
             onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
           }}
           onClick={() => {
+            setNewSessionComposerOpen(false);
             useCollaborationNavigation.getState().terminal();
             window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
             closeIfOverlay();
@@ -1561,6 +1586,9 @@ export function LeftSidebar(
     isDragging = false,
     isCombineTarget = false,
   ): React.ReactNode => {
+    const collapseKey = `collaboration:${collaboration.id}`;
+    const membersCollapsed = collapsedGroups.has(collapseKey);
+    const membersRegionId = `collaboration-members-${collaboration.id}`;
     const hasActive = mainCollaborationGroup === collaboration.id || (!mainCollaborationGroup && members.some((session) => session.id === activeSessionId));
     const completedIds = completedTaskSessions(collaborationTasks, collaboration.id);
     const retiredIds = collaboration.sessionIds.filter(id => completedIds.has(id) && id !== activeSessionId && !splitSessionIds.has(id));
@@ -1574,7 +1602,7 @@ export function LeftSidebar(
         data-collaboration-group={collaboration.id}
         data-collaboration-group-name={collaboration.name}
         aria-label={`Agent 工作组：${collaboration.name}`}
-        className={`group/collaboration relative rounded-md p-0.5 before:pointer-events-none before:absolute before:inset-0 before:rounded-md before:border before:border-border transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
+        className={`group/collaboration relative rounded-md ${membersCollapsed ? '' : 'p-0.5 before:pointer-events-none before:absolute before:inset-0 before:rounded-md before:border before:border-border'} transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
@@ -1585,9 +1613,17 @@ export function LeftSidebar(
         }`}
       >
         {renderGroupDragHandle(`移动工作组 ${collaboration.name}`, dragHandleProps)}
+        <div className="flex items-center">
+          <button type="button" aria-label={`${membersCollapsed ? '展开' : '收起'} ${collaboration.name} 的成员会话`}
+            aria-expanded={!membersCollapsed} aria-controls={membersRegionId}
+            title={`${membersCollapsed ? '展开' : '收起'}成员会话`}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-surface-elevated hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary md:h-[30px] md:w-5"
+            onClick={event => { event.stopPropagation(); toggleGroupCollapsed(collapseKey); }}>
+            <RiChevronRightLine size={14} className={membersCollapsed ? '' : 'rotate-90'} />
+          </button>
         <button
           type="button"
-          className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-xs font-medium text-foreground transition hover:bg-surface-elevated md:min-h-8"
+          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1 text-left text-xs font-medium text-foreground transition hover:text-primary md:min-h-[30px]"
           title={`打开 ${collaboration.name} 的协作工作区`}
           aria-label={`打开协作工作区：${collaboration.name}`}
           aria-current={mainCollaborationGroup === collaboration.id ? "page" : undefined}
@@ -1598,8 +1634,18 @@ export function LeftSidebar(
         >
           <RiWorkflowLine size={14} className="shrink-0 text-primary" />
           <span className="min-w-0 flex-1 truncate">{collaboration.name}</span>
-          <span className={`shrink-0 text-[10px] font-normal ${taskInbox.some(t => t.groupId === collaboration.id) ? 'text-primary' : 'text-muted-foreground'}`}>{taskInbox.filter(t => t.groupId === collaboration.id).length ? `${taskInbox.filter(t => t.groupId === collaboration.id).length} 待处理` : '协作'}</span>
+          {taskInbox.some(t => t.groupId === collaboration.id) && <span className="shrink-0 text-[10px] font-normal text-primary">{taskInbox.filter(t => t.groupId === collaboration.id).length} 待处理</span>}
         </button>
+          <button type="button" aria-label={`成员与消息：${collaboration.name}`} title="在终端旁打开成员与消息"
+            disabled={messagePanelBusy !== null || !activeSessionId && !members.length}
+            aria-busy={messagePanelBusy === collaboration.id}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-surface-elevated hover:text-primary disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary md:h-[30px] md:w-7"
+            onClick={event => { event.stopPropagation(); if (messagePanelPending.current) return; setNewSessionComposerOpen(false); messagePanelPending.current = true; setMessagePanelBusy(collaboration.id); setCollaborationActionError(null); void openCollaborationMessagesPanel(collaboration.id, activeSessionId ?? members[0]!.id).catch(error => setCollaborationActionError(error instanceof Error ? error.message : '消息面板打开失败，请重试')).finally(() => { messagePanelPending.current = false; setMessagePanelBusy(null); }); }}>
+            {messagePanelBusy === collaboration.id ? <RefreshCw size={14} className="animate-spin" /> : <MessageCircle size={14} />}
+          </button>
+        </div>
+        <div id={membersRegionId}>
+        {!membersCollapsed && <>
         {retiredIds.length > 0 && <button type="button" aria-expanded={expandedCompleted} className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-[11px] text-muted-foreground hover:bg-surface-elevated md:min-h-8" title="展开后可查看或归档执行会话，任务结果保留。" onClick={() => setCompletedSessionsExpanded(state => ({ ...state, [collaboration.id]: !expandedCompleted }))}><RiChevronRightLine size={12} className={expandedCompleted ? 'rotate-90' : ''} />已完成的执行会话 · {retiredIds.length}</button>}
         <Droppable
           droppableId={`collaboration-members:${collaboration.id}`}
@@ -1658,7 +1704,7 @@ export function LeftSidebar(
                         <button type="button" className="shrink-0 px-1 text-[10px] text-primary"
                           title={`与 ${splitWorkspaces.find((workspace) => workspace.sessionIds.includes(session.id))?.sessionIds.filter((id) => id !== session.id).map((id) => sessionsById.get(id)?.name ?? id).join('、')} 分屏`}
                           aria-label={`查看 ${session.name} 的跨组分屏`}
-                          onClick={() => { useCollaborationNavigation.getState().terminal(); window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id })); closeIfOverlay(); }}>
+                          onClick={() => { setNewSessionComposerOpen(false); useCollaborationNavigation.getState().terminal(); window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id })); closeIfOverlay(); }}>
                           <RiSplitLine size={10} />
                         </button>
                       )}
@@ -1673,11 +1719,12 @@ export function LeftSidebar(
             </div>
           )}
         </Droppable>
-        <CollaborationExecutionArchives groupId={collaboration.id} version={archivesVersion} onRestore={async session => { window.dispatchEvent(new CustomEvent('new-terminal-session', { detail: { mode: 'tmux', cwd: session.cwd, preferredFrontendSessionId: session.sessionId, requireExisting: true } })); await refreshCollaborationGroups(); useCollaborationNavigation.getState().terminal(); closeIfOverlay(); }} />
+        <CollaborationExecutionArchives groupId={collaboration.id} version={archivesVersion} onRestore={async session => { setNewSessionComposerOpen(false); window.dispatchEvent(new CustomEvent('new-terminal-session', { detail: { mode: 'tmux', cwd: session.cwd, preferredFrontendSessionId: session.sessionId, requireExisting: true } })); await refreshCollaborationGroups(); useCollaborationNavigation.getState().terminal(); closeIfOverlay(); }} />
         {collaboration.remoteSessions?.map((remote) => <button
           key={remote.sessionId} type="button" title={`${collaborationServiceLabel(remote)} · ${remote.serviceConnected === false ? '服务不可达，消息尚未送达' : remote.status}`}
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
           onClick={() => {
+            setNewSessionComposerOpen(false);
             void openRemoteSession(remote.sessionId).catch(() => {
               void openAgentOperations(collaboration.id);
             });
@@ -1687,8 +1734,10 @@ export function LeftSidebar(
           <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{collaborationServiceLabel(remote)}</span>
           {remote.serviceConnected === false && <span className="shrink-0 text-[9px]">不可达</span>}
         </button>)}
+        </>}
+        </div>
         {/* Keep the workgroup drop area below the rows, never over a sortable member. */}
-        <div data-collaboration-background className="h-1.5" />
+        <div data-collaboration-background className={membersCollapsed ? "absolute inset-0 pointer-events-none" : "h-1.5"} />
       </section>
     );
   };
@@ -1826,58 +1875,14 @@ export function LeftSidebar(
             void openAgentOperations(task.groupId).then(opened => { if (opened) requestCollaborationTask(task.groupId, task.id); });
           }}><span className="block truncate text-xs text-foreground">{task.title}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground">{rawCollaborationGroups.find(g => g.id === task.groupId)?.name ?? '协作组'} · {collaborationTaskStage(task)}</span></button>)}</div>}
         </section>}
-        {recoverableTmuxSessions.length > 0 && (
-          <section className="mb-2 shrink-0 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
-            <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">
-              <RiHistoryLine size={12} className="shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.recoverableSessions')}</span>
-              <span className="text-muted-foreground">{recoverableTmuxSessions.length}</span>
-              {onRefreshRecoverableTmuxSessions && (
-                <button
-                  type="button"
-                  onClick={onRefreshRecoverableTmuxSessions}
-                  disabled={recoverableTmuxSessionsLoading}
-                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                  aria-label={t('sidebar.refreshRecoverableSessions')}
-                  title={t('sidebar.refreshRecoverableSessions')}
-                >
-                  <RiRefreshLine size={11} className={recoverableTmuxSessionsLoading ? 'animate-spin' : ''} />
-                </button>
-              )}
-            </div>
-            <div className="space-y-0.5">
-              {recoverableTmuxSessions.slice(0, 4).map((session) => {
-                const title = session.friendlyName?.trim() || session.label?.trim() || session.name;
-                const directory = getCwdLeafName(session.cwd ?? null);
-                const attaching = attachingTmuxName === session.name;
-                return (
-                  <button
-                    key={session.name}
-                    type="button"
-                    disabled={attachingTmuxName !== null}
-                    onClick={() => handleRestoreTmuxSession(session)}
-                    className="group flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-wait disabled:opacity-60"
-                    aria-label={t('sidebar.restoreRecoverableSession', { name: title })}
-                    title={session.cwd || session.name}
-                  >
-                    <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[rgb(var(--tmux-rgb)_/_0.11)] text-[color:var(--tmux)]">
-                      {attaching ? <RiLoaderCircle size={12} className="animate-spin" /> : <RiLayoutGridLine size={12} />}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[11.5px] font-semibold text-foreground">{title}</span>
-                      <span className="block truncate text-[9.5px] text-muted-foreground">
-                        {[session.program, directory].filter(Boolean).join(' · ') || `tmux:${session.name}`}
-                      </span>
-                    </span>
-                    <span className="shrink-0 text-[10px] font-medium text-[color:var(--tmux)] group-hover:text-foreground">
-                      {attaching ? t('sidebar.restoringRecoverableSession') : t('sidebar.restore')}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        )}
+        <RecoverableSessions
+          sessions={recoverableTmuxSessions}
+          loading={recoverableTmuxSessionsLoading}
+          attachingName={attachingTmuxName}
+          onRefresh={onRefreshRecoverableTmuxSessions}
+          onRestore={handleRestoreTmuxSession}
+          onClose={onCloseRecoverableTmuxSession}
+        />
         {collaborationGroups.filter(group => !group.sessionIds.length).map(group => <DragDropContext key={group.id} onDragEnd={() => {}}>{renderCollaborationGroupItem(group, [])}</DragDropContext>)}
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
@@ -2150,10 +2155,10 @@ export function LeftSidebar(
 
       {workbenchOpen && <AgentOperationsPanel onEnterGroup={async id => { if (!await openAgentOperations(id)) throw new Error('协作组已保存，打开工作区失败，请重试'); setWorkbenchOpen(false); }} onFloatingChange={async id => { if (id) { if (!await openAgentOperations(id)) throw new Error('打开协作工作区失败'); setWorkbenchOpen(false); } }} activeSessionId={activeSessionId} defaultSessionMode={defaultSessionMode}
         onClose={() => setWorkbenchOpen(false)} onNewSession={options => onNewSession(options)} />}
-      {!mainCollaborationGroup && Object.entries(groupPanels).map(([groupId, floating]) => <AgentOperationsPanel key={groupId}
-        activeSessionId={activeSessionId} initialCollaborationGroupId={groupId} initialFloating={floating}
+      {Object.entries(groupPanels).map(([groupId, floating]) => <AgentOperationsPanel key={groupId}
+        activeSessionId={activeSessionId} initialCollaborationGroupId={groupId} initialFloating={floating} visible={!mainCollaborationGroup}
         onEnterGroup={async nextId => {
-          if (nextId === groupId) return;
+          if (nextId === groupId) { await openAgentOperations(nextId); return; }
           if (!await openAgentOperations(nextId)) throw new Error('协作组已保存，打开工作区失败，请重试');
           await saveCollaborationPanel({ floatingGroupId: null }, groupId);
           setGroupPanels(current => { const next = { ...current }; delete next[groupId]; return next; });

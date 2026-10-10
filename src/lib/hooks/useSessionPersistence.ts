@@ -93,7 +93,7 @@ interface UseSessionPersistenceReturn {
   inventory: SessionInventory | null;
   activeSessionId: string | null;
   isLoading: boolean;
-  openSession: (options: OpenSessionInventoryOptions) => Promise<OpenSessionInventoryResult>;
+  openSession: (options: OpenSessionInventoryOptions, activation?: { shouldActivate?: () => boolean }) => Promise<OpenSessionInventoryResult & { discarded: boolean }>;
   removeSession: (sessionId: string, preferredActiveSessionId?: string | null) => Promise<void>;
   updateSessionActivity: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
@@ -106,6 +106,21 @@ interface UseSessionPersistenceReturn {
 }
 
 type NormalizableSession = Omit<PersistedSession, 'customName'> & { customName?: boolean };
+
+// These fields describe the backend confirmed by a server snapshot, rather
+// than the user's current tab name/order. Inventory.updatedAt is the server's
+// snapshot generation time; the local revision breaks same-millisecond ties
+// without letting a delayed HTTP response replace facts observed since it began.
+const BACKEND_FACT_KEYS = [
+  'backendSessionId', 'mode', 'tmuxSessionName', 'lastActivity',
+  'connected', 'live', 'restorable', 'activeProgram', 'cwd', 'shellTitle', 'agent',
+] as const;
+type BackendFacts = Partial<Pick<SessionInventoryClientSession, typeof BACKEND_FACT_KEYS[number]>>;
+interface ConfirmedBackendFacts {
+  updatedAt: number;
+  revision: number;
+  facts: BackendFacts;
+}
 
 function normalizeSessionList(sessionList: NormalizableSession[]): PersistedSession[] {
   return sessionList.map((session) => ({
@@ -174,7 +189,13 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   );
   const [isLoading, setIsLoading] = useState<boolean>(initialCached === null);
   const initialized = useRef(false);
-  const activeSessionIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  const sessionsRef = useRef(sessions);
+  const inventoryRef = useRef<SessionInventory | null>(null);
+  const sessionSnapshotRevisionRef = useRef(0);
+  const backendFactRevisionRef = useRef(0);
+  const backendFactsRef = useRef(new Map<string, ConfirmedBackendFacts>());
+  const selectionRevisionRef = useRef(0);
   const isLoadingRef = useRef<boolean>(initialCached === null);
   const lastSnapshotSeqRef = useRef(0);
   // A cached cold-start GET and control-WS snapshots can both arrive after a
@@ -200,6 +221,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
   const applySessionList = useCallback((sessionList: PersistedSession[], options?: { reconcileActive?: boolean }) => {
     const filteredSessionList = sessionList.filter((session) => !removedSessionIdsRef.current.has(session.sessionId));
+    sessionsRef.current = filteredSessionList;
+    ++sessionSnapshotRevisionRef.current;
     setSessions((prev) => (sessionListKey(prev) === sessionListKey(filteredSessionList) ? prev : filteredSessionList));
     writeSessionsCache(filteredSessionList);
     if (options?.reconcileActive) {
@@ -207,7 +230,31 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     }
   }, [reconcileActiveSessionId]);
 
-  const applyInventory = useCallback((nextInventory: SessionInventory, options?: { reconcileActive?: boolean }) => {
+  const mergeBackendFacts = useCallback(<T extends PersistedSession | SessionInventoryClientSession>(
+    session: T, updatedAt: number, baseRevision?: number,
+  ): T => {
+    const previous = backendFactsRef.current.get(session.sessionId);
+    if (previous && (updatedAt < previous.updatedAt
+      || (updatedAt === previous.updatedAt && baseRevision !== undefined && previous.revision > baseRevision))) {
+      return { ...session, ...previous.facts };
+    }
+    const incoming = Object.fromEntries(BACKEND_FACT_KEYS
+      .filter(key => key in session)
+      .map(key => [key, session[key as keyof T]])) as BackendFacts;
+    const sameBackend = previous?.facts.backendSessionId === session.backendSessionId;
+    const facts: BackendFacts = {
+      ...(sameBackend ? previous?.facts : { connected: false, live: false, restorable: false }),
+      ...incoming,
+    };
+    backendFactsRef.current.set(session.sessionId, {
+      updatedAt, revision: ++backendFactRevisionRef.current, facts,
+    });
+    return { ...session, ...facts };
+  }, []);
+
+  const applyInventory = useCallback((nextInventory: SessionInventory, options?: {
+    reconcileActive?: boolean; backendBaseRevision?: number; mergedLocally?: boolean;
+  }) => {
     const filteredInventory = removedSessionIdsRef.current.size === 0
       ? nextInventory
       : {
@@ -216,8 +263,19 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
             (session) => !removedSessionIdsRef.current.has(session.sessionId),
           ),
         };
-    setInventory(filteredInventory);
-    applySessionList(normalizeInventorySessionList(filteredInventory.clientSessions), options);
+    const confirmedInventory = options?.mergedLocally ? filteredInventory : {
+      ...filteredInventory,
+      clientSessions: filteredInventory.clientSessions.map(session => mergeBackendFacts(
+        session, nextInventory.updatedAt, options?.backendBaseRevision,
+      )),
+    };
+    inventoryRef.current = confirmedInventory;
+    setInventory(confirmedInventory);
+    applySessionList(normalizeInventorySessionList(confirmedInventory.clientSessions), options);
+  }, [applySessionList, mergeBackendFacts]);
+
+  const mutateSessionList = useCallback((update: (previous: PersistedSession[]) => PersistedSession[]) => {
+    applySessionList(update(sessionsRef.current));
   }, [applySessionList]);
 
   const discardLegacyLocalState = useCallback((): PersistedSession[] => {
@@ -233,6 +291,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     localStorage.removeItem(LEGACY_STORAGE_KEY);
     clearSessionsCache();
     writeActiveSessionId(null);
+    sessionsRef.current = [];
+    activeSessionIdRef.current = null;
     setSessions([]);
     setActiveSessionIdState(null);
     console.info('[session-persist] discarded legacy local session cache');
@@ -243,6 +303,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const restoreSessions = useCallback(async (): Promise<PersistedSession[]> => {
     if (typeof window === 'undefined') return [];
     const requestRevision = localMutationRevisionRef.current;
+    const backendBaseRevision = backendFactRevisionRef.current;
 
     try {
       const nextInventory = await getSessionInventory();
@@ -251,7 +312,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
         console.info('[session-inventory] ignored restore snapshot superseded by a local mutation');
         return sessionList.filter((session) => !removedSessionIdsRef.current.has(session.sessionId));
       }
-      applyInventory(nextInventory, { reconcileActive: true });
+      applyInventory(nextInventory, { reconcileActive: true, backendBaseRevision });
 
       if (sessionList.length > 0) {
         return sessionList;
@@ -273,22 +334,86 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     return [];
   }, [applyInventory, discardLegacyLocalState]);
 
-  const openSession = useCallback(async (options: OpenSessionInventoryOptions): Promise<OpenSessionInventoryResult> => {
+  const openSession = useCallback(async (
+    options: OpenSessionInventoryOptions,
+    activation?: { shouldActivate?: () => boolean },
+  ): Promise<OpenSessionInventoryResult & { discarded: boolean }> => {
     const mutationRevision = ++localMutationRevisionRef.current;
+    const selectionRevision = selectionRevisionRef.current;
+    const snapshotRevision = sessionSnapshotRevisionRef.current;
+    const backendBaseRevision = backendFactRevisionRef.current;
     const result = await openSessionInventoryEntry(options);
-    if (mutationRevision === localMutationRevisionRef.current) {
-      applyInventory(result.inventory);
+    const previouslyConfirmed = backendFactsRef.current.get(result.session.sessionId);
+    const responseFactsSuperseded = previouslyConfirmed !== undefined && (
+      previouslyConfirmed.updatedAt > result.inventory.updatedAt
+      || (previouslyConfirmed.updatedAt === result.inventory.updatedAt && previouslyConfirmed.revision > backendBaseRevision)
+    );
+    if (mutationRevision === localMutationRevisionRef.current && snapshotRevision === sessionSnapshotRevisionRef.current) {
+      applyInventory(result.inventory, { backendBaseRevision });
+    } else {
+      // A full response may predate another creation, rename, reorder, delete,
+      // or control snapshot. Keep its order/name edits, but an existing ID may
+      // have been rebuilt by this open. Merge confirmed backend facts by source
+      // generation instead of ignoring that result or replacing the whole row.
+      const currentInventory = inventoryRef.current;
+      const inventoryById = new Map(currentInventory?.clientSessions.map((session) => [session.sessionId, session]));
+      const clientSessions = sessionsRef.current.map((session) => ({
+        frontendSessionId: session.sessionId,
+        connected: false,
+        live: false,
+        restorable: false,
+        ...inventoryById.get(session.sessionId),
+        ...session,
+      }));
+      if (!removedSessionIdsRef.current.has(result.session.sessionId)) {
+        const opened = mergeBackendFacts(result.session, result.inventory.updatedAt, backendBaseRevision);
+        const existingIndex = clientSessions.findIndex(session => session.sessionId === opened.sessionId);
+        if (existingIndex < 0) clientSessions.push(opened);
+        else {
+          const current = clientSessions[existingIndex]!;
+          clientSessions[existingIndex] = { ...opened, name: current.name,
+            customName: current.customName, createdAt: current.createdAt };
+        }
+      }
+      applyInventory({ ...(currentInventory ?? result.inventory), clientSessions }, { mergedLocally: true });
+    }
+    const canonical = inventoryRef.current?.clientSessions.find(session => session.sessionId === result.session.sessionId) ?? result.session;
+    const discarded = removedSessionIdsRef.current.has(result.session.sessionId) || canonical.backendSessionId === null;
+    if (
+      mutationRevision === localMutationRevisionRef.current
+      && selectionRevision === selectionRevisionRef.current
+      && !discarded
+      && (activation?.shouldActivate?.() ?? true)
+    ) {
+      activeSessionIdRef.current = result.session.sessionId;
       setActiveSessionIdState(result.session.sessionId);
       writeActiveSessionId(result.session.sessionId);
     }
-    return result;
-  }, [applyInventory]);
+    const sameBackend = canonical.backendSessionId === result.terminalSession.sessionId;
+    const useResponsePayload = sameBackend && !responseFactsSuperseded;
+    return {
+      ...result,
+      inventory: inventoryRef.current ?? result.inventory,
+      session: canonical,
+      // A later snapshot may already confirm a different backend. Never let
+      // the open handler temporarily attach the obsolete response payload.
+      terminalSession: {
+        ...(useResponsePayload ? result.terminalSession : { cols: options.cols ?? 80, rows: options.rows ?? 24 }),
+        sessionId: canonical.backendSessionId ?? result.terminalSession.sessionId,
+        mode: canonical.mode,
+        tmuxSessionName: canonical.tmuxSessionName,
+        activeProgram: canonical.activeProgram !== undefined ? canonical.activeProgram : (useResponsePayload ? result.terminalSession.activeProgram : null),
+        cwd: canonical.cwd !== undefined ? canonical.cwd : (useResponsePayload ? result.terminalSession.cwd : null),
+      },
+      discarded,
+    };
+  }, [applyInventory, mergeBackendFacts]);
 
   const removeSession = useCallback(async (sessionId: string, preferredActiveSessionId?: string | null) => {
     ++localMutationRevisionRef.current;
     removedSessionIdsRef.current.add(sessionId);
     removeSessionFontSize(sessionId);
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.filter(s => s.sessionId !== sessionId);
       const preferredSessionStillExists = preferredActiveSessionId != null
         && updated.some((session) => session.sessionId === preferredActiveSessionId);
@@ -298,6 +423,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
             : pickSessionAfterClose(prev, sessionId, (session) => session.sessionId))
         : activeSessionIdRef.current;
       setActiveSessionIdState(nextActiveSessionId);
+      activeSessionIdRef.current = nextActiveSessionId;
       writeActiveSessionId(nextActiveSessionId);
       writeSessionsCache(updated);
       return updated;
@@ -308,22 +434,24 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to remove session from inventory:', error);
     }
-  }, []);
+  }, [mutateSessionList]);
 
   // 更新会话活跃时间：当前只做本地缓存，服务端在 open / WS connect 时会更新 authority。
   const updateSessionActivity = useCallback((sessionId: string) => {
     const now = Date.now();
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, lastActivity: now } : s
       );
       writeSessionsCache(updated);
       return updated;
     });
-  }, []);
+  }, [mutateSessionList]);
 
   // 设置活跃会话（仅本地，不触发服务器持久化）
   const setActiveSession = useCallback((sessionId: string | null) => {
+    ++selectionRevisionRef.current;
+    activeSessionIdRef.current = sessionId;
     setActiveSessionIdState(sessionId);
     writeActiveSessionId(sessionId);
   }, []);
@@ -333,8 +461,9 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     const trimmed = newName.trim();
     if (!trimmed) return;
     const mutationRevision = ++localMutationRevisionRef.current;
+    const backendBaseRevision = backendFactRevisionRef.current;
 
-    setSessions(prev => {
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, name: trimmed, customName: true } : s
       );
@@ -344,16 +473,17 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
     try {
       const nextInventory = await updateSessionInventoryEntry(sessionId, { name: trimmed, customName: true });
-      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory);
+      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory, { backendBaseRevision });
     } catch (error) {
       console.error('Failed to rename session in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 取消自定义名称,回退到默认显示规则
   const resetSessionCustomName = useCallback(async (sessionId: string) => {
     const mutationRevision = ++localMutationRevisionRef.current;
-    setSessions(prev => {
+    const backendBaseRevision = backendFactRevisionRef.current;
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, customName: false } : s
       );
@@ -363,16 +493,17 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
     try {
       const nextInventory = await updateSessionInventoryEntry(sessionId, { customName: false });
-      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory);
+      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory, { backendBaseRevision });
     } catch (error) {
       console.error('Failed to reset session name in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 重排会话顺序
   const reorderSessions = useCallback(async (orderedIds: string[]) => {
     const mutationRevision = ++localMutationRevisionRef.current;
-    setSessions(prev => {
+    const backendBaseRevision = backendFactRevisionRef.current;
+    mutateSessionList(prev => {
       const idToSession = new Map(prev.map(s => [s.sessionId, s]));
       const reordered = orderedIds
         .map(id => idToSession.get(id))
@@ -386,19 +517,21 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
     try {
       const nextInventory = await reorderSessionInventoryEntries(orderedIds);
-      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory);
+      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory, { backendBaseRevision });
     } catch (error) {
       console.error('Failed to reorder sessions in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 清除所有会话
   const clearAllSessions = useCallback(async () => {
     ++localMutationRevisionRef.current;
-    for (const session of sessions) removedSessionIdsRef.current.add(session.sessionId);
-    setSessions([]);
+    for (const session of sessionsRef.current) removedSessionIdsRef.current.add(session.sessionId);
+    applySessionList([]);
+    inventoryRef.current = null;
     setInventory(null);
     setActiveSessionIdState(null);
+    activeSessionIdRef.current = null;
     writeActiveSessionId(null);
     clearSessionsCache();
     if (typeof window !== 'undefined') {
@@ -410,12 +543,13 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     } catch (error) {
       console.error('Failed to clear session inventory:', error);
     }
-  }, [sessions]);
+  }, [applySessionList]);
 
   // 更新会话的 backendSessionId
   const updateSessionBackendId = useCallback(async (sessionId: string, backendSessionId: string) => {
     const mutationRevision = ++localMutationRevisionRef.current;
-    setSessions(prev => {
+    const backendBaseRevision = backendFactRevisionRef.current;
+    mutateSessionList(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, backendSessionId } : s
       );
@@ -425,11 +559,11 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
     try {
       const nextInventory = await updateSessionInventoryEntry(sessionId, { backendSessionId });
-      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory);
+      if (mutationRevision === localMutationRevisionRef.current) applyInventory(nextInventory, { backendBaseRevision });
     } catch (error) {
       console.error('Failed to update session backend in inventory:', error);
     }
-  }, [applyInventory]);
+  }, [applyInventory, mutateSessionList]);
 
   // 初始化时恢复会话
   useEffect(() => {
@@ -460,11 +594,12 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
         return;
       }
 
-      const serverSessions = normalizeSessionList(snapshot.clientState.sessions || []);
+      const serverSessions = normalizeSessionList(snapshot.clientState.sessions || []).map(session =>
+        mergeBackendFacts(session, snapshot.clientState.updatedAt));
       applySessionList(serverSessions, { reconcileActive: true });
     });
     return unsubscribe;
-  }, [applyInventory, applySessionList]);
+  }, [applyInventory, applySessionList, mergeBackendFacts]);
 
   return {
     sessions,

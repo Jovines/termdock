@@ -6,6 +6,8 @@ export interface NewSessionRequestOptions {
   cwd?: string;
   command?: string;
   onResult?: (result: NewSessionCreationResult) => void;
+  /** UI owner may withdraw automatic navigation without cancelling creation. */
+  shouldActivate?: () => boolean;
 }
 
 export function classifySessionCreationError(error: unknown): NewSessionCreationError {

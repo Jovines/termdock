@@ -1,11 +1,18 @@
 /** Workflow records are explicit reports and decisions, never inferred Agent activity. */
 export interface TaskMember { serviceId: string; sessionId: string }
+/** Authenticated integration identity is separate from a terminal member. */
+export interface TaskOrigin {
+  integrationId: string; source: string; externalActor?: Record<string, unknown>;
+  externalMessageId?: string; metadata?: Record<string, unknown>;
+}
 export type TaskReportStatus = 'ack' | 'working' | 'blocked' | 'complete' | 'failed';
 export interface CollaborationTaskEvent {
   id: string; sequence: number; kind: string; actor: TaskMember | null;
   content: string; createdAt: number; attemptId: string | null;
   reportStatus?: TaskReportStatus; evidence?: unknown; artifactId?: string; target?: TaskMember;
-  source?: 'system' | 'user';
+  source?: 'system' | 'user' | 'integration';
+  origin?: TaskOrigin;
+  replyToEventId?: string;
   deliveryId?: string;
 }
 export interface CollaborationTaskDecision {
@@ -35,6 +42,7 @@ export interface CollaborationTaskAttempt {
   report?: { status: TaskReportStatus; content: string; evidence?: unknown; createdAt: number; summary?: string };
 }
 export interface CollaborationTask {
+  origin?: TaskOrigin;
   id: string; ownerServiceId: string; groupId: string; title: string; spec: string;
   constraints: string; acceptance: string; createdAt: number; updatedAt: number; revision: number;
   coordinator: TaskMember | null; parentTaskId: string | null; dependsOn: string[];
@@ -47,12 +55,14 @@ export interface CollaborationTask {
   coordination?: { notifiedSequence: number; acknowledgedSequence: number; notifiedAt: number };
 }
 export interface TaskOutbox {
+  replyToEventId?: string;
   id: string; taskId: string; attemptId: string | null; target: TaskMember;
   content: string; kind: 'task' | 'message' | 'handoff'; threadId: string;
   messageId?: string; lastError?: string; nextRetryAt?: number;
 }
-export type TaskOperationKind = 'assign' | 'report' | 'ask' | 'answer' | 'submit-plan' | 'review' | 'request-review' | 'approve-plan' | 'accept' | 'revise' | 'close' | 'reopen' | 'comment' | 'coordinator' | 'coordinate' | 'pause' | 'resume' | 'retry';
+export type TaskOperationKind = 'assign' | 'report' | 'ask' | 'answer' | 'submit-plan' | 'review' | 'request-review' | 'approve-plan' | 'accept' | 'revise' | 'close' | 'reopen' | 'comment' | 'respond' | 'coordinator' | 'coordinate' | 'pause' | 'resume' | 'retry';
 export interface TaskOperation {
+  replyToEventId?: string;
   kind: TaskOperationKind; expectedRevision?: number; idempotencyKey: string;
   content?: string; assignee?: TaskMember; coordinator?: TaskMember | null;
   attemptId?: string; status?: TaskReportStatus; evidence?: unknown;

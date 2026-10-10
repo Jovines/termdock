@@ -7,14 +7,16 @@ import { createInviteLink } from '../../lib/federation/inviteLink';
 afterEach(() => { cleanup(); localStorage.clear(); });
 describe('shared service manager', () => {
   it.each(['://', 'ftp://computer.example', 'https://computer.example?secret=value', 'https://computer.example/#termdock-invite=broken'])('keeps invalid input %s editable without attempting a connection or saving it', async input => {
-    const onAdd = vi.fn();
-    render(<ServiceManager initiallyAdding onAdd={onAdd} onOpen={async () => {}} />);
+    const onAdd = vi.fn(), onBusyChange = vi.fn();
+    render(<ServiceManager onBusyChange={onBusyChange} initiallyAdding onAdd={onAdd} onOpen={async () => {}} />);
     fireEvent.change(screen.getByLabelText('服务地址或邀请链接'), { target: { value: input } });
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain(input.includes('#termdock-invite=') ? 'Copy the full invitation link' : 'Enter a valid HTTPS service address');
     expect((screen.getByLabelText('服务地址或邀请链接') as HTMLInputElement).value).toBe(input);
     expect(onAdd).not.toHaveBeenCalled(); expect(readBrowserServices()).toEqual([]);
+    expect(document.activeElement).toBe(screen.getByLabelText('服务地址或邀请链接'));
+    expect(onBusyChange).not.toHaveBeenCalled();
     expect((screen.getByRole('button', { name: '继续' }) as HTMLButtonElement).disabled).toBe(false);
   });
   it.each(['computer.example:9834', 'https://computer.example:9834', 'https://[::1]:9834', '[::1]:9834', createInviteLink({ v: 1, serviceId: `12D3KooW${'a'.repeat(44)}`, code: 'b'.repeat(32), entryUrl: 'https://computer.example:9834' })])('retains support for %s', async input => {
@@ -65,4 +67,28 @@ it('saves an offline address without probing, opening, or retaining a password',
   fireEvent.click(screen.getByRole('button', { name: '仅保存，不连接' }));
   await waitFor(() => expect(readBrowserServices()).toEqual([{ id: 'https://offline.example:9834', url: 'https://offline.example:9834', label: 'offline.example:9834' }]));
   expect(onAdd).not.toHaveBeenCalled(); expect(onOpen).not.toHaveBeenCalled();
+});
+
+it('keeps keyboard focus and input on invalid Enter and save without starting busy work', async () => {
+  const onBusyChange = vi.fn(), onAdd = vi.fn();
+  render(<ServiceManager initiallyAdding onBusyChange={onBusyChange} onAdd={onAdd} onOpen={async () => {}} />);
+  const input = screen.getByLabelText('服务地址或邀请链接');
+  fireEvent.change(input, { target: { value: '://' } }); input.focus();
+  fireEvent.submit(input.closest('form')!);
+  await screen.findByRole('alert');
+  expect(document.activeElement).toBe(input);
+  fireEvent.click(screen.getByRole('button', { name: '仅保存，不连接' }));
+  expect(document.activeElement).toBe(input);
+  expect(onBusyChange).not.toHaveBeenCalled(); expect(onAdd).not.toHaveBeenCalled();
+});
+it('still disables repeated valid submissions while a connection is pending', async () => {
+  let finish!: () => void;
+  const onAdd = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+  render(<ServiceManager initiallyAdding onAdd={onAdd} onOpen={async () => {}} />);
+  const input = screen.getByLabelText('服务地址或邀请链接');
+  fireEvent.change(input, { target: { value: 'computer.example' } });
+  fireEvent.submit(input.closest('form')!);
+  await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(true));
+  fireEvent.submit(input.closest('form')!); expect(onAdd).toHaveBeenCalledTimes(1);
+  finish(); await waitFor(() => expect(screen.queryByLabelText('服务地址或邀请链接')).toBeNull());
 });

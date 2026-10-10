@@ -9,6 +9,7 @@ import ComputerControlView from './ComputerControlView';
 const mocks = vi.hoisted(() => ({
   peer: 'ubuntu-service',
   platform: 'linux',
+  rdpAvailable: true as boolean | undefined,
   clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn>; keyboardActive?: boolean }>,
   hosts: [] as string[],
   pointerSend: vi.fn(),
@@ -55,7 +56,7 @@ vi.mock('../../computer/rdpSession', () => ({ RdpSession: class extends EventTar
 
 beforeEach(() => {
   localStorage.clear();
-  mocks.peer = 'ubuntu-service'; mocks.platform = 'linux';
+  mocks.peer = 'ubuntu-service'; mocks.platform = 'linux'; mocks.rdpAvailable = true;
   mocks.clients.length = 0; mocks.hosts.length = 0; mocks.rdpOptions.length = 0; mocks.failures.length = 0;
   mocks.preferences = null; mocks.writes = []; mocks.pointerSend.mockClear();
   mocks.credentials = {}; mocks.credentialWrites = [];
@@ -70,7 +71,7 @@ beforeEach(() => {
       if (options?.method === 'PUT') { mocks.preferences = JSON.parse(String(options.body)); mocks.writes.push(mocks.preferences!); }
       return { ok: true, json: async () => ({ preferences: mocks.preferences || defaultComputerPreferences(mocks.platform), configured: Boolean(mocks.preferences), credentialKeys: Object.keys(mocks.credentials) }) };
     }
-    return { ok: true, json: async () => ({ platform: mocks.platform, hostname: 'ubuntu', rdpAvailable: true }) };
+    return { ok: true, json: async () => ({ platform: mocks.platform, hostname: 'ubuntu', rdpAvailable: mocks.rdpAvailable }) };
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -81,6 +82,83 @@ async function ready() {
 }
 
 describe('computer targets', () => {
+  const capabilities = [false, true, undefined] as const;
+  const protocols = ['rdp', 'vnc'] as const;
+  const credentials = ['missing', 'typed', 'saved'] as const;
+  const manualCases = capabilities.flatMap(rdpAvailable => protocols.flatMap(protocol => credentials.map(login => ({ rdpAvailable, protocol, login }))));
+  it.each(manualCases)('gates manual $protocol with capability=$rdpAvailable and $login credentials', async ({ rdpAvailable, protocol, login }) => {
+    mocks.rdpAvailable = rdpAvailable;
+    mocks.preferences = defaultComputerPreferences('linux'); mocks.preferences.autoConnect = false;
+    mocks.preferences.local.protocol = protocol; mocks.preferences.local.username = 'test-user';
+    if (login === 'saved') mocks.credentials[computerLoginKey(mocks.preferences.local)] = 'fixture-secret';
+    await ready();
+    if (login === 'typed') fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'fixture-secret' } });
+    const blocked = protocol === 'rdp' && rdpAvailable === false;
+    expect((screen.getByRole('button', { name: '连接' }) as HTMLButtonElement).disabled).toBe(blocked || login === 'missing');
+    expect(Boolean(screen.queryByText(zh.computer.rdpBackendUnavailable))).toBe(blocked);
+    // Submit directly as well: disabled presentation must also gate the runtime entry point.
+    fireEvent.submit(screen.getByLabelText('密码').closest('form')!);
+    await act(async () => {});
+    if (blocked || login === 'missing') {
+      expect(mocks.clients).toHaveLength(0);
+      expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/credentials/use'))).toBe(false);
+    } else {
+      await waitFor(() => expect(mocks.clients).toHaveLength(1));
+      expect(protocol === 'rdp' ? mocks.rdpOptions.length : mocks.hosts.length).toBe(1);
+    }
+  });
+  it.each(capabilities.flatMap(rdpAvailable => protocols.map(protocol => ({ rdpAvailable, protocol }))))('gates remembered auto-connect for $protocol with capability=$rdpAvailable', async ({ rdpAvailable, protocol }) => {
+    mocks.rdpAvailable = rdpAvailable;
+    mocks.preferences = defaultComputerPreferences('linux'); mocks.preferences.autoConnect = true;
+    mocks.preferences.local.protocol = protocol; mocks.preferences.local.username = 'test-user';
+    mocks.credentials[computerLoginKey(mocks.preferences.local)] = 'fixture-secret';
+    render(<ComputerControlView />);
+    await screen.findByPlaceholderText('已保存，留空直接连接');
+    await screen.findByText(/运行当前 Termdock 服务的电脑/);
+    await act(async () => {});
+    if (protocol === 'rdp' && rdpAvailable === false) {
+      expect(mocks.clients).toHaveLength(0);
+      expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/credentials/use'))).toBe(false);
+      expect((screen.getByRole('button', { name: '连接' }) as HTMLButtonElement).disabled).toBe(true);
+    } else {
+      await waitFor(() => expect(mocks.clients).toHaveLength(1));
+      expect((screen.getByRole('button', { name: '正在连接…' }) as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+  it.each(['local', 'remote'] as const)('retains the %s RDP settings and credentials when runtime submission is blocked', async target => {
+    mocks.rdpAvailable = false;
+    mocks.preferences = defaultComputerPreferences('linux'); mocks.preferences.autoConnect = false;
+    mocks.preferences.target = target;
+    Object.assign(mocks.preferences[target], { host: target === 'local' ? '127.0.0.1' : '192.168.1.20', username: 'test-user', port: '3390', domain: 'test-domain', ignoreCert: true });
+    await ready();
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'fixture-secret' } });
+    fireEvent.submit(screen.getByLabelText('密码').closest('form')!);
+    await act(async () => {});
+    expect(mocks.clients).toHaveLength(0);
+    expect((screen.getByLabelText('密码') as HTMLInputElement).value).toBe('fixture-secret');
+    expect((screen.getByLabelText('RDP 用户名') as HTMLInputElement).value).toBe('test-user');
+    expect((screen.getByLabelText('RDP 端口') as HTMLInputElement).value).toBe('3390');
+    expect((screen.getByLabelText('域（可选）') as HTMLInputElement).value).toBe('test-domain');
+    expect((screen.getByLabelText('信任此电脑的 RDP 证书（跳过校验）') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(zh.computer.rdpBackendRecovery)).toBeTruthy();
+    expect(mocks.credentials).toEqual({}); expect(mocks.credentialWrites).toEqual([]);
+    expect(JSON.stringify(mocks.writes)).not.toContain('fixture-secret');
+  });
+  it('allows remembered VNC auto-connect after leaving the unavailable RDP protocol', async () => {
+    mocks.rdpAvailable = false;
+    mocks.preferences = defaultComputerPreferences('linux'); mocks.preferences.autoConnect = true;
+    mocks.preferences.local.username = 'test-user';
+    mocks.credentials[computerLoginKey(mocks.preferences.local)] = 'fixture-rdp-secret';
+    mocks.credentials[computerLoginKey({ ...mocks.preferences.local, protocol: 'vnc' })] = 'fixture-vnc-secret';
+    await ready(); await act(async () => {});
+    expect(mocks.clients).toHaveLength(0);
+    fireEvent.change(screen.getByLabelText('连接协议'), { target: { value: 'vnc' } });
+    await waitFor(() => expect(mocks.clients).toHaveLength(1));
+    expect(mocks.hosts).toEqual(['127.0.0.1']); expect(mocks.rdpOptions).toEqual([]);
+    expect(screen.queryByText(zh.computer.rdpBackendUnavailable)).toBeNull();
+    expect(screen.queryByText(zh.computer.rdpBackendRecovery)).toBeNull();
+    expect(mocks.credentialWrites).toEqual([]);
+  });
   it('opens a portrait desktop full-screen on phones with tools and clipboard closed, and accepts direct keyboard input', async () => {
     const beforeWidth = window.innerWidth, beforeHeight = window.innerHeight;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 }); Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });

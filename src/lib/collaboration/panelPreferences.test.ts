@@ -1,6 +1,7 @@
+import { useCollaborationNavigation } from '../stores/useCollaborationNavigation';
 // @vitest-environment jsdom
-import { expect, it } from 'vitest';
-import { collaborationGroupPreferences, openCollaborationGroups, collaborationPanelClientId, relativePanelPosition } from './panelPreferences';
+import { expect, it, vi } from 'vitest';
+import { collaborationGroupPreferences, openCollaborationGroups, collaborationPanelClientId, relativePanelPosition, openCollaborationMessagesPanel } from './panelPreferences';
 
 it('keeps a stable client key across reopening while other clients have a different key', () => {
   localStorage.clear();
@@ -26,4 +27,41 @@ it('assigns legacy docking only to its original group and keeps it when adding s
   expect(openCollaborationGroups(state)).toEqual(['a', 'b']);
   state.groups.a.floatingGroupId = '';
   expect(openCollaborationGroups(state)).toEqual(['b']);
+});
+
+const api = vi.hoisted(() => ({ update: vi.fn() }));
+vi.mock('../terminal/api', () => ({ updateSettings: api.update }));
+
+it('saves the current message draft and split layout before opening the resident panel', async () => {
+  api.update.mockReset().mockResolvedValue({});
+  useCollaborationNavigation.setState({ groupId: 'team', drafts: { team: { content: '仅消息协作', targets: ['worker'] } } });
+  const open = vi.fn(); window.addEventListener('termdock:open-collaboration-messages', open);
+  await openCollaborationMessagesPanel('team', 'lead');
+  expect(api.update.mock.calls[0][0].collaborationPanel.state.drafts.team.content).toBe('仅消息协作');
+  expect(api.update.mock.calls[1][0].collaborationPanel.state.groups.team).toMatchObject({ floatingGroupId: 'team', mode: 'docked', dock: { sessionId: 'lead', side: 'right' } });
+  expect(open).toHaveBeenCalledOnce();
+  window.removeEventListener('termdock:open-collaboration-messages', open);
+});
+
+it('does not open a panel or discard a draft when saving the layout fails', async () => {
+  api.update.mockReset().mockRejectedValue(new Error('保存失败'));
+  useCollaborationNavigation.setState({ groupId: 'team', drafts: {} });
+  const open = vi.fn(); window.addEventListener('termdock:open-collaboration-messages', open);
+  await expect(openCollaborationMessagesPanel('team', 'lead')).rejects.toThrow('保存失败');
+  expect(open).not.toHaveBeenCalled();
+  expect(useCollaborationNavigation.getState().groupId).toBe('team');
+  window.removeEventListener('termdock:open-collaboration-messages', open);
+});
+
+it('does not pull the user out of a page selected while the layout save was pending', async () => {
+  let resolve!: (value: unknown) => void;
+  api.update.mockReset().mockImplementation(() => new Promise(done => { resolve = done; }));
+  useCollaborationNavigation.setState({ groupId: 'team', drafts: {} });
+  const open = vi.fn(); window.addEventListener('termdock:open-collaboration-messages', open);
+  const pending = openCollaborationMessagesPanel('team', 'lead');
+  await vi.waitFor(() => expect(api.update).toHaveBeenCalledOnce());
+  useCollaborationNavigation.getState().open('other'); resolve({});
+  await expect(pending).rejects.toThrow('页面已切换');
+  expect(open).not.toHaveBeenCalled();
+  window.removeEventListener('termdock:open-collaboration-messages', open);
 });

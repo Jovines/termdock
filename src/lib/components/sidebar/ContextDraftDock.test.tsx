@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextDraftDock } from './ContextDraftDock';
 
@@ -47,12 +47,12 @@ function renderDock(value = 'Review this') {
 describe('ContextDraftDock', () => {
   afterEach(cleanup);
 
-  it('edits, inserts, and sends from the editing state', () => {
+  it('edits, inserts, and sends from the editing state', async () => {
     const handlers = renderDock();
     const input = screen.getByPlaceholderText('Context draft');
 
     fireEvent.change(input, { target: { value: 'Updated prompt' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Insert' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Insert' })); });
     fireEvent.click(screen.getByRole('button', { name: 'Send draft' }));
 
     expect(handlers.onChange).toHaveBeenCalledWith('Updated prompt');

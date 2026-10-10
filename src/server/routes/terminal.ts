@@ -1,3 +1,6 @@
+import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
+import { integrationError } from '../agent/integrationStore.js';
+import { integrationLaunchCommand, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
 import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
 import { assertPeerRegistrationAuthority } from '../agent/collaborationPeerTransport.js';
@@ -27,7 +30,7 @@ import { gitStatusCache, type GitStatus } from '../utils/gitStatus.js';
 import { getPtyHostManager, type PtyHostClient } from '../ptyhost/manager.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { TERMINAL, TMUX } from '../config.js';
-import { localAccessManager } from '../utils/localAccess.js';
+import { localAccessManager, localAccessInterfaceUrl } from '../utils/localAccess.js';
 import {
   normalizeLocalAccessName,
   getLocaleSetting,
@@ -137,7 +140,7 @@ import { SessionSearchStore, type SessionSearchMetadata } from '../agent/session
 import { NativeSessionSearch } from '../agent/nativeSessionSearch.js';
 import { CollaborationError } from '../agent/collaborationProtocol.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
-import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, type CollaborationBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
+import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, type CollaborationBinding, type CollaborationPaneBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
 import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, recoverStuckPaste, sendTmuxPaneKey, writeCollaborationTmuxPane,
   type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
@@ -848,7 +851,11 @@ async function flushClientStateBroadcast(): Promise<void> {
   }
 }
 
+const integrationSessionObservers = new Set<() => void>();
+function notifyIntegrationSessions(): void { for (const listener of integrationSessionObservers) { try { listener(); } catch { /* Observation failure does not affect terminal clients. */ } } }
+
 function broadcastClientState(): void {
+  notifyIntegrationSessions();
   if (broadcastClientStateTimer) {
     return;
   }
@@ -1948,7 +1955,12 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
     sessionId: record.sessionId,
     agentNativeSessionId: binding?.pane ? binding.pane.nativeSessionId : binding?.nativeSessionId ?? backend?.agentSession?.sessionId ?? record.agentResume?.sessionId ?? null,
     backendSessionId: backendId ?? null,
-    name: record.name,
+    name: collaborationSessionDisplayName({ ...record,
+      activeProgram: backend?.activeProgram?.command ?? record.activeProgram,
+      shellTitle: backend?.lastOscTitle ?? record.shellTitle,
+      cwd: backend?.cwd ?? record.cwd,
+      agent: agent ? { displayName: agent.displayName } : null,
+    }),
     cwd: backend?.cwd ?? record.cwd ?? '',
     agent: agent ? { slug: agent.slug, displayName: agent.displayName } : null,
     status: route.state === 'unchecked' && terminalConnected ? 'terminal-connected' : route.state,
@@ -2323,6 +2335,112 @@ async function spawnCollaborationAgentSession(
     deliverCollaborationInboxWhenAgentReady(frontendSessionId);
   }, 300).unref?.();
   return { group: updatedGroup, session: orchestrationSessionSnapshot(globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId)!) };
+}
+
+/** Restricted session adapter: only preconfigured argv and the exact owned
+ * terminal can be launched; no remote drive or arbitrary shell commands. */
+async function integrationPaneIsIdleShell(pane: CollaborationPaneCandidate): Promise<boolean> {
+  if (!pane.isShell) return false;
+  try {
+    const { stdout } = await execFileAsync('ps', ['-p', String(pane.panePid), '-o', 'pgid=,tpgid=,args='], { timeout: 3000, maxBuffer: 16384 });
+    const row = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (!row || row[1] !== row[2]) return false;
+    const argv = splitCommandToArgv(row[3]);
+    const command = normalizeProgramName(argv[0]?.replace(/^-/, ''))?.toLowerCase();
+    return !!command && shellNamesBackend.has(command) && argv.slice(1).every(arg => ['-l', '-i', '-il', '-li', '--login', '--interactive'].includes(arg));
+  } catch { return false; }
+}
+function integrationTerminalRecord(record: IntegrationSession) {
+  const terminal = globalSessionState.sessions.find(s => s.sessionId === record.session_id);
+  if (terminal && (terminal.mode !== 'tmux' || terminal.tmuxSessionName !== `wt-integration-${record.session_id}`)) integrationError('SESSION_IDENTITY_MISMATCH', 'Owned TD terminal binding changed', 409);
+  return terminal;
+}
+export const integrationSessionAdapter: IntegrationSessionAdapter = {
+  subscribe(listener) { integrationSessionObservers.add(listener); return () => { integrationSessionObservers.delete(listener); }; },
+  async inspect(record) {
+    const terminal = integrationTerminalRecord(record);
+    if (!terminal) return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
+    const binding: CollaborationBinding = { sessionId: record.session_id, backendSessionId: terminal.backendSessionId,
+      mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug,
+      nativeSessionId: record.agent_native_session_id, pane: record.terminal_binding ?? null };
+    const inspected = await inspectCollaborationTmux(binding);
+    if (inspected.state === 'offline') return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
+    if (inspected.state !== 'ready' || !inspected.pane) integrationError('SESSION_IDENTITY_MISMATCH', 'Owned tmux pane cannot be uniquely verified', 409);
+    const pane = inspected.pane;
+    const layout = await getTmuxLayout(terminal.tmuxSessionName!);
+    if (layout.windows.flatMap(window => window.panes).length !== 1 || layout.activePaneId !== pane.paneId) integrationError('SESSION_IDENTITY_MISMATCH', 'Integration native binding requires the single owned pane', 409);
+    const backend = terminal.backendSessionId ? terminalSessions.get(terminal.backendSessionId) : null;
+    // Hook evidence is fresh process evidence only on the single owned pane.
+    // A recovered last-known UUID must not prove a new launch succeeded.
+    const nativeId = pane.agentSlug ? pane.nativeSessionId ?? (backend?.agent?.slug === pane.agentSlug && backend.agentSession?.rich && !backend.agentResumeRecovered ? backend.agentSession.sessionId : null) ?? null : null;
+    if (nativeId && (nativeId.length > 256 || /[\x00-\x1f\x7f]/.test(nativeId))) integrationError('NATIVE_SESSION_ID_INVALID', 'Observed native session id is invalid', 409);
+    const route = collaborationRouting.get(record.session_id);
+    if (nativeId && (!record.agent_native_session_id || record.agent_native_session_id === nativeId) && route?.pane
+      && route.pane.paneId === pane.paneId && route.pane.panePid === pane.panePid && route.pane.serverPid === pane.serverPid && route.pane.sessionId === pane.sessionId
+      && route.pane.nativeSessionId !== nativeId) collaborationRouting.bind({ ...route, nativeSessionId: nativeId, pane: { ...route.pane, nativeSessionId: nativeId } });
+    return { exists: true, running: Boolean(pane.agentSlug), shell: await integrationPaneIsIdleShell(pane), agentSlug: pane.agentSlug || null, nativeId };
+  },
+  async create(record, prepared) {
+    await listDetectedAgentLaunchers();
+    if (!agentBySlug(record.agent_slug)) integrationError('COLLAB_AGENT_UNAVAILABLE', 'Configured agent plugin is not installed');
+    if (integrationTerminalRecord(record)) integrationError('SESSION_CREATE_OUTCOME_UNKNOWN', 'Creation intent already has a terminal; inspect it instead of relaunching', 409);
+    await launchIntegrationTerminal(record, false, prepared);
+  },
+  async restore(record, prepared) {
+    await listDetectedAgentLaunchers();
+    const agent = agentBySlug(record.agent_slug);
+    if (!record.agent_native_session_id || !agent || !buildResumeCommand(agent, record.agent_native_session_id, null)) integrationError('EXACT_RESUME_UNSUPPORTED', 'Agent plugin must support exact native resume');
+    if (findActiveAgentResumeOwner('', { slug: record.agent_slug, nativeSessionId: record.agent_native_session_id, command: '' })) integrationError('NATIVE_SESSION_ALREADY_RUNNING', 'Native Agent conversation is already running', 409);
+    await launchIntegrationTerminal(record, true, prepared);
+  },
+};
+async function launchIntegrationTerminal(record: IntegrationSession, restoring: boolean, prepared: (binding: CollaborationPaneBinding) => void) {
+  await collaborationDeliveryWorker.reconfigure(record.session_id, async () => {
+    const group = collaborationStore.getGroup(record.group_id);
+    if (!group || group.deleted) integrationError('TASK_GROUP_NOT_FOUND', 'Integration group no longer exists', 404);
+    const original = await integrationSessionAdapter.inspect(record);
+    if (!original.exists) {
+      let tmuxExists = false;
+      try { await runTmux(['has-session', '-t', `=wt-integration-${record.session_id}`]); tmuxExists = true; }
+      catch (error) { if (!/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) throw error; }
+      if (tmuxExists) integrationError('SESSION_IDENTITY_MISMATCH', 'A terminal with this name exists without the owned binding', 409);
+    }
+    const opened = await openInventorySession({} as express.Request, { preferredFrontendSessionId: record.session_id,
+      mode: 'tmux', tmuxSessionName: `wt-integration-${record.session_id}`, cwd: record.cwd,
+      name: `${record.agent_slug} · ${group.name}`, customName: true });
+    if (opened.session.sessionId !== record.session_id) integrationError('SESSION_IDENTITY_MISMATCH', 'Terminal id changed', 409);
+    const terminal = integrationTerminalRecord(record)!;
+    const backend = terminalSessions.get(opened.terminalSession.sessionId);
+    if (!backend) integrationError('SESSION_BACKEND_UNAVAILABLE', 'Owned terminal backend is unavailable', 503);
+    const inspected = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId: opened.terminalSession.sessionId,
+      mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: null, nativeSessionId: null,
+      // A recreated tmux may get a new pane only during explicit exact resume.
+      pane: original.exists ? record.terminal_binding ?? null : null }, null, true);
+    if (inspected.state !== 'ready' || !inspected.pane || !await integrationPaneIsIdleShell(inspected.pane)) integrationError('SESSION_TARGET_NOT_SHELL', 'Refusing to launch into an unverified shell', 409);
+    const pane = inspected.pane;
+    const pinned: CollaborationPaneBinding = { serverPid: pane.serverPid, sessionId: pane.sessionId,
+      paneId: pane.paneId, panePid: pane.panePid, agentSlug: record.agent_slug, nativeSessionId: record.agent_native_session_id };
+    prepared(pinned); // Must persist before the command enters the terminal.
+    collaborationRouting.bind({ sessionId: record.session_id, backendSessionId: opened.terminalSession.sessionId,
+      mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug, nativeSessionId: record.agent_native_session_id, pane: pinned });
+    const latest = collaborationStore.getGroup(group.id);
+    if (!latest || latest.deleted) integrationError('TASK_GROUP_NOT_FOUND', 'Integration group changed', 409);
+    collaborationStore.save({ id: latest.id, name: latest.name, sessionIds: [...new Set([...latest.sessionIds, record.session_id])] });
+    if (restoring) upsertGlobalSessionRecord({ ...terminal, agentResume: { slug: record.agent_slug, sessionId: record.agent_native_session_id,
+      launchArgv: [record.profile.executable, ...record.profile.argv], updatedAt: Date.now() } });
+    await persistGlobalStateNow();
+    // Recheck the actual pinned shell immediately before writing. This cannot
+    // use an active-pane target which might have changed during preparation.
+    const shell = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId: opened.terminalSession.sessionId,
+      mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: null, nativeSessionId: null, pane: pinned });
+    if (shell.state !== 'ready' || !shell.pane || !await integrationPaneIsIdleShell(shell.pane)) integrationError('SESSION_TARGET_NOT_SHELL', 'Owned shell changed before launch', 409);
+    // This owned pane is a verified shell; clear stale rich state before a new
+    // process starts, so its new SessionStart must supply the native binding.
+    backend.agentSession = null; backend.agent = null; backend.agentResumeRecovered = false;
+    await runTmux(['send-keys', '-t', pinned.paneId, '-l', integrationLaunchCommand(record, restoring)]);
+    await runTmux(['send-keys', '-t', pinned.paneId, 'Enter']);
+    broadcastClientState();
+  });
 }
 
 const preparingTaskWorkers = new Map<string, Promise<{ sessionId: string; workspace: TaskWorkspace }>>();
@@ -3868,6 +3986,7 @@ function broadcastAgentStatus(sessionId: string, session: TerminalSession, force
   const previousSnapshot = lastAgentStatusSnapshots.get(sessionId);
   if (!force && previousSnapshot === snapshot) return;
   lastAgentStatusSnapshots.set(sessionId, snapshot);
+  notifyIntegrationSessions();
   broadcastEvent(sessionId, payload);
   const previous = previousSnapshot
     ? JSON.parse(previousSnapshot) as AgentStatusWirePayload
@@ -7419,7 +7538,7 @@ router.put('/toolbar-presets', (req, res) => {
 async function getSettingsPayload() {
   const localAccess = localAccessManager.getState();
   const interfaces = await Promise.all(localAccess.interfaces.map(async (entry) => {
-    const url = `${localAccess.httpsEnabled ? 'https' : 'http'}://${entry.address}:9834`;
+    const url = localAccessInterfaceUrl(localAccess.url, entry.address);
     const qrDataUrl = await QRCode.toDataURL(url, {
       margin: 1,
       width: 132,
@@ -7455,7 +7574,7 @@ async function getSettingsPayload() {
     localAccess: {
       ...localAccess,
       interfaces,
-      onboardingUrl: getOnboardingServerUrl() ?? null,
+      onboardingUrl: localAccess.status === 'loopback-only' ? null : getOnboardingServerUrl() ?? null,
     },
   };
 }

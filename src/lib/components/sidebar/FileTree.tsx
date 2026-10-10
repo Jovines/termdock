@@ -1,6 +1,6 @@
 import { FileTreeLoadingSkeleton } from './FileTreeLoadingSkeleton';
 import { LoadingSpinner as RiLoader, LoadingStatus } from '../ui/Loading';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useId, type DragEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ChevronRight as RiChevronRight,
@@ -26,6 +26,14 @@ import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore
 import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, deleteFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
+import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
+
+/** Adapts the existing reference buttons for a bounded, read-only scope task. */
+export interface FileTreeReferenceSelection {
+  paths: ReadonlySet<string>;
+  label: string;
+  disabled?: boolean;
+}
 
 interface FileTreeProps {
   rootPath: string;
@@ -33,6 +41,7 @@ interface FileTreeProps {
   /** Reuses the explorer tree as a directory picker without exposing file actions. */
   directoriesOnly?: boolean;
   onPathReference?: (path: string, key?: string) => void;
+  referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
@@ -266,6 +275,7 @@ interface FileTreeItemProps {
   onFileSelect: (path: string) => void;
   directoriesOnly?: boolean;
   onPathReference?: (path: string, key?: string) => void;
+  referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
@@ -292,6 +302,7 @@ const FileTreeItem = memo(function FileTreeItem({
   onFileSelect,
   directoriesOnly = false,
   onPathReference,
+  referenceSelection,
   getReferenceText,
   onReferenceCopied,
   insertedReferenceKey,
@@ -326,6 +337,8 @@ const FileTreeItem = memo(function FileTreeItem({
   const [dropTarget, setDropTarget] = useState(false);
   const dropDepthRef = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
+  const referenceSlot = `file-tree-reference:${useId()}:${node.path}`;
+  useKeyboardLayer(directoryMenuRef, actionsOpen && !!referenceSelection, () => setActionsOpen(false));
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isSelected = node.path === selectedFilePath || node.path === revealedDirectoryPath;
   const showChildren = node.type === 'directory' && (isExpanded || Boolean(queryLower));
@@ -334,10 +347,10 @@ const FileTreeItem = memo(function FileTreeItem({
   const canPinFile = !isDirectory && Boolean(onFilePinToggle);
   const canOpenLocal = Boolean(canOpenInFileBrowser && onOpenInFileBrowser);
   const referenceKey = `path:${node.path}`;
-  const referenceInserted = insertedReferenceKey === referenceKey;
+  const referenceInserted = insertedReferenceKey === referenceKey || !!referenceSelection?.paths.has(node.path);
   const referenceCopied = copiedReferenceKey === referenceKey;
   const referenceText = getReferenceText?.(node.path) ?? node.path;
-  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied, !!referenceSelection);
   const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
   const isDeleting = deletingFilePath === node.path;
   const hasDirectoryActions = isDirectory
@@ -356,7 +369,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const loadChildren = useCallback(async () => {
     const cached = useSidebarStore.getState().directoryCache.has(node.path);
     if (!cached && !loading) {
-      const requestSlotId = `file-tree:${node.path}`;
+      const requestSlotId = referenceSelection ? referenceSlot : `file-tree:${node.path}`;
       loadAbortRef.current?.abort();
       cancelIoSlot(requestSlotId);
       const controller = new AbortController();
@@ -376,7 +389,7 @@ const FileTreeItem = memo(function FileTreeItem({
         setLoading(false);
       }
     }
-  }, [node.path, loading, setDirectoryCache, showHiddenFiles, sortMode, gitIgnoreRoot]);
+  }, [node.path, loading, setDirectoryCache, showHiddenFiles, sortMode, gitIgnoreRoot, !!referenceSelection, referenceSlot]);
 
   const handleToggle = useCallback(async () => {
     if (node.type !== 'directory') {
@@ -491,9 +504,10 @@ const FileTreeItem = memo(function FileTreeItem({
 
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    clearDirectoryMenuPosition();
+    if (referenceSelection) openDirectoryMenuAt(event.clientX, event.clientY);
+    else clearDirectoryMenuPosition();
     setActionsOpen((open) => !open);
-  }, [clearDirectoryMenuPosition]);
+  }, [clearDirectoryMenuPosition, openDirectoryMenuAt, !!referenceSelection]);
 
   const handleDirectoryContextMenu = useCallback((event: React.MouseEvent) => {
     if (!hasDirectoryActions || !isDesktopContextMenu(event)) return;
@@ -607,7 +621,7 @@ const FileTreeItem = memo(function FileTreeItem({
             <RiMoreHorizontal size={13} />
           </button>
         )}
-        {!isDirectory && (
+        {!isDirectory && !referenceSelection && (
           <button
             type="button"
             onClick={handleDirectoryMoreClick}
@@ -624,9 +638,11 @@ const FileTreeItem = memo(function FileTreeItem({
             type="button"
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-            aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
-            title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${referenceSelection ? 'ml-1 min-h-11 min-w-11' : textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            aria-label={referenceSelection ? `${referenceSelection.label}: ${node.name}` : referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            aria-pressed={referenceSelection ? referenceInserted : undefined}
+            disabled={!!referenceSelection?.disabled && !referenceInserted}
+            title={referenceSelection ? `${referenceSelection.label}: ${node.name}` : referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </button>
@@ -634,7 +650,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
           <div
             ref={directoryMenuRef}
-            className={`${cursorMenuPosition ? 'fixed z-menu-panel' : 'absolute right-2 top-[calc(100%+2px)] z-30'} w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in`}
+            className={`${cursorMenuPosition ? referenceSelection ? 'fixed z-popover' : 'fixed z-menu-panel' : 'absolute right-2 top-[calc(100%+2px)] z-30'} w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in`}
             style={cursorMenuPosition ? { left: cursorMenuPosition.left, top: cursorMenuPosition.top } : undefined}
           >
           {canOpenLocal && (
@@ -693,7 +709,7 @@ const FileTreeItem = memo(function FileTreeItem({
           Boolean(cursorMenuPosition),
         )}
 
-        {!isDirectory && actionsOpen && (
+        {!isDirectory && !referenceSelection && actionsOpen && (
           <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {canOpenLocal && (
             <button
@@ -752,6 +768,7 @@ const FileTreeItem = memo(function FileTreeItem({
               onFileSelect={onFileSelect}
               directoriesOnly={directoriesOnly}
               onPathReference={onPathReference}
+          referenceSelection={referenceSelection}
               getReferenceText={getReferenceText}
               onReferenceCopied={onReferenceCopied}
               onDirectoryRoot={onDirectoryRoot}
@@ -783,6 +800,7 @@ interface FileSearchResultItemProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
   onPathReference?: (path: string, key?: string) => void;
+  referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
@@ -802,6 +820,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   rootPath,
   onFileSelect,
   onPathReference,
+  referenceSelection,
   getReferenceText,
   onReferenceCopied,
   insertedReferenceKey,
@@ -821,13 +840,14 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const isPinned = pinnedPaths.has(node.path);
   const canPinFile = !isDirectory && Boolean(onFilePinToggle);
   const referenceKey = `path:${node.path}`;
-  const referenceInserted = insertedReferenceKey === referenceKey;
+  const referenceInserted = insertedReferenceKey === referenceKey || !!referenceSelection?.paths.has(node.path);
   const referenceCopied = copiedReferenceKey === referenceKey;
   const referenceText = getReferenceText?.(node.path) ?? node.path;
-  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied, !!referenceSelection);
   const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
   const [actionsOpen, setActionsOpen] = useState(false);
   const { position: cursorMenuPosition, menuRef: directoryMenuRef, openAt: openDirectoryMenuAt, clearPosition: clearDirectoryMenuPosition } = useCursorAnchoredMenu(actionsOpen);
+  useKeyboardLayer(directoryMenuRef, actionsOpen && !!referenceSelection, () => setActionsOpen(false));
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isDeleting = deletingFilePath === node.path;
   const hasDirectoryActions = isDirectory
@@ -870,9 +890,10 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
 
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    clearDirectoryMenuPosition();
+    if (referenceSelection) openDirectoryMenuAt(event.clientX, event.clientY);
+    else clearDirectoryMenuPosition();
     setActionsOpen((open) => !open);
-  }, [clearDirectoryMenuPosition]);
+  }, [clearDirectoryMenuPosition, openDirectoryMenuAt, !!referenceSelection]);
 
   const handleDirectoryContextMenu = useCallback((event: React.MouseEvent) => {
     if (!hasDirectoryActions || !isDesktopContextMenu(event)) return;
@@ -955,7 +976,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             <RiMoreHorizontal size={13} />
           </button>
         )}
-        {!isDirectory && (
+        {!isDirectory && !referenceSelection && (
           <button
             type="button"
             onClick={handleDirectoryMoreClick}
@@ -972,9 +993,11 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             type="button"
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-            aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
-            title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${referenceSelection ? 'ml-1 min-h-11 min-w-11' : textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            aria-label={referenceSelection ? `${referenceSelection.label}: ${node.name}` : referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            aria-pressed={referenceSelection ? referenceInserted : undefined}
+            disabled={!!referenceSelection?.disabled && !referenceInserted}
+            title={referenceSelection ? `${referenceSelection.label}: ${node.name}` : referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </button>
@@ -983,7 +1006,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
       {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
         <div
           ref={directoryMenuRef}
-          className={`${cursorMenuPosition ? 'fixed z-menu-panel' : 'absolute right-2 top-[calc(100%+2px)] z-30'} w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in`}
+          className={`${cursorMenuPosition ? referenceSelection ? 'fixed z-popover' : 'fixed z-menu-panel' : 'absolute right-2 top-[calc(100%+2px)] z-30'} w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in`}
           style={cursorMenuPosition ? { left: cursorMenuPosition.left, top: cursorMenuPosition.top } : undefined}
         >
           {onDirectoryRoot && (
@@ -1028,7 +1051,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         Boolean(cursorMenuPosition),
       )}
 
-      {!isDirectory && actionsOpen && (
+      {!isDirectory && !referenceSelection && actionsOpen && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           <button
             type="button"
@@ -1109,6 +1132,7 @@ interface ContentSearchResultItemProps {
   query: string;
   onContentMatchSelect?: (path: string, line: number) => void;
   onPathReference?: (path: string, key?: string) => void;
+  referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
@@ -1144,6 +1168,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   query,
   onContentMatchSelect,
   onPathReference,
+  referenceSelection,
   getReferenceText,
   onReferenceCopied,
   insertedReferenceKey,
@@ -1155,10 +1180,10 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   const visibleMatches = expanded ? entry.matches.slice(0, MAX_VISIBLE_MATCHES_PER_FILE) : [];
   const hiddenCount = entry.matches.length - visibleMatches.length;
   const referenceKey = `path:${entry.path}`;
-  const referenceInserted = insertedReferenceKey === referenceKey;
+  const referenceInserted = insertedReferenceKey === referenceKey || !!referenceSelection?.paths.has(entry.path);
   const referenceCopied = copiedReferenceKey === referenceKey;
   const referenceText = getReferenceText?.(entry.path) ?? entry.path;
-  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied, !!referenceSelection);
 
   return (
     <div className="border-b border-border/10 last:border-b-0">
@@ -1187,7 +1212,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
           <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground/80">{getRelativePath(rootPath, entry.path)}</span>
         </span>
         <span className="shrink-0 select-none rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
-        <FileDownloadAction path={entry.path} />
+        {!referenceSelection && <FileDownloadAction path={entry.path} />}
         {onPathReference && (
           <button
             type="button"
@@ -1196,9 +1221,11 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
               onPathReference(entry.path, referenceKey);
             }}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-            aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
-            title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${referenceSelection ? 'ml-1 min-h-11 min-w-11' : textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            aria-label={referenceSelection ? `${referenceSelection.label}: ${entry.name}` : referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            aria-pressed={referenceSelection ? referenceInserted : undefined}
+            disabled={!!referenceSelection?.disabled && !referenceInserted}
+            title={referenceSelection ? `${referenceSelection.label}: ${entry.name}` : referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </button>
@@ -1239,8 +1266,10 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onSearchFromDirectory, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchRootPath, searchOptions = {}, searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPathReference, referenceSelection, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onSearchFromDirectory, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchRootPath, searchOptions = {}, searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
   const { t } = useI18n();
+  const referenceNamespace = useId();
+  const rootRequestSlot = referenceSelection ? `file-tree-reference-root:${referenceNamespace}:${rootPath}` : `file-tree-root:${rootPath}`;
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
@@ -1253,11 +1282,14 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const hideGitIgnoredRootsHydrated = useSidebarStore((s) => s.hideGitIgnoredRootsHydrated);
   const gitIgnoreExceptionsKey = useSidebarStore((s) => JSON.stringify(s.gitIgnoreExceptions[rootPath] ?? []));
   const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
+  const listingKey = `${rootPath}:${hideGitIgnored}:${gitIgnoreExceptionsKey}`;
+  const [readyListing, setReadyListing] = useState('');
   // Cached paths can belong to another explorer root with a different filter.
   // Clear before paint, including after restoring a project's tree snapshot.
   useLayoutEffect(() => {
     if (rootPath) invalidateDirectoryCache(rootPath, true);
-  }, [rootPath, hideGitIgnored, gitIgnoreExceptionsKey, invalidateDirectoryCache]);
+    setReadyListing(listingKey);
+  }, [rootPath, hideGitIgnored, gitIgnoreExceptionsKey, invalidateDirectoryCache, listingKey]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rootTruncated, setRootTruncated] = useState(false);
@@ -1350,7 +1382,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     // The persisted sort mode determines the server request. Waiting for this
     // lightweight hydration prevents a name-sorted request from completing
     // just before hydration clears it and triggers a second visible loading.
-    if (!sortModeReady) return;
+    if (!sortModeReady || readyListing !== listingKey) return;
     if (queryLower) {
       setLoading(false);
       return;
@@ -1365,7 +1397,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     setLoading(true);
     setError(null);
 
-    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', `file-tree-root:${rootPath}`, rootSortMode, rootPath)
+    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', rootRequestSlot, rootSortMode, rootPath)
       .then((result) => {
         if (cancelled) return;
         const treeNodes = toTreeNodes(result.entries);
@@ -1383,9 +1415,9 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     return () => {
       cancelled = true;
       controller.abort();
-      cancelIoSlot(`file-tree-root:${rootPath}`);
+      cancelIoSlot(rootRequestSlot);
     };
-  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady, hideGitIgnored, gitIgnoreExceptionsKey]);
+  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady, hideGitIgnored, gitIgnoreExceptionsKey, rootRequestSlot, readyListing, listingKey]);
 
   useEffect(() => {
     if (!activeSearchRoot || !queryLower) {
@@ -1407,7 +1439,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     setVisibleSearchCount(isContentMode ? SEARCH_INITIAL_VISIBLE_CONTENT : SEARCH_INITIAL_VISIBLE);
     setSearchMeta({ truncated: false, total: 0, engine: 'rg', limited: false, done: false });
 
-    const requestSlotId = `file-search:${activeSearchRoot}:${++searchRequestSeqRef.current}`;
+    const requestSlotId = `file-search:${referenceSelection ? referenceNamespace + ":" : ""}${activeSearchRoot}:${++searchRequestSeqRef.current}`;
     searchFilesStream(activeSearchRoot, query.trim(), (progress) => {
       if (cancelled) return;
       if (progress.engine) {
@@ -1472,7 +1504,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       controller.abort();
       cancelIoSlot(requestSlotId);
     };
-  }, [activeSearchRoot, excludeKey, isContentMode, query, queryLower, searchMode, searchOptions.caseSensitive, searchOptions.regex, searchOptions.wholeWord, showHiddenFiles]);
+  }, [activeSearchRoot, excludeKey, isContentMode, query, queryLower, searchMode, searchOptions.caseSensitive, searchOptions.regex, searchOptions.wholeWord, showHiddenFiles, !!referenceSelection, referenceNamespace]);
 
   useEffect(() => {
     if (!queryLower) return;
@@ -1543,6 +1575,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
                 query={query.trim()}
                 onContentMatchSelect={onContentMatchSelect}
                 onPathReference={onPathReference}
+          referenceSelection={referenceSelection}
                 getReferenceText={getReferenceText}
                 onReferenceCopied={onReferenceCopied}
                 insertedReferenceKey={insertedReferenceKey}
@@ -1599,6 +1632,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
                 rootPath={activeSearchRoot}
                 onFileSelect={onFileSelect}
                 onPathReference={onPathReference}
+          referenceSelection={referenceSelection}
                 getReferenceText={getReferenceText}
                 onReferenceCopied={onReferenceCopied}
                 onDirectoryRoot={onDirectoryRoot}
@@ -1636,7 +1670,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
 
   if (error) {
     return (
-      <div className="px-4 py-4 text-sm text-destructive">
+      <div role={referenceSelection ? 'alert' : undefined} className="px-4 py-4 text-sm text-destructive">
         {error}
       </div>
     );
@@ -1674,6 +1708,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
           onFileSelect={onFileSelect}
           directoriesOnly={directoriesOnly}
           onPathReference={onPathReference}
+          referenceSelection={referenceSelection}
           getReferenceText={getReferenceText}
           onReferenceCopied={onReferenceCopied}
           onDirectoryRoot={onDirectoryRoot}

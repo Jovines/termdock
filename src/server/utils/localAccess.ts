@@ -55,7 +55,27 @@ function normalizeQuestionName(name: string): string {
 }
 
 export function isLoopbackHost(host: string): boolean {
-  return LOCALHOST_NAMES.has(host) || host.startsWith('127.');
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
+  return LOCALHOST_NAMES.has(normalized) || normalized.startsWith('127.') || normalized.startsWith('::ffff:127.');
+}
+
+export function localAccessOrigin(host: string, port: number, scheme: 'http' | 'https'): string {
+  const hostname = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return new URL(`${scheme}://${hostname}:${port}`).origin;
+}
+
+export function localAccessInterfaceUrl(serviceUrl: string, address: string): string {
+  const origin = new URL(serviceUrl);
+  origin.hostname = address.includes(':') && !address.startsWith('[') ? `[${address}]` : address;
+  return origin.origin;
+}
+
+function getBoundLanIPv4Interfaces(host: string): LocalAccessInterfaceAddress[] {
+  if (isLoopbackHost(host)) return [];
+  const interfaces = getLanIPv4Interfaces();
+  if (host === '0.0.0.0' || host === '::' || host === '[::]') return interfaces;
+  const address = host.replace(/^::ffff:/, '');
+  return interfaces.filter((entry) => entry.address === address);
 }
 
 function interfaceLabel(name: string): string {
@@ -94,18 +114,19 @@ function buildState(
   reason: string | null,
 ): LocalAccessState {
   const hostname = hostnameForName(setting.name);
-  const interfaces = getLanIPv4Interfaces();
+  const interfaces = getBoundLanIPv4Interfaces(options.host);
   const lanAddresses = interfaces.map((entry) => entry.address);
   const onboardingHost = lanAddresses[0] ?? null;
-  const fallbackHostname = onboardingHost ?? hostname;
+  const wildcardHost = options.host === '0.0.0.0' || options.host === '::' || options.host === '[::]';
+  const fallbackHostname = onboardingHost ?? (wildcardHost ? hostname : options.host);
   return {
     name: setting.name,
     source: setting.source,
     hostname,
     fallbackHostname,
-    url: `${options.scheme}://${hostname}:${options.port}`,
-    fallbackUrl: `${options.scheme}://${fallbackHostname}:${options.port}`,
-    onboardingUrl: onboardingHost ? `http://${onboardingHost}:${options.onboardingPort ?? options.port}/ca` : null,
+    url: localAccessOrigin(hostname, options.port, options.scheme),
+    fallbackUrl: localAccessOrigin(fallbackHostname, options.port, options.scheme),
+    onboardingUrl: onboardingHost ? `${localAccessOrigin(onboardingHost, options.onboardingPort ?? options.port, 'http')}/ca` : null,
     status,
     reason,
     httpsEnabled: options.scheme === 'https',
@@ -135,7 +156,7 @@ export class LocalAccessManager {
     await this.stop();
 
     let setting = await getLocalAccessSettingAsync();
-    const lanAddresses = getLanIPv4Addresses();
+    const lanAddresses = getBoundLanIPv4Interfaces(options.host).map((entry) => entry.address);
     if (isLoopbackHost(options.host)) {
       this.state = buildState(setting, options, 'loopback-only', 'Server is bound to loopback only.');
       return this.state;

@@ -19,6 +19,25 @@ export type TranslatorParams = Record<string, string | number>;
 // { name: 'foo' } and the implementation can destructure what it needs.
 export type TranslationDictionary = {
   architecture: {
+    choosePaths: string;
+    browsePaths: string;
+    addScopeReference: string;
+    searchScopePaths: string;
+    useCurrentFile: string;
+    useCurrentDirectory: string;
+    browsePathsHint: string;
+    correctPathsFirst: string;
+    pathsHint: string;
+    featureScopeHint: string;
+    removePath: string;
+    chooseThisDirectory: string;
+    filterDirectory: string;
+    loadingPaths: string;
+    pathsLoadFailed: string;
+    noPaths: string;
+    pathsTruncated: string;
+    selectedPaths: string;
+    usePaths: string;
     expandDetail: string;
     collapseDetail: string;
     backToMap: string;
@@ -195,6 +214,7 @@ export type TranslationDictionary = {
     domain: string;
     rdpPasswordHint: string;
     rdpBackendUnavailable: string;
+    rdpBackendRecovery: string;
     rdpFailed: string;
     rdpLinuxStep1: string;
     rdpStep1: string;
@@ -328,6 +348,11 @@ export type TranslationDictionary = {
     placeholderBlocked: (params: TranslatorParams) => string;
     submit: string;
     invalidPassword: string;
+    identityMismatch: string;
+    unavailable: string;
+    authorizationRequired: string;
+    currentTarget: (params: TranslatorParams) => string;
+    manageServices: string;
     failed: string;
     rateLimited: string;
     continueAfterReconnect: string;
@@ -381,6 +406,9 @@ export type TranslationDictionary = {
     newSessionWithAgent: (params: TranslatorParams) => string;
     moreLaunchOptions: string;
     recoverableSessions: string;
+    confirmCloseRecoverableSession: (params: TranslatorParams) => string;
+    endRecoverableSession: string;
+    closeRecoverableSessionFailed: string;
     refreshRecoverableSessions: string;
     restoreRecoverableSession: (params: TranslatorParams) => string;
     restoringRecoverableSession: string;
@@ -560,6 +588,7 @@ export type TranslationDictionary = {
     contextDraftResize: string;
     contextDraftAutoCollapseAfterSend: string;
     contextDraftInsertFailed: string;
+    contextDraftPending: string;
     contextDraftCharacterCount: (params: TranslatorParams) => string;
     selectFilePrompt: string;
     backToFileList: string;
@@ -574,6 +603,15 @@ export type TranslationDictionary = {
     closeFileSearch: string;
     downloadFile: string;
     downloadFailed: string;
+    downloadCanceled: string;
+    uploadPending: string;
+    uploadInserting: string;
+    uploadDone: (params: TranslatorParams) => string;
+    uploadReferenceDone: string;
+    uploadReferenceRejected: string;
+    uploadLimit: string;
+    uploadCanceled: string;
+    uploadFileCount: (params: TranslatorParams) => string;
     uploadFile: string;
     uploadFiles: string;
     insertLocalFile: string;
@@ -1256,6 +1294,7 @@ export type TranslationDictionary = {
     explorerTitle: string;
     split: string;
     splitTitle: string;
+    closeFailed: (params: TranslatorParams) => string;
     splitNew: string;
     splitNewHint: string;
     splitExisting: string;

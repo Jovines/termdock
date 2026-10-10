@@ -129,6 +129,9 @@ const MESSAGE_KINDS = new Set<CollaborationMessageKind>(['message', 'ask', 'repl
 
 export class CollaborationStore {
   onMessageQueued?: () => void;
+  private changeListeners = new Set<() => void>();
+  subscribe(listener: () => void): () => void { this.changeListeners.add(listener); return () => { this.changeListeners.delete(listener); }; }
+  snapshotMessages(): CollaborationMessage[] { return structuredClone(this.document.messages); }
   private peerActivity = new Map<string, { last_terminal_output_at: number | null; activity_observed_at: number | null; last_peer_sync_at: number; activity_source: string }>();
   recordPeerActivity(sessionId: string, outputAt: unknown, observedAt: unknown): void {
     if (this.peerActivity.size >= 2000 && !this.peerActivity.has(sessionId)) this.peerActivity.delete(this.peerActivity.keys().next().value!);
@@ -761,6 +764,7 @@ export class CollaborationStore {
       fs.writeFileSync(temporaryPath, serialized, { mode: 0o600 });
       fs.renameSync(temporaryPath, this.filePath);
       this.persistedDocument = serialized;
+      for (const listener of this.changeListeners) { try { listener(); } catch { /* Journal retries from durable source records. */ } }
     } catch (error) { this.document = JSON.parse(this.persistedDocument) as CollaborationDocument; throw error; }
   }
 }
