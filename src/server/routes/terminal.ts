@@ -2,6 +2,8 @@ import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js'
 import { integrationError } from '../agent/integrationStore.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type ShellVerificationFailure } from '../agent/nativeResumeOwner.js';
 import { readNativeProcessIdentity } from '../agent/nativeProcessIdentity.js';
+import { releaseSessionRuntime } from '../agent/sessionLifecycle.js';
+import { resumeConfigurationFingerprint } from '../agent/sessionResumeConfiguration.js';
 import { integrationLaunchCommand, type IntegrationDeliveryReadiness, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
 import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
@@ -106,6 +108,7 @@ import {
   detectAgentFromCommand,
   inferResumeSessionId,
   getPluginNativeIdentityConfig,
+  getPluginResumeConfig,
   listAgents,
   type AgentInfo,
 } from '../agent/registry.js';
@@ -2379,9 +2382,57 @@ function integrationTerminalRecord(record: IntegrationSession) {
   if (terminal && (terminal.mode !== 'tmux' || terminal.tmuxSessionName !== `wt-integration-${record.session_id}`)) integrationError('SESSION_IDENTITY_MISMATCH', 'Owned TD terminal binding changed', 409);
   return terminal;
 }
+async function integrationTmuxPresent(record: IntegrationSession): Promise<boolean> {
+  try { await runTmux(['has-session', '-t', `=wt-integration-${record.session_id}`]); return true; }
+  catch (error) { if (/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) return false; throw error; }
+}
 export const integrationSessionAdapter: IntegrationSessionAdapter = {
   subscribe(listener) { integrationSessionObservers.add(listener); return () => { integrationSessionObservers.delete(listener); }; },
   registerDeliveryGuard(guard) { integrationDeliveryGuard = guard; return () => { if (integrationDeliveryGuard === guard) integrationDeliveryGuard = undefined; }; },
+  pendingMessages(id) { return collaborationStore.pendingCount(id); },
+  async prepareRelease(record) {
+    if (collaborationStore.groupsForSession(record.session_id).some(group => group.id !== record.group_id)) integrationError('SESSION_SCOPE_CONFLICT', 'Runtime belongs to another collaboration group; administrator must resolve its membership first', 409);
+    return { group_role: collaborationStore.getGroup(record.group_id)?.roles?.[record.session_id] };
+  },
+  async resumeConfiguration(record) {
+    await listDetectedAgentLaunchers();
+    const agent = agentBySlug(record.agent_slug);
+    const command = agent && buildResumeCommand(agent, 'td-fingerprint-native-id', null);
+    if (!agent || !command) integrationError('EXACT_RESUME_UNSUPPORTED', 'Agent must support exact native recovery', 409);
+    return { version: 1, slug: agent.slug, aliases: agent.aliases, capabilities: agent.capabilities ?? [],
+      resume: getPluginResumeConfig(agent.slug) ?? command, nativeIdentity: getPluginNativeIdentityConfig(agent.slug) ?? null };
+  },
+  async runtimePresent(record) {
+    if (integrationTerminalRecord(record)) return true;
+    if ([...terminalSessions.values()].some(s => s.mode === 'tmux' && s.tmuxSessionName === `wt-integration-${record.session_id}`)) return true;
+    if (collaborationStore.getGroup(record.group_id)?.sessionIds.includes(record.session_id)) return true;
+    return integrationTmuxPresent(record);
+  },
+  async release(record, reconcile) {
+    await releaseSessionRuntime({
+      barrier: action => collaborationDeliveryWorker.reconfigure(record.session_id, action),
+      exists: () => integrationTmuxPresent(record),
+      pendingMessages: () => collaborationStore.pendingCount(record.session_id),
+      async verifyOwnership() {
+        await integrationSessionAdapter.prepareRelease!(record);
+        const terminal = integrationTerminalRecord(record);
+        if (!terminal || !record.terminal_binding) integrationError('SESSION_IDENTITY_MISMATCH', 'Live runtime lacks its exact persisted binding', 409);
+        if (globalSessionState.sessions.some(other => other.sessionId !== record.session_id && (other.tmuxSessionName === terminal.tmuxSessionName
+          || terminal.backendSessionId && other.backendSessionId === terminal.backendSessionId))) integrationError('SESSION_IDENTITY_MISMATCH', 'Runtime has another logical owner', 409);
+      },
+      inspect: () => integrationSessionAdapter.inspect(record),
+      destroy: async () => { await destroyTmuxSessionSafely(`wt-integration-${record.session_id}`); },
+      async forgetRuntime() {
+        // Only remove exact owned PTY/inventory records after actual tmux absence.
+        integrationTerminalRecord(record);
+        await integrationSessionAdapter.prepareRelease!(record);
+        for (const [id, backend] of terminalSessions) if (backend.mode === 'tmux' && backend.tmuxSessionName === `wt-integration-${record.session_id}`) cleanupSession(id, { killProcess: true });
+        removeGlobalSessionRecord(record.session_id);
+        collaborationStore.archiveSession(record.session_id); collaborationRouting.remove(record.session_id);
+        await persistGlobalStateNow(); broadcastClientState();
+      },
+    }, reconcile);
+  },
   async capture(record) {
     const observed = await integrationSessionAdapter.inspect(record);
     if (!observed.exists || !observed.running || observed.agentSlug !== record.agent_slug || !record.terminal_binding
@@ -2502,11 +2553,14 @@ async function launchIntegrationTerminal(record: IntegrationSession, restoring: 
     const latest = collaborationStore.getGroup(group.id);
     if (!latest || latest.deleted) integrationError('TASK_GROUP_NOT_FOUND', 'Integration group changed', 409);
     collaborationStore.save({ id: latest.id, name: latest.name, sessionIds: [...new Set([...latest.sessionIds, record.session_id])] });
+    if (restoring && record.group_role) collaborationStore.setRole({ groupId: latest.id, sessionId: record.session_id, role: record.group_role });
     if (restoring) upsertGlobalSessionRecord({ ...terminal, agentResume: { slug: record.agent_slug, sessionId: record.agent_native_session_id,
       launchArgv: [record.profile.executable, ...record.profile.argv], updatedAt: Date.now() } });
     await persistGlobalStateNow();
     // Recheck the actual pinned shell immediately before writing. This cannot
     // use an active-pane target which might have changed during preparation.
+    if (record.resume_configuration_fingerprint && record.resume_configuration_fingerprint !== await resumeConfigurationFingerprint(record, integrationSessionAdapter)) integrationError('RESUME_CONFIGURATION_CHANGED', 'Recovery configuration changed before terminal input', 409);
+    if (restoring) await assertIntegrationNativeResumeAvailable(record);
     const shell = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId: opened.terminalSession.sessionId,
       mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: null, nativeSessionId: null, pane: pinned });
     if (shell.state !== 'ready' || !shell.pane || !await integrationPaneIsIdleShell(shell.pane)) integrationError('SESSION_TARGET_NOT_SHELL', 'Owned shell changed before launch', 409);

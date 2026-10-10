@@ -747,3 +747,49 @@ it('recovers integration replies committed while the event runtime is offline wi
   expect(recovered).toHaveLength(1); expect(recovered[0].event_id).toBe(event.event_id);
   expect(f.taskStore.snapshot()).toEqual([]);
 });
+
+
+it('exposes release grants, durable lifecycle events and exact old-message replies over the real Unix API', async () => {
+  const fake = adapter(); fake.set({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: 'native-release' });
+  fake.api.resumeConfiguration = async () => ({ resume: 'fixture-exact-v1' });
+  fake.api.runtimePresent = async record => (await fake.api.inspect(record)).exists;
+  let f: Awaited<ReturnType<typeof runtimeFixture>>;
+  fake.api.pendingMessages = id => f.messages.pendingCount(id);
+  fake.api.release = vi.fn(async record => {
+    fake.set({ exists: false, running: false, shell: false, agentSlug: null, nativeId: null });
+    f.messages.archiveSession(record.session_id);
+  });
+  fake.api.restore = vi.fn(async record => {
+    fake.set({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: record.agent_native_session_id });
+    const group = f.messages.getGroup(record.group_id)!;
+    f.messages.save({ id: group.id, name: group.name, sessionIds: [...group.sessionIds, record.session_id] });
+  });
+  f = await runtimeFixture(fake.api);
+  const grant = policy(f.group.id); grant.permissions.push('message.send', 'message.read'); f.runtime.store.update(grant);
+  const created = await f.request('POST', '/sessions', { launch_profile: 'agent', cwd: dir, idempotency_key: 'create-release' });
+  const id = created.body.session.session_id;
+  f.messages.save({ id: f.group.id, name: f.group.name, sessionIds: ['worker', id] });
+  const original = await f.request('POST', '/send', { targetSessionId: id, message: 'existing request', idempotency_key: 'old-message' });
+  expect(original.status).toBe(200); f.messages.markDelivered([original.body.message_id]);
+  fake.set({ running: false, shell: true, nativeId: null, agentSlug: null });
+  expect(await f.request('POST', `/sessions/${id}/release`, { generation: 1, idempotency_key: 'release' })).toMatchObject({ status: 403, body: { code: 'INTEGRATION_PERMISSION_DENIED' } });
+  grant.permissions.push('session.release'); f.runtime.store.update(grant);
+  const released = await f.request('POST', `/sessions/${id}/release`, { generation: 1, idempotency_key: 'release' });
+  expect(released).toMatchObject({ status: 200, body: { session: { state: 'released', generation: 2, runtime_present: false, terminal_binding: null } } });
+  for (const [route, body] of [['/send', { targetSessionId: id, message: 'no queue', idempotency_key: 'new-send' }], ['/reply', { messageId: original.body.message_id, content: 'no queue', idempotency_key: 'new-reply' }]] as const) {
+    expect(await f.request('POST', route, body)).toMatchObject({ status: 409, body: { code: 'SESSION_RELEASED' } });
+  }
+  expect(f.messages.snapshotMessages()).toHaveLength(1);
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ session_runtime_release: true, stable_session_identity: true, session_lifecycle_generation: true });
+  const stream = f.stream();
+  let releaseEvent: any;
+  for (let count = 0; count < 30; count++) { const item = await stream.next(); if (item.kind === 'session.released') { releaseEvent = item; break; } }
+  expect(releaseEvent).toMatchObject({ payload: { session: { session_id: id, generation: 2, runtime_present: false } } });
+  stream.req.destroy();
+  expect(await f.request('GET', `/admin/sessions/${id}/resume-configuration`)).toMatchObject({ status: 401 });
+  const restored = await f.request('POST', `/sessions/${id}/restore`, { idempotency_key: 'restore-after-release' });
+  expect(restored).toMatchObject({ status: 200, body: { session: { state: 'ready', generation: 3, session_id: id, agent_native_session_id: 'native-release' } } });
+  const reply = await f.request('POST', '/reply', { messageId: original.body.message_id, content: 'follow up', idempotency_key: 'reply-after-restore' });
+  expect(reply.status).toBe(200);
+  expect(f.messages.getMessage(reply.body.message_id)).toMatchObject({ toSessionId: id, replyTo: original.body.message_id });
+});

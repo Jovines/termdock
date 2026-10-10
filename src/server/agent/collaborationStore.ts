@@ -136,6 +136,8 @@ const MESSAGE_KINDS = new Set<CollaborationMessageKind>(['message', 'ask', 'repl
 export class CollaborationStore {
   onMessageQueued?: () => void;
   private changeListeners = new Set<() => void>();
+  private runtimeGuards = new Set<(id: string) => void>();
+  registerRuntimeGuard(guard: (id: string) => void): () => void { this.runtimeGuards.add(guard); return () => { this.runtimeGuards.delete(guard); }; }
   subscribe(listener: () => void): () => void { this.changeListeners.add(listener); return () => { this.changeListeners.delete(listener); }; }
   snapshotMessages(): CollaborationMessage[] { return structuredClone(this.document.messages); }
   private peerActivity = new Map<string, { last_terminal_output_at: number | null; activity_observed_at: number | null; last_peer_sync_at: number; activity_source: string }>();
@@ -403,6 +405,7 @@ export class CollaborationStore {
     if (typeof content !== 'string') throw new CollaborationError('INVALID_MESSAGE', 'Message content must be text');
     if (Buffer.byteLength(content) > COLLAB_LIMITS.message_bytes) throw new CollaborationError('MESSAGE_TOO_LARGE', `Message exceeds ${COLLAB_LIMITS.message_bytes} UTF-8 bytes`, 413);
     if (!content.trim()) throw new Error('消息不能为空');
+    for (const id of input.toSessionIds) for (const guard of this.runtimeGuards) guard(id);
     const recipients = Array.from(new Set(input.toSessionIds)).filter((id) =>
       group.sessionIds.includes(id) && id !== input.fromSessionId,
     );

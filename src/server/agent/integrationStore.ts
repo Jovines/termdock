@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { CollaborationError } from './collaborationProtocol.js';
 
 export const INTEGRATION_PROTOCOL = 1;
-export const INTEGRATION_OPERATIONS = ['message.send', 'message.read', 'task.read', 'task.create', 'task.configure', 'task.assign', 'task.comment', 'task.revise', 'task.answer', 'events.read', 'session.create', 'session.read', 'session.restore'] as const;
+export const INTEGRATION_OPERATIONS = ['message.send', 'message.read', 'task.read', 'task.create', 'task.configure', 'task.assign', 'task.comment', 'task.revise', 'task.answer', 'events.read', 'session.create', 'session.read', 'session.restore', 'session.release'] as const;
 export type IntegrationPermission = typeof INTEGRATION_OPERATIONS[number];
 export interface StartupInputCondition {
   /** Literal terms in the current terminal viewport, with horizontal space folded. */

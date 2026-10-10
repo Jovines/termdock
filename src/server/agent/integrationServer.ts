@@ -41,6 +41,7 @@ export class IntegrationRuntime {
   constructor(private options: IntegrationRuntimeOptions) {
     this.store = new IntegrationStore(path.join(options.directory, 'integrations.json'));
     this.sessions = new IntegrationSessions(path.join(options.directory, 'integration-sessions.json'), options.sessions);
+    this.stops.push(options.messages.registerRuntimeGuard(id => this.sessions.assertRuntimeMessage(id)));
     const changed = () => { try { this.sync(); } catch (error) { this.failStreams(error); this.scheduleRetry(); } };
     this.stops.push(options.messages.subscribe(changed), options.taskStore.subscribe(changed), this.sessions.subscribe(changed));
     const app = express(); app.use(express.json({ limit: '2mb' }));
@@ -60,6 +61,8 @@ export class IntegrationRuntime {
     app.get('/admin/groups', run(req => { admin(req); return { groups: options.messages.list().filter(g => !g.federated).map(g => ({ id: g.id, name: g.name })) }; }));
     app.get('/admin/capabilities', run(req => { admin(req); return this.capabilities(); }));
     app.get('/admin/sessions/:id/restore-diagnostics', run(req => { admin(req); return this.sessions.restoreDiagnostics(req.params.id); }));
+    app.get('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return this.sessions.resumeConfiguration(req.params.id); }));
+    app.post('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return { session: publicIntegrationSession(await this.sessions.confirmResumeConfiguration(req.params.id, req.body?.generation, req.body?.fingerprint)) }; }));
     app.get('/admin/principals', run(req => { admin(req); return { integrations: this.store.policies() }; }));
     app.post('/admin/principals', run(req => { admin(req); this.group(req.body?.groupId); const provisioned = this.store.provision(req.body); try { this.sync(); } catch { this.scheduleRetry(); } return { id: provisioned.principal.id, token: provisioned.token, protocol: INTEGRATION_PROTOCOL }; }));
     app.post('/admin/principals/:id/policy', run(req => { admin(req); if (req.body?.id !== req.params.id) integrationError('INVALID_INTEGRATION_POLICY', 'Policy identity must match the requested identity'); this.group(req.body?.groupId); this.store.update(req.body); return { ok: true, id: req.params.id }; }));
@@ -94,7 +97,12 @@ export class IntegrationRuntime {
       if (raw.kind && raw.kind !== 'message') integrationError('INTEGRATION_OPERATION_DENIED', 'Integration send uses ordinary messages only', 403);
       const targets = Array.isArray(raw.toSessionIds) ? raw.toSessionIds : [raw.targetSessionId];
       if (!targets.length || targets.some((id: unknown) => typeof id !== 'string')) integrationError('INVALID_MESSAGE_TARGET', 'Specify a local group member');
-      const recipients = targets.map((id: string) => scopedId(id, group.sessionIds, 'SESSION'));
+      const descriptors = this.sessions.snapshot().filter(s => s.group_id === p.groupId);
+      const recipients = targets.map((id: string) => scopedId(id, [...group.sessionIds, ...descriptors.map(s => s.session_id)], 'SESSION'));
+      for (const id of recipients) {
+        this.sessions.assertMessageTarget(p, id);
+        if (!group.sessionIds.includes(id)) integrationError('SESSION_NOT_FOUND', 'Restore the original runtime and membership before sending', 404);
+      }
       let thread: string | undefined;
       if (raw.thread_id) thread = scopedId(raw.thread_id, options.messages.snapshotMessages().filter(m => m.groupId === p.groupId).map(m => m.threadId), 'THREAD');
       const messages = options.messages.send({ ...this.messageExtras(raw), groupId: p.groupId, fromSessionId: null,
@@ -106,6 +114,7 @@ export class IntegrationRuntime {
       const raw = req.body ?? {}, original = this.message(p, raw.messageId);
       const target = original.toPrincipalId === p.id ? original.fromSessionId
         : original.integrationOrigin?.integrationId === p.id ? original.toSessionId : null;
+      if (target) this.sessions.assertMessageTarget(p, target);
       if (!target || !this.group(p.groupId).sessionIds.includes(target)) integrationError('NO_REPLY_TARGET', 'Reply requires your own message and its original live group member', 409);
       const messages = options.messages.send({ ...this.messageExtras(raw), groupId: p.groupId, fromSessionId: null,
         integrationOrigin: this.origin(p, raw.origin), toSessionIds: [target], kind: 'reply', content: raw.content, threadId: original.threadId, replyTo: original.id });
@@ -140,6 +149,7 @@ export class IntegrationRuntime {
     }));
     app.get('/sessions/:id', run(async req => { const p = principal(req); this.authorize(p, 'session.read'); return { session: publicIntegrationSession(await this.sessions.get(p, req.params.id)) }; }));
     app.post('/sessions/:id/restore', run(async req => { const p = principal(req); this.authorize(p, 'session.restore'); const session = await this.sessions.restore(p, req.params.id, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
+    app.post('/sessions/:id/release', run(async req => { const p = principal(req); this.authorize(p, 'session.release'); const session = await this.sessions.release(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.get('/events', run((req, res) => {
       const p = principal(req); this.authorize(p, 'events.read', req.query.group);
       this.sync(); this.stream(p, String(req.query.consumer ?? 'default'), req, res);
@@ -159,7 +169,8 @@ export class IntegrationRuntime {
       integration_principal: true, group_scoped_permissions: true, durable_event_push: true,
       event_ack_semantics: 'durable_received', correlated_task_responses: true, accepted_task_comments: true,
       idempotent_session_create: true, exact_session_restore: true, external_validation: false,
-      startup_input_conditions: true,
+      startup_input_conditions: true, session_runtime_release: true, stable_session_identity: true, session_lifecycle_generation: true,
+      session_resume_configuration: true, session_lifecycle_min_version: '1.4.309',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',

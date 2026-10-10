@@ -9,6 +9,15 @@ import { getTermdockVersion } from '../utils/version.js';
 
 export const INTEGRATION_HELP = `td integration — local scoped integration administration
   groups | list
+  resume-configuration <TD-session-id> (read current/recorded fingerprints; no mutation)
+  confirm-resume <TD-session-id> --generation <N> --fingerprint <sha256>
+    Administrator explicitly authorizes the current launcher/plugin recovery semantics.
+    This never proves unknown historical file contents or modifies Agent configuration.
+    Old records need this confirmation before release; new records capture a fingerprint.
+    Later changes fail closed. Grant session.release separately for runtime reclamation.
+    Minimum CLI/running service 1.4.309; capabilities.session_resume_configuration=true.
+    Errors: RESUME_CONFIGURATION_CHANGED, EXACT_RESUME_UNSUPPORTED,
+    SESSION_GENERATION_MISMATCH, SESSION_OPERATION_IN_PROGRESS, LAUNCHER_UNAVAILABLE.
   diagnostics <TD-session-id> (read the last restore check; administrator only)
   create --file <policy.json> --credential-file <private-output.json>
   update --file <policy.json> (same identity/group; preserves the credential)
@@ -55,6 +64,20 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
     const action = argv[0] ?? 'help', options: Record<string, string> = {};
     if (action === 'help' || argv.includes('--help')) { write(INTEGRATION_HELP); return 0; }
     const socketPath = integrationSocketPath(port);
+    if (action === 'resume-configuration' || action === 'confirm-resume') {
+      const id = argv[1];
+      if (!id || !/^[a-zA-Z0-9._-]{1,80}$/.test(id)) throw new Error('A full TD session id is required');
+      const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (capabilities.session_resume_configuration !== true) throw new CollaborationError('SESSION_RELEASE_UNSUPPORTED', 'CLI and running service must be at least 1.4.309', 409);
+      let body: unknown;
+      if (action === 'confirm-resume') {
+        const args: Record<string, string> = {};
+        for (let i = 2; i < argv.length; i += 2) { if (!['--generation', '--fingerprint'].includes(argv[i]) || !argv[i + 1] || args[argv[i]]) throw new Error('confirm-resume requires --generation and --fingerprint'); args[argv[i]] = argv[i + 1]; }
+        if (!/^[1-9][0-9]*$/.test(args['--generation'] ?? '') || !Number.isSafeInteger(Number(args['--generation'])) || !/^[a-f0-9]{64}$/.test(args['--fingerprint'] ?? '')) throw new Error('Invalid generation or fingerprint');
+        body = { generation: Number(args['--generation']), fingerprint: args['--fingerprint'] };
+      } else if (argv.length !== 2) throw new Error('resume-configuration requires one TD session id');
+      write(JSON.stringify(parsed(await request(socketPath, body ? 'POST' : 'GET', `/admin/sessions/${encodeURIComponent(id)}/resume-configuration`, body, headers(undefined, adminToken))))); return 0;
+    }
     if (action === 'diagnostics') {
       if (argv.length !== 2 || !/^[a-zA-Z0-9._-]{1,80}$/.test(argv[1])) throw new Error('diagnostics requires one TD session id');
       const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
@@ -114,9 +137,10 @@ export async function runIntegrationCollab(command: CollaborationCommand, port: 
       return subscribe(socketPath, `/events?${params}`, credential, command.options.timeout ? duration(String(command.options.timeout)) : undefined, io.write);
     }
     if (command.action === 'session') {
-      const route = command.operation === 'create' ? '/sessions' : `/sessions/${encodeURIComponent(command.target!)}${command.operation === 'restore' ? '/restore' : ''}`;
+      if (command.operation === 'release' && (capability.session_runtime_release !== true || capability.session_lifecycle_generation !== true || capability.stable_session_identity !== true)) throw new CollaborationError('SESSION_RELEASE_UNSUPPORTED', 'CLI and running service must support the lifecycle contract (minimum 1.4.309)', 409);
+      const route = command.operation === 'create' ? '/sessions' : `/sessions/${encodeURIComponent(command.target!)}${['restore', 'release'].includes(command.operation!) ? `/${command.operation}` : ''}`;
       const body = command.operation === 'create' ? { group_id: command.options.group, launch_profile: command.options['launch-profile'], cwd: command.options.cwd, idempotency_key: command.options['idempotency-key'] }
-        : command.operation === 'restore' ? { idempotency_key: command.options['idempotency-key'] } : undefined;
+        : ['restore', 'release'].includes(command.operation!) ? { ...(command.operation === 'release' ? { generation: Number(command.options.generation) } : {}), idempotency_key: command.options['idempotency-key'] } : undefined;
       io.write(JSON.stringify(parsed(await request(socketPath, command.operation === 'get' ? 'GET' : 'POST', route, body, headers(credential))))); return 0;
     }
     const messageCapability = command.action === 'send' ? 'integration_message_send' : command.action === 'reply' ? 'integration_message_reply'

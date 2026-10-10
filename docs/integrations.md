@@ -9,7 +9,8 @@
 直接 exec 为 pane PID 的原生 argv 核验及可选 Linux 持锁身份要求 **实际服务至少 1.4.306**；
 后台执行记录与用途迁移要求 **CLI / 实际服务均至少 1.4.307**；
 普通消息身份发送、持久回复及消息历史要求 **CLI / 实际服务均至少 1.4.308**；
-建议 CLI 与服务同步安装 1.4.308（既有接入命令的 CLI 最低仍为 1.4.301，诊断 CLI 最低为 1.4.305）。
+释放运行承载、稳定逻辑身份与恢复配置确认要求 **CLI / 实际服务均至少 1.4.309**；
+建议 CLI 与服务同步安装 1.4.309（既有接入命令的 CLI 最低仍为 1.4.301，诊断 CLI 最低为 1.4.305）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -389,7 +390,7 @@ task 事件 `event_id` 与任务内事件 ID 一致，`respond.reply_to_event_id
 | `task.delivery` | `{delivery}`：任务投递 id、attemptId、messageId、status、deliveredAt、error |
 | `message.queued/message.reply` | `{message_id,thread_id,reply_to,from_session_id,to_session_id,to_principal_id,integration_origin,response_kind,stored_at,content,metadata}` |
 | `message.delivery` | `{receipt}`：实际入队/远端接收/终端写入/后台回复保存阶段、失败、重试计数与时间，及明确回复 ID；不含快照或已读字段 |
-| `session.starting/binding_pending/ready/restoring/failed` | `{session}`：下节公开会话记录，失败包含 error_code |
+| `session.starting/binding_pending/ready/restoring/releasing/released/failed` | `{session}`：下节公开会话记录，失败包含 error_code |
 
 TD 在源记录提交后触发 journal 及订阅，journal 中的同一事件 ID 在重连重放时保持不变。
 新 consumer 从最早保留事件开始；接入方按 `event_id` 去重，**先持久写入 inbox，
@@ -438,7 +439,9 @@ agent_native_session_id,state,error_code,cwd,launch_profile,created_at,updated_a
 | binding_pending | 实际观察到该 Agent，尚未捕获确切原生 ID |
 | ready | 实际观察到该 Agent 和确切原生 ID；不表示任务空闲/完成 |
 | restoring | 显式恢复意图持久化，等待原 ID 的运行证据 |
-| failed | 启动、绑定、身份核验或运行观察失败，详见 error_code |
+| releasing | 释放意图已落盘；不能接收新投递，尚未证明实际承载回收 |
+| released | 实际进程/PTY/tmux/活动终端登记与本组活动成员已移除；恢复描述保留 |
+| failed | 启动、绑定、身份核验、释放或运行观察失败，详见 error_code |
 
 同键同请求返回原 TD ID；已记录但结果不明的启动不会自动重新执行。通常等
 session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSION_BINDING_TIMEOUT`。
@@ -526,6 +529,133 @@ PID、同 ID 拒绝/不同 ID 排除、遗留 owner、错误 start_id/PID、inod
 持锁、多个 ID 和 argv 冲突。**私有 TraeX 的 1.4.306 身份接入仍需使用方实机复验**。
 原 `startupInput` 仍独立控制首次写入；核验 native ID 不表示输入初始化完成。
 
+### 会话身份与运行承载的生命周期（1.4.309）
+
+这项能力把稳定的会话记录与可回收的终端承载分开。TD 保留逻辑 `session_id`、
+原生身份、授权归属、原启动配置和消息关联；terminal/backend/tmux/pane 是可重建的
+运行承载。`released` 不进入活动终端列表，没有常驻 Agent、PTY 或 tmux。
+它不是隐藏的终端，也不表示删除 Agent 原生历史。原生历史仍由 Agent 管理。
+
+共享内核 `sessionLifecycle.ts` 提供操作串行、原生身份预留、代次和释放验证协议；
+首批调用者为现有 IntegrationSession/受限 CLI。复用原有持久恢复记录，不新增
+conversation/job/task 或裸 UUID 导入。现有用户关闭、最近关闭列表、任务执行归档
+保持现有行为，本版尚未将它们迁入该协议。principal 是调用权限，不是业务类型。
+
+```sh
+# 管理员将 session.release 追加到原身份的 permissions，凭据保持不变。
+td integration update --file /private/path/policy.json
+# 后台从 get 获取当前 generation（不能硬编码，也不能仅沿用旧事件中的代次）。
+td collab --principal report-bridge session get <session-id>
+td collab --principal report-bridge session release <session-id> \
+  --generation <current-generation> --idempotency-key <this-release-key>
+# 下一条外部消息先持久接收，显式恢复，再 send/reply。
+td collab --principal report-bridge session restore <session-id> \
+  --idempotency-key <this-restore-key>
+td collab --principal report-bridge reply <retained-original-message-id> \
+  --file /private/path/followup.txt --idempotency-key <this-message-key>
+```
+
+权限：`session.release` 与 `session.restore` 分开授权，`session.read` 用于状态回读。
+必须仍属于原 principal/本机组；没有 `session.release` 的旧身份不会获得该能力。
+运行中 Agent 必须先由调用方明确正常退出；TD 不根据 result、快照、输出间隔或
+忙闲推断代为终止。首版验证固定的单 pane、原 shell PID/前台进程组和纯交互 shell
+参数，没有 Agent 或其它前台工作。shell 中人工输入的未执行文字不属于可靠观测，
+调用方需保证不与人工输入同时操作。无原生 ID、未知进程、进行中的启动/恢复、
+pending 消息或其它组的成员归属均拒绝；不取消 pending、不补投 delivered 正文。
+
+新增公开字段：`generation`（旧记录初始为 1）、`runtime_present`（true/false/null）、
+`operation_uncertain`（可选）、`resume_configuration_fingerprint`（可选）。
+`runtime_present=null` 表示观测/操作结果不明，不能解释为零资源；shell 仍存在时
+为 true。成功 `released` 必须 `runtime_present=false,terminal_binding=null,error_code=null`。
+释放保存的原组角色在恢复时重建，组、消息、结果、旧任务不会随释放删除。
+
+实际释放和实际恢复在执行前递增 generation；管理员兼容确认也递增，以使旧观察
+失效。已经 released 的新键 release、精确运行中的新键 restore 为无动作回读，保持
+原 operation/generation。release 必须携带 get 返回的当前代次，旧值报
+`SESSION_GENERATION_MISMATCH`；代次不等于消息序号、任务 attempt 或业务周期。
+从本版开始完成的 release/restore 幂等键重放返回**该操作原结果快照**，可能已不是
+当前状态；使用 get 查当前状态。不同参数复用键返回 `IDEMPOTENCY_CONFLICT`，
+下一次实际操作使用新键。若崩溃发生在结果快照提交前，且会话已经进入后续代次，
+旧键返回 OPERATION_OUTCOME_UNCONFIRMED，不把新操作结果冒充旧结果。升级前的旧幂等
+记录仍按兼容规则回读当前状态，不重复执行。
+
+同 ID 的生命周期串行；同 Agent/native ID 的验证/启动使用服务内互斥预留，重启后
+持久的未决启动意图也阻挡另一描述启动。同一键的并发请求共用原操作，不启动两份。
+原生身份检查继续使用实际 argv/当前持锁证据；该预留不是独立程序之间的全局原子锁。
+释放先保存意图，再阻断新投递、等待正在进行的投递，重新核验后销毁，最后保存结果。
+落盘失败不先执行回收；回收失败保留描述并报告 failed，不宣称 released。
+
+重启对 releasing/不确定记录核验实际承载：已经不存在时可以清理残留登记并收口，
+仍存在时返回 `OPERATION_OUTCOME_UNCONFIRMED`，不会自动杀进程或再启动 Agent。
+调用方读 get/诊断、明确处理现场后，可用当前 generation 和新键再次请求 release。
+Released 记录若出现未授权重建的承载，同样拒绝静默接管。
+`session.releasing/released/restoring/ready/failed` 推送原 operation_id/generation；
+沿用现有 event_id 去重、连续持久接收 ACK、断线重放与保留缺口契约。
+
+Released 上 send/reply 返回 `SESSION_RELEASED`，不入队、不隐式启动。恢复重建承载后
+逻辑 ID 不变，原 retained 消息的 reply_to、thread_id 与 principal 关联不需要迁移。
+恢复返回 ready 只证明原生身份，消息仍受本次 startupInput 保护。恢复失败不得静默
+创建另一 UUID、使用 --last，或改走新的业务任务/会话。
+
+**历史保留边界不变**：普通消息仍只覆盖保留记录（通常最近 2,000 条及待投递/近期
+幂等保护记录），每组事件仍保留 10,000 条。释放不是无限历史锚点；原消息裁剪后
+reply 返回 `MESSAGE_NOT_FOUND`，不能伪造旧 reply_to。是否用同恢复会话的新普通
+消息作为新咨询锚点由业务方决定，并保留自己的外部历史。没有 forget 或删除原生
+历史接口；用户放弃历史与释放承载是不同操作，原生历史删除不在本版范围。
+
+#### 恢复配置兼容性与旧记录初始化
+
+新建可精确恢复的记录在启动前保存配置指纹。指纹涵盖当前 launcher 的真实路径、
+文件 SHA-256、原 argv/resumeArgv/cwd、Agent 别名、精确 resume 语义、插件 nativeIdentity
+声明。它不是整个私有 Agent 安装包/包装器依赖/原生历史的备份，也不会检查私有
+会话正文。包装器路径相同不能证明内容相同；文件超过 512 MiB 不支持指纹采集。
+现有不能精确 resume 的插件仍可创建终端，但不因此获得安全释放能力。
+
+旧记录未保存历史文件内容，升级时只初始化代次，不自动采集为“历史已验证”。
+第一次 release 前，管理员先读取**当前**指纹，核对原模型/参数/cwd、包装器当前内容
+和插件恢复语义，再明确授权当前配置用于原历史恢复：
+
+```sh
+td integration resume-configuration <session-id>
+# 返回 generation, recorded_fingerprint（旧记录为 null）, current_fingerprint,
+# confirmation_required。无 shell/PTY/状态改变，不返回文件正文或凭据。
+td integration confirm-resume <session-id> \
+  --generation <returned-generation> --fingerprint <current_fingerprint>
+```
+
+确认只证明管理员接受当前兼容性，**不证明未知的旧包装器内容**；不改 argv/profile/
+cwd/native UUID/私有程序。后来指纹不一致时明确失败，管理员也可在核对后用上述
+步骤确认新兼容指纹；TD 不暗中迁移模型或参数。正在执行生命周期操作时不允许确认。
+恢复继续使用原 profile 快照；同时按当前授权的 profile/cwdRoots 复核 cwd，撤销或
+缩小授权不被旧快照绕过。插件精确恢复能力消失或身份/启动条件失败仍会拒绝。
+
+能力检测：CLI/实际服务均至少 1.4.309，协议 1；服务 capabilities 必须包含
+`session_runtime_release=true,stable_session_identity=true,session_lifecycle_generation=true,
+session_resume_configuration=true,session_lifecycle_min_version="1.4.309"`。
+CLI 对旧服务先检查能力，失败为 `SESSION_RELEASE_UNSUPPORTED`，不发送回收请求。
+本地管理员配置确认同样先探测服务能力。未知或不兼容错误不得转为新会话。
+
+| 错误码 | 准确语义及处理 |
+| --- | --- |
+| SESSION_RELEASE_UNSUPPORTED | CLI/实际服务或运行适配器不支持本协议；升级两者 |
+| INVALID_SESSION_GENERATION | 缺少或非法代次；从 get 获取正整数 |
+| SESSION_GENERATION_MISMATCH | 观察已过时；重新读当前记录，不硬改旧请求 |
+| SESSION_STILL_RUNNING | 实际 Agent 仍在运行；不能推断空闲后自动退出 |
+| SESSION_PENDING_MESSAGES | 存在 pending 正文；先明确处理，不清空或重投 |
+| SESSION_OPERATION_IN_PROGRESS | 同 ID 正在操作或原启动未决 |
+| SESSION_NATIVE_OPERATION_IN_PROGRESS | 同原生身份有其它描述的在途/持久未决操作 |
+| SESSION_SCOPE_CONFLICT | 终端还属于其它组；管理员先处理归属 |
+| SESSION_IDENTITY_MISMATCH | 固定终端/pane/PID/布局或 shell 证明不符 |
+| RESUME_CONFIGURATION_UNCONFIRMED | 旧记录缺少兼容确认；管理员核对当前指纹 |
+| RESUME_CONFIGURATION_CHANGED | launcher 内容/路径或插件恢复语义变化；不自动采纳 |
+| OPERATION_OUTCOME_UNCONFIRMED | 释放结果不明或承载重新出现；保留记录并核对 |
+| SESSION_STORAGE_FULL | 恢复记录 journal 超过 64 MiB；停止新增操作并由管理员处理 |
+| SESSION_RELEASE_FAILED | 未分类释放失败；不返回私有异常输出 |
+| SESSION_RELEASED | 消息目标已释放；先显式精确 restore |
+
+原有权限/组/目录、幂等、EXACT_RESUME_UNSUPPORTED、原生重复所有者、启动/绑定错误
+继续适用；本节不改变这些错误的保护条件。
+
 ### 管理员恢复诊断（1.4.305）
 
 `capabilities.session_restore_diagnostics=true` 表示服务支持持久恢复诊断。
@@ -585,6 +715,11 @@ no-op restore 不创建新检查。报告跟随会话保存并可在服务重启
 - 未分类异常：`SESSION_LAUNCH_FAILED`, `SESSION_OBSERVATION_FAILED`；错误不包含包装器输出、密钥或原始堆栈。
 
 ## 验收边界
+
+本版维护机验证：共享释放协议、真实 Unix socket 权限/生命周期事件、零入队拒绝、
+同键并发/旧代次/异常释放/重启对账、配置内容变化与旧记录显式确认、原消息关联；
+隔离真实 tmux 的实际销毁与原逻辑 ID 重建。本机 fixture 不等于私有 TraeX 验收，
+本版真实 TraeX 的零承载→同 UUID→真人原话题往返仍待使用方升级后验证。
 
 维护机验证：真实 Unix socket 主动推送/断线重放/撤销、journal 重载与源记录补偿、
 权限与幂等隔离、accepted 上咨询/关联答复、修订后的新结果、原 profile 恢复和

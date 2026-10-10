@@ -76,6 +76,20 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     消息历史只覆盖仍保留记录；不存在的 after-id 返回 MESSAGE_NOT_FOUND，不能据此声称历史完整。
   session create --group <id> --launch-profile <id> --cwd <absolute-path> --idempotency-key <key>
   session get <id> | session restore <id> --idempotency-key <key>
+  session release <id> --generation <session-get-generation> --idempotency-key <key>
+    权限 session.release；仅原 Agent 已退出、精确空 shell、无 pending 消息时释放实际运行承载。
+    released: runtime_present=false、terminal_binding=null；保留逻辑 ID/原生 UUID/原消息，restore 后可继续 reply。
+    released 上 send/reply 返回 SESSION_RELEASED，不入队、不隐式恢复；业务先持久接收，再明确 restore。
+    释放/恢复最低 CLI/实际服务 1.4.309；检查 session_runtime_release/stable_session_identity/session_lifecycle_generation。
+    generation 每次实际 restore/release/管理员兼容确认递增；旧 generation 拒绝，运行中精确 restore 不递增。
+    重用同幂等键回读原操作结果，不能用于新一轮恢复；用 session get 查询当前状态。
+    旧配置须管理员 td integration resume-configuration <id> 查看，再 confirm-resume 显式确认当前指纹。
+    状态 starting/restoring/binding_pending/ready/failed/releasing/released；runtime_present=null 表示无法确认。
+    失败码：INVALID_SESSION_GENERATION、SESSION_GENERATION_MISMATCH、SESSION_RELEASE_UNSUPPORTED；
+    SESSION_PENDING_MESSAGES/SESSION_STILL_RUNNING/SESSION_OPERATION_IN_PROGRESS 表示应先处理原现场；
+    SESSION_NATIVE_OPERATION_IN_PROGRESS、SESSION_SCOPE_CONFLICT、SESSION_IDENTITY_MISMATCH 拒绝并发或身份/归属冲突；
+    SESSION_RELEASE_FAILED、SESSION_STORAGE_FULL 保留原记录，不表示回收成功；
+    RESUME_CONFIGURATION_CHANGED/RESUME_CONFIGURATION_UNCONFIRMED 拒绝静默替换配置；OPERATION_OUTCOME_UNCONFIRMED 保留记录待核对。
   task respond <task-id> --attempt <attempt-id> --to-event <comment-event-id> --content <答复>
   凭据通过 TERMDOCK_INTEGRATION_CREDENTIAL_FILE 注入，不通过命令行传 token。
   消息接入最低 CLI/实际服务均为 1.4.308；capabilities 回读双方版本与 integration_message_send/reply/history。
@@ -188,7 +202,7 @@ interface RoleGroupView {
 }
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules', 'managed', 'shared-directory', 'integration']);
-const VALUE_OPTIONS = new Set(['purpose', 'principal', 'source', 'external-actor', 'external-message-id', 'launch-profile', 'to-event', 'decision', 'work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
+const VALUE_OPTIONS = new Set(['generation', 'purpose', 'principal', 'source', 'external-actor', 'external-message-id', 'launch-profile', 'to-event', 'decision', 'work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -228,10 +242,11 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     command.operation = positional.shift(); command.target = positional.shift();
     if (positional.length) throw new Error('Unexpected integration arguments');
     if (action === 'events' && (!['subscribe', 'ack'].includes(command.operation ?? '') || (command.operation === 'ack' ? !command.target : Boolean(command.target)))) throw new Error('Usage: events subscribe | events ack <cursor>');
-    if (action === 'session' && (!['create', 'get', 'restore'].includes(command.operation ?? '') || (command.operation === 'create' ? Boolean(command.target) : !command.target))) throw new Error('Usage: session create|get|restore');
+    if (action === 'session' && (!['create', 'get', 'restore', 'release'].includes(command.operation ?? '') || (command.operation === 'create' ? Boolean(command.target) : !command.target))) throw new Error('Usage: session create|get|restore|release');
     if (action === 'session' && command.operation !== 'get' && !options['idempotency-key']) throw new Error('Session mutation requires an explicit --idempotency-key');
+    if (action === 'session' && command.operation === 'release' && (!/^[1-9][0-9]*$/.test(String(options.generation ?? '')) || !Number.isSafeInteger(Number(options.generation)))) throw new Error('session release requires --generation from session get');
     const integrationFlags = action === 'events' ? command.operation === 'ack' ? ['consumer'] : ['consumer', 'group', 'timeout']
-      : command.operation === 'create' ? ['group', 'launch-profile', 'cwd', 'idempotency-key'] : command.operation === 'restore' ? ['idempotency-key'] : [];
+      : command.operation === 'create' ? ['group', 'launch-profile', 'cwd', 'idempotency-key'] : command.operation === 'restore' ? ['idempotency-key'] : command.operation === 'release' ? ['idempotency-key', 'generation'] : [];
     for (const flag of Object.keys(options)) if (!['principal', 'json', 'jsonl', 'text', 'help', ...integrationFlags].includes(flag)) throw new Error(`--${flag} is not supported by ${action} ${command.operation}`);
   } else if (action === 'task') {
     command.operation = positional.shift(); command.target = positional.shift();
@@ -307,7 +322,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session', 'principal']);
   const byAction: Record<string, string[]> = {
-    events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key'],
+    events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key', 'generation'],
     task: ['purpose', 'to-event', 'decision', 'source', 'external-actor', 'external-message-id', 'metadata', 'work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
     rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],

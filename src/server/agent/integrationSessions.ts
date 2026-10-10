@@ -2,14 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { atomicJson, integrationError, type IntegrationPrincipal, type LaunchProfile, type StartupInputCondition } from './integrationStore.js';
+import { SessionLifecycleCoordinator, assertMessageRuntime, assertReleaseFacts, assertReleaseGeneration, type SessionLifecycleDescriptor } from './sessionLifecycle.js';
+import { resumeConfigurationFingerprint } from './sessionResumeConfiguration.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
 import { NativeResumeOwnerError, type NativeOwnerCheck } from './nativeResumeOwner.js';
 
-export interface IntegrationSession {
-  terminal_binding?: CollaborationPaneBinding;
+export interface IntegrationSession extends SessionLifecycleDescriptor {
+  terminal_binding?: CollaborationPaneBinding | null;
+  resume_configuration_fingerprint?: string;
+  group_role?: string;
   operation_id: string; session_id: string; group_id: string; principal_id: string;
   agent_slug: string; agent_native_session_id: string | null;
-  state: 'starting' | 'binding_pending' | 'ready' | 'restoring' | 'failed';
   error_code: string | null; cwd: string; launch_profile: string; profile: LaunchProfile;
   created_at: number; updated_at: number; deadline: number; launch_submitted: boolean;
   startup_input?: { state: 'pending' | 'observed' | 'timed_out'; deadline: number; matched_since: number | null; observed_at: number | null };
@@ -30,6 +33,12 @@ export interface IntegrationSessionAdapter {
   create(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void): Promise<void>;
   restore(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void): Promise<void>;
   inspect(record: IntegrationSession): Promise<{ exists: boolean; running: boolean; shell: boolean; agentSlug: string | null; nativeId: string | null }>;
+  /** Current runtime presence includes orphaned tmux/backend, not inventory alone. */
+  runtimePresent?(record: IntegrationSession): Promise<boolean>;
+  release?(record: IntegrationSession, reconcile: boolean): Promise<void>;
+  pendingMessages?(id: string): number;
+  prepareRelease?(record: IntegrationSession): Promise<{ group_role?: string }>;
+  resumeConfiguration?(record: IntegrationSession): Promise<unknown>;
   subscribe(listener: () => void): () => void;
   capture?(record: IntegrationSession): Promise<string>;
   registerDeliveryGuard?(guard: (id: string) => Promise<IntegrationDeliveryReadiness | null>): () => void;
@@ -39,7 +48,7 @@ function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_cond
   const condition = record.startup_condition ?? record.profile.startupInput;
   return condition ? { state: 'pending', deadline: now + (condition.timeoutMs ?? 120000), matched_since: null, observed_at: null } : undefined;
 }
-interface Document { version: 1; sessions: IntegrationSession[]; requests: Record<string, { hash: string; sessionId: string }> }
+interface Document { version: 1; sessions: IntegrationSession[]; requests: Record<string, { hash: string; sessionId: string; operationId?: string; generation?: number; result?: IntegrationSession }> }
 export function publicIntegrationSession(record: IntegrationSession) {
   const { profile: _, deadline: _deadline, launch_submitted: _submitted, startup_condition: _condition, restore_diagnostics: diagnostics, ...publicRecord } = record;
   return { ...publicRecord, ...(diagnostics ? { restore_diagnostics_available: true } : {}) };
@@ -58,7 +67,8 @@ export class IntegrationSessions {
   private doc: Document = { version: 1, sessions: [], requests: {} };
   private pending = new Map<string, Promise<IntegrationSession>>();
   private listeners = new Set<() => void>();
-  private restoring = new Set<string>();
+  private lifecycle = new SessionLifecycleCoordinator();
+  private mutations = new Map<string, { hash: string; promise: Promise<IntegrationSession> }>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopObservation: () => void;
   private stopDeliveryGuard?: () => void;
@@ -69,7 +79,8 @@ export class IntegrationSessions {
       const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Document;
       if (doc.version !== 1 || !Array.isArray(doc.sessions) || !doc.requests) throw new Error('Invalid integration session store'); this.doc = doc;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    for (const record of this.doc.sessions) if (['starting', 'restoring', 'binding_pending'].includes(record.state) || record.startup_input?.state === 'pending') this.scheduleRefresh(record);
+    for (const record of this.doc.sessions) { record.generation ??= 1; record.runtime_present ??= null; }
+    for (const record of this.doc.sessions) if (['starting', 'restoring', 'binding_pending'].includes(record.state) || record.state === 'releasing' || record.startup_input?.state === 'pending') this.scheduleRefresh(record);
     // A pre-restart partial match cannot prove continuity of the live screen.
     for (const record of this.doc.sessions) if (record.startup_input && record.startup_input.state !== 'observed') record.startup_input.matched_since = null;
     this.stopDeliveryGuard = adapter.registerDeliveryGuard?.(id => this.deliveryReadiness(id));
@@ -83,7 +94,9 @@ export class IntegrationSessions {
   }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   snapshot(): IntegrationSession[] { return structuredClone(this.doc.sessions); }
-  private save(): void { atomicJson(this.file, this.doc); for (const listener of this.listeners) { try { listener(); } catch { /* Durable session state is reconciled on restart. */ } } }
+  private save(): void {
+    if (Buffer.byteLength(JSON.stringify(this.doc)) > 64 * 1024 * 1024) integrationError('SESSION_STORAGE_FULL', 'Recovery descriptor journal is full; no new operation was committed', 503);
+    atomicJson(this.file, this.doc); for (const listener of this.listeners) { try { listener(); } catch { /* Durable session state is reconciled on restart. */ } } }
   private saveRecord(record: IntegrationSession): void {
     const before = this.doc.sessions;
     this.doc.sessions = [...before.filter(s => s.session_id !== record.session_id), structuredClone(record)];
@@ -111,7 +124,7 @@ export class IntegrationSessions {
     if (this.doc.sessions.length >= 2000) integrationError('INTEGRATION_SESSION_LIMIT', 'Integration session storage is full', 409);
     const now = Date.now(), record: IntegrationSession = { operation_id: randomUUID(), session_id: randomBytes(6).toString('hex'),
       group_id: principal.groupId, principal_id: principal.id, agent_slug: profile.agentSlug, agent_native_session_id: null,
-      state: 'starting', error_code: null, cwd, launch_profile: profile.id, profile: structuredClone(profile),
+      state: 'starting', generation: 1, runtime_present: null, error_code: null, cwd, launch_profile: profile.id, profile: structuredClone(profile),
       created_at: now, updated_at: now, deadline: now + this.bindingTimeout, launch_submitted: false };
     record.startup_input = startupInput(record, now);
     this.doc.requests[request.scoped] = { hash: request.hash, sessionId: record.session_id };
@@ -122,6 +135,17 @@ export class IntegrationSessions {
     const promise = (async () => {
       try {
         // Store intent before launching. A failed persistence cannot execute.
+        if (this.adapter.resumeConfiguration) {
+          try {
+            const fingerprint = await resumeConfigurationFingerprint(record, this.adapter);
+            if (record.resume_configuration_fingerprint && record.resume_configuration_fingerprint !== fingerprint) integrationError('RESUME_CONFIGURATION_CHANGED', 'Recovery launcher or plugin semantics changed', 409);
+            if (!restoring) record.resume_configuration_fingerprint = fingerprint;
+          } catch (error) {
+            // Existing creation supports plugins without an exact resume path.
+            // They remain launchable, but cannot gain a releasable descriptor.
+            if (restoring || (error as { code?: unknown }).code !== 'EXACT_RESUME_UNSUPPORTED') throw error;
+          }
+        }
         record.launch_submitted = true; this.saveRecord(record);
         const prepared = (binding: CollaborationPaneBinding) => { record.terminal_binding = binding; this.saveRecord(record); };
         if (restoring) await this.adapter.restore(record, prepared); else await this.adapter.create(record, prepared);
@@ -146,38 +170,146 @@ export class IntegrationSessions {
     return structuredClone({ session_id: record.session_id, operation_id: record.operation_id,
       state: record.state, error_code: record.error_code, diagnostics: record.restore_diagnostics ?? null });
   }
-  async restore(principal: IntegrationPrincipal, id: string, idempotencyKey: string): Promise<IntegrationSession> {
+  assertRuntimeMessage(id: string): void { assertMessageRuntime(this.doc.sessions.find(s => s.session_id === id)); }
+  assertMessageTarget(principal: IntegrationPrincipal, id: string): void {
+    const record = this.doc.sessions.find(s => s.session_id === id && s.group_id === principal.groupId);
+    assertMessageRuntime(record);
+  }
+  private async mutate(principal: IntegrationPrincipal, key: string, input: unknown, action: () => Promise<IntegrationSession>): Promise<IntegrationSession> {
+    const request = this.request(principal, key, input);
+    if (request.previous?.result) { this.lookup(principal, request.previous.sessionId); return structuredClone(request.previous.result); }
+    const active = this.mutations.get(request.scoped);
+    if (active) { if (active.hash !== request.hash) integrationError('IDEMPOTENCY_CONFLICT', 'Operation key parameters changed', 409); return active.promise; }
+    const promise = action().then(result => {
+      if (this.doc.requests[request.scoped]) {
+        const before = this.doc.requests[request.scoped];
+        this.doc.requests[request.scoped] = { ...before, result: structuredClone(result) };
+        try { this.save(); } catch (error) { this.doc.requests[request.scoped] = before; throw error; }
+      }
+      return result;
+    }).finally(() => this.mutations.delete(request.scoped));
+    this.mutations.set(request.scoped, { hash: request.hash, promise }); return promise;
+  }
+  private async replayRequest(principal: IntegrationPrincipal, id: string, request: NonNullable<ReturnType<IntegrationSessions['request']>['previous']>): Promise<IntegrationSession> {
+    const record = await (this.pending.get(id) ?? this.get(principal, id));
+    if (request.operationId && (record.operation_id !== request.operationId || record.generation !== request.generation)) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Original operation result was not committed and a later generation exists; read session get, do not reuse this key', 409);
+    return record;
+  }
+  async restore(principal: IntegrationPrincipal, id: string, key: string): Promise<IntegrationSession> {
+    return this.mutate(principal, key, ['restore', id], () => this.lifecycle.run(id, () => this.restoreOnce(principal, id, key)));
+  }
+  private async restoreOnce(principal: IntegrationPrincipal, id: string, idempotencyKey: string): Promise<IntegrationSession> {
     const request = this.request(principal, idempotencyKey, ['restore', id]);
-    if (request.previous) return this.pending.get(id) ?? this.get(principal, id);
-    if (this.pending.has(id) || this.restoring.has(id)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Another session operation is in progress', 409);
-    this.restoring.add(id);
+    if (request.previous) return this.replayRequest(principal, id, request.previous);
+    if (this.pending.has(id)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Another session operation is in progress', 409);
+    let releaseNative: (() => void) | undefined;
     try {
       const record = await this.get(principal, id);
       if (!record.agent_native_session_id) integrationError('NATIVE_SESSION_ID_MISSING', 'An exact native session binding is required', 409);
       // Recheck the current grant and actual directories; restore uses the
       // original profile snapshot, never changed model or wrapper defaults.
-      if (!principal.launchProfiles.some(p => p.id === record.launch_profile)) integrationError('LAUNCH_PROFILE_DENIED', 'Original launch profile is no longer authorized', 403);
+      const authorizedProfile = principal.launchProfiles.find(p => p.id === record.launch_profile);
+      if (!authorizedProfile) integrationError('LAUNCH_PROFILE_DENIED', 'Original launch profile is no longer authorized', 403);
+      permittedCwd(authorizedProfile, record.cwd);
       permittedCwd(record.profile, record.cwd);
+      if (record.operation_uncertain || record.state === 'releasing') integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Reconcile prior release using session get before restore', 409);
       const observed = await this.adapter.inspect(record);
       if (observed.running) {
         if (observed.agentSlug !== record.agent_slug || observed.nativeId !== record.agent_native_session_id) integrationError('SESSION_IDENTITY_MISMATCH', 'Existing process does not prove the exact native binding', 409);
-        this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id };
+        this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
         try { this.save(); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
         return record;
       }
       if (['starting', 'restoring', 'binding_pending'].includes(record.state)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Prior launch outcome is not yet resolved; inspect the original session', 409);
       if (observed.exists && !observed.shell) integrationError('SESSION_TARGET_NOT_SHELL', 'Original pane is not a verified shell', 409);
+      if (record.state === 'released' && !record.resume_configuration_fingerprint) integrationError('RESUME_CONFIGURATION_UNCONFIRMED', 'Administrator must explicitly confirm the current recovery configuration', 409);
+      releaseNative = this.lifecycle.reserveNative(record, this.doc.sessions);
+      if (record.resume_configuration_fingerprint && record.resume_configuration_fingerprint !== await resumeConfigurationFingerprint(record, this.adapter)) integrationError('RESUME_CONFIGURATION_CHANGED', 'Recovery launcher or plugin semantics changed', 409);
+      record.generation = (record.generation ?? 1) + 1;
+      record.runtime_present = observed.exists;
       record.state = 'restoring'; record.error_code = null; record.operation_id = randomUUID(); record.deadline = Date.now() + this.bindingTimeout; record.updated_at = Date.now();
       record.restore_diagnostics = undefined;
       if (!record.profile.startupInput && !record.startup_condition) record.startup_condition = structuredClone(principal.launchProfiles.find(profile => profile.id === record.launch_profile)?.startupInput);
       record.startup_input = startupInput(record, Date.now());
-      this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id };
+      this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
       try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
       return await this.launch(record, true);
-    } finally { this.restoring.delete(id); }
+    } finally { releaseNative?.(); }
+  }
+  async resumeConfiguration(id: string) {
+    const record = this.doc.sessions.find(s => s.session_id === id);
+    if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Recovery record does not exist', 404);
+    return { session_id: id, generation: record.generation ?? 1, recorded_fingerprint: record.resume_configuration_fingerprint ?? null,
+      current_fingerprint: await resumeConfigurationFingerprint(record, this.adapter), confirmation_required: !record.resume_configuration_fingerprint };
+  }
+  async confirmResumeConfiguration(id: string, generation: number, fingerprint: string): Promise<IntegrationSession> {
+    return this.lifecycle.run(id, async () => {
+      const record = structuredClone(this.doc.sessions.find(s => s.session_id === id));
+      if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Recovery record does not exist', 404);
+      assertReleaseGeneration(record, generation);
+      if (this.pending.has(id) || ['starting', 'restoring', 'binding_pending', 'releasing'].includes(record.state)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Resolve the current operation before confirming compatibility', 409);
+      if (!/^[a-f0-9]{64}$/.test(fingerprint) || fingerprint !== await resumeConfigurationFingerprint(record, this.adapter)) integrationError('RESUME_CONFIGURATION_CHANGED', 'Current fingerprint no longer matches the administrator confirmation', 409);
+      record.resume_configuration_fingerprint = fingerprint; record.generation = generation + 1; record.updated_at = Date.now();
+      this.saveRecord(record); return record;
+    });
+  }
+  async release(principal: IntegrationPrincipal, id: string, generation: number, key: string): Promise<IntegrationSession> {
+    return this.mutate(principal, key, ['release', id, generation], () => this.lifecycle.run(id, async () => {
+      const request = this.request(principal, key, ['release', id, generation]);
+      if (request.previous) return this.replayRequest(principal, id, request.previous);
+      if (!this.adapter.release || !this.adapter.runtimePresent) integrationError('SESSION_RELEASE_UNSUPPORTED', 'Runtime adapter does not support release', 409);
+      if (this.pending.has(id)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Launch is in progress', 409);
+      const record = await this.get(principal, id);
+      assertReleaseGeneration(record, generation);
+      if (record.state !== 'released') {
+        assertReleaseFacts(record, await this.adapter.inspect(record));
+        if (this.adapter.pendingMessages?.(id)) integrationError('SESSION_PENDING_MESSAGES', 'Pending messages must be resolved before release', 409);
+        if (!record.resume_configuration_fingerprint) integrationError('RESUME_CONFIGURATION_UNCONFIRMED', 'Administrator must inspect and confirm the recovery configuration before release', 409);
+        if (record.resume_configuration_fingerprint !== await resumeConfigurationFingerprint(record, this.adapter)) integrationError('RESUME_CONFIGURATION_CHANGED', 'Recovery launcher or plugin semantics changed', 409);
+      }
+      if (record.state === 'released') {
+        this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
+        try { this.save(); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
+        return record;
+      }
+      if (this.adapter.prepareRelease) record.group_role = (await this.adapter.prepareRelease(record)).group_role;
+      record.state = 'releasing'; record.operation_id = randomUUID(); record.generation = generation + 1;
+      record.operation_uncertain = false; record.error_code = null; record.updated_at = Date.now();
+      this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
+      try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
+      try {
+        await this.adapter.release(record, false);
+        if (await this.adapter.runtimePresent(record)) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Runtime removal could not be confirmed', 409);
+        record.state = 'released'; record.runtime_present = false; record.terminal_binding = null; record.startup_input = undefined;
+      } catch (error) {
+        record.state = 'failed'; record.operation_uncertain = true; record.runtime_present = null;
+        record.error_code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'SESSION_RELEASE_FAILED';
+      }
+      record.updated_at = Date.now(); this.saveRecord(record); return record;
+    }));
   }
   private async refresh(id: string): Promise<void> {
     const record = structuredClone(this.doc.sessions.find(s => s.session_id === id)); if (!record) return;
+    if (record.state === 'released' || record.state === 'releasing' || record.operation_uncertain) {
+      if (this.lifecycle.active(id)) return;
+      try {
+        if (record.state !== 'released') await this.adapter.release?.(record, true);
+        const present = await this.adapter.runtimePresent?.(record);
+        if (present === undefined) integrationError('SESSION_RELEASE_UNSUPPORTED', 'Runtime presence is unavailable', 409);
+        if (record.state !== 'released') {
+          if (present) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Prior release still has a runtime; explicit release retry is required', 409);
+          // Absent runtime metadata has been reconciled without killing a live runtime.
+        } else if (present) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'A runtime exists for a released descriptor', 409);
+        const next = { ...record, state: 'released' as const, runtime_present: false, terminal_binding: null, startup_input: undefined, operation_uncertain: false, error_code: null };
+        if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
+        if (JSON.stringify(next) !== JSON.stringify(record)) this.saveRecord({ ...next, updated_at: Date.now() });
+      } catch (error) {
+        if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
+        const next = { ...record, state: 'failed' as const, runtime_present: null, operation_uncertain: true, error_code: typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'OPERATION_OUTCOME_UNCONFIRMED' };
+        if (JSON.stringify(next) !== JSON.stringify(record)) this.saveRecord({ ...next, updated_at: Date.now() });
+      }
+      return;
+    }
     let observed: Awaited<ReturnType<IntegrationSessionAdapter['inspect']>>;
     try { observed = await this.adapter.inspect(record); }
     catch (error) {
@@ -187,7 +319,7 @@ export class IntegrationSessions {
       if (record.state !== 'failed' || record.error_code !== code) this.saveRecord({ ...record, state: 'failed', error_code: typeof code === 'string' ? code : 'SESSION_OBSERVATION_FAILED', updated_at: Date.now() });
       return;
     }
-    const next = { ...record };
+    const next = { ...record, runtime_present: this.adapter.runtimePresent ? await this.adapter.runtimePresent(record) : observed.exists };
     if (observed.nativeId && (typeof observed.nativeId !== 'string' || observed.nativeId.length > 256 || /[\x00-\x1f\x7f]/.test(observed.nativeId))) { next.state = 'failed'; next.error_code = 'NATIVE_SESSION_ID_INVALID'; }
     else if (observed.running && observed.agentSlug !== record.agent_slug) { next.state = 'failed'; next.error_code = 'SESSION_IDENTITY_MISMATCH'; }
     else if (observed.running && observed.nativeId) {
@@ -217,7 +349,10 @@ export class IntegrationSessions {
   }
   /** Only gates configured launches. Native UUID and Agent turn state are not input prerequisites. */
   async deliveryReadiness(id: string): Promise<IntegrationDeliveryReadiness | null> {
-    if (!this.doc.sessions.find(record => record.session_id === id)?.startup_input) return null;
+    const existing = this.doc.sessions.find(record => record.session_id === id);
+    if (!existing) return null;
+    if (existing.state === 'released' || existing.state === 'releasing' || existing.operation_uncertain) return { allowed: false, reason: existing.state === 'released' ? 'SESSION_RELEASED' : 'SESSION_OPERATION_IN_PROGRESS' };
+    if (!existing.startup_input) return null;
     await this.refresh(id);
     const record = this.doc.sessions.find(record => record.session_id === id)!;
     if (record.error_code && record.error_code !== 'SESSION_BINDING_TIMEOUT') return { allowed: false, reason: record.error_code };
