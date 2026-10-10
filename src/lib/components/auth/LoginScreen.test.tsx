@@ -45,3 +45,25 @@ describe('login feedback and focus ownership', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(false));
   });
 });
+
+it.each([
+  ['connectionFailed', 'Could not sign in. Check the connection and try again.'],
+  ['identityMismatch', 'The service identity has changed. Check the address with its owner before trying again.'],
+  ['unavailable', 'Password sign-in is unavailable on this service. Check the address or ask its owner for an invitation.'],
+  ['authorizationRequired', 'This device needs authorization. Ask the service owner for a new invitation.'],
+])('provides safe, distinct feedback for %s and permits retry', async (reason, message) => {
+  mocks.login.mockResolvedValue({ ok: false, reason, error: '/private/credential-secret' });
+  render(<LoginScreen onLoginSuccess={() => {}} />);
+  const input = screen.getByLabelText('Enter password');
+  fireEvent.change(input, { target: { value: 'test-password' } }); fireEvent.submit(input.closest('form')!);
+  expect((await screen.findByRole('alert')).textContent).toBe(message);
+  await waitFor(() => expect(document.activeElement).toBe(input));
+  expect((input as HTMLInputElement).value).toBe('test-password');
+});
+it('shows the current destination and opens service management before sign-in', () => {
+  const onManageServices = vi.fn();
+  render(<LoginScreen serviceOrigin="https://[::1]:9881" onManageServices={onManageServices} onLoginSuccess={() => {}} />);
+  expect(screen.getByText('Signing in to [::1]:9881')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Manage services / use another address' }));
+  expect(onManageServices).toHaveBeenCalledOnce(); expect(mocks.login).not.toHaveBeenCalled();
+});

@@ -826,15 +826,18 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   });
 
   server.listen(port, host, () => {
+    const listeningAddress = server.address();
+    const listeningPort = listeningAddress && typeof listeningAddress !== 'string' ? listeningAddress.port : port;
+    const listeningHost = listeningAddress && typeof listeningAddress !== 'string' ? listeningAddress.address : host;
     const displayHost = host === '0.0.0.0' ? 'localhost' : host;
-    console.log(`Termdock server running at ${scheme}://${displayHost}:${port}`);
-    console.log(`Health check: ${scheme}://${displayHost}:${port}/health`);
+    console.log(`Termdock server running at ${scheme}://${displayHost}:${listeningPort}`);
+    console.log(`Health check: ${scheme}://${displayHost}:${listeningPort}/health`);
     const onboardingServerState = scheme === 'https'
-      ? startOnboardingServer({ httpsPort: port, caCertPath: options.httpsCaPath })
+      ? startOnboardingServer({ httpsPort: listeningPort, caCertPath: options.httpsCaPath })
       : { server: null, url: null };
-    void localAccessManager.start({ host, port, scheme, caCertPath: options.httpsCaPath, onboardingPort: options.onboardingPort ?? port }).then((state) => {
+    void localAccessManager.start({ host: listeningHost, port: listeningPort, scheme, caCertPath: options.httpsCaPath, onboardingPort: options.onboardingPort ?? listeningPort }).then((state) => {
       const publishState = () => {
-        const onboardingUrl = onboardingServerState.url ?? state.onboardingUrl;
+        const onboardingUrl = state.status === 'loopback-only' ? null : onboardingServerState.url ?? state.onboardingUrl;
         latestLocalAccessState = state;
         latestOnboardingUrl = onboardingUrl;
         if (state.status === 'active') {
