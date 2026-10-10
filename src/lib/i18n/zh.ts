@@ -8,7 +8,7 @@ export const zh: TranslationDictionary = {
     searchScopePaths: "搜索文件或目录",
     useCurrentFile: "引用当前文件",
     useCurrentDirectory: "引用当前目录",
-    browsePathsHint: "与「文件」页相同的目录树，展开目录后点击引用按钮加入分析范围。",
+    browsePathsHint: "展开目录浏览，点击右侧引用按钮加入分析范围。",
     correctPathsFirst: "请先修正已填写的路径，再添加范围。",
     pathsHint: "可选择范围或粘贴文件／行引用，路径相对当前项目。",
     featureScopeHint: "优先在所选范围内定位功能",

@@ -1154,7 +1154,7 @@ export function CollaborationTab({ fullWorkspace = false, initialView = 'tasks',
 
     {settingsOpen && selectedGroup && <CollaborationGroupSettings key={selectedGroup.id} group={selectedGroup} activeSessionId={activeSessionId} sessions={sessions} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={closeSettings} />}
     {!initialGroupId && sessionsState !== 'loaded' && !groups.length && <p role="status" className="py-5 text-xs text-muted-foreground">{sessionsState === 'loading' ? '正在加载协作组与会话…' : '会话加载失败，请重试'}</p>}
-    {!selectedGroup && (initialGroupId || sessionsState === 'loaded') && <section className="border-y border-border/15 py-4">
+    {!selectedGroup && (initialGroupId || selectedGroupId === 'new' || sessionsState === 'loaded') && <section className="border-y border-border/15 py-4">
       <div className="flex items-start justify-between gap-3"><div><h4 className="text-[12px] font-medium text-foreground">创建协作组</h4><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">先给协作组命名。成员可以现在选择，也可以以后添加；消息和看板都能独立使用。</p></div><span className={`shrink-0 text-[10px] ${selectedCount >= 2 ? 'text-primary' : 'text-muted-foreground'}`}>已选 {selectedCount} 个</span></div>
       <label className="mt-4 block space-y-1 text-[10px] text-muted-foreground">协作组名称<input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：发布准备" /></label>
       <details className="mt-3"><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted-foreground">复用已有会话（选填） · 已选 {selectedCount} 个</summary>

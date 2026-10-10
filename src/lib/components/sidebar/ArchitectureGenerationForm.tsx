@@ -61,7 +61,12 @@ export function ArchitectureGenerationForm({ rootPath, initial, outputFile, curr
   const change = () => { request.current++; setPending(false); setFeedback(null); };
   const appendPath = (path: string) => { setPaths(parsedPaths ? [...new Set([...parsedPaths, path])].join('\n') : `${paths.trim()}\n${path}`); change(); };
   const prepared = scope;
-  return <div ref={workspace} id={`${fieldId}-workspace`} tabIndex={-1} className={showBrowser ? 'grid min-w-0 grid-cols-[minmax(0,1fr)_20rem] items-start gap-3' : 'min-w-0'}><form ref={form} tabIndex={-1} className="min-w-0 space-y-2.5 rounded-xl border border-border/20 bg-surface-2 p-3" onSubmit={event => {
+  return <div ref={workspace} id={`${fieldId}-workspace`} tabIndex={-1} className={showBrowser ? 'grid min-h-0 min-w-0 flex-1 grid-cols-[20rem_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] items-start gap-3' : 'min-w-0 shrink-0'}>
+    {showBrowser && <section aria-label={t('architecture.choosePaths')} aria-describedby={`${fieldId}-browser-hint`} className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-border/20 bg-surface-2">
+      <header className="flex min-h-9 shrink-0 items-center gap-2 px-3"><h3 className="min-w-0 flex-1 truncate text-xs font-medium" title={t('architecture.browsePathsHint')}>{t('architecture.choosePaths')}</h3><p role="status" aria-label={`${t('architecture.selectedPaths')} ${parsedPaths?.length ?? 0} / 20`} className="shrink-0 text-xs tabular-nums text-muted-foreground">{parsedPaths?.length ?? 0} / 20</p><p id={`${fieldId}-browser-hint`} className="sr-only">{t('architecture.browsePathsHint')}</p></header>
+      <ArchitecturePathBrowser compact rootPath={rootPath} initialDirectory={browseDirectory} selected={parsedPaths ?? []} selectionDisabled={!parsedPaths} onChange={next => { setPaths(next.join('\n')); change(); }} />
+    </section>}
+    <form ref={form} tabIndex={-1} className={`min-w-0 space-y-2.5 rounded-xl border border-border/20 bg-surface-2 p-3 ${showBrowser ? 'max-h-full overflow-y-auto overscroll-contain' : ''}`} onSubmit={event => {
     event.preventDefault();
     if (!prepared || pending || !active || !form.current) return;
     const revision = ++request.current;
@@ -113,10 +118,6 @@ export function ArchitectureGenerationForm({ rootPath, initial, outputFile, curr
     <details><summary className="cursor-pointer py-2 text-xs text-muted-foreground">{t('architecture.previewPrompt')}</summary><textarea readOnly aria-label={t('architecture.previewPrompt')} value={prompt} className={`${field} mt-2 h-52 resize-y font-mono text-xs`} /></details>
     <p className="text-xs leading-relaxed text-muted-foreground">{t('architecture.promptHint')}</p>
   </form>
-    {showBrowser && <section aria-label={t('architecture.choosePaths')} className="flex h-[32rem] max-h-[calc(100dvh-15rem)] min-h-72 min-w-0 flex-col overflow-hidden rounded-xl border border-border/20 bg-surface-2">
-      <header className="shrink-0 space-y-1 border-b border-border/15 p-3"><h3 className="text-sm font-medium">{t('architecture.choosePaths')}</h3><p className="text-xs leading-relaxed text-muted-foreground">{t('architecture.browsePathsHint')}</p><p role="status" className="text-xs text-muted-foreground">{t('architecture.selectedPaths')} {parsedPaths?.length ?? 0} / 20</p></header>
-      <ArchitecturePathBrowser rootPath={rootPath} initialDirectory={browseDirectory} selected={parsedPaths ?? []} selectionDisabled={!parsedPaths} onChange={next => { setPaths(next.join('\n')); change(); }} />
-    </section>}
     {active && pickingPaths && <ArchitecturePathPicker rootPath={rootPath} initialDirectory={browseDirectory} initial={parsedPaths ?? []} onCancel={() => setPickingPaths(false)} onConfirm={next => { setPaths(next.join('\n')); setPickingPaths(false); change(); }} />}
   </div>;
 }

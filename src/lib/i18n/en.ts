@@ -8,7 +8,7 @@ export const en: TranslationDictionary = {
     searchScopePaths: "Search files or folders",
     useCurrentFile: "Use current file",
     useCurrentDirectory: "Use current folder",
-    browsePathsHint: "Browse the same file tree as Files. Use its reference button to add folders or files to the scope.",
+    browsePathsHint: "Expand folders to browse. Use the reference button on a row to add it to the analysis scope.",
     correctPathsFirst: "Correct the entered paths before adding more scope.",
     pathsHint: "Choose scope or paste file/line references. Paths are relative to this project.",
     featureScopeHint: "Locate this feature within the selected scope first",
