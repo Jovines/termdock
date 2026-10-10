@@ -10,6 +10,7 @@ import { getTermdockVersion } from '../utils/version.js';
 export const INTEGRATION_HELP = `td integration — local scoped integration administration
   groups | list
   create --file <policy.json> --credential-file <private-output.json>
+  update --file <policy.json> (same identity/group; preserves the credential)
   revoke <principal-id>
 Credentials are saved as a private file and never printed. Workers set
 TERMDOCK_INTEGRATION_CREDENTIAL_FILE, then use td collab --principal <id> …
@@ -57,9 +58,20 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
       if (argv.length !== 1) throw new Error('Unexpected arguments');
       write(JSON.stringify(parsed(await request(socketPath, 'GET', action === 'groups' ? '/admin/groups' : '/admin/principals', undefined, headers(undefined, adminToken))))); return 0;
     }
+    if (action === 'update') {
+      if (!options['--file'] || Object.keys(options).length !== 1) throw new Error('update requires only --file');
+      const policy = JSON.parse(fs.readFileSync(options['--file'], 'utf8'));
+      const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (capabilities.integration_policy_update !== true || policy.launchProfiles?.some((profile: { startupInput?: unknown }) => profile.startupInput !== undefined) && capabilities.startup_input_conditions !== true) throw new CollaborationError('STARTUP_INPUT_CONDITION_UNSUPPORTED', 'Running service does not support this policy update', 409);
+      write(JSON.stringify(parsed(await request(socketPath, 'POST', `/admin/principals/${encodeURIComponent(policy.id)}/policy`, policy, headers(undefined, adminToken))))); return 0;
+    }
     if (action === 'create') {
       if (!options['--file'] || !options['--credential-file'] || Object.keys(options).length !== 2) throw new Error('create requires --file and --credential-file');
       const policy = JSON.parse(fs.readFileSync(options['--file'], 'utf8'));
+      if (policy.launchProfiles?.some((profile: { startupInput?: unknown }) => profile.startupInput !== undefined)) {
+        const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+        if (capabilities.startup_input_conditions !== true) throw new CollaborationError('STARTUP_INPUT_CONDITION_UNSUPPORTED', 'Running service does not support startup input conditions', 409);
+      }
       const destination = path.resolve(options['--credential-file']); fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
       fs.closeSync(fs.openSync(destination, 'wx', 0o600)); reserved = destination;
       const credential = parsed(await request(socketPath, 'POST', '/admin/principals', policy, headers(undefined, adminToken)));

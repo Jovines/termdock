@@ -8,6 +8,17 @@ function fixture(responses: Record<string, unknown>[]) {
   return { output, calls, io };
 }
 describe('collaboration CLI contract', () => {
+  it('passes a selected group launch profile through spawn and renders its usage guidance in status', async () => {
+    const p = { id: 'fast', name: '快速排查', agentSlug: 'codex', command: 'codex --model example-fast', notes: '只用于简单查询' };
+    const f = fixture([{ ok: true }]);
+    await executeCollaborationCommand(parseCollaborationCommand(['spawn', 'team', 'codex', '--launch-profile', 'fast']), { backendSessionId: 'b' }, f.io);
+    expect(f.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/spawn'), expect.objectContaining({ agentSlug: 'codex', launchProfileId: 'fast' })]));
+    const status = fixture([{ groups: [{ id: 'team', name: '测试', sessionIds: [], launchProfiles: [p], defaultLaunchProfileId: 'fast' }] }]);
+    await executeCollaborationCommand(parseCollaborationCommand(['status', '--text']), {}, status.io);
+    expect(status.output.join('\n')).toContain(p.notes);
+    expect(status.output.join('\n')).toContain(p.command);
+    expect(status.output.join('\n')).toContain('fast（默认）');
+  });
   it('confirms shell delivery without resending the message body', async () => {
     const f = fixture([{ ok: true, message_id: 'm', status: 'pending' }]);
     expect(await executeCollaborationCommand(parseCollaborationCommand(['message', 'confirm-shell', 'm']), { backendSessionId: 'b' }, f.io)).toBe(0);

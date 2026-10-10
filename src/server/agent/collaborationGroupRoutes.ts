@@ -2,12 +2,13 @@ import { Router, type Request } from 'express';
 import type { CollaborationStore } from './collaborationStore.js';
 import { CollaborationError } from './collaborationProtocol.js';
 import { COLLAB_NAME_FORBIDDEN } from './collaborationPrompt.js';
+import { validateLaunchProfiles, type CollaborationLaunchProfile } from './collaborationLaunchProfiles.js';
 
 /** The current service owns group membership, including retained offline members. */
 export function collaborationGroupRoutes(options: {
   store: CollaborationStore;
   sessions(): Array<{ sessionId: string }>;
-  save?: (req: Request, input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number }) => Promise<unknown>;
+  save?: (req: Request, input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number; launchProfiles?: CollaborationLaunchProfile[]; defaultLaunchProfileId?: string | null }) => Promise<unknown>;
 }): Router {
   const router = Router();
   router.get('/collaboration-groups', (_req, res) => {
@@ -17,15 +18,15 @@ export function collaborationGroupRoutes(options: {
   router.post('/collaboration-groups', async (req, res) => {
     try {
       const body = req.body ?? {};
-      const { id, name, sessionIds, expectedUpdatedAt } = body;
+      const { id, name, sessionIds, expectedUpdatedAt, launchProfiles, defaultLaunchProfileId } = body;
       // Unknown fields used to be dropped silently while the save still
       // returned ok — a caller submitting `members` to rename someone got a
       // success and no rename. Reject them and route the common case (member
       // renames) to the command that actually does it.
-      const unknownKeys = Object.keys(body).filter((key) => !['id', 'name', 'sessionIds', 'expectedUpdatedAt'].includes(key));
+      const unknownKeys = Object.keys(body).filter((key) => !['id', 'name', 'sessionIds', 'expectedUpdatedAt', 'launchProfiles', 'defaultLaunchProfileId'].includes(key));
       if (unknownKeys.length) {
         const hint = unknownKeys.includes('members') ? '；要改成员显示名请用 td collab rename <session-id> <新名字>' : '';
-        throw new CollaborationError('INVALID_GROUP', `含未知字段 ${unknownKeys.join('、')}（合法字段：name, sessionIds, id, expectedUpdatedAt）${hint}`, 400);
+        throw new CollaborationError('INVALID_GROUP', `含未知字段 ${unknownKeys.join('、')}（合法字段：name, sessionIds, id, expectedUpdatedAt, launchProfiles, defaultLaunchProfileId）${hint}`, 400);
       }
       if ((id !== undefined && (typeof id !== 'string' || !id))
         || typeof name !== 'string' || !name.trim() || !Array.isArray(sessionIds)
@@ -43,12 +44,16 @@ export function collaborationGroupRoutes(options: {
           { currentUpdatedAt: existing?.updatedAt });
       }
       const ids = [...new Set<string>(sessionIds)];
-      if (options.save) { res.json(await options.save(req, { id, name, sessionIds: ids, expectedUpdatedAt })); return; }
+      const launch = launchProfiles !== undefined || defaultLaunchProfileId !== undefined ? {
+        launchProfiles: validateLaunchProfiles(launchProfiles ?? existing?.launchProfiles ?? [], defaultLaunchProfileId ?? null),
+        defaultLaunchProfileId: defaultLaunchProfileId ?? null,
+      } : {};
+      if (options.save) { res.json(await options.save(req, { id, name, sessionIds: ids, expectedUpdatedAt, ...launch })); return; }
       const known = new Set([...options.sessions().map((session) => session.sessionId), ...(existing?.sessionIds ?? [])]);
       if (ids.some((value) => !known.has(value))) {
         throw new CollaborationError('MEMBERS_CHANGED', '所选会话已变化，请刷新后重新选择；尚未保存任何修改', 409);
       }
-      res.json({ group: options.store.save({ id, name, sessionIds: ids }) });
+      res.json({ group: options.store.save({ id, name, sessionIds: ids, ...launch }) });
     } catch (error) {
       res.status(error instanceof CollaborationError ? error.httpStatus : 500)
         .json({ code: error instanceof CollaborationError ? error.code : 'GROUP_SAVE_FAILED',

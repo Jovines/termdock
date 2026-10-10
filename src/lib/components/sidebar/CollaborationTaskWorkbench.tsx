@@ -123,11 +123,14 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [preparingTeam, setPreparingTeam] = useState(false);
   const [agentSlug, setAgentSlug] = useState(() => saved<string>(`${storage}:agent`, agents[0]?.slug ?? ''));
+  const [launchProfileId, setLaunchProfileId] = useState(() => saved<string>(`${storage}:launch-profile`, group.defaultLaunchProfileId ?? ''));
+  const launchProfile = group.launchProfiles?.find(p => p.id === launchProfileId);
+  const selectedAgentSlug = launchProfile?.agentSlug ?? agentSlug;
   const [teamCwd, setTeamCwd] = useState(() => saved<string>(`${storage}:cwd`, members[0]?.cwd ?? defaultCwd ?? ''));
   useEffect(() => { if (!agentSlug && agents[0]) setAgentSlug(agents[0].slug); }, [agents, agentSlug]);
   const needsTeam = !members.find(s => s.sessionId === lead)?.agent || !workers.length;
   const [provisioned, setProvisioned] = useState<{ coordinatorSessionId: string; reviewerSessionIds: string[] } | null>(null);
-  const goalReady = !!draft.spec.trim() && (!!provisioned || !needsTeam || !group.federated && !!agents.find(agent => agent.slug === agentSlug) && !!teamCwd.trim());
+  const goalReady = !!draft.spec.trim() && (!!provisioned || !needsTeam || !group.federated && (!launchProfileId || !!launchProfile) && !!agents.find(agent => agent.slug === selectedAgentSlug) && !!teamCwd.trim());
 
   const selectedSummary = tasks.find(t => t.id === selectedId) ?? null;
   const selected = detail?.id === selectedId ? detail : null;
@@ -228,9 +231,10 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
     try {
       if (managed && (needsTeam || provisioned)) {
         setPreparingTeam(true);
-        const team = provisioned ?? await ensureCollaborationTeam(group.id, { agentSlug, cwd: teamCwd.trim() });
+        const team = provisioned ?? await ensureCollaborationTeam(group.id, { agentSlug: selectedAgentSlug, ...(launchProfileId ? { launchProfileId } : group.launchProfiles?.length ? { launchProfileId: '' } : {}), cwd: teamCwd.trim() });
         setPreparingTeam(false); setProvisioned(team); payload.coordinatorSessionId = team.coordinatorSessionId; payload.reviewerSessionIds = team.reviewerSessionIds;
         persist(`${storage}:agent`, agentSlug); persist(`${storage}:cwd`, teamCwd.trim());
+        persist(`${storage}:launch-profile`, launchProfileId);
       }
       const { task } = await createCollaborationTask({ ...payload, idempotencyKey: keyFor(payload) });
       finishRequest(payload);
@@ -307,7 +311,8 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
       <CollaborationInput paneKey={paneKey} inputKey={`${storage}:spec`} active={active && composerVisible} label={draft.mode === 'goal' ? '协作目标' : '目标与交付要求'} className={`${input} ${needsTeam && draft.mode === 'goal' ? 'min-h-24' : 'min-h-32'} resize-y text-sm leading-6`} autoFocus={creating} required disabled={busy} value={draft.spec} onUploadChange={uploadChange} onChange={value => setDraft(d => ({ ...d, spec: typeof value === 'function' ? value(d.spec) : value }))} placeholder="例如：完善附件预览体验，交付实现和评审结果，保留现有快捷键。" />
       {draft.mode === 'goal' && provisioned && <section role="status" aria-label="目标提交阶段" className="space-y-2 rounded-lg bg-primary/10 px-3 py-2 text-xs leading-5"><p className="text-primary">成员已准备，目标尚未提交。重试会复用这些成员。</p><p className="text-muted-foreground">Agent 和工作目录已用于准备成员，因此暂时锁定；目标正文仍可修改。</p>{onManageMembers && <button type="button" className={secondary} disabled={busy} onClick={() => { void onTeamReady?.(); onManageMembers(); }}>查看已准备的成员</button>}</section>}
       {draft.mode === 'goal' && (needsTeam || provisioned) ? <fieldset disabled={busy || !!provisioned} className="space-y-3"><legend className="mb-2 text-xs text-muted-foreground">{provisioned ? '已用于准备成员的配置' : '首次开始时配置 Agent'}</legend>
-        <Field label="Agent"><select aria-label="协作 Agent" className={input} value={agentSlug} onChange={e => setAgentSlug(e.target.value)}><option value="" disabled>选择已安装的 Agent</option>{agents.map(agent => <option key={agent.slug} value={agent.slug}>{agent.displayName}</option>)}</select></Field>
+        {(!!group.launchProfiles?.length || !!launchProfileId) && <Field label="启动方案"><select aria-label="协作启动方案" className={input} value={launchProfileId} onChange={e => setLaunchProfileId(e.target.value)}><option value="">Agent 默认命令</option>{group.launchProfiles?.map(p => <option key={p.id} value={p.id}>{p.name} · {agents.find(a => a.slug === p.agentSlug)?.displayName ?? p.agentSlug}</option>)}</select>{launchProfile && <details className="text-xs leading-5 text-muted-foreground"><summary className="min-h-11 cursor-pointer py-2"><span className="line-clamp-2 break-words">{launchProfile.notes || '查看启动命令与使用备注'}</span></summary><p aria-label="完整使用备注" className="whitespace-pre-wrap break-words">{launchProfile.notes}</p><code className="mt-1 block break-all">{launchProfile.command}</code></details>}{launchProfileId && !launchProfile && <p role="alert" className="text-xs text-destructive">原方案已删除，请重新选择。</p>}</Field>}
+        {!launchProfile && <Field label="Agent"><select aria-label="协作 Agent" className={input} disabled={!!launchProfile} value={selectedAgentSlug} onChange={e => setAgentSlug(e.target.value)}><option value="" disabled>选择已安装的 Agent</option>{agents.map(agent => <option key={agent.slug} value={agent.slug}>{agent.displayName}</option>)}</select></Field>}
         <Field label="工作目录"><div className="flex gap-2"><input aria-label="工作目录" className={`${input} min-w-0 flex-1`} value={teamCwd} onChange={e => setTeamCwd(e.target.value)} placeholder="选择项目所在的目录" /><button type="button" className={secondary} onClick={() => setDirectoryPickerOpen(true)}>浏览目录</button></div>{directoryPickerOpen && <Suspense fallback={<p className="text-xs">正在打开目录…</p>}><DirectoryPicker open initialPath={teamCwd.trim() || defaultCwd || "/"} title="选择协作项目目录" onCancel={() => setDirectoryPickerOpen(false)} onConfirm={path => { setTeamCwd(path); setDirectoryPickerOpen(false); }} /></Suspense>}</Field>
         {!provisioned && <p className="text-xs leading-5 text-muted-foreground">开始时配置协调者与执行/评审成员，后续目标复用。</p>}
         {group.federated && <p role="alert" className="text-xs text-muted-foreground">跨服务组请从成员设置添加 Agent。{onManageMembers && <button type="button" className={secondary} onClick={onManageMembers}>管理成员</button>}</p>}

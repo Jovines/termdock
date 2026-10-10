@@ -44,9 +44,9 @@ export class CollaborationTaskService {
     const roster = summary ? undefined : group?.sessionIds.map(sessionId => {
       const member = this.peers.taskMember(sessionId);
       const template = task.workflow?.reviewers.some(m => taskMemberKey(m) === taskMemberKey(member));
-      return { member, sessionId, role: `${template ? '此目标的执行成员模板；' : ''}${group.roles?.[sessionId] ?? ''}` };
+      return { member, sessionId, launchProfile: group.memberLaunchProfiles?.[sessionId], role: `${template ? '此目标的执行成员模板；' : ''}${group.roles?.[sessionId] ?? ''}` };
     });
-    return { ...task, children, roster, memberSessions, replica: task.ownerServiceId !== this.self, summaryOnly: summary, outbox: (summary ? [] : this.tasks.pending(task.id))
+    return { ...task, children, roster, launchProfiles: summary ? undefined : group?.launchProfiles, defaultLaunchProfileId: summary ? undefined : group?.defaultLaunchProfileId, memberSessions, replica: task.ownerServiceId !== this.self, summaryOnly: summary, outbox: (summary ? [] : this.tasks.pending(task.id))
       .map(({ id, attemptId, messageId, lastError }) => ({ id, attemptId, messageId, lastError })) };
   }
   list(groupId: string, actor: TaskMember | null) {

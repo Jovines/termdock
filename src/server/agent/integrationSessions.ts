@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { atomicJson, integrationError, type IntegrationPrincipal, type LaunchProfile } from './integrationStore.js';
+import { atomicJson, integrationError, type IntegrationPrincipal, type LaunchProfile, type StartupInputCondition } from './integrationStore.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
 
 export interface IntegrationSession {
@@ -11,6 +11,9 @@ export interface IntegrationSession {
   state: 'starting' | 'binding_pending' | 'ready' | 'restoring' | 'failed';
   error_code: string | null; cwd: string; launch_profile: string; profile: LaunchProfile;
   created_at: number; updated_at: number; deadline: number; launch_submitted: boolean;
+  startup_input?: { state: 'pending' | 'observed' | 'timed_out'; deadline: number; matched_since: number | null; observed_at: number | null };
+  /** Safety condition attached to a legacy session at explicit restore, never new argv/cwd. */
+  startup_condition?: StartupInputCondition;
 }
 /** Quote each configured argument as literal shell data, including paths. */
 export function integrationLaunchCommand(record: IntegrationSession, restore: boolean): string {
@@ -25,10 +28,17 @@ export interface IntegrationSessionAdapter {
   restore(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void): Promise<void>;
   inspect(record: IntegrationSession): Promise<{ exists: boolean; running: boolean; shell: boolean; agentSlug: string | null; nativeId: string | null }>;
   subscribe(listener: () => void): () => void;
+  capture?(record: IntegrationSession): Promise<string>;
+  registerDeliveryGuard?(guard: (id: string) => Promise<IntegrationDeliveryReadiness | null>): () => void;
+}
+export interface IntegrationDeliveryReadiness { allowed: boolean; reason: string | null }
+function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_condition'>, now: number): IntegrationSession['startup_input'] {
+  const condition = record.startup_condition ?? record.profile.startupInput;
+  return condition ? { state: 'pending', deadline: now + (condition.timeoutMs ?? 120000), matched_since: null, observed_at: null } : undefined;
 }
 interface Document { version: 1; sessions: IntegrationSession[]; requests: Record<string, { hash: string; sessionId: string }> }
 export function publicIntegrationSession(record: IntegrationSession) {
-  const { profile: _, deadline: _deadline, launch_submitted: _submitted, ...publicRecord } = record;
+  const { profile: _, deadline: _deadline, launch_submitted: _submitted, startup_condition: _condition, ...publicRecord } = record;
   return publicRecord;
 }
 export function permittedCwd(profile: LaunchProfile, cwd: string): string {
@@ -48,6 +58,7 @@ export class IntegrationSessions {
   private restoring = new Set<string>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopObservation: () => void;
+  private stopDeliveryGuard?: () => void;
   private observing = false;
   private observeAgain = false;
   constructor(private file: string, private adapter: IntegrationSessionAdapter, private bindingTimeout = 120000) {
@@ -55,12 +66,17 @@ export class IntegrationSessions {
       const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Document;
       if (doc.version !== 1 || !Array.isArray(doc.sessions) || !doc.requests) throw new Error('Invalid integration session store'); this.doc = doc;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    for (const record of this.doc.sessions) if (['starting', 'restoring', 'binding_pending'].includes(record.state)) this.scheduleRefresh(record);
+    for (const record of this.doc.sessions) if (['starting', 'restoring', 'binding_pending'].includes(record.state) || record.startup_input?.state === 'pending') this.scheduleRefresh(record);
+    // A pre-restart partial match cannot prove continuity of the live screen.
+    for (const record of this.doc.sessions) if (record.startup_input && record.startup_input.state !== 'observed') record.startup_input.matched_since = null;
+    this.stopDeliveryGuard = adapter.registerDeliveryGuard?.(id => this.deliveryReadiness(id));
     this.stopObservation = adapter.subscribe(() => { void this.refreshAll().catch(() => {}); });
   }
   private scheduleRefresh(record: IntegrationSession): void {
-    const timer = setTimeout(() => { this.timers.delete(timer); void this.refresh(record.session_id).catch(() => {}); }, Math.max(1, record.deadline - Date.now() + 5));
-    timer.unref(); this.timers.add(timer);
+    for (const deadline of new Set([record.deadline, ...(record.startup_input ? [record.startup_input.deadline] : [])])) {
+      const timer = setTimeout(() => { this.timers.delete(timer); void this.refresh(record.session_id).catch(() => {}); }, Math.max(1, deadline - Date.now() + 5));
+      timer.unref(); this.timers.add(timer);
+    }
   }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   snapshot(): IntegrationSession[] { return structuredClone(this.doc.sessions); }
@@ -94,6 +110,7 @@ export class IntegrationSessions {
       group_id: principal.groupId, principal_id: principal.id, agent_slug: profile.agentSlug, agent_native_session_id: null,
       state: 'starting', error_code: null, cwd, launch_profile: profile.id, profile: structuredClone(profile),
       created_at: now, updated_at: now, deadline: now + this.bindingTimeout, launch_submitted: false };
+    record.startup_input = startupInput(record, now);
     this.doc.requests[request.scoped] = { hash: request.hash, sessionId: record.session_id };
     try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
     return this.launch(record, false);
@@ -139,6 +156,8 @@ export class IntegrationSessions {
       if (['starting', 'restoring', 'binding_pending'].includes(record.state)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Prior launch outcome is not yet resolved; inspect the original session', 409);
       if (observed.exists && !observed.shell) integrationError('SESSION_TARGET_NOT_SHELL', 'Original pane is not a verified shell', 409);
       record.state = 'restoring'; record.error_code = null; record.operation_id = randomUUID(); record.deadline = Date.now() + this.bindingTimeout; record.updated_at = Date.now();
+      if (!record.profile.startupInput && !record.startup_condition) record.startup_condition = structuredClone(principal.launchProfiles.find(profile => profile.id === record.launch_profile)?.startupInput);
+      record.startup_input = startupInput(record, Date.now());
       this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id };
       try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
       return await this.launch(record, true);
@@ -164,8 +183,33 @@ export class IntegrationSessions {
     } else if (observed.running) { next.state = Date.now() > record.deadline ? 'failed' : 'binding_pending'; next.error_code = next.state === 'failed' ? 'SESSION_BINDING_TIMEOUT' : null; }
     else if (record.state === 'ready') { next.state = 'failed'; next.error_code = 'AGENT_NOT_RUNNING'; }
     else if (Date.now() > record.deadline && record.state !== 'failed') { next.state = 'failed'; next.error_code = 'SESSION_BINDING_TIMEOUT'; }
+    if (next.startup_input && next.startup_input.state !== 'observed') {
+      const condition = next.startup_condition ?? next.profile.startupInput!;
+      let matched = false;
+      if (observed.running && observed.agentSlug === record.agent_slug && (!next.error_code || next.error_code === 'SESSION_BINDING_TIMEOUT') && this.adapter.capture) {
+        try {
+          const fold = (text: string) => text.replace(/[^\S\r\n]+/g, ' ').trim();
+          const viewport = fold(await this.adapter.capture(next));
+          matched = condition.allOf.every(term => viewport.includes(fold(term))) && !(condition.noneOf ?? []).some(term => viewport.includes(fold(term)));
+        } catch { /* Missing capture never opens the delivery guard. */ }
+      }
+      const input = { ...next.startup_input };
+      input.matched_since = matched ? input.matched_since ?? Date.now() : null;
+      if (matched && Date.now() - input.matched_since! >= (condition.stableMs ?? 1000)) { input.state = 'observed'; input.observed_at = Date.now(); }
+      else input.state = Date.now() >= input.deadline ? 'timed_out' : 'pending';
+      next.startup_input = input;
+    }
     if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
-    if (next.state !== record.state || next.error_code !== record.error_code || next.agent_native_session_id !== record.agent_native_session_id) { next.updated_at = Date.now(); this.saveRecord(next); }
+    if (JSON.stringify(next) !== JSON.stringify(record)) { next.updated_at = Date.now(); this.saveRecord(next); }
+  }
+  /** Only gates configured launches. Native UUID and Agent turn state are not input prerequisites. */
+  async deliveryReadiness(id: string): Promise<IntegrationDeliveryReadiness | null> {
+    if (!this.doc.sessions.find(record => record.session_id === id)?.startup_input) return null;
+    await this.refresh(id);
+    const record = this.doc.sessions.find(record => record.session_id === id)!;
+    if (record.error_code && record.error_code !== 'SESSION_BINDING_TIMEOUT') return { allowed: false, reason: record.error_code };
+    return record.startup_input!.state === 'observed' ? { allowed: true, reason: null }
+      : { allowed: false, reason: record.startup_input!.state === 'timed_out' ? 'SESSION_STARTUP_INPUT_TIMEOUT' : 'SESSION_STARTUP_INPUT_PENDING' };
   }
   async refreshAll(): Promise<void> {
     if (this.observing) { this.observeAgain = true; return; }
@@ -173,5 +217,5 @@ export class IntegrationSessions {
     try { do { this.observeAgain = false; for (const record of this.snapshot()) await this.refresh(record.session_id); } while (this.observeAgain); }
     finally { this.observing = false; }
   }
-  close(): void { this.stopObservation(); for (const timer of this.timers) clearTimeout(timer); }
+  close(): void { this.stopObservation(); this.stopDeliveryGuard?.(); for (const timer of this.timers) clearTimeout(timer); }
 }

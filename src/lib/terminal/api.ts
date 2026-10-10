@@ -3867,7 +3867,11 @@ export interface AutomationRun {
   message: string | null;
 }
 
+export type CollaborationLaunchProfile = import('../../server/agent/collaborationLaunchProfiles').CollaborationLaunchProfile;
 export interface CollaborationGroup {
+  launchProfiles?: CollaborationLaunchProfile[];
+  defaultLaunchProfileId?: string | null;
+  memberLaunchProfiles?: Record<string, CollaborationLaunchProfile>;
   federated?: boolean;
   remoteSessions?: OrchestrationSession[];
   id: string;
@@ -4001,6 +4005,8 @@ export function removeAgentAutomation(automationId: string): Promise<void> {
 
 export type CollaborationGroupsResponse = CollaborationDirectoryData;
 export interface CollaborationGroupInput {
+  launchProfiles?: CollaborationLaunchProfile[];
+  defaultLaunchProfileId?: string | null;
   id?: string;
   name: string;
   sessionIds: string[];
@@ -4116,6 +4122,7 @@ export async function moveCollaborationMember(input: {
 
 export function spawnCollaborationAgent(groupId: string, input: {
   agentSlug: string;
+  launchProfileId?: string;
   name?: string;
   cwd?: string;
   task?: string;
@@ -4181,7 +4188,7 @@ export async function restoreExecutionSession(sessionId: string): Promise<{ sess
   const result = await operationsRequest<{ session: OrchestrationSession }>(`/execution-archives/${encodeURIComponent(sessionId)}/restore`, { method: 'POST' });
   executionArchiveRead = null; currentCollaborationDirectory().invalidate(); return result;
 }
-export async function ensureCollaborationTeam(groupId: string, input: { agentSlug: string; cwd: string }): Promise<{ coordinatorSessionId: string; reviewerSessionIds: string[] }> {
+export async function ensureCollaborationTeam(groupId: string, input: { agentSlug: string; launchProfileId?: string; cwd: string }): Promise<{ coordinatorSessionId: string; reviewerSessionIds: string[] }> {
   const result = await operationsRequest<{ coordinatorSessionId: string; reviewerSessionIds: string[] }>(`/collaboration-groups/${encodeURIComponent(groupId)}/team`, { method: 'POST', body: JSON.stringify(input) });
   currentCollaborationDirectory().invalidate(); return result;
 }

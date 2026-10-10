@@ -1,4 +1,5 @@
 import { plainCollaborationSnapshot } from './collaborationText.js';
+import { validateLaunchProfiles, type CollaborationLaunchProfile, type CollaborationLaunchSettings } from './collaborationLaunchProfiles.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -17,7 +18,7 @@ function newerRevision(a: { updatedAt: number; version: string }, b?: { updatedA
 function validRevision(value: CollaborationRoleVersion): boolean {
   return !!value && Number.isSafeInteger(value.updatedAt) && value.updatedAt >= 0 && typeof value.version === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(value.version);
 }
-export interface CollaborationGroup extends CollaborationContext {
+export interface CollaborationGroup extends CollaborationContext, CollaborationLaunchSettings {
   id: string;
   name: string;
   sessionIds: string[];
@@ -206,13 +207,17 @@ export class CollaborationStore {
     return taken;
   }
 
-  save(input: { id?: string; name: string; sessionIds: string[] }): CollaborationGroup {
+  save(input: { id?: string; name: string; sessionIds: string[]; launchProfiles?: CollaborationLaunchProfile[]; defaultLaunchProfileId?: string | null }): CollaborationGroup {
     const now = Date.now();
     const existing = input.id ? this.document.groups.find((group) => group.id === input.id) : null;
     if (input.id && (!existing || existing.deleted)) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
+    const launchProfiles = input.launchProfiles === undefined ? existing?.launchProfiles : validateLaunchProfiles(input.launchProfiles, input.defaultLaunchProfileId ?? null);
+    const defaultLaunchProfileId = input.defaultLaunchProfileId !== undefined ? input.defaultLaunchProfileId : input.launchProfiles !== undefined ? null : existing?.defaultLaunchProfileId;
+    if (launchProfiles || defaultLaunchProfileId) validateLaunchProfiles(launchProfiles ?? [], defaultLaunchProfileId);
     const sessionIds = Array.from(new Set(input.sessionIds.map((id) => id.trim()).filter(Boolean)));
     const group = pruneRoles({
       ...existing,
+      launchProfiles, defaultLaunchProfileId,
       ...(existing?.remoteSessions ? { remoteSessions: existing.remoteSessions.filter((session) => sessionIds.includes(session.sessionId)) } : {}),
       id: existing?.id ?? newCollaborationId(this.takenIds(), this.drawId),
       name: input.name.trim(),
@@ -225,6 +230,15 @@ export class CollaborationStore {
       : [...this.document.groups, group];
     this.persist();
     return group;
+  }
+
+  setMemberLaunchProfile(groupId: string, sessionId: string, profile: CollaborationLaunchProfile): void {
+    const group = this.getGroup(groupId);
+    if (!group || group.deleted || !group.sessionIds.includes(sessionId)) throw new CollaborationError('NOT_A_MEMBER', '会话不在协作组内', 409);
+    const [snapshot] = validateLaunchProfiles([profile], profile.id);
+    this.document.groups = this.document.groups.map(g => g.id === groupId ? { ...g,
+      memberLaunchProfiles: { ...g.memberLaunchProfiles, [sessionId]: snapshot }, updatedAt: Math.max(Date.now(), g.updatedAt + 1) } : g);
+    this.persist();
   }
 
   /** Set or clear a member's role (定位). The target may be any group member —
@@ -285,7 +299,9 @@ export class CollaborationStore {
             ...(group.remoteSessions ? { remoteSessions: group.remoteSessions.filter((session) => sourceIds.includes(session.sessionId)) } : {}),
             updatedAt: Math.max(now, group.updatedAt + 1) }, sourceIds)];
         }
-        return group.id === target.id ? [{ ...group, sessionIds: [...new Set([...group.sessionIds, input.sessionId])], updatedAt: Math.max(now, group.updatedAt + 1) }] : [group];
+        return group.id === target.id ? [{ ...group, sessionIds: [...new Set([...group.sessionIds, input.sessionId])],
+          ...(source.memberLaunchProfiles?.[input.sessionId] ? { memberLaunchProfiles: { ...group.memberLaunchProfiles, [input.sessionId]: source.memberLaunchProfiles[input.sessionId] } } : {}),
+          updatedAt: Math.max(now, group.updatedAt + 1) }] : [group];
       }),
       messages: this.document.messages,
     };
@@ -775,6 +791,8 @@ function stableJson(value: unknown): string {
 }
 
 function validateFederatedGroup(group: CollaborationGroup): void {
+    if (group.launchProfiles !== undefined || group.defaultLaunchProfileId !== undefined) validateLaunchProfiles(group.launchProfiles ?? [], group.defaultLaunchProfileId);
+    if (group.memberLaunchProfiles) for (const profile of Object.values(group.memberLaunchProfiles)) validateLaunchProfiles([profile], profile.id);
     if (!group.federated || typeof group.id !== 'string' || !group.id.startsWith('cross-') || typeof group.name !== 'string' || !group.name.trim()
       || !Number.isFinite(group.updatedAt) || !Number.isFinite(group.createdAt)
       || !Array.isArray(group.sessionIds) || group.sessionIds.some((id) => typeof id !== 'string')

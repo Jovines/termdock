@@ -3,13 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import http from 'node:http';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import { captureTmuxPaneText, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { IntegrationStore, validatePolicy, type IntegrationPolicy, type IntegrationPrincipal } from './integrationStore.js';
 import { IntegrationSessions, permittedCwd, integrationLaunchCommand, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
 import { IntegrationRuntime } from './integrationServer.js';
-import { readIntegrationCredential } from './integrationCli.js';
+import { readIntegrationCredential, runIntegrationAdmin } from './integrationCli.js';
+import { CollaborationDeliveryWorker } from './collaborationDeliveryWorker.js';
 import { CollaborationTaskStore } from './collaborationTaskStore.js';
 import { CollaborationTaskService } from './collaborationTaskService.js';
 import { CollaborationStore } from './collaborationStore.js';
@@ -147,7 +150,7 @@ async function runtimeFixture() {
   const runtime = new IntegrationRuntime(options); await runtime.listen(); resources.push(() => runtime.close());
   const issued = runtime.store.provision(policy(group.id));
   const headers = { 'x-termdock-integration-protocol': '1', 'x-termdock-integration-id': 'bridge', authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' };
-  const request = (method: string, route: string, body?: unknown, requestHeaders = headers) => new Promise<{ status: number; body: any }>((resolve, reject) => {
+  const request = (method: string, route: string, body?: unknown, requestHeaders: Record<string, string> = headers) => new Promise<{ status: number; body: any }>((resolve, reject) => {
     const req = http.request({ socketPath: options.socketPath, method, path: route, headers: requestHeaders }, res => {
       let raw = ''; res.on('data', chunk => { raw += chunk; }); res.once('end', () => resolve({ status: res.statusCode!, body: JSON.parse(raw) }));
     }); req.once('error', reject); req.end(body === undefined ? undefined : JSON.stringify(body));
@@ -184,6 +187,21 @@ it('denies scope violations, principal impersonation, user acceptance and unsent
   const p = f.runtime.store.authenticate('bridge', f.issued.token);
   const event = f.runtime.store.page(p, 'not-subscribed').events[0];
   expect(await f.request('POST', '/events/ack', { consumer: 'not-subscribed', cursor: event.cursor })).toMatchObject({ status: 409, body: { code: 'EVENT_ACK_NOT_SENT' } });
+});
+
+it('requires administration for a policy update and exposes the configured condition with the original credential', async () => {
+  const f = await runtimeFixture();
+  const adminHeaders = { 'Content-Type': 'application/json', 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  const updated = policy(f.group.id);
+  updated.launchProfiles[0].startupInput = { allOf: ['MODEL READY', '❯'], noneOf: ['model: loading'], stableMs: 1000, timeoutMs: 120000 };
+  expect(await f.request('POST', '/admin/principals/bridge/policy', updated)).toMatchObject({ status: 401 });
+  expect(await f.request('GET', '/admin/capabilities', undefined, adminHeaders)).toMatchObject({ status: 200, body: { startup_input_conditions: true, integration_policy_update: true } });
+  expect(await f.request('POST', '/admin/principals/bridge/policy', updated, adminHeaders)).toMatchObject({ status: 200, body: { ok: true, id: 'bridge' } });
+  expect(await f.request('GET', '/capabilities')).toMatchObject({ status: 200, body: { principal: { group_id: f.group.id, launch_profiles: [{ id: 'agent', startup_input_condition: true }] } } });
+  expect(f.runtime.store.authenticate('bridge', f.issued.token).launchProfiles[0].startupInput).toEqual(updated.launchProfiles[0].startupInput);
+  const other = f.messages.save({ name: 'Another local group', sessionIds: ['worker'] });
+  expect(await f.request('POST', '/admin/principals/bridge/policy', { ...updated, groupId: other.id }, adminHeaders)).toMatchObject({ status: 409, body: { code: 'INTEGRATION_GROUP_IMMUTABLE' } });
+  expect(await f.request('POST', '/admin/principals/bridge/policy', { ...updated, id: 'other' }, adminHeaders)).toMatchObject({ status: 400, body: { code: 'INVALID_INTEGRATION_POLICY' } });
 });
 
 it('reconciles a source commit missed during service shutdown and replays the same event across journal restart', async () => {
@@ -252,3 +270,170 @@ it('returns the actual grant and refuses create/assignment escalation for a read
   const task = f.taskStore.create(serviceId, { groupId: outside.id, title: 'Hidden', spec: 'Private', idempotencyKey: 'private' }, null);
   expect(await f.request('GET', `/tasks/${task.id}`)).toMatchObject({ status: 404 });
 });
+
+it('holds the first write through a loading viewport and delivers once without waiting for a native UUID', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(100000);
+  const fake = adapter(), p = principal();
+  p.launchProfiles[0].startupInput = { allOf: ['model: GPT-5.5 (MAX)', '❯'], noneOf: ['model: loading'], stableMs: 500, timeoutMs: 10000 };
+  let viewport = 'model: loading\n❯ Ask the Agent';
+  fake.api.capture = vi.fn(async () => viewport);
+  fake.set({ exists: true, running: true, agentSlug: 'fixture', nativeId: null });
+  const file = path.join(dir, 'startup-sessions.json');
+  const sessions = new IntegrationSessions(file, fake.api); resources.push(() => sessions.close());
+  const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'first' });
+  const messages = new CollaborationStore(path.join(dir, 'startup-messages.json'));
+  const group = messages.save({ name: 'Startup', sessionIds: ['sender', created.session_id] });
+  const message = messages.send({ groupId: group.id, fromSessionId: 'sender', toSessionIds: [created.session_id], kind: 'message', content: 'First task body' })[0];
+  const write = vi.fn(async () => {});
+  const delivery = new CollaborationDeliveryWorker({ store: messages, peers: () => [], isLocal: () => true, onError: () => {},
+    resolve: async id => { const gate = await sessions.deliveryReadiness(id); return gate?.allowed ? { state: 'ready', write } : { state: 'recovering', reason: gate?.reason ?? 'missing guard' }; } });
+  resources.push(() => delivery.stop());
+  await delivery.run(created.session_id);
+  expect(messages.receipt(message.id)).toMatchObject({ status: 'pending', attempt_count: 0, last_error: 'SESSION_STARTUP_INPUT_PENDING' });
+  expect(write).not.toHaveBeenCalled();
+  viewport = 'model:     GPT-5.5 (MAX) xhigh\n❯ Implement something';
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(await sessions.deliveryReadiness(created.session_id)).toMatchObject({ allowed: false });
+  await vi.advanceTimersByTimeAsync(500);
+  await delivery.run(created.session_id);
+  expect(messages.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
+  expect(write).toHaveBeenCalledTimes(1);
+  expect(await sessions.get(p, created.session_id)).toMatchObject({ state: 'binding_pending', agent_native_session_id: null, startup_input: { state: 'observed' } });
+  viewport = 'Agent is processing and has no input prompt';
+  await delivery.run(created.session_id);
+  expect(await sessions.deliveryReadiness(created.session_id)).toMatchObject({ allowed: true });
+  expect(write).toHaveBeenCalledTimes(1);
+});
+it('persists input timeout, resets partial matches on restart and rechecks the original conditions on exact restore', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(100000);
+  const fake = adapter(), p = principal(), file = path.join(dir, 'startup-timeout.json');
+  p.launchProfiles[0].startupInput = { allOf: ['MODEL READY', '❯'], stableMs: 500, timeoutMs: 1000 };
+  let viewport = 'loading'; fake.api.capture = vi.fn(async () => viewport);
+  fake.set({ exists: true, running: true, agentSlug: 'fixture', nativeId: 'native' });
+  let sessions = new IntegrationSessions(file, fake.api); resources.push(() => sessions.close());
+  const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'timeout' });
+  expect(created.state).toBe('ready'); // Binding is independent of the input condition.
+  await vi.advanceTimersByTimeAsync(1006);
+  expect(await sessions.deliveryReadiness(created.session_id)).toEqual({ allowed: false, reason: 'SESSION_STARTUP_INPUT_TIMEOUT' });
+  viewport = 'MODEL READY\n❯';
+  expect((await sessions.get(p, created.session_id)).startup_input?.matched_since).toBe(101006);
+  sessions.close(); sessions = new IntegrationSessions(file, fake.api); resources.push(() => sessions.close());
+  await vi.advanceTimersByTimeAsync(600);
+  expect(await sessions.deliveryReadiness(created.session_id)).toMatchObject({ allowed: false });
+  await vi.advanceTimersByTimeAsync(500);
+  expect(await sessions.deliveryReadiness(created.session_id)).toMatchObject({ allowed: true });
+  fake.set({ running: false, shell: true, nativeId: null });
+  p.launchProfiles[0].startupInput = { allOf: ['CHANGED CONDITION'] };
+  await sessions.restore(p, created.session_id, 'restore');
+  const restored = (fake.api.restore as ReturnType<typeof vi.fn>).mock.calls[0][0] as IntegrationSession;
+  expect(restored.profile.startupInput?.allOf).toEqual(['MODEL READY', '❯']);
+  expect(restored.startup_input?.state).toBe('pending');
+  expect(await sessions.deliveryReadiness(created.session_id)).toMatchObject({ allowed: false });
+  fake.set({ running: true, shell: false, nativeId: 'other-native' });
+  expect(await sessions.deliveryReadiness(created.session_id)).toEqual({ allowed: false, reason: 'NATIVE_SESSION_ID_MISMATCH' });
+});
+it('fails closed on missing capture and validates literal startup conditions', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(100000);
+  const fake = adapter(), p = principal();
+  const bad = policy(); bad.launchProfiles[0].startupInput = { allOf: [] };
+  expect(() => validatePolicy(bad)).toThrow(/startupInput/);
+  bad.launchProfiles[0].startupInput = { allOf: ['READY'], stableMs: 0 };
+  expect(() => validatePolicy(bad)).toThrow(/startupInput/);
+  p.launchProfiles[0].startupInput = { allOf: ['READY'], timeoutMs: 1000 };
+  fake.set({ exists: true, running: true, agentSlug: 'fixture', nativeId: null });
+  const sessions = new IntegrationSessions(path.join(dir, 'capture-missing.json'), fake.api); resources.push(() => sessions.close());
+  const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'missing' });
+  expect(await sessions.deliveryReadiness('ordinary-session')).toBeNull();
+  await vi.advanceTimersByTimeAsync(1001);
+  expect(await sessions.deliveryReadiness(created.session_id)).toEqual({ allowed: false, reason: 'SESSION_STARTUP_INPUT_TIMEOUT' });
+});
+it('refuses to provision startup conditions against an older running service before creating a credential file', async () => {
+  const server = http.createServer((_req, res) => { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ code: 'NOT_FOUND', error: 'Older integration endpoint' })); });
+  // The CLI derives its private socket from the selected service port.
+  const port = 60000 + Math.floor(Math.random() * 5000);
+  const socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const p = policy(); p.launchProfiles[0].startupInput = { allOf: ['READY'] };
+  const policyFile = path.join(dir, 'policy.json'), credentialFile = path.join(dir, 'credential-new.json');
+  fs.writeFileSync(policyFile, JSON.stringify(p));
+  const output: string[] = [];
+  expect(await runIntegrationAdmin(['create', '--file', policyFile, '--credential-file', credentialFile], port, 'admin', line => output.push(line))).toBe(1);
+  expect(fs.existsSync(credentialFile)).toBe(false);
+  expect(output.join('')).toContain('NOT_FOUND');
+});
+
+it('updates a policy without rotating credentials or moving the existing identity to another group', () => {
+  const store = new IntegrationStore(path.join(dir, 'policy-update.json'));
+  const issued = store.provision(policy());
+  const updated = policy(); updated.launchProfiles[0].startupInput = { allOf: ['MODEL READY'] };
+  store.update(updated);
+  expect(store.authenticate(updated.id, issued.token).launchProfiles[0].startupInput?.allOf).toEqual(['MODEL READY']);
+  expect(() => store.update({ ...updated, groupId: 'another' })).toThrow(/group/);
+  store.revoke(updated.id);
+  expect(() => store.update(updated)).toThrow(/reactivated/);
+});
+it('adds a startup guard to a legacy exact restore without changing its stored launch configuration', async () => {
+  const fake = adapter(), p = principal();
+  const sessions = new IntegrationSessions(path.join(dir, 'legacy-restore.json'), fake.api); resources.push(() => sessions.close());
+  const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'legacy' });
+  fake.set({ exists: true, running: true, agentSlug: 'fixture', nativeId: 'original-native' });
+  await sessions.get(p, created.session_id);
+  fake.set({ running: false, shell: true, nativeId: null });
+  p.launchProfiles[0].argv = ['changed-model'];
+  p.launchProfiles[0].startupInput = { allOf: ['ORIGINAL MODEL READY'] };
+  await sessions.restore(p, created.session_id, 'safe-restore');
+  const record = (fake.api.restore as ReturnType<typeof vi.fn>).mock.calls[0][0] as IntegrationSession;
+  expect(record.profile.argv).toEqual(created.profile.argv);
+  expect(record.profile.startupInput).toBeUndefined();
+  expect(record.startup_condition?.allOf).toEqual(['ORIGINAL MODEL READY']);
+  expect(record.startup_input?.state).toBe('pending');
+  expect(record.session_id).toBe(created.session_id);
+  expect(record.agent_native_session_id).toBe('original-native');
+});
+it.skipIf(process.platform === 'win32')('reproduces boot-time input loss in a real tmux pane and protects the first task write', async () => {
+  const exec = promisify(execFile), socket = `td-startup-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const run = async (args: string[]) => (await exec('tmux', ['-L', socket, ...args], { timeout: 5000 })).stdout;
+  const stdin = (args: string[], input: string) => new Promise<string>((resolve, reject) => {
+    const child = execFile('tmux', ['-L', socket, ...args], { timeout: 5000 }, (error, stdout) => error ? reject(error) : resolve(stdout));
+    child.stdin!.end(input);
+  });
+  const script = path.join(dir, 'boot-consumer.py'), output = path.join(dir, 'received.bin');
+  fs.writeFileSync(script, `import os,sys,time,termios,tty\ntty.setraw(0)\nos.write(1,b'model: loading\\r\\n> input initializing')\ntime.sleep(1.0)\ntermios.tcflush(0,termios.TCIFLUSH)\nos.write(1,b'\\x1b[2J\\x1b[Hmodel: FIXTURE READY\\r\\n> task input')\nwith open(sys.argv[1],'wb',buffering=0) as target:\n while True:\n  data=os.read(0,4096)\n  if not data: break\n  target.write(data)\n`);
+  const fake = adapter(), p = principal();
+  p.launchProfiles[0].startupInput = { allOf: ['model: FIXTURE READY', '> task input'], noneOf: ['model: loading'], stableMs: 500 };
+  let pane: NonNullable<IntegrationSession['terminal_binding']>;
+  fake.api.create = async (_record, prepared) => {
+    await run(['new-session', '-d', '-s', 'boot', `python3 '${script}' '${output}'`]);
+    const identity = (await run(['display-message', '-p', '-t', 'boot', '#{pid}:#{session_id}:#{pane_id}:#{pane_pid}'])).trim().split(':');
+    pane = { serverPid: Number(identity[0]), sessionId: identity[1], paneId: identity[2], panePid: Number(identity[3]), agentSlug: 'fixture', nativeSessionId: null };
+    prepared(pane); fake.set({ exists: true, running: true, shell: false, agentSlug: 'fixture', nativeId: null });
+  };
+  fake.api.capture = async () => captureTmuxPaneText(run, pane);
+  const sessions = new IntegrationSessions(path.join(dir, 'real-boot.json'), fake.api); resources.push(() => sessions.close());
+  try {
+    const created = await sessions.create(p, { profile: 'agent', cwd: dir, idempotencyKey: 'real-boot' });
+    for (let i = 0; i < 30; i++) { if ((await fake.api.capture(created)).includes('model: loading')) break; await new Promise(resolve => setTimeout(resolve, 10)); }
+    expect(await fake.api.capture(created)).toContain('model: loading');
+    // Demonstrate the actual fault: a direct write before initialization is flushed.
+    await writeCollaborationTmuxPane(run, pane!, 'UNGATED-BOOT-INPUT', stdin);
+    const messages = new CollaborationStore(path.join(dir, 'real-boot-messages.json'));
+    const group = messages.save({ name: 'Boot', sessionIds: ['sender', created.session_id] });
+    const message = messages.send({ groupId: group.id, fromSessionId: 'sender', toSessionIds: [created.session_id], kind: 'message', content: 'FIRST-TASK-BODY' })[0];
+    const write = vi.fn(async () => writeCollaborationTmuxPane(run, pane, 'FIRST-TASK-BODY', stdin));
+    const delivery = new CollaborationDeliveryWorker({ store: messages, peers: () => [], isLocal: () => true, onError: () => {},
+      resolve: async id => { const gate = await sessions.deliveryReadiness(id); return gate?.allowed ? { state: 'ready', write } : { state: 'recovering', reason: gate?.reason ?? 'missing' }; } });
+    resources.push(() => delivery.stop());
+    await delivery.run(created.session_id);
+    expect(messages.receipt(message.id)).toMatchObject({ status: 'pending', attempt_count: 0 });
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    expect(await sessions.deliveryReadiness(created.session_id)).toMatchObject({ allowed: false });
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    await delivery.run(created.session_id);
+    expect(messages.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1 });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const bytes = fs.readFileSync(output, 'utf8');
+    expect(bytes).toContain('FIRST-TASK-BODY'); expect(bytes).not.toContain('UNGATED-BOOT-INPUT');
+    expect(write).toHaveBeenCalledTimes(1);
+    expect((await sessions.get(p, created.session_id)).agent_native_session_id).toBeNull();
+  } finally { await run(['kill-server']).catch(() => {}); }
+}, 15000);

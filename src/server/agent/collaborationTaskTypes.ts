@@ -85,6 +85,8 @@ export interface CollaborationTaskView extends CollaborationTask {
   memberSessions: Record<string, string>;
   outbox: Array<{ id: string; attemptId: string | null; messageId?: string; lastError?: string }>;
   children?: Array<{ id: string; title: string; status: CollaborationTask['status']; revision: number; completionMode?: 'reviewed'; workspace?: TaskWorkspace }>;
-  roster?: Array<{ member: TaskMember; sessionId: string; role: string }>;
+  roster?: Array<{ member: TaskMember; sessionId: string; role: string; launchProfile?: import('./collaborationLaunchProfiles.js').CollaborationLaunchProfile }>;
+  launchProfiles?: import('./collaborationLaunchProfiles.js').CollaborationLaunchProfile[];
+  defaultLaunchProfileId?: string | null;
 }
 export function taskMemberKey(member: TaskMember): string { return `${member.serviceId}:${member.sessionId}`; }

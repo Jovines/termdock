@@ -1,6 +1,6 @@
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
-import { integrationLaunchCommand, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
+import { integrationLaunchCommand, type IntegrationDeliveryReadiness, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
 import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
 import { assertPeerRegistrationAuthority } from '../agent/collaborationPeerTransport.js';
@@ -136,6 +136,7 @@ import { CollaborationStore, type CollaborationGroup, type CollaborationMessageK
 import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { ambiguousIdMessage } from '../agent/collaborationProtocol.js';
 import { buildCollaborationSpawnCommand, resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
+import { resolveCollaborationLaunch, launchProfileKey } from '../agent/collaborationLaunchProfiles.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import { NativeSessionSearch } from '../agent/nativeSessionSearch.js';
 import { CollaborationError } from '../agent/collaborationProtocol.js';
@@ -852,6 +853,7 @@ async function flushClientStateBroadcast(): Promise<void> {
 }
 
 const integrationSessionObservers = new Set<() => void>();
+let integrationDeliveryGuard: ((id: string) => Promise<IntegrationDeliveryReadiness | null>) | undefined;
 function notifyIntegrationSessions(): void { for (const listener of integrationSessionObservers) { try { listener(); } catch { /* Observation failure does not affect terminal clients. */ } } }
 
 function broadcastClientState(): void {
@@ -2186,6 +2188,9 @@ async function rebindCollaborationRoute(frontendSessionId: string, paneId: strin
 async function resolveCollaborationRoute(frontendSessionId: string): Promise<CollaborationRoute> {
   let record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
   if (!record) return { state: 'offline', reason: 'SESSION_REMOVED' };
+  if (record.tmuxSessionName?.startsWith('wt-integration-') && !integrationDeliveryGuard) return { state: 'unavailable', reason: 'INTEGRATION_RUNTIME_UNAVAILABLE' };
+  const startup = await integrationDeliveryGuard?.(frontendSessionId);
+  if (startup && !startup.allowed) return { state: 'recovering', reason: startup.reason ?? 'SESSION_STARTUP_INPUT_PENDING' };
   let backend = resolveOrchestrationBackend(record);
   let binding = collaborationRouting.get(frontendSessionId) ?? {
     sessionId: record.sessionId, backendSessionId: null, mode: record.mode, tmuxSessionName: record.tmuxSessionName,
@@ -2273,10 +2278,10 @@ async function spawnCollaborationAgentSession(
   req: express.Request,
   group: CollaborationGroup,
   sourceSessionId: string | null,
-  input: { agentSlug?: unknown; name?: unknown; cwd?: unknown; task?: unknown; mode?: unknown },
+  input: { agentSlug?: unknown; launchProfileId?: unknown; name?: unknown; cwd?: unknown; task?: unknown; mode?: unknown },
   bootstrapRole?: string,
 ): Promise<{ group: ReturnType<CollaborationStore['save']>; session: OrchestrationSessionSnapshot }> {
-  const agentSlug = typeof input.agentSlug === 'string' ? input.agentSlug.trim().toLowerCase() : '';
+  const { agentSlug, profile } = resolveCollaborationLaunch(group, input);
   const launchers = await listDetectedAgentLaunchers();
   const launcher = launchers.find((candidate) => candidate.slug === agentSlug);
   if (!launcher) throw new HttpStatusError(400, '所选 Agent 当前不可用', 'COLLAB_AGENT_UNAVAILABLE');
@@ -2298,7 +2303,7 @@ async function spawnCollaborationAgentSession(
   }
   const requestedCwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
   const opened = await openInventorySession(req, {
-    name: requestedName || `${launcher.displayName} · ${group.name}`,
+    name: requestedName || `${profile?.name ?? launcher.displayName} · ${group.name}`,
     customName: true,
     mode,
     cwd: requestedCwd || fallbackRecord?.cwd || undefined,
@@ -2321,7 +2326,8 @@ async function spawnCollaborationAgentSession(
     sessionIds: [...latestGroup.sessionIds, frontendSessionId],
   });
   if (bootstrapRole) collaborationStore.setRole({ groupId: group.id, sessionId: frontendSessionId, role: bootstrapRole });
-  writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: launcher.command })}\r`);
+  if (profile) collaborationStore.setMemberLaunchProfile(group.id, frontendSessionId, profile);
+  writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: profile?.command ?? launcher.command })}\r`);
 
   const requestedTask = typeof input.task === 'string' ? input.task.trim().slice(0, 20_000) : '';
   collaborationStore.send({
@@ -2334,7 +2340,7 @@ async function spawnCollaborationAgentSession(
   setTimeout(() => {
     deliverCollaborationInboxWhenAgentReady(frontendSessionId);
   }, 300).unref?.();
-  return { group: updatedGroup, session: orchestrationSessionSnapshot(globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId)!) };
+  return { group: collaborationStore.getGroup(group.id)!, session: orchestrationSessionSnapshot(globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId)!) };
 }
 
 /** Restricted session adapter: only preconfigured argv and the exact owned
@@ -2357,6 +2363,15 @@ function integrationTerminalRecord(record: IntegrationSession) {
 }
 export const integrationSessionAdapter: IntegrationSessionAdapter = {
   subscribe(listener) { integrationSessionObservers.add(listener); return () => { integrationSessionObservers.delete(listener); }; },
+  registerDeliveryGuard(guard) { integrationDeliveryGuard = guard; return () => { if (integrationDeliveryGuard === guard) integrationDeliveryGuard = undefined; }; },
+  async capture(record) {
+    const observed = await integrationSessionAdapter.inspect(record);
+    if (!observed.exists || !observed.running || observed.agentSlug !== record.agent_slug || !record.terminal_binding
+      || record.agent_native_session_id && observed.nativeId && record.agent_native_session_id !== observed.nativeId) {
+      integrationError('SESSION_IDENTITY_MISMATCH', 'Startup input observation requires the original Agent pane', 409);
+    }
+    return captureTmuxPaneText(runTmux, record.terminal_binding);
+  },
   async inspect(record) {
     const terminal = integrationTerminalRecord(record);
     if (!terminal) return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
@@ -2453,9 +2468,14 @@ export function prepareCollaborationTaskWorker(task: CollaborationTask, template
     const source = globalSessionState.sessions.find(s => s.sessionId === template.sessionId);
     if (!source || template.serviceId !== service.descriptor().serviceId) throw new Error('执行成员当前不可用，请协调者重新分派');
     const snapshot = orchestrationSessionSnapshot(source);
+    const inheritedProfile = collaborationStore.getGroup(task.groupId)?.memberLaunchProfiles?.[template.sessionId];
     const slug = snapshot.agent?.slug ?? source.agentResume?.slug;
     const launcher = (await listDetectedAgentLaunchers()).find(a => a.slug === slug);
     if (!launcher || !source.cwd) throw new Error('独立代码任务需要有项目目录的 Agent 成员，请选择可用成员');
+    if (inheritedProfile) {
+      if (inheritedProfile.agentSlug !== launcher.slug) throw new Error('执行成员的启动方案与当前 Agent 不一致，请重新分派');
+      resolveCollaborationLaunch({ launchProfiles: [inheritedProfile] }, { launchProfileId: inheritedProfile.id, agentSlug: launcher.slug });
+    }
     const workspace = await prepareTaskWorkspace(task, source.cwd, dependencies,
       (dependency, repository) => importTaskDependency(task, dependency, repository, service, readDependency));
     await pathValidator.allowSessionCwd(workspace.cwd);
@@ -2475,12 +2495,13 @@ export function prepareCollaborationTaskWorker(task: CollaborationTask, template
       const temporary = `${launchFile}.${process.pid}.tmp`;
       await fs.promises.writeFile(temporary, JSON.stringify({ sessionId: record.sessionId, backendId: opened.terminalSession.sessionId }), { mode: 0o600 });
       await fs.promises.rename(temporary, launchFile);
-      writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: launcher.command })}\r`);
+      writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: inheritedProfile?.command ?? launcher.command })}\r`);
     }
     const group = collaborationStore.getGroup(task.groupId);
     if (!group || group.deleted) throw new Error('协作组已删除，执行目录已保留');
     if (!group.sessionIds.includes(record.sessionId)) await service.save({ id: group.id, name: group.name,
       sessionIds: [...group.sessionIds, record.sessionId], expectedUpdatedAt: group.updatedAt });
+    if (inheritedProfile) collaborationStore.setMemberLaunchProfile(group.id, record.sessionId, inheritedProfile);
     return { sessionId: record.sessionId, workspace };
   })().finally(() => preparingTaskWorkers.delete(key));
   preparingTaskWorkers.set(key, operation); return operation;
@@ -6785,22 +6806,23 @@ router.post('/operations/collaboration-groups/:groupId/team', async (req, res) =
     if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
     if (!group || group.deleted) return res.status(404).json({ error: '协作组不存在' });
     if (group.federated) throw new Error('跨服务组请先从成员设置添加 Agent');
-    const agentSlug = typeof req.body?.agentSlug === 'string' ? req.body.agentSlug : '';
+    const { agentSlug, profile } = resolveCollaborationLaunch(group, req.body ?? {});
     if (!(await listDetectedAgentLaunchers()).some(agent => agent.slug === agentSlug)) throw new Error('所选 Agent 当前不可用');
     if (typeof req.body?.cwd !== 'string' || !req.body.cwd.trim()) throw new Error('请选择工作目录');
     const cwd = await resolveWorkingDirectory(req, req.body.cwd);
     const previous = preparingTeams.get(group.id) ?? Promise.resolve();
-    const operation = previous.catch(() => {}).then(() => ensureTeam({ agentSlug, cwd,
+    const operation = previous.catch(() => {}).then(() => ensureTeam({ agentSlug, cwd, launchProfileKey: launchProfileKey(profile),
       members: () => {
         const current = collaborationStore.getGroup(group.id);
         if (!current || current.deleted) throw new Error('协作组已删除');
+        if (profile && launchProfileKey(current.launchProfiles?.find(p => p.id === profile.id)) !== launchProfileKey(profile)) throw new Error('启动方案已变更，请重新开始协作');
         return globalSessionState.sessions.filter(record => current.sessionIds.includes(record.sessionId))
-          .map(record => ({ id: record.sessionId, cwd: record.cwd, role: current.roles?.[record.sessionId], agentSlug: orchestrationSessionSnapshot(record).agent?.slug }));
+          .map(record => ({ id: record.sessionId, cwd: record.cwd, role: current.roles?.[record.sessionId], agentSlug: orchestrationSessionSnapshot(record).agent?.slug, launchProfileKey: launchProfileKey(current.memberLaunchProfiles?.[record.sessionId]) }));
       },
       spawn: async role => {
         const current = collaborationStore.getGroup(group.id);
         if (!current || current.deleted) throw new Error('协作组已删除');
-        const result = await spawnCollaborationAgentSession(req, current, null, { agentSlug, cwd, mode: 'tmux', name: role.startsWith('自动协调者') ? `协调 ${group.name}` : `执行与评审 ${group.name}` }, role);
+        const result = await spawnCollaborationAgentSession(req, current, null, { agentSlug, launchProfileId: profile?.id ?? '', cwd, mode: 'tmux', name: role.startsWith('自动协调者') ? `协调 ${group.name}` : `执行与评审 ${group.name}` }, role);
         return result.session.sessionId;
       },
     }));

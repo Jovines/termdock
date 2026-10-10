@@ -6,10 +6,15 @@ import { CollaborationError } from './collaborationProtocol.js';
 export const INTEGRATION_PROTOCOL = 1;
 export const INTEGRATION_OPERATIONS = ['task.read', 'task.create', 'task.assign', 'task.comment', 'task.revise', 'task.answer', 'events.read', 'session.create', 'session.read', 'session.restore'] as const;
 export type IntegrationPermission = typeof INTEGRATION_OPERATIONS[number];
+export interface StartupInputCondition {
+  /** Literal terms in the current terminal viewport, with horizontal space folded. */
+  allOf: string[]; noneOf?: string[]; stableMs?: number; timeoutMs?: number;
+}
 export interface LaunchProfile {
   id: string; agentSlug: string; executable: string; argv: string[]; cwdRoots: string[];
   /** Exact structured resume template; {sessionId} must be its own argument. */
   resumeArgv: string[];
+  startupInput?: StartupInputCondition;
 }
 export interface IntegrationPolicy { id: string; groupId: string; permissions: IntegrationPermission[]; launchProfiles: LaunchProfile[] }
 export interface IntegrationPrincipal extends IntegrationPolicy { tokenHash: string; revoked: boolean }
@@ -51,6 +56,16 @@ export function validatePolicy(value: IntegrationPolicy): IntegrationPolicy {
     if (!Array.isArray(profile.argv) || !Array.isArray(profile.resumeArgv) || [...profile.argv, ...profile.resumeArgv].some(a => typeof a !== 'string' || /[\x00-\x1f\x7f]/.test(a) || a.length > 8192) || profile.argv.length > 128 || profile.resumeArgv.length > 128) integrationError('INVALID_INTEGRATION_POLICY', 'Invalid structured argv');
     if (profile.resumeArgv.filter(a => a === '{sessionId}').length !== 1 || profile.resumeArgv.filter(a => a === '{launchArgs}').length !== 1 || profile.resumeArgv.some(a => a.includes('{sessionId}') && a !== '{sessionId}') || profile.resumeArgv.includes('--last')) integrationError('INVALID_INTEGRATION_POLICY', 'resumeArgv requires one {sessionId} and one {launchArgs}; --last is forbidden');
     if (!Array.isArray(profile.cwdRoots) || !profile.cwdRoots.length || profile.cwdRoots.some(root => typeof root !== 'string' || !path.isAbsolute(root) || /[\x00-\x1f\x7f]/.test(root))) integrationError('INVALID_INTEGRATION_POLICY', 'cwdRoots must be absolute paths');
+    if (profile.startupInput !== undefined) {
+      const condition = profile.startupInput;
+      const validTerms = (terms: unknown): terms is string[] => Array.isArray(terms) && terms.length <= 16
+        && terms.every(term => typeof term === 'string' && !!term.trim() && term.length <= 256 && !/[\x00-\x1f\x7f]/.test(term));
+      if (!condition || !validTerms(condition.allOf) || !condition.allOf.length || condition.noneOf !== undefined && !validTerms(condition.noneOf)
+        || condition.stableMs !== undefined && (!Number.isInteger(condition.stableMs) || condition.stableMs < 500 || condition.stableMs > 5000)
+        || condition.timeoutMs !== undefined && (!Number.isInteger(condition.timeoutMs) || condition.timeoutMs < 1000 || condition.timeoutMs > 120000)) {
+        integrationError('INVALID_INTEGRATION_POLICY', 'Invalid startupInput literal conditions or timing bounds');
+      }
+    }
   }
   // Policies contain launcher configuration, never authentication material.
   return structuredClone({ id: value.id, groupId: value.groupId, permissions: value.permissions, launchProfiles: value.launchProfiles });
@@ -78,6 +93,16 @@ export class IntegrationStore {
     const token = randomBytes(32).toString('base64url');
     const next = structuredClone(this.doc); next.principals.push({ ...checked, tokenHash: hash(token), revoked: false }); this.write(next);
     return { principal: checked, token };
+  }
+  update(policy: IntegrationPolicy): void {
+    const checked = validatePolicy(policy), next = structuredClone(this.doc);
+    const index = next.principals.findIndex(principal => principal.id === checked.id);
+    if (index < 0) integrationError('INTEGRATION_NOT_FOUND', 'Integration does not exist', 404);
+    const existing = next.principals[index];
+    if (existing.revoked) integrationError('INTEGRATION_REVOKED', 'Revoked identities cannot be reactivated', 403);
+    if (existing.groupId !== checked.groupId) integrationError('INTEGRATION_GROUP_IMMUTABLE', 'An existing identity cannot change its group', 409);
+    next.principals[index] = { ...checked, tokenHash: existing.tokenHash, revoked: false };
+    this.write(next);
   }
   revoke(id: string): void {
     const next = structuredClone(this.doc), principal = next.principals.find(p => p.id === id);

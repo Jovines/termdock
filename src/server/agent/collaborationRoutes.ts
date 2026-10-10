@@ -311,6 +311,8 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       id: group.id, name: group.name, sessionIds: group.sessionIds,
       members: group.sessionIds.map((sessionId) => ({ sessionId, name: names[sessionId] ?? null })),
       roles: group.roles ?? {},
+      launchProfiles: group.launchProfiles ?? [], defaultLaunchProfileId: group.defaultLaunchProfileId ?? null,
+      memberLaunchProfiles: group.memberLaunchProfiles ?? {},
     };
   };
   router.get('/rules', run((req, res, sessionId) => {

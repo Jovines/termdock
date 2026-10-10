@@ -510,6 +510,19 @@ it('starts a goal from an empty group and keeps the provisioned team on a task-s
  expect(api.create.mock.calls[1][0]).toMatchObject({coordinatorSessionId:'new-lead',reviewerSessionIds:['new-worker']});
 });
 
+it('starts an empty team using the group’s chosen launch profile and exposes its model and usage notes', async () => {
+  const profile = { id: 'deep', name: '深度实现', agentSlug: 'codex', command: 'codex --model example-deep -c model_reasoning_effort=high', notes: '复杂实现使用；简单问题不用。' };
+  api.team.mockResolvedValue({ coordinatorSessionId: 'new-lead', reviewerSessionIds: ['new-worker'] });
+  api.create.mockResolvedValue({ task: task({ title: '完成复杂实现' }) });
+  setup([], { group: { ...group, sessionIds: [], launchProfiles: [profile], defaultLaunchProfileId: profile.id }, sessions: [], agents: [{ slug: 'codex', displayName: 'Codex', command: 'codex', accentColor: 'var(--primary)', icon: null }], defaultCwd: '/project' });
+  fireEvent.change(await screen.findByRole('textbox', { name: '协作目标' }), { target: { value: '完成复杂实现' } });
+  expect(screen.getByRole('combobox', { name: '协作启动方案' })).toHaveProperty('value', 'deep');
+  expect(screen.getByText(profile.command)).toBeTruthy();
+  expect(screen.getByText(/复杂实现使用/, { selector: 'span' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '开始协作' }));
+  await waitFor(() => expect(api.team).toHaveBeenCalledWith('team', { agentSlug: 'codex', launchProfileId: 'deep', cwd: '/project' }));
+});
+
 it('retains prepared members and its draft through cancel/reopen, even after the group roster refreshes', async () => {
   const team = { coordinatorSessionId: 'lead', reviewerSessionIds: ['worker'] };
   api.team.mockResolvedValue(team); api.create.mockRejectedValueOnce(Error('目标未提交'));

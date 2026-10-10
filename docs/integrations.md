@@ -1,6 +1,7 @@
 # TD 通用外部接入（协议 1）
 
 最低 CLI / 运行服务版本：**termdock 1.4.300**，两者都必须升级并重启服务。
+启动输入条件与保留凭据的策略更新要求 **CLI / 实际运行服务均至少 1.4.301**；协议仍为 1。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -69,6 +70,46 @@ CLI 使用当前运行服务的端口，默认 9834。每个端口的身份、�
 分别保存在 `~/.termdock/integration-state/<port>/`，通过原子写入及 fsync 持久化。
 这是 TD 接口的权限边界，不是同一操作系统用户下的进程沙箱。
 
+### 启动输入条件与策略更新（1.4.301）
+
+部分 Agent 在首次 prompt 后才产生原生 UUID，启动期间也可能丢弃提前写入的输入。
+管理员可在对应 `launchProfiles` 项中增加 `startupInput`，让 TD 在原绑定 pane 的
+**当前可见终端画面**满足条件后才首次投递。下面是使用方 TraeX 0.209.1 / GPT-5.5
+(MAX) xhigh 的画面匹配示例；换模型、语言或 TUI 版本时须按实际画面调整：
+
+```json
+"startupInput": {
+  "allOf": ["model: GPT-5.5 (MAX) xhigh", "❯"],
+  "noneOf": ["model: loading"],
+  "stableMs": 1000,
+  "timeoutMs": 120000
+}
+```
+
+`allOf` 的每个字面文本都须出现，`noneOf` 的每个文本都须缺席；区分大小写，
+连续横向空白折叠为一个空格，不使用正则或终端历史。每组最多 16 项，每项
+1–256 字符，禁止控制字符；`allOf` 不能为空。`stableMs` 默认 1000，允许
+500–5000；`timeoutMs` 默认 120000，允许 1000–120000，均为整数毫秒。
+TD 至少两次观察到匹配画面，间隔达到 `stableMs` 后放行；中途观察到不匹配就
+重新计时，服务重启也清除尚未完成的匹配计时。这是终端画面条件，不证明 Agent
+内部已就绪、已消费或持续空闲，不依赖 Agent hook。原生 ID 为空也可满足此条件。
+
+在现有**完整策略文件**中加入条件，再由本机管理员执行：
+
+```sh
+td integration update --file /private/policy.json
+```
+
+`update` 替换完整权限/profile 策略，保留身份 ID、本机组、凭据和历史；不能改组，
+不能重新激活已撤销身份。更新文件不要遗漏原权限/profile；无需重写凭据文件。
+新建会话使用新策略。没有旧启动条件的既有会话，仅在下一次明确 `restore`
+**实际启动 Agent 时**附加同 profile ID 的新安全条件；原 argv/model/cwd/包装器
+和原生 UUID 不变。已有条件的原启动快照仍保留；对已经精确运行的会话调用 restore
+不会重新启动或重设条件。更新不会重投已 `delivered` 的正文。
+
+未配置 `startupInput` 的旧 profile 保留原投递方式；TD 不猜测各家 TUI 的加载画面。
+管理员 CLI 会先读取运行服务能力，旧服务缺接口或能力时失败，不会忽略条件后继续配置。
+
 ## 版本与能力核验
 
 ```sh
@@ -81,6 +122,11 @@ td collab --principal report-bridge capabilities
 及允许的 profile ID / Agent slug / cwd roots，不返回完整启动配置。要求协议 1；缺 socket、鉴权失败或协议不兼容
 会直接失败，不回退到旧会话身份/公开 HTTP。协议兼容是运行判断依据，不能只比较
 已安装 npm 版本。普通 `td collab --session <id> capabilities` 同样返回 CLI/服务版本。
+
+使用启动条件时，还须确认 `startup_input_conditions=true`、
+`integration_policy_update=true`，以及
+`principal.launch_profiles` 中目标 profile 的 `startup_input_condition=true`。
+这些布尔值由实际服务回读；服务能力支持不等于身份已配置条件。
 
 ## 任务与权限
 
@@ -199,7 +245,8 @@ td collab --principal report-bridge session restore <session-id> --idempotency-k
 agent_native_session_id,state,error_code,cwd,launch_profile,created_at,updated_at,terminal_binding`。
 `terminal_binding` 是实际 tmux server/session/pane/PID 的固定身份。集成终端须保持单一 pane；
 新增窗口/pane 会使原生身份核验失败，避免误用其它 pane 的 hook。完整原 profile
-仅在服务私有持久记录中保存，不通过事件发送。
+仅在服务私有持久记录中保存，不通过事件发送。配置启动条件时，公开记录及 session
+事件另外包含 `startup_input={state,deadline,matched_since,observed_at}`，时间为 Unix 毫秒。
 
 | state | 精确含义 |
 | --- | --- |
@@ -213,6 +260,20 @@ agent_native_session_id,state,error_code,cwd,launch_profile,created_at,updated_a
 session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSION_BINDING_TIMEOUT`。
 服务重启会继续核验待绑定记录。未捕获真实原生 ID，restore 返回
 `NATIVE_SESSION_ID_MISSING`，不能伪造 UUID 或选择“最近会话”。
+
+启动输入条件独立于原生绑定状态：`ready` 不证明首条输入可写，`binding_pending`
+也不禁止已经满足画面条件的输入。`startup_input.state=pending` 时消息保持 pending、
+尚未写入终端，诊断码 `SESSION_STARTUP_INPUT_PENDING`；超过 deadline 后变为
+`timed_out`，码 `SESSION_STARTUP_INPUT_TIMEOUT`，不会因超时盲投。终端身份核验或
+采集失败也不会放行。持续投递重试/会话 get 可以再次核验；只有重新观察到符合条件
+的画面并满足间隔才转为 `observed`，记录 `observed_at`。等待条件本身不增加实际
+写入次数，不创建新 attempt/session。集成运行时不可用时，受管终端投递返回
+`INTEGRATION_RUNTIME_UNAVAILABLE`。
+
+`observed` 只表示本次启动的画面条件已观测；后续咨询保留通常的追加投递方式，
+不以 Agent 忙闲门控。真正执行 restore 时重新等待启动条件。写入后的 `delivered`
+仍只表示终端写入；`AGENT_CONSUME_UNCONFIRMED` 也不能解释为已消费或应自动重投。
+任务完成继续以负责人明确 `report complete` 为准。
 
 恢复保留原 TD ID、原生 ID、argv/model/cwd/包装器配置。原会话已经精确运行时直接
 返回现状；发现其它 ID、未知进程或 pane 被复用则拒绝。原 tmux 已退出时，只有
@@ -232,8 +293,12 @@ session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSI
 权限与幂等隔离、accepted 上咨询/关联答复、修订后的新结果、原 profile 恢复和
 实际 shell 参数透传。适配器测试不冒充真实 Agent 的原生会话验收。
 
-维护机未安装 TraeX；**真实 TraeX UUID 捕获及恢复尚待使用方开发机联调**。
-使用方升级 CLI 和实际运行服务、回读 capabilities 后，应核对原 TD ID、真实
-TraeX UUID 与原 argv/cwd/包装器快照，并验证 Agent 真正加载原对话。
+维护机未安装 TraeX；已用真实 tmux/终端程序复现加载期间丢弃输入，并验证配置条件
+阻止早投、仅写一次，以及无原生 UUID 时仍可放行；这不冒充真实 TraeX 启动验收。
+使用方已报告 1.4.300 开发机真实 TraeX UUID 捕获与精确恢复通过，原对话记忆、
+原 UUID、TD ID、attempt 和 artifact 保持一致。**1.4.301 的冷启动门控及超时诊断
+仍须使用方升级 CLI/实际运行服务后实机复验**，维护机没有代替完成该项。
+回读 capabilities 后，应核对原 TD ID、真实 TraeX UUID 与原 argv/cwd/包装器快照，
+并验证 Agent 真正加载原对话。
 先完成测试环境的创建→追问→关联答复，再验重复键、追加咨询、断线重投和精确恢复。
 业务定时器或正式群接入由使用方明确启用，TD 发版不会启用这些业务流程。

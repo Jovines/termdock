@@ -34,6 +34,24 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'termdock-workflow-')); stor
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe('classified collaboration workflows', () => {
+  it('exposes launch commands and usage notes to the coordinator while retaining member launch snapshots', async () => {
+    const messages = new CollaborationStore(join(dir, 'messages.json'));
+    const original = { id: 'deep', name: '深度实现', agentSlug: 'codex', command: 'codex --model example-deep', notes: '复杂实现使用；简单查询不要使用。' };
+    const group = messages.save({ name: 'test', sessionIds: ['lead', 'worker'], launchProfiles: [original], defaultLaunchProfileId: original.id });
+    messages.setMemberLaunchProfile(group.id, 'worker', original);
+    const changed = { ...original, command: 'codex --model example-new', notes: '新任务使用新版配置。' };
+    messages.save({ id: group.id, name: group.name, sessionIds: group.sessionIds, launchProfiles: [changed], defaultLaunchProfileId: changed.id });
+    const root = store.create(owner, { idempotencyKey: randomUUID(), groupId: group.id, title: '实现', spec: '修复问题', managed: true, coordinator: lead, reviewers: [worker] }, null);
+    const peers = { descriptor: () => ({ serviceId: owner }), taskSession: (m: TaskMember) => m.sessionId,
+      taskMember: (sessionId: string) => ({ serviceId: owner, sessionId }) } as unknown as CollaborationService;
+    const service = new CollaborationTaskService(store, messages, peers, vi.fn());
+    const view = await service.get(root.id, lead);
+    expect(view.launchProfiles).toEqual([changed]);
+    expect(view.defaultLaunchProfileId).toBe('deep');
+    expect(view.roster?.find(m => m.sessionId === 'worker')?.launchProfile).toEqual(original);
+    expect(store.pending(root.id).find(m => m.kind === 'task')?.content).toContain('根据用户填写的 notes 判断适用任务');
+    expect(service.list(group.id, lead)[0].launchProfiles).toBeUndefined();
+  });
   it('requires a fresh result and review after explicit reopening, including after reload and uncertain retries', () => {
     const root = goal(), child = step(root, 'read-only');
     store.activateScheduled(child.id, child.revision, worker);

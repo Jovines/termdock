@@ -23,6 +23,17 @@ describe('authoritative collaboration membership HTTP API', () => {
     const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return { status: response.status, body: await response.json() };
   };
+  it('saves launch commands and guidance with revision checks, and rejects invalid configuration without partial changes', async () => {
+    const p = { id: 'fast', name: '快速排查', agentSlug: 'codex', command: 'codex --model example-fast', notes: '简单问题使用；复杂实现不要使用。' };
+    const original = (await save({ name: '启动组', sessionIds: ['custom'], launchProfiles: [p], defaultLaunchProfileId: p.id })).body.group;
+    expect(original).toMatchObject({ launchProfiles: [p], defaultLaunchProfileId: p.id });
+    expect((await save({ id: original.id, name: original.name, sessionIds: original.sessionIds, expectedUpdatedAt: original.updatedAt, launchProfiles: [], defaultLaunchProfileId: p.id })).status).toBe(400);
+    expect(store.getGroup(original.id)?.launchProfiles).toEqual([p]);
+    const renamed = (await save({ id: original.id, name: '另一个名称', sessionIds: original.sessionIds, expectedUpdatedAt: original.updatedAt })).body.group;
+    expect(renamed.launchProfiles).toEqual([p]);
+    expect((await save({ id: original.id, name: original.name, sessionIds: original.sessionIds, expectedUpdatedAt: original.updatedAt, launchProfiles: [], defaultLaunchProfileId: null })).status).toBe(409);
+    expect(store.getGroup(original.id)?.launchProfiles).toEqual([p]);
+  });
   it('lists and saves custom agents and plain terminals with the same rules', async () => {
     const listed = await (await fetch(url)).json();
     expect(listed).toMatchObject({ capabilities: { groupRevision: 1 }, sessions });

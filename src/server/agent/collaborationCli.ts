@@ -90,9 +90,11 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     不是完整聊天历史或完成凭证；用 status --text 查成员 ID；不支持远端成员，远端请 send 询问进展。)
 ── 群与规则 ──
   group save --file group.json
-    JSON: {name, sessionIds, id?, expectedUpdatedAt?}; same service API as the UI.
+    JSON: {name, sessionIds, id?, expectedUpdatedAt?, launchProfiles?, defaultLaunchProfileId?}; same service API as the UI.
   add|remove <group-id> <session-id>
-  spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]
+  spawn <group-id> <agent-slug> [--launch-profile <方案id>] [--name <name>] [--cwd <path>] [--task <text>]
+    (status / task get expose launchProfiles: consult notes before choosing;
+     omitted profile uses the group's matching default; an empty profile uses the plain launcher)
   rules get <group-id> [--text] | rules set <group-id> <text> | --file <path> | --stdin [--if-version <version>]
     | rules clear <group-id> [--if-version <version>]
     (shared group guidance, up to 8192 UTF-8 bytes; message envelopes retain
@@ -292,7 +294,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     inbox: ['raw', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
     message: ['raw', 'receipt-only', 'no-rules', 'follow', 'wait-until', 'timeout', 'expect-reply'], cursor: ['consumer'],
-    add: [], remove: [], spawn: ['name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: ['lines', 'raw'],
+    add: [], remove: [], spawn: ['launch-profile', 'name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: ['lines', 'raw'],
   };
   for (const option of byAction[action]) allowed.add(option);
   for (const option of Object.keys(options)) if (!allowed.has(option)) throw new Error(`--${option} is not supported by ${action}`);
@@ -484,6 +486,9 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
             const member = peersAndSource.find(item => item?.sessionId === id);
             io.write(roleLine({ sessionId: id, name: member?.name }, view.roles?.[id]));
           }
+          const profiles = group.launchProfiles as Array<{ id: string; name: string; agentSlug: string; command: string; notes: string }> | undefined;
+          if (profiles?.length) io.write('启动方案（按备注选择，创建时带 --launch-profile <id>）：');
+          for (const profile of profiles ?? []) io.write(`  ${profile.id}${group.defaultLaunchProfileId === profile.id ? '（默认）' : ''} · ${profile.name} · ${profile.agentSlug}\n    命令：${profile.command}\n    使用备注：${profile.notes || '未填写'}`);
         }
         io.write('查看伙伴当前屏幕（只读，仅本机 tmux）：');
         for (const peer of result.peers ?? []) {
@@ -613,7 +618,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       } else output(plan);
       return 0;
     } else {
-      const body = command.action === 'spawn' ? { groupId: command.groupId, agentSlug: command.agentSlug, name: command.name, cwd: command.cwd, task: command.task }
+      const body = command.action === 'spawn' ? { groupId: command.groupId, agentSlug: command.agentSlug, launchProfileId: o['launch-profile'], name: command.name, cwd: command.cwd, task: command.task }
         : { groupId: command.groupId, targetSessionId: command.sessionId, action: command.action };
       output(await request('POST', command.action === 'spawn' ? '/spawn' : '/members', body)); return 0;
     }

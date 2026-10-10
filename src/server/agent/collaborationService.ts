@@ -5,6 +5,7 @@ import type { Packet } from '../federation/packets.js';
 import type { CollaborationGroup, CollaborationStore } from './collaborationStore.js';
 import { CollaborationError } from './collaborationProtocol.js';
 import { COLLAB_NAME_FORBIDDEN } from './collaborationPrompt.js';
+import { validateLaunchProfiles } from './collaborationLaunchProfiles.js';
 import type { TaskMember } from './collaborationTaskTypes.js';
 import { remoteSession, validateCollaborationNode, type CollaborationNode, type CollaborationPeerTransport, type CollaborationRpc } from './collaborationPeerTransport.js';
 
@@ -21,6 +22,7 @@ const local = (origin: string, id: string) => { const a = address(id); return a?
 const mapRoles = <T>(value: Record<string, T> | undefined, map: (id: string) => string) => value && Object.fromEntries(Object.entries(value).map(([id, item]) => [map(id), item]));
 function mapGroup(group: CollaborationGroup, map: (id: string) => string): CollaborationGroup {
   return { ...group, sessionIds: group.sessionIds.map(map), roles: mapRoles(group.roles, map), roleVersions: mapRoles(group.roleVersions, map),
+    memberLaunchProfiles: mapRoles(group.memberLaunchProfiles, map),
     instructions: group.instructions && { ...group.instructions, updatedBy: map(group.instructions.updatedBy) } };
 }
 
@@ -319,14 +321,18 @@ export class CollaborationService {
       services: [...services, ...missing.map(origin => ({ origin, label: origin, connected: false, error: '服务连接授权尚未同步；在已授权服务页面连接后会自动完成'  }))],
       removedServices: this.document.removedPeers?.map(peer => ({ serviceId: peer.serviceId, origin: peer.origin, label: peer.origin, connected: false })) ?? [] };
   }
-  async save(input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number }) {
+  async save(input: { id?: string; name: string; sessionIds: string[]; expectedUpdatedAt?: number; launchProfiles?: import('./collaborationLaunchProfiles.js').CollaborationLaunchProfile[]; defaultLaunchProfileId?: string | null }) {
     const existing = input.id ? this.options.store.getGroup(input.id) : null;
     if (input.id && (!existing || existing.deleted)) throw new Error('GROUP_NOT_FOUND');
     if (existing && input.expectedUpdatedAt !== existing.updatedAt) throw new CollaborationError('GROUP_CHANGED', `协作组已变化（当前 updatedAt=${existing.updatedAt}），请刷新后重试`, 409, { currentUpdatedAt: existing.updatedAt });
     if (typeof input.name !== 'string' || !input.name.trim() || COLLAB_NAME_FORBIDDEN.test(input.name) || !Array.isArray(input.sessionIds) || input.sessionIds.some(id => typeof id !== 'string')) throw new Error('INVALID_GROUP');
+    const launch = input.launchProfiles !== undefined || input.defaultLaunchProfileId !== undefined ? {
+      launchProfiles: validateLaunchProfiles(input.launchProfiles ?? existing?.launchProfiles ?? [], input.defaultLaunchProfileId ?? null),
+      defaultLaunchProfileId: input.defaultLaunchProfileId ?? null,
+    } : {};
     if (!input.sessionIds.some(id => address(id)) && !existing?.federated) {
       if (input.sessionIds.some(id => !this.options.sessions().some(s => s.sessionId === id) && !existing?.sessionIds.includes(id))) throw new Error('GROUP_MEMBER_UNAVAILABLE');
-      return { group: this.options.store.save(input) };
+      return { group: this.options.store.save({ ...input, ...launch }) };
     }
     if (input.sessionIds.length < 2) throw new CollaborationError('INVALID_GROUP', '跨服务组仍需两个成员；修改未保存', 400);
     if (!this.document.origin) throw new Error('COLLABORATION_PAIRING_REQUIRED');
@@ -335,7 +341,7 @@ export class CollaborationService {
     if (!input.sessionIds.some(id => !address(id))) throw new Error('GROUP_MUST_INCLUDE_LOCAL_MEMBER');
     const available = new Set([...this.options.sessions(), ...this.directory().sessions.filter(s => s.serviceConnected)].map(s => s.sessionId));
     if (!Array.isArray(input.sessionIds) || input.sessionIds.some(id => !available.has(id) && !existing?.sessionIds.includes(id))) throw new Error('GROUP_MEMBER_UNAVAILABLE');
-    const group: CollaborationGroup = { ...existing, id: existing?.federated ? existing.id : `cross-${randomBytes(16).toString('hex')}`, name: input.name,
+    const group: CollaborationGroup = { ...existing, ...launch, id: existing?.federated ? existing.id : `cross-${randomBytes(16).toString('hex')}`, name: input.name,
       sessionIds: [...new Set(input.sessionIds)], createdAt: existing?.createdAt ?? Date.now(), updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1), federated: true };
     const canonical = mapGroup(group, id => address(id) ? id : remoteSession(this.node().origin, id));
     if (canonical.sessionIds.some(id => !this.nodes().some(node => node.origin === address(id)?.origin))) throw new Error('COLLABORATION_PAIRING_REQUIRED');
