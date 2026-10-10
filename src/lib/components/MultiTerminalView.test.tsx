@@ -8,7 +8,9 @@ import type { OpenSessionInventoryResult, SessionInventory } from '../terminal';
 const api = vi.hoisted(() => ({
   getSessionInventory: vi.fn(), openSessionInventoryEntry: vi.fn(), removeSessionInventoryEntry: vi.fn(),
   closeTerminal: vi.fn(), killTmuxSession: vi.fn(), sendTerminalInput: vi.fn(),
+  updateSessionInventoryEntry: vi.fn(), reorderSessionInventoryEntries: vi.fn(),
 }));
+const control = vi.hoisted(() => ({ subscribeClientState: vi.fn() }));
 vi.mock('../terminal', () => api);
 vi.mock('../terminal/api', async (original) => ({
   ...await original<typeof import('../terminal/api')>(),
@@ -16,7 +18,7 @@ vi.mock('../terminal/api', async (original) => ({
   getSettings: vi.fn().mockResolvedValue({}),
   suspendTerminalConnectionReconnects: vi.fn(),
 }));
-vi.mock('../utils/clientStateSync', () => ({ subscribeClientState: () => () => undefined }));
+vi.mock('../utils/clientStateSync', () => control);
 vi.mock('swiper/react', () => ({
   Swiper: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   SwiperSlide: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -46,6 +48,8 @@ import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 import { useSessionOrderStore } from '../stores/useSessionOrderStore';
+
+const originalSetTerminalSession = useTerminalStore.getState().setTerminalSession;
 
 const sessions = ['one', 'two', 'three'].map((sessionId, index) => ({
   frontendSessionId: sessionId, sessionId, name: `Session ${sessionId}`, customName: true,
@@ -78,11 +82,15 @@ describe('MultiTerminalView session recovery and keyboard ownership', () => {
       matches: false, media, onchange: null, addListener: vi.fn(), removeListener: vi.fn(),
       addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
     })));
-    useTerminalStore.setState({ sessions: new Map(), activeSessionId: null });
+    useTerminalStore.setState({ sessions: new Map(), activeSessionId: null, setTerminalSession: originalSetTerminalSession });
     useSidebarStore.setState({ leftOpen: false, rightOpen: false, groupByFolder: false });
     useCollaborationPanelDock.setState({ activePaneId: null, docks: {}, hosts: {} });
     useSessionOrderStore.setState({ collaborationGroups: [] });
     api.getSessionInventory.mockResolvedValue(inventory);
+    api.openSessionInventoryEntry.mockReset();
+    api.updateSessionInventoryEntry.mockReturnValue(new Promise(() => undefined));
+    api.reorderSessionInventoryEntries.mockReturnValue(new Promise(() => undefined));
+    control.subscribeClientState.mockImplementation(() => () => undefined);
     api.removeSessionInventoryEntry.mockResolvedValue(undefined);
     api.closeTerminal.mockResolvedValue(undefined);
     api.killTmuxSession.mockResolvedValue(undefined);
@@ -96,7 +104,7 @@ describe('MultiTerminalView session recovery and keyboard ownership', () => {
     await waitFor(() => expect(updates.mock.lastCall?.[0].activeSessionId).toBe('one'));
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Terminal one' })).toBeTruthy());
     return { updates, current: () => updates.mock.lastCall![0] as {
-      activeSessionId: string; sessions: { id: string }[]; splitWorkspaces: { sessionIds: string[] }[];
+      activeSessionId: string; sessions: { id: string; name: string }[]; splitWorkspaces: { sessionIds: string[] }[];
     } };
   }
 
@@ -188,13 +196,16 @@ describe('MultiTerminalView session recovery and keyboard ownership', () => {
     dispatch('new-terminal-session', { preferredFrontendSessionId: 'one', requireExisting: true, command: 'test-command', onResult });
     dispatch('close-terminal-session', 'one');
     await waitFor(() => expect(current().sessions.map(session => session.id)).not.toContain('one'));
+    const storeWrites = vi.spyOn(useTerminalStore.getState(), 'setTerminalSession').mockClear();
     await act(async () => {
-      pending.resolve({ session: sessions[0]!, terminalSession: { sessionId: 'backend-one', cols: 80, rows: 24 }, inventory, reused: true });
+      pending.resolve(reopenedResult());
       await pending.promise;
     });
     expect(current().sessions.map(session => session.id)).not.toContain('one');
     expect(onResult).toHaveBeenCalledWith({ ok: false, error: 'unknown' });
     expect(api.sendTerminalInput).not.toHaveBeenCalled();
+    expect(storeWrites.mock.calls.filter(([id]) => id === 'one')).toEqual([]);
+    expect(cachedBackend()).toBeUndefined();
   });
 
   it('retains a late split creation without pairing a reopened chooser', async () => {
@@ -248,5 +259,97 @@ describe('MultiTerminalView session recovery and keyboard ownership', () => {
     await waitFor(() => expect(current().sessions.map(session => session.id)).not.toContain('one'));
     expect(current().activeSessionId).toBe('three');
     expect(window.localStorage.getItem('termdock-active-session')).toBe('three');
+  });
+
+
+  function reopenedResult(updatedAt = 20, backend = 'rebuilt-backend'): OpenSessionInventoryResult {
+    const session = { ...sessions[0]!, backendSessionId: backend, connected: true, live: true, cwd: `/${backend}` };
+    return { session, terminalSession: { sessionId: backend, cols: 100, rows: 40, cwd: `/${backend}` }, reused: true,
+      inventory: { ...inventory, updatedAt, clientSessions: [session, ...sessions.slice(1)] } };
+  }
+
+  function cachedBackend() {
+    return JSON.parse(localStorage.getItem('termdock-sessions-cache')!).find((session: {sessionId: string}) => session.sessionId === 'one')?.backendSessionId;
+  }
+
+  it.each(['rename restored', 'rename other', 'reorder', 'creation'])('uses the rebuilt binding in runtime/store/cache during %s', async (mutation) => {
+    const pending = deferred<OpenSessionInventoryResult>();
+    const creating = deferred<OpenSessionInventoryResult>();
+    api.openSessionInventoryEntry.mockReturnValueOnce(pending.promise).mockReturnValueOnce(creating.promise);
+    const { current } = await ready();
+    dispatch('new-terminal-session', { preferredFrontendSessionId: 'one', requireExisting: true });
+    dispatch('switch-terminal-session', 'two');
+    if (mutation === 'rename restored') dispatch('rename-terminal-session', { sessionId: 'one', name: 'Renamed one' });
+    if (mutation === 'rename other') dispatch('rename-terminal-session', { sessionId: 'two', name: 'Renamed two' });
+    if (mutation === 'reorder') dispatch('reorder-terminal-session', { sessionIds: ['two', 'one', 'three'] });
+    if (mutation === 'creation') {
+      dispatch('new-terminal-session', {});
+      const created = { ...sessions[0]!, frontendSessionId: 'created', sessionId: 'created', backendSessionId: 'backend-created' };
+      await act(async () => {
+        creating.resolve({ session: created, terminalSession: { sessionId: 'backend-created', cols: 80, rows: 24 }, reused: false,
+          inventory: { ...inventory, updatedAt: 10, clientSessions: [...sessions, created] } });
+        await creating.promise;
+      });
+    }
+    const storeWrites = vi.spyOn(useTerminalStore.getState(), 'setTerminalSession').mockClear();
+    await act(async () => { pending.resolve(reopenedResult()); await pending.promise; });
+    await waitFor(() => expect(useTerminalStore.getState().sessions.get('one')?.terminalSessionId).toBe('rebuilt-backend'));
+    expect(cachedBackend()).toBe('rebuilt-backend');
+    expect(storeWrites.mock.calls.filter(([id]) => id === 'one').map(([, session]) => session.sessionId)).not.toContain('backend-one');
+    expect(current().activeSessionId).toBe(mutation === 'creation' ? 'created' : 'two');
+    if (mutation === 'rename restored') expect(current().sessions.find(session => session.id === 'one')?.name).toBe('Renamed one');
+    if (mutation === 'rename other') expect(current().sessions.find(session => session.id === 'two')?.name).toBe('Renamed two');
+    if (mutation === 'reorder') expect(current().sessions.map(session => session.id)).toEqual(['two', 'one', 'three']);
+    if (mutation === 'creation') expect(current().sessions.map(session => session.id)).toContain('created');
+    // This event resolves against MultiTerminalView's runtime list, so a
+    // passing store/cache assertion cannot conceal an obsolete runtime binding.
+    dispatch('close-terminal-session-by-backend', 'rebuilt-backend');
+    await waitFor(() => expect(api.removeSessionInventoryEntry).toHaveBeenCalledWith('one'));
+    await waitFor(() => expect(current().sessions.map(session => session.id)).not.toContain('one'));
+  });
+
+  it.each(['before', 'after'])('keeps a later control backend in runtime/store when received %s open', async (order) => {
+    const pending = deferred<OpenSessionInventoryResult>();
+    api.openSessionInventoryEntry.mockReturnValue(pending.promise);
+    const { current } = await ready();
+    dispatch('new-terminal-session', { preferredFrontendSessionId: 'one', requireExisting: true });
+    dispatch('switch-terminal-session', 'two');
+    const listener = control.subscribeClientState.mock.calls[0]![0] as (snapshot: unknown) => void;
+    const push = () => listener({ type: 'client-state', seq: 2, inventory: reopenedResult(30, 'control-backend').inventory });
+    if (order === 'before') act(push);
+    const storeWrites = vi.spyOn(useTerminalStore.getState(), 'setTerminalSession').mockClear();
+    await act(async () => { pending.resolve(reopenedResult()); await pending.promise; });
+    if (order === 'after') act(push);
+    await waitFor(() => expect(useTerminalStore.getState().sessions.get('one')?.terminalSessionId).toBe('control-backend'));
+    expect(cachedBackend()).toBe('control-backend');
+    expect(current().activeSessionId).toBe('two');
+    const bindings = storeWrites.mock.calls.filter(([id]) => id === 'one').map(([, session]) => session.sessionId);
+    expect(bindings).not.toContain('backend-one');
+    if (order === 'before') expect(bindings).not.toContain('rebuilt-backend');
+    dispatch('close-terminal-session-by-backend', 'control-backend');
+    await waitFor(() => expect(api.removeSessionInventoryEntry).toHaveBeenCalledWith('one'));
+    await waitFor(() => expect(current().sessions.map(session => session.id)).not.toContain('one'));
+  });
+
+  it('does not rewrite the runtime binding when a delayed rename inventory settles after open', async () => {
+    const pending = deferred<OpenSessionInventoryResult>();
+    const rename = deferred<SessionInventory>();
+    api.openSessionInventoryEntry.mockReturnValue(pending.promise);
+    api.updateSessionInventoryEntry.mockReturnValue(rename.promise);
+    const { current } = await ready();
+    dispatch('new-terminal-session', { preferredFrontendSessionId: 'one', requireExisting: true });
+    dispatch('rename-terminal-session', { sessionId: 'one', name: 'Renamed one' });
+    await act(async () => { pending.resolve(reopenedResult()); await pending.promise; });
+    const storeWrites = vi.spyOn(useTerminalStore.getState(), 'setTerminalSession').mockClear();
+    await act(async () => {
+      rename.resolve({ ...inventory, updatedAt: 10, clientSessions: sessions.map(session => session.sessionId === 'one' ? { ...session, name: 'Renamed one' } : session) });
+      await rename.promise;
+    });
+    await waitFor(() => expect(current().sessions.find(session => session.id === 'one')?.name).toBe('Renamed one'));
+    expect(cachedBackend()).toBe('rebuilt-backend');
+    expect(useTerminalStore.getState().sessions.get('one')?.terminalSessionId).toBe('rebuilt-backend');
+    expect(storeWrites.mock.calls.filter(([id]) => id === 'one').map(([, session]) => session.sessionId)).not.toContain('backend-one');
+    dispatch('close-terminal-session-by-backend', 'rebuilt-backend');
+    await waitFor(() => expect(api.removeSessionInventoryEntry).toHaveBeenCalledWith('one'));
   });
 });
