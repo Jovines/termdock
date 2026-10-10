@@ -45,7 +45,12 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
     try { return JSON.parse(localStorage.getItem(`${storage}:board`) ?? 'null') as { lane?: TaskLane; scope?: string; query?: string; closed?: boolean; showSteps?: boolean } | null; }
     catch { return null; }
   });
-  const [lane, setLane] = useState<TaskLane>(() => lanes.some(l => l.id === initial?.lane) ? initial!.lane! : tasks.some(t => collaborationTaskLane(t) === 'attention') ? 'attention' : tasks.some(t => collaborationTaskLane(t) === 'running') ? 'running' : tasks.some(t => collaborationTaskLane(t) === 'backlog') ? 'backlog' : 'done');
+  const [lane, setLane] = useState<TaskLane>(() => {
+    if (lanes.some(l => l.id === initial?.lane)) return initial!.lane!;
+    const rows = collaborationBoardTasks(tasks, initial?.showSteps === true, initial?.query ?? '');
+    const phases = rows.map(row => row.attention ? 'attention' : collaborationTaskLane(row.task));
+    return phases.includes('attention') ? 'attention' : phases.includes('running') ? 'running' : phases.includes('backlog') ? 'backlog' : 'done';
+  });
   laneRef.current = lane;
   function selectLane(next: TaskLane, animate = true) {
     setLane(next);
@@ -91,15 +96,15 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
   useEffect(() => {
     try { localStorage.setItem(`${storage}:board`, JSON.stringify({ lane, scope, query, closed, showSteps })); } catch { /* Current navigation remains usable in private mode. */ }
   }, [storage, lane, scope, query, closed, showSteps]);
-  const selectedLane = selectedId ? tasks.find(t => t.id === selectedId) : undefined;
-  const selectedStage = selectedLane ? collaborationTaskLane(selectedLane) : undefined;
-  useEffect(() => { if (selectedStage) selectLane(selectedStage, false); }, [selectedId, selectedStage]);
   const roots = tasks.filter(t => t.workflow?.kind === 'goal');
   const boardRows = collaborationBoardTasks(tasks, showSteps, query);
   const rowById = new Map(boardRows.map(row => [row.task.id, row]));
   const boardLane = (task: CollaborationTaskView): TaskLane => rowById.get(task.id)?.attention ? 'attention' : collaborationTaskLane(task);
+  const selectedRow = selectedId ? boardRows.find(row => row.task.id === selectedId || row.children.some(child => child.id === selectedId)) : undefined;
+  const selectedStage = selectedRow ? boardLane(selectedRow.task) : undefined;
+  useEffect(() => { if (selectedStage) selectLane(selectedStage, false); }, [selectedId, selectedStage]);
   const scoped = boardRows.map(row => row.task).filter(t => (closed || t.status !== 'closed')
-    && (scope === 'all' || t.id === scope || t.parentTaskId === scope)
+    && (scope === 'all' || t.id === scope || rowById.get(t.id)?.rootId === scope)
     && (!query.trim() || `${t.title} ${t.spec} ${t.attempts.map(a => name(t, a.assignee)).join(' ')}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
   const filterCount = Number(scope !== 'all') + Number(closed) + Number(showSteps);
   const compactButton = 'inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary';

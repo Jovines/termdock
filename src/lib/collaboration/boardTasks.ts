@@ -25,7 +25,7 @@ export function collaborationBoardTasks(tasks: CollaborationTaskView[], showStep
         ?? children.find(child => collaborationTaskNeedsAttention(child) || child.workflow?.paused)
       : undefined;
     const attentionCount = children.filter(child => collaborationTaskNeedsAttention(child) || child.workflow?.paused).length;
-    return { task, children, attention, attentionCount };
+    return { task, children, attention, attentionCount, rootId: rootById.get(task.id)! };
   });
 }
 

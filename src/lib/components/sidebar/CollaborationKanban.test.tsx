@@ -12,6 +12,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 function setup(records = tasks) { const settings = vi.fn(), select = vi.fn(); const view = render(<CollaborationKanban tasks={records} selectedId={null} onSelect={select} name={() => '成员'} storage="test-mobile" action={<button>新目标</button>} navigation={<nav aria-label="协作工作区"><button>看板</button><button>成员</button></nav>} settings={<button onClick={settings}>组设置</button>} />); return { ...view, settings, select }; }
 describe('mobile kanban navigation', () => {
+ it('returns from a hidden completed execution to its active goal’s lane', () => {
+  const child = { ...base, id: 'child', parentTaskId: base.id, title: '已完成执行', status: 'accepted' as const };
+  render(<CollaborationKanban tasks={[base, child]} selectedId="child" onSelect={vi.fn()} name={() => '成员'} storage="return-goal" />);
+  expect(screen.getByRole('button', { name: /执行中\s*1/ }).getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByRole('button', { name: /当前任务/ })).toBeTruthy();
+ });
  it('shows one user goal, with execution details available through an explicit filter', () => {
   const root = { ...base, status: 'accepted' as const };
   const child = { ...base, id: 'child', parentTaskId: root.id, title: '内部执行步骤', status: 'accepted' as const, completionMode: 'reviewed' as const };
