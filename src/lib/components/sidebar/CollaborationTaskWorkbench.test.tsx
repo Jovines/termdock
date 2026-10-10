@@ -33,6 +33,17 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('collaboration goal journeys', () => {
+  it('starts with the result and keeps completed execution details behind one disclosure', async () => {
+    const child = task({ id: 'child', title: '执行验证', parentTaskId: 'goal', status: 'accepted', completionMode: 'reviewed' });
+    setup([task({ status: 'accepted', artifacts: [result, review], children: [{ id: child.id, title: child.title, status: 'accepted', completionMode: 'reviewed', revision: 1 }] }), child], { board: true });
+    await choose();
+    const disclosure = screen.getByText('执行过程').closest('details')!;
+    expect(disclosure.open).toBe(false);
+    fireEvent.click(disclosure.querySelector('summary')!);
+    // Browser handles native details toggling; the row remains reachable inside it.
+    fireEvent.click(within(disclosure).getByRole('button', { name: /执行验证/ }));
+    expect(await screen.findByRole('heading', { name: '执行验证' })).toBeTruthy();
+  });
   it('opens a board result as a full reading page with a persistent acceptance action', async () => {
     const body = '内部交接：任务 abc 版本 def。\n\n结论：CPU 25.6%，未见过载。\n\n限制：仅采样 20 秒。';
     const record = task({ artifacts: [{ ...result, content: body }, review] });
@@ -143,7 +154,9 @@ describe('collaboration goal journeys', () => {
   it('uses one location path to distinguish the board from the parent goal and preserves the child draft', async () => {
     const root = task({ children: [{ id: 'child', title: '分析磁盘占用', status: 'open', revision: 2 }] });
     const child = task({ id: 'child', title: '分析磁盘占用', parentTaskId: 'goal', workflow: { ...root.workflow!, kind: 'step', rootTaskId: 'goal' } });
-    setup([root, child], { board: true }); await choose('分析磁盘占用');
+    setup([root, child], { board: true }); await choose();
+    fireEvent.click(screen.getByText('执行过程'));
+    await choose('分析磁盘占用');
     const path = screen.getByRole('navigation', { name: '任务位置' });
     expect(within(path).getAllByRole('button')).toHaveLength(2);
     expect(within(path).getByText('子任务详情').getAttribute('aria-current') ?? within(path).getByText('子任务详情').parentElement?.getAttribute('aria-current')).toBe('page');
@@ -161,10 +174,12 @@ describe('collaboration goal journeys', () => {
     expect(api.update).not.toHaveBeenCalled();
   });
   it('shows every ancestor in a nested task path', async () => {
-    const root = task();
-    const parent = task({ id: 'parent', title: '检查磁盘', parentTaskId: 'goal', workflow: { ...root.workflow!, kind: 'step' } });
+    const root = task({ children: [{ id: 'parent', title: '检查磁盘', status: 'open', revision: 2 }] });
+    const parent = task({ id: 'parent', title: '检查磁盘', parentTaskId: 'goal', workflow: { ...root.workflow!, kind: 'step' }, children: [{ id: 'child', title: '统计目录', status: 'open', revision: 2 }] });
     const child = task({ id: 'child', title: '统计目录', parentTaskId: 'parent', workflow: { ...root.workflow!, kind: 'step' } });
-    setup([root, parent, child], { board: true }); await choose('统计目录');
+    setup([root, parent, child], { board: true }); await choose();
+    fireEvent.click(screen.getByText('执行过程')); await choose('检查磁盘');
+    fireEvent.click(screen.getByText('执行过程')); await choose('统计目录');
     const path = screen.getByRole('navigation', { name: '任务位置' });
     expect(within(path).getAllByRole('button').map(button => button.textContent)).toEqual(['看板', '目标：完善预览体验', '父任务：检查磁盘']);
     fireEvent.click(within(path).getByRole('button', { name: '查看父任务：检查磁盘' }));
@@ -383,7 +398,7 @@ describe('primary kanban journeys', () => {
     expect(screen.queryByRole('region', { name: '任务详情' })).toBeNull();
     expect(within(screen.getByRole('region', { name: '执行中任务' })).getByRole('button', { name: /改进预览体验/ })).toBeTruthy();
   });
-  it('shows root goals and actionable child tasks in their own lanes and filters by goal', async () => {
+  it('surfaces child decisions on their goal and returns to the goal after answering', async () => {
     const child = task({ id: 'child', title: '选择预览布局', parentTaskId: 'goal', workflow: { ...task().workflow!, kind: 'step' }, decisions: [{ id: 'q', attemptId: 'attempt', question: '采用哪种布局？', options: ['保留终端'], status: 'pending', createdAt: 5 }] });
     setup([task(), child, task({ id: 'waiting', title: '等待分派的任务', activeAttemptId: null, attempts: [], workflow: undefined }), task({ id: 'done', title: '已验收的任务', status: 'accepted' })], { board: true });
     await screen.findByRole('heading', { name: '任务看板' });
@@ -392,14 +407,14 @@ describe('primary kanban journeys', () => {
     fireEvent.click(screen.getByRole('button', { name: '筛选任务' }));
     fireEvent.change(screen.getByRole('combobox', { name: '按目标查看' }), { target: { value: 'goal' } });
     expect(screen.queryByRole('button', { name: /等待分派的任务/ })).toBeNull();
-    fireEvent.click(within(screen.getByRole('region', { name: '需要你任务' })).getByRole('button', { name: /选择预览布局/ }));
+    fireEvent.click(within(screen.getByRole('region', { name: '需要你任务' })).getByRole('button', { name: /完善预览体验/ }));
     await screen.findByRole('textbox', { name: '你的回答' });
     fireEvent.click(screen.getByRole('button', { name: '保留终端' }));
     api.update.mockResolvedValue({ task: { ...child, revision: 3, decisions: [{ ...child.decisions[0], status: 'answered', answer: '保留终端' }] } });
     fireEvent.click(screen.getByRole('button', { name: '回复并继续' }));
     await waitFor(() => expect(api.update).toHaveBeenCalledWith('child', expect.objectContaining({ kind: 'answer', decisionId: 'q', expectedRevision: 2 })));
     fireEvent.click(screen.getByRole('button', { name: '返回看板' }));
-    expect(within(screen.getByRole('region', { name: '执行中任务' })).getByRole('button', { name: /选择预览布局/ })).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: '执行中任务' })).getByRole('button', { name: /完善预览体验/ })).toBeTruthy();
   });
   it('uses the actual container width for a focused mobile detail and keeps the answer on return', async () => {
     vi.stubGlobal('ResizeObserver', class { constructor(private callback: typeof resize) {} observe() { this.callback([{ contentRect: { width: 360 } }]); } disconnect() {} });

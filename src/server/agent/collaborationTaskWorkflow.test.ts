@@ -34,6 +34,33 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'termdock-workflow-')); stor
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe('classified collaboration workflows', () => {
+  it('requires a fresh result and review after explicit reopening, including after reload and uncertain retries', () => {
+    const root = goal(), child = step(root, 'read-only');
+    store.activateScheduled(child.id, child.revision, worker);
+    const accepted = finish(child), oldResult = accepted.artifacts.filter(a => a.kind === 'result').at(-1)!;
+    const reopen: TaskOperation = { kind: 'reopen', content: '发现遗漏，补充检查', expectedRevision: accepted.revision, idempotencyKey: randomUUID() };
+    const next = store.apply(child.id, reopen, lead);
+    expect(next.status).toBe('open'); expect(next.completionMode).toBeUndefined();
+    expect(next.events.at(-1)).toMatchObject({ kind: 'revise', content: '发现遗漏，补充检查' });
+    store = new CollaborationTaskStore(join(dir, 'tasks.json'));
+    expect(store.apply(child.id, reopen, lead).revision).toBe(next.revision);
+    store.advance(owner); store.advance(owner);
+    expect(store.get(child.id)!.status).toBe('open');
+    expect(store.get(child.id)!.artifacts.filter(a => a.kind === 'result')).toHaveLength(1);
+    expect(() => apply(child.id, { kind: 'accept', artifactId: oldResult.id, expectedRevision: store.get(child.id)!.revision }, null)).toThrow('修改要求之后');
+    const completed = finish(store.get(child.id)!);
+    expect(completed.status).toBe('accepted');
+    expect(completed.acceptedArtifactId).not.toBe(oldResult.id);
+    expect(completed.artifacts.filter(a => a.kind === 'review')).toHaveLength(2);
+  });
+  it('resumes a closed task without fabricating a result revision when nothing was delivered', () => {
+    const root = goal();
+    const closed = apply(root.id, { kind: 'close', expectedRevision: root.revision }, null);
+    const reopened = apply(root.id, { kind: 'reopen', expectedRevision: closed.revision }, null);
+    expect(reopened.status).toBe('open'); expect(reopened.workflow?.paused).toBe(false);
+    expect(reopened.events.at(-1)?.kind).toBe('reopen');
+    expect(reopened.events.some(e => e.kind === 'revise')).toBe(false);
+  });
   it('finishes and accepts a reviewed read-only goal without a worktree or integration task', () => {
     const root = goal(), child = step(root, 'read-only');
     expect(child.workflow?.isolated).toBe(false);
@@ -230,6 +257,16 @@ describe('classified collaboration workflows', () => {
     const card = store.list(['team'], true).find(t => t.id === root.id)!;
     expect(card.events.find(e => e.source === 'user')).toMatchObject({ kind: 'revise', content: ('继续检查磁盘，不重复采样' + '。'.repeat(600)).slice(0, 512) });
     expect(card.events.find(e => e.source === 'user')!.content).toHaveLength(512);
+  });
+
+  it('keeps a bounded pending question visible in lightweight cards and preserves the full question in detail', () => {
+    const root = goal(), content = '请选择验证范围：桌面还是手机？' + '详细条件。'.repeat(150);
+    apply(root.id, { kind: 'ask', attemptId: root.activeAttemptId!, content, options: ['桌面', '手机'] }, lead);
+    const card = store.list(['team'], true).find(t => t.id === root.id)!;
+    expect(card.decisions[0].question).toBe(content.slice(0, 512));
+    expect(card.decisions[0].options).toEqual([]);
+    expect(store.get(root.id)!.decisions[0].question).toBe(content);
+    expect(store.get(root.id)!.decisions[0].options).toEqual(['桌面', '手机']);
   });
 
 });

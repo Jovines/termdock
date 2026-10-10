@@ -1,0 +1,1372 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-09T10:31:39Z",
+  "summary": "粘贴功能架构，基于当前工作区实际代码静态分析。覆盖终端文本与移动事件补偿、图片/文件/视频读取上传、本机路径身份核对、协作草稿插入及远程电脑文本剪贴板。依赖深度止于边界。已分析路径（仅相关代码段）：desktop/clipboardFiles.ts、desktop/fileDropUpload.ts、desktop/main.ts、desktop/preload.cts、src/lib/android/captureDelivery.ts、src/lib/collaboration/inputTarget.ts、src/lib/components/computer/ComputerControlView.tsx、src/lib/components/sidebar/AgentOperationsPanel.tsx、src/lib/components/sidebar/CollaborationInput.tsx、src/lib/components/sidebar/CollaborationTaskWorkbench.tsx、src/lib/components/sidebar/RightSidebar.tsx、src/lib/components/terminal/MobileKeyboard.tsx、src/lib/components/terminal/TerminalViewport.tsx、src/lib/components/views/TerminalView.tsx、src/lib/computer/novnc.d.ts、src/lib/computer/platform.ts、src/lib/computer/rdpSession.ts、src/lib/computer/secureRdpTunnel.ts、src/lib/computer/secureVncChannel.ts、src/lib/desktop/nativeBridge.ts、src/lib/desktop/shellPath.ts、src/lib/federation/browserIntegration.ts、src/lib/federation/clientScope.ts、src/lib/terminal/api.ts、src/lib/terminal/bracketedPaste.ts、src/lib/terminal/clipboardImage.ts、src/lib/terminal/factory.ts、src/main.tsx、src/server/entry.ts、src/server/routes/computer.ts、src/server/routes/filesystem.ts、src/server/routes/rdp.ts、src/server/routes/terminal.ts。范围限制：不展开复制、OSC52、普通拖拽、下载预览、后台 Agent 自动投递、服务发现、加密协议和终端进程内部。不确定性：未执行应用、测试、构建或部署；macOS NSPasteboard、iOS/PWA 权限、旧 preload 安装版本、首次加载、断线和直连/入口中转场景均未实测。原生读取和任务输入框有目标切换校验，但 TerminalViewport 附件上传后未看到同等的本地复核，不能保证所有入口在上传期间切换目标都安全。旧 pasteClipboardImage 接口仍存在，所追踪页面未调用，已安装旧客户端额外行为未验证。输入排队、插入反馈和远程剪贴板发送状态不等于执行确认或 Agent 已读。",
+  "analysis": {
+    "kind": "feature",
+    "target": "粘贴相关的",
+    "paths": [],
+    "depth": "boundary",
+    "focus": ""
+  },
+  "perspectives": [
+    {
+      "id": "overview",
+      "title": "粘贴功能总览",
+      "summary": "终端、协作草稿和远程电脑是三个独立粘贴入口；图片、文件和视频复用页面上传。加密通信与服务端会话为依赖边界，只标示调用契约。",
+      "nodes": [
+        {
+          "id": "terminal_entry",
+          "title": "终端粘贴入口",
+          "summary": "隐藏文本域接收系统粘贴与移动输入事件；控制器支持主动读取剪贴板，统一处理文字和附件。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 5187
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 4651
+            }
+          ]
+        },
+        {
+          "id": "mobile_entry",
+          "title": "移动端粘贴按钮",
+          "summary": "350 毫秒内去重，经过 TerminalView 调用当前控制器，保持剪贴板读取的用户手势。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/MobileKeyboard.tsx",
+              "line": 326
+            },
+            {
+              "path": "src/lib/components/terminal/MobileKeyboard.tsx",
+              "line": 772
+            },
+            {
+              "path": "src/lib/components/views/TerminalView.tsx",
+              "line": 2328
+            }
+          ]
+        },
+        {
+          "id": "clipboard_core",
+          "title": "剪贴板内容适配",
+          "summary": "从原生桥接或浏览器读取图片、视频和文件，转为 File 或经身份验证的本机路径。",
+          "files": [
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 21
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 42
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 71
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1692
+            }
+          ]
+        },
+        {
+          "id": "native_reader",
+          "title": "桌面原生读取",
+          "summary": "preload 经 IPC 请求原始数据；主进程校验窗口；macOS 文件读取仅为匹配本机身份的目标返回原路径，其他返回字节。",
+          "files": [
+            {
+              "path": "desktop/preload.cts",
+              "line": 118
+            },
+            {
+              "path": "desktop/main.ts",
+              "line": 1479
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 55
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 151
+            }
+          ]
+        },
+        {
+          "id": "text_encoding",
+          "title": "文本与路径编码",
+          "summary": "文字清洗换行和空白，多行内容构造单个括号粘贴块；路径转义并添加尾随空格。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 115
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1611
+            },
+            {
+              "path": "src/lib/terminal/bracketedPaste.ts",
+              "line": 6
+            },
+            {
+              "path": "src/lib/desktop/shellPath.ts",
+              "line": 10
+            }
+          ]
+        },
+        {
+          "id": "attachment_upload",
+          "title": "页面附件上传",
+          "summary": "图片生成唯一文件名；附件上传到目标服务 /tmp 并校验返回路径；通用上传通过页面 fetch。",
+          "files": [
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 10
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 103
+            },
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 2895
+            }
+          ]
+        },
+        {
+          "id": "collaboration_router",
+          "title": "显式粘贴目标选择",
+          "summary": "按活动协作面板和接收器选择草稿；没有接收器时回到终端。普通终端键入不经此分流器。",
+          "files": [
+            {
+              "path": "src/lib/collaboration/inputTarget.ts",
+              "line": 5
+            },
+            {
+              "path": "src/lib/collaboration/inputTarget.ts",
+              "line": 22
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1643
+            }
+          ]
+        },
+        {
+          "id": "collaboration_drafts",
+          "title": "协作草稿粘贴",
+          "summary": "任务输入框排队准备附件并在选区插入；群组消息框上传事件文件并更新对应群组草稿。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 39
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 57
+            },
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 873
+            },
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 885
+            },
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 1159
+            }
+          ]
+        },
+        {
+          "id": "computer_clipboard",
+          "title": "远程电脑剪贴板",
+          "summary": "向 VNC 或 RDP 发送文本剪贴板，再由用户触发目标平台的粘贴快捷键。",
+          "files": [
+            {
+              "path": "src/lib/components/computer/ComputerControlView.tsx",
+              "line": 303
+            },
+            {
+              "path": "src/lib/computer/rdpSession.ts",
+              "line": 92
+            },
+            {
+              "path": "src/lib/computer/platform.ts",
+              "line": 12
+            }
+          ]
+        },
+        {
+          "id": "encrypted_transport_boundary",
+          "title": "边界：页面加密通信",
+          "summary": "挂载前安装加密 fetch；上传及备用输入请求进入该通道；终端和远程电脑连接使用 secureSocket。不展开加密协议和入口路由。",
+          "files": [
+            {
+              "path": "src/main.tsx",
+              "line": 25
+            },
+            {
+              "path": "src/lib/federation/browserIntegration.ts",
+              "line": 443
+            },
+            {
+              "path": "src/lib/federation/browserIntegration.ts",
+              "line": 464
+            }
+          ]
+        },
+        {
+          "id": "backend_boundary",
+          "title": "边界：目标服务后端",
+          "summary": "上传接口落盘并返回路径；终端接口写入 PTY；电脑桥接转发协议数据。不展开通用文件系统、会话管理或目标程序。",
+          "files": [
+            {
+              "path": "src/server/routes/filesystem.ts",
+              "line": 5491
+            },
+            {
+              "path": "src/server/routes/terminal.ts",
+              "line": 8451
+            },
+            {
+              "path": "src/server/routes/terminal.ts",
+              "line": 9148
+            },
+            {
+              "path": "src/server/routes/computer.ts",
+              "line": 119
+            },
+            {
+              "path": "src/server/routes/rdp.ts",
+              "line": 110
+            }
+          ]
+        },
+        {
+          "id": "explicit_callers_boundary",
+          "title": "边界：显式粘贴调用方",
+          "summary": "上下文草稿和 Android 文本插入发送 termdock-insert-reference 并携带 paste 标记；仅分析事件契约。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/RightSidebar.tsx",
+              "line": 8088
+            },
+            {
+              "path": "src/lib/android/captureDelivery.ts",
+              "line": 5
+            },
+            {
+              "path": "src/lib/components/views/TerminalView.tsx",
+              "line": 2036
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "mobile_entry",
+          "to": "terminal_entry",
+          "label": "调用粘贴控制器"
+        },
+        {
+          "from": "explicit_callers_boundary",
+          "to": "terminal_entry",
+          "label": "发送显式插入事件"
+        },
+        {
+          "from": "terminal_entry",
+          "to": "clipboard_core",
+          "label": "读取剪贴板"
+        },
+        {
+          "from": "clipboard_core",
+          "to": "native_reader",
+          "label": "请求原始数据"
+        },
+        {
+          "from": "terminal_entry",
+          "to": "text_encoding",
+          "label": "编码文字与路径"
+        },
+        {
+          "from": "terminal_entry",
+          "to": "collaboration_router",
+          "label": "选择内容接收方"
+        },
+        {
+          "from": "collaboration_router",
+          "to": "collaboration_drafts",
+          "label": "插入活动草稿"
+        },
+        {
+          "from": "terminal_entry",
+          "to": "attachment_upload",
+          "label": "准备附件路径"
+        },
+        {
+          "from": "collaboration_drafts",
+          "to": "clipboard_core",
+          "label": "复用内容读取"
+        },
+        {
+          "from": "collaboration_drafts",
+          "to": "attachment_upload",
+          "label": "上传草稿附件"
+        },
+        {
+          "from": "attachment_upload",
+          "to": "encrypted_transport_boundary",
+          "label": "发送上传请求"
+        },
+        {
+          "from": "text_encoding",
+          "to": "encrypted_transport_boundary",
+          "label": "发送终端输入"
+        },
+        {
+          "from": "computer_clipboard",
+          "to": "encrypted_transport_boundary",
+          "label": "发送文本与按键"
+        },
+        {
+          "from": "encrypted_transport_boundary",
+          "to": "backend_boundary",
+          "label": "抵达业务接口"
+        }
+      ]
+    },
+    {
+      "id": "text_lifecycle",
+      "title": "文本粘贴与显式提交流程",
+      "summary": "普通粘贴设置 submitAfterPaste=false，全部换行留在括号块内。显式插入可把提交回车拼接在块外。控制器返回成功表示内容已处理，不能证明服务端执行或 Agent 已读。",
+      "nodes": [
+        {
+          "id": "mobile_trigger",
+          "title": "移动按钮触发",
+          "summary": "按钮去重后直接调用控制器 pasteClipboardText。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/MobileKeyboard.tsx",
+              "line": 326
+            },
+            {
+              "path": "src/lib/components/views/TerminalView.tsx",
+              "line": 2328
+            }
+          ]
+        },
+        {
+          "id": "capture",
+          "title": "捕获或主动读取文字",
+          "summary": "onPaste 取得 text/plain；主动读取复用一次 clipboard.read 的返回项；旧浏览器使用 readText。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 5187
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1724
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 4651
+            }
+          ]
+        },
+        {
+          "id": "textarea_recovery",
+          "title": "移动浏览器输入补偿",
+          "summary": "beforeinput 捕获粘贴类型；input 比较前后值，识别显式粘贴或一次多行插入，避免普通差量同步拆开换行。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 5086
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 5164
+            },
+            {
+              "path": "src/lib/terminal/bracketedPaste.ts",
+              "line": 24
+            }
+          ]
+        },
+        {
+          "id": "normalize",
+          "title": "清洗终端文字",
+          "summary": "统一换行为 CR，转换 Unicode 空格并移除零宽字符；空文本返回失败。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 115
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1639
+            }
+          ]
+        },
+        {
+          "id": "select_destination",
+          "title": "选择粘贴目标",
+          "summary": "先尝试协作接收器，未被接收时进入终端发送。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1643
+            },
+            {
+              "path": "src/lib/collaboration/inputTarget.ts",
+              "line": 22
+            }
+          ]
+        },
+        {
+          "id": "draft_boundary",
+          "title": "边界：协作草稿接收器",
+          "summary": "接收文字并更新草稿；停止于内容插入，不展开后续任务发送和执行。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 25
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 34
+            },
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 873
+            }
+          ]
+        },
+        {
+          "id": "encode_payload",
+          "title": "生成单条粘贴载荷",
+          "summary": "重置输入模型与选区；只有含换行的 paste 数据构造括号块，ESC 变为可见字符；普通粘贴不追加块外提交回车。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1611
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1628
+            },
+            {
+              "path": "src/lib/terminal/bracketedPaste.ts",
+              "line": 6
+            }
+          ]
+        },
+        {
+          "id": "explicit_insert_boundary",
+          "title": "边界：显式粘贴并发送",
+          "summary": "上下文草稿携带 paste 和 nonce；TerminalView 按目标会话接收并反馈插入结果，断联或重连阶段拒绝事件插入。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/RightSidebar.tsx",
+              "line": 8088
+            },
+            {
+              "path": "src/lib/components/views/TerminalView.tsx",
+              "line": 2036
+            }
+          ]
+        },
+        {
+          "id": "view_delivery",
+          "title": "终端视图投递",
+          "summary": "只投递活动或明确指定终端；粘贴跳过移动修饰符变换，通过 terminal.sendInput 发送并处理错误。",
+          "files": [
+            {
+              "path": "src/lib/components/views/TerminalView.tsx",
+              "line": 1929
+            },
+            {
+              "path": "src/lib/components/views/TerminalView.tsx",
+              "line": 2013
+            },
+            {
+              "path": "src/lib/terminal/factory.ts",
+              "line": 38
+            }
+          ]
+        },
+        {
+          "id": "input_api_boundary",
+          "title": "边界：终端输入 API",
+          "summary": "OPEN 或 CONNECTING 连接进入 pendingInputs；其他情况通过页面 fetch 调用输入接口。flush 发送 input 消息；调用完成不等于 PTY 已处理。",
+          "files": [
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 466
+            },
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 1048
+            },
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 1066
+            }
+          ]
+        },
+        {
+          "id": "transport_boundary",
+          "title": "边界：加密输入通道",
+          "summary": "secureSocket 与页面加密 fetch 将输入送往目标服务，通信失败不降级为直接 HTTP 业务请求。只分析公共接口。",
+          "files": [
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 683
+            },
+            {
+              "path": "src/lib/federation/browserIntegration.ts",
+              "line": 443
+            },
+            {
+              "path": "src/lib/federation/browserIntegration.ts",
+              "line": 464
+            }
+          ]
+        },
+        {
+          "id": "pty_boundary",
+          "title": "边界：服务端终端写入",
+          "summary": "WebSocket input 写入附件连接或 PTY；输入请求写入对应 PTY。不展开 tmux、进程管理和前台程序行为。",
+          "files": [
+            {
+              "path": "src/server/routes/terminal.ts",
+              "line": 9148
+            },
+            {
+              "path": "src/server/routes/terminal.ts",
+              "line": 8451
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "mobile_trigger",
+          "to": "capture",
+          "label": "主动读取剪贴板"
+        },
+        {
+          "from": "capture",
+          "to": "normalize",
+          "label": "取得纯文本"
+        },
+        {
+          "from": "textarea_recovery",
+          "to": "normalize",
+          "label": "恢复粘贴文字"
+        },
+        {
+          "from": "normalize",
+          "to": "select_destination",
+          "label": "提交清洗后内容"
+        },
+        {
+          "from": "select_destination",
+          "to": "draft_boundary",
+          "label": "协作接收器优先"
+        },
+        {
+          "from": "select_destination",
+          "to": "encode_payload",
+          "label": "无人接收则入终端"
+        },
+        {
+          "from": "explicit_insert_boundary",
+          "to": "encode_payload",
+          "label": "传入粘贴与提交意图"
+        },
+        {
+          "from": "encode_payload",
+          "to": "view_delivery",
+          "label": "发送单条载荷"
+        },
+        {
+          "from": "view_delivery",
+          "to": "input_api_boundary",
+          "label": "调用输入接口"
+        },
+        {
+          "from": "input_api_boundary",
+          "to": "transport_boundary",
+          "label": "输入消息或加密请求"
+        },
+        {
+          "from": "transport_boundary",
+          "to": "pty_boundary",
+          "label": "送达目标终端"
+        }
+      ]
+    },
+    {
+      "id": "attachment_flow",
+      "title": "图片、文件和视频的数据流",
+      "summary": "终端先尝试桌面文件读取，再处理已快照的事件载荷；浏览器主动读取先查视频、再查图片和文字。复用本机路径须核验身份，其他附件由当前页面上传。图中路径返回不代表内容已执行。",
+      "nodes": [
+        {
+          "id": "browser_boundary",
+          "title": "边界：浏览器剪贴板",
+          "summary": "ClipboardEvent 提供 Files 或文件 items；Clipboard API 按 MIME 读取 Blob，格式和权限取决于浏览器。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 5190
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1728
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 30
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 57
+            }
+          ]
+        },
+        {
+          "id": "target_boundary",
+          "title": "边界：当前目标身份",
+          "summary": "selectedTarget 提供页面目标 peerId，原生读取前后检查身份未变化。不展开服务发现和路由。",
+          "files": [
+            {
+              "path": "src/lib/federation/clientScope.ts",
+              "line": 23
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 72
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 87
+            }
+          ]
+        },
+        {
+          "id": "native_read",
+          "title": "原生文件与图片读取",
+          "summary": "IPC 校验服务窗口；macOS 读取文件 URL 和电影类型数据，优先真实视频文件；声明视频却无数据时抛错。生成视频读完后清理临时目录；图片返回 PNG 字节。",
+          "files": [
+            {
+              "path": "desktop/preload.cts",
+              "line": 118
+            },
+            {
+              "path": "desktop/main.ts",
+              "line": 1479
+            },
+            {
+              "path": "desktop/main.ts",
+              "line": 1486
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 55
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 94
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 129
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 175
+            }
+          ]
+        },
+        {
+          "id": "native_local_paths",
+          "title": "本机路径复用判断",
+          "summary": "请求 peerId 必须匹配本机服务身份；原始文件才能返回路径，否则读取字节。生成电影始终返回字节，不传已清理的临时路径。",
+          "files": [
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 22
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 151
+            },
+            {
+              "path": "desktop/clipboardFiles.ts",
+              "line": 155
+            }
+          ]
+        },
+        {
+          "id": "choose_content",
+          "title": "终端内容优先级",
+          "summary": "原生路径或文件优先，其后事件文件和文字；浏览器主动读取视频优先于图片。普通原生读取错误允许尝试其他内容，视频错误直接终止。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1692
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1706
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1728
+            }
+          ]
+        },
+        {
+          "id": "file_adapters",
+          "title": "转换与完整性校验",
+          "summary": "ArrayBuffer 或 Blob 转 File，保留类型并检查视频非空；图片生成唯一文件名；上传后必须取得完整路径列表。",
+          "files": [
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 10
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 42
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 71
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 103
+            }
+          ]
+        },
+        {
+          "id": "upload_request",
+          "title": "上传到目标服务",
+          "summary": "uploadFiles 通过 multipart files 字段和 CSRF 头请求 /api/terminal/fs/upload?dir=/tmp，页面 fetch 超时或失败时抛错。",
+          "files": [
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 2895
+            },
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 307
+            },
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 361
+            }
+          ]
+        },
+        {
+          "id": "transport_boundary",
+          "title": "边界：加密上传通道",
+          "summary": "启动时安装加密 fetch，上传交给当前加密客户端，不依赖首次加载已有 Service Worker 控制。停止于通信接口。",
+          "files": [
+            {
+              "path": "src/main.tsx",
+              "line": 25
+            },
+            {
+              "path": "src/lib/federation/browserIntegration.ts",
+              "line": 464
+            },
+            {
+              "path": "src/lib/federation/browserIntegration.ts",
+              "line": 496
+            }
+          ]
+        },
+        {
+          "id": "upload_route_boundary",
+          "title": "边界：服务端上传接口",
+          "summary": "验证目录并解析 multipart，清洗文件名、选择唯一落盘路径，完成后返回 name、path、size。仅分析粘贴调用的接口。",
+          "files": [
+            {
+              "path": "src/server/entry.ts",
+              "line": 412
+            },
+            {
+              "path": "src/server/routes/filesystem.ts",
+              "line": 5491
+            },
+            {
+              "path": "src/server/routes/filesystem.ts",
+              "line": 5535
+            },
+            {
+              "path": "src/server/routes/filesystem.ts",
+              "line": 5559
+            },
+            {
+              "path": "src/server/routes/filesystem.ts",
+              "line": 5582
+            }
+          ]
+        },
+        {
+          "id": "insert_paths",
+          "title": "转义并插入路径",
+          "summary": "目标上传路径或核验的原始路径经过 escapeShellPath，拼接空格后优先交给协作接收器，否则发送终端序列。",
+          "files": [
+            {
+              "path": "src/lib/desktop/shellPath.ts",
+              "line": 10
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1662
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1676
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1703
+            }
+          ]
+        },
+        {
+          "id": "error_feedback",
+          "title": "失败反馈",
+          "summary": "不可读取的视频禁止退回文字或封面；读取和上传失败显示 pasteError，并返回失败结果。",
+          "files": [
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 6
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 78
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1706
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1754
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 4831
+            }
+          ]
+        },
+        {
+          "id": "legacy_boundary",
+          "title": "边界：旧原生上传入口",
+          "summary": "保留的 pasteClipboardImage 由 preload 调用旧上传函数；所追踪新页面调用 readClipboardImage 并在页面上传，未发现调用旧入口。已安装旧客户端行为未验证。",
+          "files": [
+            {
+              "path": "src/lib/desktop/nativeBridge.ts",
+              "line": 73
+            },
+            {
+              "path": "desktop/preload.cts",
+              "line": 120
+            },
+            {
+              "path": "desktop/fileDropUpload.ts",
+              "line": 66
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 21
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "browser_boundary",
+          "to": "choose_content",
+          "label": "提供事件或异步内容"
+        },
+        {
+          "from": "target_boundary",
+          "to": "native_local_paths",
+          "label": "核对目标服务身份"
+        },
+        {
+          "from": "native_read",
+          "to": "native_local_paths",
+          "label": "取得文件与字节"
+        },
+        {
+          "from": "native_local_paths",
+          "to": "choose_content",
+          "label": "返回路径或字节"
+        },
+        {
+          "from": "choose_content",
+          "to": "file_adapters",
+          "label": "转换图片与附件"
+        },
+        {
+          "from": "choose_content",
+          "to": "insert_paths",
+          "label": "复用核验路径"
+        },
+        {
+          "from": "file_adapters",
+          "to": "upload_request",
+          "label": "上传附件"
+        },
+        {
+          "from": "upload_request",
+          "to": "transport_boundary",
+          "label": "发送 multipart 请求"
+        },
+        {
+          "from": "transport_boundary",
+          "to": "upload_route_boundary",
+          "label": "调用目标上传接口"
+        },
+        {
+          "from": "upload_route_boundary",
+          "to": "insert_paths",
+          "label": "返回目标文件路径"
+        },
+        {
+          "from": "choose_content",
+          "to": "error_feedback",
+          "label": "读取失败或不可读视频"
+        },
+        {
+          "from": "file_adapters",
+          "to": "error_feedback",
+          "label": "空视频或路径不完整"
+        },
+        {
+          "from": "upload_request",
+          "to": "error_feedback",
+          "label": "上传失败或超时"
+        }
+      ]
+    },
+    {
+      "id": "collaboration_paste",
+      "title": "协作草稿的粘贴与附件插入",
+      "summary": "任务草稿与群组消息采用两个实际实现。任务输入框串行准备附件并检查服务目标；群组输入框处理浏览器文件载荷并保存原群组草稿。止于草稿更新，不展开任务调度和消息投递。",
+      "nodes": [
+        {
+          "id": "task_caller_boundary",
+          "title": "边界：协作任务页面",
+          "summary": "任务规格、决定回答和跟进要求共用 CollaborationInput，并通过附件忙碌计数约束提交。只分析组件契约。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/CollaborationTaskWorkbench.tsx",
+              "line": 266
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationTaskWorkbench.tsx",
+              "line": 419
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationTaskWorkbench.tsx",
+              "line": 432
+            }
+          ]
+        },
+        {
+          "id": "task_input",
+          "title": "任务草稿输入框",
+          "summary": "管理选区、附件忙碌与错误；注册协作接收器，在草稿插入文字或附件路径。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 11
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 24
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 32
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 93
+            }
+          ]
+        },
+        {
+          "id": "task_paste",
+          "title": "任务粘贴内容选择",
+          "summary": "普通浏览器文字保留默认 textarea 粘贴；原生文件优先，其后事件文件、文字、异步视频和图片；视频错误直接终止。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 57
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 68
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 77
+            }
+          ],
+          "parentId": "task_input"
+        },
+        {
+          "id": "task_queue",
+          "title": "顺序与目标校验",
+          "summary": "Promise 队列记录选区；操作前后比较 origin、peerId 和 serviceOrigin，维护上传计数并反馈错误。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 38
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 39
+            }
+          ],
+          "parentId": "task_input"
+        },
+        {
+          "id": "task_insert",
+          "title": "更新任务草稿",
+          "summary": "文字未变时替换原选区，上传等待期间已有新文字则追加，避免覆盖较新草稿；文件路径先转义。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 25
+            },
+            {
+              "path": "src/lib/components/sidebar/CollaborationInput.tsx",
+              "line": 48
+            }
+          ],
+          "parentId": "task_input"
+        },
+        {
+          "id": "group_input",
+          "title": "群组消息草稿",
+          "summary": "消息框处理 clipboardData.files；无文件时保留默认文字粘贴，按面板激活状态注册显式接收器。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 871
+            },
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 1159
+            }
+          ]
+        },
+        {
+          "id": "group_upload",
+          "title": "群组附件准备",
+          "summary": "上传至 /tmp 并核验完整路径；仍在原群组时追加，切换后保存到原群组草稿。",
+          "files": [
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 885
+            },
+            {
+              "path": "src/lib/components/sidebar/AgentOperationsPanel.tsx",
+              "line": 893
+            }
+          ]
+        },
+        {
+          "id": "routing",
+          "title": "显式粘贴分流器",
+          "summary": "根据活动面板选择接收器；捕获阶段处理引用事件，带 nonce 时发出插入确认。",
+          "files": [
+            {
+              "path": "src/lib/collaboration/inputTarget.ts",
+              "line": 5
+            },
+            {
+              "path": "src/lib/collaboration/inputTarget.ts",
+              "line": 22
+            },
+            {
+              "path": "src/lib/collaboration/inputTarget.ts",
+              "line": 29
+            }
+          ]
+        },
+        {
+          "id": "clipboard_boundary",
+          "title": "边界：共享剪贴板适配",
+          "summary": "复用原生文件和浏览器视频、图片读取及附件上传辅助函数；本视角不展开实现。",
+          "files": [
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 21
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 42
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 71
+            },
+            {
+              "path": "src/lib/terminal/clipboardImage.ts",
+              "line": 103
+            }
+          ]
+        },
+        {
+          "id": "upload_boundary",
+          "title": "边界：页面上传接口",
+          "summary": "所有协作附件由当前页面调用 uploadFiles 取得目标文件路径。不重复展开加密通信。",
+          "files": [
+            {
+              "path": "src/lib/terminal/api.ts",
+              "line": 2895
+            }
+          ]
+        },
+        {
+          "id": "terminal_caller_boundary",
+          "title": "边界：终端粘贴调用方",
+          "summary": "终端清洗文字或准备附件路径后调用分流器，被接收时停止终端发送。",
+          "files": [
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1639
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1666
+            },
+            {
+              "path": "src/lib/components/terminal/TerminalViewport.tsx",
+              "line": 1682
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "task_caller_boundary",
+          "to": "task_input",
+          "label": "传入草稿和忙碌回调"
+        },
+        {
+          "from": "task_paste",
+          "to": "task_queue",
+          "label": "排队准备内容"
+        },
+        {
+          "from": "task_paste",
+          "to": "clipboard_boundary",
+          "label": "读取附件"
+        },
+        {
+          "from": "task_queue",
+          "to": "upload_boundary",
+          "label": "请求附件路径"
+        },
+        {
+          "from": "task_queue",
+          "to": "task_insert",
+          "label": "核验目标后插入"
+        },
+        {
+          "from": "group_input",
+          "to": "group_upload",
+          "label": "粘贴文件载荷"
+        },
+        {
+          "from": "group_upload",
+          "to": "upload_boundary",
+          "label": "请求全部路径"
+        },
+        {
+          "from": "terminal_caller_boundary",
+          "to": "routing",
+          "label": "优先尝试协作目标"
+        },
+        {
+          "from": "routing",
+          "to": "task_insert",
+          "label": "插入任务草稿"
+        },
+        {
+          "from": "routing",
+          "to": "group_input",
+          "label": "追加群组草稿"
+        }
+      ]
+    },
+    {
+      "id": "remote_clipboard",
+      "title": "远程电脑剪贴板与粘贴快捷键",
+      "summary": "远程电脑文本表单先发送剪贴板，用户另行点击平台粘贴快捷键。发送状态表示客户端调用成功，不证明远端已读或粘贴成功。noVNC、Guacamole 和服务端转发均止于接口边界。",
+      "nodes": [
+        {
+          "id": "clipboard_ui",
+          "title": "远程剪贴板表单",
+          "summary": "仅连接且非只读时显示，文本长度上限 16384；提交调用 clipboardPasteFrom 并显示发送状态或错误。",
+          "files": [
+            {
+              "path": "src/lib/components/computer/ComputerControlView.tsx",
+              "line": 303
+            }
+          ]
+        },
+        {
+          "id": "shortcut_ui",
+          "title": "远程粘贴按键",
+          "summary": "依平台映射粘贴组合键，依次按下并反向释放；发送前检查连接和只读状态。",
+          "files": [
+            {
+              "path": "src/lib/components/computer/ComputerControlView.tsx",
+              "line": 198
+            },
+            {
+              "path": "src/lib/components/computer/ComputerControlView.tsx",
+              "line": 309
+            },
+            {
+              "path": "src/lib/computer/platform.ts",
+              "line": 12
+            }
+          ]
+        },
+        {
+          "id": "vnc_boundary",
+          "title": "边界：VNC 剪贴板适配",
+          "summary": "使用 noVNC 的 clipboardPasteFrom 和 sendKey；库内部剪贴板编码不在分析范围。",
+          "files": [
+            {
+              "path": "src/lib/components/computer/ComputerControlView.tsx",
+              "line": 166
+            },
+            {
+              "path": "src/lib/components/computer/ComputerControlView.tsx",
+              "line": 173
+            },
+            {
+              "path": "src/lib/computer/novnc.d.ts",
+              "line": 16
+            }
+          ]
+        },
+        {
+          "id": "rdp_adapter",
+          "title": "RDP 文本剪贴板适配",
+          "summary": "非只读且未销毁时创建 text/plain 剪贴板流，用 StringWriter 发送并结束；按键转换为 Guacamole 按键事件，库内部止于边界。",
+          "files": [
+            {
+              "path": "src/lib/computer/rdpSession.ts",
+              "line": 89
+            },
+            {
+              "path": "src/lib/computer/rdpSession.ts",
+              "line": 92
+            }
+          ]
+        },
+        {
+          "id": "channel_boundary",
+          "title": "边界：加密远程控制通道",
+          "summary": "VNC 通道发送编码数据，RDP 隧道发送指令；均使用 secureSocket 访问电脑 WebSocket，仅核对接口。",
+          "files": [
+            {
+              "path": "src/lib/computer/secureVncChannel.ts",
+              "line": 19
+            },
+            {
+              "path": "src/lib/computer/secureVncChannel.ts",
+              "line": 40
+            },
+            {
+              "path": "src/lib/computer/secureRdpTunnel.ts",
+              "line": 21
+            },
+            {
+              "path": "src/lib/computer/secureRdpTunnel.ts",
+              "line": 39
+            },
+            {
+              "path": "src/lib/federation/browserIntegration.ts",
+              "line": 443
+            }
+          ]
+        },
+        {
+          "id": "server_boundary",
+          "title": "边界：电脑协议转发",
+          "summary": "VNC data 解码后写入 TCP；RDP 白名单允许 clipboard、blob、end 等指令并转发。不展开目标系统剪贴板能力。",
+          "files": [
+            {
+              "path": "src/server/routes/computer.ts",
+              "line": 119
+            },
+            {
+              "path": "src/server/routes/rdp.ts",
+              "line": 110
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "clipboard_ui",
+          "to": "vnc_boundary",
+          "label": "发送 VNC 剪贴板文本"
+        },
+        {
+          "from": "clipboard_ui",
+          "to": "rdp_adapter",
+          "label": "发送 RDP 剪贴板文本"
+        },
+        {
+          "from": "shortcut_ui",
+          "to": "vnc_boundary",
+          "label": "发送粘贴组合键"
+        },
+        {
+          "from": "shortcut_ui",
+          "to": "rdp_adapter",
+          "label": "发送粘贴组合键"
+        },
+        {
+          "from": "vnc_boundary",
+          "to": "channel_boundary",
+          "label": "写入 VNC 数据"
+        },
+        {
+          "from": "rdp_adapter",
+          "to": "channel_boundary",
+          "label": "发送剪贴板流指令"
+        },
+        {
+          "from": "channel_boundary",
+          "to": "server_boundary",
+          "label": "加密传输协议数据"
+        }
+      ]
+    }
+  ]
+}

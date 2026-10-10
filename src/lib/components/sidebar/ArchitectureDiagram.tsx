@@ -9,12 +9,13 @@ import { useI18n } from '../../i18n';
 import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
 import './architecture.css';
 
-export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, active = true, inspector, inspectorStage = 'details', onDismissInspector, onExpandedChange, navigation, heading }: {
+export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, active = true, referenceWidth, inspector, inspectorStage = 'details', onDismissInspector, onExpandedChange, navigation, heading }: {
   view: ArchitecturePerspective;
   parentId?: string;
   selectedId: string | null;
   onSelect: (id: string) => void;
   active?: boolean;
+  referenceWidth?: number;
   inspector?: ReactNode;
   inspectorStage?: 'preview' | 'details' | 'source' | 'analysis';
   onDismissInspector?: () => void;
@@ -39,7 +40,7 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   const expandedChange = useRef(onExpandedChange); expandedChange.current = onExpandedChange;
   const canvasPosition = useRef({ left: 0, top: 0 });
   const [downloadError, setDownloadError] = useState(false);
-  const [viewportSize, setViewportSize] = useState({ width: 320, height: 320 });
+  const [viewportSize, setViewportSize] = useState({ width: 320, height: 320, clipHeight: 0 });
   const pointers = useRef(new Map<number, { x: number; y: number; nodeId?: string }>());
   const dragged = useRef(false);
   const dragDistance = useRef(0);
@@ -51,10 +52,10 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
     // Reading is the default. Large graphs scroll instead of shrinking labels
     // and touch targets until they become unreadable.
     // Docking a reading pane changes the canvas size, not the user's zoom.
-    const availableWidth = expanded ? window.innerWidth : viewportSize.width;
+    const availableWidth = expanded ? window.innerWidth : referenceWidth || viewportSize.width;
     const scale = Math.max(1, Math.min(1.4, Math.max(160, availableWidth - 24) / width));
     return { width, height, scale };
-  }, [svg, viewportSize.width, expanded]);
+  }, [svg, viewportSize.width, expanded, referenceWidth]);
   const size = { width: geometry.width * geometry.scale * zoom, height: geometry.height * geometry.scale * zoom };
 
   const changeZoom = (value: number, x?: number, y?: number) => {
@@ -99,9 +100,13 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   useEffect(() => {
     const container = viewport.current;
     if (!container) return;
-    const resize = () => setViewportSize({ width: container.clientWidth || 320, height: container.clientHeight || 320 });
+    const clip = container.closest<HTMLElement>('[data-architecture-content]');
+    const resize = () => {
+      setViewportSize({ width: container.clientWidth || 320, height: container.clientHeight || 320, clipHeight: clip?.clientHeight || 0 });
+    };
     resize();
     const observer = new ResizeObserver(resize); observer.observe(container);
+    if (clip) observer.observe(clip);
     return () => observer.disconnect();
   }, [svg, expanded]);
 
@@ -141,11 +146,26 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
     });
   });
   useLayoutEffect(() => {
-    if (!expanded || !selectedId || inspectorStage === 'source' || inspectorStage === 'analysis') return;
+    if (!selectedId || inspectorStage === 'source' || inspectorStage === 'analysis') return;
     const container = viewport.current;
     const node = [...(root.current?.querySelectorAll<SVGGElement>('[data-architecture-node]') ?? [])].find(node => node.dataset.architectureNode === selectedId);
     if (!container || !node) return;
-    const canvas = container.getBoundingClientRect(), box = node.getBoundingClientRect();
+    let canvas = container.getBoundingClientRect();
+    const clip = container.closest<HTMLElement>('[data-architecture-content]');
+    if (!expanded && clip && canvas.width > 24 && canvas.height > 24) {
+      const boundary = clip.getBoundingClientRect();
+      // An expanded reading pane may leave the inline graph below the fold.
+      // Reveal only enough graph to retain context, without resetting the page.
+      const visibleHeight = Math.min(canvas.height, Math.max(160, boundary.height - 136));
+      if (boundary.height > 160 && Math.min(canvas.bottom, boundary.bottom) - Math.max(canvas.top, boundary.top) < visibleHeight) {
+        clip.scrollTop += Math.max(0, canvas.top - boundary.bottom + visibleHeight);
+        canvas = container.getBoundingClientRect();
+      }
+      // The perspective selector and diagram toolbar stay above the graph.
+      const top = Math.max(canvas.top, boundary.top + 136), bottom = Math.min(canvas.bottom, boundary.bottom);
+      canvas = new DOMRect(canvas.left, top, canvas.width, Math.max(0, bottom - top));
+    }
+    const box = node.getBoundingClientRect();
     if (canvas.width <= 24 || canvas.height <= 24 || box.width <= 0 || box.height <= 0) return;
     // Move only as far as needed to keep the selected node in the remaining
     // canvas. Avoid scrollIntoView, which also scrolls ancestor panels.
@@ -157,7 +177,7 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
       : box.top < canvas.top + margin ? box.top - canvas.top - margin
       : box.bottom > canvas.bottom - margin ? box.bottom - canvas.bottom + margin : 0;
     container.scrollLeft += dx; container.scrollTop += dy;
-  }, [selectedId, viewportSize.width, viewportSize.height, expanded, inspectorStage, svg]);
+  }, [selectedId, viewportSize.width, viewportSize.height, viewportSize.clipHeight, expanded, inspectorStage, svg]);
   const selectNode = (id: string) => {
     [...(root.current?.querySelectorAll<SVGGElement>('[data-architecture-node]') ?? [])].find(node => node.dataset.architectureNode === id)?.focus?.({ preventScroll: true });
     onSelect(id);
@@ -180,7 +200,7 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
     {expanded ? <header className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border/15 px-2 py-1">
       <div className="min-w-0 basis-full px-1 min-[360px]:basis-0 min-[360px]:flex-1">{heading ?? <h2 className="truncate text-xs font-semibold" title={title}>{title}</h2>}</div>
       <div className="flex w-full shrink-0 items-center justify-between gap-1 min-[360px]:w-auto" title={t('architecture.panHint')}>{controls}</div>
-    </header> : <div className="shrink-0 border-b border-border/15 px-2 py-1">
+    </header> : <div className="sticky top-[60px] z-10 shrink-0 border-b border-border/15 bg-surface-2 px-2 py-1">
       <div className="flex items-center justify-between gap-1">{controls}</div>
       <p className="px-1 pb-1 text-xs text-muted-foreground">{t('architecture.panHint')}</p>
     </div>}
@@ -189,7 +209,7 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
     <div className={expanded ? 'relative flex min-h-0 flex-1 flex-col overflow-hidden min-[768px]:flex-row' : 'relative'}>
     {failed ? <p role="alert" className="p-4 text-sm text-muted-foreground">{t('architecture.diagramFailed')}</p>
       : !svg ? <p role="status" className="p-4 text-sm text-muted-foreground">{t('architecture.rendering')}</p>
-      : <div ref={viewport} data-sidebar-gesture-ignore className={`termdock-architecture-viewport overflow-auto overscroll-contain p-3 ${expanded ? 'min-h-0 min-w-0 flex-1' : 'h-[min(50dvh,26rem)]'}`} style={{ touchAction: 'none' }}
+      : <div ref={viewport} data-sidebar-gesture-ignore className={`termdock-architecture-viewport overflow-auto overscroll-contain p-3 ${expanded ? 'min-h-0 min-w-0 flex-1' : 'h-[min(50dvh,26rem)]'}`} style={{ touchAction: 'none', maxHeight: !expanded && viewportSize.clipHeight ? Math.max(160, viewportSize.clipHeight - 150) : undefined }}
         onPointerDown={event => {
           if (event.button !== 0) return;
           if (!pointers.current.size) { dragged.current = false; dragDistance.current = 0; }
@@ -237,5 +257,5 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   if (expanded) return createPortal(<section ref={dialog} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t('architecture.diagram')} data-sidebar-gesture-ignore className="fixed inset-0 z-modal-panel flex flex-col overflow-hidden bg-surface text-foreground pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
     {contents}
   </section>, document.body);
-  return <section className="overflow-hidden rounded-xl border border-border/20 bg-surface-2" aria-label={t('architecture.diagram')}>{contents}</section>;
+  return <section className="overflow-clip rounded-xl border border-border/20 bg-surface-2" aria-label={t('architecture.diagram')}>{contents}</section>;
 }

@@ -134,7 +134,7 @@ export class CollaborationTaskStore {
         deliveries: task.deliveries.filter(d => d.attemptId === task.activeAttemptId && d.error).slice(-1),
         attempts: current ? [{ ...current, report: current.report ? { ...current.report, summary: reportSummary, content: '', evidence: undefined } : undefined }] : [],
         artifacts: [plan, result, ...task.artifacts.filter(a => a.kind === 'review' && a.reviewsArtifactId === result?.id)].filter((a): a is NonNullable<typeof a> => !!a).map(a => ({ ...a, content: '', summary: (a.summary || (a.kind === 'result' && collaborationResultPresentation(a.content).condensed ? collaborationResultPresentation(a.content).summary : undefined))?.slice(0, 800), evidence: undefined })),
-        decisions: task.decisions.filter(d => d.status === 'pending').map(d => ({ ...d, question: '', options: [] })),
+        decisions: task.decisions.filter(d => d.status === 'pending').map(d => ({ ...d, question: d.question.slice(0, 512), options: [] })),
         events: task.events.filter(e => ['revise', 'request-review'].includes(e.kind) && e.attemptId === task.activeAttemptId).slice(-4).map(e => ({ ...e, content: e.source === 'user' && e.kind === 'revise' ? e.content.slice(0, 512) : '' })) };
     }));
   }
@@ -384,7 +384,14 @@ export class CollaborationTaskStore {
       } else if (input.kind === 'close' || input.kind === 'reopen') {
         task.status = input.kind === 'close' ? 'closed' : 'open'; this.event(task, input.kind, actor, content || (input.kind === 'close' ? '任务已关闭，终端工作未被中止' : '任务已重新打开'));
         if (input.kind === 'close') doc.outbox = doc.outbox.filter(o => o.taskId !== task.id || !!o.messageId);
-        else delete task.acceptedArtifactId;
+        else {
+          delete task.acceptedArtifactId; delete task.completionMode; delete task.automationIssue;
+          if (task.artifacts.some(a => a.kind === 'result' && a.attemptId === task.activeAttemptId)) {
+            // Reopening starts a new result round; old reviews remain history, not approval.
+            const event = this.event(task, 'revise', actor, content || '任务重新开启，请继续当前分派并提交新结果；新版本需要重新评审');
+            if (actor === null) event.source = 'user';
+          }
+        }
         if (input.kind === 'close') for (const decision of task.decisions) if (decision.status === 'pending') decision.status = 'superseded';
         if (task.workflow?.kind === 'goal') task.workflow.paused = input.kind === 'close';
       } else if (input.kind === 'coordinate') {

@@ -21,6 +21,24 @@ afterEach(() => {
   else delete (SVGElement.prototype as { getBBox?: unknown }).getBBox;
 });
 describe('interactive architecture SVG', () => {
+  it('keeps an ordinary graph selection inside its reduced canvas without shrinking the chosen zoom', async () => {
+    const callbacks: Array<() => void> = [];
+    vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { callbacks.push(callback); } observe() {} disconnect() {} });
+    const component = render(<ArchitectureDiagram view={view} selectedId={null} onSelect={vi.fn()} referenceWidth={1200} />);
+    const node = await screen.findByRole('button', { name: 'Server' });
+    const viewport = component.container.querySelector<HTMLElement>('.termdock-architecture-viewport')!;
+    let width = 1100;
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, get: () => width });
+    viewport.getBoundingClientRect = () => new DOMRect(0, 200, width, 416);
+    node.getBoundingClientRect = () => new DOMRect(900 - viewport.scrollLeft, 300, 200, 60);
+    const zoom = screen.getByRole('button', { name: 'Reset diagram zoom' }).textContent;
+    width = 648;
+    component.rerender(<ArchitectureDiagram view={view} selectedId="server" onSelect={vi.fn()} referenceWidth={1200} />);
+    expect(viewport.scrollLeft).toBe(464);
+    expect(node.getBoundingClientRect().right).toBe(636);
+    expect(screen.getByRole('button', { name: 'Reset diagram zoom' }).textContent).toBe(zoom);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
   it('moves an obstructed selection into the remaining canvas without changing zoom, including after expanding details', async () => {
     Object.defineProperty(SVGElement.prototype, 'getBBox', { configurable: true, value: () => ({ x: 0, y: 0, width: 2000, height: 1800 }) });
     const component = render(<ArchitectureDiagram view={view} selectedId={null} onSelect={vi.fn()} inspectorStage="preview" />);

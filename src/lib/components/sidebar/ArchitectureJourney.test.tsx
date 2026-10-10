@@ -41,6 +41,49 @@ const setup = async () => {
   return { ...view, dialog, onOpenFile, onInsertPrompt };
 };
 describe('architecture reading journey', () => {
+  it('uses a nonmodal side reading pane in a wide ordinary workspace and returns from source without losing zoom or pan', async () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1200);
+    try {
+      const onOpenFile = vi.fn();
+      const component = render(<ArchitecturePanel rootPath="/project" active onOpenFile={onOpenFile} onInsertPrompt={vi.fn()} renderSource={file => <div>Source {file.path}:{file.line}</div>} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Server' }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+      await waitFor(() => expect(component.container.querySelector('.termdock-architecture-viewport')).toBeTruthy());
+      const viewport = component.container.querySelector<HTMLElement>('.termdock-architecture-viewport')!;
+      viewport.scrollLeft = 130; viewport.scrollTop = 90;
+      const zoom = screen.getByRole('button', { name: 'Reset diagram zoom' }).textContent;
+      screen.getByRole('combobox', { name: 'Perspective' }).focus();
+      expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Perspective' }));
+      fireEvent.click(screen.getByRole('button', { name: 'src/server.ts:12' }));
+      expect(screen.getByText('Source src/server.ts:12')).toBeTruthy();
+      expect(screen.queryByRole('combobox', { name: 'Perspective' })).toBeNull();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.getByRole('combobox', { name: 'Perspective' })).toBeTruthy();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Reset diagram zoom' }).textContent).toBe(zoom);
+      expect(viewport.scrollLeft).toBe(130); expect(viewport.scrollTop).toBe(90);
+      expect(onOpenFile).not.toHaveBeenCalled();
+    } finally { width.mockRestore(); }
+  });
+  it('uses the narrow sidebar budget even on a desktop, and keeps ordinary graph controls available while reading', async () => {
+    vi.stubGlobal('innerWidth', 1440);
+    render(<ArchitecturePanel rootPath="/project" active onOpenFile={vi.fn()} onInsertPrompt={vi.fn()} />);
+    await screen.findByRole('button', { name: 'Server' });
+    fireEvent.click(screen.getByRole('button', { name: 'Relationship diagram' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Server' }));
+    expect(screen.getByRole('button', { name: 'Read module details' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'src/server.ts:12' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Read module details' }));
+    expect(screen.getByRole('button', { name: 'src/server.ts:12' })).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const fit = screen.getByRole('button', { name: 'Fit entire diagram' });
+    fit.focus(); expect(document.activeElement).toBe(fit);
+    fireEvent.keyDown(fit, { key: 'Escape' });
+    expect(screen.getByRole('button', { name: 'Read module details' })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Read module details' }), { key: 'Escape' });
+    expect(screen.queryByRole('button', { name: 'Read module details' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open fullscreen diagram' })).toBeTruthy();
+  });
   it('starts with a compact phone preview and expands details only on request, with one reading layer per Escape', async () => {
     vi.stubGlobal('innerWidth', 402);
     const { dialog } = await setup();

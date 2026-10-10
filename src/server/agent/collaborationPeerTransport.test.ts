@@ -31,7 +31,8 @@ async function setup() {
         const target = nodes.findIndex(node => node.serviceId === peer.serviceId);
         return { closed: false, close() {}, request: async packet => {
           const result = transports[target].receive(nodes[index].serviceId, { ...packet, id: 'rpc' } as Packet);
-          if (loseReceipt) { loseReceipt = false; throw new Error('RECEIPT_LOST'); }
+          // Background context exchanges must not consume the message-receipt fault.
+          if (loseReceipt && index === 0 && target === 1 && packet.message) { loseReceipt = false; throw new Error('RECEIPT_LOST'); }
           return { ...result, id: 'rpc', type: 'result' };
         } };
       }, deliver: id => {

@@ -10,8 +10,30 @@ beforeEach(() => {
  vi.stubGlobal('ResizeObserver', class { constructor(private callback: ResizeObserverCallback) {} observe() { this.callback([{ contentRect: { width: 360 } }] as ResizeObserverEntry[], this as unknown as ResizeObserver); } disconnect() {} });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-function setup() { const settings = vi.fn(), select = vi.fn(); const view = render(<CollaborationKanban tasks={tasks} selectedId={null} onSelect={select} name={() => '成员'} storage="test-mobile" action={<button>新目标</button>} navigation={<nav aria-label="协作工作区"><button>看板</button><button>成员</button></nav>} settings={<button onClick={settings}>组设置</button>} />); return { ...view, settings, select }; }
+function setup(records = tasks) { const settings = vi.fn(), select = vi.fn(); const view = render(<CollaborationKanban tasks={records} selectedId={null} onSelect={select} name={() => '成员'} storage="test-mobile" action={<button>新目标</button>} navigation={<nav aria-label="协作工作区"><button>看板</button><button>成员</button></nav>} settings={<button onClick={settings}>组设置</button>} />); return { ...view, settings, select }; }
 describe('mobile kanban navigation', () => {
+ it('shows one user goal, with execution details available through an explicit filter', () => {
+  const root = { ...base, status: 'accepted' as const };
+  const child = { ...base, id: 'child', parentTaskId: root.id, title: '内部执行步骤', status: 'accepted' as const, completionMode: 'reviewed' as const };
+  const { container, select } = setup([root, child]);
+  expect(container.querySelectorAll('[data-task-id]')).toHaveLength(1);
+  expect(screen.getByRole('button', { name: /当前任务/ }).textContent).toContain('已完成 · 你已验收');
+  fireEvent.click(screen.getByRole('button', { name: /当前任务/ })); expect(select).toHaveBeenCalledWith(root.id);
+  fireEvent.click(screen.getByRole('button', { name: '更多看板操作' }));
+  fireEvent.click(screen.getByRole('button', { name: '筛选任务' }));
+  fireEvent.click(screen.getByRole('checkbox', { name: '显示执行子任务' }));
+  expect(container.querySelectorAll('[data-task-id]')).toHaveLength(2);
+  expect(screen.getByRole('button', { name: /内部执行步骤/ }).textContent).toContain('执行交付已评审');
+ });
+ it('routes a hidden execution exception through its goal card into the task that needs attention', () => {
+  const child = { ...base, id: 'child', parentTaskId: base.id, title: '检查访问条件', automationIssue: '测试错误：执行目录不可用' };
+  const { container, select } = setup([base, child]);
+  expect(container.querySelectorAll('[data-task-id]')).toHaveLength(1);
+  const card = screen.getByRole('button', { name: /当前任务.*来自执行任务：检查访问条件/ });
+  expect(within(screen.getByRole('region', { name: '需要你任务' })).getByRole('button', { name: /当前任务/ })).toBe(card);
+  expect(card.textContent).toContain('测试错误：执行目录不可用');
+  fireEvent.click(card); expect(select).toHaveBeenCalledWith('child');
+ });
  it('synchronizes a swipe with stage buttons and keeps inactive cards out of keyboard navigation', () => {
   const { container, select } = setup(); const rail = container.querySelector<HTMLElement>('[data-kanban-scroll]')!;
   Object.defineProperty(rail, 'clientWidth', { value: 360 });

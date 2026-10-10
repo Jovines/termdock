@@ -158,11 +158,16 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
     setSelectedId(nodeHistory[nodeHistory.length - 1]); setNodeHistory(history => history.slice(0, -1));
   } : undefined;
   const backLabel = sourceFile || moduleGeneration ? t('architecture.backToModule') : t('architecture.previousModule');
-  const previewDetail = !wideViewport && !detailExpanded && !sourceFile && !moduleGeneration;
+  // Use the available workspace, rather than the device width, to choose a
+  // reading layout. A narrow desktop sidebar needs the same room as a phone.
+  const sideDetail = diagramExpanded ? wideViewport : panelWidth >= 900;
+  const previewDetail = !sideDetail && !detailExpanded && !sourceFile && !moduleGeneration;
+  const readingOnly = !diagramExpanded && !!selected && (!!sourceFile || !!moduleGeneration || mode === 'outline');
   const button = 'inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-medium transition hover:bg-surface-elevated focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40';
-  const inspector = (inGraph: boolean) => selected && (inGraph && previewDetail
+  const dismissDetail = previewDetail ? closeDetail : backDetail ?? (!sideDetail && mode === 'graph' ? () => setDetailExpanded(false) : closeDetail);
+  const inspector = (inGraph: boolean) => selected && ((inGraph || mode === 'graph') && previewDetail
     ? <ArchitectureNodePreview node={selected} onExpand={() => setDetailExpanded(true)} onClose={closeDetail} />
-    : <ArchitectureInspector active={active && !moduleGeneration} docked={inGraph && !sourceFile && !moduleGeneration} title={selected.title} stageKey={`${selected.id}:${sourceFile ? `${sourceFile.path}:${sourceFile.line}` : moduleGeneration ? 'analysis' : 'details'}`} source={!!sourceFile} fullHeight={!!moduleGeneration} inGraph={inGraph} side={!sourceFile && mode === 'graph' && panelWidth >= 680} onBack={backDetail} backLabel={backLabel} onClose={closeDetail} onDismiss={backDetail ?? closeDetail} onCollapse={inGraph && !wideViewport && !sourceFile && !moduleGeneration ? () => setDetailExpanded(false) : undefined}>
+    : <ArchitectureInspector active={active && !moduleGeneration} docked={!inGraph || (!sourceFile && !moduleGeneration)} title={selected.title} stageKey={`${selected.id}:${sourceFile ? `${sourceFile.path}:${sourceFile.line}` : moduleGeneration ? 'analysis' : 'details'}`} source={!!sourceFile} fullHeight={inGraph ? !!moduleGeneration : readingOnly} inGraph={inGraph} side={sideDetail} onBack={backDetail} backLabel={backLabel} onClose={closeDetail} onDismiss={dismissDetail} onCollapse={!sideDetail && !readingOnly && !sourceFile && !moduleGeneration ? () => setDetailExpanded(false) : undefined}>
     {sourceFile && renderSource ? renderSource(sourceFile) : moduleGeneration ? <>
       <ArchitectureGenerationForm active={active} key={selected.id} rootPath={rootPath!} initial={moduleGeneration} onInsertPrompt={onInsertPrompt} onPrepared={setPreparedModuleFile} onClose={() => setModuleGeneration(null)} />
       {preparedModuleFile && <button type="button" className={`${button} mt-3 bg-primary/15 text-primary`} onClick={() => { setPreparedAnalysis(moduleGeneration); selectFile(preparedModuleFile); closeDetail(); }}>{t('architecture.viewPrepared')}</button>}
@@ -170,16 +175,21 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
   </ArchitectureInspector>);
 
   if (!rootPath) return <p className="p-5 text-sm text-muted-foreground">{t('fileTree.noWorkingDir')}</p>;
-  return <div ref={panel} className="relative flex h-full min-h-0 flex-col">
+  return <div ref={panel} className="relative flex h-full min-h-0 flex-col" onKeyDown={event => {
+    if (!diagramExpanded && selected && event.key === 'Escape' && !event.defaultPrevented && !event.nativeEvent.isComposing) {
+      event.preventDefault(); event.stopPropagation(); dismissDetail();
+    }
+  }}>
     <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/15 px-3 py-2">
       <span className="flex items-center gap-2 text-sm font-semibold"><Network size={16} />{t('architecture.title')}</span>
       <div className="flex items-center gap-1">
-        <button ref={generationTrigger} type="button" className={button} disabled={!currentAnalysis} onClick={() => { if (currentAnalysis) setGeneration(generation ? null : { initial: currentAnalysis, ...(document ? { outputFile: file } : {}) }); }} aria-expanded={!!generation}><Sparkles size={14} />{t(document ? 'architecture.update' : 'architecture.generate')}</button>
-        {(document || file !== ARCHITECTURE_FILE) && <button type="button" className={`${button} px-2`} aria-label={t('architecture.newAnalysis')} onClick={() => setGeneration({ initial: DEFAULT_ANALYSIS })}><Plus size={16} /></button>}
+        <button ref={generationTrigger} type="button" className={button} disabled={!currentAnalysis} onClick={() => { if (currentAnalysis) { closeDetail(); setGeneration(generation ? null : { initial: currentAnalysis, ...(document ? { outputFile: file } : {}) }); } }} aria-expanded={!!generation}><Sparkles size={14} />{t(document ? 'architecture.update' : 'architecture.generate')}</button>
+        {(document || file !== ARCHITECTURE_FILE) && <button type="button" className={`${button} px-2`} aria-label={t('architecture.newAnalysis')} onClick={() => { closeDetail(); setGeneration({ initial: DEFAULT_ANALYSIS }); }}><Plus size={16} /></button>}
         <button type="button" className={`${button} px-2`} aria-label={t('architecture.refresh')} disabled={loading} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={15} className={loading ? 'animate-spin' : ''} /></button>
       </div>
     </div>
-    <div ref={content} className="min-h-0 flex-1 overflow-y-auto p-3 [overflow-anchor:none]">
+    <div className={`relative flex min-h-0 flex-1 ${sideDetail && !readingOnly ? 'flex-row' : 'flex-col'}`} data-architecture-workspace>
+    <div ref={content} hidden={readingOnly} data-architecture-content className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3 [overflow-anchor:none]">
       {generation ? <ArchitectureGenerationForm active={active} key={`${generation.outputFile ?? 'new'}:${JSON.stringify(generation.initial)}`} rootPath={rootPath} initial={generation.initial} outputFile={generation.outputFile} onInsertPrompt={onInsertPrompt} onPrepared={(nextFile, analysis) => { setPreparedAnalysis(analysis); selectFile(nextFile); }} onClose={closeGeneration} /> : <>
         <label className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">{t('architecture.savedAnalyses')}<select aria-label={t('architecture.savedAnalyses')} value={file} onChange={event => { setPreparedAnalysis(DEFAULT_ANALYSIS); selectFile(event.target.value); }} className="min-h-10 min-w-0 flex-1 rounded-lg border border-border/20 bg-surface-2 px-2 text-sm text-foreground">{availableFiles.map(path => <option key={path} value={path}>{path === ARCHITECTURE_FILE ? t('architecture.projectRange') : `${t(path.includes('/module-') ? 'architecture.moduleRange' : 'architecture.featureRange')}: ${path === file && document?.analysis ? document.analysis.target.replace(/\n/g, ', ') : architectureFileLabel(path)}`}</option>)}</select></label>
         {libraryError && <p role="alert" className="mb-3 text-xs text-muted-foreground">{t('architecture.libraryFailed')}</p>}
@@ -197,7 +207,7 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
           <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">{parent?.summary ?? view.summary}</p>
           <div role="group" aria-label={t('architecture.browseMode')} className="flex gap-1 rounded-lg bg-surface-2 p-1">{(['outline', 'graph'] as const).map(value => <button type="button" key={value} aria-pressed={mode === value} className={`${button} flex-1 ${mode === value ? 'bg-surface text-primary' : 'text-muted-foreground'}`} onClick={() => setDisplayMode(value)}>{t(value === 'outline' ? 'architecture.outlineMode' : 'architecture.graphMode')}</button>)}</div>
           {mode === 'graph' ? <>
-            <ArchitectureDiagram view={view} parentId={parentId} selectedId={selectedId} onSelect={selectNode} active={active} inspector={inspector(true)} inspectorStage={sourceFile ? 'source' : moduleGeneration ? 'analysis' : previewDetail ? 'preview' : 'details'} onDismissInspector={previewDetail ? closeDetail : backDetail ?? (!wideViewport ? () => setDetailExpanded(false) : closeDetail)} onExpandedChange={expanded => { setDiagramExpanded(expanded); if (!expanded) closeDetail(); }} heading={<div className="relative"><select aria-label={t('architecture.perspective')} title={view.title} value={view.id} onChange={event => { setPerspectiveId(event.target.value); navigate([]); }} className="h-11 w-full min-w-0 appearance-none truncate bg-surface pr-4 text-xs font-semibold focus-visible:ring-2 focus-visible:ring-ring">{document.perspectives.map(view => <option key={view.id} value={view.id}>{view.title}</option>)}</select><ChevronDown size={12} className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-muted-foreground" /></div>} navigation={validTrail.length > 0 ? <nav aria-label={t('architecture.breadcrumb')} className="flex items-center gap-1 px-2"><button type="button" className={`${button} shrink-0 px-2`} onClick={() => navigate(validTrail.slice(0, -1))}>{t('architecture.parentModule')}</button><span className="truncate text-xs text-muted-foreground">{view.title} / {parent?.title}</span></nav> : undefined} />
+            <ArchitectureDiagram view={view} parentId={parentId} selectedId={selectedId} onSelect={selectNode} active={active} referenceWidth={panelWidth} inspector={inspector(true)} inspectorStage={sourceFile ? 'source' : moduleGeneration ? 'analysis' : previewDetail ? 'preview' : 'details'} onDismissInspector={dismissDetail} onExpandedChange={expanded => { setDiagramExpanded(expanded); if (!expanded) closeDetail(); }} heading={<div className="relative"><select aria-label={t('architecture.perspective')} title={view.title} value={view.id} onChange={event => { setPerspectiveId(event.target.value); navigate([]); }} className="h-11 w-full min-w-0 appearance-none truncate bg-surface pr-4 text-xs font-semibold focus-visible:ring-2 focus-visible:ring-ring">{document.perspectives.map(view => <option key={view.id} value={view.id}>{view.title}</option>)}</select><ChevronDown size={12} className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-muted-foreground" /></div>} navigation={validTrail.length > 0 ? <nav aria-label={t('architecture.breadcrumb')} className="flex items-center gap-1 px-2"><button type="button" className={`${button} shrink-0 px-2`} onClick={() => navigate(validTrail.slice(0, -1))}>{t('architecture.parentModule')}</button><span className="truncate text-xs text-muted-foreground">{view.title} / {parent?.title}</span></nav> : undefined} />
             <details><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted-foreground">{t('architecture.modules')} ({scope.nodes.length})</summary><div className="flex flex-wrap gap-2">{scope.nodes.map(node => <button type="button" key={node.id} aria-pressed={selected?.id === node.id} className={`${button} bg-surface-2`} onClick={() => selectNode(node.id)}>{node.title}</button>)}</div></details>
           </> : <div className="space-y-2" role="group" aria-label={t('architecture.modules')}>
             {scope.nodes.map(node => <div key={node.id}><button type="button" aria-label={node.title} aria-expanded={selected?.id === node.id} className="block min-h-16 w-full rounded-xl border border-border/20 bg-surface-2 p-3 text-left transition hover:bg-surface-elevated focus-visible:ring-2 focus-visible:ring-ring" onClick={() => selectNode(node.id)}>
@@ -217,5 +227,6 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
       </>}
     </div>
     {active && !diagramExpanded && inspector(false)}
+    </div>
   </div>;
 }

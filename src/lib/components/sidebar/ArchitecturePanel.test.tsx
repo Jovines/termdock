@@ -43,6 +43,7 @@ describe('native architecture browsing', () => {
     expect(notes.open).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Server' }));
     expect(screen.getByRole('region', { name: 'Server' }).textContent).toContain('Backend');
+    fireEvent.click(screen.getByRole('button', { name: 'Close module details' }));
     fireEvent.click(screen.getByRole('button', { name: 'Relationship diagram' }));
     expect(screen.getByText('Diagram')).toBeTruthy();
     expect(notes.open).toBe(false);
@@ -274,6 +275,7 @@ describe('native architecture browsing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Routes' }));
     fireEvent.click(screen.getByRole('button', { name: 'src/server/routes/filesystem.ts:50' }));
     expect(input.onOpenFile).toHaveBeenCalledWith({ path: 'src/server/routes/filesystem.ts', line: 50 });
+    fireEvent.click(screen.getByRole('button', { name: 'Close module details' }));
     fireEvent.change(screen.getByRole('combobox', { name: 'Perspective' }), { target: { value: 'data' } });
     expect(screen.getByRole('button', { name: 'Input' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Routes' })).toBeNull();
