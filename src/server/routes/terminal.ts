@@ -1,6 +1,6 @@
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
-import { assertNativeResumeAvailable } from '../agent/nativeResumeOwner.js';
+import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates } from '../agent/nativeResumeOwner.js';
 import { integrationLaunchCommand, type IntegrationDeliveryReadiness, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
 import { ensureTeam } from '../agent/collaborationTeam.js';
 import { androidRecordings } from '../android/recording.js';
@@ -2417,25 +2417,21 @@ async function assertIntegrationNativeResumeAvailable(record: IntegrationSession
   // Refresh the shared Linux process snapshot once for this restore decision.
   // Never use a recovered hook or the last-known UUID as live-owner proof.
   if (process.platform === 'linux') await getProcessSnapshot(true);
-  const candidates = [...terminalSessions].map(([backendSessionId, backend]) => {
-    const persisted = globalSessionState.sessions.find(entry => entry.backendSessionId === backendSessionId)?.agentResume;
-    return { backendSessionId, cachedSlug: backend.agent?.slug ?? persisted?.slug ?? null,
-      cachedNativeId: backend.agentSession?.sessionId ?? persisted?.sessionId ?? null };
-  });
+  const candidates = collectNativeResumeOwnerCandidates(globalSessionState.sessions, terminalSessions);
   await assertNativeResumeAvailable({ slug: record.agent_slug, nativeSessionId: record.agent_native_session_id! },
     own?.backendSessionId ?? null, candidates, async candidate => {
       const backend = terminalSessions.get(candidate.backendSessionId);
-      if (!backend) return [];
+      const tmuxSessionName = candidate.tmuxSessionName;
       // Duplicate inventory attachments to the original owned pane are not
       // another process; launchIntegrationTerminal verifies that pane again.
-      if (backend.mode === 'tmux' && backend.tmuxSessionName === own?.tmuxSessionName) return [];
-      if (backend.mode === 'tmux' && backend.tmuxSessionName) {
-        try { await runTmux(['has-session', '-t', `=${backend.tmuxSessionName}`]); }
+      if (tmuxSessionName && tmuxSessionName === own?.tmuxSessionName) return [];
+      if (tmuxSessionName) {
+        try { await runTmux(['has-session', '-t', `=${tmuxSessionName}`]); }
         catch (error) {
           if (/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) return [];
           throw error;
         }
-        const layout = await getTmuxLayout(backend.tmuxSessionName);
+        const layout = await getTmuxLayout(tmuxSessionName);
         return Promise.all(layout.windows.flatMap(window => window.panes).map(async pane => {
           const program = await resolveTmuxPaneProgram(pane, true, true);
           const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
@@ -2446,6 +2442,7 @@ async function assertIntegrationNativeResumeAvailable(record: IntegrationSession
             nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null };
         }));
       }
+      if (!backend) return [];
       const program = await detectShellActiveProgram(backend);
       const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
       return [{ confirmed: !!program && program.source !== 'unknown', agentSlug: agent?.slug ?? null,

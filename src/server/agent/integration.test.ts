@@ -14,7 +14,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { IntegrationStore, validatePolicy, type IntegrationPolicy, type IntegrationPrincipal } from './integrationStore.js';
 import { IntegrationSessions, permittedCwd, integrationLaunchCommand, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
 import { IntegrationRuntime } from './integrationServer.js';
-import { assertNativeResumeAvailable } from './nativeResumeOwner.js';
+import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates } from './nativeResumeOwner.js';
 import { readIntegrationCredential, runIntegrationAdmin } from './integrationCli.js';
 import { CollaborationDeliveryWorker } from './collaborationDeliveryWorker.js';
 import { CollaborationTaskStore } from './collaborationTaskStore.js';
@@ -439,6 +439,11 @@ it.skipIf(process.platform !== 'linux')('recovers the live plugin UUID after sto
     const verifyOwner = (excluded: string) => assertNativeResumeAvailable({ slug: 'fixture-agent', nativeSessionId: nativeId }, excluded,
       [cachedOwner], async () => { const live = await api.inspect(created); return [{ confirmed: true, agentSlug: live.agentSlug, nativeId: live.nativeId }]; });
     await expect(verifyOwner('another-backend')).rejects.toMatchObject({ code: 'NATIVE_SESSION_ALREADY_RUNNING' });
+    const detached = collectNativeResumeOwnerCandidates([{ sessionId: 'detached-td', backendSessionId: 'previous-server-backend',
+      mode: 'tmux', tmuxSessionName: 'native', agentResume: { slug: 'fixture-agent', sessionId: 'old-native-C' } }], new Map());
+    await expect(assertNativeResumeAvailable({ slug: 'fixture-agent', nativeSessionId: nativeId }, 'another-backend', detached,
+      async () => { const live = await api.inspect(created); return [{ confirmed: true, agentSlug: live.agentSlug, nativeId: live.nativeId }]; }))
+      .rejects.toMatchObject({ code: 'NATIVE_SESSION_ALREADY_RUNNING' });
     await verifyOwner('fixture-backend');
     sessions.close(); sessions = new IntegrationSessions(file, api, 1);
     await new Promise(resolve => setTimeout(resolve, 5));

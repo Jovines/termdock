@@ -4,7 +4,8 @@
 启动输入条件与保留凭据的策略更新要求 **CLI / 实际运行服务均至少 1.4.301**；协议仍为 1。
 插件原生 ID 的前台 argv 回读及服务重启后的运行中 restore 核验修复要求
 **实际运行服务至少 1.4.302**。退出后的重复原生会话检查修复要求
-**实际运行服务至少 1.4.303**；建议 CLI 与服务同步安装 1.4.303（CLI 最低仍为 1.4.301）。
+**实际运行服务至少 1.4.303**。没有 PTY 附着的已登记 tmux 的重复保护修复要求
+**实际运行服务至少 1.4.304**；建议 CLI 与服务同步安装 1.4.304（CLI 最低仍为 1.4.301）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -303,6 +304,12 @@ operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒
 返回 `NATIVE_SESSION_OWNER_UNCONFIRMED` 并停止恢复；应检查该终端，不绕过保护。
 此检查覆盖服务已登记终端，不声称枚举其他应用中全部原生会话。
 
+1.4.304 起，检查合并持久终端清单和当前 PTY backend；服务重启后无需网页挂接，
+已登记 tmux 的每个 pane 都会现场核验。旧登记 UUID C 不会排除当前实际运行 UUID A
+的终端，终端的协作路由为 recovering/offline 或绑定不匹配也不会跳过检查。
+仅在确认 tmux 已消失或当前进程排除冲突时继续；未知进程、同 Agent 缺少精确 UUID、
+观察失败均返回 `NATIVE_SESSION_OWNER_UNCONFIRMED`，不以旧 UUID 证明没有冲突。
+
 常见失败码（每项都是完整字符串）：
 
 - 配置/权限：`LAUNCH_PROFILE_DENIED`, `LAUNCHER_UNAVAILABLE`, `COLLAB_AGENT_UNAVAILABLE`, `SESSION_CWD_MISSING`, `SESSION_CWD_DENIED`, `INTEGRATION_SESSION_NOT_FOUND`, `INTEGRATION_SESSION_LIMIT`。
@@ -325,7 +332,10 @@ operation/pane，不启动第二个 Agent；进程携带不同 UUID 时继续拒
 不重复启动、不同 UUID 拒绝，以及进程退出后缓存 UUID 不再阻挡恢复。使用方已报告
 1.4.302 真实 TraeX 服务重启回读、运行中恢复不重启、不同 UUID 拒绝通过；显式恢复
 原 UUID 也已回读 ready，但配置的模型 footer 条件被暂态提示替换，输入仍保持待投递。
-**1.4.303 的真实 TraeX 退出后恢复与稳定输入条件仍须使用方实机复验**。
+使用方已报告 1.4.303 退出后精确恢复通过，也发现未挂接 PTY 的已登记 tmux 重复保护
+遗漏；维护机已用“旧 UUID C、实际运行 UUID A、无 PTY 附着”的真实隔离 tmux 复现，
+并验证 1.4.304 编译后检查在该状态下拒绝再次启动。
+**1.4.304 的真实 TraeX 重复保护与稳定输入条件仍须使用方实机复验**。
 回读 capabilities 后，应核对原 TD ID、真实 TraeX UUID 与原 argv/cwd/包装器快照，
 并验证 Agent 真正加载原对话。
 先完成测试环境的创建→追问→关联答复，再验重复键、追加咨询、断线重投和精确恢复。
