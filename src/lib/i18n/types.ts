@@ -1266,6 +1266,7 @@ export type TranslationDictionary = {
     explorerTitle: string;
     split: string;
     splitTitle: string;
+    closeFailed: (params: TranslatorParams) => string;
     splitNew: string;
     splitNewHint: string;
     splitExisting: string;

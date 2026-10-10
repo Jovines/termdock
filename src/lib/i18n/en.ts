@@ -1248,6 +1248,7 @@ export const en: TranslationDictionary = {
     explorerTitle: 'Explorer',
     split: 'Split',
     splitTitle: 'Add to split workspace',
+    closeFailed: ({ name }) => `Could not close ${name}. The session is still open. Try again.`,
     splitNew: 'New session in workspace',
     splitNewHint: 'Uses the current directory and default type; add as many panes as needed',
     splitExisting: 'Choose a session or workspace',
