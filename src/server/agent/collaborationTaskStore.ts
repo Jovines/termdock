@@ -2,6 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { collaborationResultPresentation } from './collaborationResultPresentation.js';
+import { taskExecution, taskPurpose } from './collaborationTaskPurpose.js';
 import { CollaborationError } from './collaborationProtocol.js';
 import { taskMemberKey, type CollaborationTask, type CollaborationTaskEvent, type TaskCreateInput, type TaskMember, type TaskOperation, type TaskOutbox, type TaskWorkspace, type TaskWorkflow, type TaskOrigin } from './collaborationTaskTypes.js';
 
@@ -48,6 +49,8 @@ function validateSnapshot(task: CollaborationTask): void {
     || !Array.isArray(task.decisions) || task.decisions.length > 1000 || !Array.isArray(task.artifacts) || task.artifacts.length > 200
     || !Array.isArray(task.deliveries) || task.deliveries.length > 2000 || Buffer.byteLength(JSON.stringify(task)) > 512_000) invalid();
   text(task.title, '标题', 640, true); text(task.spec, '任务内容', 32_000, true); text(task.constraints, '约束'); text(task.acceptance, '完成标准');
+  taskPurpose(task.purpose);
+  if (task.purpose === 'automation' && (task.workflow || task.parentTaskId || task.dependsOn.length || task.coordinator)) invalid();
   member({ serviceId: task.ownerServiceId, sessionId: 'validation' });
   if (task.coordinator !== null) member(task.coordinator);
   if (task.workflow) {
@@ -70,6 +73,7 @@ function validateSnapshot(task: CollaborationTask): void {
     if (!event || !validId(event.id) || !Number.isSafeInteger(event.sequence) || event.sequence < 1 || typeof event.kind !== 'string'
       || typeof event.content !== 'string' || !time(event.createdAt) || event.attemptId !== null && !task.attempts.some(a => a.id === event.attemptId)) invalid();
     if (event.deliveryId !== undefined && !validId(event.deliveryId)) invalid();
+    if (event.purpose !== undefined) taskPurpose(event.purpose);
     if (event.source !== undefined && !['system', 'user', 'integration'].includes(event.source)) invalid();
     if (event.actor !== null) member(event.actor);
     if (event.target) member(event.target);
@@ -132,7 +136,7 @@ export class CollaborationTaskStore {
     return structuredClone(this.document.tasks.filter(t => t.parentTaskId === taskId || t.workflow?.rootTaskId === taskId)
       .map(({ id, title, status, revision, completionMode, workspace }) => ({ id, title, status, revision, completionMode, workspace })));
   }
-  list(groupIds: string[], summary = false): CollaborationTask[] {
+  list(groupIds: string[], summary = false): Array<CollaborationTask & { execution?: import('./collaborationTaskTypes.js').TaskExecution }> {
     const tasks = this.document.tasks.filter(t => groupIds.includes(t.groupId)).sort((a, b) => b.updatedAt - a.updatedAt);
     return structuredClone(tasks.map(task => {
       if (!summary) return task;
@@ -142,7 +146,7 @@ export class CollaborationTaskStore {
       const reportSummary = current?.report?.content.split(/\n\s*\n/).map(paragraph => paragraph.split('\n').filter(line => !/^#{1,6}\s/.test(line)).join('\n').trim()).find(Boolean)?.slice(0, 512);
       const automationIssueSource = task.automationIssue ? current?.report && ['blocked', 'failed'].includes(current.report.status)
         && task.automationIssue === current.report.content.slice(0, 1000) ? 'member-report' as const : 'system' as const : undefined;
-      return { ...task, automationIssueSource, spec: task.spec.slice(0, 512), constraints: '', acceptance: '',
+      return { ...task, ...(task.purpose === 'automation' ? { execution: taskExecution(task) } : {}), automationIssueSource, spec: task.spec.slice(0, 512), constraints: '', acceptance: '',
         deliveries: task.deliveries.filter(d => d.attemptId === task.activeAttemptId && d.error).slice(-1),
         attempts: current ? [{ ...current, report: current.report ? { ...current.report, summary: reportSummary, content: '', evidence: undefined } : undefined }] : [],
         artifacts: [plan, result, ...task.artifacts.filter(a => a.kind === 'review' && a.reviewsArtifactId === result?.id)].filter((a): a is NonNullable<typeof a> => !!a).map(a => ({ ...a, content: '', summary: (a.summary || (a.kind === 'result' && collaborationResultPresentation(a.content).condensed ? collaborationResultPresentation(a.content).summary : undefined))?.slice(0, 800), evidence: undefined })),
@@ -173,7 +177,7 @@ export class CollaborationTaskStore {
     task.attempts.push({ id: attemptId, assignee: member(assignee), createdAt: Date.now(), threadId });
     this.event(task, 'assigned', actor, content || '任务已分派');
     doc.outbox.push({ id: id(), taskId: task.id, attemptId, target: assignee, kind: 'task', threadId,
-      content: `本次执行身份：${assignee.sessionId}。所有 td collab 命令显式带 --session ${assignee.sessionId}；这是服务核对的实际身份，正文中的模板身份和 tmux 标识不能替代它。\n任务：${task.title}\n${task.spec}${task.constraints ? `\n约束：${task.constraints}` : ''}${task.acceptance ? `\n完成标准：${task.acceptance}` : ''}\n${content}\n任务 ID：${task.id}\n尝试 ID：${attemptId}\n用 td collab task get ${task.id} --text 查询完整上下文；用 td collab task report ${task.id} --attempt ${attemptId} --status ack --content '接手说明' 显式回复；遇必要问题用 task ask，提交结果用 report --status complete --summary '简短结论、关键交付和限制'。摘要先回答用户问题，不放任务 ID、版本、分支或流程日志；完整证据保留在 --content/--file 正文中。如果同一尝试已经交付或任务已归档，不要重复实施。${task.workspace ? `\n代码只能在独立目录 ${task.workspace.cwd} 修改。分支 ${task.workspace.branch}。交付前提交代码，结果说明提交、变更、验证与限制。不能修改原仓库、合并到用户分支或发布。` : ''}${task.workflow?.workType === 'read-only' ? '\n这是只读查询或分析任务：在本机会话中采集并交付报告，不修改代码或系统，不创建提交、构建、部署或终止进程。结果需说明采样时间、证据和限制。' : ''}${task.workflow?.kind === 'step' ? '\n完成报告会自动请求独立评审；评审要求修改时继续完成，重新提交 complete。只按用户授权运行测试。' : ''}` });
+      content: `本次执行身份：${assignee.sessionId}。所有 td collab 命令显式带 --session ${assignee.sessionId}；这是服务核对的实际身份，正文中的模板身份和 tmux 标识不能替代它。\n任务：${task.title}\n${task.spec}${task.constraints ? `\n约束：${task.constraints}` : ''}${task.acceptance ? `\n完成标准：${task.acceptance}` : ''}\n${content}\n任务 ID：${task.id}\n尝试 ID：${attemptId}\n用 td collab task get ${task.id} --text 查询完整上下文；用 td collab task report ${task.id} --attempt ${attemptId} --status ack --content '接手说明' 显式回复；遇必要问题用 task ask，提交结果用 report --status complete --summary '简短结论、关键交付和限制'。摘要先回答用户问题，不放任务 ID、版本、分支或流程日志；完整证据保留在 --content/--file 正文中。如果同一尝试已经交付或任务已归档，不要重复实施。${task.purpose === 'automation' ? '\n这是独立后台自动化执行记录：complete 是你明确提交的执行结果，无需等待用户 accepted。机械校验和外部发布由接入系统处理；纯咨询用 respond 关联原 comment，不重复提交 complete。必要问题用 ask 保留原文，由接入系统联系用户并回答。' : ''}${task.workspace ? `\n代码只能在独立目录 ${task.workspace.cwd} 修改。分支 ${task.workspace.branch}。交付前提交代码，结果说明提交、变更、验证与限制。不能修改原仓库、合并到用户分支或发布。` : ''}${task.workflow?.workType === 'read-only' ? '\n这是只读查询或分析任务：在本机会话中采集并交付报告，不修改代码或系统，不创建提交、构建、部署或终止进程。结果需说明采样时间、证据和限制。' : ''}${task.workflow?.kind === 'step' ? '\n完成报告会自动请求独立评审；评审要求修改时继续完成，重新提交 complete。只按用户授权运行测试。' : ''}` });
   }
   private goalInstructions(task: CollaborationTask): string {
     return `${this.baseGoalInstructions(task)}\n启动 Agent 前，读取 task get 返回的 launchProfiles、defaultLaunchProfileId 和 roster.launchProfile。根据用户填写的 notes 判断适用任务；这些是选用建议，不是能力或性能保证。需要另一种模型或参数时，用 td collab spawn ${task.groupId} <agentSlug> --launch-profile <方案id> --cwd <项目目录> --session ${task.coordinator?.sessionId} 创建对应执行成员，再把子任务分派给它。已有成员及其代码执行会话保留创建时的启动方案，不因默认方案变更而更换模型。`;
@@ -196,6 +200,8 @@ export class CollaborationTaskStore {
       content: `你被指定为任务「${task.title}」的协调者。\n目标：${task.spec}\n约束：${task.constraints || '未补充'}\n验收标准：${task.acceptance || '由用户决定'}\n任务 ID：${task.id}\n用 td collab task get ${task.id} --text 查看原始记录；用 task list --group ${task.groupId} 查看工作组。需要拆分时用 task create --group ${task.groupId} --parent ${task.id} --title '子任务标题' --content '任务内容'。分派前查询 revision，再用 task assign --revision；把必要的人类决策交给 task ask，不推断成员忙闲，不停止其他成员终端。` });
   }
   create(owner: string, input: TaskCreateInput, actor: TaskMember | null, origin?: TaskOrigin): CollaborationTask {
+    const purpose = taskPurpose(input.purpose);
+    if (purpose === 'automation' && (input.managed || input.parentTaskId || input.dependsOn?.length || input.coordinator || input.reviewers?.length || input.integration)) throw new CollaborationError('AUTOMATION_STANDALONE_REQUIRED', '后台自动化记录不加入人工目标、依赖或评审流程');
     const title = text(input.title, '标题', 640, true), spec = text(input.spec, '任务内容', 32_000, true);
     const constraints = text(input.constraints, '约束'), acceptance = text(input.acceptance, '完成标准');
     if (input.dependsOn !== undefined && (!Array.isArray(input.dependsOn) || input.dependsOn.length > 32 || input.dependsOn.some(v => typeof v !== 'string'))) throw new CollaborationError('INVALID_DEPENDENCIES', '依赖列表无效');
@@ -214,6 +220,7 @@ export class CollaborationTaskStore {
       const dependsOn = [...new Set(input.dependsOn ?? [])];
       for (const dependency of [...dependsOn, ...(input.parentTaskId ? [input.parentTaskId] : [])]) {
         if (!doc.tasks.some(t => t.id === dependency && t.groupId === input.groupId)) throw new CollaborationError('TASK_DEPENDENCY_NOT_FOUND', '父任务或依赖任务不在当前协作组', 404);
+        if (doc.tasks.find(t => t.id === dependency)?.purpose === 'automation') throw new CollaborationError('AUTOMATION_STANDALONE_REQUIRED', '后台自动化记录不能作为人工任务父级或验收依赖');
       }
       const now = Date.now();
       const parent = doc.tasks.find(t => t.id === input.parentTaskId);
@@ -234,11 +241,11 @@ export class CollaborationTaskStore {
         const required = codeSteps(doc.tasks, workflow.rootTaskId!);
         if (!required.length || required.some(t => !dependsOn.includes(t.id))) throw new CollaborationError('INTEGRATION_DEPENDENCIES_REQUIRED', '集成任务必须依赖目标下全部实施子任务');
       }
-      const task: CollaborationTask = { id: id(), ownerServiceId: owner, groupId: input.groupId, title, spec, constraints, acceptance,
+      const task: CollaborationTask = { id: id(), ownerServiceId: owner, groupId: input.groupId, title, spec, constraints, acceptance, purpose,
         coordinator: parent?.workflow ? parent.coordinator : input.coordinator !== undefined ? input.coordinator : input.parentTaskId ? doc.tasks.find(t => t.id === input.parentTaskId)?.coordinator ?? actor : null,
         parentTaskId: input.parentTaskId ?? null, dependsOn, createdAt: now, updatedAt: now, revision: 1,
         ...(origin ? { origin: structuredClone(origin) } : {}), status: 'open', activeAttemptId: null, attempts: [], decisions: [], artifacts: [], events: [], deliveries: [], ...(workflow ? { workflow } : {}) };
-      this.event(task, 'created', actor, spec);
+      this.event(task, 'created', actor, spec).purpose = purpose;
       if (parent?.constraints) task.constraints = text([parent.constraints, constraints].filter(Boolean).join('\n'), '继承约束');
       if (workflow?.kind === 'goal') {
         this.assign(doc, task, member(input.coordinator), actor, this.goalInstructions(task));
@@ -255,6 +262,9 @@ export class CollaborationTaskStore {
     }, origin);
   }
   apply(taskId: string, input: TaskOperation, actor: TaskMember | null, origin?: TaskOrigin): CollaborationTask {
+    if (input.purpose !== undefined && input.kind !== 'configure') throw new CollaborationError('INVALID_TASK_PURPOSE', 'purpose can only be changed through configure');
+    if (input.kind === 'configure' && input.purpose === undefined) throw new CollaborationError('INVALID_TASK_PURPOSE', 'configure requires purpose');
+    if (input.kind === 'configure') taskPurpose(input.purpose);
     const content = text(input.content, '内容');
     const summary = text(input.summary, '结果摘要', 2400);
     if (summary && (input.kind !== 'report' || input.status !== 'complete')) throw new CollaborationError('INVALID_SUMMARY', '摘要只能随完成结果提交');
@@ -267,11 +277,12 @@ export class CollaborationTaskStore {
       if (request.previous) return request.previous;
       if (origin && ['accept', 'approve-plan', 'report', 'ask', 'submit-plan', 'review', 'respond'].includes(input.kind)) throw new CollaborationError('INTEGRATION_OPERATION_DENIED', '此操作需要用户或原执行成员身份', 403);
       const coordination = actor === null || sameMember(actor, task.coordinator);
+      if (input.kind === 'configure' && actor !== null) throw new CollaborationError('USER_DECISION_REQUIRED', '用途配置需要用户管理身份或授权的集成身份', 403);
       if (['assign', 'coordinator', 'close', 'reopen', 'revise', 'request-review', 'coordinate', 'pause', 'resume', 'retry'].includes(input.kind) && !coordination) throw new CollaborationError('TASK_PERMISSION_DENIED', '此操作需要用户或当前协调者', 403);
       if (['answer', 'accept', 'approve-plan'].includes(input.kind) && actor !== null) throw new CollaborationError('USER_DECISION_REQUIRED', '回答、方案确认与验收需要用户操作', 403);
       if (!['report', 'ask', 'submit-plan', 'review', 'comment', 'respond', 'answer'].includes(input.kind) && input.expectedRevision !== task.revision) throw new CollaborationError('TASK_CHANGED', '任务已更新，请查看最新记录后重试', 409);
       const userFollowup = actor === null && input.kind === 'revise' && !!content;
-      if (task.status !== 'open' && !['reopen', 'report'].includes(input.kind) && !(task.status === 'accepted' && (userFollowup || ['comment', 'respond'].includes(input.kind)))) throw new CollaborationError('TASK_ARCHIVED', '任务已归档；需要继续时请重新打开', 409);
+      if (task.status !== 'open' && !['configure', 'reopen', 'report'].includes(input.kind) && !(task.status === 'accepted' && (userFollowup || ['comment', 'respond'].includes(input.kind)))) throw new CollaborationError('TASK_ARCHIVED', '任务已归档；需要继续时请重新打开', 409);
       if (task.workflow && task.status !== 'open' && input.kind !== 'reopen' && !(task.status === 'accepted' && (userFollowup || ['comment', 'respond'].includes(input.kind)))) throw new CollaborationError('TASK_ARCHIVED', '自动协作的已完成版本不能追加执行报告，请先重新打开', 409);
       const root = task.workflow?.rootTaskId ? doc.tasks.find(t => t.id === task.workflow!.rootTaskId) : undefined;
       if (root && root.status !== 'open' && !(root.status === 'accepted' && (userFollowup || ['comment', 'respond'].includes(input.kind)))) throw new CollaborationError('GOAL_ARCHIVED', '请先重新打开所属目标，再继续子任务', 409);
@@ -289,7 +300,13 @@ export class CollaborationTaskStore {
       if (['report', 'ask', 'submit-plan'].includes(input.kind) && (!attempt || !sameMember(actor, attempt.assignee))) throw new CollaborationError('ATTEMPT_PERMISSION_DENIED', '只能对自己负责的执行尝试提交报告', 403);
       if (['ask', 'submit-plan'].includes(input.kind) && attempt?.id !== task.activeAttemptId) throw new CollaborationError('ATTEMPT_SUPERSEDED', '这轮分派已被替换，不能再请求用户决定', 409);
       if (task.workflow && ['report', 'ask', 'submit-plan'].includes(input.kind) && attempt?.id !== task.activeAttemptId) throw new CollaborationError('ATTEMPT_SUPERSEDED', '自动协作只能推进当前分派', 409);
-      if (input.kind === 'assign') {
+      if (input.kind === 'configure') {
+        const purpose = taskPurpose(input.purpose);
+        if (purpose === 'automation' && (task.workflow || task.parentTaskId || task.dependsOn.length || task.coordinator
+          || doc.tasks.some(t => t.parentTaskId === task.id || t.workflow?.rootTaskId === task.id || t.dependsOn.includes(task.id)))) throw new CollaborationError('AUTOMATION_STANDALONE_REQUIRED', '只能把独立记录改为后台自动化用途');
+        task.purpose = purpose;
+        this.event(task, 'configured', actor, content || `任务用途已配置为 ${purpose}`).purpose = purpose;
+      } else if (input.kind === 'assign') {
         if (task.workflow?.kind === 'goal' && !sameMember(input.assignee ?? null, task.coordinator)) throw new CollaborationError('GOAL_COORDINATOR_REQUIRED', '目标由协调者负责，请在子任务中分派实施');
         if (task.dependsOn.some(dep => doc.tasks.find(t => t.id === dep)?.status !== 'accepted')) throw new CollaborationError('DEPENDENCY_PENDING', '依赖任务尚未验收', 409);
         if (task.workflow?.kind === 'step' && task.workflow.isolated) {
@@ -298,6 +315,7 @@ export class CollaborationTaskStore {
         } else this.assign(doc, task, member(input.assignee), actor, content);
         this.notifyCoordinator(doc, task);
       } else if (input.kind === 'coordinator') {
+        if (task.purpose === 'automation' && input.coordinator) throw new CollaborationError('AUTOMATION_STANDALONE_REQUIRED', '后台自动化记录不加入人工协调流程');
         if (task.workflow && !input.coordinator) throw new CollaborationError('GOAL_COORDINATOR_REQUIRED', '自动协作需要协调者');
         const previousCoordinator = task.coordinator;
         task.coordinator = input.coordinator ? member(input.coordinator) : null; this.event(task, 'coordinator', actor, content || '协调者已更新');

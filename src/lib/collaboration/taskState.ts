@@ -24,6 +24,12 @@ export function collaborationTaskBlocker(task: CollaborationTaskView) {
 export function collaborationTaskStage(task: CollaborationTaskView): string {
   if (task.status === 'accepted') return task.completionMode === 'reviewed' ? '独立评审通过' : '已验收';
   if (task.status === 'closed') return '已关闭';
+  if (task.purpose === 'automation') {
+    const labels = { unassigned: '后台记录待分派', awaiting_report: '后台执行等待明确报告',
+      ack: '执行成员已确认接手', working: '成员报告进行中', blocked: '成员报告受阻',
+      failed: '成员报告失败', complete: '执行已交付' };
+    return task.execution ? labels[task.execution.status] : '后台执行记录';
+  }
   if (task.decisions.some(q => q.status === 'pending')) return '需要你回答';
   const blocker = collaborationTaskBlocker(task);
   if (blocker) return blocker.label;
@@ -46,5 +52,5 @@ export function collaborationTaskStage(task: CollaborationTaskView): string {
   return attempt.deliveryStatus === 'delivered' ? '已写入终端 · 等待回复' : '等待投递';
 }
 export function collaborationTaskNeedsAttention(task: CollaborationTaskView): boolean {
-  return task.status === 'open' && ['需要你回答', '需要你确认方案', '等待你验收', '执行准备受阻', '自动安排受阻', '成员报告受阻', '成员报告失败', '投递未成功', '投递需要关注', '投递需要处理'].includes(collaborationTaskStage(task));
+  return task.purpose !== 'automation' && task.status === 'open' && ['需要你回答', '需要你确认方案', '等待你验收', '执行准备受阻', '自动安排受阻', '成员报告受阻', '成员报告失败', '投递未成功', '投递需要关注', '投递需要处理'].includes(collaborationTaskStage(task));
 }

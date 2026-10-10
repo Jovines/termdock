@@ -6,6 +6,12 @@ export interface TaskOrigin {
   externalMessageId?: string; metadata?: Record<string, unknown>;
 }
 export type TaskReportStatus = 'ack' | 'working' | 'blocked' | 'complete' | 'failed';
+export type TaskPurpose = 'interactive' | 'automation';
+/** Current explicit execution facts, independent of user acceptance and terminal activity. */
+export interface TaskExecution {
+  status: TaskReportStatus | 'unassigned' | 'awaiting_report';
+  attemptId: string | null; reportEventId: string | null; artifactId: string | null; reportedAt: number | null;
+}
 export interface CollaborationTaskEvent {
   id: string; sequence: number; kind: string; actor: TaskMember | null;
   content: string; createdAt: number; attemptId: string | null;
@@ -14,6 +20,7 @@ export interface CollaborationTaskEvent {
   origin?: TaskOrigin;
   replyToEventId?: string;
   deliveryId?: string;
+  purpose?: TaskPurpose;
 }
 export interface CollaborationTaskDecision {
   id: string; attemptId: string; question: string; options: string[];
@@ -42,6 +49,8 @@ export interface CollaborationTaskAttempt {
   report?: { status: TaskReportStatus; content: string; evidence?: unknown; createdAt: number; summary?: string };
 }
 export interface CollaborationTask {
+  /** Missing on old records means interactive. Automation is a standalone background record. */
+  purpose?: TaskPurpose;
   origin?: TaskOrigin;
   id: string; ownerServiceId: string; groupId: string; title: string; spec: string;
   constraints: string; acceptance: string; createdAt: number; updatedAt: number; revision: number;
@@ -60,8 +69,9 @@ export interface TaskOutbox {
   content: string; kind: 'task' | 'message' | 'handoff'; threadId: string;
   messageId?: string; lastError?: string; nextRetryAt?: number;
 }
-export type TaskOperationKind = 'assign' | 'report' | 'ask' | 'answer' | 'submit-plan' | 'review' | 'request-review' | 'approve-plan' | 'accept' | 'revise' | 'close' | 'reopen' | 'comment' | 'respond' | 'coordinator' | 'coordinate' | 'pause' | 'resume' | 'retry';
+export type TaskOperationKind = 'configure' | 'assign' | 'report' | 'ask' | 'answer' | 'submit-plan' | 'review' | 'request-review' | 'approve-plan' | 'accept' | 'revise' | 'close' | 'reopen' | 'comment' | 'respond' | 'coordinator' | 'coordinate' | 'pause' | 'resume' | 'retry';
 export interface TaskOperation {
+  purpose?: TaskPurpose;
   replyToEventId?: string;
   kind: TaskOperationKind; expectedRevision?: number; idempotencyKey: string;
   content?: string; assignee?: TaskMember; coordinator?: TaskMember | null;
@@ -71,6 +81,7 @@ export interface TaskOperation {
   summary?: string;
 }
 export interface TaskCreateInput {
+  purpose?: TaskPurpose;
   idempotencyKey: string; groupId: string; title: string; spec: string;
   constraints?: string; acceptance?: string; assignee?: TaskMember;
   coordinator?: TaskMember | null; parentTaskId?: string | null; dependsOn?: string[];
@@ -79,6 +90,7 @@ export interface TaskCreateInput {
   workType?: 'code' | 'read-only';
 }
 export interface CollaborationTaskView extends CollaborationTask {
+  execution?: TaskExecution;
   /** Response metadata computed before a summary omits the report body; never persisted. */
   automationIssueSource?: 'member-report' | 'system';
   summaryOnly?: boolean; replica?: boolean;

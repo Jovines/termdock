@@ -161,6 +161,7 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       managed_goals: true, automatic_review: true, dependency_dispatch: true, isolated_worktrees: true, encrypted_commit_transfer: true,
       durable_questions: true, user_acceptance: true, versioned_artifacts: true, independent_reviews: true,
       correlated_responses: true, accepted_comments: true,
+      background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true,
       task_reply: 'Replies to task-linked user messages are stored in the task; status=stored is not a terminal delivery receipt' },
     routing: { background_recovery: true, explicit_rebind: Boolean(rebind), fixed_tmux_pane: true },
     statuses: ['pending', 'delivered', 'failed', 'expired'], queued_status: 'pending',

@@ -197,6 +197,54 @@ async function runtimeFixture(sessionAdapter?: IntegrationSessionAdapter) {
   };
   return { runtime, messages, group, taskStore, request, stream, options, issued };
 }
+it('requires an explicit configure grant, preserves identity credentials, and pushes a durable background-purpose migration', async () => {
+  const f = await runtimeFixture();
+  const created = await f.request('POST', '/tasks', { input: { title: 'Existing', spec: 'Already executed', idempotencyKey: 'create', assigneeSessionId: 'worker' } });
+  const task = created.body.task;
+  f.taskStore.apply(task.id, { kind: 'report', status: 'complete', attemptId: task.activeAttemptId, content: 'Original result', idempotencyKey: 'complete' }, worker);
+  const original = f.taskStore.get(task.id)!, outbox = f.taskStore.pending(task.id);
+  const body = { input: { kind: 'configure', purpose: 'automation', expectedRevision: original.revision, idempotencyKey: 'migrate' } };
+  expect(await f.request('POST', `/tasks/${task.id}`, body)).toMatchObject({ status: 403, body: { code: 'INTEGRATION_PERMISSION_DENIED' } });
+  expect(f.taskStore.get(task.id)).toEqual(original);
+  const updated = policy(f.group.id); updated.permissions.push('task.configure');
+  f.runtime.store.update(updated);
+  expect(f.runtime.store.authenticate('bridge', f.issued.token).permissions).toContain('task.configure');
+  const stream = f.stream();
+  const result = await f.request('POST', `/tasks/${task.id}`, body);
+  expect(result).toMatchObject({ status: 200, body: { task: { id: task.id, purpose: 'automation', activeAttemptId: task.activeAttemptId,
+    status: 'open', execution: { status: 'complete', artifactId: original.artifacts[0].id } } } });
+  expect(f.taskStore.pending(task.id)).toEqual(outbox);
+  expect(result.body.task.attempts).toEqual(original.attempts); expect(result.body.task.artifacts).toEqual(original.artifacts);
+  let event: any;
+  for (let i = 0; i < 20; i++) { event = await stream.next(); if (event.kind === 'task.configured') break; }
+  expect(event).toMatchObject({ type: 'event', task_id: task.id, kind: 'task.configured', payload: { event: { purpose: 'automation', source: 'integration' } } });
+  expect(event.event_id).toBe(result.body.event_id);
+  const replay = new IntegrationStore(path.join(dir, 'integrations.json'));
+  const p = replay.authenticate('bridge', f.issued.token);
+  expect(replay.page(p, 'inbox').events.some(e => e.event_id === event.event_id)).toBe(true);
+  expect(await f.request('POST', '/events/ack', { consumer: 'inbox', cursor: event.cursor })).toMatchObject({ status: 200 });
+  expect(await f.request('POST', `/tasks/${task.id}`, body)).toMatchObject({ status: 200, body: { event_id: result.body.event_id } });
+  expect(f.taskStore.get(task.id)?.events.filter(e => e.kind === 'configured')).toHaveLength(1);
+  expect(new CollaborationTaskStore(path.join(dir, 'tasks.json')).get(task.id)?.purpose).toBe('automation');
+});
+it('creates scoped background records, returns current execution in summaries and rejects cross-group migrations or forged acceptance', async () => {
+  const f = await runtimeFixture();
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true, external_validation: false });
+  const input = { title: 'Background', spec: 'Run', purpose: 'automation', idempotencyKey: 'background', assigneeSessionId: 'worker' };
+  const created = await f.request('POST', '/tasks', { input });
+  expect(created.body.task).toMatchObject({ purpose: 'automation', execution: { status: 'awaiting_report', artifactId: null } });
+  expect((await f.request('POST', '/tasks', { input })).body.task.id).toBe(created.body.task.id);
+  const task = created.body.task;
+  f.taskStore.apply(task.id, { kind: 'report', status: 'complete', attemptId: task.activeAttemptId, content: 'Evidence', idempotencyKey: 'finish' }, worker);
+  const listed = await f.request('GET', '/tasks?purpose=automation');
+  expect(listed.body.tasks[0]).toMatchObject({ purpose: 'automation', execution: { status: 'complete' }, status: 'open' });
+  expect((await f.request('GET', '/tasks?purpose=interactive')).body.tasks).toEqual([]);
+  expect(await f.request('GET', '/tasks?purpose=invalid')).toMatchObject({ status: 400, body: { code: 'INVALID_TASK_PURPOSE' } });
+  expect(await f.request('POST', '/tasks', { input: { ...input, purpose: 'all', idempotencyKey: 'invalid' } })).toMatchObject({ status: 400 });
+  expect(await f.request('POST', `/tasks/${task.id}`, { input: { kind: 'accept', idempotencyKey: 'fake' } })).toMatchObject({ status: 403 });
+  const other = f.taskStore.create(serviceId, { groupId: 'outside', title: 'Other', spec: 'Other', idempotencyKey: 'outside' }, null);
+  expect(await f.request('POST', `/tasks/${other.id}`, { input: { kind: 'configure', purpose: 'automation', expectedRevision: 1, idempotencyKey: 'outside-configure' } })).toMatchObject({ status: 404 });
+});
 it('restricts cross-terminal restore diagnostics to the real administrator socket, excluding principal responses and events', async () => {
   const fake = adapter(); fake.set({ exists: true, running: true, agentSlug: 'fixture', nativeId: 'native' });
   fake.api.restore = async () => assertNativeResumeAvailable({ slug: 'fixture', nativeSessionId: 'native' }, 'own',

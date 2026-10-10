@@ -13,10 +13,12 @@ export interface CollaborationCommand {
 }
 export const COLLAB_HELP = `td collab — durable messages; no agent-specific hooks required
 ── 任务闭环 ──
-  task list [--group <组id>] | task get <任务id>
+  task list [--group <组id>] [--purpose interactive|automation|all] | task get <任务id>
+  task configure <任务id> --purpose interactive|automation --revision <当前版本>
   task create --group <组id> --title <标题> --content <正文> [--assignee <成员id>]
     [--constraints <约束>] [--acceptance <验收标准>] [--coordinator <成员id>]
     [--parent <任务id>] [--depends-on <任务id,任务id>] [--integration]
+    [--purpose interactive|automation]（默认 interactive；automation 是独立后台记录，无需用户验收）
   task assign <任务id> --assignee <成员id> --revision <当前版本>
   task report <任务id> --attempt <尝试id> --status ack|working|blocked|complete|failed --content <正文>
   task ask <任务id> --attempt <尝试id> --content <问题> [--options '["选项一","选项二"]']
@@ -171,7 +173,7 @@ interface RoleGroupView {
 }
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules', 'managed', 'shared-directory', 'integration']);
-const VALUE_OPTIONS = new Set(['principal', 'source', 'external-actor', 'external-message-id', 'launch-profile', 'to-event', 'decision', 'work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
+const VALUE_OPTIONS = new Set(['purpose', 'principal', 'source', 'external-actor', 'external-message-id', 'launch-profile', 'to-event', 'decision', 'work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -218,7 +220,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     for (const flag of Object.keys(options)) if (!['principal', 'json', 'jsonl', 'text', 'help', ...integrationFlags].includes(flag)) throw new Error(`--${flag} is not supported by ${action} ${command.operation}`);
   } else if (action === 'task') {
     command.operation = positional.shift(); command.target = positional.shift();
-    if (positional.length || !['list', 'get', 'create', 'assign', 'report', 'respond', 'answer', 'ask', 'plan', 'review', 'request-review', 'comment', 'revise', 'close', 'reopen', 'coordinate', 'pause', 'resume', 'retry'].includes(command.operation ?? '')) throw new Error('Usage: td collab task list|get|create|assign|report|ask|plan|review|request-review|comment|revise|close|reopen');
+    if (positional.length || !['list', 'get', 'create', 'configure', 'assign', 'report', 'respond', 'answer', 'ask', 'plan', 'review', 'request-review', 'comment', 'revise', 'close', 'reopen', 'coordinate', 'pause', 'resume', 'retry'].includes(command.operation ?? '')) throw new Error('Usage: td collab task list|get|create|assign|report|ask|plan|review|request-review|comment|revise|close|reopen');
     if (['list', 'create'].includes(command.operation!) ? Boolean(command.target) : !command.target) throw new Error('task command requires a full task id except list/create');
     if (options.principal && !['list', 'get'].includes(command.operation!) && !options['idempotency-key']) throw new Error('Integration task mutation requires an explicit --idempotency-key');
   } else if (['send', 'reply', 'handoff'].includes(action)) {
@@ -287,7 +289,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session', 'principal']);
   const byAction: Record<string, string[]> = {
     events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key'],
-    task: ['to-event', 'decision', 'source', 'external-actor', 'external-message-id', 'metadata', 'work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
+    task: ['purpose', 'to-event', 'decision', 'source', 'external-actor', 'external-message-id', 'metadata', 'work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
     rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],

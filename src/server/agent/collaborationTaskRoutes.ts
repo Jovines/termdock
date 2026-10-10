@@ -35,7 +35,7 @@ export function collaborationTaskRoutes(options: { agent: boolean; store: Collab
   router.get('/', run((req, { tasks, actor }) => {
     const requested = typeof req.query.group === 'string' ? groupId(req.query.group) : null;
     const groups = requested ? [requested] : actor ? options.store.groupsForSession(actor.sessionId).map(g => g.id) : options.store.list().map(g => g.id);
-    return { tasks: groups.flatMap(id => tasks.list(id, actor)) };
+    return { tasks: groups.flatMap(id => tasks.list(id, actor, req.query.purpose ?? (options.agent ? 'all' : 'interactive'))) };
   }));
   router.get('/:taskId', run(async (req, { tasks, actor }) => ({ task: await tasks.get(req.params.taskId, actor) })));
   const input = (req: Request, peers: CollaborationService) => {

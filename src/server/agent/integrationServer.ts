@@ -10,7 +10,7 @@ import type { CollaborationTaskStore } from './collaborationTaskStore.js';
 import type { CollaborationTaskService } from './collaborationTaskService.js';
 import type { CollaborationService } from './collaborationService.js';
 import type { TaskOrigin, TaskOperation, TaskCreateInput } from './collaborationTaskTypes.js';
-import { IntegrationStore, INTEGRATION_PROTOCOL, integrationError, type IntegrationPermission, type IntegrationPrincipal, type IntegrationEvent } from './integrationStore.js';
+import { IntegrationStore, INTEGRATION_PROTOCOL, INTEGRATION_OPERATIONS, integrationError, type IntegrationPermission, type IntegrationPrincipal, type IntegrationEvent } from './integrationStore.js';
 import { IntegrationSessions, publicIntegrationSession, type IntegrationSessionAdapter } from './integrationSessions.js';
 import { getTermdockVersion } from '../utils/version.js';
 
@@ -59,24 +59,24 @@ export class IntegrationRuntime {
     app.post('/admin/principals/:id/policy', run(req => { admin(req); if (req.body?.id !== req.params.id) integrationError('INVALID_INTEGRATION_POLICY', 'Policy identity must match the requested identity'); this.group(req.body?.groupId); this.store.update(req.body); return { ok: true, id: req.params.id }; }));
     app.post('/admin/principals/:id/revoke', run(req => { admin(req); this.store.revoke(req.params.id); return { ok: true }; }));
     app.get('/capabilities', run(req => { const p = principal(req); return { ...this.capabilities(), principal: { id: p.id, group_id: p.groupId, permissions: p.permissions, launch_profiles: p.launchProfiles.map(profile => ({ id: profile.id, agent_slug: profile.agentSlug, cwd_roots: profile.cwdRoots, startup_input_condition: !!profile.startupInput })) } }; }));
-    app.get('/tasks', run(req => { const p = principal(req); this.authorize(p, 'task.read', req.query.group); return { tasks: options.tasks.list(p.groupId, null) }; }));
+    app.get('/tasks', run(req => { const p = principal(req); this.authorize(p, 'task.read', req.query.group); return { tasks: options.tasks.list(p.groupId, null, req.query.purpose) }; }));
     app.get('/tasks/:id', run(async req => { const p = principal(req); this.taskPermission(p, req.params.id, 'task.read'); return { task: await options.tasks.get(req.params.id, null) }; }));
     app.post('/tasks', run(async req => {
       const p = principal(req), raw = req.body?.input ?? {};
       this.authorize(p, 'task.create', raw.groupId);
       if (raw.managed || raw.parentTaskId || raw.dependsOn?.length || raw.coordinatorSessionId || raw.reviewerSessionIds?.length || raw.integration) integrationError('INTEGRATION_OPERATION_DENIED', 'Integration creates ordinary standalone tasks only', 403);
       const input: TaskCreateInput = { idempotencyKey: raw.idempotencyKey, groupId: p.groupId, title: raw.title, spec: raw.spec,
-        constraints: raw.constraints, acceptance: raw.acceptance, assignee: raw.assigneeSessionId ? options.peers.taskMember(String(raw.assigneeSessionId)) : undefined };
+        purpose: raw.purpose, constraints: raw.constraints, acceptance: raw.acceptance, assignee: raw.assigneeSessionId ? options.peers.taskMember(String(raw.assigneeSessionId)) : undefined };
       if (input.assignee) this.authorize(p, 'task.assign');
       const task = await options.tasks.create(input, null, this.origin(p, req.body?.origin)); this.sync(); return { task };
     }));
     app.post('/tasks/:id', run(async req => {
       const p = principal(req), raw = req.body?.input ?? {};
-      const permissions: Record<string, IntegrationPermission> = { assign: 'task.assign', comment: 'task.comment', revise: 'task.revise', answer: 'task.answer' };
+      const permissions: Record<string, IntegrationPermission> = { configure: 'task.configure', assign: 'task.assign', comment: 'task.comment', revise: 'task.revise', answer: 'task.answer' };
       const permission = permissions[raw.kind]; if (!permission) integrationError('INTEGRATION_OPERATION_DENIED', 'Operation requires a user or terminal member', 403);
       this.taskPermission(p, req.params.id, permission);
       const input: TaskOperation = { kind: raw.kind, idempotencyKey: raw.idempotencyKey, content: raw.content,
-        expectedRevision: raw.expectedRevision, decisionId: raw.decisionId,
+        purpose: raw.purpose, expectedRevision: raw.expectedRevision, decisionId: raw.decisionId,
         assignee: raw.assigneeSessionId ? options.peers.taskMember(String(raw.assigneeSessionId)) : undefined };
       const task = await options.tasks.apply(req.params.id, input, null, this.origin(p, req.body?.origin)); this.sync();
       const event = options.taskStore.integrationRequestEvent(p.id, input.idempotencyKey, task.id);
@@ -119,7 +119,8 @@ export class IntegrationRuntime {
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',
-      permissions: ['task.read', 'task.create', 'task.assign', 'task.comment', 'task.revise', 'task.answer', 'events.read', 'session.create', 'session.read', 'session.restore'] };
+      background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true,
+      permissions: INTEGRATION_OPERATIONS };
   }
   private error(error: unknown) {
     return { type: 'error', ok: false, code: error instanceof CollaborationError ? error.code : 'INTEGRATION_INTERNAL_ERROR',

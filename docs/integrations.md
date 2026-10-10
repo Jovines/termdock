@@ -7,7 +7,8 @@
 **实际运行服务至少 1.4.303**。没有 PTY 附着的已登记 tmux 的重复保护修复要求
 **实际运行服务至少 1.4.304**。管理员恢复诊断要求 **CLI / 实际服务均至少 1.4.305**；
 直接 exec 为 pane PID 的原生 argv 核验及可选 Linux 持锁身份要求 **实际服务至少 1.4.306**；
-建议 CLI 与服务同步安装 1.4.306（既有接入命令的 CLI 最低仍为 1.4.301，诊断 CLI 最低为 1.4.305）。
+后台执行记录与用途迁移要求 **CLI / 实际服务均至少 1.4.307**；
+建议 CLI 与服务同步安装 1.4.307（既有接入命令的 CLI 最低仍为 1.4.301，诊断 CLI 最低为 1.4.305）。
 现有 `--session`、消息投递、任务报告与自动协作入口继续兼容；旧的
 `task create --integration` 仍表示代码集成子任务，新身份使用 `--principal`。
 
@@ -140,12 +141,97 @@ td collab --principal report-bridge capabilities
 `principal.launch_profiles` 中目标 profile 的 `startup_input_condition=true`。
 这些布尔值由实际服务回读；服务能力支持不等于身份已配置条件。
 
+## 后台自动化执行记录（1.4.307）
+
+`td automation` 是已有定时投递入口：`list/create/show/run/pause/resume/delete`。
+它的 run `success` 只表示投递，记录不包含结果版本或关联咨询，最多保留 100 条；
+它不是本节的后台执行记录。外部定时器继续由接入方管理。
+
+后台工作复用可靠的 task/attempt/artifact/event 存储，显式使用
+`purpose=automation`。旧记录缺少 purpose 时按 `interactive` 处理，新建也默认 interactive。
+这是使用方式与记录契约，不是安全隔离或简单 CSS 隐藏：
+
+- automation 是本机协作组内的独立记录；不加入人工目标、父子任务、依赖验收、协调者或自动评审。
+- 继续通过原 session 投递、精确恢复，用原 attempt report、comment/respond 和持久事件关联。
+- `complete` 是执行成员的明确结果交付，无需逐期 accepted。它不等于业务机械校验通过或外部发布成功。
+  业务按 artifact_id 保存机械校验和外部 outbox；本版 `external_validation=false`。
+- 用户任务生命周期 `status=open|accepted|closed` 保持既有含义；后台是否执行交付，读下面的 `execution`，
+  不等待 `status=accepted`。不自动生成 accepted；principal 仍不能验收。已有用户验收历史保留。
+- 人工工作台列表 API 默认只列 interactive，看板与“需要你”同样排除 automation，
+  包括 complete、blocked、failed、预期测试超时和真实提问。业务负责在飞书分诊/提问，
+  可使用 task ask/answer 持久关联。异常、问题原文、投递状态和失败重试并未删除或改成成功。
+- Agent CLI 与 principal 的 task list 默认保留全部授权组记录；可用 `--purpose automation|interactive|all` 筛选。
+  task get 不受用途过滤，原始正文与历史仍可回读。用途不代替组权限。
+
+先核验实际服务 capabilities：
+`background_task_records=true`、`task_purpose_configuration=true`、`explicit_execution_state=true`。
+普通 collab 能力位在 `task_workflow` 内，principal 的在响应顶层。CLI 与实际服务均至少 1.4.307，协议仍是 1。
+CLI 对带 purpose 的操作和 configure 会先探测能力，缺失返回
+`BACKGROUND_TASK_RECORDS_UNSUPPORTED`，不会向旧服务提交变更或降级创建普通任务。
+
+新建后台执行记录（使用既有私有凭据文件注入）：
+
+```sh
+td collab --principal report-bridge task create --group <本机组ID> \
+  --purpose automation --title '本期报告' --content '完整执行要求' \
+  --assignee <原TD-session-id> --idempotency-key <本次创建键>
+td collab --principal report-bridge task list --purpose automation
+td collab --principal report-bridge task get <task-id>
+```
+
+automation 的完整与摘要响应均提供 `execution`：
+
+```json
+{
+  "status": "complete",
+  "attemptId": "原执行尝试ID",
+  "reportEventId": "原report事件ID",
+  "artifactId": "本版本结果ID",
+  "reportedAt": 1791636000000
+}
+```
+
+`execution.status` 为 `unassigned`、`awaiting_report` 或明确成员报告的
+`ack/working/blocked/complete/failed`。它只根据当前 attempt 的有序原始 report/revise 事件生成：
+尚未报告及最新 revise 之后等待新报告时，reportEventId/artifactId/reportedAt 为 null；
+只有当前明确 complete 的 artifactId 非 null。comment/respond 不改变 execution、结果或 attempt；
+revise 使旧一轮 execution 失效，再次 complete 产生新 artifact。历史 attempt 的报告不会覆盖当前执行事实。
+投递成功、终端快照、事件 ACK、其他会话忙闲均不能推导 execution 状态。
+`reportedAt` 是原 report 事件时间，execution 为回读投影，不写回或伪造原报告。
+
+已有普通任务原地迁移，不重跑：管理员先在原策略的 permissions 中**追加** `task.configure`，
+保留 id/groupId/其他权限/profile/启动条件，用 `td integration update --file <原策略.json>` 更新。
+该操作保留凭据；仍需核对 principal.permissions，不能把服务支持的 permissions 当实际授权。
+然后读取原记录的最新 revision：
+
+```sh
+td collab --principal report-bridge task get <原task-id>
+td collab --principal report-bridge task configure <原task-id> \
+  --purpose automation --revision <刚回读的revision> \
+  --idempotency-key <此记录的用途迁移键>
+```
+
+configure 在同一持久事务中更新 purpose、revision 并记录 `task.configured`（payload.event.purpose）。
+创建事件也保留创建时 purpose。新配置事件沿用既有持久推送/重连/ACK 契约。
+用途迁移保留原 task/group/attempt/session 关联、投递、artifact、原始事件和已验收/关闭历史，
+不建立新 attempt/session，不投递正文、不恢复终端、不自动 accepted。
+旧创建请求的同一幂等键仍绑定原请求体；不要把它改为带新 purpose 的 create，否则会正确报幂等冲突。
+迁移后保持原业务键与 TD ID，只有未来新记录才使用 purpose=automation 的新创建请求。
+测试记录也可配置为 automation，测试与正式业务组的分离仍由接入方完成，不自动替别人迁移任务。
+
+configure 需要本机管理员（既有受权任务 API）或授权组内持有 `task.configure` 的 principal；
+终端成员不能配置。拒绝无 grant、跨组、过期 revision；同一幂等请求返回原事件且不重复追加。
+`TASK_CHANGED` 时重新读取并核对，不盲覆写。用途非法返回 `INVALID_TASK_PURPOSE`；
+非独立记录返回 `AUTOMATION_STANDALONE_REQUIRED`，跨服务组返回 `BACKGROUND_TASK_LOCAL_ONLY`。
+已关闭的记录只迁移用途仍保持关闭，不由 configure 隐式恢复咨询或执行。
+
 ## 任务与权限
 
 | 操作 | 外部身份 | 会话成员 / 用户规则 |
 | --- | --- | --- |
 | list/get | `task.read`，只读授权组 | 保留现有组权限 |
-| create | `task.create`，普通独立任务 | 指定负责人另需 `task.assign`，必须在组内 |
+| create | `task.create`，独立任务或后台执行记录 | 指定负责人另需 `task.assign`，必须在组内 |
+| configure | `task.configure` | 显式配置用途，必须带 revision 与幂等键；会话成员不能配置 |
 | assign | `task.assign` | 必须带当前 revision；新建 attempt，不隐式恢复会话 |
 | comment | `task.comment` | open/accepted 可咨询，保留原结果、验收和 attempt |
 | revise | `task.revise` | 带 revision，重开并使旧结果失去验收资格，沿用当前 attempt |
@@ -208,6 +294,7 @@ task 事件 `event_id` 与任务内事件 ID 一致，`respond.reply_to_event_id
 | kind | payload |
 | --- | --- |
 | `task.created/assigned/scheduled/coordinator` | `{event}`：原事件、actor、content、attemptId、sequence、createdAt、origin 等 |
+| `task.configured` | `{event}`：`purpose=interactive|automation`，原配置操作者、时间及 source/origin；没有终端投递 |
 | `task.report` | `{event}`：另含明确 reportStatus（ack/working/blocked/complete/failed）、evidence；新 complete 含 artifactId |
 | `task.comment/respond/revise` | `{event}`：咨询含 target/deliveryId，答复含 replyToEventId |
 | `task.question/answer` | `{event}`；decision 的完整状态从 task get 回读 |

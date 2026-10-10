@@ -6,6 +6,7 @@ import { CollaborationError } from './collaborationProtocol.js';
 import { CollaborationTaskStore } from './collaborationTaskStore.js';
 import { captureTaskCommit } from './collaborationTaskWorkspace.js';
 import { taskBundleChunk } from './collaborationTaskBundles.js';
+import { taskExecution, taskPurpose, taskPurposeFilter } from './collaborationTaskPurpose.js';
 import { taskMemberKey, type CollaborationTask, type CollaborationTaskView, type TaskCreateInput, type TaskMember, type TaskOperation, type TaskWorkspace, type TaskOrigin } from './collaborationTaskTypes.js';
 
 export type PrepareTaskWorker = (task: CollaborationTask, template: TaskMember, dependencies: CollaborationTask[]) => Promise<{ sessionId: string; workspace: TaskWorkspace }>;
@@ -34,7 +35,7 @@ export class CollaborationTaskService {
   private validateMembers(groupId: string, input: TaskCreateInput | TaskOperation) {
     for (const member of [input.assignee, input.coordinator, ...('reviewers' in input ? input.reviewers ?? [] : [])]) if (member) this.group(groupId, member);
   }
-  private view(task: CollaborationTask, summary = false): CollaborationTaskView {
+  private view(task: CollaborationTask & { execution?: CollaborationTaskView['execution'] }, summary = false): CollaborationTaskView {
     const members = [...task.attempts.map(a => a.assignee), ...task.artifacts.map(a => a.actor),
       ...task.events.flatMap(e => [...(e.actor ? [e.actor] : []), ...(e.target ? [e.target] : [])]), ...(task.coordinator ? [task.coordinator] : []), ...(task.workflow?.reviewers ?? [])];
     const memberSessions: Record<string, string> = {};
@@ -46,12 +47,13 @@ export class CollaborationTaskService {
       const template = task.workflow?.reviewers.some(m => taskMemberKey(m) === taskMemberKey(member));
       return { member, sessionId, launchProfile: group.memberLaunchProfiles?.[sessionId], role: `${template ? '此目标的执行成员模板；' : ''}${group.roles?.[sessionId] ?? ''}` };
     });
-    return { ...task, children, roster, launchProfiles: summary ? undefined : group?.launchProfiles, defaultLaunchProfileId: summary ? undefined : group?.defaultLaunchProfileId, memberSessions, replica: task.ownerServiceId !== this.self, summaryOnly: summary, outbox: (summary ? [] : this.tasks.pending(task.id))
+    return { ...task, purpose: taskPurpose(task.purpose), ...(task.purpose === 'automation' ? { execution: task.execution ?? taskExecution(task) } : {}), children, roster, launchProfiles: summary ? undefined : group?.launchProfiles, defaultLaunchProfileId: summary ? undefined : group?.defaultLaunchProfileId, memberSessions, replica: task.ownerServiceId !== this.self, summaryOnly: summary, outbox: (summary ? [] : this.tasks.pending(task.id))
       .map(({ id, attemptId, messageId, lastError }) => ({ id, attemptId, messageId, lastError })) };
   }
-  list(groupId: string, actor: TaskMember | null) {
+  list(groupId: string, actor: TaskMember | null, purpose: unknown = 'all') {
     this.group(groupId, actor);
-    return this.tasks.list([groupId], true).map(task => this.view(task, true));
+    const filter = taskPurposeFilter(purpose);
+    return this.tasks.list([groupId], true).filter(task => filter === 'all' || taskPurpose(task.purpose) === filter).map(task => this.view(task, true));
   }
   async get(taskId: string, actor: TaskMember | null) {
     const task = this.tasks.get(taskId);
@@ -60,7 +62,8 @@ export class CollaborationTaskService {
     return this.view(task);
   }
   async create(input: TaskCreateInput, actor: TaskMember | null, origin?: TaskOrigin) {
-    this.group(input.groupId, actor); this.validateMembers(input.groupId, input);
+    const group = this.group(input.groupId, actor); this.validateMembers(input.groupId, input);
+    if (input.purpose === 'automation' && group.federated) throw new CollaborationError('BACKGROUND_TASK_LOCAL_ONLY', '首版后台自动化记录使用本机协作组', 409);
     const dependencies = [...(input.dependsOn ?? []), ...(input.parentTaskId ? [input.parentTaskId] : [])];
     const authority = dependencies.length ? this.tasks.get(dependencies[0])?.ownerServiceId : this.self;
     if (!authority) throw new CollaborationError('TASK_DEPENDENCY_NOT_FOUND', '父任务或依赖任务不存在', 404);
@@ -77,7 +80,8 @@ export class CollaborationTaskService {
   async apply(taskId: string, input: TaskOperation, actor: TaskMember | null, origin?: TaskOrigin) {
     const task = this.tasks.get(taskId);
     if (!task) throw new CollaborationError('TASK_NOT_FOUND', '任务不存在', 404);
-    this.group(task.groupId, actor); this.validateMembers(task.groupId, input);
+    const group = this.group(task.groupId, actor); this.validateMembers(task.groupId, input);
+    if (input.kind === 'configure' && input.purpose === 'automation' && group.federated) throw new CollaborationError('BACKGROUND_TASK_LOCAL_ONLY', '首版后台自动化记录使用本机协作组', 409);
     if (origin && task.ownerServiceId !== this.self) throw new CollaborationError('INTEGRATION_LOCAL_ONLY', '首版集成任务须由本机服务保存', 409);
     if (task.ownerServiceId !== this.self) {
       const result = await this.peers.requestTasks(task.ownerServiceId, { op: 'apply', taskId, input, actorSessionId: actor?.sessionId ?? null });
@@ -104,7 +108,7 @@ export class CollaborationTaskService {
         artifactId: child.acceptedArtifactId, integration: child.workflow?.integration === true,
         commit: (child.artifacts.find(a => a.id === child.acceptedArtifactId)?.evidence as { commit?: string } | undefined)?.commit })) } };
     }
-    const updated = this.tasks.apply(taskId, input, actor, origin); void this.flush(); return this.view(updated);
+    const updated = this.tasks.apply(taskId, input, actor, origin); if (input.kind !== 'configure') void this.flush(); return this.view(updated);
   }
   heads(groupIds: string[]) { return this.tasks.heads(groupIds, this.self); }
   async dependencyChunk(taskId: string, dependencyId: string, offset: unknown, targetService = this.self): Promise<Record<string, any>> {

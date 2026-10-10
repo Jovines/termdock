@@ -3,6 +3,7 @@ import { collaborationTaskNeedsAttention, collaborationTaskStage } from './taskS
 
 /** Execution details stay attached to the user's goal, with orphaned work retained. */
 export function collaborationBoardTasks(tasks: CollaborationTaskView[], showSteps = false, query = '') {
+  tasks = tasks.filter(task => task.purpose !== 'automation');
   const byId = new Map(tasks.map(task => [task.id, task]));
   const parent = (task: CollaborationTaskView) => byId.get(task.parentTaskId ?? task.workflow?.rootTaskId ?? '');
   const rootOf = (task: CollaborationTaskView) => {
