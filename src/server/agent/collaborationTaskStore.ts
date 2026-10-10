@@ -3,11 +3,11 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { collaborationResultPresentation } from './collaborationResultPresentation.js';
 import { CollaborationError } from './collaborationProtocol.js';
-import { taskMemberKey, type CollaborationTask, type CollaborationTaskEvent, type TaskCreateInput, type TaskMember, type TaskOperation, type TaskOutbox, type TaskWorkspace, type TaskWorkflow } from './collaborationTaskTypes.js';
+import { taskMemberKey, type CollaborationTask, type CollaborationTaskEvent, type TaskCreateInput, type TaskMember, type TaskOperation, type TaskOutbox, type TaskWorkspace, type TaskWorkflow, type TaskOrigin } from './collaborationTaskTypes.js';
 
 interface TaskDocument {
   version: 1; tasks: CollaborationTask[]; outbox: TaskOutbox[];
-  requests: Record<string, { hash: string; taskId: string }>;
+  requests: Record<string, { hash: string; taskId: string; eventId?: string }>;
 }
 const id = () => randomBytes(16).toString('hex');
 const codeSteps = (tasks: CollaborationTask[], rootId: string) => tasks.filter(t => {
@@ -70,7 +70,7 @@ function validateSnapshot(task: CollaborationTask): void {
     if (!event || !validId(event.id) || !Number.isSafeInteger(event.sequence) || event.sequence < 1 || typeof event.kind !== 'string'
       || typeof event.content !== 'string' || !time(event.createdAt) || event.attemptId !== null && !task.attempts.some(a => a.id === event.attemptId)) invalid();
     if (event.deliveryId !== undefined && !validId(event.deliveryId)) invalid();
-    if (event.source !== undefined && !['system', 'user'].includes(event.source)) invalid();
+    if (event.source !== undefined && !['system', 'user', 'integration'].includes(event.source)) invalid();
     if (event.actor !== null) member(event.actor);
     if (event.target) member(event.target);
   }
@@ -94,6 +94,9 @@ function validateSnapshot(task: CollaborationTask): void {
 
 /** Atomic document writes keep decisions and their outgoing messages in one transaction. */
 export class CollaborationTaskStore {
+  private listeners = new Set<() => void>();
+  subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  snapshot(): CollaborationTask[] { return structuredClone(this.document.tasks); }
   private document: TaskDocument = { version: 1, tasks: [], outbox: [], requests: {} };
   constructor(private file: string) {
     try {
@@ -102,9 +105,13 @@ export class CollaborationTaskStore {
       this.document = doc;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
-  private transaction<T>(mutate: (doc: TaskDocument) => T): T {
+  private transaction<T>(mutate: (doc: TaskDocument) => T, origin?: TaskOrigin): T {
     const next = structuredClone(this.document);
     const result = mutate(next);
+    if (origin) {
+      const previous = new Set(this.document.tasks.flatMap(t => t.events.map(e => e.id)));
+      for (const task of next.tasks) for (const event of task.events) if (!previous.has(event.id) && event.actor === null && event.source !== 'system') { event.source = 'integration'; event.origin = structuredClone(origin); }
+    }
     if (next.tasks.some(task => Buffer.byteLength(JSON.stringify(task)) > 512_000)) throw new CollaborationError('TASK_HISTORY_LIMIT', '此任务记录达到 500 KiB，请建立后续任务并保留本任务为历史', 409);
     const serialized = JSON.stringify(next);
     if (Buffer.byteLength(serialized) > 64 * 1024 * 1024) throw new CollaborationError('TASK_STORAGE_FULL', '任务记录已达到保存上限，请导出历史后整理', 409);
@@ -112,7 +119,12 @@ export class CollaborationTaskStore {
     const temporary = `${this.file}.${process.pid}.tmp`;
     writeFileSync(temporary, serialized, { mode: 0o600 }); renameSync(temporary, this.file);
     this.document = next;
+    for (const listener of this.listeners) { try { listener(); } catch { /* Durable sources allow the integration journal to retry. */ } }
     return structuredClone(result);
+  }
+  integrationRequestEvent(principalId: string, key: string, taskId: string): CollaborationTaskEvent | undefined {
+    const request = this.document.requests[`integration:${principalId}:${key}`];
+    return request?.taskId === taskId ? structuredClone(this.document.tasks.find(t => t.id === taskId)?.events.find(e => e.id === request.eventId)) : undefined;
   }
   get(taskId: string): CollaborationTask | null { return structuredClone(this.document.tasks.find(t => t.id === taskId) ?? null); }
   owned(owner: string): CollaborationTask[] { return structuredClone(this.document.tasks.filter(t => t.ownerServiceId === owner)); }
@@ -135,7 +147,7 @@ export class CollaborationTaskStore {
         attempts: current ? [{ ...current, report: current.report ? { ...current.report, summary: reportSummary, content: '', evidence: undefined } : undefined }] : [],
         artifacts: [plan, result, ...task.artifacts.filter(a => a.kind === 'review' && a.reviewsArtifactId === result?.id)].filter((a): a is NonNullable<typeof a> => !!a).map(a => ({ ...a, content: '', summary: (a.summary || (a.kind === 'result' && collaborationResultPresentation(a.content).condensed ? collaborationResultPresentation(a.content).summary : undefined))?.slice(0, 800), evidence: undefined })),
         decisions: task.decisions.filter(d => d.status === 'pending').map(d => ({ ...d, question: d.question.slice(0, 512), options: [] })),
-        events: task.events.filter(e => ['revise', 'request-review'].includes(e.kind) && e.attemptId === task.activeAttemptId).slice(-4).map(e => ({ ...e, content: e.source === 'user' && e.kind === 'revise' ? e.content.slice(0, 512) : '' })) };
+        events: task.events.filter(e => ['revise', 'request-review'].includes(e.kind) && e.attemptId === task.activeAttemptId).slice(-4).map(e => ({ ...e, content: ['user', 'integration'].includes(e.source ?? '') && e.kind === 'revise' ? e.content.slice(0, 512) : '' })) };
     }));
   }
   heads(groupIds: string[], owner: string) { return this.document.tasks.filter(t => groupIds.includes(t.groupId) && t.ownerServiceId === owner).map(t => ({ id: t.id, revision: t.revision })); }
@@ -145,10 +157,10 @@ export class CollaborationTaskStore {
     const event = { id: id(), sequence: (task.events.at(-1)?.sequence ?? 0) + 1, kind, actor, content, attemptId, createdAt: Math.max(Date.now(), (task.events.at(-1)?.createdAt ?? 0) + 1) };
     task.events.push(event); return event;
   }
-  private request(doc: TaskDocument, actor: TaskMember | null, key: unknown, payload: unknown): { key: string; hash: string; previous?: CollaborationTask } {
+  private request(doc: TaskDocument, actor: TaskMember | null, key: unknown, payload: unknown, origin?: TaskOrigin): { key: string; hash: string; previous?: CollaborationTask } {
     if (typeof key !== 'string' || !key.trim() || key.length > 256) throw new CollaborationError('INVALID_IDEMPOTENCY_KEY', '需要有效的请求幂等键');
-    const scoped = `${actor ? taskMemberKey(actor) : 'user'}:${key}`;
-    const hash = createHash('sha256').update(stable(payload)).digest('hex');
+    const scoped = `${origin ? `integration:${origin.integrationId}` : actor ? taskMemberKey(actor) : 'user'}:${key}`;
+    const hash = createHash('sha256').update(stable(origin ? [payload, origin] : payload)).digest('hex');
     const previous = doc.requests[scoped];
     if (previous && previous.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', '该请求已用于不同内容；请保留原请求或重新开始', 409);
     return { key: scoped, hash, previous: previous ? doc.tasks.find(t => t.id === previous.taskId) : undefined };
@@ -180,7 +192,7 @@ export class CollaborationTaskStore {
     doc.outbox.push({ id: id(), taskId: task.id, attemptId: attempt?.id ?? null, target: task.coordinator, kind: 'message', threadId: attempt?.threadId ?? task.id,
       content: `你被指定为任务「${task.title}」的协调者。\n目标：${task.spec}\n约束：${task.constraints || '未补充'}\n验收标准：${task.acceptance || '由用户决定'}\n任务 ID：${task.id}\n用 td collab task get ${task.id} --text 查看原始记录；用 task list --group ${task.groupId} 查看工作组。需要拆分时用 task create --group ${task.groupId} --parent ${task.id} --title '子任务标题' --content '任务内容'。分派前查询 revision，再用 task assign --revision；把必要的人类决策交给 task ask，不推断成员忙闲，不停止其他成员终端。` });
   }
-  create(owner: string, input: TaskCreateInput, actor: TaskMember | null): CollaborationTask {
+  create(owner: string, input: TaskCreateInput, actor: TaskMember | null, origin?: TaskOrigin): CollaborationTask {
     const title = text(input.title, '标题', 640, true), spec = text(input.spec, '任务内容', 32_000, true);
     const constraints = text(input.constraints, '约束'), acceptance = text(input.acceptance, '完成标准');
     if (input.dependsOn !== undefined && (!Array.isArray(input.dependsOn) || input.dependsOn.length > 32 || input.dependsOn.some(v => typeof v !== 'string'))) throw new CollaborationError('INVALID_DEPENDENCIES', '依赖列表无效');
@@ -193,7 +205,7 @@ export class CollaborationTaskStore {
     if (input.reviewers && (!Array.isArray(input.reviewers) || input.reviewers.length > 32)) throw new CollaborationError('INVALID_REVIEWERS', '评审成员列表无效');
     input.reviewers?.forEach(member);
     return this.transaction(doc => {
-      const request = this.request(doc, actor, input.idempotencyKey, input);
+      const request = this.request(doc, actor, input.idempotencyKey, input, origin);
       if (request.previous) return request.previous;
       if (doc.tasks.length >= 2000) throw new CollaborationError('TASK_LIMIT', '任务记录达到上限，请导出并整理历史', 409);
       const dependsOn = [...new Set(input.dependsOn ?? [])];
@@ -222,7 +234,7 @@ export class CollaborationTaskStore {
       const task: CollaborationTask = { id: id(), ownerServiceId: owner, groupId: input.groupId, title, spec, constraints, acceptance,
         coordinator: parent?.workflow ? parent.coordinator : input.coordinator !== undefined ? input.coordinator : input.parentTaskId ? doc.tasks.find(t => t.id === input.parentTaskId)?.coordinator ?? actor : null,
         parentTaskId: input.parentTaskId ?? null, dependsOn, createdAt: now, updatedAt: now, revision: 1,
-        status: 'open', activeAttemptId: null, attempts: [], decisions: [], artifacts: [], events: [], deliveries: [], ...(workflow ? { workflow } : {}) };
+        ...(origin ? { origin: structuredClone(origin) } : {}), status: 'open', activeAttemptId: null, attempts: [], decisions: [], artifacts: [], events: [], deliveries: [], ...(workflow ? { workflow } : {}) };
       this.event(task, 'created', actor, spec);
       if (parent?.constraints) task.constraints = text([parent.constraints, constraints].filter(Boolean).join('\n'), '继承约束');
       if (workflow?.kind === 'goal') {
@@ -237,9 +249,9 @@ export class CollaborationTaskStore {
       }
       this.notifyCoordinator(doc, task);
       doc.tasks.push(task); this.touchParent(doc, task, '新子任务已创建'); doc.requests[request.key] = { hash: request.hash, taskId: task.id }; return task;
-    });
+    }, origin);
   }
-  apply(taskId: string, input: TaskOperation, actor: TaskMember | null): CollaborationTask {
+  apply(taskId: string, input: TaskOperation, actor: TaskMember | null, origin?: TaskOrigin): CollaborationTask {
     const content = text(input.content, '内容');
     const summary = text(input.summary, '结果摘要', 2400);
     if (summary && (input.kind !== 'report' || input.status !== 'complete')) throw new CollaborationError('INVALID_SUMMARY', '摘要只能随完成结果提交');
@@ -248,17 +260,18 @@ export class CollaborationTaskStore {
     return this.transaction(doc => {
       const task = doc.tasks.find(t => t.id === taskId);
       if (!task) throw new CollaborationError('TASK_NOT_FOUND', '任务不存在或无权查看', 404);
-      const request = this.request(doc, actor, input.idempotencyKey, [taskId, input]);
+      const request = this.request(doc, actor, input.idempotencyKey, [taskId, input], origin);
       if (request.previous) return request.previous;
+      if (origin && ['accept', 'approve-plan', 'report', 'ask', 'submit-plan', 'review', 'respond'].includes(input.kind)) throw new CollaborationError('INTEGRATION_OPERATION_DENIED', '此操作需要用户或原执行成员身份', 403);
       const coordination = actor === null || sameMember(actor, task.coordinator);
       if (['assign', 'coordinator', 'close', 'reopen', 'revise', 'request-review', 'coordinate', 'pause', 'resume', 'retry'].includes(input.kind) && !coordination) throw new CollaborationError('TASK_PERMISSION_DENIED', '此操作需要用户或当前协调者', 403);
       if (['answer', 'accept', 'approve-plan'].includes(input.kind) && actor !== null) throw new CollaborationError('USER_DECISION_REQUIRED', '回答、方案确认与验收需要用户操作', 403);
-      if (!['report', 'ask', 'submit-plan', 'review', 'comment', 'answer'].includes(input.kind) && input.expectedRevision !== task.revision) throw new CollaborationError('TASK_CHANGED', '任务已更新，请查看最新记录后重试', 409);
+      if (!['report', 'ask', 'submit-plan', 'review', 'comment', 'respond', 'answer'].includes(input.kind) && input.expectedRevision !== task.revision) throw new CollaborationError('TASK_CHANGED', '任务已更新，请查看最新记录后重试', 409);
       const userFollowup = actor === null && input.kind === 'revise' && !!content;
-      if (task.status !== 'open' && !['reopen', 'report'].includes(input.kind) && !(task.status === 'accepted' && userFollowup)) throw new CollaborationError('TASK_ARCHIVED', '任务已归档；需要继续时请重新打开', 409);
-      if (task.workflow && task.status !== 'open' && input.kind !== 'reopen' && !(task.status === 'accepted' && userFollowup)) throw new CollaborationError('TASK_ARCHIVED', '自动协作的已完成版本不能追加执行报告，请先重新打开', 409);
+      if (task.status !== 'open' && !['reopen', 'report'].includes(input.kind) && !(task.status === 'accepted' && (userFollowup || ['comment', 'respond'].includes(input.kind)))) throw new CollaborationError('TASK_ARCHIVED', '任务已归档；需要继续时请重新打开', 409);
+      if (task.workflow && task.status !== 'open' && input.kind !== 'reopen' && !(task.status === 'accepted' && (userFollowup || ['comment', 'respond'].includes(input.kind)))) throw new CollaborationError('TASK_ARCHIVED', '自动协作的已完成版本不能追加执行报告，请先重新打开', 409);
       const root = task.workflow?.rootTaskId ? doc.tasks.find(t => t.id === task.workflow!.rootTaskId) : undefined;
-      if (root && root.status !== 'open' && !(root.status === 'accepted' && userFollowup)) throw new CollaborationError('GOAL_ARCHIVED', '请先重新打开所属目标，再继续子任务', 409);
+      if (root && root.status !== 'open' && !(root.status === 'accepted' && (userFollowup || ['comment', 'respond'].includes(input.kind)))) throw new CollaborationError('GOAL_ARCHIVED', '请先重新打开所属目标，再继续子任务', 409);
       if (userFollowup && task.status === 'accepted') {
         task.status = 'open'; delete task.acceptedArtifactId; delete task.completionMode;
         this.event(task, 'reopen', null, '用户要求继续跟进，保留上一版交付');
@@ -306,7 +319,17 @@ export class CollaborationTaskStore {
         }
         attempt!.report = { status: input.status!, content, evidence: input.evidence, createdAt: Date.now() };
         const event = this.event(task, 'report', actor, content, attempt!.id); event.reportStatus = input.status; event.evidence = input.evidence;
-        if (input.status === 'complete') task.artifacts.push({ id: id(), attemptId: attempt!.id, kind: 'result', content, ...(summary ? { summary } : {}), evidence: input.evidence, actor: actor!, createdAt: event.createdAt });
+        if (input.status === 'complete' && task.status === 'accepted') { task.status = 'open'; delete task.acceptedArtifactId; delete task.completionMode; }
+        if (input.status === 'complete') {
+          event.artifactId = id();
+          task.artifacts.push({ id: event.artifactId, attemptId: attempt!.id, kind: 'result', content, ...(summary ? { summary } : {}), evidence: input.evidence, actor: actor!, createdAt: event.createdAt });
+        }
+      } else if (input.kind === 'respond') {
+        const original = task.events.find(e => e.id === input.replyToEventId && e.kind === 'comment');
+        const originalAttempt = original && task.attempts.find(a => a.id === original.attemptId);
+        if (!original || !originalAttempt || originalAttempt.id !== input.attemptId || !sameMember(actor, originalAttempt.assignee)) throw new CollaborationError('RESPONSE_PERMISSION_DENIED', '请由原追问对应的执行成员回复，并指定原事件和分派', 403);
+        if (!content) throw new CollaborationError('INVALID_RESPONSE', '答复不能为空');
+        const response = this.event(task, 'respond', actor, content, originalAttempt.id); response.replyToEventId = original.id; response.evidence = input.evidence;
       } else if (input.kind === 'ask') {
         if (!content || input.options !== undefined && (!Array.isArray(input.options) || input.options.length > 8 || input.options.some(v => typeof v !== 'string' || !v.trim() || v.length > 500))) throw new CollaborationError('INVALID_QUESTION', '问题正文与选项无效');
         task.decisions.push({ id: id(), attemptId: attempt!.id, question: content, options: input.options ?? [], status: 'pending', createdAt: Date.now() });
@@ -319,7 +342,7 @@ export class CollaborationTaskStore {
         this.event(task, 'answer', null, content, decision.attemptId);
         const recipient = task.attempts.find(a => a.id === decision.attemptId)!;
         doc.outbox.push({ id: id(), taskId: task.id, attemptId: recipient.id, target: recipient.assignee, kind: 'message', threadId: recipient.threadId,
-          content: `任务「${task.title}」问题已回答\n问题：${decision.question}\n用户回答：${content}\n任务 ID：${task.id}\n尝试 ID：${recipient.id}` });
+          content: `任务「${task.title}」问题已回答\n问题：${decision.question}\n${origin ? '外部接入回答' : '用户回答'}：${content}\n任务 ID：${task.id}\n尝试 ID：${recipient.id}` });
       } else if (input.kind === 'submit-plan' || input.kind === 'review') {
         if (!content || !actor) throw new CollaborationError('INVALID_ARTIFACT', '交付物需要成员身份和正文');
         const reviewed = input.kind === 'review' ? task.artifacts.find(a => a.id === input.artifactId && a.kind !== 'review') : undefined;
@@ -372,7 +395,7 @@ export class CollaborationTaskStore {
         if (recipient && !sameMember(actor, recipient.assignee)) {
           event.target = recipient.assignee; event.deliveryId = id();
           doc.outbox.push({ id: event.deliveryId, taskId: task.id, attemptId: recipient.id, target: recipient.assignee,
-            kind: 'message', threadId: recipient.threadId, content: `任务「${task.title}」${input.kind === 'revise' ? actor === null ? '用户要求继续跟进' : '修改要求' : '补充反馈'}：\n${content}\n任务 ID：${task.id}\n尝试 ID：${recipient.id}${task.workflow?.kind === 'goal' ? `\n本轮继续沿用此目标和已交付证据，只推进新增要求。\n${this.goalInstructions(task)}` : '\n按这次要求继续当前分派，重新提交 complete 和摘要；新版本会重新独立评审。'}` });
+            kind: 'message', threadId: recipient.threadId, replyToEventId: event.id, content: `任务「${task.title}」${input.kind === 'revise' ? actor === null ? origin ? '外部接入要求继续跟进' : '用户要求继续跟进' : '修改要求' : '补充反馈'}：\n${content}\n任务 ID：${task.id}\n尝试 ID：${recipient.id}${input.kind === 'comment' ? `\n这是纯咨询，保留当前结果与验收。请用 td collab --session ${recipient.assignee.sessionId} task respond ${task.id} --attempt ${recipient.id} --to-event ${event.id} --content '答复' 关联回复；只有明确提交新的交付物才用 complete。` : task.workflow?.kind === 'goal' ? `\n本轮继续沿用此目标和已交付证据，只推进新增要求。\n${this.goalInstructions(task)}` : '\n按这次要求继续当前分派，重新提交 complete 和摘要；新版本会重新独立评审。'}` });
           if (task.workflow?.kind === 'goal' && task.coordination) {
             task.coordination.notifiedSequence = event.sequence; task.coordination.notifiedAt = Date.now();
           }
@@ -412,14 +435,14 @@ export class CollaborationTaskStore {
           delete outbox.lastError; delete outbox.nextRetryAt;
         }
       } else throw new CollaborationError('INVALID_TASK_OPERATION', '不支持的任务操作');
-      if (['report', 'ask', 'answer', 'submit-plan', 'review', 'accept', 'revise', 'close', 'reopen'].includes(input.kind)) this.notifyCoordinator(doc, task, task.events.at(-1));
+      if (['report', 'respond', 'ask', 'answer', 'submit-plan', 'review', 'accept', 'revise', 'close', 'reopen'].includes(input.kind)) this.notifyCoordinator(doc, task, task.events.at(-1));
       if (task.events.length > 1000 || task.artifacts.length > 200 || task.attempts.length > 100) throw new CollaborationError('TASK_HISTORY_LIMIT', '此任务历史达到上限，请建立后续任务并保留本任务为历史', 409);
       task.revision++; task.updatedAt = Math.max(Date.now(), task.updatedAt + 1);
-      if (task.workflow && input.kind !== 'coordinate') this.touchParent(doc, task, `${input.kind}${input.status ? ` / ${input.status}` : ''}：${content.slice(0, 1500)}`);
+      if (task.workflow && !['coordinate', 'comment', 'respond'].includes(input.kind)) this.touchParent(doc, task, `${input.kind}${input.status ? ` / ${input.status}` : ''}：${content.slice(0, 1500)}`);
       if (task.workflow && ['blocked', 'failed'].includes(input.status ?? '')) task.automationIssue = content.slice(0, 1000);
       if (task.workflow && input.kind === 'report' && ['ack', 'working', 'complete'].includes(input.status ?? '')) delete task.automationIssue;
-      doc.requests[request.key] = { hash: request.hash, taskId }; return task;
-    });
+      doc.requests[request.key] = { hash: request.hash, taskId, eventId: task.events.at(-1)?.id }; return task;
+    }, origin);
   }
   private touchParent(doc: TaskDocument, task: CollaborationTask, content: string) {
     const root = task.workflow?.rootTaskId ? doc.tasks.find(t => t.id === task.workflow!.rootTaskId) : undefined;
@@ -506,7 +529,7 @@ export class CollaborationTaskStore {
           this.event(task, 'review-passed', review!.actor, review!.content).source = 'system';
           this.touchParent(doc, task, '独立评审通过，后续依赖可以接续');
         } else if (action === 'review-feedback') {
-          const boundary = task.events.filter(e => e.kind === 'revise' && e.source === 'user' && e.attemptId === task.activeAttemptId).at(-1)?.sequence ?? 0;
+          const boundary = task.events.filter(e => e.kind === 'revise' && ['user', 'integration'].includes(e.source ?? '') && e.attemptId === task.activeAttemptId).at(-1)?.sequence ?? 0;
           const rounds = task.events.filter(e => e.kind === 'revise' && e.actor === null && e.artifactId && e.attemptId === task.activeAttemptId && e.sequence > boundary).length;
           const blocked = review!.verdict === 'blocked' || rounds >= task.workflow!.maxRevisions;
           const event = this.event(task, blocked ? 'review-blocked' : 'revise', null, review!.content); event.artifactId = result!.id; event.source = 'system';

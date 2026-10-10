@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { normalizeSplitWorkspaces, reorderSplitWorkspaceSessions, type SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import { I18nProvider } from '../../i18n';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
+import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { LeftSidebar, buildCollaborationSections } from './LeftSidebar';
 
@@ -68,6 +69,8 @@ function point(element: Element | null) {
   fireEvent.pointerMove(window, { clientX: 50, clientY: 50 });
 }
 beforeEach(() => {
+  localStorage.clear();
+  useCollaborationPanelDock.setState({ docks: {}, hosts: {} });
   useCollaborationTaskInbox.setState({ tasks: [], allTasks: [], error: null });
   vi.clearAllMocks(); useCollaborationNavigation.setState({ groupId: null });
   mocks.save.mockResolvedValue({ group: baseGroup });
@@ -372,4 +375,33 @@ describe('primary workspace navigation', () => {
     fireEvent.click(row.querySelector('.sidebar-session-primary')!);
     expect(useCollaborationNavigation.getState().groupId).toBeNull();
   });
+});
+
+it('collapses every member, keeps the active terminal and group entry, and remembers the preference', async () => {
+  const switchTerminal = vi.fn(); window.addEventListener('switch-terminal-session', switchTerminal);
+  const handlers = await setup();
+  const collapse = screen.getByRole('button', { name: '收起 Release team 的成员会话' });
+  expect(collapse.getAttribute('aria-expanded')).toBe('true');
+  const group = screen.getByRole('region', { name: 'Agent 工作组：Release team' });
+  fireEvent.click(collapse);
+  expect(group.querySelector('[data-collaboration-member]')).toBeNull();
+  expect(screen.getByRole('button', { name: '展开 Release team 的成员会话' }).getAttribute('aria-expanded')).toBe('false');
+  expect(JSON.parse(localStorage.getItem('termdock-sidebar-collapsed-folder-groups')!)).toContain('collaboration:team');
+  expect(switchTerminal).not.toHaveBeenCalled();
+  expect(handlers.onCloseSession).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '打开协作工作区：Release team' }));
+  expect(useCollaborationNavigation.getState().groupId).toBe('team');
+  expect(group.querySelector('[data-collaboration-member]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '展开 Release team 的成员会话' }));
+  expect(group.querySelectorAll('[data-collaboration-member]')).toHaveLength(3);
+  expect(JSON.parse(localStorage.getItem('termdock-sidebar-collapsed-folder-groups')!)).not.toContain('collaboration:team');
+  window.removeEventListener('switch-terminal-session', switchTerminal);
+});
+
+it('opening the standalone board preserves the existing message split', async () => {
+  await setup();
+  useCollaborationPanelDock.getState().setDock('team', { sessionId: 'a', side: 'right' });
+  fireEvent.click(screen.getByRole('button', { name: '打开协作工作区：Release team' }));
+  expect(useCollaborationPanelDock.getState().docks.team).toEqual({ sessionId: 'a', side: 'right' });
+  expect(useCollaborationNavigation.getState().groupId).toBe('team');
 });

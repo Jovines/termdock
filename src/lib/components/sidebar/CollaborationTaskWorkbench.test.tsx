@@ -101,7 +101,8 @@ describe('collaboration goal journeys', () => {
     await screen.findByText('跟进要求已保存，等待新结果。');
     expect(screen.queryByRole('textbox', { name: '跟进要求' })).toBeNull();
     expect(screen.getByText('上一版结果')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '验收此结果' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByRole('button', { name: '验收此结果' })).toBeNull();
+    expect(screen.getByText('等待新结果后可验收')).toBeTruthy();
     expect(screen.getByRole('region', { name: '最近跟进' }).textContent).toContain('等待写入终端');
     expect(localStorage.getItem(`termdock:tasks:${location.origin}:team:goal:feedback`)).toBe('""');
     expect(api.update.mock.calls[0][1]).toMatchObject({ kind: 'revise', content: '继续查看磁盘占用' });
@@ -454,7 +455,7 @@ it('shows the real failure on the card and opens the existing explicit retry flo
   setup([record], { board: true, sessions: sessions.map(s => ({ ...s, name: `tmux:wt-${s.sessionId}` })) });
   const card = await screen.findByRole('button', { name: /查看原因与处理/ });
   expect(card.textContent).toContain(issue);
-  expect(card.textContent).toContain('Codex 1');
+  expect(card.closest('article')?.textContent).toContain('Codex 1');
   expect(card.textContent).not.toContain('tmux:');
   expect(api.update).not.toHaveBeenCalled();
   fireEvent.click(card);
@@ -665,7 +666,7 @@ it('shows member conditions and independent delivery errors together, keeping or
   setup([summary], { board: true }); api.get.mockResolvedValue({ task: record });
   const card = await screen.findByRole('button', { name: /查看条件与异常处理/ });
   expect(card.textContent).toContain('需要补齐测试授权条件'); expect(card.textContent).toContain('消息投递失败：成员连接未恢复');
-  expect(within(card).getByText(/最近明确报告：成员报告受阻/).querySelector('time')?.dateTime).toBe(new Date(reportAt).toISOString());
+  expect(within(card.closest('article')!).getByText(/最近明确报告：成员报告受阻/).querySelector('time')?.dateTime).toBe(new Date(reportAt).toISOString());
   fireEvent.click(card);
   await screen.findByRole('heading', { name: '成员报告受阻' });
   expect(screen.getByRole('heading', { name: '投递需要处理' })).toBeTruthy();
@@ -700,4 +701,50 @@ it('leaves an omitted legacy record source unclassified and offers no system ret
   expect(screen.queryByRole('button', { name: '重新检查自动安排' })).toBeNull();
   expect(screen.queryByRole('button', { name: '重试现有投递' })).toBeNull();
   expect(api.update).not.toHaveBeenCalled();
+});
+
+it('puts the current follow-up and unfinished work before a collapsed previous result', async () => {
+  const child = task({ id: 'new-code', parentTaskId: 'goal', title: '修复上传时的覆盖问题', workflow: { ...task().workflow!, kind: 'step' } });
+  const record = task({ artifacts: [result, review], children: [{ id: child.id, title: child.title, status: 'open', revision: 1 }], events: [
+    { id: 'followup', sequence: 1, kind: 'revise', source: 'user', actor: null, attemptId: 'attempt', content: '直接修复这些问题', createdAt: 8 },
+    { id: 'update', sequence: 2, kind: 'coordinate', actor: member, attemptId: 'attempt', content: '原始协调记录：正在核对交付证据，尚未完成集成。', createdAt: 9 },
+  ] });
+  setup([record, child], { board: true }); await choose();
+  expect(screen.getByRole('button', { name: '进展' }).getAttribute('aria-pressed')).toBe('true');
+  const progress = screen.getByRole('region', { name: '当前进展' });
+  expect(progress.textContent).toContain('1 项执行尚未完成交付与评审');
+  const old = screen.getByText('查看上一版结果').closest('details')!;
+  expect(old.open).toBe(false);
+  expect(old.textContent).toContain('附件布局已完成');
+  const report = screen.getByText('协调者最近的更新').closest('details')!;
+  expect(report.open).toBe(false);
+  expect(report.textContent).toContain('原始协调记录');
+  expect(screen.queryByRole('button', { name: '验收此结果' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '历史交付' }));
+  expect(screen.getByRole('heading', { name: '上一版结果' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '返回当前进展' }));
+  fireEvent.click(within(screen.getByRole('region', { name: '当前进展' })).getByRole('button', { name: /修复上传/ }));
+  expect(await screen.findByRole('heading', { name: child.title })).toBeTruthy();
+});
+
+it('does not present a previous-round coordination update as a response to the new follow-up', async () => {
+  setup([task({ artifacts: [result, review], events: [
+    { id: 'old', sequence: 1, kind: 'coordinate', actor: member, content: '这是旧一轮的协调记录', createdAt: 7, attemptId: 'attempt' },
+    { id: 'followup', sequence: 2, kind: 'revise', source: 'user', actor: null, content: '请继续修复', createdAt: 8, attemptId: 'attempt' },
+  ] })], { board: true }); await choose();
+  expect(screen.getByText('尚未收到这次跟进后的明确更新。')).toBeTruthy();
+  expect(screen.queryByText('协调者最近的更新')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '动态' }));
+  expect(screen.getByText('这是旧一轮的协调记录')).toBeTruthy();
+});
+
+it('restores the result view and acceptance when the new version has passed review', async () => {
+  const fresh = { ...result, id: 'fresh', createdAt: 10, summary: '这次修复已经完成', content: '本轮完整交付报告' };
+  setup([task({ artifacts: [result, review, fresh, { ...review, id: 'new-review', reviewsArtifactId: fresh.id, createdAt: 11 }], events: [{ id: 'followup', sequence: 1, kind: 'revise', source: 'user', actor: null, attemptId: 'attempt', content: '请直接修复', createdAt: 8 }] })], { board: true });
+  await choose();
+  expect(screen.getByRole('button', { name: '结果' }).getAttribute('aria-pressed')).toBe('true');
+  expect(screen.queryByRole('region', { name: '当前进展' })).toBeNull();
+  expect(screen.getByRole('heading', { name: '交付结果' })).toBeTruthy();
+  expect((screen.getByRole('button', { name: '验收此结果' }) as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.queryByText('附件布局已完成')).toBeNull();
 });

@@ -47,8 +47,7 @@ describe('architecture prompt insertion acknowledgement', () => {
     expect(input.onPrepared).not.toHaveBeenCalled();
     expect(screen.getByRole('status').textContent).toContain('Could not add the prompt');
     expect((screen.getByRole('textbox', { name: 'Feature to understand' }) as HTMLInputElement).value).toBe(initial.target);
-    fireEvent.click(screen.getByText('Dependencies and other options'));
-    expect((screen.getByRole('textbox', { name: 'Focus and constraints (optional)' }) as HTMLTextAreaElement).value).toBe(initial.focus);
+    expect((screen.getByRole('textbox', { name: 'Analysis request and constraints (optional)' }) as HTMLTextAreaElement).value).toBe(initial.focus);
     fireEvent.click(screen.getByRole('button', { name: 'Insert prompt' }));
     await waitFor(() => expect(input.onPrepared).toHaveBeenCalledOnce());
     expect(input.onInsertPrompt).toHaveBeenCalledTimes(2);

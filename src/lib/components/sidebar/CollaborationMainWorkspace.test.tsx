@@ -16,7 +16,7 @@ vi.mock('../../terminal/api', async importOriginal => ({
 }));
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear();
-  useCollaborationNavigation.setState({ groupId: 'main-fixture', drafts: {} });
+  useCollaborationNavigation.setState({ groupId: 'main-fixture', view: 'tasks', drafts: {} });
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   api.settings.mockResolvedValue({}); api.updateSettings.mockResolvedValue({});
   api.groups.mockResolvedValue({ groups: [{ id: 'main-fixture', name: '纯数据主工作区', sessionIds: ['fixture-member'], createdAt: 1, updatedAt: 1 }], sessions: [] });
@@ -61,4 +61,50 @@ it('does not move focus back to navigation after the user has started editing', 
   expect(document.activeElement).toBe(field);
   expect(field).toHaveProperty('value', '下一帧前已开始编辑');
   expect(useCollaborationNavigation.getState().drafts['main-fixture']?.content).toBe('下一帧前已开始编辑');
+});
+
+it('offers embedding only in the message view and saves its unsent draft before switching', async () => {
+  api.groups.mockResolvedValue({ groups: [{ id: 'main-fixture', name: '消息协作', sessionIds: ['fixture-member'], createdAt: 1, updatedAt: 1 }], sessions: [] });
+  const open = vi.fn(); window.addEventListener('termdock:open-collaboration-messages', open);
+  render(<CollaborationMainWorkspace groupId="main-fixture" activeSessionId="terminal" onOpenSidebar={() => {}} defaultSessionMode="shell" />);
+  await screen.findByRole('heading', { name: '任务看板' });
+  expect(screen.queryByRole('button', { name: '放到终端旁' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '成员与消息' }));
+  fireEvent.change(screen.getByRole('textbox', { name: '内容' }), { target: { value: '保留消息草稿' } });
+  fireEvent.click(screen.getByRole('button', { name: '放到终端旁' }));
+  await waitFor(() => expect(open).toHaveBeenCalledOnce());
+  expect(useCollaborationNavigation.getState().drafts['main-fixture'].content).toBe('保留消息草稿');
+  expect(api.send).not.toHaveBeenCalled();
+  expect(api.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ collaborationPanel: expect.objectContaining({ state: expect.objectContaining({ groups: { 'main-fixture': expect.objectContaining({ dock: { sessionId: 'terminal', side: 'right' } }) } }) }) }));
+  window.removeEventListener('termdock:open-collaboration-messages', open);
+});
+
+it('offers session selection instead of dismissing the board into an empty terminal', async () => {
+  const open = vi.fn();
+  render(<CollaborationMainWorkspace groupId="main-fixture" activeSessionId={null} onOpenSidebar={open} defaultSessionMode="shell" />);
+  await screen.findByRole('heading', { name: '任务看板' });
+  fireEvent.click(screen.getByRole('button', { name: '选择终端' }));
+  expect(open).toHaveBeenCalledOnce();
+  expect(useCollaborationNavigation.getState().groupId).toBe('main-fixture');
+});
+it('names the active terminal and preserves the message draft when leaving the board', async () => {
+  api.groups.mockResolvedValue({ groups: [{ id: 'main-fixture', name: '消息协作', sessionIds: ['fixture-member'], createdAt: 1, updatedAt: 1 }], sessions: [{ sessionId: 'terminal', serviceId: 'local', name: 'TD维护者' }] });
+  render(<CollaborationMainWorkspace groupId="main-fixture" activeSessionId="terminal" onOpenSidebar={() => {}} defaultSessionMode="shell" />);
+  await screen.findByRole('button', { name: '打开终端：TD维护者' });
+  fireEvent.click(screen.getByRole('button', { name: '成员与消息' }));
+  fireEvent.change(screen.getByRole('textbox', { name: '内容' }), { target: { value: '尚未发送的说明' } });
+  fireEvent.click(screen.getByRole('button', { name: '打开终端：TD维护者' }));
+  expect(useCollaborationNavigation.getState().groupId).toBeNull();
+  expect(useCollaborationNavigation.getState().drafts['main-fixture'].content).toBe('尚未发送的说明');
+  expect(api.send).not.toHaveBeenCalled();
+});
+
+it('enters member messages directly when opened from the launcher', async () => {
+  useCollaborationNavigation.getState().open('main-fixture', 'messages');
+  render(<CollaborationMainWorkspace groupId="main-fixture" activeSessionId={null} onOpenSidebar={() => {}} defaultSessionMode="shell" />);
+  await screen.findByRole('textbox', { name: '内容' });
+  expect(screen.getByRole('button', { name: '成员与消息' }).getAttribute('aria-pressed')).toBe('true');
+  expect(screen.queryByRole('heading', { name: '任务看板' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '看板' }));
+  expect(await screen.findByRole('heading', { name: '任务看板' })).toBeTruthy();
 });

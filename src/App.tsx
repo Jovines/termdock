@@ -2694,6 +2694,7 @@ function App() {
         tmuxSessionName,
         cwd: activeCwd,
         command: overrides?.command,
+        shouldActivate: overrides?.shouldActivate,
         onResult: overrides?.onResult ?? ((result: NewSessionCreationResult) => {
           quickSessionPendingRef.current = false;
           setQuickSessionPending(false);
@@ -2722,23 +2723,27 @@ function App() {
     }
   }, []);
 
+  const closeRecoverableTmuxSession = useCallback(async (name: string) => {
+    const { cleanedSessions } = await killTmuxSession(name);
+    // Drop any frontend tabs that were attached to this tmux session.
+    for (const backendId of cleanedSessions) {
+      window.dispatchEvent(new CustomEvent('close-terminal-session-by-backend', { detail: backendId }));
+    }
+    await refreshTmuxSessions();
+  }, [refreshTmuxSessions]);
+
   const handleKillTmuxSession = useCallback(async (name: string) => {
     setTmuxKillingName(name);
     setTmuxKillError(null);
     try {
-      const { cleanedSessions } = await killTmuxSession(name);
-      // Drop any frontend tabs that were attached to this tmux session.
-      for (const backendId of cleanedSessions) {
-        window.dispatchEvent(new CustomEvent('close-terminal-session-by-backend', { detail: backendId }));
-      }
+      await closeRecoverableTmuxSession(name);
       setTmuxConfirmKillName(null);
-      await refreshTmuxSessions();
     } catch (error) {
       setTmuxKillError(error instanceof Error ? error.message : 'Failed to kill tmux session');
     } finally {
       setTmuxKillingName(null);
     }
-  }, [refreshTmuxSessions]);
+  }, [closeRecoverableTmuxSession]);
 
   // Clear attaching state when the tmux session becomes connected or after timeout
   useEffect(() => {
@@ -5262,6 +5267,7 @@ function App() {
         recoverableTmuxSessions={recoverableTmuxSessions}
         recoverableTmuxSessionsLoading={tmuxRefreshing}
         onRefreshRecoverableTmuxSessions={() => { void refreshTmuxSessions(); }}
+        onCloseRecoverableTmuxSession={closeRecoverableTmuxSession}
         onCloseSession={handleSidebarCloseSession}
         onSplitSession={dispatchOpenSplitChooser}
         onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
@@ -5406,6 +5412,7 @@ function App() {
             recoverableTmuxSessions={recoverableTmuxSessions}
             recoverableTmuxSessionsLoading={tmuxRefreshing}
             onRefreshRecoverableTmuxSessions={() => { void refreshTmuxSessions(); }}
+            onCloseRecoverableTmuxSession={closeRecoverableTmuxSession}
             onCloseSession={handleSidebarCloseSession}
             onSplitSession={dispatchOpenSplitChooser}
             onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}

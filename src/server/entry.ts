@@ -1,7 +1,8 @@
+import { IntegrationRuntime, integrationSocketPath } from './agent/integrationServer.js';
 import { CollaborationService } from './agent/collaborationService.js';
 import { X509Certificate } from 'node:crypto';
 import { CollaborationPeerTransport, connectCollaborationRpc, type CollaborationRpc } from './agent/collaborationPeerTransport.js';
-import { collaborationStore, collaborationTaskStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions, prepareCollaborationTaskWorker } from './routes/terminal.js';
+import { collaborationStore, collaborationTaskStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions, prepareCollaborationTaskWorker, integrationSessionAdapter } from './routes/terminal.js';
 import { CollaborationTaskService } from './agent/collaborationTaskService.js';
 import { setPushTargetPeerId } from './notifications/pushService.js';
 import { desktopDirectTargets } from './federation/desktopTargets.js';
@@ -625,7 +626,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       return routeInvitations.consume(code, subjectId);
     },
   });
-  void federation.then(runtime => {
+  void federation.then(async runtime => {
     federationServiceId = runtime.serviceId; setPushTargetPeerId(runtime.serviceId); refreshDirectTargets();
     app.locals.passwordRuntime = runtime;
     const receiveCollaboration = (subjectId: string, packet: import('./federation/packets.js').Packet) => {
@@ -676,6 +677,16 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       (task, template, dependencies) => prepareCollaborationTaskWorker(task, template, dependencies, collaborationService!,
         (taskId, dependencyId, offset) => collaborationTasks.dependencyChunk(taskId, dependencyId, offset)));
     app.locals.collaborationTasks = collaborationTasks;
+    if (options.port !== 0) {
+      let integration: IntegrationRuntime | undefined;
+      try {
+        const port = options.port ?? DEFAULT_PORT;
+        integration = new IntegrationRuntime({ directory: path.join(homedir(), '.termdock', 'integration-state', String(port)), socketPath: integrationSocketPath(port), adminToken: options.localApiToken,
+          messages: collaborationStore, taskStore: collaborationTaskStore, tasks: collaborationTasks, peers: collaborationService, sessions: integrationSessionAdapter });
+        await integration.listen(); app.locals.integrationRuntime = integration;
+        server.once('close', () => { void integration?.close(); });
+      } catch { await integration?.close(); console.error('[integrations] Local integration endpoint could not start; existing terminal service remains available'); }
+    }
     collaborationTasks.start();
     server.once('close', () => collaborationTasks.close());
     collaborationService.start();

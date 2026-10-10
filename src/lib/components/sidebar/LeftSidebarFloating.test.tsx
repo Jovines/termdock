@@ -28,7 +28,7 @@ it('restores the server floating preference and persists closing it', async () =
     splitWorkspaces={[]} onRemoveFromSplit={vi.fn()} onSetSplitLayout={vi.fn()} onReorderSplitWorkspace={vi.fn()}
     onRenameSplitWorkspace={vi.fn()} onCombineSplitSessions={vi.fn()} onReorderSessions={vi.fn()} /></I18nProvider>);
   expect(await screen.findByRole('region', { name: '工作组消息浮窗' })).toBeTruthy();
-  expect(screen.getByRole('heading', { name: 'Release team' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Release team', level: 2 })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '关闭' }));
   await waitFor(() => expect(screen.queryByRole('region', { name: '工作组消息浮窗' })).toBeNull());
   expect(settings.update).toHaveBeenCalledWith({ collaborationPanel: { clientId: collaborationPanelClientId(), state: { groups: { release: { floatingGroupId: null } } } } });

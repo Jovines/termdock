@@ -19,6 +19,25 @@ export type TranslatorParams = Record<string, string | number>;
 // { name: 'foo' } and the implementation can destructure what it needs.
 export type TranslationDictionary = {
   architecture: {
+    choosePaths: string;
+    browsePaths: string;
+    addScopeReference: string;
+    searchScopePaths: string;
+    useCurrentFile: string;
+    useCurrentDirectory: string;
+    browsePathsHint: string;
+    correctPathsFirst: string;
+    pathsHint: string;
+    featureScopeHint: string;
+    removePath: string;
+    chooseThisDirectory: string;
+    filterDirectory: string;
+    loadingPaths: string;
+    pathsLoadFailed: string;
+    noPaths: string;
+    pathsTruncated: string;
+    selectedPaths: string;
+    usePaths: string;
     expandDetail: string;
     collapseDetail: string;
     backToMap: string;
@@ -387,6 +406,9 @@ export type TranslationDictionary = {
     newSessionWithAgent: (params: TranslatorParams) => string;
     moreLaunchOptions: string;
     recoverableSessions: string;
+    confirmCloseRecoverableSession: (params: TranslatorParams) => string;
+    endRecoverableSession: string;
+    closeRecoverableSessionFailed: string;
     refreshRecoverableSessions: string;
     restoreRecoverableSession: (params: TranslatorParams) => string;
     restoringRecoverableSession: string;

@@ -1,3 +1,4 @@
+import { useCollaborationNavigation } from '../stores/useCollaborationNavigation';
 import { updateSettings, type CollaborationPanelState } from '../terminal/api';
 
 let fallbackClientId: string | undefined;
@@ -38,4 +39,15 @@ export function openCollaborationGroups(state: CollaborationPanelState | undefin
   const ids = Object.entries(state?.groups ?? {}).filter(([, group]) => group.floatingGroupId).map(([id]) => id);
   if (state?.floatingGroupId && !state.groups?.[state.floatingGroupId]) ids.push(state.floatingGroupId);
   return ids;
+}
+
+/** Save the resident message layout before leaving the standalone workspace. */
+export async function openCollaborationMessagesPanel(groupId: string, sessionId: string): Promise<void> {
+  const navigation = useCollaborationNavigation.getState();
+  const requestedFrom = navigation.groupId;
+  if (navigation.drafts[groupId]) await saveCollaborationPanel({ drafts: { [groupId]: navigation.drafts[groupId] } });
+  const dock = { sessionId, side: window.innerWidth < 640 ? 'bottom' as const : 'right' as const };
+  await saveCollaborationPanel({ floatingGroupId: groupId, mode: 'docked', dock }, groupId);
+  if (useCollaborationNavigation.getState().groupId !== requestedFrom) throw new Error('布局已保存；页面已切换，请重新打开成员消息');
+  window.dispatchEvent(new CustomEvent('termdock:open-collaboration-messages', { detail: { groupId, dock } }));
 }

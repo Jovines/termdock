@@ -20,6 +20,7 @@ if (process.argv.slice(2).some(arg => arg === '--federation-pairing' || arg === 
   process.exit(await runFederationCli(process.argv.slice(2)));
 }
 
+import { INTEGRATION_HELP, runIntegrationAdmin, revokeIntegration, runIntegrationCollab } from './agent/integrationCli.js';
 import { parseNotifyCommand, NOTIFY_HELP, NOTIFY_PROMPT, type NotifyCommand } from './agent/notifyCli.js';
 import { detectLocalSessionContext, resolveLocalCollaborationContext } from './agent/localSessionContext.js';
 import { parseAutomationCommand, executeAutomationCommand, AUTOMATION_HELP, type AutomationCommand } from './agent/automationCli.js';
@@ -192,6 +193,7 @@ interface CliOptions {
   pluginHooks?: { slug: string; action: 'install' | 'uninstall' };
   pluginRemove?: string;
   agentEvent?: { slug: string; event: string; status?: string };
+  integration?: string[];
   collab?: CollaborationCommand;
   automation?: AutomationCommand;
   notify?: NotifyCommand;
@@ -298,6 +300,7 @@ Short commands:
   n [message]       Progress reminder; run td n for help and Agent instructions
   notify [message]  Same as n (see td n --prompt)
   automation         Manage scheduled tasks (see td automation --help)
+  integration       Manage local scoped integrations (see integration help)
   collab status      Show this Session's collaboration groups and peers
   collab inbox       Read messages without acknowledging (see collab --help)
   collab send <session-id> <message>
@@ -759,6 +762,7 @@ function parseArgs(argv: string[]): CliOptions {
   let pluginHooks: { slug: string; action: 'install' | 'uninstall' } | undefined;
   let pluginRemove: string | undefined;
   let agentEvent: { slug: string; event: string; status?: string } | undefined;
+  let integration: string[] | undefined;
   let collab: CliOptions['collab'];
   let automation: AutomationCommand | undefined;
   let notify: NotifyCommand | undefined;
@@ -862,6 +866,8 @@ function parseArgs(argv: string[]): CliOptions {
       try { automation = parseAutomationCommand(argv.slice(1)); }
       catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: getMessage(error) })); process.exit(1); }
       argv = [];
+    } else if (command === 'integration') {
+      integration = argv.slice(1); argv = [];
     } else if (command === 'collab') {
       try { collab = parseCollaborationCommand(argv.slice(1)); }
       catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: error instanceof Error ? error.message : String(error) })); process.exit(1); }
@@ -1251,6 +1257,7 @@ function parseArgs(argv: string[]): CliOptions {
     pluginHooks,
     pluginRemove,
     agentEvent,
+    integration,
     collab,
     automation,
     notify,
@@ -1511,6 +1518,9 @@ async function runAutomation(command: AutomationCommand): Promise<void> {
 
 async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<void> {
   const runningState = getRunningState();
+  if (command.options.principal) {
+    process.exitCode = await runIntegrationCollab(command, runningState?.port ?? 9834, { write: line => console.log(line), stdin: readStdinText }); return;
+  }
   if (!runningState?.localApiToken) {
     // Help is a plain read: it must stay available without a running server.
     if (command.action === 'help') { console.log(COLLAB_HELP); return; }
@@ -3714,6 +3724,17 @@ async function main(): Promise<void> {
 
   if (options.automation) {
     await runAutomation(options.automation);
+    return;
+  }
+
+  if (options.integration) {
+    const argv = options.integration;
+    if (!argv.length || ['help', '--help'].includes(argv[0])) { console.log(INTEGRATION_HELP); return; }
+    const state = getRunningState();
+    if (!state?.localApiToken) { console.error(JSON.stringify({ ok: false, code: 'SERVICE_UNAVAILABLE', error: 'Termdock is not running' })); process.exitCode = 1; return; }
+    process.exitCode = argv[0] === 'revoke' && argv.length === 2
+      ? await revokeIntegration(argv[1], state.port, state.localApiToken, line => console.log(line))
+      : await runIntegrationAdmin(argv, state.port, state.localApiToken, line => console.log(line));
     return;
   }
 

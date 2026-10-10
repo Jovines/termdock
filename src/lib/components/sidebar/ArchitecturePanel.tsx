@@ -8,6 +8,7 @@ import { ArchitectureGenerationForm } from './ArchitectureGenerationForm';
 import { ArchitectureNodeDetail } from './ArchitectureNodeDetail';
 import { ArchitectureInspector } from './ArchitectureInspector';
 import { ArchitectureNodePreview } from './ArchitectureNodePreview';
+import { useSidebarStore } from '../../stores/useSidebarStore';
 
 function selectionKey(root: string): string { return `termdock.architecture.selection:${root}`; }
 function savedSelection(root: string | null): string {
@@ -28,6 +29,8 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
   renderSource?: (file: ArchitectureFile) => ReactNode;
 }) {
   const { t, locale } = useI18n();
+  const currentFile = useSidebarStore(state => state.rootPath === rootPath ? state.selectedFilePath : null);
+  const currentDirectory = useSidebarStore(state => state.rootPath === rootPath ? state.explorerRoot : null);
   const [file, setFile] = useState(() => savedSelection(rootPath));
   const [library, setLibrary] = useState<string[]>([]);
   const [libraryError, setLibraryError] = useState(false);
@@ -169,7 +172,7 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
     ? <ArchitectureNodePreview node={selected} onExpand={() => setDetailExpanded(true)} onClose={closeDetail} />
     : <ArchitectureInspector active={active && !moduleGeneration} docked={!inGraph || (!sourceFile && !moduleGeneration)} title={selected.title} stageKey={`${selected.id}:${sourceFile ? `${sourceFile.path}:${sourceFile.line}` : moduleGeneration ? 'analysis' : 'details'}`} source={!!sourceFile} fullHeight={inGraph ? !!moduleGeneration : readingOnly} inGraph={inGraph} side={sideDetail} onBack={backDetail} backLabel={backLabel} onClose={closeDetail} onDismiss={dismissDetail} onCollapse={!sideDetail && !readingOnly && !sourceFile && !moduleGeneration ? () => setDetailExpanded(false) : undefined}>
     {sourceFile && renderSource ? renderSource(sourceFile) : moduleGeneration ? <>
-      <ArchitectureGenerationForm active={active} key={selected.id} rootPath={rootPath!} initial={moduleGeneration} onInsertPrompt={onInsertPrompt} onPrepared={setPreparedModuleFile} onClose={() => setModuleGeneration(null)} />
+      <ArchitectureGenerationForm active={active} key={selected.id} rootPath={rootPath!} currentFile={currentFile} currentDirectory={currentDirectory} initial={moduleGeneration} onInsertPrompt={onInsertPrompt} onPrepared={setPreparedModuleFile} onClose={() => setModuleGeneration(null)} />
       {preparedModuleFile && <button type="button" className={`${button} mt-3 bg-primary/15 text-primary`} onClick={() => { setPreparedAnalysis(moduleGeneration); selectFile(preparedModuleFile); closeDetail(); }}>{t('architecture.viewPrepared')}</button>}
     </> : <ArchitectureNodeDetail embedded node={selected} view={view!} parentId={parentId} onSelect={id => selectNode(id, true)} onExplore={() => navigate([...validTrail, selected.id])} onAnalyze={() => prepareModule(selected)} onOpenFile={openSource} onClose={closeDetail} />}
   </ArchitectureInspector>);
@@ -190,7 +193,7 @@ export function ArchitecturePanel({ rootPath, active, onInsertPrompt, onOpenFile
     </div>
     <div className={`relative flex min-h-0 flex-1 ${sideDetail && !readingOnly ? 'flex-row' : 'flex-col'}`} data-architecture-workspace>
     <div ref={content} hidden={readingOnly} data-architecture-content className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3 [overflow-anchor:none]">
-      {generation ? <ArchitectureGenerationForm active={active} key={`${generation.outputFile ?? 'new'}:${JSON.stringify(generation.initial)}`} rootPath={rootPath} initial={generation.initial} outputFile={generation.outputFile} onInsertPrompt={onInsertPrompt} onPrepared={(nextFile, analysis) => { setPreparedAnalysis(analysis); selectFile(nextFile); }} onClose={closeGeneration} /> : <>
+      {generation ? <ArchitectureGenerationForm active={active} key={`${generation.outputFile ?? 'new'}:${JSON.stringify(generation.initial)}`} rootPath={rootPath} currentFile={currentFile} currentDirectory={currentDirectory} initial={generation.initial} outputFile={generation.outputFile} onInsertPrompt={onInsertPrompt} onPrepared={(nextFile, analysis) => { setPreparedAnalysis(analysis); selectFile(nextFile); }} onClose={closeGeneration} /> : <>
         <label className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">{t('architecture.savedAnalyses')}<select aria-label={t('architecture.savedAnalyses')} value={file} onChange={event => { setPreparedAnalysis(DEFAULT_ANALYSIS); selectFile(event.target.value); }} className="min-h-10 min-w-0 flex-1 rounded-lg border border-border/20 bg-surface-2 px-2 text-sm text-foreground">{availableFiles.map(path => <option key={path} value={path}>{path === ARCHITECTURE_FILE ? t('architecture.projectRange') : `${t(path.includes('/module-') ? 'architecture.moduleRange' : 'architecture.featureRange')}: ${path === file && document?.analysis ? document.analysis.target.replace(/\n/g, ', ') : architectureFileLabel(path)}`}</option>)}</select></label>
         {libraryError && <p role="alert" className="mb-3 text-xs text-muted-foreground">{t('architecture.libraryFailed')}</p>}
 

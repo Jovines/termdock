@@ -1,4 +1,5 @@
 import { terminalMessage } from './collaborationStore.js';
+import { getTermdockVersion } from '../utils/version.js';
 import { assertPeerRegistrationAuthority } from './collaborationPeerTransport.js';
 import { Router, type Request, type Response } from 'express';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from './collaborationStore.js';
@@ -155,10 +156,11 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   };
-  router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, limits: COLLAB_LIMITS,
+  router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, server_version: getTermdockVersion(), limits: COLLAB_LIMITS,
     task_workflow: { version: 2, command: 'td collab task', single_authority: true, explicit_reports: true,
       managed_goals: true, automatic_review: true, dependency_dispatch: true, isolated_worktrees: true, encrypted_commit_transfer: true,
       durable_questions: true, user_acceptance: true, versioned_artifacts: true, independent_reviews: true,
+      correlated_responses: true, accepted_comments: true,
       task_reply: 'Replies to task-linked user messages are stored in the task; status=stored is not a terminal delivery receipt' },
     routing: { background_recovery: true, explicit_rebind: Boolean(rebind), fixed_tmux_pane: true },
     statuses: ['pending', 'delivered', 'failed', 'expired'], queued_status: 'pending',
@@ -205,12 +207,12 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
   router.post('/reply', run(async (req, res, sessionId) => {
     const original = ownMessage(String(req.body.messageId ?? ''), sessionId, true);
     if (!original.fromSessionId) {
-      const link = original.metadata?.termdockTask as { taskId?: string; attemptId?: string } | undefined;
+      const link = original.metadata?.termdockTask as { taskId?: string; attemptId?: string; replyToEventId?: string } | undefined;
       if (link?.taskId && req.app.locals.collaborationTasks) {
         const extras = extrasFromBody(req.body);
         const status = extras.task?.status ?? (extras.responseKind === 'ack' ? 'ack' : extras.responseKind === 'result' ? 'complete' : extras.responseKind === 'progress' ? 'working' : null);
         const task = await req.app.locals.collaborationTasks.apply(link.taskId, {
-          kind: status ? 'report' : 'comment', status: status ?? undefined, attemptId: link.attemptId,
+          kind: status ? 'report' : link.replyToEventId ? 'respond' : 'comment', replyToEventId: link.replyToEventId, status: status ?? undefined, attemptId: link.attemptId,
           content: req.body.content, evidence: extras.task?.evidence, idempotencyKey: extras.idempotencyKey,
         }, req.app.locals.collaborationService.taskMember(sessionId));
         res.json({ ok: true, status: 'stored', task_recorded: true, task_id: task.id, task_revision: task.revision }); return;

@@ -16,7 +16,8 @@
     "runtime-manifest.json",
     "README.md",
     "LICENSE",
-    "scripts"
+    "scripts",
+    "docs/integrations.md"
   ],
   "scripts": {
     "clean": "rimraf dist",

@@ -1,3 +1,4 @@
+import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -58,6 +59,7 @@ vi.mock('../../terminal/api', () => ({
 }));
 
 afterEach(() => {
+  useCollaborationNavigation.setState({ drafts: {}, groupId: null, view: 'tasks' });
   cleanup();
   localStorage.clear();
   apiMocks.getSettings.mockReset().mockResolvedValue({ collaborationPanels: { [collaborationPanelClientId()]: { groups: { floating: { mode: 'floating' } } } } });
@@ -110,7 +112,7 @@ describe('AgentOperationsPanel', () => {
     const user = userEvent.setup();
     render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
     await user.click(screen.getByRole('button', { name: '协作组' }));
-    expect(screen.getByText('正在加载会话…')).toBeTruthy();
+    expect(screen.getByText('正在加载协作组与会话…')).toBeTruthy();
     reject(new Error('连接中断'));
     expect(await screen.findByText('会话加载失败，请重试')).toBeTruthy();
     expect(screen.queryByText('当前服务暂无可选会话')).toBeNull();
@@ -479,27 +481,24 @@ it('labels remote members and reports unreachable delivery without claiming succ
   expect(screen.queryByText(/消息已送达/)).toBeNull();
 });
 
-it('filters new results independently of ACKs and never marks filtered-out records seen', async () => {
+it('shows every message without type or seen filters, including ordinary exchanges', async () => {
   const user = userEvent.setup();
+  localStorage.setItem('collab-seen:evidence-group', JSON.stringify(['ack', 'result']));
   apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [{ id: 'evidence-group', name: '证据组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 }], sessions: [] });
   apiMocks.listCollaborationMessages.mockResolvedValue({ messages: [
-    { id: 'ack', kind: 'reply', responseKind: 'ack', content: '仅表示收到', threadId: 'thread', createdAt: 1, fromSessionId: 'two', toSessionId: 'one', status: 'read' },
-    { id: 'result', kind: 'reply', responseKind: 'result', content: '证据：检查通过', threadId: 'thread', createdAt: 2, fromSessionId: 'two', toSessionId: 'one', status: 'read' },
+    { id: 'ack', kind: 'reply', responseKind: 'ack', content: '仅表示收到', threadId: 'thread', createdAt: 1, fromSessionId: 'two', toSessionId: 'one', status: 'delivered' },
+    { id: 'result', kind: 'reply', responseKind: 'result', content: '证据：检查通过', threadId: 'thread', createdAt: 2, fromSessionId: 'two', toSessionId: 'one', status: 'delivered' },
+    { id: 'ordinary', kind: 'message', content: '请继续核对配置', threadId: 'another', createdAt: 3, fromSessionId: 'one', toSessionId: 'two', status: 'delivered' },
   ] });
   render(<AgentOperationsPanel activeSessionId="one" initialCollaborationGroupId="evidence-group" onClose={() => undefined} onNewSession={() => undefined} />);
   await user.click(await screen.findByRole('button', { name: '成员与消息' }));
-  await screen.findByText('证据：检查通过');
-  await user.selectOptions(screen.getByLabelText('筛选回复类型'), 'result');
-  expect(screen.queryByText('仅表示收到')).toBeNull();
-  await user.click(screen.getByLabelText('只看新记录'));
-  await user.click(screen.getByRole('button', { name: '标记当前记录已看' }));
-  expect(screen.queryByText('证据：检查通过')).toBeNull();
-  expect(JSON.parse(localStorage.getItem('collab-seen:evidence-group')!)).toEqual(['result']);
-  await user.selectOptions(screen.getByLabelText('筛选回复类型'), 'ack');
+  expect(await screen.findByText('证据：检查通过')).toBeTruthy();
   expect(screen.getByText('仅表示收到')).toBeTruthy();
-  await user.click(screen.getByLabelText('只看新记录'));
-  await user.selectOptions(screen.getByLabelText('筛选回复类型'), 'result');
-  expect(screen.getByText('证据：检查通过')).toBeTruthy();
+  expect(screen.getByText('请继续核对配置')).toBeTruthy();
+  expect(screen.queryByLabelText('筛选回复类型')).toBeNull();
+  expect(screen.queryByLabelText('只看新记录')).toBeNull();
+  expect(screen.queryByRole('button', { name: '标记当前记录已看' })).toBeNull();
+  expect(JSON.parse(localStorage.getItem('collab-seen:evidence-group')!)).toEqual(['ack', 'result']);
 });
 
 
@@ -856,4 +855,78 @@ it('opening B preserves the docked A composer, draft, recipients and message des
   expect(screen.getByDisplayValue('alpha draft')).toBe(a);
   view.rerender(<>{layout}{panel('alpha')}</>);
   expect(screen.getByDisplayValue('alpha draft')).toBe(a);
+});
+
+it('opens member messages directly from the group list without requiring a terminal or opening the board', async () => {
+  const group = { id: 'message-only', name: '只沟通消息', sessionIds: ['one'], createdAt: 1, updatedAt: 1 };
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [] });
+  const enter = vi.fn().mockResolvedValue(undefined), close = vi.fn();
+  render(<AgentOperationsPanel activeSessionId={null} onEnterGroup={enter} onClose={close} onNewSession={() => {}} />);
+  fireEvent.click(await screen.findByRole('button', { name: '成员消息：只沟通消息' }));
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(enter).toHaveBeenCalledExactlyOnceWith('message-only');
+  expect(useCollaborationNavigation.getState()).toMatchObject({ groupId: 'message-only', view: 'messages' });
+  expect(apiMocks.sendCollaborationMessage).not.toHaveBeenCalled();
+});
+it('keeps the group launcher open when navigation fails and allows choosing another group', async () => {
+  const groups = ['alpha', 'beta'].map(id => ({ id, name: id, sessionIds: [], createdAt: 1, updatedAt: 1 }));
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups, sessions: [] });
+  const enter = vi.fn().mockRejectedValueOnce(new Error('协作区暂不可用')).mockResolvedValue(undefined), close = vi.fn();
+  render(<AgentOperationsPanel activeSessionId={null} onEnterGroup={enter} onClose={close} onNewSession={() => {}} />);
+  fireEvent.click(await screen.findByRole('button', { name: '看板：alpha' }));
+  await screen.findByText('协作区暂不可用');
+  expect(close).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '看板：beta' }));
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(useCollaborationNavigation.getState()).toMatchObject({ groupId: 'beta', view: 'tasks' });
+});
+it('creates a group with no existing sessions and enters messages as the default destination', async () => {
+  const group = { id: 'new-empty', name: '新讨论组', sessionIds: [], createdAt: 1, updatedAt: 1 };
+  const enter = vi.fn().mockResolvedValue(undefined), close = vi.fn();
+  apiMocks.saveCollaborationGroup.mockResolvedValue({ group });
+  render(<AgentOperationsPanel activeSessionId={null} onEnterGroup={enter} onClose={close} onNewSession={() => {}} />);
+  fireEvent.change(await screen.findByRole('textbox', { name: '协作组名称' }), { target: { value: '新讨论组' } });
+  fireEvent.click(screen.getByRole('button', { name: '创建协作组' }));
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledExactlyOnceWith({ name: '新讨论组', sessionIds: [] });
+  expect(useCollaborationNavigation.getState()).toMatchObject({ groupId: 'new-empty', view: 'messages' });
+});
+it('uses readable member names in the optional session picker and keeps route IDs as values', async () => {
+  const sessions = ['one', 'two'].map(sessionId => ({ sessionId, name: `tmux:wt-${sessionId}`, cwd: '/project', status: 'ready', currentTask: '', capability: '', agent: { displayName: 'Codex' } }));
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions });
+  render(<AgentOperationsPanel activeSessionId={null} onClose={() => {}} onNewSession={() => {}} />);
+  await screen.findByText('Codex 1');
+  expect(screen.getByText('Codex 2')).toBeTruthy();
+  expect(screen.queryByText('tmux:wt-one')).toBeNull();
+  expect(screen.queryByText('tmux:wt-two')).toBeNull();
+  apiMocks.saveCollaborationGroup.mockResolvedValue({ group: { id: 'new', name: '研发组', sessionIds: ['two'], createdAt: 1, updatedAt: 1 } });
+  fireEvent.click(screen.getByRole('checkbox', { name: /Codex 2/ }));
+  fireEvent.change(screen.getByRole('textbox', { name: '协作组名称' }), { target: { value: '研发组' } });
+  fireEvent.click(screen.getByRole('button', { name: '创建协作组' }));
+  await waitFor(() => expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledExactlyOnceWith({ name: '研发组', sessionIds: ['two'] }));
+});
+
+it('waits for the group directory before offering creation so late data cannot replace a new draft', async () => {
+  let resolve!: (data: unknown) => void;
+  apiMocks.listCollaborationGroups.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  render(<AgentOperationsPanel activeSessionId={null} onClose={() => {}} onNewSession={() => {}} />);
+  expect(await screen.findByText('正在加载协作组与会话…')).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: '协作组名称' })).toBeNull();
+  await act(async () => resolve({ groups: [{ id: 'existing', name: '已有讨论组', sessionIds: [], createdAt: 1, updatedAt: 1 }], sessions: [] }));
+  expect(await screen.findByRole('button', { name: '成员消息：已有讨论组' })).toBeTruthy();
+  expect(apiMocks.saveCollaborationGroup).not.toHaveBeenCalled();
+});
+
+it('opens settings for a different group from the launcher and returns to its group list', async () => {
+  const groups = ['alpha', 'beta'].map(id => ({ id, name: id, sessionIds: [], createdAt: 1, updatedAt: 1 }));
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups, sessions: [] });
+  render(<AgentOperationsPanel activeSessionId={null} onClose={() => {}} onNewSession={() => {}} />);
+  fireEvent.click(await screen.findByRole('button', { name: '设置：beta' }));
+  const settings = await screen.findByRole('region', { name: '协作组设置' });
+  expect(within(settings).getByRole('textbox', { name: '协作组名称' })).toHaveProperty('value', 'beta');
+  fireEvent.click(screen.getByRole('button', { name: '返回协作组' }));
+  expect(screen.queryByRole('region', { name: '协作组设置' })).toBeNull();
+  expect(screen.getByRole('button', { name: '成员消息：alpha' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '成员消息：beta' })).toBeTruthy();
+  expect(apiMocks.saveCollaborationGroup).not.toHaveBeenCalled();
 });

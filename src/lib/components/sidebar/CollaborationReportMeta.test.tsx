@@ -24,3 +24,11 @@ it('explains missing original timestamps without replacing them with record upda
   expect(screen.getByText(/报告时间未提供/).querySelector('time')).toBeNull();
   expect(screen.getByText(/记录更新：/).querySelector('time')).toBeTruthy();
 });
+
+it('keeps the original report time on compact cards without displaying administrative update times', () => {
+  const view = render(<CollaborationReportMeta compact task={{ activeAttemptId: 'active', attempts: [attempt], updatedAt: recordAt }} />);
+  expect(screen.getByText(/最近明确报告：成员报告受阻/).querySelector('time')?.dateTime).toBe(new Date(reportAt).toISOString());
+  expect(screen.queryByText(/记录更新：/)).toBeNull();
+  view.rerender(<CollaborationReportMeta compact task={{ activeAttemptId: 'new', attempts: [attempt], updatedAt: recordAt }} />);
+  expect(view.container.textContent).toBe('');
+});

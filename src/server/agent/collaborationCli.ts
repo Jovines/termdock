@@ -1,10 +1,11 @@
+import { getTermdockVersion } from '../utils/version.js';
 import fs from 'node:fs';
 import { executeTaskCommand } from './collaborationTaskCli.js';
 import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError, canonicalShortId } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'task' | 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
+  action: 'events' | 'session' | 'task' | 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
   target?: string; message?: string; groupId?: string; sessionId?: string; sessionIds?: string[]; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
@@ -54,6 +55,16 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   Scheduled self-reminders: td automation create --name 'Review progress' --every 30 --self --prompt 'Review group progress and continue'
   Scheduling help: td automation --help
 
+── 后台集成（独立凭据；本机 Unix socket） ──
+  td integration help（管理授权与启动配置）
+  td collab --principal <id> capabilities
+  events subscribe --consumer <name> --jsonl（主动推送，默认持续运行）
+  events ack <cursor> --consumer <name>（仅声明已持久接收）
+  session create --group <id> --launch-profile <id> --cwd <absolute-path> --idempotency-key <key>
+  session get <id> | session restore <id> --idempotency-key <key>
+  task respond <task-id> --attempt <attempt-id> --to-event <comment-event-id> --content <答复>
+  凭据通过 TERMDOCK_INTEGRATION_CREDENTIAL_FILE 注入，不通过命令行传 token。
+  已验收任务可追加纯咨询；respond 保留当前结果与验收，revise 是修改要求。
 ── 常用 ──
   status (who is in my groups, their names, roles, observed activity.
     Status values: service-reachable/service-unreachable mark remote node
@@ -158,7 +169,7 @@ interface RoleGroupView {
 }
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules', 'managed', 'shared-directory', 'integration']);
-const VALUE_OPTIONS = new Set(['work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
+const VALUE_OPTIONS = new Set(['principal', 'source', 'external-actor', 'external-message-id', 'launch-profile', 'to-event', 'decision', 'work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -183,7 +194,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     positional.push('capture');
   }
   const action = (requestedAction === 'capture' ? 'drive' : requestedAction === 'traits' ? 'role' : requestedAction) as CollaborationCommand['action'];
-  if (!['task', 'status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['events', 'session', 'task', 'status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (typeof options.session === 'string' && !options.session.trim()) throw new Error('--session requires a non-empty full Termdock session id');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
@@ -191,10 +202,23 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   if (options['expect-reply'] && !['ack', 'result', 'any'].includes(String(options['expect-reply']))) throw new Error('expect-reply must be ack, result or any');
   if (options.timeout) duration(String(options.timeout));
   const command: CollaborationCommand = { action, json: !options.text, options };
-  if (action === 'task') {
+  if (options.principal !== undefined && !/^[a-zA-Z0-9._-]{1,80}$/.test(String(options.principal))) throw new Error('--principal requires a valid integration id');
+  if (options.principal && options.session) throw new Error('Choose --principal or --session');
+  if (['events', 'session'].includes(action)) {
+    if (!options.principal) throw new Error('This command requires --principal <integration-id>');
     command.operation = positional.shift(); command.target = positional.shift();
-    if (positional.length || !['list', 'get', 'create', 'assign', 'report', 'ask', 'plan', 'review', 'request-review', 'comment', 'revise', 'close', 'reopen', 'coordinate', 'pause', 'resume', 'retry'].includes(command.operation ?? '')) throw new Error('Usage: td collab task list|get|create|assign|report|ask|plan|review|request-review|comment|revise|close|reopen');
+    if (positional.length) throw new Error('Unexpected integration arguments');
+    if (action === 'events' && (!['subscribe', 'ack'].includes(command.operation ?? '') || (command.operation === 'ack' ? !command.target : Boolean(command.target)))) throw new Error('Usage: events subscribe | events ack <cursor>');
+    if (action === 'session' && (!['create', 'get', 'restore'].includes(command.operation ?? '') || (command.operation === 'create' ? Boolean(command.target) : !command.target))) throw new Error('Usage: session create|get|restore');
+    if (action === 'session' && command.operation !== 'get' && !options['idempotency-key']) throw new Error('Session mutation requires an explicit --idempotency-key');
+    const integrationFlags = action === 'events' ? command.operation === 'ack' ? ['consumer'] : ['consumer', 'group', 'timeout']
+      : command.operation === 'create' ? ['group', 'launch-profile', 'cwd', 'idempotency-key'] : command.operation === 'restore' ? ['idempotency-key'] : [];
+    for (const flag of Object.keys(options)) if (!['principal', 'json', 'jsonl', 'text', 'help', ...integrationFlags].includes(flag)) throw new Error(`--${flag} is not supported by ${action} ${command.operation}`);
+  } else if (action === 'task') {
+    command.operation = positional.shift(); command.target = positional.shift();
+    if (positional.length || !['list', 'get', 'create', 'assign', 'report', 'respond', 'answer', 'ask', 'plan', 'review', 'request-review', 'comment', 'revise', 'close', 'reopen', 'coordinate', 'pause', 'resume', 'retry'].includes(command.operation ?? '')) throw new Error('Usage: td collab task list|get|create|assign|report|ask|plan|review|request-review|comment|revise|close|reopen');
     if (['list', 'create'].includes(command.operation!) ? Boolean(command.target) : !command.target) throw new Error('task command requires a full task id except list/create');
+    if (options.principal && !['list', 'get'].includes(command.operation!) && !options['idempotency-key']) throw new Error('Integration task mutation requires an explicit --idempotency-key');
   } else if (['send', 'reply', 'handoff'].includes(action)) {
     command.target = positional.shift(); command.message = positional.join(' ');
     if (!command.target || (!command.message && !options.file && !options.stdin)) throw new Error(`${action} requires a target and message`);
@@ -258,9 +282,10 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
       throw new Error(`Unknown drive action ${command.operation ?? ''}; use approve|enter|escape|space|left|right|up|down|capture|run`);
     }
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
-  const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session']);
+  const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session', 'principal']);
   const byAction: Record<string, string[]> = {
-    task: ['work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
+    events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key'],
+    task: ['to-event', 'decision', 'source', 'external-actor', 'external-message-id', 'metadata', 'work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
     rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
@@ -438,6 +463,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
     }
     if (command.action === 'capabilities' || command.action === 'status') {
       const result = await request('GET', command.action === 'status' ? '/peers' : '/capabilities') as Json & { source?: { sessionId?: string; name?: string }; peers?: Array<Json & { sessionId?: string; name?: string }>; groups?: Array<Json> };
+      if (command.action === 'capabilities') result.cli_version = getTermdockVersion();
       if (command.action === 'status' && o.text) {
         // Human-readable status: no JSON dump, one line per fact.
         const source = result.source as { sessionId?: string; name?: string } | undefined;
