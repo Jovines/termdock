@@ -98,6 +98,9 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
   const [pendingRevoke, setPendingRevoke] = useState<string>();
   const [selectingSessions, setSelectingSessions] = useState(false);
   const [draftSessionIds, setDraftSessionIds] = useState<string[]>([]);
+  let inviteHostname: string | undefined;
+  try { inviteHostname = new URL(entryAddress === 'custom' ? normalizeServiceAddress(customAddress) : entryAddress || currentServiceOrigin || location.origin).hostname; } catch { /* Keep an incomplete custom address editable. */ }
+  const localInviteAddress = !!inviteHostname && ['localhost', '127.0.0.1', '[::1]'].includes(inviteHostname);
   const activeGrants = grants.filter(grant => grant.revokedAt === undefined && (!grant.expiresAt || grant.expiresAt > Date.now()));
   const inactiveGrants = grants.filter(grant => !activeGrants.includes(grant));
   const devices = [...new Set(activeGrants.map(grant => grant.subjectId))].map(subjectId => {
@@ -231,10 +234,10 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             {preset === 'write' && <p className="text-xs leading-relaxed text-muted-foreground">终端命令可读写该系统用户有权访问的文件。</p>}
             {preset === 'full' && <p className="text-xs leading-relaxed text-muted-foreground">拥有此服务的全部当前及未来权限。仅授予你完全信任的设备。</p>}
             {hasBackup && <label className="flex items-start gap-3 text-sm"><input type="checkbox" className="mt-0.5 h-4 w-4 accent-primary" checked={includeBackup} onChange={event => setIncludeBackup(event.target.checked)} /><span>让新设备也能使用备用连接<span className="mt-1 block text-xs leading-relaxed text-muted-foreground">需要入口管理员授权；关闭后生成直接连接邀请。</span></span></label>}
-            {inviteAddresses.length > 0 && <details className="rounded-xl border border-border px-3 py-2 text-left">
-              <summary className="cursor-pointer text-sm font-medium text-foreground">接入地址<span className="ml-2 text-xs font-normal text-muted-foreground">默认当前地址，可换用 IP 或域名</span></summary>
+            <details className="rounded-xl border border-border px-3 py-2 text-left">
+              <summary className="cursor-pointer text-sm font-medium text-foreground">接入地址<span className="ml-2 text-xs font-normal text-muted-foreground">{entryAddress === 'custom' ? customAddress || '请输入地址' : new URL(entryAddress || currentServiceOrigin || location.origin).host}</span></summary>
               <fieldset className="mt-2 space-y-2"><legend className="sr-only">受邀设备打开的地址</legend>
-                <p className="text-xs leading-relaxed text-muted-foreground">受邀设备将打开这个地址。当前地址无法访问时，可改用其他可访问的 IP 或域名。</p>
+                <p className="text-xs leading-relaxed text-muted-foreground">{localInviteAddress ? '当前地址仅供这台电脑使用。邀请其他设备时，请选择它能访问的服务域名或 IP 地址。' : '受邀设备将打开这个地址。请确认它能访问所选的服务域名或 IP 地址。'}</p>
                 <div className="space-y-2">{([
                   ['', '当前地址', new URL(currentServiceOrigin || location.origin).host],
                   ...inviteAddresses.map(item => [item.url, item.label, new URL(item.url).host] as [string, string, string]),
@@ -246,7 +249,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
                 </label>)}</div>
                 {entryAddress === 'custom' && <input type="text" className={field} inputMode="url" placeholder="例如：https://192.168.1.23:9834" value={customAddress} onChange={event => setCustomAddress(event.target.value)} />}
               </fieldset>
-            </details>}
+            </details>
             <div><button className={`${primaryButton} inline-flex w-full items-center justify-center gap-2 text-sm`} type="submit" disabled={busy || loading}>{busy && <Loader2 size={16} className="animate-spin" />}{busy ? '正在生成…' : '生成邀请'}</button><p className="mt-2 text-center text-xs leading-relaxed text-muted-foreground">链接 10 分钟内有效 · 访问权限{grantExpiry ? '按设定时间到期' : '保留至撤销'}</p></div>
           </form>}
         </section>}

@@ -21,7 +21,7 @@ export function rememberConnectionPath(serviceId: string, key: string): void {
  * the whole attempt; a reachable alternate must not bypass revoked access. */
 export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], dispose: (value: T) => void, sequential = false): Promise<{ value: T; key: string }> {
   return new Promise((resolve, reject) => {
-    let cursor = 0, pending = 0, settled = false, lastError: unknown;
+    let cursor = 0, pending = 0, settled = false, lastError: unknown, identityError: unknown;
     let hedge: ReturnType<typeof setTimeout> | undefined;
     const controllers = new Set<AbortController>();
     const finish = () => {
@@ -32,7 +32,7 @@ export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], disp
     const start = () => {
       if (settled) return;
       if (cursor >= attempts.length) {
-        if (!pending) { settled = true; finish(); reject(lastError || new Error('没有可用的连接路线。')); }
+        if (!pending) { settled = true; finish(); reject(identityError || lastError || new Error('没有可用的连接路线。')); }
         return;
       }
       if (pending >= (sequential ? 1 : 2)) return;
@@ -53,6 +53,9 @@ export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], disp
         controllers.delete(controller); pending--;
         if (settled) return;
         lastError = error;
+        // A later unreachable address must not hide an observed pin failure.
+        // Still allow another route to succeed with that same pinned identity.
+        if (error instanceof Error && error.name === 'UnexpectedPeerError') identityError = error;
         if (error instanceof DeviceAuthorizationRequired) { settled = true; finish(); reject(error); return; }
         start();
       });

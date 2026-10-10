@@ -163,3 +163,16 @@ describe('FederationAccess invitation flow', () => {
     await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ entryAddress: 'https://10.0.0.8:9834' })));
   });
 });
+
+it('always offers a custom invite address and warns that localhost is local to one computer', async () => {
+  const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
+  render(<FederationAccess paired currentServiceOrigin="https://localhost:9881" onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} />);
+  fireEvent.click(screen.getByText('邀请设备'));
+  const disclosure = screen.getByText('接入地址').closest('details')!; disclosure.open = true;
+  expect(disclosure.textContent).toContain('localhost:9881');
+  expect(disclosure.textContent).toContain('当前地址仅供这台电脑使用');
+  fireEvent.click(screen.getByRole('radio', { name: /自定义地址/ }));
+  fireEvent.change(screen.getByPlaceholderText('例如：https://192.168.1.23:9834'), { target: { value: 'https://[::1]:9881' } });
+  fireEvent.click(screen.getByRole('button', { name: '生成邀请' }));
+  await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ entryAddress: 'https://[::1]:9881', scope: { kind: 'service' }, actions: ['session.view'] }));
+});

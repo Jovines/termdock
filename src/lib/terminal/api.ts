@@ -8,6 +8,7 @@ import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
 import { currentSecureClient, readWithSecureReconnect, secureSocket } from '../federation/browserIntegration';
 import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from '../federation/transportLifecycle';
 import { clearPreviewResourceCache, fetchPreviewResource } from '../utils/previewResourceCache';
+import { loginFailureReason, passwordLoginFailure, type LoginFailureReason } from '../federation/passwordLoginFailure';
 import type {
   TerminalSession,
   TerminalStreamEvent,
@@ -1885,17 +1886,22 @@ export async function getAuthStatus(): Promise<AuthStatus> {
 
 export interface LoginResult {
   ok: boolean;
+  reason?: LoginFailureReason;
   error?: string;
   retryAfterMs?: number;
   rateLimited?: boolean;
 }
 
 export async function loginWithPassword(password: string): Promise<LoginResult> {
-  const response = await fetch('/api/auth/login', {
+  let response: Response;
+  try { response = await fetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password }),
-  });
+  }); } catch (error) {
+    const failure = passwordLoginFailure(error);
+    return { ok: false, reason: loginFailureReason(failure.code), error: failure.message };
+  }
   if (response.ok) {
     // Force a fresh CSRF token tied to the new session.
     resetCsrfTokenCache();
@@ -1905,12 +1911,13 @@ export async function loginWithPassword(password: string): Promise<LoginResult> 
   if (response.status === 429) {
     return {
       ok: false,
+      reason: 'rateLimited',
       rateLimited: true,
       retryAfterMs: typeof data?.retryAfterMs === 'number' ? data.retryAfterMs : undefined,
       error: data?.error || 'Too many failed attempts. Please wait and try again.',
     };
   }
-  return { ok: false, error: data?.error || 'Login failed' };
+  return { ok: false, reason: loginFailureReason(data?.code) || (response.status === 401 ? 'invalidPassword' : 'unavailable'), error: data?.error || 'Login failed' };
 }
 
 export async function logout(): Promise<void> {

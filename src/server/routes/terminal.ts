@@ -27,7 +27,7 @@ import { gitStatusCache, type GitStatus } from '../utils/gitStatus.js';
 import { getPtyHostManager, type PtyHostClient } from '../ptyhost/manager.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { TERMINAL, TMUX } from '../config.js';
-import { localAccessManager } from '../utils/localAccess.js';
+import { localAccessManager, localAccessInterfaceUrl } from '../utils/localAccess.js';
 import {
   normalizeLocalAccessName,
   getLocaleSetting,
@@ -7419,7 +7419,7 @@ router.put('/toolbar-presets', (req, res) => {
 async function getSettingsPayload() {
   const localAccess = localAccessManager.getState();
   const interfaces = await Promise.all(localAccess.interfaces.map(async (entry) => {
-    const url = `${localAccess.httpsEnabled ? 'https' : 'http'}://${entry.address}:9834`;
+    const url = localAccessInterfaceUrl(localAccess.url, entry.address);
     const qrDataUrl = await QRCode.toDataURL(url, {
       margin: 1,
       width: 132,
@@ -7455,7 +7455,7 @@ async function getSettingsPayload() {
     localAccess: {
       ...localAccess,
       interfaces,
-      onboardingUrl: getOnboardingServerUrl() ?? null,
+      onboardingUrl: localAccess.status === 'loopback-only' ? null : getOnboardingServerUrl() ?? null,
     },
   };
 }

@@ -329,6 +329,11 @@ export type TranslationDictionary = {
     placeholderBlocked: (params: TranslatorParams) => string;
     submit: string;
     invalidPassword: string;
+    identityMismatch: string;
+    unavailable: string;
+    authorizationRequired: string;
+    currentTarget: (params: TranslatorParams) => string;
+    manageServices: string;
     failed: string;
     rateLimited: string;
     continueAfterReconnect: string;
