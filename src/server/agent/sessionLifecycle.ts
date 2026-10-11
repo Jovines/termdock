@@ -6,7 +6,7 @@ export interface SessionRuntimeFacts {
   exists: boolean; running: boolean; shell: boolean;
   agentSlug: string | null; nativeId: string | null;
 }
-export type RecoverableSessionState = 'starting' | 'binding_pending' | 'ready' | 'restoring' | 'failed' | 'releasing' | 'released';
+export type RecoverableSessionState = 'starting' | 'binding_pending' | 'ready' | 'restoring' | 'failed' | 'releasing' | 'released' | 'closing' | 'closed';
 export interface SessionLifecycleDescriptor {
   session_id: string; operation_id: string; generation?: number;
   state: RecoverableSessionState; runtime_present?: boolean | null;
@@ -51,6 +51,8 @@ export function assertReleaseFacts(record: SessionLifecycleDescriptor, facts: Se
 }
 export function assertMessageRuntime(record: SessionLifecycleDescriptor | undefined): void {
   if (!record) return;
+  if (record.state === 'closed') fail('SESSION_CLOSED', 'Session was explicitly closed; it cannot be sent to or restored');
+  if (record.state === 'closing') fail('SESSION_OPERATION_IN_PROGRESS', 'Session close is in progress');
   if (record.state === 'released') fail('SESSION_RELEASED', 'Runtime was released; explicitly restore this session before sending');
   if (record.state === 'releasing') fail('SESSION_OPERATION_IN_PROGRESS', 'Runtime release is in progress; message was not enqueued');
   if (record.operation_uncertain) fail('OPERATION_OUTCOME_UNCONFIRMED', 'Lifecycle outcome needs reconciliation before sending');

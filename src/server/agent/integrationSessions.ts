@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { cleanMemberName } from './collaborationRoutes.js';
+import type { SessionCloseTarget } from './sessionManagement.js';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { atomicJson, integrationError, type IntegrationPrincipal, type LaunchProfile, type StartupInputCondition } from './integrationStore.js';
@@ -13,6 +15,13 @@ export interface IntegrationSession extends SessionLifecycleDescriptor {
   terminal_binding?: CollaborationPaneBinding | null;
   resume_configuration_fingerprint?: string;
   group_role?: string;
+  name?: string;
+  name_updated_at?: number;
+  name_generation?: number;
+  name_operation_id?: string;
+  rename_pending?: boolean;
+  /** A close remains fenced, including after an ambiguous crash. */
+  close_intent?: { operation_id: string; target: SessionCloseTarget | null };
   operation_id: string; session_id: string; group_id: string; principal_id: string;
   agent_slug: string; agent_native_session_id: string | null;
   error_code: string | null; cwd: string; launch_profile: string; profile: LaunchProfile;
@@ -39,6 +48,10 @@ export function integrationLaunchCommand(record: IntegrationSession, restore: bo
   return `cd -- ${quote(record.cwd)} && ${[record.profile.executable, ...args].map(quote).join(' ')}`;
 }
 export interface IntegrationSessionAdapter {
+  prepareRename?(record: IntegrationSession): Promise<void>;
+  rename?(record: IntegrationSession): Promise<void>;
+  prepareClose?(record: IntegrationSession): Promise<SessionCloseTarget | null>;
+  closeRuntime?(record: IntegrationSession, reconcile: boolean): Promise<void>;
   create(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress?: (phase: LaunchPhase) => void): Promise<void>;
   restore(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress?: (phase: LaunchPhase) => void): Promise<void>;
   retryCold?(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress: (phase: LaunchPhase) => void): Promise<void>;
@@ -63,8 +76,8 @@ function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_cond
 interface Document { version: 1; sessions: IntegrationSession[]; requests: Record<string, { hash: string; sessionId: string; operationId?: string; generation?: number; result?: IntegrationSession }> }
 export function publicIntegrationSession(record: IntegrationSession) {
   const { profile: _, deadline: _deadline, launch_submitted: _submitted, startup_condition: _condition, restore_diagnostics: diagnostics,
-    launch_diagnostics: launchDiagnostics, launch_diagnostics_history: _history, message_history_seen: _messages, ...publicRecord } = record;
-  return { ...publicRecord, ...(diagnostics ? { restore_diagnostics_available: true } : {}),
+    launch_diagnostics: launchDiagnostics, launch_diagnostics_history: _history, message_history_seen: _messages, close_intent: _closeIntent, ...publicRecord } = record;
+  return { ...publicRecord, close_pending: !!_closeIntent, ...(diagnostics ? { restore_diagnostics_available: true } : {}),
     ...(launchDiagnostics ? { launch_diagnostics_available: true } : {}) };
 }
 export function permittedCwd(profile: LaunchProfile, cwd: string): string {
@@ -84,6 +97,7 @@ export class IntegrationSessions {
   private lifecycle = new SessionLifecycleCoordinator();
   private mutations = new Map<string, { hash: string; promise: Promise<IntegrationSession> }>();
   private coldRetries = new Set<string>();
+  private closingOperations = new Set<string>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopObservation: () => void;
   private stopDeliveryGuard?: () => void;
@@ -95,7 +109,7 @@ export class IntegrationSessions {
       if (doc.version !== 1 || !Array.isArray(doc.sessions) || !doc.requests) throw new Error('Invalid integration session store'); this.doc = doc;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     for (const record of this.doc.sessions) { record.generation ??= 1; record.runtime_present ??= null; }
-    for (const record of this.doc.sessions) if (['starting', 'restoring', 'binding_pending'].includes(record.state) || record.state === 'releasing' || record.startup_input?.state === 'pending') this.scheduleRefresh(record);
+    for (const record of this.doc.sessions) if (['starting', 'restoring', 'binding_pending'].includes(record.state) || ['releasing', 'closing'].includes(record.state) || record.startup_input?.state === 'pending') this.scheduleRefresh(record);
     // A pre-restart partial match cannot prove continuity of the live screen.
     for (const record of this.doc.sessions) if (record.startup_input && record.startup_input.state !== 'observed') record.startup_input.matched_since = null;
     this.stopDeliveryGuard = adapter.registerDeliveryGuard?.(id => this.deliveryReadiness(id));
@@ -208,7 +222,10 @@ export class IntegrationSessions {
   }
   assertRuntimeMessage(id: string): void {
     const record = this.doc.sessions.find(s => s.session_id === id);
+    if (this.closingOperations.has(id)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Session close preflight is in progress', 409);
     if (this.coldRetries.has(id) || record?.cold_retry_pending) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Cold retry must finish or be reconciled before sending', 409);
+    if (record?.state === 'closing' && !record.operation_uncertain) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Session close is in progress', 409);
+    if (record?.close_intent) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Close outcome requires reconciliation', 409);
     assertMessageRuntime(record);
     // Durable, conservative latch before admission; even a later enqueue
     // failure cannot make a previously attempted business request disappear.
@@ -245,11 +262,13 @@ export class IntegrationSessions {
     return this.mutate(principal, key, ['retry-cold', id, generation], () => this.lifecycle.run(id, async () => {
       const request = this.request(principal, key, ['retry-cold', id, generation]);
       if (request.previous) return this.replayRequest(principal, id, request.previous);
+      this.assertManagementSettled(this.lookup(principal, id));
       if (!this.adapter.retryCold || !this.adapter.messageHistory) integrationError('SESSION_COLD_RETRY_UNSUPPORTED', 'Runtime adapter does not support verified cold retry', 409);
       if (this.pending.has(id)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Launch is in progress', 409);
       this.coldRetries.add(id);
       try {
         const record = await this.get(principal, id);
+        this.assertManagementSettled(record);
         assertReleaseGeneration(record, generation);
         if (record.cold_retry_pending || record.operation_uncertain) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Reconcile prior lifecycle outcome before cold retry', 409);
         if (record.agent_native_session_id) integrationError('SESSION_COLD_RETRY_NATIVE_BOUND', 'Use exact native restore for a bound session', 409);
@@ -285,6 +304,7 @@ export class IntegrationSessions {
     let releaseNative: (() => void) | undefined;
     try {
       const record = await this.get(principal, id);
+      this.assertManagementSettled(record);
       if (record.cold_retry_pending) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Reconcile the cold retry before native restore', 409);
       if (!record.agent_native_session_id) integrationError('NATIVE_SESSION_ID_MISSING', 'An exact native session binding is required', 409);
       // Recheck the current grant and actual directories; restore uses the
@@ -329,6 +349,7 @@ export class IntegrationSessions {
     return this.lifecycle.run(id, async () => {
       const record = structuredClone(this.doc.sessions.find(s => s.session_id === id));
       if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Recovery record does not exist', 404);
+      this.assertManagementSettled(record);
       assertReleaseGeneration(record, generation);
       if (this.pending.has(id) || record.operation_uncertain || ['starting', 'restoring', 'binding_pending', 'releasing'].includes(record.state)) {
         integrationError('SESSION_OPERATION_IN_PROGRESS', 'Resolve the current lifecycle operation before clearing startup input conditions', 409);
@@ -348,6 +369,7 @@ export class IntegrationSessions {
     return this.lifecycle.run(id, async () => {
       const record = structuredClone(this.doc.sessions.find(s => s.session_id === id));
       if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Recovery record does not exist', 404);
+      this.assertManagementSettled(record);
       assertReleaseGeneration(record, generation);
       if (this.pending.has(id) || ['starting', 'restoring', 'binding_pending', 'releasing'].includes(record.state)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Resolve the current operation before confirming compatibility', 409);
       if (!/^[a-f0-9]{64}$/.test(fingerprint) || fingerprint !== await resumeConfigurationFingerprint(record, this.adapter)) integrationError('RESUME_CONFIGURATION_CHANGED', 'Current fingerprint no longer matches the administrator confirmation', 409);
@@ -355,13 +377,85 @@ export class IntegrationSessions {
       this.saveRecord(record); return record;
     });
   }
+  private assertManagementSettled(record: IntegrationSession): void {
+    if (record.state === 'closed') integrationError('SESSION_CLOSED', 'Explicitly closed sessions cannot be restored or restarted', 409);
+    if (record.state === 'closing' && !record.operation_uncertain) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Session close is in progress', 409);
+    if (record.close_intent || record.state === 'closing') integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Reconcile the pending close before any lifecycle operation', 409);
+    if (record.rename_pending) integrationError('SESSION_RENAME_SYNC_PENDING', 'Read session get to reconcile the pending name update', 409);
+  }
+  private assertManagementIdle(record: IntegrationSession): void {
+    if (this.pending.has(record.session_id) || record.cold_retry_pending || record.operation_uncertain || ['starting', 'restoring', 'binding_pending', 'releasing', 'closing'].includes(record.state)) {
+      integrationError('SESSION_OPERATION_IN_PROGRESS', 'Resolve the current lifecycle operation first', 409);
+    }
+  }
+  async rename(principal: IntegrationPrincipal, id: string, generation: number, value: unknown, key: string): Promise<IntegrationSession> {
+    if (typeof value !== 'string') integrationError('INVALID_NAME', 'name must be non-empty text up to 80 characters');
+    const name = cleanMemberName(value);
+    if (!name) integrationError('INVALID_NAME', 'name must be non-empty text up to 80 characters');
+    return this.mutate(principal, key, ['rename', id, generation, name], () => this.lifecycle.run(id, async () => {
+      const request = this.request(principal, key, ['rename', id, generation, name]);
+      if (request.previous) return this.replayRequest(principal, id, request.previous);
+      if (!this.adapter.rename) integrationError('SESSION_RENAME_UNSUPPORTED', 'Runtime adapter does not support renaming', 409);
+      const record = await this.get(principal, id);
+      assertReleaseGeneration(record, generation);
+      if (record.close_intent || record.rename_pending) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Resolve the pending management operation first', 409);
+      this.assertManagementIdle(record);
+      await this.adapter.prepareRename?.(record);
+      record.name = name; record.name_updated_at = Date.now(); record.updated_at = record.name_updated_at;
+      record.generation = generation + 1; record.name_generation = record.generation; record.name_operation_id = record.operation_id; record.rename_pending = true;
+      this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
+      try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
+      try { await this.adapter.rename(record); record.rename_pending = false; this.saveRecord(record); }
+      catch { /* Durable intent is retried by get/restart; no runtime is created. */ }
+      return this.lookup(principal, id);
+    }));
+  }
+  async closeSession(principal: IntegrationPrincipal, id: string, generation: number, key: string): Promise<IntegrationSession> {
+    return this.mutate(principal, key, ['close', id, generation], () => this.lifecycle.run(id, async () => {
+      const request = this.request(principal, key, ['close', id, generation]);
+      if (request.previous) return this.replayRequest(principal, id, request.previous);
+      this.closingOperations.add(id);
+      try {
+        if (!this.adapter.prepareClose || !this.adapter.closeRuntime || !this.adapter.runtimePresent) integrationError('SESSION_CLOSE_UNSUPPORTED', 'Runtime adapter does not support closing', 409);
+        const record = await this.get(principal, id);
+        assertReleaseGeneration(record, generation);
+        if (record.close_intent || record.rename_pending) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Read session get to reconcile prior management intent', 409);
+        this.assertManagementIdle(record);
+        if (record.state === 'closed') {
+          if (await this.adapter.runtimePresent(record)) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Unexpected runtime exists for a closed record', 409);
+          this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
+          try { this.save(); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
+          return record;
+        }
+        if (this.adapter.pendingMessages?.(id)) integrationError('SESSION_PENDING_MESSAGES', 'Pending messages must be resolved before closing', 409);
+        const target = await this.adapter.prepareClose(record);
+        record.operation_id = randomUUID(); record.generation = generation + 1; record.state = 'closing';
+        record.close_intent = { operation_id: record.operation_id, target }; record.error_code = null;
+        record.operation_uncertain = false; record.updated_at = Date.now();
+        this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
+        try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
+        try {
+          await this.adapter.closeRuntime(record, false);
+          if (await this.adapter.runtimePresent(record)) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Runtime removal cannot be confirmed', 409);
+          record.state = 'closed'; record.runtime_present = false; record.terminal_binding = null; record.startup_input = undefined;
+          record.close_intent = undefined;
+        } catch (error) {
+          record.state = 'failed'; record.operation_uncertain = true; record.runtime_present = null;
+          record.error_code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'SESSION_CLOSE_FAILED';
+        }
+        record.updated_at = Date.now(); this.saveRecord(record); return record;
+      } finally { this.closingOperations.delete(id); }
+    }));
+  }
   async release(principal: IntegrationPrincipal, id: string, generation: number, key: string): Promise<IntegrationSession> {
     return this.mutate(principal, key, ['release', id, generation], () => this.lifecycle.run(id, async () => {
       const request = this.request(principal, key, ['release', id, generation]);
       if (request.previous) return this.replayRequest(principal, id, request.previous);
+      this.assertManagementSettled(this.lookup(principal, id));
       if (!this.adapter.release || !this.adapter.runtimePresent) integrationError('SESSION_RELEASE_UNSUPPORTED', 'Runtime adapter does not support release', 409);
       if (this.pending.has(id)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Launch is in progress', 409);
       const record = await this.get(principal, id);
+      this.assertManagementSettled(record);
       assertReleaseGeneration(record, generation);
       if (record.state !== 'released') {
         assertReleaseFacts(record, await this.adapter.inspect(record));
@@ -392,6 +486,37 @@ export class IntegrationSessions {
   }
   private async refresh(id: string): Promise<void> {
     const record = structuredClone(this.doc.sessions.find(s => s.session_id === id)); if (!record) return;
+    if (record.rename_pending) {
+      if (this.lifecycle.active(id)) return;
+      try { await this.lifecycle.run(id, async () => {
+        if (!this.adapter.rename) return;
+        await this.adapter.rename(record);
+        if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
+        record.rename_pending = false; this.saveRecord(record);
+      }); } catch { /* Keep the persisted intent for a later get/restart. */ }
+      return;
+    }
+    if (record.state === 'closed' || record.state === 'closing' || record.close_intent) {
+      if (this.lifecycle.active(id)) return;
+      try {
+        if (record.state !== 'closed') {
+          if (!this.adapter.closeRuntime) integrationError('SESSION_CLOSE_UNSUPPORTED', 'Close reconciliation is unavailable', 409);
+          await this.adapter.closeRuntime(record, true);
+        }
+        if (!this.adapter.runtimePresent || await this.adapter.runtimePresent(record)) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Runtime exists for a closed or closing session', 409);
+        const next = { ...record, state: 'closed' as const, runtime_present: false, terminal_binding: null, close_intent: undefined,
+          operation_uncertain: false, error_code: null, startup_input: undefined };
+        if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
+        if (JSON.stringify(next) !== JSON.stringify(record)) this.saveRecord({ ...next, updated_at: Date.now() });
+      } catch (error) {
+        if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
+        // Keep closed terminal, and keep unresolved intent fenced. Never kill on refresh.
+        const next = { ...record, runtime_present: null, operation_uncertain: true,
+          error_code: typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'OPERATION_OUTCOME_UNCONFIRMED' };
+        if (JSON.stringify(next) !== JSON.stringify(record)) this.saveRecord({ ...next, updated_at: Date.now() });
+      }
+      return;
+    }
     if (record.cold_retry_pending && (this.lifecycle.active(id) || this.pending.has(id))) return;
     if (record.state === 'released' || record.state === 'releasing' || record.operation_uncertain) {
       if (this.lifecycle.active(id)) return;
@@ -469,6 +594,9 @@ export class IntegrationSessions {
   async deliveryReadiness(id: string): Promise<IntegrationDeliveryReadiness | null> {
     const existing = this.doc.sessions.find(record => record.session_id === id);
     if (!existing) return null;
+    if (this.closingOperations.has(id)) return { allowed: false, reason: 'SESSION_OPERATION_IN_PROGRESS' };
+    if (existing.state === 'closed') return { allowed: false, reason: 'SESSION_CLOSED' };
+    if (existing.close_intent || existing.state === 'closing') return { allowed: false, reason: 'SESSION_OPERATION_IN_PROGRESS' };
     if (existing.state === 'released' || existing.state === 'releasing' || existing.operation_uncertain) return { allowed: false, reason: existing.state === 'released' ? 'SESSION_RELEASED' : 'SESSION_OPERATION_IN_PROGRESS' };
     if (!existing.startup_input) return null;
     await this.refresh(id);

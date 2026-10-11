@@ -1,4 +1,5 @@
 import type { ComputerPointer } from './pointer';
+import type { ComputerZoom } from './zoom';
 
 export type ComputerTouchMode = 'trackpad' | 'direct';
 const MODE_KEY = 'termdock:computer-touch-mode:v1';
@@ -29,6 +30,7 @@ export function attachComputerTouchpad(
   pointer: ComputerPointer,
   cursor: HTMLElement,
   position: { current: TouchpadPosition | null },
+  options: { mode?: ComputerTouchMode; zoom?: ComputerZoom; viewOnly?: boolean } = {},
 ): () => void {
   const listeners = new AbortController();
   const fingers = new Map<number, Finger>();
@@ -37,6 +39,9 @@ export function attachComputerTouchpad(
   let moved = false;
   let cancelled = false;
   let scrolling = false;
+  let pinching = false;
+  let pinchDistance = 0;
+  let pinchZoom = 1;
   let scrollY = 0;
   let buttons = 0;
   let frame: number | undefined;
@@ -84,7 +89,7 @@ export function attachComputerTouchpad(
   };
   const drawCursor = () => {
     const g = measure(), p = point();
-    if (!g.width || !g.height || !cursorVisible) { cursor.hidden = true; return; }
+    if (!g.width || !g.height || !cursorVisible || pinching || options.mode === 'direct' || options.viewOnly) { cursor.hidden = true; return; }
     let x = g.left + p.x * g.scaleX, y = g.top + p.y * g.scaleY;
     // Follow the pointer only when it crosses an original-size viewport edge.
     // Read all geometry before writing scroll offsets and the cursor transform.
@@ -106,6 +111,7 @@ export function attachComputerTouchpad(
     cursor.style.transform = `translate3d(${x}px, ${y}px, 0)`;
   };
   const transmit = (mask = buttons) => {
+    if (options.viewOnly) return;
     const p = point();
     pointer.send(Math.round(p.x), Math.round(p.y), mask);
   };
@@ -132,13 +138,23 @@ export function attachComputerTouchpad(
   };
   const suppress = (event: Event) => { if (event.cancelable) event.preventDefault(); event.stopImmediatePropagation(); };
   const centroidY = () => [...fingers.values()].reduce((sum, finger) => sum + finger.y, 0) / fingers.size;
+  const twoFingers = () => {
+    const [a, b] = [...fingers.values()];
+    return { distance: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  };
+  const directPosition = (event: PointerEvent) => {
+    const g = measure();
+    position.current = { x: clamp((event.clientX - g.clientLeft - g.left) / g.scaleX, g.width),
+      y: clamp((event.clientY - g.clientTop - g.top) / g.scaleY, g.height) };
+  };
   const down = (event: PointerEvent) => {
     if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
     suppress(event);
     cursorVisible = true;
     schedule();
     if (!fingers.size) {
-      startedAt = performance.now(); maxFingers = 0; moved = false; cancelled = false; scrolling = false; scrollY = 0;
+      startedAt = performance.now(); maxFingers = 0; moved = false; cancelled = false; scrolling = false; pinching = false; scrollY = 0;
+      if (options.mode === 'direct') directPosition(event);
     }
     fingers.set(event.pointerId, { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY });
     maxFingers = Math.max(maxFingers, fingers.size);
@@ -148,7 +164,10 @@ export function attachComputerTouchpad(
       hold = setTimeout(() => {
         if (!stopped && fingers.size === 1 && !moved && !cancelled) { buttons = 1; transmit(); }
       }, DRAG_MS);
-    } else { release(); scrolling = true; }
+    } else {
+      release(); scrolling = true;
+      if (fingers.size === 2) { pinchDistance = twoFingers().distance; pinchZoom = options.zoom?.get() ?? 1; }
+    }
   };
   const move = (event: PointerEvent) => {
     if (event.pointerType === 'mouse') {
@@ -164,21 +183,38 @@ export function attachComputerTouchpad(
     if (!finger) return;
     suppress(event);
     const previousY = centroidY();
+    const previousFocus = fingers.size === 2 ? twoFingers() : undefined;
     const dx = event.clientX - finger.x, dy = event.clientY - finger.y;
     finger.x = event.clientX; finger.y = event.clientY;
     if (Math.hypot(finger.x - finger.startX, finger.y - finger.startY) > TAP_DISTANCE) {
       moved = true; clearTimeout(hold);
     }
     if (fingers.size === 2 && !cancelled) {
+      const focus = twoFingers();
+      if (options.zoom && pinchDistance > 0 && (pinching || Math.abs(focus.distance / pinchDistance - 1) > 0.06)) {
+        pinching = true; moved = true; scrollY = 0;
+        options.zoom.set(pinchZoom * focus.distance / pinchDistance, focus);
+        geometryDirty = true;
+        if (previousFocus) options.zoom.pan(focus.x - previousFocus.x, focus.y - previousFocus.y);
+        schedule(); return;
+      }
+      if (options.mode === 'direct' && options.zoom && options.zoom.get() > 1 && previousFocus) {
+        moved = true; options.zoom.pan(focus.x - previousFocus.x, focus.y - previousFocus.y); geometryDirty = true; schedule(); return;
+      }
       // Natural scrolling: moving fingers upward scrolls the desktop down.
       scrollY += previousY - centroidY();
       if (Math.abs(scrollY) >= SCROLL_STEP) { moved = true; schedule(); }
     } else if (fingers.size === 1 && !scrolling && !cancelled) {
+      if (options.mode === 'direct') {
+        directPosition(event);
+        if (moved) buttons = 1;
+        pendingMovement = true; schedule(); return;
+      }
       const p = point();
       // One CSS pixel of finger motion moves the displayed cursor one pixel.
       // Tap tolerance only classifies clicks; it must not create a dead zone
       // or discard the beginning of a slow, precise movement.
-      const g = geometry ?? measure();
+      const g = measure();
       p.x += dx / g.scaleX; p.y += dy / g.scaleY;
       point(); pendingMovement = true; schedule();
     }
@@ -194,7 +230,7 @@ export function attachComputerTouchpad(
     if (fingers.size) return;
     scrollY = 0;
     if (!cancelled && !wasDragging && !moved && maxFingers <= 2 && performance.now() - startedAt <= TAP_MS) {
-      transmit(maxFingers === 2 ? 4 : 1); transmit(0);
+      if (options.mode !== 'direct' || maxFingers === 1) { transmit(maxFingers === 2 ? 4 : 1); transmit(0); }
     }
   };
   const reset = () => {
@@ -204,13 +240,13 @@ export function attachComputerTouchpad(
     scrollY = 0;
     for (const id of ids) try { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); } catch { /* Disposed element. */ }
   };
-  const options = { capture: true, passive: false, signal: listeners.signal };
-  viewport.addEventListener('pointerdown', down, options);
-  viewport.addEventListener('pointermove', move, options);
-  viewport.addEventListener('pointerup', up, options);
-  viewport.addEventListener('pointercancel', up, options);
-  viewport.addEventListener('lostpointercapture', up, options);
-  for (const name of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'contextmenu']) viewport.addEventListener(name, suppress, options);
+  const listenerOptions = { capture: true, passive: false, signal: listeners.signal };
+  viewport.addEventListener('pointerdown', down, listenerOptions);
+  viewport.addEventListener('pointermove', move, listenerOptions);
+  viewport.addEventListener('pointerup', up, listenerOptions);
+  viewport.addEventListener('pointercancel', up, listenerOptions);
+  viewport.addEventListener('lostpointercapture', up, listenerOptions);
+  for (const name of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'contextmenu']) viewport.addEventListener(name, suppress, listenerOptions);
   const layoutChanged = () => { geometryDirty = true; schedule(); };
   viewport.addEventListener('scroll', layoutChanged, { capture: true, signal: listeners.signal });
   window.addEventListener('blur', reset, { signal: listeners.signal });

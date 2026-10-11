@@ -88,15 +88,23 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     SESSION_COLD_RETRY_RUNTIME_UNCONFIRMED/SESSION_COLD_RETRY_UNSUPPORTED；
     SESSION_COLD_RETRY_INTERRUPTED 表示重启后已核实原 shell，需新键明确重试。
     代次/并发/配置/授权错误沿用 release/restore 契约，不能自动绕过。
+  session rename <id> --generation <N> --name <name> --idempotency-key <key>
+    权限 session.rename；仅本 principal 创建、本机授权组的会话。名称持久化，restore继承；不启动或写入正文。
+    generation递增；原launch operation_id保持。rename_pending=true时用get对账显示同步。
+  session close <id> --generation <N> --idempotency-key <key>
+    权限 session.close；显式终止精确自有Agent/原失败空shell，移除活动承载；保留历史与诊断。
+    closed终态拒绝send/reply/restore/retry-cold；release才是保留精确恢复的入口。
+    有pending/进行中操作/身份不明确时拒绝；中断只对账不自动再终止，close_pending=true表示结果未确认。
+    rename/close最低CLI与实际服务1.4.315；session_rename/session_close=true；两个权限默认不授权。
   session release <id> --generation <session-get-generation> --idempotency-key <key>
     权限 session.release；仅原 Agent 已退出、精确空 shell、无 pending 消息时释放实际运行承载。
     released: runtime_present=false、terminal_binding=null；保留逻辑 ID/原生 UUID/原消息，restore 后可继续 reply。
     released 上 send/reply 返回 SESSION_RELEASED，不入队、不隐式恢复；业务先持久接收，再明确 restore。
     释放/恢复最低 CLI/实际服务 1.4.309；检查 session_runtime_release/stable_session_identity/session_lifecycle_generation。
-    generation 每次实际 restore/release/管理员兼容确认递增；旧 generation 拒绝，运行中精确 restore 不递增。
+    generation 每次实际 restore/release/rename/close/管理员兼容确认递增；旧 generation 拒绝，运行中精确 restore 不递增。
     重用同幂等键回读原操作结果，不能用于新一轮恢复；用 session get 查询当前状态。
     旧配置须管理员 td integration resume-configuration <id> 查看，再 confirm-resume 显式确认当前指纹。
-    状态 starting/restoring/binding_pending/ready/failed/releasing/released；runtime_present=null 表示无法确认。
+    状态 starting/restoring/binding_pending/ready/failed/releasing/released/closing/closed；runtime_present=null 表示无法确认。
     失败码：INVALID_SESSION_GENERATION、SESSION_GENERATION_MISMATCH、SESSION_RELEASE_UNSUPPORTED；
     SESSION_PENDING_MESSAGES/SESSION_STILL_RUNNING/SESSION_OPERATION_IN_PROGRESS 表示应先处理原现场；
     SESSION_NATIVE_OPERATION_IN_PROGRESS、SESSION_SCOPE_CONFLICT、SESSION_IDENTITY_MISMATCH 拒绝并发或身份/归属冲突；
@@ -264,11 +272,12 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     command.operation = positional.shift(); command.target = positional.shift();
     if (positional.length) throw new Error('Unexpected integration arguments');
     if (action === 'events' && (!['subscribe', 'ack'].includes(command.operation ?? '') || (command.operation === 'ack' ? !command.target : Boolean(command.target)))) throw new Error('Usage: events subscribe | events ack <cursor>');
-    if (action === 'session' && (!['create', 'get', 'restore', 'release', 'retry-cold'].includes(command.operation ?? '') || (command.operation === 'create' ? Boolean(command.target) : !command.target))) throw new Error('Usage: session create|get|restore|release|retry-cold');
+    if (action === 'session' && (!['create', 'get', 'restore', 'release', 'retry-cold', 'rename', 'close'].includes(command.operation ?? '') || (command.operation === 'create' ? Boolean(command.target) : !command.target))) throw new Error('Usage: session create|get|restore|release|retry-cold|rename|close');
     if (action === 'session' && command.operation !== 'get' && !options['idempotency-key']) throw new Error('Session mutation requires an explicit --idempotency-key');
-    if (action === 'session' && ['release', 'retry-cold'].includes(command.operation ?? '') && (!/^[1-9][0-9]*$/.test(String(options.generation ?? '')) || !Number.isSafeInteger(Number(options.generation)))) throw new Error(`session ${command.operation} requires --generation from session get`);
+    if (action === 'session' && ['release', 'retry-cold', 'rename', 'close'].includes(command.operation ?? '') && (!/^[1-9][0-9]*$/.test(String(options.generation ?? '')) || !Number.isSafeInteger(Number(options.generation)))) throw new Error(`session ${command.operation} requires --generation from session get`);
+    if (action === 'session' && command.operation === 'rename' && !String(options.name ?? '').trim()) throw new Error('session rename requires --name');
     const integrationFlags = action === 'events' ? command.operation === 'ack' ? ['consumer'] : ['consumer', 'group', 'timeout']
-      : command.operation === 'create' ? ['group', 'launch-profile', 'cwd', 'idempotency-key'] : command.operation === 'restore' ? ['idempotency-key'] : ['release', 'retry-cold'].includes(command.operation ?? '') ? ['idempotency-key', 'generation'] : [];
+      : command.operation === 'create' ? ['group', 'launch-profile', 'cwd', 'idempotency-key'] : command.operation === 'restore' ? ['idempotency-key'] : ['release', 'retry-cold', 'rename', 'close'].includes(command.operation ?? '') ? ['idempotency-key', 'generation', ...(command.operation === 'rename' ? ['name'] : [])] : [];
     for (const flag of Object.keys(options)) if (!['principal', 'json', 'jsonl', 'text', 'help', ...integrationFlags].includes(flag)) throw new Error(`--${flag} is not supported by ${action} ${command.operation}`);
   } else if (action === 'task') {
     command.operation = positional.shift(); command.target = positional.shift();
@@ -344,7 +353,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   } else if (positional.length && action !== 'help') throw new Error(`Unexpected arguments for ${action}`);
   const allowed = new Set(['json', 'jsonl', 'text', 'help', 'session', 'principal']);
   const byAction: Record<string, string[]> = {
-    events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key', 'generation'],
+    events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key', 'generation', 'name'],
     task: ['purpose', 'to-event', 'decision', 'source', 'external-actor', 'external-message-id', 'metadata', 'work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
     rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],

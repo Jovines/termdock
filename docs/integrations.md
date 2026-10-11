@@ -1,5 +1,7 @@
 # TD 通用外部接入（协议 1）
 
+principal 改名/显式关闭要求 **CLI / 实际服务均至少 1.4.315**（见文末契约）。
+
 最低 CLI / 运行服务版本：**termdock 1.4.300**，两者都必须升级并重启服务。
 启动输入条件与保留凭据的策略更新要求 **CLI / 实际运行服务均至少 1.4.301**；协议仍为 1。
 插件原生 ID 的前台 argv 回读及服务重启后的运行中 restore 核验修复要求
@@ -916,3 +918,111 @@ PID/start_id、实际 FD/inode 与内核 flock 一致的私有原生所有权证
 并验证 Agent 真正加载原对话。
 先完成测试环境的创建→追问→关联答复，再验重复键、追加咨询、断线重投和精确恢复。
 业务定时器或正式群接入由使用方明确启用，TD 发版不会启用这些业务流程。
+
+## 1.4.315：后台身份改名与显式关闭
+
+最低 **CLI 与实际运行服务均为 1.4.315**；协议仍为 1。回读能力
+`session_rename=true / session_rename_min_version=1.4.315`、
+`session_close=true / session_close_min_version=1.4.315`。CLI 对缺少对应能力的服务返回
+`SESSION_RENAME_UNSUPPORTED / SESSION_CLOSE_UNSUPPORTED`，不降级借用终端身份。
+
+管理员在原完整策略中按需追加独立权限 `session.rename`、`session.close`，通过
+`td integration update --file <policy.json>` 更新；旧身份不会自动获得这两个权限。
+同一凭据、组、profile 和其他权限保留。后台 principal 不需要绑定终端，已有未删除的
+本机授权组允许零活动成员；创建、恢复也不要求额外保留空管理成员。组的首次创建与
+授权仍由管理员完成。普通手动创建的管理终端不属于 principal，不纳入这两个权限。
+
+```sh
+td collab --principal <id> session get <sid>
+td collab --principal <id> session rename <sid> \
+  --generation <session-get-generation> --name 'Fast model' --idempotency-key <key>
+td collab --principal <id> session close <sid> \
+  --generation <session-get-generation> --idempotency-key <key>
+# 每次新操作前回读当前generation；同一请求重试保持相同参数与key。
+```
+
+对应本机 integration Unix socket 路由为 `POST /sessions/:id/rename`（JSON
+`{generation,name,idempotency_key}`）和 `POST /sessions/:id/close`（JSON
+`{generation,idempotency_key}`）。凭据仍只通过私有 credential file 注入，不能放 argv、
+消息或日志。授权必须同时命中持久记录 `principal_id + group_id + session_id`，
+不能修改同组其他 principal 或手动创建的成员；越界返回 `INTEGRATION_SESSION_NOT_FOUND`。
+
+### 名称与代次
+
+rename 复用已有名称清洗规则：控制字符/空白折叠、去首尾空白，截取最多 80 个字符；
+清洗后为空返回 `INVALID_NAME`。名称保存为逻辑记录的 `name`，同步活动终端登记、
+网页清单和 tmux 友好名称，释放后仍保留，下一次 restore 使用该名称。
+released/closed 可以仅改审计名称，不重建运行承载、不启动 Agent、不写终端正文。
+
+每次实际 rename 递增 generation，**保留原 launch `operation_id`、native UUID、
+argv/profile/cwd/配置指纹及启动诊断**。`name_updated_at / name_generation /
+name_operation_id` 记录本次改名对应的时间、代次和原操作；不把改名当作一次新启动。
+新 `session.renamed` 事件包含 `{session_id,name,generation,operation_id}`，
+沿用既有 event_id 去重、持久 inbox/ACK/重放契约。
+
+先持久保存名称意图，再同步显示。`rename_pending=true` 表示名称已落盘，但显示同步
+尚未收口；`session get` 或服务重启会重试显示同步，不重新递增、不创建终端。
+进行中的启动/恢复/释放/关闭或不确定结果拒绝改名；待同步名称必须先通过 get 对账。
+操作返回仍为 `{session: ...}`；不要把返回同键的历史快照当作最新状态。
+
+### close 与 release 的区别
+
+| 操作 | 运行承载 | 逻辑记录 | 后续恢复 |
+|---|---|---|---|
+| release | 只回收已退出 Agent 的精确原 shell | 保留原生恢复描述及消息关联 | 显式 restore 原 UUID |
+| close | 明确结束精确自有运行 Agent，或原失败冷启动 shell | 保留审计、诊断及仍在保留期的消息 | closed 终态，首版不提供 reopen/restore |
+
+close 不依据快照文字、忙闲、结果或验收推断是否可以终止。调用者负责业务授权与关闭
+时机；TD 负责机械范围和承载核验。开始关闭会生成独立 `operation_id`、generation+1，
+**先持久 `closing` 意图与精确目标实例，再进入既有 worker 屏障**，避免与自动终端写入
+交叉。原 launch 诊断保留，其 operation_id 仍属于原启动，不随 close 改写。
+
+必须无 pending 消息、无进行中/不确定启动或生命周期操作。scope 必须唯一：拒绝跨组
+共有运行承载、其他逻辑所有者、链接到其他会话的 pane、分屏/其他 pane、原 tmux/pane 绑定变化。运行 Agent
+需要当前 tmux server 实例与前台进程 PID/start identity、正确 Agent 与可验证的精确原 native UUID；
+未绑定 UUID 的失败冷启动仅可关闭已证明的原 foreground shell，不能杀未确认的 Agent。
+Linux 用当前 `/proc` starttime；macOS 用当前 `ps lstart` 与前台关系，不采用历史 PID。
+不可观测平台/权限或缺失身份失败关闭。这里只做运行身份验证，不表示应用输入就绪。
+
+终止前再次回读并比对原进程实例，按精确 tmux **session ID** 终止自有会话，不对
+进程组执行批量 kill，不删除 native 历史、工作目录、credential、授权组或其他业务。
+终止后最多观察 2 秒确认原实例与 tmux 消失，不重复终止。确认之后才移除活动 PTY、
+侧栏登记和组成员并提交 `closed`、`runtime_present=false`、`terminal_binding=null`。
+TD 生命周期锁不排他控制外部 tmux 命令/手工进程替换，最终核验与系统操作之间仍存在
+外部竞争窗口；不承诺对未受 TD 控制的外部操作提供原子事务或阻止所有派生后台进程。
+
+### 失败、幂等与重启
+
+同一逻辑会话复用生命周期协调器；同参数同键合并/回读原操作，不重复终止。不同键
+并发返回 `SESSION_OPERATION_IN_PROGRESS`；旧代次返回 `SESSION_GENERATION_MISMATCH`。
+同键的已保存失败或 pending 结果也保持原快照，最新事实须另外 get。
+
+关闭意图未落盘时不终止承载。终止/清理/结果落盘失败时保留意图，报告 failed 与
+`operation_uncertain=true / close_pending=true / runtime_present=null`，不宣称 closed。
+重启及 get **只对账，不再发送终止**：确认原进程和 tmux 已不存在后，可以清理残留
+登记并收口 closed；仍存活、被替换或身份不明则保持拒绝，不自动杀可能的新进程。
+显式关闭过的记录即使出现异常新运行承载，也不会回到 ready。
+
+`closed` 上新 send/reply/restore/retry-cold/release 返回 `SESSION_CLOSED`，不入队，
+不隐式新建 native UUID。尚未收口的 close 拒绝新投递及其他生命周期操作，先 get 对账。
+已保存的幂等操作结果可以回读，但不会执行新副作用。主动事件继续推送
+`session.closing / session.closed / session.failed`，payload 为公开 `{session}`；
+公开记录不暴露精确 close 进程目标，仅提供 `close_pending` 等状态。
+
+| 错误 | 含义与处理 |
+|---|---|
+| INTEGRATION_PERMISSION_DENIED | 没有独立授权，不能借用成员身份绕过 |
+| INTEGRATION_SESSION_NOT_FOUND | 记录不属于当前 principal/本机组或不存在 |
+| INVALID_NAME / INVALID_SESSION_GENERATION / INVALID_IDEMPOTENCY_KEY | 修正参数后按正式契约调用 |
+| SESSION_GENERATION_MISMATCH / IDEMPOTENCY_CONFLICT | 代次或同键参数不同，回读状态；不要自动改参数重试 |
+| SESSION_OPERATION_IN_PROGRESS / SESSION_RENAME_SYNC_PENDING | 进行中或显示意图未收口，先 get |
+| SESSION_PENDING_MESSAGES | 存在待投递消息，业务先明确处理，TD不自动丢弃 |
+| SESSION_SCOPE_CONFLICT / SESSION_IDENTITY_MISMATCH | 共享归属、pane或原生身份冲突，管理员核对 |
+| SESSION_CLOSE_TARGET_UNCONFIRMED / SESSION_CLOSE_TARGET_CHANGED | 当前前台实例无法证明或意图后已变化，不终止未知进程 |
+| SESSION_CLOSE_FAILED / OPERATION_OUTCOME_UNCONFIRMED | 关闭/对账结果未确认，保留证据且不自动再次终止 |
+| SESSION_CLOSED | 审计终态，不能当 released 恢复 |
+
+关闭不是消息送达、消费或业务完成证明；历史保留额度/事件保留缺口仍按原契约，不是
+永久审计存储。close 不增加 task、看板或 accepted。真实私有 TraeX 与 DevBox
+共享升级/业务适配由接入方后续验收；维护侧验证仅覆盖隔离测试的真实 tmux/Linux
+进程退出与源码回归。macOS 真实 close 路径尚未实机验收。

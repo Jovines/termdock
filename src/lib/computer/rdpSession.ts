@@ -15,6 +15,7 @@ export class RdpSession extends EventTarget {
   private listeners = new AbortController();
   private readonlyMode = false;
   private fit = true;
+  private zoom = 1;
   private resizePaused = false;
   private disposed = false;
   private connected = false;
@@ -93,7 +94,7 @@ export class RdpSession extends EventTarget {
     if (!this.container.clientWidth || !this.container.clientHeight) return;
     this.viewportScale = this.fit && width && height
       ? Math.min(this.container.clientWidth / width, this.keyboardScale ?? this.container.clientHeight / height) : 1;
-    this.display.scale(this.viewportScale);
+    this.display.scale(this.viewportScale * this.zoom);
   }
   private scheduleResize(): void {
     clearTimeout(this.resizeTimer);
@@ -110,6 +111,9 @@ export class RdpSession extends EventTarget {
     }, 150);
   }
   set scaleViewport(fit: boolean) { this.fit = fit; this.scale(); this.scheduleResize(); }
+  set viewportZoom(zoom: number) { this.zoom = zoom; this.scale(); }
+  get viewportZoom(): number { return this.zoom; }
+  get viewportScroller(): HTMLElement { return this.container; }
   set pauseResize(paused: boolean) { this.resizePaused = paused; this.scheduleResize(); }
   set keyboardActive(active: boolean) {
     if (active === this.phoneKeyboardActive) return;

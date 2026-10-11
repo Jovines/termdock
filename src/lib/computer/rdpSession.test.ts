@@ -22,6 +22,13 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 function session() { return new RdpSession(document.createElement('div'), { host: '127.0.0.1', port: 3389, username: 'test', password: 'secret', domain: '', ignoreCert: false, width: 1280, height: 800 }, vi.fn()); }
 describe('RDP viewport lifecycle', () => {
+  it('retains manual magnification when the viewport resizes without changing pointer scale independently', () => {
+    const s = session(); s.viewportZoom = 2;
+    expect(mocks.scale).toHaveBeenLastCalledWith(2.25);
+    mocks.height = 400; mocks.observers[0]();
+    expect(mocks.scale).toHaveBeenLastCalledWith(1);
+    s.viewportZoom = 1; expect(mocks.scale).toHaveBeenLastCalledWith(0.5); s.disconnect();
+  });
   it('waits for observed login before announcing a connected Guacamole desktop, and announces once', () => {
     const s = session(), connected = vi.fn(); s.addEventListener('connect', connected);
     mocks.tunnels[0].onauthentication('pending'); mocks.clients[0].onstatechange(3);

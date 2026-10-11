@@ -979,3 +979,75 @@ it('documents cold retry and refuses incompatible services before making a retry
   supported = true; expect(await runIntegrationCollab(command, port, io)).toBe(0);
   expect(calls).toEqual(['/capabilities', '/capabilities', '/sessions/id/retry-cold']); expect(output.join('')).not.toContain('test-private-token');
 });
+it('scoped management grants require no empty terminal; close retains messages and rename emits durable events', async () => {
+  const runtimeIds = new Set<string>();
+  const binding = { serverPid: 101, sessionId: '$102', paneId: '%103', panePid: 104, agentSlug: 'fixture', nativeSessionId: 'native-fixture' };
+  let f!: Awaited<ReturnType<typeof runtimeFixture>>;
+  const api: IntegrationSessionAdapter = {
+    create: async (r, prepared) => { prepared(binding); runtimeIds.add(r.session_id); const g = f.messages.getGroup(r.group_id)!; f.messages.save({ ...g, sessionIds: [...g.sessionIds, r.session_id] }); },
+    restore: vi.fn(async () => {}), subscribe: () => () => {},
+    inspect: async r => ({ exists: runtimeIds.has(r.session_id), running: runtimeIds.has(r.session_id), shell: false, agentSlug: 'fixture', nativeId: 'native-fixture' }),
+    runtimePresent: async r => runtimeIds.has(r.session_id), rename: vi.fn(async () => {}),
+    prepareClose: async () => ({ binding, tmux_server_start_id: 'linux:101', kind: 'agent', process_pid: 105, process_start_id: 'linux:106', native_id: 'native-fixture' }),
+    closeRuntime: async (r, reconcile) => { if (reconcile && runtimeIds.has(r.session_id)) throw new Error('still present'); runtimeIds.delete(r.session_id); f.messages.archiveSession(r.session_id); },
+    pendingMessages: () => 0,
+  };
+  f = await runtimeFixture(api); f.messages.archiveSession('worker');
+  expect(f.messages.getGroup(f.group.id)).toMatchObject({ sessionIds: [] });
+  const created = await f.request('POST', '/sessions', { launch_profile: 'agent', cwd: dir, idempotency_key: 'create' });
+  const id = created.body.session.session_id, grant = policy(f.group.id);
+  expect(created.body.session).toMatchObject({ state: 'ready' });
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ session_rename: true, session_close: true, session_rename_min_version: '1.4.315', session_close_min_version: '1.4.315' });
+  const rename = { generation: 1, name: 'Fast', idempotency_key: 'rename' };
+  const close = { generation: 2, idempotency_key: 'close' };
+  expect(await f.request('POST', `/sessions/${id}/rename`, rename)).toMatchObject({ status: 403, body: { code: 'INTEGRATION_PERMISSION_DENIED' } });
+  expect(await f.request('POST', `/sessions/${id}/close`, { ...close, generation: 1 })).toMatchObject({ status: 403, body: { code: 'INTEGRATION_PERMISSION_DENIED' } });
+  grant.permissions.push('session.rename'); f.runtime.store.update(grant);
+  const renamed = await f.request('POST', `/sessions/${id}/rename`, rename);
+  expect(renamed).toMatchObject({ status: 200, body: { session: { name: 'Fast', generation: 2, operation_id: created.body.session.operation_id, rename_pending: false } } });
+  expect(await f.request('POST', `/sessions/${id}/close`, close)).toMatchObject({ status: 403 });
+  const foreign = f.runtime.store.provision({ ...grant, id: 'other' });
+  expect(await f.request('POST', `/sessions/${id}/rename`, { ...rename, generation: 2 }, { 'Content-Type': 'application/json', authorization: `Bearer ${foreign.token}`, 'x-termdock-integration-id': 'other', 'x-termdock-integration-protocol': '1' })).toMatchObject({ status: 404, body: { code: 'INTEGRATION_SESSION_NOT_FOUND' } });
+  const original = f.messages.send({ groupId: f.group.id, fromSessionId: null, toSessionIds: [id], integrationOrigin: { integrationId: 'bridge', source: 'fixture' }, kind: 'message', content: 'historical request' })[0];
+  f.messages.markDelivered([original.id]);
+  const audit = f.messages.storeIntegrationReply(original.id, id, 'historical result', { responseKind: 'result', idempotencyKey: 'result' });
+  grant.permissions.push('session.close', 'message.send', 'message.read'); f.runtime.store.update(grant);
+  expect(await f.request('POST', `/sessions/${id}/close`, { ...close, generation: '2' })).toMatchObject({ status: 409, body: { code: 'INVALID_SESSION_GENERATION' } });
+  const closed = await f.request('POST', `/sessions/${id}/close`, close);
+  expect(closed).toMatchObject({ status: 200, body: { session: { state: 'closed', generation: 3, runtime_present: false, terminal_binding: null, close_pending: false } } });
+  expect(await f.request('POST', `/sessions/${id}/close`, close)).toEqual(closed);
+  expect(await f.request('GET', `/message/${audit.id}`)).toMatchObject({ status: 200, body: { message: { content: 'historical result' } } });
+  for (const [route, body] of [[`/sessions/${id}/restore`, { idempotency_key: 'restore' }], [`/sessions/${id}/retry-cold`, { generation: 3, idempotency_key: 'retry' }], ['/send', { targetSessionId: id, content: 'new', idempotency_key: 'send' }]] as const) expect(await f.request('POST', route, body)).toMatchObject({ status: 409, body: { code: 'SESSION_CLOSED' } });
+  expect(await f.request('POST', '/reply', { messageId: original.id, content: 'followup', idempotency_key: 'reply' })).toMatchObject({ status: 409, body: { code: 'SESSION_CLOSED' } });
+  expect(api.restore).not.toHaveBeenCalled(); expect(f.messages.getGroup(f.group.id)).toMatchObject({ sessionIds: [] });
+  const p = f.runtime.store.authenticate('bridge', f.issued.token);
+  const events = f.runtime.store.page(p, 'management').events;
+  expect(events.find(e => e.kind === 'session.renamed')).toMatchObject({ payload: { name: 'Fast', generation: 2, operation_id: created.body.session.operation_id } });
+  expect(events.find(e => e.kind === 'session.closed')).toMatchObject({ payload: { session: { state: 'closed', runtime_present: false } } });
+});
+it('rename/close CLI validates required flags and fails closed against old capabilities', async () => {
+  for (const args of [['rename', 'id', '--generation', '1'], ['close', 'id'], ['close', 'id', '--generation', '1', '--name', 'bad'], ['rename', 'id', '--generation', '0', '--name', 'bad']]) expect(() => parseCollaborationCommand(['--principal', 'bridge', 'session', ...args, '--idempotency-key', 'key'])).toThrow();
+  const credentialFile = path.join(dir, 'credential');
+  fs.writeFileSync(credentialFile, JSON.stringify({ id: 'bridge', protocol: 1, token: 'private-token' }), { mode: 0o600 });
+  const original = process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE; process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE = credentialFile;
+  resources.push(() => { if (original === undefined) delete process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE; else process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE = original; });
+  const calls: string[] = []; let supported = false;
+  const server = http.createServer((req, res) => {
+    calls.push(req.url!); res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.url === '/capabilities') { res.end(JSON.stringify({ integration_protocol: 1, session_rename: supported, session_close: supported })); return; }
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
+      expect(JSON.parse(raw)).toEqual({ generation: 1, idempotency_key: 'key', ...(req.url?.endsWith('/rename') ? { name: 'Fast' } : {}) });
+      res.end(JSON.stringify({ session: { session_id: 'id', generation: 2 } }));
+    });
+  });
+  const port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  for (const operation of ['rename', 'close']) {
+    const output: string[] = [], io = { write: (line: string) => { output.push(line); }, stdin: async () => '' };
+    const command = parseCollaborationCommand(['--principal', 'bridge', 'session', operation, 'id', '--generation', '1', '--idempotency-key', 'key', ...(operation === 'rename' ? ['--name', 'Fast'] : [])]);
+    supported = false; expect(await runIntegrationCollab(command, port, io)).toBe(1);
+    expect(JSON.parse(output.at(-1)!).code).toBe(operation === 'rename' ? 'SESSION_RENAME_UNSUPPORTED' : 'SESSION_CLOSE_UNSUPPORTED');
+    supported = true; expect(await runIntegrationCollab(command, port, io)).toBe(0); expect(output.join('')).not.toContain('private-token');
+  }
+  expect(calls).toEqual(['/capabilities', '/capabilities', '/sessions/id/rename', '/capabilities', '/capabilities', '/sessions/id/close']);
+});

@@ -157,6 +157,8 @@ export class IntegrationRuntime {
     app.post('/sessions/:id/restore', run(async req => { const p = principal(req); this.authorize(p, 'session.restore'); const session = await this.sessions.restore(p, req.params.id, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.post('/sessions/:id/retry-cold', run(async req => { const p = principal(req); this.authorize(p, 'session.create'); const session = await this.sessions.retryCold(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.post('/sessions/:id/release', run(async req => { const p = principal(req); this.authorize(p, 'session.release'); const session = await this.sessions.release(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
+    app.post('/sessions/:id/rename', run(async req => { const p = principal(req); this.authorize(p, 'session.rename'); const session = await this.sessions.rename(p, req.params.id, req.body?.generation, req.body?.name, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
+    app.post('/sessions/:id/close', run(async req => { const p = principal(req); this.authorize(p, 'session.close'); const session = await this.sessions.closeSession(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.get('/events', run((req, res) => {
       const p = principal(req); this.authorize(p, 'events.read', req.query.group);
       this.sync(); this.stream(p, String(req.query.consumer ?? 'default'), req, res);
@@ -183,6 +185,8 @@ export class IntegrationRuntime {
       terminal_input_runtime_fence: true, terminal_input_runtime_fence_min_version: '1.4.313',
       session_launch_diagnostics: true, session_launch_diagnostics_min_version: '1.4.314',
       session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
+      session_rename: true, session_rename_min_version: '1.4.315',
+      session_close: true, session_close_min_version: '1.4.315',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',
@@ -262,6 +266,10 @@ export class IntegrationRuntime {
       }
       for (const session of this.sessions.snapshot()) if (groups.has(session.group_id)) updates.push({ sourceKey: `session:${session.session_id}`, sourceVersion: JSON.stringify(publicIntegrationSession(session)), event: {
         group_id: session.group_id, kind: `session.${session.state}`, created_at: session.updated_at, source: 'system', actor: { integration_id: session.principal_id }, payload: { session: publicIntegrationSession(session) } } });
+      for (const session of this.sessions.snapshot()) if (groups.has(session.group_id) && session.name_updated_at) updates.push({
+        sourceKey: `session-name:${session.session_id}`, sourceVersion: JSON.stringify([session.name, session.name_updated_at, session.name_generation]), event: {
+          group_id: session.group_id, kind: 'session.renamed', created_at: session.name_updated_at, source: 'system',
+          actor: { integration_id: session.principal_id }, payload: { session_id: session.session_id, name: session.name, generation: session.name_generation, operation_id: session.name_operation_id } } });
       updates.sort((a, b) => a.event.created_at - b.event.created_at);
       this.store.append(updates);
     } finally { this.syncing = false; }

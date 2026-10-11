@@ -2,6 +2,7 @@ import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js'
 import { integrationError } from '../agent/integrationStore.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type ShellVerificationFailure } from '../agent/nativeResumeOwner.js';
 import { readNativeProcessIdentity } from '../agent/nativeProcessIdentity.js';
+import { closeSessionRuntime, foregroundProcessInstance, processStartIdentity, type SessionCloseTarget } from '../agent/sessionManagement.js';
 import { releaseSessionRuntime } from '../agent/sessionLifecycle.js';
 import { resumeConfigurationFingerprint } from '../agent/sessionResumeConfiguration.js';
 import { integrationLaunchCommand, type IntegrationDeliveryReadiness, type IntegrationSession, type IntegrationSessionAdapter } from '../agent/integrationSessions.js';
@@ -1050,7 +1051,7 @@ function schedulePersistGlobalState(): void {
   }, 200);
 }
 
-async function persistGlobalStateNow(): Promise<void> {
+async function persistGlobalStateNow(strict = false): Promise<void> {
   if (persistGlobalStateTimer) {
     clearTimeout(persistGlobalStateTimer);
     persistGlobalStateTimer = null;
@@ -1059,6 +1060,7 @@ async function persistGlobalStateNow(): Promise<void> {
     await writeJsonFile(GLOBAL_SESSION_STATE_FILE, globalSessionState);
   } catch (error) {
     console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
+    if (strict) throw error;
   }
 }
 
@@ -2485,9 +2487,98 @@ async function integrationTmuxPresent(record: IntegrationSession): Promise<boole
   try { await runTmux(['has-session', '-t', `=wt-integration-${record.session_id}`]); return true; }
   catch (error) { if (/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) return false; throw error; }
 }
+async function verifyIntegrationRuntimeOwnership(record: IntegrationSession): Promise<void> {
+  await integrationSessionAdapter.prepareRelease!(record);
+  const terminal = integrationTerminalRecord(record);
+  if (terminal && globalSessionState.sessions.some(other => other.sessionId !== record.session_id
+    && (other.tmuxSessionName === terminal.tmuxSessionName || terminal.backendSessionId && other.backendSessionId === terminal.backendSessionId))) {
+    integrationError('SESSION_IDENTITY_MISMATCH', 'Runtime has another logical owner', 409);
+  }
+}
+async function forgetIntegrationRuntime(record: IntegrationSession): Promise<void> {
+  if (await integrationTmuxPresent(record)) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Owned tmux still exists', 409);
+  await verifyIntegrationRuntimeOwnership(record);
+  for (const [id, backend] of terminalSessions) if (backend.mode === 'tmux' && backend.tmuxSessionName === `wt-integration-${record.session_id}`) cleanupSession(id, { killProcess: true });
+  removeGlobalSessionRecord(record.session_id);
+  collaborationStore.archiveSession(record.session_id); collaborationRouting.remove(record.session_id);
+  await persistGlobalStateNow(true); broadcastClientState();
+}
+async function observeIntegrationCloseTarget(record: IntegrationSession): Promise<SessionCloseTarget> {
+  await verifyIntegrationRuntimeOwnership(record);
+  const terminal = integrationTerminalRecord(record);
+  if (!terminal || !record.terminal_binding) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Original runtime binding is unavailable', 409);
+  const inspected = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId: terminal.backendSessionId,
+    mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug,
+    nativeSessionId: record.agent_native_session_id, pane: record.terminal_binding }, undefined, false, true);
+  if (inspected.state !== 'ready' || !inspected.pane) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Original pinned pane cannot be verified', 409);
+  const layout = await getTmuxLayout(terminal.tmuxSessionName!);
+  const panes = layout.windows.flatMap(window => window.panes);
+  if (panes.length !== 1 || layout.activePaneId !== record.terminal_binding.paneId) integrationError('SESSION_IDENTITY_MISMATCH', 'Only the single original owned pane can be closed', 409);
+  const pane = panes[0];
+  const paneOwners = (await runTmux(['list-panes', '-a', '-F', '#{session_id} #{pane_id}'])).trim().split('\n');
+  if (paneOwners.some(line => { const [owner, id] = line.trim().split(/\s+/); return id === pane.id && owner !== record.terminal_binding!.sessionId; })) integrationError('SESSION_SCOPE_CONFLICT', 'Owned pane is linked into another tmux session', 409);
+  if (process.platform === 'linux') await getProcessSnapshot(true);
+  const program = await resolveTmuxPaneProgram(pane, true, true);
+  const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
+  let kind: SessionCloseTarget['kind'], pid: number, nativeId: string | null = null;
+  if (agent) {
+    if (!record.agent_native_session_id || agent.slug !== record.agent_slug || program?.source !== 'tmux-tty' || !program.processPid) {
+      integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'A running Agent requires a live exact native identity', 409);
+    }
+    const identity = await observeProgramNativeIdentity(agent, program);
+    if (identity.failure || identity.nativeId !== record.agent_native_session_id) integrationError('SESSION_IDENTITY_MISMATCH', 'Current Agent native identity differs from the owned record', 409);
+    kind = 'agent'; pid = program.processPid!; nativeId = identity.nativeId;
+  } else {
+    if (!await integrationPaneIsIdleShell(inspected.pane)) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Current runtime is not a verified foreground shell', 409);
+    kind = 'shell'; pid = pane.pid!;
+  }
+  const serverStart = await processStartIdentity(record.terminal_binding.serverPid);
+  if (!serverStart) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Current tmux server instance is unavailable', 409);
+  return { binding: { ...record.terminal_binding }, tmux_server_start_id: serverStart, kind, process_pid: pid,
+    process_start_id: await foregroundProcessInstance(pid), native_id: nativeId };
+}
 export const integrationSessionAdapter: IntegrationSessionAdapter = {
   subscribe(listener) { integrationSessionObservers.add(listener); return () => { integrationSessionObservers.delete(listener); }; },
   registerDeliveryGuard(guard) { integrationDeliveryGuard = guard; return () => { if (integrationDeliveryGuard === guard) integrationDeliveryGuard = undefined; }; },
+  async prepareRename(record) {
+    await verifyIntegrationRuntimeOwnership(record);
+    if (!integrationTerminalRecord(record) && await integrationTmuxPresent(record)) integrationError('SESSION_IDENTITY_MISMATCH', 'Live tmux lacks its owned terminal registration', 409);
+  },
+  async rename(record) {
+    await integrationSessionAdapter.prepareRename!(record);
+    const terminal = integrationTerminalRecord(record);
+    if (!terminal) return; // Metadata survives released/closed; never recreate a runtime.
+    if (!record.name) integrationError('INVALID_NAME', 'Missing persistent display name');
+    if (await integrationTmuxPresent(record)) await setTmuxOption(terminal.tmuxSessionName!, '@termdock-friendly-name', record.name);
+    upsertGlobalSessionRecord({ ...terminal, name: record.name, customName: true, autoTitle: null });
+    await persistGlobalStateNow(true); await getSessionInventorySnapshot({ refresh: true }); broadcastClientState();
+  },
+  async prepareClose(record) {
+    if (collaborationStore.pendingCount(record.session_id)) integrationError('SESSION_PENDING_MESSAGES', 'Pending messages must be resolved before closing', 409);
+    await verifyIntegrationRuntimeOwnership(record);
+    return await integrationTmuxPresent(record) ? observeIntegrationCloseTarget(record) : null;
+  },
+  async closeRuntime(record, reconcile) {
+    await closeSessionRuntime({
+      barrier: action => collaborationDeliveryWorker.reconfigure(record.session_id, action),
+      async exists() {
+        if (await integrationTmuxPresent(record)) return true;
+        const target = record.close_intent?.target;
+        return !!target && await processStartIdentity(target.process_pid) === target.process_start_id;
+      },
+      pendingMessages: () => collaborationStore.pendingCount(record.session_id),
+      observe: () => observeIntegrationCloseTarget(record),
+      async destroy(target) {
+        // Kill by immutable tmux session ID, not by a potentially reused name.
+        // No process-group kill or application prompt is sent.
+        if (JSON.stringify(await observeIntegrationCloseTarget(record)) !== JSON.stringify(target)) integrationError('SESSION_CLOSE_TARGET_CHANGED', 'Close target changed before teardown', 409);
+        intentionallyDeletingTmuxSessions.add(`wt-integration-${record.session_id}`);
+        try { await runTmux(['kill-session', '-t', target.binding.sessionId]); }
+        finally { intentionallyDeletingTmuxSessions.delete(`wt-integration-${record.session_id}`); }
+      },
+      forgetRuntime: () => forgetIntegrationRuntime(record),
+    }, record.close_intent?.target ?? null, reconcile);
+  },
   pendingMessages(id) { return collaborationStore.pendingCount(id); },
   messageHistory(id) { return collaborationStore.hasTerminalMessageHistory(id); },
   async prepareRelease(record) {
@@ -2654,7 +2745,7 @@ async function launchIntegrationTerminal(record: IntegrationSession, restoring: 
     }
     const opened = await openInventorySession({} as express.Request, { preferredFrontendSessionId: record.session_id,
       mode: 'tmux', tmuxSessionName: `wt-integration-${record.session_id}`, cwd: record.cwd,
-      name: `${record.agent_slug} · ${group.name}`, customName: true });
+      name: record.name ?? `${record.agent_slug} · ${group.name}`, customName: true });
     if (opened.session.sessionId !== record.session_id) integrationError('SESSION_IDENTITY_MISMATCH', 'Terminal id changed', 409);
     const terminal = integrationTerminalRecord(record)!;
     const backend = terminalSessions.get(opened.terminalSession.sessionId);

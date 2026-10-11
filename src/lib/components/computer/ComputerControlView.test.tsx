@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   peer: 'ubuntu-service',
   platform: 'linux',
   rdpAvailable: true as boolean | undefined,
-  clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn>; keyboardActive?: boolean }>,
+  clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn>; keyboardActive?: boolean; focusOnClick?: boolean }>,
   hosts: [] as string[],
   pointerSend: vi.fn(),
   rdpOptions: [] as RdpConnection[],
@@ -82,6 +82,44 @@ async function ready() {
 }
 
 describe('computer targets', () => {
+  it('tracks software keyboard dismissal separately from the input panel and reopens it on the next tap', async () => {
+    const beforeWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    const viewport = Object.assign(new EventTarget(), { height: 844, offsetTop: 0 });
+    vi.stubGlobal('visualViewport', viewport);
+    try {
+      await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+      fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
+      await waitFor(() => expect(mocks.clients).toHaveLength(1)); act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+      const button = screen.getByRole('button', { name: '键盘' }); fireEvent.click(button);
+      const input = screen.getByLabelText('直接输入到电脑');
+      expect(document.activeElement).toBe(input); expect(button.getAttribute('aria-pressed')).toBe('false');
+      act(() => { viewport.height = 500; viewport.dispatchEvent(new Event('resize')); });
+      expect(button.getAttribute('aria-pressed')).toBe('true');
+      // iOS can dismiss the keyboard without blurring its field.
+      act(() => { viewport.height = 844; viewport.dispatchEvent(new Event('resize')); });
+      expect(button.getAttribute('aria-pressed')).toBe('false'); expect(document.activeElement).toBe(input);
+      fireEvent.click(button); expect(screen.getByLabelText('直接输入到电脑')).toBe(input); expect(document.activeElement).toBe(input);
+      act(() => { viewport.height = 500; viewport.dispatchEvent(new Event('resize')); });
+      expect(button.getAttribute('aria-pressed')).toBe('true'); fireEvent.click(button);
+      expect(screen.queryByLabelText('直接输入到电脑')).toBeNull(); expect(button.getAttribute('aria-pressed')).toBe('false');
+    } finally { Object.defineProperty(window, 'innerWidth', { configurable: true, value: beforeWidth }); }
+  });
+  it('keeps VNC keyboard focus during mouse use and restores canvas focus after closing the keyboard', async () => {
+    mocks.platform = 'darwin';
+    await ready();
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
+    await waitFor(() => expect(mocks.clients).toHaveLength(1)); act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+    fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+    const input = screen.getByLabelText('直接输入到电脑');
+    expect(document.activeElement).toBe(input); expect(mocks.clients[0].focusOnClick).toBe(false);
+    expect(fireEvent.mouseDown(screen.getByLabelText('远程电脑桌面'))).toBe(false);
+    expect(document.activeElement).toBe(input);
+    fireEvent.click(screen.getByRole('button', { name: '向左' }));
+    await waitFor(() => expect(mocks.clients[0].sendKey.mock.calls).toEqual([[0xff51, 'ArrowLeft', true], [0xff51, 'ArrowLeft', false]]));
+    fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+    expect(mocks.clients[0].focusOnClick).toBe(true); expect(screen.queryByLabelText('直接输入到电脑')).toBeNull();
+  });
   const capabilities = [false, true, undefined] as const;
   const protocols = ['rdp', 'vnc'] as const;
   const credentials = ['missing', 'typed', 'saved'] as const;
