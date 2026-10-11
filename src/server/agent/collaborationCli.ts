@@ -183,6 +183,11 @@ Idempotency retention: 7 days. Terminal delivery, ACK and result never imply eac
 Delivery semantics: delivered records completion of terminal write calls;
 it does not guarantee receipt, submission, consumption or task completion; a timeout stops waiting, it does not cancel delivery.
 Terminal input: paste once, wait 50ms, send one unbracketed CR (Enter).
+TD-started/resumed Agents: the first delivery waits for current Agent process and
+terminal binding (exact native id on resume); cold starts do not require a native id.
+AGENT_LAUNCH_PENDING/TIMEOUT leaves the body queued with no terminal write.
+This one-time launch check is not application input-ready; subsequent messages
+and ordinary terminals follow the existing path. No screen text or hooks required.
 No paste-marker recognition, automatic extra Enter or consumption checks.
 The service cannot see whether the recipient's agent consumed a message.
 Use explicit replies as evidence. A screen snapshot is only an observation;
@@ -370,6 +375,10 @@ const DELIVERY_DIAGNOSTICS: Record<string, string> = {
   DELIVERY_IN_PROGRESS: '投递进行中（写入前的中间标记，正常会在数秒内推进为 delivered 或带原因的重试）',
   TERMINAL_WRITE_FAILED: '写入对方终端失败，会按重试间隔继续尝试',
   TMUX_PANE_CHANGED: '目标面板已变化，投递已跳过，等待重新绑定',
+  AGENT_LAUNCH_PENDING: 'TD 启动的 Agent 尚未确认运行和终端绑定；消息保留队列，尚未写入',
+  AGENT_LAUNCH_TIMEOUT: '120 秒内未观察到目标 Agent；消息保留，未盲投，不证明应用故障',
+  AGENT_LAUNCH_IDENTITY_MISMATCH: '启动后的 Agent 或恢复 UUID 不匹配；消息保留，未写入',
+  AGENT_LAUNCH_CHANGED: '启动操作已变化，重新检查当前启动记录',
   TMUX_PANE_IN_MODE: '目标面板处于 tmux 模式（如滚动查看），按键已跳过',
 };
 export function deliveryDiagnosticText(lastError: unknown): string {

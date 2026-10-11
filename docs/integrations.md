@@ -504,6 +504,21 @@ session 事件；get 也会现场核验。120 秒内未形成绑定返回 `SESSI
 不自动补回车、不根据终端文字确认消费。`delivered`/`pty_written` 是现有回执字段，
 仅记录终端写入调用完成，不保证对方收到、提交、消费或执行。快照只作观测，明确回复单独关联。
 旧回执中的 `AGENT_CONSUME_UNCONFIRMED` 保留历史，不触发补键或重投。
+
+1.4.312 起，TD 实际启动/恢复 Agent 时持久记录一次进程检查意图。仅该次启动的
+首次投递在原终端观察到目标 Agent 后放行；恢复还须匹配原 native UUID，冷启动
+不要求首次输入前尚未生成的 UUID。已有会话和普通 Terminal 不新增检查；运行中
+no-op restore 不重新开启检查。检查是运行/绑定事实，不表示 TUI 已完成输入初始化。
+`startup_input_disabled` 仅清除画面条件，独立于该进程检查。capabilities 为
+`agent_launch_process_check=true`，最低运行服务 1.4.312；建议 CLI 同升以取得新诊断文案。
+
+未确认时普通消息保持 pending、实际写入次数不增加，诊断 `AGENT_LAUNCH_PENDING`；
+120 秒后 `AGENT_LAUNCH_TIMEOUT`，不同 Agent/原 UUID 为 `AGENT_LAUNCH_IDENTITY_MISMATCH`。
+不因超时盲投或重新启动，后续如果现场确实观察到正确进程可解除检查。检查随活动
+终端登记持久化，服务重启保留；新的实际启动/恢复重新生成检查 ID，旧观察不能清除
+新检查。一旦当前检查解除，后续普通消息沿原终端路由，不重复判断应用就绪/忙闲。
+已正常 release 的承载登记被移除，下一次 restore 在新承载上重新记录检查。
+
 任务完成继续以负责人明确 `report complete` 为准。
 
 恢复保留原 TD ID、原生 ID、argv/model/cwd/包装器配置。原会话已经精确运行时直接

@@ -134,6 +134,7 @@ import { archiveTaskWorkspace, restoreTaskWorkspace, snapshotTaskWorkspace } fro
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { writeBracketedPrompt, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
+import { agentLaunchBlockReason, normalizeAgentLaunchCheck, type AgentLaunchCheck } from '../agent/agentLaunchCheck.js';
 import { prepareSupervisionEnable } from '../utils/enableSupervision.js';
 import { buildServerHealthState, dismissServerHealth } from '../utils/serverHealth.js';
 import { collaborationRoutes } from '../agent/collaborationRoutes.js';
@@ -470,6 +471,8 @@ interface PersistedClientSession {
   // 最近一次的 agent 会话恢复信息（last-known）：agent 退出 / server 重启后
   // 仍可用其原生 session id + 启动参数重建 `claude --resume …` 恢复命令。
   agentResume?: PersistedAgentResumeInfo | null;
+  /** Pending only for an explicit TD Agent launch; removed after its first live observation. */
+  agentLaunchCheck?: AgentLaunchCheck | null;
 }
 
 interface GlobalSessionState {
@@ -1402,6 +1405,7 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
       ? candidate.shellTitle
       : null,
     agentResume: normalizePersistedAgentResumeInfo(candidate.agentResume),
+    agentLaunchCheck: normalizeAgentLaunchCheck(candidate.agentLaunchCheck),
   };
 }
 
@@ -1997,14 +2001,48 @@ function writeTerminalInput(session: TerminalSession, value: string): void {
   session.ptyProcess.write(value.replace(/\r?\n/g, '\r'));
 }
 
-function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: string, attempt = 0): void {
+async function beginAgentLaunchCheck(frontendSessionId: string, agentSlug: string, nativeSessionId: string | null = null): Promise<void> {
+  const record = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
+  if (!record) throw new Error('SESSION_REMOVED');
+  upsertGlobalSessionRecord({ ...record, agentLaunchCheck: { id: randomUUID(), agentSlug, nativeSessionId, deadline: Date.now() + 120_000 } });
+  await persistGlobalStateNow();
+}
+
+async function observeAgentLaunchCheck(record: PersistedClientSession, observed: { agentSlug: string | null; nativeSessionId: string | null }): Promise<CollaborationRoute | null> {
+  const check = record.agentLaunchCheck;
+  if (!check) return null;
+  const reason = agentLaunchBlockReason(check, observed);
+  if (reason) return { state: 'recovering', reason };
+  const latest = globalSessionState.sessions.find(candidate => candidate.sessionId === record.sessionId);
+  if (!latest) return { state: 'offline', reason: 'SESSION_REMOVED' };
+  if (latest.agentLaunchCheck?.id !== check.id) return { state: 'recovering', reason: 'AGENT_LAUNCH_CHANGED' };
+  upsertGlobalSessionRecord({ ...latest, agentLaunchCheck: null });
+  await persistGlobalStateNow();
+  return null;
+}
+
+async function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: string, attempt = 0): Promise<void> {
   const session = terminalSessions.get(backendSessionId);
   if (!session) return;
+  const record = globalSessionState.sessions.find(candidate => candidate.backendSessionId === backendSessionId);
+  if (record?.agentLaunchCheck) {
+    await refreshCollaborationAgentIdentity(backendSessionId, session, true);
+    const agent = detectAgentFromCommand(session.activeProgram?.rawArgs ?? session.activeProgram?.command ?? '', agentCustomCommands());
+    const nativeSessionId = agent && session.activeProgram?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(session.activeProgram.rawArgs)) : null;
+    const blocked = await observeAgentLaunchCheck(record, { agentSlug: agent?.slug ?? null, nativeSessionId });
+    if (blocked) {
+      if (blocked.reason !== 'AGENT_LAUNCH_PENDING') throw new Error(blocked.reason ?? 'AGENT_LAUNCH_PENDING');
+      await new Promise(resolve => setTimeout(resolve, 250));
+      return deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1);
+    }
+    await writeBracketedPrompt(session.ptyProcess, prompt);
+    return;
+  }
   if (canDeliverPromptToAgent(session) || attempt >= 60) {
     void writeBracketedPrompt(session.ptyProcess, prompt).catch((error) => console.error('[automation] terminal write failed:', getErrorMessage(error)));
     return;
   }
-  setTimeout(() => deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1), 250);
+  setTimeout(() => { void deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1).catch(error => console.error('[automation] terminal write failed:', getErrorMessage(error))); }, 250);
 }
 
 async function runAgentAutomation(automation: AgentAutomation, req?: express.Request): Promise<void> {
@@ -2015,11 +2053,12 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === automation.targetSessionId);
       const backend = record?.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
       if (!record || !backend) throw new Error('目标会话当前不在线');
-      if (!canDeliverPromptToAgent(backend)) throw new Error('目标会话当前没有运行中的 Agent');
+      if (!record.agentLaunchCheck && !canDeliverPromptToAgent(backend)) throw new Error('目标会话当前没有运行中的 Agent');
       frontendSessionId = record.sessionId;
       const message = automation.prompt || automation.command;
       if (!message) throw new Error('自动任务没有可发送的内容');
-      await writeBracketedPrompt(backend.ptyProcess, message);
+      if (record.agentLaunchCheck) await deliverAutomationPromptWhenReady(record.backendSessionId!, message);
+      else await writeBracketedPrompt(backend.ptyProcess, message);
     } else {
       const request = req ?? ({} as express.Request);
       const opened = await openInventorySession(request, {
@@ -2031,9 +2070,13 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       frontendSessionId = opened.session.sessionId;
       const backend = terminalSessions.get(opened.terminalSession.sessionId);
       if (!backend) throw new Error('自动任务会话创建失败');
-      if (automation.command) writeTerminalInput(backend, `${automation.command}\r`);
+      if (automation.command) {
+        const agent = detectAgentFromCommand(automation.command, agentCustomCommands());
+        if (agent) await beginAgentLaunchCheck(frontendSessionId, agent.slug);
+        writeTerminalInput(backend, `${automation.command}\r`);
+      }
       if (automation.prompt) {
-        if (automation.command) deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, automation.prompt);
+        if (automation.command) await deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, automation.prompt);
         else await writeBracketedPrompt(backend.ptyProcess, automation.prompt);
       }
     }
@@ -2120,7 +2163,7 @@ function formatLocalCollaborationMessages(frontendSessionId: string, messages: C
  *  agent-keyed selector can never reach it. Delivery still needs an agent (the
  *  confirm gate and prompt formatting assume a TUI); driving a terminal —
  *  run/capture — is a shell operation and works on any pane. */
-async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false): Promise<ReturnType<typeof selectCollaborationPane>> {
+async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false, freshProcess = false): Promise<ReturnType<typeof selectCollaborationPane>> {
   if (!binding.tmuxSessionName) return { state: 'offline', reason: 'TMUX_BINDING_MISSING' };
   const name = `=${binding.tmuxSessionName}`;
   try { await runTmux(['has-session', '-t', name]); }
@@ -2134,11 +2177,11 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
   if (layout.sessionName !== binding.tmuxSessionName) throw new Error('TMUX_SESSION_IDENTITY_CHANGED');
   const serverPid = Number((await runTmux(['display-message', '-p', '#{pid}'])).trim());
   if (!Number.isInteger(serverPid) || serverPid <= 0) throw new Error('TMUX_SERVER_IDENTITY_UNAVAILABLE');
-  if (nativeProcessIdentity && process.platform === 'linux') await getProcessSnapshot(true);
+  if ((nativeProcessIdentity || freshProcess) && process.platform === 'linux') await getProcessSnapshot(true);
   const panes: CollaborationPaneCandidate[] = await Promise.all(layout.windows.flatMap((window) => window.panes).map(async (pane) => {
     // Native identity needs the foreground argv even for a named binary;
     // pane_current_command alone cannot prove an exact resumed conversation.
-    const program = await resolveTmuxPaneProgram(pane, true);
+    const program = await resolveTmuxPaneProgram(pane, true, nativeProcessIdentity || freshProcess);
     const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
     const identity = nativeProcessIdentity ? await observeProgramNativeIdentity(agent, program)
       : { nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null, failure: null };
@@ -2193,8 +2236,8 @@ async function rebindCollaborationRoute(frontendSessionId: string, paneId: strin
 }
 
 /**
- * Delivery is deliberately un-gated: any reachable recipient receives the
- * message immediately, whatever its agent is doing. Busy guessing (hook state,
+ * A TD-initiated Agent launch waits once for current process/binding evidence.
+ * Existing terminals receive messages whatever their agent is doing. Busy guessing (hook state,
  * turn phase) is the sender's job — the send receipt carries a screen
  * snapshot of the recipient after the write, and the sender judges from that.
  */
@@ -2210,11 +2253,13 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     agentSlug: record.agentResume?.slug ?? null, nativeSessionId: record.agentResume?.sessionId ?? null, pane: null,
   };
   if (binding.mode === 'tmux') {
-    const inspected = await inspectCollaborationTmux(binding);
+    const inspected = await inspectCollaborationTmux(binding, undefined, false, Boolean(record.agentLaunchCheck?.nativeSessionId), Boolean(record.agentLaunchCheck));
     if (inspected.state !== 'ready' || !inspected.pane) return inspected;
     record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
     if (!record) return { state: 'offline', reason: 'SESSION_REMOVED_DURING_RECOVERY' };
     const pane = inspected.pane;
+    const launch = await observeAgentLaunchCheck(record, { agentSlug: pane.agentSlug || null, nativeSessionId: pane.nativeSessionId });
+    if (launch) return launch;
     // Remember the target before attachment. A failed attachment must not let
     // a subsequent active-pane change silently choose another recipient.
     const pinned = { serverPid: pane.serverPid, sessionId: pane.sessionId, paneId: pane.paneId, panePid: pane.panePid,
@@ -2244,8 +2289,14 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     } };
   }
   if (!backend || !binding.backendSessionId) return { state: 'offline', reason: 'SHELL_BACKEND_NOT_RUNNING' };
-  await refreshCollaborationAgentIdentity(binding.backendSessionId, backend);
+  await refreshCollaborationAgentIdentity(binding.backendSessionId, backend, Boolean(record.agentLaunchCheck));
   const target = backend;
+  if (record.agentLaunchCheck) {
+    const agent = detectAgentFromCommand(target.activeProgram?.rawArgs ?? target.activeProgram?.command ?? '', agentCustomCommands());
+    const nativeSessionId = agent && target.activeProgram?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(target.activeProgram.rawArgs)) : null;
+    const launch = await observeAgentLaunchCheck(record, { agentSlug: agent?.slug ?? null, nativeSessionId });
+    if (launch) return launch;
+  }
   return { state: 'ready',
     isShell: backend.activeProgram?.source !== 'unknown' && shellNamesBackend.has(backend.activeProgram?.command?.toLowerCase() ?? ''),
     capture: async () => target.autoTitleContext,
@@ -2262,14 +2313,16 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
 async function refreshCollaborationAgentIdentity(
   backendSessionId: string,
   session: TerminalSession,
+  freshProcess = false,
 ): Promise<void> {
   let activeProgram: TerminalSession['activeProgram'] = null;
   if (session.mode === 'shell') {
-    activeProgram = await getCachedShellActiveProgram(backendSessionId, session);
+    activeProgram = freshProcess ? await detectShellActiveProgram(session, true) : await getCachedShellActiveProgram(backendSessionId, session);
   } else if (session.tmuxSessionName) {
-    const layout = await getCachedTmuxLayout(session.tmuxSessionName);
+    const layout = freshProcess ? await getTmuxLayout(session.tmuxSessionName) : await getCachedTmuxLayout(session.tmuxSessionName);
+    if (freshProcess && process.platform === 'linux') await getProcessSnapshot(true);
     const activePane = getActivePaneFromLayout(layout);
-    const resolved = activePane ? await resolveTmuxPaneProgram(activePane) : null;
+    const resolved = activePane ? await resolveTmuxPaneProgram(activePane, freshProcess, freshProcess) : null;
     activeProgram = resolved
       ? { ...resolved, updatedAt: Date.now() }
       : getActiveProgramFromTmuxLayout(layout);
@@ -2320,6 +2373,7 @@ async function spawnCollaborationAgentSession(
   const frontendSessionId = opened.session.sessionId;
   const backend = terminalSessions.get(opened.terminalSession.sessionId);
   if (!backend) throw new HttpStatusError(500, 'Agent Session 创建失败', 'COLLAB_AGENT_SESSION_FAILED');
+  await beginAgentLaunchCheck(frontendSessionId, launcher.slug);
 
   const latestGroup = collaborationStore.getGroup(group.id);
   if (!latestGroup || latestGroup.deleted) {
@@ -2563,6 +2617,7 @@ async function launchIntegrationTerminal(record: IntegrationSession, restoring: 
     // This owned pane is a verified shell; clear stale rich state before a new
     // process starts, so its new SessionStart must supply the native binding.
     backend.agentSession = null; backend.agent = null; backend.agentResumeRecovered = false;
+    await beginAgentLaunchCheck(record.session_id, record.agent_slug, restoring ? record.agent_native_session_id : null);
     await runTmux(['send-keys', '-t', pinned.paneId, '-l', integrationLaunchCommand(record, restoring)]);
     await runTmux(['send-keys', '-t', pinned.paneId, 'Enter']);
     broadcastClientState();
@@ -2602,6 +2657,7 @@ export function prepareCollaborationTaskWorker(task: CollaborationTask, template
     let launch: { sessionId: string; backendId: string } | null = null;
     try { launch = JSON.parse(await fs.promises.readFile(launchFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (!currentAgent && (!launch || launch.backendId !== opened.terminalSession.sessionId)) {
+      await beginAgentLaunchCheck(record.sessionId, launcher.slug);
       // Persist before typing: a retry must never type the launcher into a newly booted Agent's prompt.
       const temporary = `${launchFile}.${process.pid}.tmp`;
       await fs.promises.writeFile(temporary, JSON.stringify({ sessionId: record.sessionId, backendId: opened.terminalSession.sessionId }), { mode: 0o600 });
@@ -4934,7 +4990,7 @@ async function sampleTerminalSession(sessionId: string, session: TerminalSession
   return events;
 }
 
-async function detectShellActiveProgram(session: TerminalSession): Promise<{
+async function detectShellActiveProgram(session: TerminalSession, includeArguments = false): Promise<{
   command: string | null;
   source: 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown';
   rawArgs: string | null;
@@ -4983,10 +5039,15 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
       const foregroundRows = rows.filter((row) => row.command && row.tpgid > 0 && row.pgid === row.tpgid && !row.stat.startsWith('Z'));
       const preferredForeground = foregroundRows.find((row) => row.pid !== pid) ?? foregroundRows[foregroundRows.length - 1];
       if (preferredForeground?.command) {
+        // Startup checks need current argv, including an exact resume UUID;
+        // ordinary terminal sampling retains its existing inexpensive path.
+        const rawArgs = includeArguments
+          ? (await execFileAsync('ps', ['-p', String(preferredForeground.pid), '-o', 'args='], { timeout: 3000, maxBuffer: 512 * 1024 })).stdout.trim() || null
+          : null;
         return {
           command: preferredForeground.command,
           source: 'shell-tty',
-          rawArgs: null,
+          rawArgs,
           updatedAt: Date.now(),
         };
       }
@@ -7461,6 +7522,7 @@ router.post('/operations/execution-archives/:sessionId/restore', executionArchiv
     else { cleanupSession(opened.terminalSession.sessionId, { killProcess: true }); globalSessionState.sessions = globalSessionState.sessions.filter(item => item.sessionId !== record.sessionId); }
     collaborationStore.archiveSession(record.sessionId); await persistGlobalStateNow(); broadcastClientState(); throw error;
   }
+  await beginAgentLaunchCheck(record.sessionId, target.slug, target.nativeSessionId);
   writeTerminalInput(backend, `${command}\r`);
   restoreArchivedMembership(entry, record.sessionId);
   await persistGlobalStateNow(); broadcastClientState();
@@ -8785,7 +8847,13 @@ router.post('/:sessionId/agent-resume', async (req, res) => {
   }
 
   try {
-    await writeBracketedPrompt(session.ptyProcess, target.command);
+    const frontend = globalSessionState.sessions.find(candidate => candidate.backendSessionId === sessionId);
+    const launch = async () => {
+      if (frontend) await beginAgentLaunchCheck(frontend.sessionId, target.slug, target.nativeSessionId);
+      await writeBracketedPrompt(session.ptyProcess, target.command);
+    };
+    if (frontend) await collaborationDeliveryWorker.reconfigure(frontend.sessionId, launch);
+    else await launch();
     session.lastActivity = Date.now();
     res.json({ success: true, command: target.command });
   } catch (error) {
