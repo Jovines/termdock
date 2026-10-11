@@ -1,7 +1,7 @@
 import { plainCollaborationSnapshot } from './collaborationText.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
 import { normalizePromptForPaste, waitForPromptSubmit } from './promptDelivery.js';
-import { serializeTerminalInput, type TerminalInputGuard } from './terminalInput.js';
+import { serializeTerminalInput, type TerminalInputGuard, type PromptWriteProgress } from './terminalInput.js';
 
 /** Terminal-level keys a caller may inject into a member pane. Kept
  * enumerated (never freeform): driving another session's keyboard is strong
@@ -56,8 +56,13 @@ export function writeCollaborationTmuxPane(
   prompt: string,
   stdin: (args: string[], input: string) => Promise<string>,
   assertCurrent?: TerminalInputGuard,
+  progress?: PromptWriteProgress,
 ): Promise<void> {
-  return serializeTerminalInput(paneInputKey(pane), () => writeTmuxPrompt(run, pane, prompt, stdin, assertCurrent));
+  progress?.('queue_wait');
+  return serializeTerminalInput(paneInputKey(pane), () => {
+    progress?.('queue_acquired');
+    return writeTmuxPrompt(run, pane, prompt, stdin, assertCurrent, progress);
+  });
 }
 
 async function writeTmuxPrompt(
@@ -67,6 +72,7 @@ async function writeTmuxPrompt(
   /** Body travels on stdin so tmux cannot parse its semicolons/backslashes. */
   stdin: (args: string[], input: string) => Promise<string>,
   assertCurrent?: TerminalInputGuard,
+  progress?: PromptWriteProgress,
 ): Promise<void> {
   await assertSamePane(run, pane);
   assertCurrent?.();
@@ -90,6 +96,7 @@ async function writeTmuxPrompt(
   try {
     // Paste once, then send one unbracketed CR after 50ms. No screen parsing,
     // Agent-specific recovery, consumption confirmation or additional Enter.
+    progress?.('paste_attempted');
     await stdin([
       // The body arrives on stdin, not argv: it is user content, and in a
       // `\;` chain argv is a language where `;` and `\` mean something.
@@ -99,9 +106,11 @@ async function writeTmuxPrompt(
       // for it to rewrite — the flag is insurance, not the mechanism.
       'paste-buffer', '-p', '-r', '-d', '-b', buffer, '-t', pane.paneId,
     ], normalizePromptForPaste(prompt));
+    progress?.('paste_written');
     await waitForPromptSubmit();
     await assertSamePane(run, pane);
     assertCurrent?.();
+    progress?.('submit_attempted');
     await run([
       // The submit key rides outside the paste block: inside it, an editor
       // inserts a pasted CR as text instead of acting on it. Pasting the bare
@@ -109,6 +118,7 @@ async function writeTmuxPrompt(
       'set-buffer', '-b', buffer, '--', '\r', ';',
       'paste-buffer', '-d', '-b', buffer, '-t', pane.paneId,
     ]);
+    progress?.('submit_written');
   } finally {
     // -d consumed the buffer on the happy path; this sweeps up after a failed
     // paste so no stray buffer is left on the server.

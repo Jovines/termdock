@@ -32,6 +32,7 @@ import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeTool
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
+import { usesTouchTerminalLayout } from '../../utils/touchTerminalLayout';
 import { clientLog } from '../../utils/clientLog';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../../terminal/settings';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
@@ -94,9 +95,7 @@ function describeVideoCompressionPreparation(state: VideoCompressionPreparationS
 type Modifier = 'ctrl' | 'alt';
 
 function detectMobileTerminalLayout(): boolean {
-  if (typeof window === 'undefined') return false;
-  const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
-  return hasTouch && window.innerWidth < 768;
+  return usesTouchTerminalLayout();
 }
 
 const STREAM_OPTIONS = {

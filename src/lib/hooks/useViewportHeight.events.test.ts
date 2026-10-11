@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { useViewportHeight } from './useViewportHeight';
+import { syncInitialViewportCssVars, useViewportHeight } from './useViewportHeight';
 
 afterEach(() => {
   cleanup();
@@ -9,6 +9,122 @@ afterEach(() => {
   vi.unstubAllGlobals();
   document.body.replaceChildren();
   document.documentElement.removeAttribute('style');
+  delete document.documentElement.dataset.termdockTouchViewport;
+  delete document.documentElement.dataset.termdockPwaStatusBar;
+});
+
+it('uses no top fallback with a native iPad status bar, while retaining a real inset on old installs', () => {
+  vi.stubGlobal('innerHeight', 938);
+  vi.stubGlobal('innerWidth', 1389);
+  vi.stubGlobal('screen', { width: 1032, height: 1389 });
+  vi.stubGlobal('navigator', {
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X)',
+    platform: 'MacIntel', maxTouchPoints: 5, standalone: true,
+  });
+  document.documentElement.dataset.termdockPwaStatusBar = 'default';
+  document.documentElement.style.setProperty('--safe-top-inset', 'env(safe-area-inset-top, 0px)');
+  let rawTop = 0;
+  vi.spyOn(window, 'getComputedStyle').mockImplementation(() => ({
+    paddingTop: `${rawTop}px`, paddingRight: '0px', paddingBottom: '20px', paddingLeft: '0px',
+  }) as CSSStyleDeclaration);
+  const frames = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.set(++frameId, callback);
+    return frameId;
+  });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  const flush = () => act(() => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(performance.now());
+  });
+  syncInitialViewportCssVars();
+  renderHook(() => useViewportHeight());
+  flush();
+  expect(document.documentElement.style.getPropertyValue('--safe-top-inset')).toBe('0px');
+  act(() => {
+    rawTop = 32;
+    window.dispatchEvent(new Event('resize'));
+  });
+  flush();
+  expect(document.documentElement.style.getPropertyValue('--safe-top-inset')).toBe('32px');
+});
+
+it('reserves iPad PWA safe areas across rotation, keyboard movement and blur', () => {
+  const viewport = Object.assign(new EventTarget(), { height: 820, width: 1180, offsetTop: 0 });
+  vi.stubGlobal('visualViewport', viewport);
+  vi.stubGlobal('innerHeight', 820);
+  vi.stubGlobal('innerWidth', 1180);
+  vi.stubGlobal('screen', { width: 820, height: 1180 });
+  vi.stubGlobal('navigator', {
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X)',
+    platform: 'MacIntel', maxTouchPoints: 5, standalone: true,
+  });
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  let rawBottom = 0;
+  vi.spyOn(window, 'getComputedStyle').mockImplementation(() => ({
+    paddingTop: '0px', paddingRight: '0px', paddingBottom: `${rawBottom}px`, paddingLeft: '0px',
+  }) as CSSStyleDeclaration);
+  const frames = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.set(++frameId, callback);
+    return frameId;
+  });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  const flush = () => act(() => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(performance.now());
+  });
+  syncInitialViewportCssVars();
+  const style = document.documentElement.style;
+  expect(document.documentElement.dataset.termdockTouchViewport).toBe('true');
+  expect(style.getPropertyValue('--safe-top-inset')).toBe('20px');
+  expect(style.getPropertyValue('--safe-bottom-inset')).toBe('20px');
+  renderHook(() => useViewportHeight());
+  flush();
+  const input = document.createElement('textarea');
+  document.body.append(input);
+  input.focus();
+  for (const [height, offsetTop] of [[480, 0], [480, 48], [520, 48], [820, 0]]) {
+    act(() => {
+      viewport.height = height;
+      viewport.offsetTop = offsetTop;
+      viewport.dispatchEvent(new Event('resize'));
+    });
+    flush();
+    const inset = Math.max(0, 820 - height - 20);
+    expect(style.getPropertyValue('--kb-height')).toBe(`${inset}px`);
+    expect(820 - 20 - inset).toBeLessThanOrEqual(height);
+  }
+  // A stale visual measurement after keyboard dismissal cannot keep shifting
+  // the touch toolbar when no editable element owns focus.
+  act(() => {
+    input.blur();
+    viewport.height = 480;
+    viewport.dispatchEvent(new Event('resize'));
+  });
+  flush();
+  expect(style.getPropertyValue('--kb-height')).toBe('0px');
+  act(() => {
+    vi.stubGlobal('innerWidth', 820);
+    vi.stubGlobal('innerHeight', 1180);
+    viewport.width = 820;
+    viewport.height = 1180;
+    window.dispatchEvent(new Event('resize'));
+  });
+  flush();
+  expect(style.getPropertyValue('--app-base-vh')).toBe('1180px');
+  expect(style.getPropertyValue('--safe-bottom-inset')).toBe('20px');
+  // Keep a real platform inset when it is larger than the fallback.
+  act(() => {
+    rawBottom = 34;
+    window.dispatchEvent(new Event('resize'));
+  });
+  flush();
+  expect(style.getPropertyValue('--safe-bottom-inset')).toBe('34px');
 });
 
 it('follows each viewport measurement and restores after rapid reversals without historical height or timers', () => {

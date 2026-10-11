@@ -60,7 +60,7 @@ export class IntegrationRuntime {
     };
     app.get('/admin/groups', run(req => { admin(req); return { groups: options.messages.list().filter(g => !g.federated).map(g => ({ id: g.id, name: g.name })) }; }));
     app.get('/admin/capabilities', run(req => { admin(req); return this.capabilities(); }));
-    app.get('/admin/sessions/:id/restore-diagnostics', run(req => { admin(req); return this.sessions.restoreDiagnostics(req.params.id); }));
+    app.get('/admin/sessions/:id/restore-diagnostics', run(req => { admin(req); return { ...this.sessions.restoreDiagnostics(req.params.id), ...this.sessions.launchDiagnostics(req.params.id) }; }));
     app.get('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return this.sessions.resumeConfiguration(req.params.id); }));
     app.post('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return { session: publicIntegrationSession(await this.sessions.confirmResumeConfiguration(req.params.id, req.body?.generation, req.body?.fingerprint)) }; }));
     app.post('/admin/sessions/:id/startup-input/clear', run(async req => {
@@ -155,6 +155,7 @@ export class IntegrationRuntime {
     }));
     app.get('/sessions/:id', run(async req => { const p = principal(req); this.authorize(p, 'session.read'); return { session: publicIntegrationSession(await this.sessions.get(p, req.params.id)) }; }));
     app.post('/sessions/:id/restore', run(async req => { const p = principal(req); this.authorize(p, 'session.restore'); const session = await this.sessions.restore(p, req.params.id, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
+    app.post('/sessions/:id/retry-cold', run(async req => { const p = principal(req); this.authorize(p, 'session.create'); const session = await this.sessions.retryCold(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.post('/sessions/:id/release', run(async req => { const p = principal(req); this.authorize(p, 'session.release'); const session = await this.sessions.release(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.get('/events', run((req, res) => {
       const p = principal(req); this.authorize(p, 'events.read', req.query.group);
@@ -180,6 +181,8 @@ export class IntegrationRuntime {
       session_startup_input_clear: true, session_startup_input_clear_min_version: '1.4.310',
       agent_launch_process_check: true, agent_launch_process_check_min_version: '1.4.312',
       terminal_input_runtime_fence: true, terminal_input_runtime_fence_min_version: '1.4.313',
+      session_launch_diagnostics: true, session_launch_diagnostics_min_version: '1.4.314',
+      session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',

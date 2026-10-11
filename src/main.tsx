@@ -14,6 +14,7 @@ import { syncInitialViewportCssVars } from './lib/hooks/useViewportHeight';
 import { I18nProvider } from './lib/i18n';
 import { SessionNoticeBridge, SessionNoticeCenter } from './lib/components/SessionNotice';
 import { PwaUpdateNotice } from './lib/components/PwaUpdateNotice';
+import { PwaStatusBarSurface } from './lib/components/PwaStatusBarSurface';
 import { setupPwaUpdateReload } from './lib/utils/pwaUpdate';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 import { ServiceWorkspaceHost } from './lib/services/ServiceWorkspaceHost';
@@ -44,6 +45,7 @@ try {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
+    <PwaStatusBarSurface />
     <StartupHandoff />
     <I18nProvider>
       {window.parent === window && <><PwaUpdateNotice /><SessionNoticeCenter /></>}

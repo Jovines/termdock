@@ -86,3 +86,20 @@ describe('PTY paste and submit', () => {
   });
 
 });
+
+describe('durable input progress', () => {
+  afterEach(() => vi.useRealTimers());
+  it('records returned paste and submit separately while retaining the 50ms pair', async () => {
+    vi.useFakeTimers(); const writes: string[] = [], events: string[] = [];
+    const delivery = writeBracketedPrompt({ write: value => { writes.push(value); } }, 'body', undefined, stage => { events.push(stage); });
+    await vi.advanceTimersByTimeAsync(49);
+    expect(events).toEqual(['queue_wait', 'queue_acquired', 'paste_attempted', 'paste_written']); expect(writes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1); await delivery;
+    expect(events).toEqual(['queue_wait', 'queue_acquired', 'paste_attempted', 'paste_written', 'submit_attempted', 'submit_written']); expect(writes.at(-1)).toBe('\r');
+  });
+  it('does not perform input whose pre-write checkpoint could not be committed', async () => {
+    const target = { write: vi.fn() }, stages: string[] = [];
+    await expect(writeBracketedPrompt(target, 'body', undefined, stage => { stages.push(stage); if (stage === 'paste_attempted') throw new Error('persistence unavailable'); })).rejects.toThrow('persistence unavailable');
+    expect(target.write).not.toHaveBeenCalled(); expect(stages.at(-1)).toBe('paste_attempted');
+  });
+});

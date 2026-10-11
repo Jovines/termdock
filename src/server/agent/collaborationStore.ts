@@ -127,6 +127,8 @@ interface CollaborationDocument {
   consumers?: Record<string, number>;
   transport?: Record<string, TransportDiagnostic>;
   prunedThrough?: Record<string, number>;
+  prunedSenders?: Record<string, true>;
+  terminalHistoryComplete?: boolean;
   fragments?: Record<string, { groupId: string; total: number; sha256: string; chunks: Record<string, string>; createdAt: number }>;
 }
 
@@ -140,6 +142,12 @@ export class CollaborationStore {
   registerRuntimeGuard(guard: (id: string) => void): () => void { this.runtimeGuards.add(guard); return () => { this.runtimeGuards.delete(guard); }; }
   subscribe(listener: () => void): () => void { this.changeListeners.add(listener); return () => { this.changeListeners.delete(listener); }; }
   snapshotMessages(): CollaborationMessage[] { return structuredClone(this.document.messages); }
+  /** Pruning markers preserve both sides of message history without bodies. */
+  hasTerminalMessageHistory(id: string): boolean | null {
+    if ((this.document.prunedThrough?.[id] ?? 0) > 0 || this.document.prunedSenders?.[id]
+      || this.document.messages.some(message => message.toSessionId === id || message.fromSessionId === id)) return true;
+    return this.historyAvailable ? false : null;
+  }
   private peerActivity = new Map<string, { last_terminal_output_at: number | null; activity_observed_at: number | null; last_peer_sync_at: number; activity_source: string }>();
   recordPeerActivity(sessionId: string, outputAt: unknown, observedAt: unknown): void {
     if (this.peerActivity.size >= 2000 && !this.peerActivity.has(sessionId)) this.peerActivity.delete(this.peerActivity.keys().next().value!);
@@ -147,8 +155,9 @@ export class CollaborationStore {
       activity_observed_at: typeof observedAt === 'number' && Number.isFinite(observedAt) ? observedAt : null,
       last_peer_sync_at: Date.now(), activity_source: 'remote_terminal_output' });
   }
-  private document: CollaborationDocument = { version: 2, groups: [], messages: [] };
+  private document: CollaborationDocument = { version: 2, groups: [], messages: [], terminalHistoryComplete: true };
   private persistedDocument = JSON.stringify(this.document);
+  private historyAvailable = true;
 
   /** `drawId` is the random source behind newCollaborationId. It is a
    *  constructor seam so tests can force a collision and prove the guard
@@ -156,6 +165,15 @@ export class CollaborationStore {
   constructor(private readonly filePath: string, private readonly drawId: () => string = drawCollaborationId) {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<CollaborationDocument>;
+      const validMarkers = (value: unknown, validate: (entry: unknown) => boolean) => value === undefined
+        || (value !== null && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(validate));
+      this.historyAvailable = parsed.version === 2 && Array.isArray(parsed.messages)
+        && parsed.messages.every(message => message && typeof message.id === 'string' && typeof message.toSessionId === 'string'
+          && (message.fromSessionId === null || typeof message.fromSessionId === 'string') && MESSAGE_KINDS.has(message.kind))
+        && (parsed.terminalHistoryComplete === undefined || parsed.terminalHistoryComplete === true)
+        && validMarkers(parsed.prunedThrough, entry => Number.isSafeInteger(entry) && (entry as number) >= 0)
+        && validMarkers(parsed.prunedSenders, entry => entry === true)
+        && (!Object.keys(parsed.prunedThrough ?? {}).length || parsed.prunedSenders !== undefined);
       if (Array.isArray(parsed.groups)) {
         this.document.groups = parsed.groups.filter((group) => group && typeof group.id === 'string' && Array.isArray(group.sessionIds));
       }
@@ -175,7 +193,9 @@ export class CollaborationStore {
       this.document.transport = parsed.transport ?? {};
       this.document.fragments = parsed.fragments ?? {};
       this.document.prunedThrough = parsed.prunedThrough ?? {};
-    } catch { /* first run */ }
+      this.document.prunedSenders = parsed.prunedSenders ?? {};
+    } catch (error) { this.historyAvailable = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+    this.document.terminalHistoryComplete = this.historyAvailable;
     this.persistedDocument = JSON.stringify(this.document);
   }
 
@@ -821,6 +841,7 @@ export class CollaborationStore {
     this.document.messages = this.document.messages.filter((message) => {
       if (message.status === 'pending' || protectedIds.has(message.id) || retained.has(message.id)) return true;
       (this.document.prunedThrough ??= {})[message.toSessionId] = Math.max(this.document.prunedThrough?.[message.toSessionId] ?? 0, message.sequence ?? 0);
+      if (message.fromSessionId) (this.document.prunedSenders ??= {})[message.fromSessionId] = true;
       delete this.document.transport?.[message.id];
       return false;
     });

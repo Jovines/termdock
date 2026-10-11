@@ -1,6 +1,7 @@
 import { viewportWindow } from '../services/workspaceViewport';
 import React from 'react';
 import { createDebugLogger } from '../utils/debug';
+import { isIOSDevice, usesTouchTerminalLayout } from '../utils/touchTerminalLayout';
 
 interface UseViewportHeightOptions {
   cssVarName?: string;
@@ -114,11 +115,7 @@ const toPx = (value: string | null | undefined) => {
   return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
 };
 
-const isIOSLike = () => {
-  if (typeof navigator === 'undefined') return false;
-  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-};
+const isIOSLike = isIOSDevice;
 
 const isStandaloneDisplay = () => {
   if (typeof window === 'undefined') return false;
@@ -133,9 +130,6 @@ const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
   }
 
   const portrait = getBestKnownViewportHeight() >= getBestKnownViewportWidth();
-  if (!portrait) {
-    return { top: 0, right: 0, bottom: 0, left: 0 };
-  }
 
   const screenWidth = window.screen?.width || window.innerWidth;
   const screenHeight = window.screen?.height || window.innerHeight;
@@ -143,7 +137,12 @@ const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
   const logicalHeight = Math.max(screenWidth, screenHeight);
 
   if (logicalWidth >= 700) {
-    return { top: 20, right: 0, bottom: 20, left: 0 };
+    const nativeStatusBar = viewportWindow().document.documentElement.dataset.termdockPwaStatusBar === 'default';
+    return { top: nativeStatusBar ? 0 : 20, right: 0, bottom: 20, left: 0 };
+  }
+
+  if (!portrait) {
+    return { top: 0, right: 0, bottom: 0, left: 0 };
   }
 
   if (logicalHeight < 780) {
@@ -160,6 +159,13 @@ const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
 
 export function syncInitialViewportCssVars(cssVarName = '--app-vh'): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+  document.documentElement.dataset.termdockTouchViewport = String(
+    usesTouchTerminalLayout() || viewportWindow().innerWidth <= 768,
+  );
+  document.documentElement.dataset.termdockIpadPwa = String(
+    document.documentElement.dataset.termdockPwaStatusBar === 'default' && isStandaloneDisplay(),
+  );
 
   const visualViewportHeight = toPositivePx(viewportWindow().visualViewport?.height);
   const visualViewportOffsetTop = Math.max(0, Math.round(viewportWindow().visualViewport?.offsetTop ?? 0));
@@ -333,6 +339,9 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     const syncViewportHeight = (source = 'event') => {
       rafId = null;
+      document.documentElement.dataset.termdockTouchViewport = String(
+        usesTouchTerminalLayout() || viewportWindow().innerWidth <= 768,
+      );
       const nextHeight = getViewportHeight();
       const nextOffsetTop = Math.round(viewportWindow().visualViewport?.offsetTop ?? 0);
       const measuredViewportHeight = toPositivePx(viewportWindow().visualViewport?.height);

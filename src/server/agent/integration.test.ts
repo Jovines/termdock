@@ -919,3 +919,63 @@ it('documents the clear command offline and refuses an old service before mutati
   expect(await runIntegrationAdmin(args, port, 'local-admin', line => output.push(line))).toBe(0);
   expect(calls).toEqual(['/admin/capabilities', '/admin/capabilities', '/admin/sessions/id/startup-input/clear']);
 });
+
+it('exposes authenticated cold retry and admin-only launch diagnostics on the real Unix API', async () => {
+  const fake = adapter(); fake.set({ exists: true, running: false, shell: true });
+  fake.api.resumeConfiguration = async () => ({ exact: 'fixture-v1' });
+  fake.api.create = vi.fn(async (_record, prepared, progress) => {
+    prepared({ serverPid: 1, sessionId: '$1', paneId: '%1', panePid: 2, agentSlug: 'fixture', nativeSessionId: null });
+    progress?.('queue_wait'); throw new Error('private launcher stdout');
+  });
+  fake.api.messageHistory = () => false;
+  fake.api.retryCold = vi.fn(async (_record, _prepared, progress) => {
+    progress('queue_wait'); progress('queue_acquired'); progress('paste_attempted'); progress('paste_written'); progress('submit_attempted'); progress('submit_written');
+    fake.set({ running: true, shell: false, agentSlug: 'fixture', nativeId: 'new-cold-native' });
+  });
+  const f = await runtimeFixture(fake.api);
+  const id = (await f.request('POST', '/sessions', { launch_profile: 'agent', cwd: dir, idempotency_key: 'create' })).body.session.session_id;
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ session_cold_retry: true, session_launch_diagnostics: true, session_cold_retry_min_version: '1.4.314' });
+  const route = `/admin/sessions/${id}/restore-diagnostics`;
+  expect(await f.request('GET', route)).toMatchObject({ status: 401 });
+  const admin = { 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  expect(await f.request('GET', route, undefined, admin)).toMatchObject({ status: 200, body: { launch_diagnostics: { phase: 'queue_wait', reason_code: 'UNCLASSIFIED_LAUNCH_ERROR' }, launch_diagnostics_history: [] } });
+  const grant = policy(f.group.id); grant.permissions = grant.permissions.filter(permission => permission !== 'session.create'); f.runtime.store.update(grant);
+  const retry = { generation: 1, idempotency_key: 'retry' };
+  expect(await f.request('POST', `/sessions/${id}/retry-cold`, retry)).toMatchObject({ status: 403, body: { code: 'INTEGRATION_PERMISSION_DENIED' } });
+  grant.permissions.push('session.create'); f.runtime.store.update(grant);
+  expect(await f.request('POST', `/sessions/${id}/retry-cold`, { ...retry, generation: '1' })).toMatchObject({ status: 409, body: { code: 'INVALID_SESSION_GENERATION' } });
+  const retried = await f.request('POST', `/sessions/${id}/retry-cold`, retry);
+  expect(retried).toMatchObject({ status: 200, body: { session: { session_id: id, generation: 2, launch_diagnostics_available: true, cold_retry_pending: false } } });
+  expect((await f.request('GET', `/sessions/${id}`)).body).toMatchObject({ session: { state: 'ready', agent_native_session_id: 'new-cold-native' } });
+  expect(await f.request('POST', `/sessions/${id}/retry-cold`, retry)).toEqual(retried);
+  expect(fake.api.retryCold).toHaveBeenCalledTimes(1);
+  const report = (await f.request('GET', route, undefined, admin)).body;
+  expect(report.launch_diagnostics_history).toHaveLength(1); expect(JSON.stringify(report)).not.toContain('private launcher stdout');
+});
+
+it('documents cold retry and refuses incompatible services before making a retry request', async () => {
+  for (const argv of [['session', 'retry-cold', 'id', '--idempotency-key', 'k'], ['session', 'retry-cold', 'id', '--generation', '0', '--idempotency-key', 'k'], ['session', 'retry-cold', 'id', '--generation', '1', '--idempotency-key', 'k', '--cwd', '/tmp']]) {
+    expect(() => parseCollaborationCommand(['--principal', 'bridge', ...argv])).toThrow();
+  }
+  const output: string[] = [], io = { write: (value: string) => { output.push(value); }, stdin: async () => '' };
+  expect(await runIntegrationCollab(parseCollaborationCommand(['--principal', 'bridge', 'session', 'retry-cold', '--help']), 59999, io)).toBe(0);
+  expect(output.join('')).toContain('不是恢复未知原生历史');
+  const credential = path.join(dir, 'retry-credential.json'); fs.writeFileSync(credential, JSON.stringify({ id: 'bridge', token: 'test-private-token', protocol: 1 }), { mode: 0o600 });
+  const original = process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE; process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE = credential;
+  resources.push(() => { if (original === undefined) delete process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE; else process.env.TERMDOCK_INTEGRATION_CREDENTIAL_FILE = original; });
+  let supported = false; const calls: string[] = [];
+  const server = http.createServer((req, res) => {
+    calls.push(req.url!); res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.url === '/capabilities') { res.end(JSON.stringify({ integration_protocol: 1, session_cold_retry: supported })); return; }
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
+      expect(JSON.parse(raw)).toEqual({ generation: 1, idempotency_key: 'retry' }); res.end(JSON.stringify({ session: { session_id: 'id', generation: 2 } }));
+    });
+  });
+  const port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const command = parseCollaborationCommand(['--principal', 'bridge', 'session', 'retry-cold', 'id', '--generation', '1', '--idempotency-key', 'retry']);
+  expect(await runIntegrationCollab(command, port, io)).toBe(1);
+  expect(calls).toEqual(['/capabilities']); expect(JSON.parse(output.at(-1)!)).toMatchObject({ code: 'SESSION_COLD_RETRY_UNSUPPORTED' });
+  supported = true; expect(await runIntegrationCollab(command, port, io)).toBe(0);
+  expect(calls).toEqual(['/capabilities', '/capabilities', '/sessions/id/retry-cold']); expect(output.join('')).not.toContain('test-private-token');
+});

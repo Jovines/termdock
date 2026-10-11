@@ -29,6 +29,7 @@ export default defineConfig({
         navigateFallback: 'index.html',
       },
       includeAssets: [
+        'ipad-status-bar.js',
         'favicon.ico',
         'apple-touch-icon-180x180.png',
         'pwa-192x192.png',

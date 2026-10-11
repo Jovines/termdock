@@ -29,7 +29,10 @@ export const INTEGRATION_HELP = `td integration — local scoped integration adm
     Minimum CLI/running service 1.4.309; capabilities.session_resume_configuration=true.
     Errors: RESUME_CONFIGURATION_CHANGED, EXACT_RESUME_UNSUPPORTED,
     SESSION_GENERATION_MISMATCH, SESSION_OPERATION_IN_PROGRESS, LAUNCHER_UNAVAILABLE.
-  diagnostics <TD-session-id> (read the last restore check; administrator only)
+  diagnostics <TD-session-id> (read stored launch/restore diagnostics; administrator only)
+    1.4.314 adds phase/timestamps, paste/submit write facts and target-change
+    evidence; no argv/environment/credentials or application readiness claim.
+    Prior versions cannot reconstruct missing launch evidence retroactively.
   create --file <policy.json> --credential-file <private-output.json>
   update --file <policy.json> (same identity/group; preserves the credential)
   revoke <principal-id>
@@ -160,10 +163,11 @@ export async function runIntegrationCollab(command: CollaborationCommand, port: 
       return subscribe(socketPath, `/events?${params}`, credential, command.options.timeout ? duration(String(command.options.timeout)) : undefined, io.write);
     }
     if (command.action === 'session') {
+      if (command.operation === 'retry-cold' && capability.session_cold_retry !== true) throw new CollaborationError('SESSION_COLD_RETRY_UNSUPPORTED', 'CLI and running service must support explicit cold retry (minimum 1.4.314)', 409);
       if (command.operation === 'release' && (capability.session_runtime_release !== true || capability.session_lifecycle_generation !== true || capability.stable_session_identity !== true)) throw new CollaborationError('SESSION_RELEASE_UNSUPPORTED', 'CLI and running service must support the lifecycle contract (minimum 1.4.309)', 409);
-      const route = command.operation === 'create' ? '/sessions' : `/sessions/${encodeURIComponent(command.target!)}${['restore', 'release'].includes(command.operation!) ? `/${command.operation}` : ''}`;
+      const route = command.operation === 'create' ? '/sessions' : `/sessions/${encodeURIComponent(command.target!)}${['restore', 'release', 'retry-cold'].includes(command.operation!) ? `/${command.operation}` : ''}`;
       const body = command.operation === 'create' ? { group_id: command.options.group, launch_profile: command.options['launch-profile'], cwd: command.options.cwd, idempotency_key: command.options['idempotency-key'] }
-        : ['restore', 'release'].includes(command.operation!) ? { ...(command.operation === 'release' ? { generation: Number(command.options.generation) } : {}), idempotency_key: command.options['idempotency-key'] } : undefined;
+        : ['restore', 'release', 'retry-cold'].includes(command.operation!) ? { ...(['release', 'retry-cold'].includes(command.operation!) ? { generation: Number(command.options.generation) } : {}), idempotency_key: command.options['idempotency-key'] } : undefined;
       io.write(JSON.stringify(parsed(await request(socketPath, command.operation === 'get' ? 'GET' : 'POST', route, body, headers(credential))))); return 0;
     }
     const messageCapability = command.action === 'send' ? 'integration_message_send' : command.action === 'reply' ? 'integration_message_reply'

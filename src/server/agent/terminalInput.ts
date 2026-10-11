@@ -21,11 +21,20 @@ function serializeInQueue<K extends object | string, T>(store: {
 }
 
 export type TerminalInputGuard = () => void;
+export type PromptWriteStage = 'queue_wait' | 'queue_acquired' | 'paste_attempted' | 'paste_written' | 'submit_attempted' | 'submit_written';
+export type PromptWriteProgress = (stage: PromptWriteStage) => void;
+export class TerminalInputTargetChangedError extends Error {
+  readonly code = 'TERMINAL_INPUT_TARGET_CHANGED';
+  constructor(readonly evidence?: {
+    expected_backend_session_id: string | null; current_backend_session_id: string | null;
+    expected_launch_id: string | null; current_launch_id: string | null; backend_instance_matches: boolean;
+  }) { super('TERMINAL_INPUT_TARGET_CHANGED'); }
+}
 
 /** Clearing a one-time launch check does not change the runtime generation. */
 export function captureTerminalInputGuard<T>(current: () => T, expected = current()): TerminalInputGuard {
   return () => {
-    if (current() !== expected) throw new Error('TERMINAL_INPUT_TARGET_CHANGED');
+    if (current() !== expected) throw new TerminalInputTargetChangedError();
   };
 }
 

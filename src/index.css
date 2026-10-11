@@ -277,6 +277,14 @@ body {
   background-color: var(--chrome-bg);
 }
 
+/* iOS 27 standalone fixed-edge sampling workaround. An empty text-clipped
+   background keeps this 11px marker from painting over content or dialogs. */
+.pwa-status-bar-surface {
+  height: 11px;
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
 html {
   height: var(--app-vh, 100vh);
   width: 100vw;
@@ -329,6 +337,7 @@ body {
   width: 100vw;
   overscroll-behavior: none;
   padding-top: var(--safe-top-inset, env(safe-area-inset-top, 0px));
+  padding-bottom: var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px));
 }
 
 @supports (-webkit-touch-callout: none) {
@@ -346,6 +355,12 @@ body {
 /* Keep JS-driven --app-vh authoritative.
    Native 100dvh is not reliable enough with iOS/PWA soft-keyboard animation
    and can override the visualViewport-based shrink logic. */
+
+/* Leave the iPad PWA header below the native gradient's overhang. Each
+   workspace reserves this once inside its own physical-viewport root. */
+html[data-termdock-ipad-pwa='true'] #root {
+  padding-top: calc(var(--safe-top-inset, env(safe-area-inset-top, 0px)) + 32px);
+}
 
 /*
  * Chrome glow: 同色系微光 grazes the top of drawer panels(顶 tab 不用——
@@ -774,42 +789,41 @@ body {
   color: var(--foreground);
 }
 
-/* Mobile-specific styles — use fixed base height so keyboard never resizes the terminal.
+/* Touch terminal styles include wide iPads and landscape phones. Use fixed base
+   height so keyboard never resizes the terminal.
    --app-base-vh is set by JS to window.innerHeight at startup / orientation change,
    and does NOT shrink when the soft-keyboard opens.  The terminal area stays the same
    pixel height; instead we translate it up via TerminalView.tsx. */
-@media (max-width: 768px) {
-  html {
-    height: var(--app-base-vh, 100lvh);
-    width: 100vw;
-  }
+html[data-termdock-touch-viewport='true'] {
+  height: var(--app-base-vh, 100lvh);
+  width: 100vw;
+}
 
-  body {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    overflow: hidden;
-    height: var(--app-base-vh, 100lvh);
-    width: 100vw;
-    touch-action: pan-y;
-    background-color: var(--chrome-bg) !important;
-    color: var(--foreground) !important;
-  }
+html[data-termdock-touch-viewport='true'] body {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  height: var(--app-base-vh, 100lvh);
+  width: 100vw;
+  touch-action: pan-y;
+  background-color: var(--chrome-bg) !important;
+  color: var(--foreground) !important;
+}
 
-  #root {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: var(--app-base-vh, 100lvh);
-    padding-bottom: var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px));
-  }
+html[data-termdock-touch-viewport='true'] #root {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--app-base-vh, 100lvh);
+  padding-bottom: var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px));
+}
 
-  .terminal-viewport-container {
-    touch-action: none;
-    overscroll-behavior: contain;
-  }
+html[data-termdock-touch-viewport='true'] .terminal-viewport-container {
+  touch-action: none;
+  overscroll-behavior: contain;
 }
 
 @keyframes fade-in {

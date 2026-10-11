@@ -76,6 +76,18 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     消息历史只覆盖仍保留记录；不存在的 after-id 返回 MESSAGE_NOT_FOUND，不能据此声称历史完整。
   session create --group <id> --launch-profile <id> --cwd <absolute-path> --idempotency-key <key>
   session get <id> | session restore <id> --idempotency-key <key>
+  session retry-cold <id> --generation <session-get-generation> --idempotency-key <key>
+    权限 session.create；仅 failed、无 native UUID、无 TD 消息历史/待投递、原合格 shell、配置指纹一致。
+    保留原 TD ID/启动配置，显式重新冷启动；可能创建新 UUID，不是恢复未知原生历史。
+    最低 CLI/实际服务 1.4.314；session_cold_retry=true。既有 create 同键仍不重新启动。
+    不终止 Agent、不重建消失的承载、不自动补键；未知消息历史或操作结果拒绝。
+    用 session get 查当前状态；同键回读原操作，重启不自动再启动。
+    诊断由管理员 td integration diagnostics <id> 回读，需 session_launch_diagnostics=true。
+    失败码：SESSION_COLD_RETRY_NATIVE_BOUND/SESSION_COLD_RETRY_NOT_FAILED；
+    SESSION_MESSAGE_HISTORY_PRESENT/SESSION_MESSAGE_HISTORY_UNCONFIRMED；
+    SESSION_COLD_RETRY_RUNTIME_UNCONFIRMED/SESSION_COLD_RETRY_UNSUPPORTED；
+    SESSION_COLD_RETRY_INTERRUPTED 表示重启后已核实原 shell，需新键明确重试。
+    代次/并发/配置/授权错误沿用 release/restore 契约，不能自动绕过。
   session release <id> --generation <session-get-generation> --idempotency-key <key>
     权限 session.release；仅原 Agent 已退出、精确空 shell、无 pending 消息时释放实际运行承载。
     released: runtime_present=false、terminal_binding=null；保留逻辑 ID/原生 UUID/原消息，restore 后可继续 reply。
@@ -252,11 +264,11 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     command.operation = positional.shift(); command.target = positional.shift();
     if (positional.length) throw new Error('Unexpected integration arguments');
     if (action === 'events' && (!['subscribe', 'ack'].includes(command.operation ?? '') || (command.operation === 'ack' ? !command.target : Boolean(command.target)))) throw new Error('Usage: events subscribe | events ack <cursor>');
-    if (action === 'session' && (!['create', 'get', 'restore', 'release'].includes(command.operation ?? '') || (command.operation === 'create' ? Boolean(command.target) : !command.target))) throw new Error('Usage: session create|get|restore|release');
+    if (action === 'session' && (!['create', 'get', 'restore', 'release', 'retry-cold'].includes(command.operation ?? '') || (command.operation === 'create' ? Boolean(command.target) : !command.target))) throw new Error('Usage: session create|get|restore|release|retry-cold');
     if (action === 'session' && command.operation !== 'get' && !options['idempotency-key']) throw new Error('Session mutation requires an explicit --idempotency-key');
-    if (action === 'session' && command.operation === 'release' && (!/^[1-9][0-9]*$/.test(String(options.generation ?? '')) || !Number.isSafeInteger(Number(options.generation)))) throw new Error('session release requires --generation from session get');
+    if (action === 'session' && ['release', 'retry-cold'].includes(command.operation ?? '') && (!/^[1-9][0-9]*$/.test(String(options.generation ?? '')) || !Number.isSafeInteger(Number(options.generation)))) throw new Error(`session ${command.operation} requires --generation from session get`);
     const integrationFlags = action === 'events' ? command.operation === 'ack' ? ['consumer'] : ['consumer', 'group', 'timeout']
-      : command.operation === 'create' ? ['group', 'launch-profile', 'cwd', 'idempotency-key'] : command.operation === 'restore' ? ['idempotency-key'] : command.operation === 'release' ? ['idempotency-key', 'generation'] : [];
+      : command.operation === 'create' ? ['group', 'launch-profile', 'cwd', 'idempotency-key'] : command.operation === 'restore' ? ['idempotency-key'] : ['release', 'retry-cold'].includes(command.operation ?? '') ? ['idempotency-key', 'generation'] : [];
     for (const flag of Object.keys(options)) if (!['principal', 'json', 'jsonl', 'text', 'help', ...integrationFlags].includes(flag)) throw new Error(`--${flag} is not supported by ${action} ${command.operation}`);
   } else if (action === 'task') {
     command.operation = positional.shift(); command.target = positional.shift();

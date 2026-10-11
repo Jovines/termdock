@@ -785,6 +785,104 @@ no-op restore 不创建新检查。报告跟随会话保存并可在服务重启
 - 启动/恢复：`SESSION_CREATE_OUTCOME_UNKNOWN`, `SESSION_OPERATION_IN_PROGRESS`, `SESSION_BINDING_TIMEOUT`, `EXACT_RESUME_UNSUPPORTED`, `NATIVE_SESSION_ALREADY_RUNNING`, `NATIVE_SESSION_OWNER_UNCONFIRMED`, `AGENT_NOT_RUNNING`。
 - 未分类异常：`SESSION_LAUNCH_FAILED`, `SESSION_OBSERVATION_FAILED`；错误不包含包装器输出、密钥或原始堆栈。
 
+## 1.4.314：启动诊断与显式冷启动重试
+
+最低 CLI 和实际运行服务均为 **1.4.314**，协议仍为 1。先回读两者版本及实际服务
+`session_launch_diagnostics=true`、`session_cold_retry=true`；对应
+`*_min_version` 均为 `1.4.314`。CLI 遇到不支持重试的服务返回
+`SESSION_COLD_RETRY_UNSUPPORTED`，不发出重试请求。
+
+管理员沿用 `td integration diagnostics <TD-session-id>`，同一响应新增
+`launch_diagnostics`（可为 null）与 `launch_diagnostics_history`（最多 16 个此前实际
+启动操作）。旧 `diagnostics` 原生所有者报告字段保持兼容；该入口仅回读持久记录，
+不重新扫描进程、不挂接终端、不发送输入。313 及更早启动没有新增报告，不能从升级
+反推旧失败原因。已有失败会话可以在满足下述检查后显式重试，产生新的诊断。
+
+启动报告字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `operation_id / generation / kind` | 此次操作和承载代次；kind 为 `cold_start / cold_retry / native_restore` |
+| `phase / updated_at / steps` | 最后持久阶段和时间；steps 最多最近 24 个阶段，时间是 TD 记录时间 |
+| `error_code / reason_code` | 公开失败码及已分类原因；无法分类为 `UNCLASSIFIED_LAUNCH_ERROR`，不保存原始错误文本 |
+| `paste / submit` | 各自为 `not_attempted / attempted / write_returned`；attempted 在调用输入前持久保存，write_returned 表示调用返回 |
+| `runtime_exists` | 最后观察是否存在原承载；没有观察时为 null，不代表读取时的实时进程 |
+| `target_change` | 仅发生承载 fencing 冲突时可有：期望/当前 backend ID、期望/当前 launch ID、backend 实例是否相同 |
+
+阶段清单：`configuration`、`runtime_prepare`、`binding_persist`、
+`native_owner_check`（精确恢复）、`runtime_verify`、`launch_intent`、
+`queue_wait`、`queue_acquired`、`paste_attempted`、`paste_written`、
+`submit_attempted`、`submit_written`、`binding_observe`；中断冷重试回读到原 shell 时
+另记 `reconciled_shell`。阶段只表示 TD 实际到达的步骤，不推断私有 CLI 根因。
+崩溃在输入调用附近时，attempted 不能证明写入发生或未发生，不能据此补键。
+write_returned 不证明原生程序消费、提交、成功执行或最终结果。正文仍按原机制
+粘贴一次、等待至少 50ms、发送一次 CR；没有新的屏幕识别、启动 sleep 或额外 Enter。
+
+完整报告仅管理员可读；principal 与主动 session 事件只返回
+`launch_diagnostics_available=true`，不返回阶段、其他候选或结构证据。报告不保存
+argv、命令正文、stdout/stderr、环境变量或凭据。报告历史受上述条数及原描述总存储
+预算约束，不是无限保留的排查日志。
+
+正式冷重试命令：
+
+```sh
+td collab --principal <id> session get <TD-session-id>
+td integration diagnostics <TD-session-id>
+td collab --principal <id> session retry-cold <TD-session-id> \
+  --generation <get返回的generation> --idempotency-key <本次操作唯一键>
+```
+
+权限沿用 **session.create**，并核对记录所属 principal/本机组、原 profile 当前仍被授权、
+原 cwd 同时符合旧快照和当前目录授权。使用原启动配置快照，不接受新 argv/cwd/profile
+参数。它保留逻辑 TD ID、消息关联和旧操作证据；实际尝试递增 generation、建立新
+operation_id，状态为 starting，可能随后 binding_pending/ready/failed。返回的操作
+快照不是实时状态；用 session get 查询最新状态。
+
+只允许 failed、尚未绑定 native UUID、无 TD 消息历史/待投递且没有进行中或未确认操作
+的记录；还需核实原绑定的唯一承载仍存在、原前台 Agent 已退出、回到合格 shell。
+TD 会在生命周期锁及 worker 承载变更屏障内复核，不终止 Agent，不删除旧记录，不重建
+消失或身份不明的终端。shell 检查不声称可读取用户未提交的任意草稿，调用方仍须拥有
+输入操作权限并避免其他手工输入。TD 消息入队前设置持久、单调的历史标记；即使稍后
+入队失败也保守拒绝冷重试。314 起消息裁剪保留双方历史标记；升级前已裁剪且没有 sender 标记的
+历史无法证明完整，没有已知消息也返回未确认。旧格式或不可读存储同样拒绝；此缺口
+持久保留，不因一次正常写入而被误判已修复。
+
+必须有可信的原 launcher/plugin 恢复语义指纹且当前仍匹配；缺少指纹时管理员沿用
+resume-configuration / confirm-resume 明确核对确认，不能把路径相同当内容相同。
+指纹只覆盖 TD 已记录的 launcher 文件、原配置和插件恢复语义，不声称验证包装器依赖
+或私有 Agent 二进制全部内容。
+
+**cold retry 不是 native restore。** 无已知 UUID 时不能保证延续之前未知的原生历史，
+也不证明旧程序未创建过原生历史；重试可能创建新 UUID。已有 UUID 必须使用原
+session restore 与原生身份/重复所有者保护。原 session create 同幂等键继续回读已有
+记录，不会自动冷重试。
+
+同键同参数回读原操作结果，不再次启动；同键不同参数返回 IDEMPOTENCY_CONFLICT。
+同会话不同操作键不能并发启动。重试意图和新代次在输入前持久保存，重试期间 send/reply
+拒绝且不入队。服务重启后不会自动再启动：session get 核实原程序与 UUID 后可以转为
+ready；回读精确原 shell 则为 failed/SESSION_COLD_RETRY_INTERRUPTED，明确结束未确认
+状态，后续需新键显式重试；承载消失或仍不能确认时保留 cold_retry_pending=true 并拒绝
+发送/重试。旧操作结果未提交且出现后续代次时，同旧键返回 OPERATION_OUTCOME_UNCONFIRMED，
+不能把当前代次伪装为旧操作结果。
+
+| 拒绝码（HTTP 409，另有注明时除外） | 含义 |
+| --- | --- |
+| `INVALID_SESSION_GENERATION / SESSION_GENERATION_MISMATCH` | 未传有效数值代次 / 代次已变 |
+| `SESSION_COLD_RETRY_UNSUPPORTED` | CLI 或运行服务/adapter 不支持 |
+| `SESSION_COLD_RETRY_NATIVE_BOUND` | 已有 UUID，应走精确 restore |
+| `SESSION_COLD_RETRY_NOT_FAILED` | 当前不是 failed 冷启动 |
+| `SESSION_MESSAGE_HISTORY_PRESENT / SESSION_MESSAGE_HISTORY_UNCONFIRMED` | 有消息/入队尝试 / 无法可靠核实历史 |
+| `SESSION_COLD_RETRY_RUNTIME_UNCONFIRMED` | 无法核实原承载和退出 shell |
+| `SESSION_OPERATION_IN_PROGRESS / OPERATION_OUTCOME_UNCONFIRMED` | 操作在进行 / 前次结果须对账 |
+| `RESUME_CONFIGURATION_UNCONFIRMED / RESUME_CONFIGURATION_CHANGED` | 指纹缺失 / launcher 或恢复语义变化 |
+| `SESSION_SCOPE_CONFLICT / SESSION_IDENTITY_MISMATCH` | 跨组承载或逻辑所有权冲突 |
+| `LAUNCH_PROFILE_DENIED / SESSION_CWD_DENIED`（403） | 原 profile 或 cwd 当前不再授权 |
+
+其他启动错误仍沿用前述准确码；fencing 冲突可为
+`TERMINAL_INPUT_TARGET_CHANGED`，观察失败为 `SESSION_OBSERVATION_FAILED`，未知启动异常
+为 `SESSION_LAUNCH_FAILED`，原 shell 检查失败可为 `SESSION_TARGET_NOT_SHELL`。
+新能力并未确认 DevBox 私有 TraeX 的间歇启动原因，也不代替业务明确回复验收。
+
 ## 验收边界
 
 本版维护机验证：共享释放协议、真实 Unix socket 权限/生命周期事件、零入队拒绝、

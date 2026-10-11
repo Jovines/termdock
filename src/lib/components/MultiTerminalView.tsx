@@ -52,6 +52,7 @@ import {
 } from '../stores/useSidebarStore';
 import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../terminal/display';
 import { createDebugLogger } from '../utils/debug';
+import { usesTouchTerminalLayout } from '../utils/touchTerminalLayout';
 import { clientLog } from '../utils/clientLog';
 import { markStartupMilestone } from '../utils/startupPerformance';
 import { pickSessionAfterClose } from '../utils/sessionSelection';
@@ -133,8 +134,7 @@ const MAX_SPLIT_RATIO = 0.9;
 
 function detectMobileSplitLayout(): { mobile: boolean; landscape: boolean } {
   if (typeof window === 'undefined') return { mobile: false, landscape: false };
-  const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
-  const mobile = hasTouch && Math.min(window.innerWidth, window.innerHeight) < 768;
+  const mobile = usesTouchTerminalLayout();
   return {
     mobile,
     landscape: mobile && window.innerWidth > window.innerHeight,

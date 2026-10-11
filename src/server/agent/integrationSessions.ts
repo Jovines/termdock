@@ -6,6 +6,8 @@ import { SessionLifecycleCoordinator, assertMessageRuntime, assertReleaseFacts, 
 import { resumeConfigurationFingerprint } from './sessionResumeConfiguration.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
 import { NativeResumeOwnerError, type NativeOwnerCheck } from './nativeResumeOwner.js';
+import { CollaborationError } from './collaborationProtocol.js';
+import { beginLaunchDiagnostics, launchFailure, launchProgress, type LaunchPhase, type SessionLaunchDiagnostics } from './sessionLaunchDiagnostics.js';
 
 export interface IntegrationSession extends SessionLifecycleDescriptor {
   terminal_binding?: CollaborationPaneBinding | null;
@@ -22,6 +24,11 @@ export interface IntegrationSession extends SessionLifecycleDescriptor {
   startup_input_disabled?: boolean;
   /** Administrator-only locators from the last rejected restore check. */
   restore_diagnostics?: NativeOwnerCheck & { operation_id: string };
+  launch_diagnostics?: SessionLaunchDiagnostics;
+  launch_diagnostics_history?: SessionLaunchDiagnostics[];
+  message_history_seen?: boolean;
+  cold_retry_pending?: boolean;
+  cold_retry_count?: number;
 }
 /** Quote each configured argument as literal shell data, including paths. */
 export function integrationLaunchCommand(record: IntegrationSession, restore: boolean): string {
@@ -32,8 +39,10 @@ export function integrationLaunchCommand(record: IntegrationSession, restore: bo
   return `cd -- ${quote(record.cwd)} && ${[record.profile.executable, ...args].map(quote).join(' ')}`;
 }
 export interface IntegrationSessionAdapter {
-  create(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void): Promise<void>;
-  restore(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void): Promise<void>;
+  create(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress?: (phase: LaunchPhase) => void): Promise<void>;
+  restore(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress?: (phase: LaunchPhase) => void): Promise<void>;
+  retryCold?(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress: (phase: LaunchPhase) => void): Promise<void>;
+  messageHistory?(id: string): boolean | null;
   inspect(record: IntegrationSession): Promise<{ exists: boolean; running: boolean; shell: boolean; agentSlug: string | null; nativeId: string | null }>;
   /** Current runtime presence includes orphaned tmux/backend, not inventory alone. */
   runtimePresent?(record: IntegrationSession): Promise<boolean>;
@@ -53,8 +62,10 @@ function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_cond
 }
 interface Document { version: 1; sessions: IntegrationSession[]; requests: Record<string, { hash: string; sessionId: string; operationId?: string; generation?: number; result?: IntegrationSession }> }
 export function publicIntegrationSession(record: IntegrationSession) {
-  const { profile: _, deadline: _deadline, launch_submitted: _submitted, startup_condition: _condition, restore_diagnostics: diagnostics, ...publicRecord } = record;
-  return { ...publicRecord, ...(diagnostics ? { restore_diagnostics_available: true } : {}) };
+  const { profile: _, deadline: _deadline, launch_submitted: _submitted, startup_condition: _condition, restore_diagnostics: diagnostics,
+    launch_diagnostics: launchDiagnostics, launch_diagnostics_history: _history, message_history_seen: _messages, ...publicRecord } = record;
+  return { ...publicRecord, ...(diagnostics ? { restore_diagnostics_available: true } : {}),
+    ...(launchDiagnostics ? { launch_diagnostics_available: true } : {}) };
 }
 export function permittedCwd(profile: LaunchProfile, cwd: string): string {
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || /[\x00-\x1f\x7f]/.test(cwd)) integrationError('SESSION_CWD_DENIED', 'cwd must be absolute', 403);
@@ -72,6 +83,7 @@ export class IntegrationSessions {
   private listeners = new Set<() => void>();
   private lifecycle = new SessionLifecycleCoordinator();
   private mutations = new Map<string, { hash: string; promise: Promise<IntegrationSession> }>();
+  private coldRetries = new Set<string>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopObservation: () => void;
   private stopDeliveryGuard?: () => void;
@@ -102,7 +114,9 @@ export class IntegrationSessions {
     atomicJson(this.file, this.doc); for (const listener of this.listeners) { try { listener(); } catch { /* Durable session state is reconciled on restart. */ } } }
   private saveRecord(record: IntegrationSession): void {
     const before = this.doc.sessions;
-    this.doc.sessions = [...before.filter(s => s.session_id !== record.session_id), structuredClone(record)];
+    const seen = before.find(s => s.session_id === record.session_id)?.message_history_seen;
+    this.doc.sessions = [...before.filter(s => s.session_id !== record.session_id), structuredClone({ ...record,
+      ...(seen ? { message_history_seen: true } : {}) })];
     try { this.save(); } catch (error) { this.doc.sessions = before; throw error; }
   }
   private lookup(principal: IntegrationPrincipal, id: string): IntegrationSession {
@@ -128,13 +142,14 @@ export class IntegrationSessions {
     const now = Date.now(), record: IntegrationSession = { operation_id: randomUUID(), session_id: randomBytes(6).toString('hex'),
       group_id: principal.groupId, principal_id: principal.id, agent_slug: profile.agentSlug, agent_native_session_id: null,
       state: 'starting', generation: 1, runtime_present: null, error_code: null, cwd, launch_profile: profile.id, profile: structuredClone(profile),
-      created_at: now, updated_at: now, deadline: now + this.bindingTimeout, launch_submitted: false };
+      created_at: now, updated_at: now, deadline: now + this.bindingTimeout, launch_submitted: false, message_history_seen: false };
+    record.launch_diagnostics = beginLaunchDiagnostics(record.operation_id, 1, 'cold_start');
     record.startup_input = startupInput(record, now);
     this.doc.requests[request.scoped] = { hash: request.hash, sessionId: record.session_id };
     try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
     return this.launch(record, false);
   }
-  private launch(record: IntegrationSession, restoring: boolean): Promise<IntegrationSession> {
+  private launch(record: IntegrationSession, restoring: boolean, retryCold = false): Promise<IntegrationSession> {
     const promise = (async () => {
       try {
         // Store intent before launching. A failed persistence cannot execute.
@@ -146,18 +161,30 @@ export class IntegrationSessions {
           } catch (error) {
             // Existing creation supports plugins without an exact resume path.
             // They remain launchable, but cannot gain a releasable descriptor.
-            if (restoring || (error as { code?: unknown }).code !== 'EXACT_RESUME_UNSUPPORTED') throw error;
+            if (restoring || retryCold || (error as { code?: unknown }).code !== 'EXACT_RESUME_UNSUPPORTED') throw error;
           }
         }
         record.launch_submitted = true; this.saveRecord(record);
+        const progress = (phase: LaunchPhase) => {
+          const latest = this.doc.sessions.find(s => s.session_id === record.session_id)!;
+          if (latest.operation_id !== record.operation_id || latest.generation !== record.generation) integrationError('SESSION_GENERATION_MISMATCH', 'Launch operation changed during progress recording', 409);
+          if (latest.launch_diagnostics) {
+            record.launch_diagnostics = launchProgress(latest.launch_diagnostics, phase);
+            this.saveRecord({ ...latest, launch_diagnostics: record.launch_diagnostics });
+          }
+        };
         const prepared = (binding: CollaborationPaneBinding) => { record.terminal_binding = binding; this.saveRecord(record); };
-        if (restoring) await this.adapter.restore(record, prepared); else await this.adapter.create(record, prepared);
+        if (retryCold) await this.adapter.retryCold!(record, prepared, progress);
+        else if (restoring) await this.adapter.restore(record, prepared, progress);
+        else await this.adapter.create(record, prepared, progress);
+        progress('binding_observe');
         await this.refresh(record.session_id);
         this.scheduleRefresh(record);
       } catch (error) {
         const current = this.doc.sessions.find(s => s.session_id === record.session_id)!;
         const code = (error as { code?: unknown }).code;
         this.saveRecord({ ...current, state: 'failed', error_code: typeof code === 'string' ? code : 'SESSION_LAUNCH_FAILED',
+          launch_diagnostics: current.launch_diagnostics ? launchFailure(current.launch_diagnostics, error, typeof code === 'string' ? code : 'SESSION_LAUNCH_FAILED') : undefined,
           restore_diagnostics: error instanceof NativeResumeOwnerError ? { ...structuredClone(error.diagnostics), operation_id: current.operation_id } : undefined,
           updated_at: Date.now() });
       }
@@ -173,10 +200,23 @@ export class IntegrationSessions {
     return structuredClone({ session_id: record.session_id, operation_id: record.operation_id,
       state: record.state, error_code: record.error_code, diagnostics: record.restore_diagnostics ?? null });
   }
-  assertRuntimeMessage(id: string): void { assertMessageRuntime(this.doc.sessions.find(s => s.session_id === id)); }
+  launchDiagnostics(id: string) {
+    const record = this.doc.sessions.find(s => s.session_id === id);
+    if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Integration session does not exist', 404);
+    return structuredClone({ launch_diagnostics: record.launch_diagnostics ?? null,
+      launch_diagnostics_history: record.launch_diagnostics_history ?? [] });
+  }
+  assertRuntimeMessage(id: string): void {
+    const record = this.doc.sessions.find(s => s.session_id === id);
+    if (this.coldRetries.has(id) || record?.cold_retry_pending) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Cold retry must finish or be reconciled before sending', 409);
+    assertMessageRuntime(record);
+    // Durable, conservative latch before admission; even a later enqueue
+    // failure cannot make a previously attempted business request disappear.
+    if (record && !record.message_history_seen) this.saveRecord({ ...record, message_history_seen: true });
+  }
   assertMessageTarget(principal: IntegrationPrincipal, id: string): void {
     const record = this.doc.sessions.find(s => s.session_id === id && s.group_id === principal.groupId);
-    assertMessageRuntime(record);
+    if (record) this.assertRuntimeMessage(id);
   }
   private async mutate(principal: IntegrationPrincipal, key: string, input: unknown, action: () => Promise<IntegrationSession>): Promise<IntegrationSession> {
     const request = this.request(principal, key, input);
@@ -201,6 +241,43 @@ export class IntegrationSessions {
   async restore(principal: IntegrationPrincipal, id: string, key: string): Promise<IntegrationSession> {
     return this.mutate(principal, key, ['restore', id], () => this.lifecycle.run(id, () => this.restoreOnce(principal, id, key)));
   }
+  async retryCold(principal: IntegrationPrincipal, id: string, generation: number, key: string): Promise<IntegrationSession> {
+    return this.mutate(principal, key, ['retry-cold', id, generation], () => this.lifecycle.run(id, async () => {
+      const request = this.request(principal, key, ['retry-cold', id, generation]);
+      if (request.previous) return this.replayRequest(principal, id, request.previous);
+      if (!this.adapter.retryCold || !this.adapter.messageHistory) integrationError('SESSION_COLD_RETRY_UNSUPPORTED', 'Runtime adapter does not support verified cold retry', 409);
+      if (this.pending.has(id)) integrationError('SESSION_OPERATION_IN_PROGRESS', 'Launch is in progress', 409);
+      this.coldRetries.add(id);
+      try {
+        const record = await this.get(principal, id);
+        assertReleaseGeneration(record, generation);
+        if (record.cold_retry_pending || record.operation_uncertain) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Reconcile prior lifecycle outcome before cold retry', 409);
+        if (record.agent_native_session_id) integrationError('SESSION_COLD_RETRY_NATIVE_BOUND', 'Use exact native restore for a bound session', 409);
+        if (record.state !== 'failed') integrationError('SESSION_COLD_RETRY_NOT_FAILED', 'Only failed unbound cold starts can be retried', 409);
+        const history = this.adapter.messageHistory(id);
+        if (history === null) integrationError('SESSION_MESSAGE_HISTORY_UNCONFIRMED', 'Message history cannot be verified', 409);
+        if (record.message_history_seen || history || this.adapter.pendingMessages?.(id)) integrationError('SESSION_MESSAGE_HISTORY_PRESENT', 'Cold retry refuses any TD business message history or attempted admission', 409);
+        const authorized = principal.launchProfiles.find(p => p.id === record.launch_profile);
+        if (!authorized) integrationError('LAUNCH_PROFILE_DENIED', 'Original launch profile is no longer authorized', 403);
+        permittedCwd(authorized, record.cwd); permittedCwd(record.profile, record.cwd);
+        if (!record.resume_configuration_fingerprint) integrationError('RESUME_CONFIGURATION_UNCONFIRMED', 'Administrator must confirm the launcher/plugin fingerprint', 409);
+        if (record.resume_configuration_fingerprint !== await resumeConfigurationFingerprint(record, this.adapter)) integrationError('RESUME_CONFIGURATION_CHANGED', 'Launcher/plugin configuration changed', 409);
+        const observed = await this.adapter.inspect(record);
+        if (!record.terminal_binding || !observed.exists || observed.running || !observed.shell || observed.nativeId) integrationError('SESSION_COLD_RETRY_RUNTIME_UNCONFIRMED', 'Retry requires the exact original, exited foreground shell', 409);
+        record.launch_diagnostics_history = [...(record.launch_diagnostics_history ?? []), ...(record.launch_diagnostics ? [record.launch_diagnostics] : [])].slice(-16);
+        record.generation = generation + 1; record.operation_id = randomUUID(); record.state = 'starting'; record.error_code = null;
+        record.cold_retry_pending = true; record.cold_retry_count = (record.cold_retry_count ?? 0) + 1;
+        record.runtime_present = true; record.launch_submitted = false; record.updated_at = Date.now(); record.deadline = Date.now() + this.bindingTimeout;
+        record.restore_diagnostics = undefined; record.startup_input = startupInput(record, Date.now());
+        record.launch_diagnostics = beginLaunchDiagnostics(record.operation_id, record.generation, 'cold_retry');
+        this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
+        try { this.saveRecord(record); } catch (error) { delete this.doc.requests[request.scoped]; throw error; }
+        const result = await this.launch(record, false, true);
+        result.cold_retry_pending = false; this.saveRecord(result);
+        return result;
+      } finally { this.coldRetries.delete(id); }
+    }));
+  }
   private async restoreOnce(principal: IntegrationPrincipal, id: string, idempotencyKey: string): Promise<IntegrationSession> {
     const request = this.request(principal, idempotencyKey, ['restore', id]);
     if (request.previous) return this.replayRequest(principal, id, request.previous);
@@ -208,6 +285,7 @@ export class IntegrationSessions {
     let releaseNative: (() => void) | undefined;
     try {
       const record = await this.get(principal, id);
+      if (record.cold_retry_pending) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Reconcile the cold retry before native restore', 409);
       if (!record.agent_native_session_id) integrationError('NATIVE_SESSION_ID_MISSING', 'An exact native session binding is required', 409);
       // Recheck the current grant and actual directories; restore uses the
       // original profile snapshot, never changed model or wrapper defaults.
@@ -232,6 +310,8 @@ export class IntegrationSessions {
       record.runtime_present = observed.exists;
       record.state = 'restoring'; record.error_code = null; record.operation_id = randomUUID(); record.deadline = Date.now() + this.bindingTimeout; record.updated_at = Date.now();
       record.restore_diagnostics = undefined;
+      record.launch_diagnostics_history = [...(record.launch_diagnostics_history ?? []), ...(record.launch_diagnostics ? [record.launch_diagnostics] : [])].slice(-16);
+      record.launch_diagnostics = beginLaunchDiagnostics(record.operation_id, record.generation, 'native_restore');
       if (!record.startup_input_disabled && !record.profile.startupInput && !record.startup_condition) record.startup_condition = structuredClone(principal.launchProfiles.find(profile => profile.id === record.launch_profile)?.startupInput);
       record.startup_input = startupInput(record, Date.now());
       this.doc.requests[request.scoped] = { hash: request.hash, sessionId: id, operationId: record.operation_id, generation: record.generation };
@@ -312,6 +392,7 @@ export class IntegrationSessions {
   }
   private async refresh(id: string): Promise<void> {
     const record = structuredClone(this.doc.sessions.find(s => s.session_id === id)); if (!record) return;
+    if (record.cold_retry_pending && (this.lifecycle.active(id) || this.pending.has(id))) return;
     if (record.state === 'released' || record.state === 'releasing' || record.operation_uncertain) {
       if (this.lifecycle.active(id)) return;
       try {
@@ -338,7 +419,9 @@ export class IntegrationSessions {
       const current = this.doc.sessions.find(s => s.session_id === id);
       if (JSON.stringify(current) !== JSON.stringify(record)) return;
       const code = (error as { code?: unknown }).code;
-      if (record.state !== 'failed' || record.error_code !== code) this.saveRecord({ ...record, state: 'failed', error_code: typeof code === 'string' ? code : 'SESSION_OBSERVATION_FAILED', updated_at: Date.now() });
+      const errorCode = typeof code === 'string' ? code : 'SESSION_OBSERVATION_FAILED';
+      if (record.state !== 'failed' || record.error_code !== errorCode) this.saveRecord({ ...record, state: 'failed', error_code: errorCode,
+        launch_diagnostics: record.launch_diagnostics ? launchFailure(record.launch_diagnostics, error, errorCode) : undefined, updated_at: Date.now() });
       return;
     }
     const next = { ...record, runtime_present: this.adapter.runtimePresent ? await this.adapter.runtimePresent(record) : observed.exists };
@@ -350,6 +433,19 @@ export class IntegrationSessions {
     } else if (observed.running) { next.state = Date.now() > record.deadline ? 'failed' : 'binding_pending'; next.error_code = next.state === 'failed' ? 'SESSION_BINDING_TIMEOUT' : null; }
     else if (record.state === 'ready') { next.state = 'failed'; next.error_code = 'AGENT_NOT_RUNNING'; }
     else if (Date.now() > record.deadline && record.state !== 'failed') { next.state = 'failed'; next.error_code = 'SESSION_BINDING_TIMEOUT'; }
+    if (record.cold_retry_pending) {
+      if (next.state === 'ready') next.cold_retry_pending = false;
+      else if (record.terminal_binding && observed.exists && !observed.running && observed.shell && !observed.nativeId) {
+        next.state = 'failed'; next.error_code = 'SESSION_COLD_RETRY_INTERRUPTED'; next.cold_retry_pending = false;
+        if (next.launch_diagnostics) next.launch_diagnostics = launchProgress(next.launch_diagnostics, 'reconciled_shell');
+      } else if (!observed.exists) { next.state = 'failed'; next.error_code = 'SESSION_COLD_RETRY_RUNTIME_UNCONFIRMED'; }
+    }
+    if (next.launch_diagnostics) {
+      next.launch_diagnostics = { ...next.launch_diagnostics, runtime_exists: observed.exists };
+      if (next.state === 'failed' && next.error_code && (record.state !== 'failed' || record.error_code !== next.error_code)) {
+        next.launch_diagnostics = launchFailure(next.launch_diagnostics, new CollaborationError(next.error_code, '', 409), next.error_code);
+      }
+    }
     if (next.startup_input && next.startup_input.state !== 'observed') {
       const condition = next.startup_condition ?? next.profile.startupInput!;
       let matched = false;
