@@ -1,3 +1,5 @@
+import { serializeTerminalInput, type TerminalInputGuard } from './terminalInput.js';
+
 /**
  * Fold a prompt into the single-channel form both tmux and agent TUIs expect:
  * every line break becomes one CR (commits a line inside the editor, and is
@@ -19,18 +21,15 @@ export function buildBracketedPasteBytes(prompt: string): string {
   return `\x1b[200~${normalizePromptForPaste(prompt)}\x1b[201~`;
 }
 
-const promptWrites = new WeakMap<object, Promise<void>>();
-
 /** Serialize TD prompt pairs per PTY. Success only records terminal writes. */
-export function writeBracketedPrompt(target: { write: (data: string) => void }, prompt: string): Promise<void> {
-  const previous = promptWrites.get(target) ?? Promise.resolve();
-  const operation = previous.catch(() => undefined).then(async () => {
+export function writeBracketedPrompt(target: { write: (data: string) => void }, prompt: string, assertCurrent?: TerminalInputGuard): Promise<void> {
+  return serializeTerminalInput(target, async () => {
+    assertCurrent?.();
     target.write(buildBracketedPasteBytes(prompt));
     await waitForPromptSubmit();
+    assertCurrent?.();
     target.write('\r');
-  }).finally(() => { if (promptWrites.get(target) === operation) promptWrites.delete(target); });
-  promptWrites.set(target, operation);
-  return operation;
+  });
 }
 
 /**

@@ -1,3 +1,4 @@
+import { captureTerminalInputGuard } from './terminalInput.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildBracketedPasteBytes, writeBracketedPrompt, canDeliverPromptToAgent } from './promptDelivery.js';
 
@@ -54,4 +55,34 @@ describe('PTY paste and submit', () => {
     expect(a.write.mock.calls).toEqual([['\x1b[200~one\x1b[201~'], ['\r'], ['\x1b[200~two\x1b[201~'], ['\r']]);
     expect(b.write).toHaveBeenCalledTimes(2);
   });
+  it('fences a queued paste when its runtime has changed and lets later input proceed', async () => {
+    vi.useFakeTimers();
+    const target = { write: vi.fn() };
+    let generation = 'old';
+    const first = writeBracketedPrompt(target, 'first');
+    const stale = writeBracketedPrompt(target, 'stale', captureTerminalInputGuard(() => generation));
+    const failure = expect(stale).rejects.toThrow('TERMINAL_INPUT_TARGET_CHANGED');
+    await vi.advanceTimersByTimeAsync(0);
+    generation = 'new';
+    const next = writeBracketedPrompt(target, 'next', captureTerminalInputGuard(() => generation));
+    await vi.advanceTimersByTimeAsync(100);
+    await Promise.all([first, failure, next]);
+    expect(target.write.mock.calls).toEqual([
+      ['\x1b[200~first\x1b[201~'], ['\r'], ['\x1b[200~next\x1b[201~'], ['\r'],
+    ]);
+  });
+
+  it('never sends an old delayed CR into a replacement runtime', async () => {
+    vi.useFakeTimers();
+    const target = { write: vi.fn() };
+    let generation = 'old';
+    const delivery = writeBracketedPrompt(target, 'old-body', captureTerminalInputGuard(() => generation));
+    const failure = expect(delivery).rejects.toThrow('TERMINAL_INPUT_TARGET_CHANGED');
+    await vi.advanceTimersByTimeAsync(49);
+    generation = 'new';
+    await vi.advanceTimersByTimeAsync(1);
+    await failure;
+    expect(target.write.mock.calls).toEqual([['\x1b[200~old-body\x1b[201~']]);
+  });
+
 });

@@ -111,6 +111,20 @@ describe.skipIf(process.platform === 'win32')('collaboration tmux transport', ()
       // submitting once — never doubled markers, never escaped text, never a
       // LF that a separator rule could rewrite.
       expect(delivered).toBe('\x1b[200~LINE1\rLINE2\rLINE3\x1b[201~\r');
+      // Real automatic messages and an explicitly requested key share one
+      // transport queue, so the key cannot land inside either paste/CR pair.
+      await Promise.all([
+        writeCollaborationTmuxPane(run, pane, 'FIRST', stdinFor(socket)),
+        sendTmuxPaneKey(run, pane, 'space'),
+        writeCollaborationTmuxPane(run, pane, 'SECOND', stdinFor(socket)),
+      ]);
+      const expected = delivered + '\x1b[200~FIRST\x1b[201~\r \x1b[200~SECOND\x1b[201~\r';
+      for (let attempt = 0; attempt < 50; attempt++) {
+        delivered = (await execFileAsync('cat', [out])).stdout;
+        if (delivered.length >= expected.length) break;
+        await new Promise(done => setTimeout(done, 20));
+      }
+      expect(delivered).toBe(expected);
     } finally {
       await run(['kill-server']).catch(() => undefined);
       await execFileAsync('rm', ['-f', out]).catch(() => undefined);

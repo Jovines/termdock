@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { captureTmuxPaneHistory, captureTmuxPaneText, detectApprovalDialog, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
+import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, detectApprovalDialog, sendTmuxPaneKey, writeCollaborationTmuxPane } from './collaborationTmuxDelivery.js';
 
 const PANE = { serverPid: 1, sessionId: '$0', paneId: '%0', panePid: 2, agentSlug: '', nativeSessionId: null };
 const IDENTITY = '1:$0:%0:2';
@@ -79,6 +79,38 @@ describe('buffer-channel delivery', () => {
       .toEqual(['load-buffer', 'set-buffer', 'load-buffer', 'set-buffer']);
   });
 
+  it('keeps requested keys and approval observation outside the paste/CR pair', async () => {
+    vi.useFakeTimers();
+    const { run, stdin, calls } = recorder({ 'capture-pane': 'requires approval' });
+    const paste = writeCollaborationTmuxPane(run, PANE, 'body', stdin);
+    const key = sendTmuxPaneKey(run, PANE, 'space');
+    const approval = approveCollaborationDialog(run, PANE);
+    await vi.advanceTimersByTimeAsync(49);
+    expect(calls.some(args => args[0] === 'send-keys' || args[0] === 'capture-pane')).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.all([paste, key, approval]);
+    expect(calls.filter(args => ['set-buffer', 'send-keys', 'capture-pane'].includes(args[0]!))
+      .map(args => args[0] === 'send-keys' ? args.at(-1) : args[0]))
+      .toEqual(['set-buffer', 'Space', 'capture-pane', 'Enter']);
+  });
+
+  it('cleans up and rejects a delayed submit after the TD launch changes', async () => {
+    vi.useFakeTimers();
+    const { run, stdin, calls } = recorder();
+    let current = true;
+    const delivery = writeCollaborationTmuxPane(run, PANE, 'body', stdin, () => {
+      if (!current) throw new Error('TERMINAL_INPUT_TARGET_CHANGED');
+    });
+    const failure = expect(delivery).rejects.toThrow('TERMINAL_INPUT_TARGET_CHANGED');
+    await vi.advanceTimersByTimeAsync(49);
+    current = false;
+    await vi.advanceTimersByTimeAsync(1);
+    await failure;
+    expect(stdin).toHaveBeenCalledTimes(1);
+    expect(calls.some(args => args[0] === 'set-buffer')).toBe(false);
+    expect(calls.at(-1)?.[0]).toBe('delete-buffer');
+  });
+
   it('loads the body on stdin and pipes it once through load-buffer + paste-buffer', async () => {
     const { run, calls, stdin, bodies } = recorder();
     await writeCollaborationTmuxPane(run, PANE, 'collab-message', stdin);
@@ -148,6 +180,23 @@ describe('buffer-channel delivery', () => {
 });
 
 describe('named keys vs pane modes', () => {
+  it('rejects a queued key when the launch changes while an earlier paste finishes', async () => {
+    vi.useFakeTimers();
+    try {
+      const { run, stdin, calls } = recorder();
+      let current = true;
+      const paste = writeCollaborationTmuxPane(run, PANE, 'body', stdin);
+      const key = sendTmuxPaneKey(run, PANE, 'enter', () => {
+        if (!current) throw new Error('TERMINAL_INPUT_TARGET_CHANGED');
+      });
+      const failure = expect(key).rejects.toThrow('TERMINAL_INPUT_TARGET_CHANGED');
+      await vi.advanceTimersByTimeAsync(49);
+      current = false;
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.all([paste, failure]);
+      expect(calls.some(args => args[0] === 'send-keys')).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
   it('sends the key when the pane is not in a mode', async () => {
     const { run, calls } = recorder({ 'display-message': '0' });
     await sendTmuxPaneKey(run, PANE, 'enter');

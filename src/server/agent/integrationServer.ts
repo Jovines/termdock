@@ -179,6 +179,7 @@ export class IntegrationRuntime {
       session_resume_configuration: true, session_lifecycle_min_version: '1.4.309',
       session_startup_input_clear: true, session_startup_input_clear_min_version: '1.4.310',
       agent_launch_process_check: true, agent_launch_process_check_min_version: '1.4.312',
+      terminal_input_runtime_fence: true, terminal_input_runtime_fence_min_version: '1.4.313',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',

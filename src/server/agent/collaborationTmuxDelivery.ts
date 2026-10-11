@@ -1,6 +1,7 @@
 import { plainCollaborationSnapshot } from './collaborationText.js';
 import type { CollaborationPaneBinding } from './collaborationRouting.js';
 import { normalizePromptForPaste, waitForPromptSubmit } from './promptDelivery.js';
+import { serializeTerminalInput, type TerminalInputGuard } from './terminalInput.js';
 
 /** Terminal-level keys a caller may inject into a member pane. Kept
  * enumerated (never freeform): driving another session's keyboard is strong
@@ -44,7 +45,9 @@ async function assertSamePane(
 /** Unique-per-process buffer name so concurrent deliveries to different panes
  *  never share (or clobber) a buffer. */
 let bufferSequence = 0;
-const paneWrites = new Map<string, Promise<void>>();
+function paneInputKey(pane: CollaborationPaneBinding): string {
+  return `${pane.serverPid}:${pane.sessionId}:${pane.paneId}:${pane.panePid}`;
+}
 
 /** Serialize TD paste/submit pairs for this exact runtime pane. */
 export function writeCollaborationTmuxPane(
@@ -52,13 +55,9 @@ export function writeCollaborationTmuxPane(
   pane: CollaborationPaneBinding,
   prompt: string,
   stdin: (args: string[], input: string) => Promise<string>,
+  assertCurrent?: TerminalInputGuard,
 ): Promise<void> {
-  const key = `${pane.serverPid}:${pane.sessionId}:${pane.paneId}:${pane.panePid}`;
-  const previous = paneWrites.get(key) ?? Promise.resolve();
-  const operation = previous.catch(() => undefined).then(() => writeTmuxPrompt(run, pane, prompt, stdin))
-    .finally(() => { if (paneWrites.get(key) === operation) paneWrites.delete(key); });
-  paneWrites.set(key, operation);
-  return operation;
+  return serializeTerminalInput(paneInputKey(pane), () => writeTmuxPrompt(run, pane, prompt, stdin, assertCurrent));
 }
 
 async function writeTmuxPrompt(
@@ -67,8 +66,10 @@ async function writeTmuxPrompt(
   prompt: string,
   /** Body travels on stdin so tmux cannot parse its semicolons/backslashes. */
   stdin: (args: string[], input: string) => Promise<string>,
+  assertCurrent?: TerminalInputGuard,
 ): Promise<void> {
   await assertSamePane(run, pane);
+  assertCurrent?.();
   // A fixed pane target is independent of the current window, keyboard focus
   // and browser presence. Delivery goes through a named tmux buffer rather
   // than `send-keys -l`: while a pane is in copy-mode, literal bytes are
@@ -100,6 +101,7 @@ async function writeTmuxPrompt(
     ], normalizePromptForPaste(prompt));
     await waitForPromptSubmit();
     await assertSamePane(run, pane);
+    assertCurrent?.();
     await run([
       // The submit key rides outside the paste block: inside it, an editor
       // inserts a pasted CR as text instead of acting on it. Pasting the bare
@@ -127,13 +129,21 @@ export async function paneInMode(
  *  unchanged. Named keys only — no freeform keystroke passthrough. Refuses
  *  while the pane is in a mode: there the key would be taken by the mode
  *  handler (Enter in copy-mode exits the user's scroll) rather than the app. */
-export async function sendTmuxPaneKey(
+export function sendTmuxPaneKey(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
   key: CollaborationPaneKey,
+  assertCurrent?: TerminalInputGuard,
+): Promise<void> {
+  return serializeTerminalInput(paneInputKey(pane), () => sendTmuxPaneKeyUnlocked(run, pane, key, assertCurrent));
+}
+
+async function sendTmuxPaneKeyUnlocked(
+  run: (args: string[]) => Promise<string>, pane: CollaborationPaneBinding, key: CollaborationPaneKey, assertCurrent?: TerminalInputGuard,
 ): Promise<void> {
   await assertSamePane(run, pane);
   if (await paneInMode(run, pane)) throw new Error('TMUX_PANE_IN_MODE');
+  assertCurrent?.();
   await run(['send-keys', '-t', pane.paneId, TMUX_KEY_NAMES[key]]);
 }
 
@@ -152,16 +162,19 @@ export async function captureTmuxPaneText(
  *  Enter (the highlighted option). Refuses unless the screen actually shows
  *  an approval prompt: driving a dialog that isn't there would only inject
  *  a stray keystroke into the agent's work. Returns false when no dialog. */
-export async function approveCollaborationDialog(
+export function approveCollaborationDialog(
   run: (args: string[]) => Promise<string>,
   pane: CollaborationPaneBinding,
+  assertCurrent?: TerminalInputGuard,
 ): Promise<boolean> {
-  const content = await captureTmuxPaneText(run, pane);
-  if (!detectApprovalDialog(content)) return false;
-  // sendTmuxPaneKey refuses in-mode panes, so a dialog-looking screen behind a
-  // user's scroll never turns Enter into copy-mode navigation.
-  await sendTmuxPaneKey(run, pane, 'enter');
-  return true;
+  return serializeTerminalInput(paneInputKey(pane), async () => {
+    assertCurrent?.();
+    const content = await captureTmuxPaneText(run, pane);
+    if (!detectApprovalDialog(content)) return false;
+    // The same input queue covers both the observation and requested key.
+    await sendTmuxPaneKeyUnlocked(run, pane, 'enter', assertCurrent);
+    return true;
+  });
 }
 
 /** History-inclusive terminal observation, without inferring consumption. */

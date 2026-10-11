@@ -183,6 +183,9 @@ Idempotency retention: 7 days. Terminal delivery, ACK and result never imply eac
 Delivery semantics: delivered records completion of terminal write calls;
 it does not guarantee receipt, submission, consumption or task completion; a timeout stops waiting, it does not cancel delivery.
 Terminal input: paste once, wait 50ms, send one unbracketed CR (Enter).
+TD automatic prompts, launch commands and drive keys share each transport's input queue.
+Waiting input is bound to its original runtime; TERMINAL_INPUT_TARGET_CHANGED
+means the terminal or TD launch changed, not that an Agent rejected the message.
 TD-started/resumed Agents: the first delivery waits for current Agent process and
 terminal binding (exact native id on resume); cold starts do not require a native id.
 AGENT_LAUNCH_PENDING/TIMEOUT leaves the body queued with no terminal write.
@@ -379,6 +382,7 @@ const DELIVERY_DIAGNOSTICS: Record<string, string> = {
   AGENT_LAUNCH_TIMEOUT: '120 秒内未观察到目标 Agent；消息保留，未盲投，不证明应用故障',
   AGENT_LAUNCH_IDENTITY_MISMATCH: '启动后的 Agent 或恢复 UUID 不匹配；消息保留，未写入',
   AGENT_LAUNCH_CHANGED: '启动操作已变化，重新检查当前启动记录',
+  TERMINAL_INPUT_TARGET_CHANGED: '等待写入时终端承载或 TD 启动代次发生变化，旧操作未继续写入新承载；请核对回执与快照',
   TMUX_PANE_IN_MODE: '目标面板处于 tmux 模式（如滚动查看），按键已跳过',
 };
 export function deliveryDiagnosticText(lastError: unknown): string {

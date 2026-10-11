@@ -134,6 +134,7 @@ import { archiveTaskWorkspace, restoreTaskWorkspace, snapshotTaskWorkspace } fro
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { writeBracketedPrompt, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
+import { captureTerminalInputGuard, waitAndWriteTerminalInput, type TerminalInputGuard } from '../agent/terminalInput.js';
 import { agentLaunchBlockReason, normalizeAgentLaunchCheck, type AgentLaunchCheck } from '../agent/agentLaunchCheck.js';
 import { prepareSupervisionEnable } from '../utils/enableSupervision.js';
 import { buildServerHealthState, dismissServerHealth } from '../utils/serverHealth.js';
@@ -473,6 +474,8 @@ interface PersistedClientSession {
   agentResume?: PersistedAgentResumeInfo | null;
   /** Pending only for an explicit TD Agent launch; removed after its first live observation. */
   agentLaunchCheck?: AgentLaunchCheck | null;
+  /** Retained after the one-time check resolves, fencing old asynchronous input. */
+  agentLaunchGeneration?: string | null;
 }
 
 interface GlobalSessionState {
@@ -1406,6 +1409,8 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
       : null,
     agentResume: normalizePersistedAgentResumeInfo(candidate.agentResume),
     agentLaunchCheck: normalizeAgentLaunchCheck(candidate.agentLaunchCheck),
+    agentLaunchGeneration: typeof candidate.agentLaunchGeneration === 'string' ? candidate.agentLaunchGeneration
+      : normalizeAgentLaunchCheck(candidate.agentLaunchCheck)?.id ?? null,
   };
 }
 
@@ -1997,14 +2002,11 @@ function searchMetadataForBackend(backendSessionId: string, session: TerminalSes
   };
 }
 
-function writeTerminalInput(session: TerminalSession, value: string): void {
-  session.ptyProcess.write(value.replace(/\r?\n/g, '\r'));
-}
-
 async function beginAgentLaunchCheck(frontendSessionId: string, agentSlug: string, nativeSessionId: string | null = null): Promise<void> {
   const record = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
   if (!record) throw new Error('SESSION_REMOVED');
-  upsertGlobalSessionRecord({ ...record, agentLaunchCheck: { id: randomUUID(), agentSlug, nativeSessionId, deadline: Date.now() + 120_000 } });
+  const id = randomUUID();
+  upsertGlobalSessionRecord({ ...record, agentLaunchGeneration: id, agentLaunchCheck: { id, agentSlug, nativeSessionId, deadline: Date.now() + 120_000 } });
   await persistGlobalStateNow();
 }
 
@@ -2021,28 +2023,66 @@ async function observeAgentLaunchCheck(record: PersistedClientSession, observed:
   return null;
 }
 
-async function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: string, attempt = 0): Promise<void> {
+function terminalInputGuard(record: PersistedClientSession): TerminalInputGuard {
+  const frontendSessionId = record.sessionId;
+  const backendSessionId = record.backendSessionId;
+  const generation = captureTerminalInputGuard(() => globalSessionState.sessions
+    .find(candidate => candidate.sessionId === frontendSessionId)?.agentLaunchGeneration ?? null,
+  record.agentLaunchGeneration ?? null);
+  const backend = backendSessionId ? terminalSessions.get(backendSessionId) : undefined;
+  return () => {
+    const latest = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
+    if (!latest) throw new Error('SESSION_REMOVED');
+    generation();
+    if (latest.backendSessionId !== backendSessionId
+      || backendSessionId && terminalSessions.get(backendSessionId) !== backend) throw new Error('TERMINAL_INPUT_TARGET_CHANGED');
+  };
+}
+
+/** tmux input always uses the pane queue, including automation and launch commands. */
+async function automaticTerminalInput(record: PersistedClientSession, assertCurrent = terminalInputGuard(record)) {
+  assertCurrent();
+  if (record.mode === 'tmux') {
+    const binding = collaborationRouting.get(record.sessionId) ?? {
+      sessionId: record.sessionId, backendSessionId: record.backendSessionId, mode: record.mode,
+      tmuxSessionName: record.tmuxSessionName, agentSlug: null, nativeSessionId: null, pane: null,
+    };
+    const inspected = await inspectCollaborationTmux(binding, null, true);
+    assertCurrent();
+    if (inspected.state !== 'ready' || !inspected.pane) throw new Error(inspected.reason ?? 'TMUX_PANE_UNAVAILABLE');
+    const pane = inspected.pane;
+    return (prompt: string) => writeCollaborationTmuxPane(runTmux, pane, prompt, runTmuxStdin, assertCurrent);
+  }
+  const backend = record.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+  if (!backend) throw new Error('SHELL_BACKEND_NOT_RUNNING');
+  return (prompt: string) => writeBracketedPrompt(backend.ptyProcess, prompt, assertCurrent);
+}
+
+async function writeAutomaticTerminalPrompt(frontendSessionId: string, prompt: string): Promise<void> {
+  const record = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
+  if (!record) throw new Error('SESSION_REMOVED');
+  const write = await automaticTerminalInput(record);
+  await write(prompt);
+}
+
+async function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: string): Promise<void> {
   const session = terminalSessions.get(backendSessionId);
-  if (!session) return;
   const record = globalSessionState.sessions.find(candidate => candidate.backendSessionId === backendSessionId);
-  if (record?.agentLaunchCheck) {
+  if (!session || !record) throw new Error('SHELL_BACKEND_NOT_RUNNING');
+  const assertCurrent = terminalInputGuard(record);
+  const write = await automaticTerminalInput(record, assertCurrent);
+  await waitAndWriteTerminalInput({ assertCurrent, write: () => write(prompt), ready: async attempt => {
+    const latest = globalSessionState.sessions.find(candidate => candidate.sessionId === record.sessionId)!;
+    if (!latest.agentLaunchCheck) return canDeliverPromptToAgent(session) || attempt >= 60;
     await refreshCollaborationAgentIdentity(backendSessionId, session, true);
+    assertCurrent();
     const agent = detectAgentFromCommand(session.activeProgram?.rawArgs ?? session.activeProgram?.command ?? '', agentCustomCommands());
     const nativeSessionId = agent && session.activeProgram?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(session.activeProgram.rawArgs)) : null;
-    const blocked = await observeAgentLaunchCheck(record, { agentSlug: agent?.slug ?? null, nativeSessionId });
-    if (blocked) {
-      if (blocked.reason !== 'AGENT_LAUNCH_PENDING') throw new Error(blocked.reason ?? 'AGENT_LAUNCH_PENDING');
-      await new Promise(resolve => setTimeout(resolve, 250));
-      return deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1);
-    }
-    await writeBracketedPrompt(session.ptyProcess, prompt);
-    return;
-  }
-  if (canDeliverPromptToAgent(session) || attempt >= 60) {
-    void writeBracketedPrompt(session.ptyProcess, prompt).catch((error) => console.error('[automation] terminal write failed:', getErrorMessage(error)));
-    return;
-  }
-  setTimeout(() => { void deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1).catch(error => console.error('[automation] terminal write failed:', getErrorMessage(error))); }, 250);
+    const blocked = await observeAgentLaunchCheck(latest, { agentSlug: agent?.slug ?? null, nativeSessionId });
+    if (!blocked) return true;
+    if (blocked.reason !== 'AGENT_LAUNCH_PENDING') throw new Error(blocked.reason ?? 'AGENT_LAUNCH_PENDING');
+    return false;
+  } });
 }
 
 async function runAgentAutomation(automation: AgentAutomation, req?: express.Request): Promise<void> {
@@ -2057,8 +2097,7 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       frontendSessionId = record.sessionId;
       const message = automation.prompt || automation.command;
       if (!message) throw new Error('自动任务没有可发送的内容');
-      if (record.agentLaunchCheck) await deliverAutomationPromptWhenReady(record.backendSessionId!, message);
-      else await writeBracketedPrompt(backend.ptyProcess, message);
+      await deliverAutomationPromptWhenReady(record.backendSessionId!, message);
     } else {
       const request = req ?? ({} as express.Request);
       const opened = await openInventorySession(request, {
@@ -2073,14 +2112,14 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       if (automation.command) {
         const agent = detectAgentFromCommand(automation.command, agentCustomCommands());
         if (agent) await beginAgentLaunchCheck(frontendSessionId, agent.slug);
-        writeTerminalInput(backend, `${automation.command}\r`);
+        await writeAutomaticTerminalPrompt(frontendSessionId, automation.command);
       }
       if (automation.prompt) {
         if (automation.command) await deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, automation.prompt);
-        else await writeBracketedPrompt(backend.ptyProcess, automation.prompt);
+        else await writeAutomaticTerminalPrompt(frontendSessionId, automation.prompt);
       }
     }
-    automationStore.finishRun(run.id, 'success', frontendSessionId, '任务已投递');
+    automationStore.finishRun(run.id, 'success', frontendSessionId, '已粘贴到终端并发送回车');
   } catch (error) {
     automationStore.finishRun(run.id, 'failed', frontendSessionId, getErrorMessage(error));
     throw error;
@@ -2247,6 +2286,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
   if (record.tmuxSessionName?.startsWith('wt-integration-') && !integrationDeliveryGuard) return { state: 'unavailable', reason: 'INTEGRATION_RUNTIME_UNAVAILABLE' };
   const startup = await integrationDeliveryGuard?.(frontendSessionId);
   if (startup && !startup.allowed) return { state: 'recovering', reason: startup.reason ?? 'SESSION_STARTUP_INPUT_PENDING' };
+  const assertGeneration = captureTerminalInputGuard(() => globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId)?.agentLaunchGeneration ?? null, record.agentLaunchGeneration ?? null);
   let backend = resolveOrchestrationBackend(record);
   let binding = collaborationRouting.get(frontendSessionId) ?? {
     sessionId: record.sessionId, backendSessionId: null, mode: record.mode, tmuxSessionName: record.tmuxSessionName,
@@ -2254,6 +2294,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
   };
   if (binding.mode === 'tmux') {
     const inspected = await inspectCollaborationTmux(binding, undefined, false, Boolean(record.agentLaunchCheck?.nativeSessionId), Boolean(record.agentLaunchCheck));
+    assertGeneration();
     if (inspected.state !== 'ready' || !inspected.pane) return inspected;
     record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
     if (!record) return { state: 'offline', reason: 'SESSION_REMOVED_DURING_RECOVERY' };
@@ -2282,15 +2323,19 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
       backend = resolveOrchestrationBackend(record);
     }
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
+    assertGeneration();
+    const assertCurrent = terminalInputGuard(globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId)!);
     return { state: 'ready', isShell: pane.isShell, capture: async () => captureTmuxPaneText(runTmux, pinned), write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
-      await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin);
+      await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin, () => { assertGeneration(); assertCurrent(); });
       backend!.lastActivity = Date.now();
     } };
   }
   if (!backend || !binding.backendSessionId) return { state: 'offline', reason: 'SHELL_BACKEND_NOT_RUNNING' };
   await refreshCollaborationAgentIdentity(binding.backendSessionId, backend, Boolean(record.agentLaunchCheck));
+  assertGeneration();
   const target = backend;
+  const assertCurrent = terminalInputGuard(record);
   if (record.agentLaunchCheck) {
     const agent = detectAgentFromCommand(target.activeProgram?.rawArgs ?? target.activeProgram?.command ?? '', agentCustomCommands());
     const nativeSessionId = agent && target.activeProgram?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(target.activeProgram.rawArgs)) : null;
@@ -2303,7 +2348,10 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     write: async (messages) => {
     if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
     if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('SHELL_BACKEND_CHANGED');
-    await writeBracketedPrompt(target.ptyProcess, formatLocalCollaborationMessages(frontendSessionId, messages));
+    await writeBracketedPrompt(target.ptyProcess, formatLocalCollaborationMessages(frontendSessionId, messages), () => {
+      assertGeneration(); assertCurrent();
+      if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('TERMINAL_INPUT_TARGET_CHANGED');
+    });
     target.lastActivity = Date.now();
   } };
 }
@@ -2390,7 +2438,7 @@ async function spawnCollaborationAgentSession(
   });
   if (bootstrapRole) collaborationStore.setRole({ groupId: group.id, sessionId: frontendSessionId, role: bootstrapRole });
   if (profile) collaborationStore.setMemberLaunchProfile(group.id, frontendSessionId, profile);
-  writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: profile?.command ?? launcher.command })}\r`);
+  await writeAutomaticTerminalPrompt(frontendSessionId, buildCollaborationSpawnCommand({ slug: launcher.slug, command: profile?.command ?? launcher.command }));
 
   const requestedTask = typeof input.task === 'string' ? input.task.trim().slice(0, 20_000) : '';
   collaborationStore.send({
@@ -2618,8 +2666,7 @@ async function launchIntegrationTerminal(record: IntegrationSession, restoring: 
     // process starts, so its new SessionStart must supply the native binding.
     backend.agentSession = null; backend.agent = null; backend.agentResumeRecovered = false;
     await beginAgentLaunchCheck(record.session_id, record.agent_slug, restoring ? record.agent_native_session_id : null);
-    await runTmux(['send-keys', '-t', pinned.paneId, '-l', integrationLaunchCommand(record, restoring)]);
-    await runTmux(['send-keys', '-t', pinned.paneId, 'Enter']);
+    await writeAutomaticTerminalPrompt(record.session_id, integrationLaunchCommand(record, restoring));
     broadcastClientState();
   });
 }
@@ -2662,7 +2709,7 @@ export function prepareCollaborationTaskWorker(task: CollaborationTask, template
       const temporary = `${launchFile}.${process.pid}.tmp`;
       await fs.promises.writeFile(temporary, JSON.stringify({ sessionId: record.sessionId, backendId: opened.terminalSession.sessionId }), { mode: 0o600 });
       await fs.promises.rename(temporary, launchFile);
-      writeTerminalInput(backend, `${buildCollaborationSpawnCommand({ slug: launcher.slug, command: inheritedProfile?.command ?? launcher.command })}\r`);
+      await writeAutomaticTerminalPrompt(opened.session.sessionId, buildCollaborationSpawnCommand({ slug: launcher.slug, command: inheritedProfile?.command ?? launcher.command }));
     }
     const group = collaborationStore.getGroup(task.groupId);
     if (!group || group.deleted) throw new Error('协作组已删除，执行目录已保留');
@@ -6665,16 +6712,20 @@ router.post('/tmux/recovery/restore-all', async (_req, res) => {
     }
 
     try {
-      await tmuxLifecycle.run(`restore:${record.tmuxSessionName}`, async () => {
+      await collaborationDeliveryWorker.reconfigure(frontendSessionId, () => tmuxLifecycle.run(`restore:${record.tmuxSessionName}`, async () => {
         await prepareManagedTmuxSessionUnlocked(record.tmuxSessionName!, record.cwd!);
         const metadata = await resolveLiveTmuxMetadata(record.tmuxSessionName!);
         const foreground = metadata?.program?.toLowerCase() ?? null;
         if (foreground && !shellNamesBackend.has(foreground)) {
           throw new Error(`pane is busy with ${foreground}`);
         }
-        await runTmux(['send-keys', '-t', record.tmuxSessionName!, '-l', '--', command]);
-        await runTmux(['send-keys', '-t', record.tmuxSessionName!, 'Enter']);
-      });
+        // Explicit recovery may replace the vanished tmux pane. A pending
+        // message alone must never replace that binding.
+        const previous = collaborationRouting.get(frontendSessionId);
+        if (previous) collaborationRouting.bind({ ...previous, pane: null });
+        await beginAgentLaunchCheck(frontendSessionId, agent.slug, target.nativeSessionId);
+        await writeAutomaticTerminalPrompt(frontendSessionId, command);
+      }));
       outcomes.push({ sessionId: frontendSessionId, restored: true });
     } catch (error) {
       outcomes.push({ sessionId: frontendSessionId, restored: false, error: getErrorMessage(error) });
@@ -7249,7 +7300,7 @@ router.post('/operations/orchestration/cleanup', async (req, res) => {
 // caller, tmux-local only, and `approve` refuses unless an approval dialog is
 // actually showing (Enter on the highlighted option). The dialogs may be
 // approving any command the member agent asked for; the caller is presumed to
-// own that decision (the delivery confirm gate uses the same primitive).
+// own that decision. Ordinary delivery never invokes approval automatically.
 const DRIVE_KEYS = new Set<CollaborationPaneKey>(['enter', 'escape', 'space', 'left', 'right', 'up', 'down']);
 router.post('/operations/orchestration/drive', async (req, res) => {
   const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
@@ -7268,6 +7319,7 @@ router.post('/operations/orchestration/drive', async (req, res) => {
     return res.status(409).json({ error: '目标会话不是 tmux 会话，无法从 CLI 驱动（模式：' + (record.mode ?? 'unknown') + '）' });
   }
   const binding = collaborationRouting.get(target);
+  const assertCurrent = terminalInputGuard(record);
   let pane = binding?.pane ?? null;
   if (!pane) {
     // No pinned Agent pane: resolve the session's pane directly so a plain
@@ -7293,7 +7345,7 @@ router.post('/operations/orchestration/drive', async (req, res) => {
   }
   try {
     if (action === 'approve') {
-      const approved = await approveCollaborationDialog(runTmux, pane);
+      const approved = await approveCollaborationDialog(runTmux, pane, assertCurrent);
       if (!approved) return res.status(409).json({ ok: false, code: 'NO_APPROVAL_DIALOG', error: '目标面板当前没有显示审批对话框；未发送任何按键' });
       return res.json({ ok: true, action, sessionId: target, approved: true });
     }
@@ -7310,14 +7362,14 @@ router.post('/operations/orchestration/drive', async (req, res) => {
       if (text.length > 10_000) return res.status(400).json({ error: 'run 文本过长（上限 10000 字符）；需要更多内容请走 td collab send 投递' });
       // Same bracketed-paste write path deliveries use: one line, one submit,
       // embedded newlines stay inside the recipient's editor.
-      await writeCollaborationTmuxPane(runTmux, pane, text, runTmuxStdin);
+      await writeCollaborationTmuxPane(runTmux, pane, text, runTmuxStdin, assertCurrent);
       const snapshot = await captureTmuxPaneText(runTmux, pane);
       return res.json({ ok: true, action, sessionId: target, text, snapshot });
     }
     if (!DRIVE_KEYS.has(action as CollaborationPaneKey)) {
       return res.status(400).json({ error: `未知动作 ${action}；可用：approve|enter|escape|space|left|right|up|down|capture|run` });
     }
-    await sendTmuxPaneKey(runTmux, pane, action as CollaborationPaneKey);
+    await sendTmuxPaneKey(runTmux, pane, action as CollaborationPaneKey, assertCurrent);
     res.json({ ok: true, action, sessionId: target });
   } catch (error) {
     res.status(409).json({ ok: false, code: 'DRIVE_FAILED', error: getErrorMessage(error) });
@@ -7523,7 +7575,7 @@ router.post('/operations/execution-archives/:sessionId/restore', executionArchiv
     collaborationStore.archiveSession(record.sessionId); await persistGlobalStateNow(); broadcastClientState(); throw error;
   }
   await beginAgentLaunchCheck(record.sessionId, target.slug, target.nativeSessionId);
-  writeTerminalInput(backend, `${command}\r`);
+  await writeAutomaticTerminalPrompt(opened.session.sessionId, command);
   restoreArchivedMembership(entry, record.sessionId);
   await persistGlobalStateNow(); broadcastClientState();
   return { session: orchestrationSessionSnapshot(globalSessionState.sessions.find(item => item.sessionId === record.sessionId)!) };
@@ -8850,7 +8902,8 @@ router.post('/:sessionId/agent-resume', async (req, res) => {
     const frontend = globalSessionState.sessions.find(candidate => candidate.backendSessionId === sessionId);
     const launch = async () => {
       if (frontend) await beginAgentLaunchCheck(frontend.sessionId, target.slug, target.nativeSessionId);
-      await writeBracketedPrompt(session.ptyProcess, target.command);
+      if (frontend) await writeAutomaticTerminalPrompt(frontend.sessionId, target.command);
+      else await writeBracketedPrompt(session.ptyProcess, target.command, captureTerminalInputGuard(() => terminalSessions.get(sessionId), session));
     };
     if (frontend) await collaborationDeliveryWorker.reconfigure(frontend.sessionId, launch);
     else await launch();
