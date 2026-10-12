@@ -72,3 +72,15 @@ it('bounded keys cannot be forgotten to allow duplicate creation and existing ke
   expect(() => restarted.createEmptyLocalGroup('New', 'new')).toThrow(expect.objectContaining({ code: 'GROUP_CREATE_LIMIT' }));
   expect(restarted.createEmptyLocalGroup('Case', 'key')).toEqual(first);
 });
+
+it('a same-key retry must not ACK success while directory fsync is still failing', () => {
+  const store = new CollaborationStore(file), original = fs.fsyncSync;
+  const spy = vi.spyOn(fs, 'fsyncSync').mockImplementation(fd => { if (fs.fstatSync(fd).isDirectory()) throw new Error('directory remains unavailable'); original(fd); });
+  expect(() => store.createEmptyLocalGroup('Case', 'key')).toThrow('directory remains unavailable');
+  const created = store.list()[0];
+  expect(() => store.createEmptyLocalGroup('Case', 'key')).toThrow('directory remains unavailable');
+  expect(store.list()).toHaveLength(1); spy.mockRestore();
+  const confirm = vi.spyOn(fs, 'fsyncSync');
+  expect(store.createEmptyLocalGroup('Case', 'key')).toEqual(created);
+  expect(confirm).toHaveBeenCalledTimes(2); expect(new CollaborationStore(file).createEmptyLocalGroup('Case', 'key')).toEqual(created);
+});

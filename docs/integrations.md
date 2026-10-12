@@ -1027,10 +1027,10 @@ TD 生命周期锁不排他控制外部 tmux 命令/手工进程替换，最终�
 共享升级/业务适配由接入方后续验收；维护侧验证仅覆盖隔离测试的真实 tmux/Linux
 进程退出与源码回归。macOS 真实 close 路径尚未实机验收。
 
-## 1.4.317：管理员幂等创建空本机组
+## 1.4.317 / 1.4.318：管理员幂等创建空本机组
 
-最低 **CLI / 实际服务均为 1.4.317**，协议仍为 1。管理员回读
-`admin_local_group_create=true`、`admin_local_group_create_min_version=1.4.317`；
+最低 **CLI / 实际服务均为 1.4.318**，协议仍为 1。管理员回读
+`admin_local_group_create=true`、`admin_local_group_create_min_version=1.4.318`；
 旧服务缺少能力时 CLI 返回 `ADMIN_LOCAL_GROUP_CREATE_UNSUPPORTED`，不回退到终端
 成员来源、网页裸 HTTP 或私有文件写入。
 
@@ -1060,13 +1060,15 @@ API 名称非法返回 `INVALID_GROUP`，key 非法返回 `INVALID_IDEMPOTENCY_K
 授权、业务调度或三模型创建。**组创建与后续 principal 授权是两步操作，不是一个事务**。
 后者继续遵循已有凭据落盘、唯一 principal ID、固定授权组和拒绝静默替换规则。
 
+key在同一服务的管理员入口范围内共享，宿主应使用稳定的业务前缀避免互相碰撞。
 同服务存储中，同 key 同参数（名称规范化后）返回原创建快照，包括原 ID、空成员和
 原时间；同 key 异参返回 `IDEMPOTENCY_CONFLICT`。之后给原组加入成员或改名，不会改变
 创建快照，不能把重试响应的空 `sessionIds` 当作当前成员清单；当前名称可用 groups
 回读，成员清单沿现有组管理读接口。HTTP 回执丢失或持久写入结果不明时，保留原 key
 和名称重试对账，不要换新 key “再建一个”。
 
-文件替换前失败不会提交半个组；替换后 fsync/回执异常可能已经创建，应同键对账。
+1.4.318 补齐异常重试：同键回读前再次 durable 提交当前组和原创建记录；目录
+fsync 持续失败仍返回失败，不以缓存记录冒充成功。文件替换前失败不会提交半个组；替换后 fsync/回执异常可能已经创建，应同键对账。
 服务重启保留 key→原快照映射。原组被明确删除、变成跨服务目标或原 ID 已不存在时，
 同键返回 `GROUP_CREATE_TARGET_UNAVAILABLE`，不新建替代组；全局清理也保留该 key 的
 保留记录。创建 journal 损坏、无法可靠读取或其完整性未确认返回

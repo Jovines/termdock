@@ -287,6 +287,9 @@ export class CollaborationStore {
       if (previous.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', 'This administrator key was used for different group parameters', 409);
       const current = this.getGroup(previous.group.id);
       if (!current || current.deleted || current.federated) throw new CollaborationError('GROUP_CREATE_TARGET_UNAVAILABLE', 'Original local group was deleted or changed; this key cannot create a replacement', 409);
+      // A previous directory-fsync failure may have committed the key without
+      // confirming durability. Reconfirm the current group+key before ACK.
+      this.persist(true);
       return structuredClone(previous.group);
     }
     if (Object.keys(this.document.localGroupRequests ?? {}).length >= 2000) throw new CollaborationError('GROUP_CREATE_LIMIT', 'Administrator group creation journal has reached its 2000-record limit', 409);

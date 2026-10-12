@@ -195,7 +195,7 @@ export class IntegrationRuntime {
       session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
       session_rename: true, session_rename_min_version: '1.4.315',
       session_close: true, session_close_min_version: '1.4.315',
-      admin_local_group_create: true, admin_local_group_create_min_version: '1.4.317',
+      admin_local_group_create: true, admin_local_group_create_min_version: '1.4.318',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',

@@ -11,7 +11,7 @@ export const INTEGRATION_HELP = `td integration — local scoped integration adm
   groups | list
   group create --name <name> --idempotency-key <key>
     Administrator only; create an empty local group without a terminal source.
-    Minimum CLI/running service 1.4.317; admin_local_group_create=true.
+    Minimum CLI/running service 1.4.318; admin_local_group_create=true.
     Returns {group: original creation snapshot}; same key/parameters reuse it.
     Groups may later gain members; the snapshot is not their current membership.
     No IDs, members, federation, launch profiles or principal credentials accepted.
@@ -103,7 +103,7 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
       }
       if (!args['--name']?.trim() || !args['--idempotency-key']?.trim() || Object.keys(args).length !== 2) throw new CollaborationError('INVALID_GROUP_CREATE_REQUEST', usage, 400);
       const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
-      if (capabilities.admin_local_group_create !== true) throw new CollaborationError('ADMIN_LOCAL_GROUP_CREATE_UNSUPPORTED', 'CLI and running service must support empty local group creation (minimum 1.4.317)', 409);
+      if (capabilities.admin_local_group_create !== true) throw new CollaborationError('ADMIN_LOCAL_GROUP_CREATE_UNSUPPORTED', 'CLI and running service must support empty local group creation (minimum 1.4.318)', 409);
       write(JSON.stringify(parsed(await request(socketPath, 'POST', '/admin/groups', { name: args['--name'], idempotency_key: args['--idempotency-key'] }, headers(undefined, adminToken)))));
       return 0;
     }

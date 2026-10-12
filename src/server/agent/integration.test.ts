@@ -1064,7 +1064,7 @@ it('only local administrators can create empty groups without a terminal; body s
   expect(await f.request('POST', '/admin/groups', { ...body, name: 'Other' }, headers)).toMatchObject({ status: 409, body: { code: 'IDEMPOTENCY_CONFLICT' } });
   const groupId = a.body.group.id;
   expect(await f.request('POST', '/admin/principals', { ...policy(groupId), id: 'case-owner' }, headers)).toMatchObject({ status: 200, body: { id: 'case-owner', protocol: 1 } });
-  expect((await f.request('GET', '/admin/capabilities', undefined, headers)).body).toMatchObject({ admin_local_group_create: true, admin_local_group_create_min_version: '1.4.317' });
+  expect((await f.request('GET', '/admin/capabilities', undefined, headers)).body).toMatchObject({ admin_local_group_create: true, admin_local_group_create_min_version: '1.4.318' });
   f.messages.remove(groupId);
   expect(await f.request('POST', '/admin/groups', body, headers)).toMatchObject({ status: 409, body: { code: 'GROUP_CREATE_TARGET_UNAVAILABLE' } });
 });
