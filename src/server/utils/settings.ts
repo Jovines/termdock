@@ -55,6 +55,7 @@ export interface AndroidPanelSettings {
 export interface SettingsDoc {
   collaborationPanels: Record<string, CollaborationPanelState>;
   androidPanel: AndroidPanelSettings;
+  rightSidebarTabs: { architecture: boolean; computer: boolean };
   [key: string]: unknown;
   version: 1;
   preventSleep: boolean;
@@ -350,6 +351,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     attentionButtonEnabled: raw.attentionButtonEnabled !== false,
     collaborationPanels: normalizeCollaborationPanels(raw.collaborationPanels),
     androidPanel: normalizeAndroidPanel(raw.androidPanel),
+    rightSidebarTabs: normalizeRightSidebarTabs(raw.rightSidebarTabs),
     collaborationFloatingGroupId: typeof raw.collaborationFloatingGroupId === 'string' && raw.collaborationFloatingGroupId.trim() ? raw.collaborationFloatingGroupId.trim() : null,
     serviceSwitcherExpanded: raw.serviceSwitcherExpanded === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
@@ -917,6 +919,21 @@ export function normalizeCollaborationPanels(value: unknown, depth = 0): Record<
     result[id] = state;
   }
   return result;
+}
+
+export function normalizeRightSidebarTabs(value: unknown): SettingsDoc['rightSidebarTabs'] {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return { architecture: raw.architecture !== false, computer: raw.computer !== false };
+}
+
+export function getRightSidebarTabsSetting(): SettingsDoc['rightSidebarTabs'] { return loadSettings().rightSidebarTabs; }
+
+export function setRightSidebarTabsSetting(patch: Partial<SettingsDoc['rightSidebarTabs']>): SettingsDoc {
+  return updateSettings(settings => {
+    for (const key of ['architecture', 'computer'] as const) {
+      if (typeof patch[key] === 'boolean') settings.rightSidebarTabs[key] = patch[key];
+    }
+  });
 }
 
 export function getAndroidPanelSetting(): AndroidPanelSettings { return loadSettings().androidPanel; }

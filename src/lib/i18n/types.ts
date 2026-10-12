@@ -582,6 +582,8 @@ export type TranslationDictionary = {
     tabAndroid: string;
     tabComputer: string;
     showAndroidTab: string;
+    showArchitectureTab: string;
+    showComputerTab: string;
     inserted: string;
     copied: string;
     toggleContextDraft: string;

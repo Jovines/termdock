@@ -62,6 +62,8 @@ import {
   setCollaborationPanelSetting,
   getAndroidPanelSetting,
   setAndroidPanelSetting,
+  getRightSidebarTabsSetting,
+  setRightSidebarTabsSetting,
   normalizeAndroidPanel,
   getCollaborationFloatingGroupIdSetting,
   setCollaborationFloatingGroupIdSetting,
@@ -7949,6 +7951,7 @@ async function getSettingsPayload() {
     attentionButtonEnabled: getAttentionButtonEnabledSetting(),
     collaborationPanels: getCollaborationPanelsSetting(),
     androidPanel: getAndroidPanelSetting(),
+    rightSidebarTabs: getRightSidebarTabsSetting(),
     collaborationFloatingGroupId: getCollaborationFloatingGroupIdSetting(),
     serviceSwitcherExpanded: getServiceSwitcherExpandedSetting(),
     fileSortModes: getFileSortModesSetting(),
@@ -8108,6 +8111,9 @@ router.put('/settings', async (req, res) => {
     setNewSessionAgentSlugSetting(slug);
   }
 
+  if (body.rightSidebarTabs && typeof body.rightSidebarTabs === 'object') {
+    setRightSidebarTabsSetting(body.rightSidebarTabs);
+  }
   if (body.androidPanel && typeof body.androidPanel === 'object') {
     // 与现有设置合并后再校验：允许只更新部分字段（如仅切开关）。
     const merged = normalizeAndroidPanel({ ...getAndroidPanelSetting(), ...(body.androidPanel as Record<string, unknown>) });

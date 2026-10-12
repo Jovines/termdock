@@ -6653,6 +6653,8 @@ export function RightSidebar(
     () => useSidebarStore.getState().rightTab === 'android',
   );
   const [androidTabEnabled, setAndroidTabEnabled] = useState(false);
+  const [optionalTabs, setOptionalTabs] = useState({ architecture: true, computer: true });
+  const optionalTabChangesRef = useRef(new Set<'architecture' | 'computer'>());
   // dock 到分屏时由 App 顶层持有投屏实例，侧栏这里不再挂第二个流。
   const androidDock = useCollaborationPanelDock(state => state.docks[ANDROID_DOCK_GROUP]);
   const androidDocked = Boolean(androidDock);
@@ -7691,6 +7693,7 @@ export function RightSidebar(
   const effectiveRightTab = (() => {
     let tab = rightTab;
     if (tab === 'android' && !androidTabEnabled) tab = 'files';
+    if ((tab === 'architecture' || tab === 'computer') && !optionalTabs[tab]) tab = 'files';
     if (gitKnownUnavailable && (tab === 'git' || tab === 'diff')) tab = 'files';
     return tab;
   })();
@@ -7833,12 +7836,17 @@ export function RightSidebar(
     return () => window.clearTimeout(timer);
   }, [isOpen, androidPaneActive, hasMountedAndroidPane]);
 
-  // 「设备」Tab 的显示开关：服务端设置，跨客户端共享。
+  // 可选 Tab 的显示开关：服务端设置，跨客户端共享。
   useEffect(() => {
     let cancelled = false;
     void getSettings().then(settings => {
-      if (!cancelled && settings.androidPanel) setAndroidTabEnabled(settings.androidPanel.enabled === true);
-    }).catch(() => { /* 读取失败保持默认关闭 */ });
+      if (cancelled) return;
+      if (settings.androidPanel) setAndroidTabEnabled(settings.androidPanel.enabled === true);
+      setOptionalTabs(current => ({
+        architecture: optionalTabChangesRef.current.has('architecture') ? current.architecture : settings.rightSidebarTabs?.architecture !== false,
+        computer: optionalTabChangesRef.current.has('computer') ? current.computer : settings.rightSidebarTabs?.computer !== false,
+      }));
+    }).catch(() => { /* 读取失败保留默认显示选择 */ });
     return () => { cancelled = true; };
   }, []);
 
@@ -7847,6 +7855,14 @@ export function RightSidebar(
     if (enabled) setRightTab('android');
     else if (useSidebarStore.getState().rightTab === 'android') setRightTab('files');
     void updateSettings({ androidPanel: { enabled } }).catch(() => { /* 本地状态已切换 */ });
+  }, [setRightTab]);
+
+  const toggleOptionalTab = useCallback((tab: 'architecture' | 'computer', enabled: boolean) => {
+    optionalTabChangesRef.current.add(tab);
+    setOptionalTabs(current => ({ ...current, [tab]: enabled }));
+    if (enabled) setRightTab(tab);
+    else if (useSidebarStore.getState().rightTab === tab) setRightTab('files');
+    void updateSettings({ rightSidebarTabs: { [tab]: enabled } }).catch(() => { /* 本地状态已切换 */ });
   }, [setRightTab]);
 
   const handleFileTreeScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
@@ -11651,6 +11667,22 @@ export function RightSidebar(
             </button>
             {headerMenuOpen && (
               <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-56 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+                {(['architecture', 'computer'] as const).map(tab => (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={optionalTabs[tab]}
+                    onClick={() => toggleOptionalTab(tab, !optionalTabs[tab])}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2"
+                  >
+                    {tab === 'architecture' ? <RiNetwork size={14} className="text-muted-foreground" /> : <RiMonitor size={14} className="text-muted-foreground" />}
+                    <span className="flex-1">{t(tab === 'architecture' ? 'rightSidebar.showArchitectureTab' : 'rightSidebar.showComputerTab')}</span>
+                    <span aria-hidden="true" className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition ${optionalTabs[tab] ? 'bg-primary' : 'bg-surface-elevated'}`}>
+                      <span className={`absolute h-3 w-3 rounded-full bg-background transition-all ${optionalTabs[tab] ? 'left-3.5' : 'left-0.5'}`} />
+                    </span>
+                  </button>
+                ))}
                 <button
                   type="button"
                   role="menuitemcheckbox"
@@ -11860,12 +11892,10 @@ export function RightSidebar(
           </div>
         )}
 
-        {/* Non-Git workspaces drop the Git/Changes tabs (mobile reaches preview
-            from the file list, desktop keeps it alongside the tree) but keep Files
-            and Device so mirroring stays reachable everywhere. */}
+        {/* Non-Git workspaces drop Git/Changes; optional tabs follow saved visibility. */}
         <div
           className="mt-2 grid gap-0.5 rounded-md bg-surface-2 p-0.5"
-          style={{ gridTemplateColumns: `repeat(${(gitKnownUnavailable ? 3 : 5) + (androidTabEnabled ? 1 : 0)}, minmax(0, 1fr))` }}
+          style={{ gridTemplateColumns: `repeat(${(gitKnownUnavailable ? 1 : 3) + Number(optionalTabs.architecture) + Number(optionalTabs.computer) + Number(androidTabEnabled)}, minmax(0, 1fr))` }}
         >
           {!gitKnownUnavailable && (
             <>
@@ -11910,15 +11940,15 @@ export function RightSidebar(
             <RiFolder size={12} />
             {t('rightSidebar.tabFiles')}
           </button>
-          <button
+          {optionalTabs.architecture && <button
             type="button"
             onClick={(event) => handleTabClick('architecture', event)}
             className={`flex items-center justify-center gap-1 rounded px-1 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${architecturePaneActive ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-2'}`}
           >
             <RiNetwork size={12} />
             {t('architecture.tab')}
-          </button>
-          <button
+          </button>}
+          {optionalTabs.computer && <button
             type="button"
             onClick={(event) => handleTabClick('computer', event)}
             className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
@@ -11927,7 +11957,7 @@ export function RightSidebar(
           >
             <RiMonitor size={12} />
             {t('rightSidebar.tabComputer')}
-          </button>
+          </button>}
           {androidTabEnabled && (
             <button
               type="button"
@@ -12545,7 +12575,7 @@ export function RightSidebar(
           ))}
         </Pane>
 
-        <Pane active={architecturePaneActive} mounted={hasMountedArchitecturePane || (isOpen && architecturePaneActive)}>
+        <Pane active={architecturePaneActive} mounted={optionalTabs.architecture && (hasMountedArchitecturePane || (isOpen && architecturePaneActive))}>
           <Suspense fallback={<p role="status" className="p-4 text-sm text-muted-foreground">{t('architecture.loading')}</p>}>
             <ArchitecturePanel
               key={rootPath}

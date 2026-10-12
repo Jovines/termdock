@@ -565,6 +565,8 @@ export const zh: TranslationDictionary = {
     tabAndroid: '设备',
     tabComputer: '电脑',
     showAndroidTab: '显示设备 Tab',
+    showArchitectureTab: '显示架构 Tab',
+    showComputerTab: '显示电脑 Tab',
     inserted: '已插入',
     copied: '已复制',
     toggleContextDraft: '切换上下文草稿',

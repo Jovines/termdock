@@ -119,6 +119,19 @@ describe('normalizeActiveGitRepos', () => {
 });
 
 describe('settings persistence', () => {
+  it('preserves independent sidebar tab choices across reloads and partial changes', () => {
+    const file = tempSettingsPath();
+    const defaults = loadSettingsFile(file);
+    expect(defaults.rightSidebarTabs).toEqual({ architecture: true, computer: true });
+    defaults.rightSidebarTabs.architecture = false;
+    saveSettingsFile(defaults, file);
+    const reloaded = loadSettingsFile(file);
+    expect(reloaded.rightSidebarTabs).toEqual({ architecture: false, computer: true });
+    reloaded.rightSidebarTabs.computer = false;
+    saveSettingsFile(reloaded, file);
+    expect(loadSettingsFile(file).rightSidebarTabs).toEqual({ architecture: false, computer: false });
+  });
+
   it('defaults the running-session button to disabled and preserves an enabled preference', () => {
     const settingsFile = tempSettingsPath();
 

@@ -565,6 +565,8 @@ export const en: TranslationDictionary = {
     tabAndroid: 'Device',
     tabComputer: 'Mac',
     showAndroidTab: 'Show device tab',
+    showArchitectureTab: 'Show architecture tab',
+    showComputerTab: 'Show computer tab',
     inserted: 'Inserted',
     copied: 'Copied',
     toggleContextDraft: 'Toggle context draft',
