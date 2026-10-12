@@ -31,7 +31,7 @@ export function collaborationRulesAge(updatedAt: number, now = Date.now()): stri
  * names may carry them, so the render layer neutralizes them defensively;
  * user-entered names are rejected at creation instead.
  */
-export const COLLAB_NAME_FORBIDDEN = /[【】「」·\x00-\x1f\x7f]/;
+export { COLLAB_NAME_FORBIDDEN } from './collaborationProtocol.js';
 
 /** Render-safe name for shell header / per-message source lines: reserved
  * bracket and delimiter characters become spaces (they would otherwise split

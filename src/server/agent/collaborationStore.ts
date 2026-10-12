@@ -3,7 +3,7 @@ import { validateLaunchProfiles, type CollaborationLaunchProfile, type Collabora
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { COLLAB_LIMITS, CollaborationError, STATUS_RANK, canonicalShortId, drawCollaborationId, newCollaborationId, resolveIdPrefix, validateExtras, type IdResolution, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
+import { COLLAB_NAME_FORBIDDEN, COLLAB_LIMITS, CollaborationError, STATUS_RANK, canonicalShortId, drawCollaborationId, newCollaborationId, resolveIdPrefix, validateExtras, type IdResolution, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
 
 export interface CollaborationRules { text: string; version: string; updatedAt: number; updatedBy: string }
 export interface CollaborationRoleVersion { version: string; updatedAt: number }
@@ -120,6 +120,9 @@ export function terminalMessage(message: CollaborationMessage, raw = false) {
 
 interface CollaborationDocument {
   version: 2;
+  /** Atomic with the group; administrator keys are hashed, never published. */
+  localGroupRequests?: Record<string, { hash: string; group: CollaborationGroup }>;
+  localGroupRequestsComplete?: boolean;
   groups: CollaborationGroup[];
   messages: CollaborationMessage[];
   sequence?: number;
@@ -155,9 +158,10 @@ export class CollaborationStore {
       activity_observed_at: typeof observedAt === 'number' && Number.isFinite(observedAt) ? observedAt : null,
       last_peer_sync_at: Date.now(), activity_source: 'remote_terminal_output' });
   }
-  private document: CollaborationDocument = { version: 2, groups: [], messages: [], terminalHistoryComplete: true };
+  private document: CollaborationDocument = { version: 2, groups: [], messages: [], terminalHistoryComplete: true, localGroupRequestsComplete: true };
   private persistedDocument = JSON.stringify(this.document);
   private historyAvailable = true;
+  private groupCreationAvailable = true;
 
   /** `drawId` is the random source behind newCollaborationId. It is a
    *  constructor seam so tests can force a collision and prove the guard
@@ -186,6 +190,14 @@ export class CollaborationStore {
           this.document.sequence = Math.max(this.document.sequence ?? 0, message.sequence);
         }
       }
+      const requests = parsed.localGroupRequests;
+      this.groupCreationAvailable = [1, 2].includes(parsed.version ?? 0) && Array.isArray(parsed.groups)
+        && (parsed.localGroupRequestsComplete === undefined || parsed.localGroupRequestsComplete === true) && (requests === undefined || requests !== null && typeof requests === 'object' && !Array.isArray(requests)
+          && Object.entries(requests).every(([key, value]) => /^[a-f0-9]{64}$/.test(key) && value && /^[a-f0-9]{64}$/.test(value.hash)
+            && value.group && typeof value.group.id === 'string' && typeof value.group.name === 'string'
+            && Array.isArray(value.group.sessionIds) && value.group.sessionIds.length === 0 && value.group.federated === false
+            && Number.isSafeInteger(value.group.createdAt) && Number.isSafeInteger(value.group.updatedAt)));
+      this.document.localGroupRequests = this.groupCreationAvailable ? requests ?? {} : {};
       this.document.sequence = Math.max(parsed.sequence ?? 0, this.document.sequence ?? 0);
 
       this.document.idempotency = parsed.idempotency ?? {};
@@ -194,8 +206,9 @@ export class CollaborationStore {
       this.document.fragments = parsed.fragments ?? {};
       this.document.prunedThrough = parsed.prunedThrough ?? {};
       this.document.prunedSenders = parsed.prunedSenders ?? {};
-    } catch (error) { this.historyAvailable = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+    } catch (error) { this.historyAvailable = (error as NodeJS.ErrnoException).code === 'ENOENT'; this.groupCreationAvailable = this.historyAvailable; }
     this.document.terminalHistoryComplete = this.historyAvailable;
+    this.document.localGroupRequestsComplete = this.groupCreationAvailable;
     this.persistedDocument = JSON.stringify(this.document);
   }
 
@@ -257,6 +270,34 @@ export class CollaborationStore {
       : [...this.document.groups, group];
     this.persist();
     return group;
+  }
+
+  /** The administrator request and empty local group share one durable commit.
+   * No terminal identity, arbitrary membership, or federation is involved. */
+  createEmptyLocalGroup(value: unknown, key: unknown): CollaborationGroup {
+    if (typeof value !== 'string' || !value.trim() || value.length > 256 || COLLAB_NAME_FORBIDDEN.test(value)) {
+      throw new CollaborationError('INVALID_GROUP', 'name must be non-empty text up to 256 characters without forbidden group-name characters', 400);
+    }
+    if (typeof key !== 'string' || !key.trim() || key.length > 256) throw new CollaborationError('INVALID_IDEMPOTENCY_KEY', 'An explicit 1..256 character idempotency key is required', 400);
+    if (!this.groupCreationAvailable) throw new CollaborationError('GROUP_CREATION_STATE_UNCONFIRMED', 'Creation journal is unavailable; reconcile the persisted state before creating another group', 409);
+    const name = value.trim(), requestKey = crypto.createHash('sha256').update(key).digest('hex');
+    const hash = crypto.createHash('sha256').update(JSON.stringify(['empty-local-group', name])).digest('hex');
+    const previous = this.document.localGroupRequests?.[requestKey];
+    if (previous) {
+      if (previous.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', 'This administrator key was used for different group parameters', 409);
+      const current = this.getGroup(previous.group.id);
+      if (!current || current.deleted || current.federated) throw new CollaborationError('GROUP_CREATE_TARGET_UNAVAILABLE', 'Original local group was deleted or changed; this key cannot create a replacement', 409);
+      return structuredClone(previous.group);
+    }
+    if (Object.keys(this.document.localGroupRequests ?? {}).length >= 2000) throw new CollaborationError('GROUP_CREATE_LIMIT', 'Administrator group creation journal has reached its 2000-record limit', 409);
+    const now = Date.now(), group: CollaborationGroup = { id: newCollaborationId(this.takenIds(), this.drawId), name,
+      sessionIds: [], federated: false, createdAt: now, updatedAt: now };
+    this.document = { ...this.document, groups: [...this.document.groups, group], localGroupRequests: {
+      ...this.document.localGroupRequests, [requestKey]: { hash, group: structuredClone(group) } } };
+    // persist restores the last committed document on failure. A post-rename
+    // fsync failure retains the committed request so retries cannot duplicate.
+    this.persist(true);
+    return structuredClone(group);
   }
 
   setMemberLaunchProfile(groupId: string, sessionId: string, profile: CollaborationLaunchProfile): void {
@@ -398,7 +439,7 @@ export class CollaborationStore {
 
   clear(): void {
     if (this.document.groups.length === 0 && this.document.messages.length === 0) return;
-    this.document = { version: 2, groups: this.document.groups
+    this.document = { version: 2, localGroupRequests: this.document.localGroupRequests, localGroupRequestsComplete: this.groupCreationAvailable, groups: this.document.groups
       .map((group) => group.deleted ? group : ({ ...group, deleted: true, updatedAt: Math.max(Date.now(), group.updatedAt + 1) })), messages: [] };
     this.persist();
   }

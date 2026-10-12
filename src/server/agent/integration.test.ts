@@ -1051,3 +1051,41 @@ it('rename/close CLI validates required flags and fails closed against old capab
   }
   expect(calls).toEqual(['/capabilities', '/capabilities', '/sessions/id/rename', '/capabilities', '/capabilities', '/sessions/id/close']);
 });
+it('only local administrators can create empty groups without a terminal; body scope is strict and a new principal can use it', async () => {
+  const f = await runtimeFixture(), body = { name: 'Case', idempotency_key: 'case-group' };
+  const headers = { 'Content-Type': 'application/json', 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  expect(await f.request('POST', '/admin/groups', body)).toMatchObject({ status: 401, body: { code: 'INTEGRATION_ADMIN_REQUIRED' } });
+  const before = f.messages.list().length;
+  for (const extra of [{ sessionIds: [] }, { federated: true }, { id: 'chosen' }, { launchProfiles: [] }, { principal: 'bridge' }]) expect(await f.request('POST', '/admin/groups', { ...body, ...extra }, headers)).toMatchObject({ status: 400, body: { code: 'INVALID_GROUP_CREATE_REQUEST' } });
+  expect(f.messages.list()).toHaveLength(before);
+  const [a, b] = await Promise.all([f.request('POST', '/admin/groups', body, headers), f.request('POST', '/admin/groups', body, headers)]);
+  expect(a.status).toBe(200); expect(a).toEqual(b); expect(a.body).toMatchObject({ group: { name: 'Case', sessionIds: [], federated: false } });
+  expect(f.messages.list()).toHaveLength(before + 1);
+  expect(await f.request('POST', '/admin/groups', { ...body, name: 'Other' }, headers)).toMatchObject({ status: 409, body: { code: 'IDEMPOTENCY_CONFLICT' } });
+  const groupId = a.body.group.id;
+  expect(await f.request('POST', '/admin/principals', { ...policy(groupId), id: 'case-owner' }, headers)).toMatchObject({ status: 200, body: { id: 'case-owner', protocol: 1 } });
+  expect((await f.request('GET', '/admin/capabilities', undefined, headers)).body).toMatchObject({ admin_local_group_create: true, admin_local_group_create_min_version: '1.4.317' });
+  f.messages.remove(groupId);
+  expect(await f.request('POST', '/admin/groups', body, headers)).toMatchObject({ status: 409, body: { code: 'GROUP_CREATE_TARGET_UNAVAILABLE' } });
+});
+it('administrator group CLI validates scope, gates old services and uses the private socket without leaking its token', async () => {
+  const output: string[] = [], write = (line: string) => { output.push(line); };
+  const args = ['group', 'create', '--name', 'Case', '--idempotency-key', 'key'];
+  for (const bad of [['group', 'create'], [...args, '--session', 'member'], [...args, '--name', 'Other'], ['group', 'get', 'id']]) expect(await runIntegrationAdmin(bad, 59999, 'private-admin', write)).toBe(1);
+  expect(await runIntegrationAdmin(['group', 'create', '--help'], 59999, 'private-admin', write)).toBe(0); expect(output.join('')).toContain('admin_local_group_create=true');
+  let supported = false; const calls: string[] = [];
+  const server = http.createServer((req, res) => {
+    expect(req.headers['x-termdock-local-token']).toBe('private-admin'); expect(req.headers.authorization).toBeUndefined(); calls.push(req.url!);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.url === '/admin/capabilities') { res.end(JSON.stringify({ admin_local_group_create: supported })); return; }
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
+      expect(JSON.parse(raw)).toEqual({ name: 'Case', idempotency_key: 'key' }); res.end(JSON.stringify({ group: { id: 'created', name: 'Case', sessionIds: [] } }));
+    });
+  });
+  const port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  expect(await runIntegrationAdmin(args, port, 'private-admin', write)).toBe(1); expect(JSON.parse(output.at(-1)!)).toMatchObject({ code: 'ADMIN_LOCAL_GROUP_CREATE_UNSUPPORTED' });
+  expect(calls).toEqual(['/admin/capabilities']); supported = true;
+  expect(await runIntegrationAdmin(args, port, 'private-admin', write)).toBe(0); expect(JSON.parse(output.at(-1)!)).toMatchObject({ group: { id: 'created', sessionIds: [] } });
+  expect(calls).toEqual(['/admin/capabilities', '/admin/capabilities', '/admin/groups']); expect(output.join('')).not.toContain('private-admin');
+});

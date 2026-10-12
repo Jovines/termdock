@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
 
+/** Shared local group-name validation; presentation keeps its compatible export. */
+export const COLLAB_NAME_FORBIDDEN = /[【】「」·\x00-\x1f\x7f]/;
+
 /** Transport facts and application reports deliberately remain separate. */
 export const COLLAB_LIMITS = {
   message_bytes: 1_048_576,

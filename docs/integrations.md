@@ -1026,3 +1026,70 @@ TD 生命周期锁不排他控制外部 tmux 命令/手工进程替换，最终�
 永久审计存储。close 不增加 task、看板或 accepted。真实私有 TraeX 与 DevBox
 共享升级/业务适配由接入方后续验收；维护侧验证仅覆盖隔离测试的真实 tmux/Linux
 进程退出与源码回归。macOS 真实 close 路径尚未实机验收。
+
+## 1.4.317：管理员幂等创建空本机组
+
+最低 **CLI / 实际服务均为 1.4.317**，协议仍为 1。管理员回读
+`admin_local_group_create=true`、`admin_local_group_create_min_version=1.4.317`；
+旧服务缺少能力时 CLI 返回 `ADMIN_LOCAL_GROUP_CREATE_UNSUPPORTED`，不回退到终端
+成员来源、网页裸 HTTP 或私有文件写入。
+
+```sh
+td integration group create --name 'Case A' --idempotency-key case-a:group
+# 返回 {"group":{"id":"...","name":"Case A","sessionIds":[],
+#              "federated":false,"createdAt":...,"updatedAt":...}}
+td integration groups   # 回读现有本机组的id/name
+# 使用返回的group.id填入新的独立policy.groupId：
+td integration create --file case-a-policy.json --credential-file case-a-credential.json
+```
+
+本机 Unix socket 管理路由 `POST /admin/groups`，JSON 只接受
+`{name,idempotency_key}`。沿用本机管理员 credential 的鉴权与协议版本检查，由正式
+CLI 从服务状态读取管理员凭据；不要把它放在命令行、消息、日志，也不要发给 Agent。
+principal 凭据不能调用此入口（`INTEGRATION_ADMIN_REQUIRED`），没有新增 principal
+建组权限。请求不能携带成员/目标ID/federated/launchProfiles/principal 等字段，
+即使 `sessionIds=[]` 也属于多余参数，返回 `INVALID_GROUP_CREATE_REQUEST`。
+
+名称去除首尾空白，非空、最多 256 字符，沿用现有本机组的禁止字符规则（括号
+`【】「」`、间隔号 `·`、C0 控制字符及 DEL）。名称不作为唯一标识；不同 key 同名可以
+建立不同组。幂等 key 必须非空、最多 256 字符，按原字符串区分；存储中只保存其哈希。
+API 名称非法返回 `INVALID_GROUP`，key 非法返回 `INVALID_IDEMPOTENCY_KEY`。
+
+创建记录和空组写入同一个协作存储文件，以一次 durable 原子替换提交，包含文件与
+父目录 fsync。服务内同步执行，无终端/tmux/Agent 启动和正文投递；不包含 principal
+授权、业务调度或三模型创建。**组创建与后续 principal 授权是两步操作，不是一个事务**。
+后者继续遵循已有凭据落盘、唯一 principal ID、固定授权组和拒绝静默替换规则。
+
+同服务存储中，同 key 同参数（名称规范化后）返回原创建快照，包括原 ID、空成员和
+原时间；同 key 异参返回 `IDEMPOTENCY_CONFLICT`。之后给原组加入成员或改名，不会改变
+创建快照，不能把重试响应的空 `sessionIds` 当作当前成员清单；当前名称可用 groups
+回读，成员清单沿现有组管理读接口。HTTP 回执丢失或持久写入结果不明时，保留原 key
+和名称重试对账，不要换新 key “再建一个”。
+
+文件替换前失败不会提交半个组；替换后 fsync/回执异常可能已经创建，应同键对账。
+服务重启保留 key→原快照映射。原组被明确删除、变成跨服务目标或原 ID 已不存在时，
+同键返回 `GROUP_CREATE_TARGET_UNAVAILABLE`，不新建替代组；全局清理也保留该 key 的
+保留记录。创建 journal 损坏、无法可靠读取或其完整性未确认返回
+`GROUP_CREATION_STATE_UNCONFIRMED`，普通存储写入不会自动把这种情况改称“已确认”。
+此时管理员先对账/修复可信存储，不能通过换 key 绕过。
+
+每个服务存储最多保留 2,000 个此入口的创建记录（含已删除组的 key 保留记录），满时
+新 key 返回 `GROUP_CREATE_LIMIT`；已有 key 仍可回读。首版无 TTL/forget，不为腾空间
+静默删除幂等证据。这不增加会话、普通消息、事件 journal 的原保留额度；调用者负责
+组/凭据/逻辑记录预算。保证范围是唯一运行服务写入同一持久存储；不提供多个独立
+服务共享文件的分布式事务，不能降级到旧写入器后再假设幂等证据仍完整。
+
+推荐外部宿主按自身业务创建独立本机组，再用现有 integration create 授权独立
+principal，可复用相同的 launchProfiles 配置模板。已有组允许零活动成员，随后
+principal create/restore 不要求保留空管理终端。此能力不创建业务 Case、定时器、
+consumer、task 或看板任务；Case/组/principal/session/message 映射由宿主持久保存。
+
+已有 principal 的 groupId 仍不可修改（`INTEGRATION_GROUP_IMMUTABLE`）；普通成员迁组
+也不会迁移 IntegrationSession 的归属、旧消息/reply、事件或 ACK 游标。此入口不提供
+旧 Case/原会话迁移。新组独立使用新授权，已有链路保持原归属完成/关闭。
+
+事件订阅协议未改变：新 consumer 从该组保留窗口最早可见位置开始，并非“从现在”
+开始；读取不自动 ACK。当前没有公开 ready/subscribed 帧，进程启动不能当订阅完成。
+即使普通 send 早于实际订阅建立，保留期内的事实也可重放；宿主按 event_id 持久
+去重/连续 ACK，并按原 message ID/reply_to 用历史对账明确回复。heartbeat 仅是连接
+观测，不表示宿主 inbox 已落盘或业务已完成。

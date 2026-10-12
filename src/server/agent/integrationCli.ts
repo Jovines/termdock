@@ -9,6 +9,18 @@ import { getTermdockVersion } from '../utils/version.js';
 
 export const INTEGRATION_HELP = `td integration — local scoped integration administration
   groups | list
+  group create --name <name> --idempotency-key <key>
+    Administrator only; create an empty local group without a terminal source.
+    Minimum CLI/running service 1.4.317; admin_local_group_create=true.
+    Returns {group: original creation snapshot}; same key/parameters reuse it.
+    Groups may later gain members; the snapshot is not their current membership.
+    No IDs, members, federation, launch profiles or principal credentials accepted.
+    Deleted/changed targets are not recreated; preserve the key after uncertain results.
+    Errors: INVALID_GROUP, INVALID_IDEMPOTENCY_KEY, IDEMPOTENCY_CONFLICT,
+    GROUP_CREATE_TARGET_UNAVAILABLE, GROUP_CREATION_STATE_UNCONFIRMED,
+    GROUP_CREATE_LIMIT (2000 retained creation records), ADMIN_LOCAL_GROUP_CREATE_UNSUPPORTED.
+    Next authorize a new fixed-group principal using integration create; no empty
+    administrator terminal is required. Existing principal/session ownership is unchanged.
   clear-startup-input <TD-session-id> --generation <N>
     Administrator removes this session's saved screen conditions and disables
     inheritance on later restores; original identity/launch/history are preserved.
@@ -81,6 +93,20 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
     const action = argv[0] ?? 'help', options: Record<string, string> = {};
     if (action === 'help' || argv.includes('--help')) { write(INTEGRATION_HELP); return 0; }
     const socketPath = integrationSocketPath(port);
+    if (action === 'group') {
+      const args: Record<string, string> = {};
+      const usage = 'Usage: td integration group create --name <name> --idempotency-key <key>';
+      if (argv[1] !== 'create') throw new CollaborationError('INVALID_GROUP_CREATE_REQUEST', usage, 400);
+      for (let i = 2; i < argv.length; i += 2) {
+        if (!['--name', '--idempotency-key'].includes(argv[i]) || !argv[i + 1] || Object.hasOwn(args, argv[i])) throw new CollaborationError('INVALID_GROUP_CREATE_REQUEST', usage, 400);
+        args[argv[i]] = argv[i + 1];
+      }
+      if (!args['--name']?.trim() || !args['--idempotency-key']?.trim() || Object.keys(args).length !== 2) throw new CollaborationError('INVALID_GROUP_CREATE_REQUEST', usage, 400);
+      const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (capabilities.admin_local_group_create !== true) throw new CollaborationError('ADMIN_LOCAL_GROUP_CREATE_UNSUPPORTED', 'CLI and running service must support empty local group creation (minimum 1.4.317)', 409);
+      write(JSON.stringify(parsed(await request(socketPath, 'POST', '/admin/groups', { name: args['--name'], idempotency_key: args['--idempotency-key'] }, headers(undefined, adminToken)))));
+      return 0;
+    }
     if (action === 'clear-startup-input') {
       const id = argv[1];
       if (argv.length !== 4 || !id || !/^[a-zA-Z0-9._-]{1,80}$/.test(id) || argv[2] !== '--generation'

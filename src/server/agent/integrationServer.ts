@@ -59,6 +59,14 @@ export class IntegrationRuntime {
       if (!expected.length || given.length !== expected.length || !timingSafeEqual(given, expected)) integrationError('INTEGRATION_ADMIN_REQUIRED', 'Local administration credential is required', 401);
     };
     app.get('/admin/groups', run(req => { admin(req); return { groups: options.messages.list().filter(g => !g.federated).map(g => ({ id: g.id, name: g.name })) }; }));
+    app.post('/admin/groups', run(req => {
+      admin(req);
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['name', 'idempotency_key'].includes(key))) {
+        integrationError('INVALID_GROUP_CREATE_REQUEST', 'Specify only name and idempotency_key; members, federation, IDs and launch configuration are not accepted');
+      }
+      return { group: options.messages.createEmptyLocalGroup(body.name, body.idempotency_key) };
+    }));
     app.get('/admin/capabilities', run(req => { admin(req); return this.capabilities(); }));
     app.get('/admin/sessions/:id/restore-diagnostics', run(req => { admin(req); return { ...this.sessions.restoreDiagnostics(req.params.id), ...this.sessions.launchDiagnostics(req.params.id) }; }));
     app.get('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return this.sessions.resumeConfiguration(req.params.id); }));
@@ -187,6 +195,7 @@ export class IntegrationRuntime {
       session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
       session_rename: true, session_rename_min_version: '1.4.315',
       session_close: true, session_close_min_version: '1.4.315',
+      admin_local_group_create: true, admin_local_group_create_min_version: '1.4.317',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',
