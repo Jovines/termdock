@@ -65,6 +65,7 @@ import { AgentOperationsPanel } from './AgentOperationsPanel';
 import { SidebarUtilityActions } from './SidebarUtilityActions';
 import { SwipeToCloseSession } from './SwipeToCloseSession';
 import { RecoverableSessions } from './RecoverableSessions';
+import { CollaborationGroupActions } from './CollaborationGroupActions';
 
 
 interface LeftSidebarProps {
@@ -1579,6 +1580,27 @@ export function LeftSidebar(
     );
   };
 
+  const openGroupMessages = (groupId: string, fallbackSessionId?: string) => {
+    const sessionId = activeSessionId ?? fallbackSessionId;
+    if (messagePanelPending.current || !sessionId) return;
+    setNewSessionComposerOpen(false); messagePanelPending.current = true;
+    setMessagePanelBusy(groupId); setCollaborationActionError(null);
+    void openCollaborationMessagesPanel(groupId, sessionId)
+      .catch(error => setCollaborationActionError(error instanceof Error ? error.message : '消息面板打开失败，请重试'))
+      .finally(() => { messagePanelPending.current = false; setMessagePanelBusy(null); });
+  };
+  const collaborationGroupChanged = (groupId: string, next: CollaborationGroup | null) => {
+    collaborationRefreshIdRef.current += 1;
+    setRawCollaborationGroups(current => next ? current.map(group => group.id === groupId ? next : group) : current.filter(group => group.id !== groupId));
+    if (!next) {
+      if (useCollaborationNavigation.getState().groupId === groupId) useCollaborationNavigation.getState().terminal();
+      useCollaborationPanelDock.getState().setDock(groupId, null);
+      setGroupPanels(current => { const panels = { ...current }; delete panels[groupId]; return panels; });
+      requestAnimationFrame(() => activeItemRef.current?.focus({ preventScroll: true }));
+      void saveCollaborationPanel({ floatingGroupId: null }, groupId).catch(() => setCollaborationActionError('协作组已删除，面板布局保存失败，请刷新后检查。'));
+    }
+    void refreshCollaborationGroups();
+  };
   const renderCollaborationGroupItem = (
     collaboration: SidebarCollaborationGroup,
     members: SidebarSession[],
@@ -1613,7 +1635,11 @@ export function LeftSidebar(
         }`}
       >
         {renderGroupDragHandle(`移动工作组 ${collaboration.name}`, dragHandleProps)}
-        <div className="flex items-center">
+        <CollaborationGroupActions group={rawCollaborationGroups.find(group => group.id === collaboration.id) ?? collaboration}
+          collapsed={membersCollapsed} onOpen={() => { void openAgentOperations(collaboration.id); }}
+          onMessages={messagePanelBusy === null && (activeSessionId || members.length) ? () => openGroupMessages(collaboration.id, members[0]?.id) : undefined}
+          onToggleCollapsed={() => toggleGroupCollapsed(collapseKey)}
+          onChanged={next => collaborationGroupChanged(collaboration.id, next)}>
           <button type="button" aria-label={`${membersCollapsed ? '展开' : '收起'} ${collaboration.name} 的成员会话`}
             aria-expanded={!membersCollapsed} aria-controls={membersRegionId}
             title={`${membersCollapsed ? '展开' : '收起'}成员会话`}
@@ -1640,10 +1666,10 @@ export function LeftSidebar(
             disabled={messagePanelBusy !== null || !activeSessionId && !members.length}
             aria-busy={messagePanelBusy === collaboration.id}
             className="flex h-11 w-11 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-surface-elevated hover:text-primary disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary md:h-[30px] md:w-7"
-            onClick={event => { event.stopPropagation(); if (messagePanelPending.current) return; setNewSessionComposerOpen(false); messagePanelPending.current = true; setMessagePanelBusy(collaboration.id); setCollaborationActionError(null); void openCollaborationMessagesPanel(collaboration.id, activeSessionId ?? members[0]!.id).catch(error => setCollaborationActionError(error instanceof Error ? error.message : '消息面板打开失败，请重试')).finally(() => { messagePanelPending.current = false; setMessagePanelBusy(null); }); }}>
+            onClick={event => { event.stopPropagation(); openGroupMessages(collaboration.id, members[0]?.id); }}>
             {messagePanelBusy === collaboration.id ? <RefreshCw size={14} className="animate-spin" /> : <MessageCircle size={14} />}
           </button>
-        </div>
+        </CollaborationGroupActions>
         <div id={membersRegionId}>
         {!membersCollapsed && <>
         {retiredIds.length > 0 && <button type="button" aria-expanded={expandedCompleted} className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-[11px] text-muted-foreground hover:bg-surface-elevated md:min-h-8" title="展开后可查看或归档执行会话，任务结果保留。" onClick={() => setCompletedSessionsExpanded(state => ({ ...state, [collaboration.id]: !expandedCompleted }))}><RiChevronRightLine size={12} className={expandedCompleted ? 'rotate-90' : ''} />已完成的执行会话 · {retiredIds.length}</button>}

@@ -1089,3 +1089,66 @@ it('administrator group CLI validates scope, gates old services and uses the pri
   expect(await runIntegrationAdmin(args, port, 'private-admin', write)).toBe(0); expect(JSON.parse(output.at(-1)!)).toMatchObject({ group: { id: 'created', sessionIds: [] } });
   expect(calls).toEqual(['/admin/capabilities', '/admin/capabilities', '/admin/groups']); expect(output.join('')).not.toContain('private-admin');
 });
+it('administrator-only metadata rename serializes competing revisions and exposes current/applied snapshots without changing principal or runtime', async () => {
+  const f = await runtimeFixture(), group = f.group;
+  const headers = { 'Content-Type': 'application/json', 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  const route = `/admin/groups/${group.id}`, body = { name: 'Short', expected_updated_at: group.updatedAt, idempotency_key: 'rename' };
+  const principalBefore = f.runtime.store.authenticate('bridge', f.issued.token);
+  expect(await f.request('GET', route)).toMatchObject({ status: 401, body: { code: 'INTEGRATION_ADMIN_REQUIRED' } });
+  expect(await f.request('POST', `${route}/rename`, body)).toMatchObject({ status: 401, body: { code: 'INTEGRATION_ADMIN_REQUIRED' } });
+  for (const extra of [{ sessionIds: [] }, { principal: 'bridge' }, { federated: false }, { id: group.id }, { launchProfiles: [] }]) {
+    expect(await f.request('POST', `${route}/rename`, { ...body, ...extra }, headers)).toMatchObject({ status: 400, body: { code: 'INVALID_GROUP_RENAME_REQUEST' } });
+  }
+  expect(await f.request('GET', route, undefined, headers)).toEqual({ status: 200, body: { group: { id: group.id, name: group.name, updatedAt: group.updatedAt } } });
+  expect(await f.request('GET', `/admin/groups/${group.id.slice(0, -1)}`, undefined, headers)).toMatchObject({ status: 404, body: { code: 'GROUP_NOT_FOUND' } });
+  const simultaneous = await Promise.all([f.request('POST', `${route}/rename`, body, headers), f.request('POST', `${route}/rename`, body, headers)]);
+  expect(simultaneous.map(r => r.status)).toEqual([200, 200]); expect(simultaneous.map(r => r.body.replayed).sort()).toEqual([false, true]);
+  expect(simultaneous[0].body.applied).toEqual(simultaneous[1].body.applied);
+  const revision = simultaneous[0].body.group.updatedAt;
+  const competitors = await Promise.all(['Next', 'Other'].map(name => f.request('POST', `${route}/rename`, { name, expected_updated_at: revision, idempotency_key: name }, headers)));
+  expect(competitors.map(r => r.status).sort()).toEqual([200, 409]);
+  const winner = competitors.find(r => r.status === 200)!;
+  expect(competitors.find(r => r.status === 409)!.body).toMatchObject({ code: 'GROUP_CHANGED', currentUpdatedAt: winner.body.group.updatedAt });
+  const replay = await f.request('POST', `${route}/rename`, body, headers);
+  expect(replay.body).toEqual({ group: winner.body.group, applied: simultaneous[0].body.applied, replayed: true });
+  expect((await f.request('GET', '/admin/groups', undefined, headers)).body.groups).toContainEqual(winner.body.group);
+  expect(f.runtime.store.authenticate('bridge', f.issued.token)).toEqual(principalBefore);
+  expect(f.messages.getGroup(group.id)).toEqual({ ...group, name: winner.body.group.name, updatedAt: winner.body.group.updatedAt });
+  expect(f.options.sessions.create).not.toHaveBeenCalled(); expect(f.options.sessions.restore).not.toHaveBeenCalled();
+  expect((await f.request('GET', '/admin/capabilities', undefined, headers)).body).toMatchObject({ admin_local_group_rename: true, admin_local_group_rename_min_version: '1.4.319' });
+});
+it('metadata CLI gates unsupported services, validates exact arguments and preserves historical/current JSON without printing credentials', async () => {
+  const output: string[] = [], write = (line: string) => { output.push(line); };
+  const args = ['group', 'rename', 'group-id', '--name', 'Short', '--expected-updated-at', '12', '--idempotency-key', 'key'];
+  for (const bad of [['group', 'get'], ['group', 'get', 'id', '--session', 'member'], args.slice(0, -2), [...args, '--name', 'Extra'], [...args, '--federated', 'false'], ['group', 'rename', 'id', '--name', 'x', '--expected-updated-at', '1.5', '--idempotency-key', 'k']]) {
+    expect(await runIntegrationAdmin(bad, 59999, 'private-admin', write)).toBe(1);
+  }
+  expect(await runIntegrationAdmin(['group', 'rename', '--help'], 59999, 'private-admin', write)).toBe(0);
+  expect(output.join('')).toContain('applied: original committed metadata');
+  let supported = false, conflict = false; const calls: string[] = [];
+  const result = { group: { id: 'group-id', name: 'Current', updatedAt: 14 }, applied: { id: 'group-id', name: 'Short', updatedAt: 13 }, replayed: true };
+  const server = http.createServer((req, res) => {
+    calls.push(req.url!); expect(req.headers['x-termdock-local-token']).toBe('private-admin'); expect(req.headers.authorization).toBeUndefined();
+    if (conflict && req.method === 'POST') { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ code: 'GROUP_CHANGED', currentUpdatedAt: 14, error: 'Group changed', privateField: 'must-not-propagate' })); req.resume(); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.url === '/admin/capabilities') { res.end(JSON.stringify({ admin_local_group_rename: supported })); return; }
+    if (req.method === 'GET') { res.end(JSON.stringify({ group: result.group })); return; }
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
+      expect(JSON.parse(raw)).toEqual({ name: 'Short', expected_updated_at: 12, idempotency_key: 'key' }); res.end(JSON.stringify(result));
+    });
+  });
+  const port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  for (const command of [args, ['group', 'get', 'group-id']]) {
+    expect(await runIntegrationAdmin(command, port, 'private-admin', write)).toBe(1);
+    expect(JSON.parse(output.at(-1)!)).toMatchObject({ code: 'ADMIN_LOCAL_GROUP_RENAME_UNSUPPORTED' });
+  }
+  expect(calls).toEqual(['/admin/capabilities', '/admin/capabilities']); supported = true;
+  expect(await runIntegrationAdmin(args, port, 'private-admin', write)).toBe(0); expect(JSON.parse(output.at(-1)!)).toEqual(result);
+  expect(await runIntegrationAdmin(['group', 'get', 'group-id'], port, 'private-admin', write)).toBe(0); expect(JSON.parse(output.at(-1)!)).toEqual({ group: result.group });
+  expect(calls.slice(2)).toEqual(['/admin/capabilities', '/admin/groups/group-id/rename', '/admin/capabilities', '/admin/groups/group-id']);
+  conflict = true;
+  expect(await runIntegrationAdmin(args, port, 'private-admin', write)).toBe(1);
+  expect(JSON.parse(output.at(-1)!)).toEqual({ ok: false, code: 'GROUP_CHANGED', currentUpdatedAt: 14, error: 'Group changed' });
+  expect(output.join('')).not.toContain('private-admin');
+});

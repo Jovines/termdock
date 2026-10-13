@@ -1095,3 +1095,77 @@ consumer、task 或看板任务；Case/组/principal/session/message 映射由�
 即使普通 send 早于实际订阅建立，保留期内的事实也可重放；宿主按 event_id 持久
 去重/连续 ACK，并按原 message ID/reply_to 用历史对账明确回复。heartbeat 仅是连接
 观测，不表示宿主 inbox 已落盘或业务已完成。
+
+## 1.4.319：管理员查询与改名本机组
+
+最低 **CLI / 实际服务均为 1.4.319**，协议仍为 1。回读
+`admin_local_group_rename=true`、`admin_local_group_rename_min_version=1.4.319`；
+该能力同时覆盖精确查询、改名及管理员列表的 `updatedAt` 回读。旧服务缺少能力时
+CLI 返回 `ADMIN_LOCAL_GROUP_RENAME_UNSUPPORTED`，不回退到成员身份、网页接口或私有文件。
+
+```sh
+td integration group get <精确group-id>
+# {"group":{"id":"...","name":"原名称","updatedAt":1790000000000}}
+td integration group rename <精确group-id> --name '短标题' \
+  --expected-updated-at 1790000000000 --idempotency-key stable-group-rename-key
+td integration groups   # 列表保留id/name，追加updatedAt
+```
+
+沿用本机 Unix socket 管理员鉴权，无终端来源、无新 principal 权限。管理路由：
+`GET /admin/groups/:id`；`POST /admin/groups/:id/rename`，只接受
+`{name,expected_updated_at,idempotency_key}`。不接受成员、角色、principal、指定新ID、
+federated 或启动配置。组 ID 必须精确匹配，不解析前缀/名称；仅存活本机组可用。
+GET 返回最小显示元数据 `{id,name,updatedAt}`，不导出启动配置、成员创建请求或凭据。
+
+名称与空组创建复用校验：首尾 trim、非空、最多 256 字符，禁止
+`【】「」`、`·`、C0 控制字符及 DEL。key 非空、最多 256 字符，按原字符串区分并只存
+哈希。改名 key 在同一管理员服务的 **rename 操作范围**共享，与 create key 独立；
+建议使用稳定业务前缀。`expected_updated_at` 必须是非负安全整数。
+
+复用现有组 `updatedAt` 作为并发版本。实际改名严格递增，只有名称相同时是持久记录的
+no-op，不推进版本。网页或成员/配置变更也可能推进组版本；新请求不匹配当前值返回
+`GROUP_CHANGED`（409）及 `currentUpdatedAt`，没有改动或成功回执。宿主重新 get、确认
+当前内容后，再用新版本和新 key 作新的决定；不要静默覆盖刚发生的改动。
+
+返回两个独立快照，均只有 `{id,name,updatedAt}`：
+
+```json
+{
+  "group": {"id":"...","name":"当前名称","updatedAt":1790000000002},
+  "applied": {"id":"...","name":"原操作改成的名称","updatedAt":1790000000001},
+  "replayed": true
+}
+```
+
+首次成功 `replayed=false`，`group` 与 `applied` 相同；同 key、同精确组ID、同规范化名称、
+同原期望版本重试，`replayed=true`，返回原 `applied` 和 **当前** `group`。以后另有网页或
+管理员改名，旧键回读不重新执行，不撤销后来的名称/版本。原参数任意改变返回
+`IDEMPOTENCY_CONFLICT`（409）。原 create 的空组创建快照不变，也不因此创建新组。
+回执丢失或 fsync 失败时保留原全部参数/key 重试，不换 key 掩盖不确定结果。
+
+名称/版本与幂等回执在同一个协作存储中 durable 原子提交，包含文件及父目录 fsync。
+替换前失败回滚；替换后 fsync 失败可能已改名，但不能宣称成功。同键重试再次 durable
+提交当前存储以确认结果，持续失败仍返回错误；不会第二次推进版本。重启保留原回执。
+rename journal 完整性不明返回 `GROUP_RENAME_STATE_UNCONFIRMED`，普通写入/全局清理不
+解除该阻断。最多保留 2,000 条 rename 回执（删除目标的 key 也保留）；达到上限新 key
+返回 `GROUP_RENAME_LIMIT`，已有 key 可回读。没有 TTL/forget；调用者管理保留预算。
+保证范围仍是同持久存储唯一服务写入，不提供多进程共享文件事务，也不保证旧写入器
+降级后能保留新 journal。
+
+新请求目标不存在/删除返回 `GROUP_NOT_FOUND`（404），跨服务组 `GROUP_NOT_LOCAL`
+（409）；已有成功 key 的目标删除/变跨服务后重试 `GROUP_RENAME_TARGET_UNAVAILABLE`
+（409），不复活或新建替代。非法精确 ID `INVALID_GROUP_ID`，非法名称 `INVALID_GROUP`，
+非法版本 `INVALID_GROUP_VERSION`，非法 key `INVALID_IDEMPOTENCY_KEY`，多余/错误请求参数
+`INVALID_GROUP_RENAME_REQUEST`（以上 400）。当前组版本无法可靠读取/递增时
+`GROUP_STATE_UNCONFIRMED`（409）。存储 IO 失败为 `INTEGRATION_INTERNAL_ERROR`（500），
+不是成功回执；沿原键对账。
+
+只修改 `name/updatedAt`；保留组 ID、成员/角色/配置、principal 归属及凭据、
+TD/native session ID、消息/reply、事件/consumer 历史。没有 Agent 启动/恢复/终端写入、
+迁组或业务 Case/裁判逻辑。网页组列表与管理员入口读同一个 store，名称通过现有侧栏
+刷新（定时约 10 秒及焦点刷新）显示，不承诺瞬时推送，也不把名称更新当 Agent 状态。
+
+验收包含真实临时文件原子替换、file/dir fsync 失败和同键恢复、重启、旧快照回读、
+并发不同键竞争/同键重放、删除/跨服务、管理员 Unix 路由/CLI 权限及 JSON、网页列表
+回读和旧网页表单版本冲突。DevBox 业务组及真实 macOS/iOS 显示尚待接入方实机验收，
+不以源码/模拟回归代替其运行现场。

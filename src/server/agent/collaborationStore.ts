@@ -31,6 +31,8 @@ export interface CollaborationGroup extends CollaborationContext, CollaborationL
   federated?: boolean;
   deleted?: boolean;
   remoteSessions?: CollaborationRemoteSession[];
+  /** Local provisioning requests, kept separate from user-facing member roles. */
+  memberCreationKeys?: Record<string, string>;
 }
 
 /** Characters that would corrupt a role line injected into the delivery shell
@@ -49,6 +51,7 @@ export function sanitizeCollaborationRole(role: string, max = COLLAB_ROLE_MAX_CH
 
 /** Drop roles whose member has left the group; survivors keep theirs. */
 function pruneRoles(group: CollaborationGroup, sessionIds: string[]): CollaborationGroup {
+  if (group.memberCreationKeys) group = { ...group, memberCreationKeys: Object.fromEntries(Object.entries(group.memberCreationKeys).filter(([id]) => sessionIds.includes(id))) };
   if (!group.roles) return group;
   const roles = Object.fromEntries(Object.entries(group.roles).filter(([id]) => sessionIds.includes(id)));
   return Object.keys(roles).length ? { ...group, roles } : { ...group, roles: undefined };
@@ -123,6 +126,8 @@ interface CollaborationDocument {
   /** Atomic with the group; administrator keys are hashed, never published. */
   localGroupRequests?: Record<string, { hash: string; group: CollaborationGroup }>;
   localGroupRequestsComplete?: boolean;
+  localGroupRenames?: Record<string, { hash: string; applied: LocalGroupMetadata }>;
+  localGroupRenamesComplete?: boolean;
   groups: CollaborationGroup[];
   messages: CollaborationMessage[];
   sequence?: number;
@@ -137,6 +142,18 @@ interface CollaborationDocument {
 
 const MAX_MESSAGES = 2_000;
 const MESSAGE_KINDS = new Set<CollaborationMessageKind>(['message', 'ask', 'reply', 'task', 'handoff', 'done']);
+
+export interface LocalGroupMetadata { id: string; name: string; updatedAt: number }
+function localGroupName(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 256 || COLLAB_NAME_FORBIDDEN.test(value)) {
+    throw new CollaborationError('INVALID_GROUP', 'name must be non-empty text up to 256 characters without forbidden group-name characters', 400);
+  }
+  return value.trim();
+}
+function localGroupRequestKey(key: unknown): string {
+  if (typeof key !== 'string' || !key.trim() || key.length > 256) throw new CollaborationError('INVALID_IDEMPOTENCY_KEY', 'An explicit 1..256 character idempotency key is required', 400);
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
 
 export class CollaborationStore {
   onMessageQueued?: () => void;
@@ -162,6 +179,7 @@ export class CollaborationStore {
   private persistedDocument = JSON.stringify(this.document);
   private historyAvailable = true;
   private groupCreationAvailable = true;
+  private groupRenamesAvailable = true;
 
   /** `drawId` is the random source behind newCollaborationId. It is a
    *  constructor seam so tests can force a collision and prove the guard
@@ -198,6 +216,15 @@ export class CollaborationStore {
             && Array.isArray(value.group.sessionIds) && value.group.sessionIds.length === 0 && value.group.federated === false
             && Number.isSafeInteger(value.group.createdAt) && Number.isSafeInteger(value.group.updatedAt)));
       this.document.localGroupRequests = this.groupCreationAvailable ? requests ?? {} : {};
+      const renames = parsed.localGroupRenames;
+      this.groupRenamesAvailable = [1, 2].includes(parsed.version ?? 0) && Array.isArray(parsed.groups)
+        && (parsed.localGroupRenamesComplete === undefined || parsed.localGroupRenamesComplete === true)
+        && (renames === undefined || renames !== null && typeof renames === 'object' && !Array.isArray(renames)
+          && Object.entries(renames).every(([key, value]) => /^[a-f0-9]{64}$/.test(key) && value && typeof value.hash === 'string' && /^[a-f0-9]{64}$/.test(value.hash)
+            && value.applied && typeof value.applied.id === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(value.applied.id)
+            && typeof value.applied.name === 'string' && !!value.applied.name.trim() && value.applied.name.length <= 256
+            && !COLLAB_NAME_FORBIDDEN.test(value.applied.name) && Number.isSafeInteger(value.applied.updatedAt) && value.applied.updatedAt >= 0));
+      this.document.localGroupRenames = this.groupRenamesAvailable ? renames ?? {} : {};
       this.document.sequence = Math.max(parsed.sequence ?? 0, this.document.sequence ?? 0);
 
       this.document.idempotency = parsed.idempotency ?? {};
@@ -206,9 +233,10 @@ export class CollaborationStore {
       this.document.fragments = parsed.fragments ?? {};
       this.document.prunedThrough = parsed.prunedThrough ?? {};
       this.document.prunedSenders = parsed.prunedSenders ?? {};
-    } catch (error) { this.historyAvailable = (error as NodeJS.ErrnoException).code === 'ENOENT'; this.groupCreationAvailable = this.historyAvailable; }
+    } catch (error) { this.historyAvailable = (error as NodeJS.ErrnoException).code === 'ENOENT'; this.groupCreationAvailable = this.historyAvailable; this.groupRenamesAvailable = this.historyAvailable; }
     this.document.terminalHistoryComplete = this.historyAvailable;
     this.document.localGroupRequestsComplete = this.groupCreationAvailable;
+    this.document.localGroupRenamesComplete = this.groupRenamesAvailable;
     this.persistedDocument = JSON.stringify(this.document);
   }
 
@@ -275,12 +303,8 @@ export class CollaborationStore {
   /** The administrator request and empty local group share one durable commit.
    * No terminal identity, arbitrary membership, or federation is involved. */
   createEmptyLocalGroup(value: unknown, key: unknown): CollaborationGroup {
-    if (typeof value !== 'string' || !value.trim() || value.length > 256 || COLLAB_NAME_FORBIDDEN.test(value)) {
-      throw new CollaborationError('INVALID_GROUP', 'name must be non-empty text up to 256 characters without forbidden group-name characters', 400);
-    }
-    if (typeof key !== 'string' || !key.trim() || key.length > 256) throw new CollaborationError('INVALID_IDEMPOTENCY_KEY', 'An explicit 1..256 character idempotency key is required', 400);
+    const name = localGroupName(value), requestKey = localGroupRequestKey(key);
     if (!this.groupCreationAvailable) throw new CollaborationError('GROUP_CREATION_STATE_UNCONFIRMED', 'Creation journal is unavailable; reconcile the persisted state before creating another group', 409);
-    const name = value.trim(), requestKey = crypto.createHash('sha256').update(key).digest('hex');
     const hash = crypto.createHash('sha256').update(JSON.stringify(['empty-local-group', name])).digest('hex');
     const previous = this.document.localGroupRequests?.[requestKey];
     if (previous) {
@@ -303,6 +327,47 @@ export class CollaborationStore {
     return structuredClone(group);
   }
 
+  /** Exact local lookup; no prefix/name resolution or private group configuration. */
+  getLocalGroupMetadata(id: unknown): LocalGroupMetadata {
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(id)) throw new CollaborationError('INVALID_GROUP_ID', 'An exact group ID is required', 400);
+    const group = this.getGroup(id);
+    if (!group || group.deleted) throw new CollaborationError('GROUP_NOT_FOUND', 'Local group does not exist', 404);
+    if (group.federated) throw new CollaborationError('GROUP_NOT_LOCAL', 'Administrator metadata operations require a local group', 409);
+    if (!Number.isSafeInteger(group.updatedAt) || group.updatedAt < 0) throw new CollaborationError('GROUP_STATE_UNCONFIRMED', 'Group revision is unavailable', 409);
+    return { id: group.id, name: group.name, updatedAt: group.updatedAt };
+  }
+
+  /** Display metadata and its original receipt share a durable commit. */
+  renameLocalGroup(id: unknown, value: unknown, expectedUpdatedAt: unknown, key: unknown): { group: LocalGroupMetadata; applied: LocalGroupMetadata; replayed: boolean } {
+    const name = localGroupName(value), requestKey = localGroupRequestKey(key);
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(id)) throw new CollaborationError('INVALID_GROUP_ID', 'An exact group ID is required', 400);
+    if (!Number.isSafeInteger(expectedUpdatedAt) || (expectedUpdatedAt as number) < 0) throw new CollaborationError('INVALID_GROUP_VERSION', 'expected_updated_at must be a non-negative safe integer', 400);
+    if (!this.groupRenamesAvailable) throw new CollaborationError('GROUP_RENAME_STATE_UNCONFIRMED', 'Rename journal is unavailable; reconcile persisted state before renaming', 409);
+    const hash = crypto.createHash('sha256').update(JSON.stringify(['rename-local-group', id, name, expectedUpdatedAt])).digest('hex');
+    const previous = this.document.localGroupRenames?.[requestKey];
+    if (previous) {
+      if (previous.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', 'This administrator rename key was used with different parameters', 409);
+      if (previous.applied.id !== id || previous.applied.name !== name || previous.applied.updatedAt < (expectedUpdatedAt as number)) {
+        throw new CollaborationError('GROUP_RENAME_STATE_UNCONFIRMED', 'Stored rename receipt does not match its request', 409);
+      }
+      const target = this.getGroup(id);
+      if (!target || target.deleted || target.federated) throw new CollaborationError('GROUP_RENAME_TARGET_UNAVAILABLE', 'Original local rename target is unavailable; no replacement is created', 409);
+      const group = this.getLocalGroupMetadata(id);
+      this.persist(true);
+      return { group, applied: { ...previous.applied }, replayed: true };
+    }
+    const current = this.getLocalGroupMetadata(id);
+    if (current.updatedAt !== expectedUpdatedAt) throw new CollaborationError('GROUP_CHANGED', 'Group changed; read its current revision before deciding again', 409, { currentUpdatedAt: current.updatedAt });
+    if (Object.keys(this.document.localGroupRenames ?? {}).length >= 2000) throw new CollaborationError('GROUP_RENAME_LIMIT', 'Administrator rename journal has reached its 2000-record limit', 409);
+    const updatedAt = name === current.name ? current.updatedAt : Math.max(Date.now(), current.updatedAt + 1);
+    if (!Number.isSafeInteger(updatedAt)) throw new CollaborationError('GROUP_STATE_UNCONFIRMED', 'Group revision cannot advance safely', 409);
+    const applied = { id, name, updatedAt };
+    this.document = { ...this.document, groups: this.document.groups.map(group => group.id === id ? { ...group, name, updatedAt } : group),
+      localGroupRenames: { ...this.document.localGroupRenames, [requestKey]: { hash, applied } } };
+    this.persist(true);
+    return { group: { ...applied }, applied: { ...applied }, replayed: false };
+  }
+
   setMemberLaunchProfile(groupId: string, sessionId: string, profile: CollaborationLaunchProfile): void {
     const group = this.getGroup(groupId);
     if (!group || group.deleted || !group.sessionIds.includes(sessionId)) throw new CollaborationError('NOT_A_MEMBER', '会话不在协作组内', 409);
@@ -316,7 +381,7 @@ export class CollaborationStore {
    * oneself, a peer, or a federated remote session; peers can set each other's
    * roles. Roles ride the group document into federation and are dropped
    * together with the member on removal. */
-  setRole(input: { groupId: string; sessionId: string; role: string | null }): CollaborationGroup {
+  setRole(input: { groupId: string; sessionId: string; role: string | null; creationKey?: string }): CollaborationGroup {
     const group = this.getGroup(input.groupId);
     if (!group || group.deleted) throw new CollaborationError('GROUP_NOT_FOUND', '协作组已删除，请刷新列表', 404);
     if (!group.sessionIds.includes(input.sessionId)) throw new CollaborationError('NOT_A_MEMBER', '该会话不在协作组中，无法设置定位', 400);
@@ -325,6 +390,7 @@ export class CollaborationStore {
     if (role) roles[input.sessionId] = role;
     else delete roles[input.sessionId];
     const updated = { ...group, roles: Object.keys(roles).length ? roles : undefined,
+      ...(input.creationKey ? { memberCreationKeys: { ...group.memberCreationKeys, [input.sessionId]: input.creationKey } } : {}),
       roleVersions: { ...group.roleVersions, [input.sessionId]: { version: crypto.randomUUID(), updatedAt: Math.max(Date.now(), (group.roleVersions?.[input.sessionId]?.updatedAt ?? 0) + 1) } },
       updatedAt: Math.max(Date.now(), group.updatedAt + 1) };
     this.document.groups = this.document.groups.map((candidate) => candidate.id === group.id ? updated : candidate);
@@ -442,7 +508,8 @@ export class CollaborationStore {
 
   clear(): void {
     if (this.document.groups.length === 0 && this.document.messages.length === 0) return;
-    this.document = { version: 2, localGroupRequests: this.document.localGroupRequests, localGroupRequestsComplete: this.groupCreationAvailable, groups: this.document.groups
+    this.document = { version: 2, localGroupRequests: this.document.localGroupRequests, localGroupRequestsComplete: this.groupCreationAvailable,
+      localGroupRenames: this.document.localGroupRenames, localGroupRenamesComplete: this.groupRenamesAvailable, groups: this.document.groups
       .map((group) => group.deleted ? group : ({ ...group, deleted: true, updatedAt: Math.max(Date.now(), group.updatedAt + 1) })), messages: [] };
     this.persist();
   }

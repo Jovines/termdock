@@ -2395,6 +2395,7 @@ async function spawnCollaborationAgentSession(
   sourceSessionId: string | null,
   input: { agentSlug?: unknown; launchProfileId?: unknown; name?: unknown; cwd?: unknown; task?: unknown; mode?: unknown },
   bootstrapRole?: string,
+  creationKey?: string,
 ): Promise<{ group: ReturnType<CollaborationStore['save']>; session: OrchestrationSessionSnapshot }> {
   const { agentSlug, profile } = resolveCollaborationLaunch(group, input);
   const launchers = await listDetectedAgentLaunchers();
@@ -2441,7 +2442,7 @@ async function spawnCollaborationAgentSession(
     name: latestGroup.name,
     sessionIds: [...latestGroup.sessionIds, frontendSessionId],
   });
-  if (bootstrapRole) collaborationStore.setRole({ groupId: group.id, sessionId: frontendSessionId, role: bootstrapRole });
+  if (bootstrapRole) collaborationStore.setRole({ groupId: group.id, sessionId: frontendSessionId, role: bootstrapRole, creationKey });
   if (profile) collaborationStore.setMemberLaunchProfile(group.id, frontendSessionId, profile);
   await writeAutomaticTerminalPrompt(frontendSessionId, buildCollaborationSpawnCommand({ slug: launcher.slug, command: profile?.command ?? launcher.command }));
 
@@ -7170,23 +7171,27 @@ router.post('/operations/collaboration-groups/:groupId/team', async (req, res) =
     if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
     if (!group || group.deleted) return res.status(404).json({ error: '协作组不存在' });
     if (group.federated) throw new Error('跨服务组请先从成员设置添加 Agent');
+    const coordinatorSessionId = req.body?.coordinatorSessionId;
+    if (coordinatorSessionId !== undefined && coordinatorSessionId !== null && (typeof coordinatorSessionId !== 'string' || !coordinatorSessionId)) throw new Error('请选择有效的协调者');
+    const coordinatorCreationKey = req.body?.coordinatorCreationKey;
+    if (coordinatorCreationKey !== undefined && (typeof coordinatorCreationKey !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(coordinatorCreationKey))) throw new Error('协调者创建请求无效');
     const { agentSlug, profile } = resolveCollaborationLaunch(group, req.body ?? {});
     if (!(await listDetectedAgentLaunchers()).some(agent => agent.slug === agentSlug)) throw new Error('所选 Agent 当前不可用');
     if (typeof req.body?.cwd !== 'string' || !req.body.cwd.trim()) throw new Error('请选择工作目录');
     const cwd = await resolveWorkingDirectory(req, req.body.cwd);
     const previous = preparingTeams.get(group.id) ?? Promise.resolve();
-    const operation = previous.catch(() => {}).then(() => ensureTeam({ agentSlug, cwd, launchProfileKey: launchProfileKey(profile),
+    const operation = previous.catch(() => {}).then(() => ensureTeam({ agentSlug, cwd, launchProfileKey: launchProfileKey(profile), coordinatorSessionId, coordinatorCreationKey,
       members: () => {
         const current = collaborationStore.getGroup(group.id);
         if (!current || current.deleted) throw new Error('协作组已删除');
         if (profile && launchProfileKey(current.launchProfiles?.find(p => p.id === profile.id)) !== launchProfileKey(profile)) throw new Error('启动方案已变更，请重新开始协作');
         return globalSessionState.sessions.filter(record => current.sessionIds.includes(record.sessionId))
-          .map(record => ({ id: record.sessionId, cwd: record.cwd, role: current.roles?.[record.sessionId], agentSlug: orchestrationSessionSnapshot(record).agent?.slug, launchProfileKey: launchProfileKey(current.memberLaunchProfiles?.[record.sessionId]) }));
+          .map(record => ({ id: record.sessionId, cwd: record.cwd, role: current.roles?.[record.sessionId], agentSlug: orchestrationSessionSnapshot(record).agent?.slug, launchProfileKey: launchProfileKey(current.memberLaunchProfiles?.[record.sessionId]), creationKey: current.memberCreationKeys?.[record.sessionId] }));
       },
-      spawn: async role => {
+      spawn: async (role, creationKey) => {
         const current = collaborationStore.getGroup(group.id);
         if (!current || current.deleted) throw new Error('协作组已删除');
-        const result = await spawnCollaborationAgentSession(req, current, null, { agentSlug, launchProfileId: profile?.id ?? '', cwd, mode: 'tmux', name: role.startsWith('自动协调者') ? `协调 ${group.name}` : `执行与评审 ${group.name}` }, role);
+        const result = await spawnCollaborationAgentSession(req, current, null, { agentSlug, launchProfileId: profile?.id ?? '', cwd, mode: 'tmux', name: role.startsWith('自动协调者') ? `协调 ${group.name}` : `执行与评审 ${group.name}` }, role, creationKey);
         return result.session.sessionId;
       },
     }));

@@ -9,6 +9,24 @@ import { getTermdockVersion } from '../utils/version.js';
 
 export const INTEGRATION_HELP = `td integration — local scoped integration administration
   groups | list
+  group get <exact-group-id>
+  group rename <exact-group-id> --name <name> --expected-updated-at <N> --idempotency-key <key>
+    Administrator only; minimum CLI/running service 1.4.319;
+    admin_local_group_rename=true covers get/rename and group revision reads.
+    get returns {group:{id,name,updatedAt}}; groups also returns updatedAt.
+    rename returns {group: current metadata, applied: original committed metadata,
+    replayed: boolean}. Only name/updatedAt change; no membership, principal,
+    terminal, launch, message, history or creation-snapshot changes.
+    Read the revision first. GROUP_CHANGED returns currentUpdatedAt; reread and
+    decide again with a new key. Retry uncertain results with the original key
+    and all original parameters; a later rename is never overwritten by replay.
+    Same normalized name is a recorded no-op. Keys are retained, capped at 2000.
+    No terminal source, principal grant, prefix/name lookup or federated group.
+    Errors: INVALID_GROUP_RENAME_REQUEST, INVALID_GROUP_ID, INVALID_GROUP,
+    INVALID_GROUP_VERSION, INVALID_IDEMPOTENCY_KEY, IDEMPOTENCY_CONFLICT,
+    GROUP_CHANGED, GROUP_NOT_FOUND, GROUP_NOT_LOCAL, GROUP_STATE_UNCONFIRMED,
+    GROUP_RENAME_TARGET_UNAVAILABLE, GROUP_RENAME_STATE_UNCONFIRMED,
+    GROUP_RENAME_LIMIT, ADMIN_LOCAL_GROUP_RENAME_UNSUPPORTED.
   group create --name <name> --idempotency-key <key>
     Administrator only; create an empty local group without a terminal source.
     Minimum CLI/running service 1.4.318; admin_local_group_create=true.
@@ -84,7 +102,8 @@ function request(socketPath: string, method: string, route: string, body: unknow
 }
 function parsed(response: { statusCode: number; body: string }): Record<string, any> {
   const result = JSON.parse(response.body);
-  if (response.statusCode >= 300) throw new CollaborationError(result.code ?? 'INTEGRATION_REQUEST_FAILED', result.error ?? 'Integration request failed', response.statusCode);
+  if (response.statusCode >= 300) throw new CollaborationError(result.code ?? 'INTEGRATION_REQUEST_FAILED', result.error ?? 'Integration request failed', response.statusCode,
+    result.code === 'GROUP_CHANGED' && Number.isSafeInteger(result.currentUpdatedAt) ? { currentUpdatedAt: result.currentUpdatedAt } : undefined);
   return result;
 }
 export async function runIntegrationAdmin(argv: string[], port: number, adminToken: string, write: (line: string) => void): Promise<number> {
@@ -93,6 +112,25 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
     const action = argv[0] ?? 'help', options: Record<string, string> = {};
     if (action === 'help' || argv.includes('--help')) { write(INTEGRATION_HELP); return 0; }
     const socketPath = integrationSocketPath(port);
+    if (action === 'group' && ['get', 'rename'].includes(argv[1])) {
+      const operation = argv[1], id = argv[2], args: Record<string, string> = {};
+      const usage = 'Usage: td integration group get <exact-id> | group rename <exact-id> --name <name> --expected-updated-at <N> --idempotency-key <key>';
+      if (!id || !/^[a-zA-Z0-9._-]{1,80}$/.test(id)) throw new CollaborationError('INVALID_GROUP_ID', usage, 400);
+      if (operation === 'get' && argv.length !== 3) throw new CollaborationError('INVALID_GROUP_RENAME_REQUEST', usage, 400);
+      if (operation === 'rename') {
+        for (let i = 3; i < argv.length; i += 2) {
+          if (!['--name', '--expected-updated-at', '--idempotency-key'].includes(argv[i]) || !argv[i + 1] || Object.hasOwn(args, argv[i])) throw new CollaborationError('INVALID_GROUP_RENAME_REQUEST', usage, 400);
+          args[argv[i]] = argv[i + 1];
+        }
+        if (Object.keys(args).length !== 3 || !args['--name']?.trim() || !args['--idempotency-key']?.trim()) throw new CollaborationError('INVALID_GROUP_RENAME_REQUEST', usage, 400);
+        if (!/^(0|[1-9][0-9]*)$/.test(args['--expected-updated-at']) || !Number.isSafeInteger(Number(args['--expected-updated-at']))) throw new CollaborationError('INVALID_GROUP_VERSION', usage, 400);
+      }
+      const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (capabilities.admin_local_group_rename !== true) throw new CollaborationError('ADMIN_LOCAL_GROUP_RENAME_UNSUPPORTED', 'CLI and running service must support administrator group metadata operations (minimum 1.4.319)', 409);
+      const body = operation === 'rename' ? { name: args['--name'], expected_updated_at: Number(args['--expected-updated-at']), idempotency_key: args['--idempotency-key'] } : undefined;
+      write(JSON.stringify(parsed(await request(socketPath, body ? 'POST' : 'GET', `/admin/groups/${encodeURIComponent(id)}${body ? '/rename' : ''}`, body, headers(undefined, adminToken)))));
+      return 0;
+    }
     if (action === 'group') {
       const args: Record<string, string> = {};
       const usage = 'Usage: td integration group create --name <name> --idempotency-key <key>';
@@ -169,7 +207,9 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
     throw new Error('Unknown integration operation');
   } catch (error) {
     if (reserved) fs.unlinkSync(reserved);
-    write(JSON.stringify({ ok: false, code: error instanceof CollaborationError ? error.code : 'INTEGRATION_ADMIN_ERROR', error: error instanceof CollaborationError ? error.message : 'Integration administration failed; inspect arguments and private file paths' })); return 1;
+    write(JSON.stringify({ ok: false, code: error instanceof CollaborationError ? error.code : 'INTEGRATION_ADMIN_ERROR',
+      ...(error instanceof CollaborationError && error.code === 'GROUP_CHANGED' ? error.details : {}),
+      error: error instanceof CollaborationError ? error.message : 'Integration administration failed; inspect arguments and private file paths' })); return 1;
   }
 }
 export async function revokeIntegration(id: string, port: number, adminToken: string, write: (line: string) => void): Promise<number> {

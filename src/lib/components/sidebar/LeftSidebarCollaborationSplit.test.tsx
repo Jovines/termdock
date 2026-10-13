@@ -405,3 +405,33 @@ it('opening the standalone board preserves the existing message split', async ()
   expect(useCollaborationPanelDock.getState().docks.team).toEqual({ sessionId: 'a', side: 'right' });
   expect(useCollaborationNavigation.getState().groupId).toBe('team');
 });
+
+it('deletes a group from its header, retains terminals and clears only its workspace and dock after success', async () => {
+  const handlers = await setup();
+  useCollaborationNavigation.getState().open('team');
+  useCollaborationPanelDock.getState().setDock('team', { sessionId: 'a', side: 'right' });
+  useCollaborationPanelDock.getState().setDock('other', { sessionId: 'd', side: 'bottom' });
+  fireEvent.contextMenu(screen.getByRole('button', { name: '打开协作工作区：Release team' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: '删除协作组' }));
+  expect(mocks.remove).not.toHaveBeenCalled();
+  mocks.list.mockResolvedValue({ groups: [] });
+  fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Agent 工作组：Release team' })).toBeNull());
+  expect(mocks.remove).toHaveBeenCalledWith('team', 1);
+  expect(useCollaborationNavigation.getState().groupId).toBeNull();
+  expect(useCollaborationPanelDock.getState().docks.team).toBeUndefined();
+  expect(useCollaborationPanelDock.getState().docks.other).toEqual({ sessionId: 'd', side: 'bottom' });
+  expect(screen.getByRole('button', { name: 'A' })).toBeTruthy();
+  expect(handlers.onCloseSession).not.toHaveBeenCalled(); expect(handlers.onRemoveFromSplit).not.toHaveBeenCalled();
+});
+it('offers the same context actions for an empty group and preserves another open workspace', async () => {
+  const handlers = await setup(false, []);
+  useCollaborationNavigation.getState().open('other');
+  fireEvent.click(screen.getByRole('button', { name: '协作组操作：Release team' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: '删除协作组' }));
+  mocks.list.mockResolvedValue({ groups: [] });
+  fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+  await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith('team', 1));
+  expect(useCollaborationNavigation.getState().groupId).toBe('other');
+  expect(handlers.onCloseSession).not.toHaveBeenCalled();
+});

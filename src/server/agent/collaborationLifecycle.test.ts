@@ -60,3 +60,31 @@ it('only archives completed isolated workers and protects active tasks, reviewer
  for(const protectedTask of [{...task,status:'open'},{...task,coordinator:member},{...task,workflow:{...task.workflow,reviewers:[member]}},{...task,workspace:undefined}]) expect(()=>completedExecution([protectedTask as CollaborationTask],'local','worker')).toThrow();
  expect(()=>completedExecution([task],'another','worker')).toThrow();
 });
+
+it('honors an existing coordinator of another Agent type and never assigns it as its own reviewer', async () => {
+ const members = [{id:'selected',agentSlug:'claude',cwd:'/other',role:'自动执行与评审 (codex)'},{id:'worker',agentSlug:'codex',cwd:'/project',role:''}];
+ const team = await ensureTeam({members:()=>members,coordinatorSessionId:'selected',agentSlug:'codex',cwd:'/project',spawn:async()=>{throw Error('unexpected launch')}});
+ expect(team).toEqual({coordinatorSessionId:'selected',reviewerSessionIds:['worker']});
+ await expect(ensureTeam({members:()=>members,coordinatorSessionId:'missing',agentSlug:'codex',cwd:'/project',spawn:async()=>{throw Error('unexpected launch')}})).rejects.toThrow('所选协调者');
+});
+it('creates a coordinator on an explicit new request and reuses only that request across retries and restarts', async () => {
+ const members: Array<{id:string;agentSlug:string;cwd:string;role:string;creationKey?:string}> = [{id:'old-lead',agentSlug:'codex',cwd:'/project',role:'自动协调者 (codex)'},{id:'worker',agentSlug:'codex',cwd:'/project',role:'自动执行与评审 (codex)'}];
+ const spawned:string[]=[];
+ const options = {members:()=>members,coordinatorSessionId:null,coordinatorCreationKey:'request-one',agentSlug:'codex',cwd:'/project',spawn:async(role:string,creationKey?:string)=>{const id=`new-${spawned.length}`;spawned.push(role);members.push({id,agentSlug:'codex',cwd:'/project',role,creationKey});return id;}};
+ expect(await ensureTeam(options)).toEqual({coordinatorSessionId:'new-0',reviewerSessionIds:['worker']});
+ const restarted=JSON.parse(JSON.stringify(members));
+ expect(await ensureTeam({...options,members:()=>restarted})).toEqual({coordinatorSessionId:'new-0',reviewerSessionIds:['worker']});
+ expect(spawned).toHaveLength(1);
+ expect(await ensureTeam({...options,coordinatorCreationKey:'request-two'})).toEqual({coordinatorSessionId:'new-1',reviewerSessionIds:['worker']});
+ expect(spawned).toHaveLength(2);
+});
+it('persists provisioning keys alongside clean member roles and drops keys when members leave', () => {
+ const file=path.join(dir,'groups.json'),store=new CollaborationStore(file);
+ const group=store.save({name:'准备成员',sessionIds:['lead','worker']});
+ store.setRole({groupId:group.id,sessionId:'lead',role:'自动协调者 (codex)',creationKey:'request-one'});
+ const restarted=new CollaborationStore(file);
+ expect(restarted.getGroup(group.id)?.memberCreationKeys).toEqual({lead:'request-one'});
+ expect(restarted.getGroup(group.id)?.roles).toEqual({lead:'自动协调者 (codex)'});
+ restarted.save({id:group.id,name:group.name,sessionIds:['worker']});
+ expect(restarted.getGroup(group.id)?.memberCreationKeys).toEqual({});
+});

@@ -4192,7 +4192,7 @@ export async function restoreExecutionSession(sessionId: string): Promise<{ sess
   const result = await operationsRequest<{ session: OrchestrationSession }>(`/execution-archives/${encodeURIComponent(sessionId)}/restore`, { method: 'POST' });
   executionArchiveRead = null; currentCollaborationDirectory().invalidate(); return result;
 }
-export async function ensureCollaborationTeam(groupId: string, input: { agentSlug: string; launchProfileId?: string; cwd: string }): Promise<{ coordinatorSessionId: string; reviewerSessionIds: string[] }> {
+export async function ensureCollaborationTeam(groupId: string, input: { agentSlug: string; launchProfileId?: string; cwd: string; coordinatorSessionId?: string | null; coordinatorCreationKey?: string }): Promise<{ coordinatorSessionId: string; reviewerSessionIds: string[] }> {
   const result = await operationsRequest<{ coordinatorSessionId: string; reviewerSessionIds: string[] }>(`/collaboration-groups/${encodeURIComponent(groupId)}/team`, { method: 'POST', body: JSON.stringify(input) });
   currentCollaborationDirectory().invalidate(); return result;
 }

@@ -33,6 +33,7 @@ function saved<T>(key: string, fallback: T): T {
 }
 function persist(key: string, value: unknown) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Private mode still supports the current editing session. */ } }
 const emptyDraft: Draft = { mode: 'goal', isolated: true, title: '', spec: '', constraints: '', acceptance: '', assignee: '', coordinator: '', parent: '', dependencies: [] };
+const newCoordinator = '__new_coordinator__';
 function savedDraft(key: string): Draft {
   const draft = { ...emptyDraft, ...saved(key, emptyDraft) };
   if (!draft || !Array.isArray(draft.dependencies) || draft.dependencies.some(id => typeof id !== 'string')
@@ -117,20 +118,27 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
   const alive = useRef(true), requestKeys = useRef(new Map<string, string>()), polling = useRef(false);
   const rawMembers = group.sessionIds.flatMap(id => { const session = sessions.find(s => s.sessionId === id); return session ? [session] : []; });
   const members = rawMembers.map(session => ({ ...session, name: collaborationMemberLabel(session, rawMembers) }));
+  const creatingCoordinator = draft.coordinator === newCoordinator;
   const preferredLead = draft.coordinator || saved<string>(`${storage}:lead`, '');
-  const lead = members.find(s => s.sessionId === preferredLead)?.sessionId || members.find(s => s.agent)?.sessionId || members[0]?.sessionId || '';
+  const selectedCoordinator = members.find(s => s.sessionId === draft.coordinator && s.agent);
+  const coordinatorUnavailable = !!draft.coordinator && !creatingCoordinator && !selectedCoordinator;
+  const lead = creatingCoordinator || coordinatorUnavailable ? '' : selectedCoordinator?.sessionId || members.find(s => s.sessionId === preferredLead && s.agent)?.sessionId || members.find(s => s.agent)?.sessionId || '';
   const workers = members.filter(s => s.sessionId !== lead && s.agent).map(s => s.sessionId);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [preparingTeam, setPreparingTeam] = useState(false);
-  const [agentSlug, setAgentSlug] = useState(() => saved<string>(`${storage}:agent`, agents[0]?.slug ?? ''));
+  const [agentSlug, setAgentSlug] = useState(() => saved<string>(`${storage}:agent`, ''));
   const [launchProfileId, setLaunchProfileId] = useState(() => saved<string>(`${storage}:launch-profile`, group.defaultLaunchProfileId ?? ''));
   const launchProfile = group.launchProfiles?.find(p => p.id === launchProfileId);
-  const selectedAgentSlug = launchProfile?.agentSlug ?? agentSlug;
+  // Infer from the roster on every render: agents and sessions can arrive later.
+  // Explicit choices stay separate so refreshes never replace the user's choice.
+  const memberAgentSlugs = members.flatMap(member => member.agent && agents.some(agent => agent.slug === member.agent!.slug) ? [member.agent.slug] : []);
+  const commonAgentSlug = [...new Set(memberAgentSlugs)].sort((a, b) => memberAgentSlugs.filter(slug => slug === b).length - memberAgentSlugs.filter(slug => slug === a).length)[0];
+  const inferredAgentSlug = agents.find(agent => agent.slug === selectedCoordinator?.agent?.slug)?.slug ?? commonAgentSlug ?? agents[0]?.slug ?? '';
+  const selectedAgentSlug = launchProfile?.agentSlug ?? (agentSlug || inferredAgentSlug);
   const [teamCwd, setTeamCwd] = useState(() => saved<string>(`${storage}:cwd`, members[0]?.cwd ?? defaultCwd ?? ''));
-  useEffect(() => { if (!agentSlug && agents[0]) setAgentSlug(agents[0].slug); }, [agents, agentSlug]);
   const needsTeam = !members.find(s => s.sessionId === lead)?.agent || !workers.length;
   const [provisioned, setProvisioned] = useState<{ coordinatorSessionId: string; reviewerSessionIds: string[] } | null>(null);
-  const goalReady = !!draft.spec.trim() && (!!provisioned || !needsTeam || !group.federated && (!launchProfileId || !!launchProfile) && !!agents.find(agent => agent.slug === selectedAgentSlug) && !!teamCwd.trim());
+  const goalReady = !!draft.spec.trim() && (!!provisioned || !coordinatorUnavailable && (!needsTeam || !group.federated && (!launchProfileId || !!launchProfile) && !!agents.find(agent => agent.slug === selectedAgentSlug) && !!teamCwd.trim()));
 
   const selectedSummary = tasks.find(t => t.id === selectedId) ?? null;
   const selected = detail?.id === selectedId ? detail : null;
@@ -231,7 +239,9 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
     try {
       if (managed && (needsTeam || provisioned)) {
         setPreparingTeam(true);
-        const team = provisioned ?? await ensureCollaborationTeam(group.id, { agentSlug: selectedAgentSlug, ...(launchProfileId ? { launchProfileId } : group.launchProfiles?.length ? { launchProfileId: '' } : {}), cwd: teamCwd.trim() });
+        const teamRequestKey = creatingCoordinator ? saved<string>(`${storage}:team-request`, '') || crypto.randomUUID() : undefined;
+        if (teamRequestKey) persist(`${storage}:team-request`, teamRequestKey);
+        const team = provisioned ?? await ensureCollaborationTeam(group.id, { agentSlug: selectedAgentSlug, ...(launchProfileId ? { launchProfileId } : group.launchProfiles?.length ? { launchProfileId: '' } : {}), cwd: teamCwd.trim(), ...(creatingCoordinator ? { coordinatorSessionId: null, coordinatorCreationKey: teamRequestKey } : lead ? { coordinatorSessionId: lead } : {}) });
         setPreparingTeam(false); setProvisioned(team); payload.coordinatorSessionId = team.coordinatorSessionId; payload.reviewerSessionIds = team.reviewerSessionIds;
         persist(`${storage}:agent`, agentSlug); persist(`${storage}:cwd`, teamCwd.trim());
         persist(`${storage}:launch-profile`, launchProfileId);
@@ -241,6 +251,7 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
       if (alive.current) { setTasks(list => [task, ...list.filter(t => t.id !== task.id)]); setSelectedId(task.id); setMobileDetail(true);
         setDetail(task);
         if (managed) persist(`${storage}:lead`, payload.coordinatorSessionId);
+        persist(`${storage}:team-request`, null);
         setProvisioned(null); void onTeamReady?.();
         setDraft(emptyDraft); setCreating(false); setFilter('open'); setQuery(''); setNotice(managed ? '目标已提交，协调者收到后开始拆分与分派。后续评审和依赖由服务接续。' : '任务已保存。分派后由服务端持续投递。'); }
     } catch (e) { if (alive.current) setError(e instanceof Error ? e.message : '创建失败'); }
@@ -310,14 +321,15 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
       {draft.mode === 'task' && <Field label="任务标题"><input className={input} required maxLength={200} value={draft.title} onChange={e => setDraft(d => ({ ...d, title: e.target.value }))} placeholder="要完成什么？" /></Field>}
       <CollaborationInput paneKey={paneKey} inputKey={`${storage}:spec`} active={active && composerVisible} label={draft.mode === 'goal' ? '协作目标' : '目标与交付要求'} className={`${input} ${needsTeam && draft.mode === 'goal' ? 'min-h-24' : 'min-h-32'} resize-y text-sm leading-6`} autoFocus={creating} required disabled={busy} value={draft.spec} onUploadChange={uploadChange} onChange={value => setDraft(d => ({ ...d, spec: typeof value === 'function' ? value(d.spec) : value }))} placeholder="例如：完善附件预览体验，交付实现和评审结果，保留现有快捷键。" />
       {draft.mode === 'goal' && provisioned && <section role="status" aria-label="目标提交阶段" className="space-y-2 rounded-lg bg-primary/10 px-3 py-2 text-xs leading-5"><p className="text-primary">成员已准备，目标尚未提交。重试会复用这些成员。</p><p className="text-muted-foreground">Agent 和工作目录已用于准备成员，因此暂时锁定；目标正文仍可修改。</p>{onManageMembers && <button type="button" className={secondary} disabled={busy} onClick={() => { void onTeamReady?.(); onManageMembers(); }}>查看已准备的成员</button>}</section>}
+      {draft.mode === 'goal' && <Field label="协调者"><select aria-label="协调者" className={input} disabled={busy || !!provisioned} value={draft.coordinator} onChange={e => { persist(`${storage}:team-request`, null); setDraft(d => ({ ...d, coordinator: e.target.value })); }}><option value="">自动选择（优先复用组内 Agent）</option><option value={newCoordinator} disabled={!!group.federated}>新建协调者</option>{coordinatorUnavailable && <option value={draft.coordinator} disabled>原协调者已不可用，请重新选择</option>}{members.map(m => <option key={m.sessionId} value={m.sessionId} disabled={!m.agent}>{m.name}{m.agent ? ` · ${m.agent.displayName}` : '（需要启动 Agent）'}</option>)}</select>{coordinatorUnavailable && !provisioned && <p role="alert" className="text-xs text-destructive">所选协调者已离组或未运行 Agent，请重新选择。</p>}</Field>}
       {draft.mode === 'goal' && (needsTeam || provisioned) ? <fieldset disabled={busy || !!provisioned} className="space-y-3"><legend className="mb-2 text-xs text-muted-foreground">{provisioned ? '已用于准备成员的配置' : '首次开始时配置 Agent'}</legend>
         {(!!group.launchProfiles?.length || !!launchProfileId) && <Field label="启动方案"><select aria-label="协作启动方案" className={input} value={launchProfileId} onChange={e => setLaunchProfileId(e.target.value)}><option value="">Agent 默认命令</option>{group.launchProfiles?.map(p => <option key={p.id} value={p.id}>{p.name} · {agents.find(a => a.slug === p.agentSlug)?.displayName ?? p.agentSlug}</option>)}</select>{launchProfile && <details className="text-xs leading-5 text-muted-foreground"><summary className="min-h-11 cursor-pointer py-2"><span className="line-clamp-2 break-words">{launchProfile.notes || '查看启动命令与使用备注'}</span></summary><p aria-label="完整使用备注" className="whitespace-pre-wrap break-words">{launchProfile.notes}</p><code className="mt-1 block break-all">{launchProfile.command}</code></details>}{launchProfileId && !launchProfile && <p role="alert" className="text-xs text-destructive">原方案已删除，请重新选择。</p>}</Field>}
         {!launchProfile && <Field label="Agent"><select aria-label="协作 Agent" className={input} disabled={!!launchProfile} value={selectedAgentSlug} onChange={e => setAgentSlug(e.target.value)}><option value="" disabled>选择已安装的 Agent</option>{agents.map(agent => <option key={agent.slug} value={agent.slug}>{agent.displayName}</option>)}</select></Field>}
         <Field label="工作目录"><div className="flex gap-2"><input aria-label="工作目录" className={`${input} min-w-0 flex-1`} value={teamCwd} onChange={e => setTeamCwd(e.target.value)} placeholder="选择项目所在的目录" /><button type="button" className={secondary} onClick={() => setDirectoryPickerOpen(true)}>浏览目录</button></div>{directoryPickerOpen && <Suspense fallback={<p className="text-xs">正在打开目录…</p>}><DirectoryPicker open initialPath={teamCwd.trim() || defaultCwd || "/"} title="选择协作项目目录" onCancel={() => setDirectoryPickerOpen(false)} onConfirm={path => { setTeamCwd(path); setDirectoryPickerOpen(false); }} /></Suspense>}</Field>
-        {!provisioned && <p className="text-xs leading-5 text-muted-foreground">开始时配置协调者与执行/评审成员，后续目标复用。</p>}
+        {!provisioned && <p className="text-xs leading-5 text-muted-foreground">{creatingCoordinator ? '开始时新建协调者，并补齐执行/评审成员。' : '保留所选协调者，开始时补齐执行/评审成员；自动选择会优先复用组内 Agent。'}</p>}
         {group.federated && <p role="alert" className="text-xs text-muted-foreground">跨服务组请从成员设置添加 Agent。{onManageMembers && <button type="button" className={secondary} onClick={onManageMembers}>管理成员</button>}</p>}
         {!agents.length && <p role="alert" className="text-xs text-muted-foreground">尚未检测到可启动的 Agent。安装后刷新，或从成员设置复用现有 Agent。{onManageMembers && <button type="button" className={secondary} onClick={onManageMembers}>管理成员</button>}</p>}
-      </fieldset> : draft.mode === 'goal' ? <div className="flex items-center gap-3"><span className="shrink-0 text-xs text-muted-foreground">协调者</span><select aria-label="协调者" className={`${input} min-w-0 flex-1`} value={lead} onChange={e => setDraft(d => ({ ...d, coordinator: e.target.value }))}>{members.map(m => <option key={m.sessionId} value={m.sessionId} disabled={!m.agent}>{m.name}{!m.agent ? '（需要启动 Agent）' : ''}</option>)}</select></div> : <Field label="分派给"><select className={input} value={draft.assignee} onChange={e => setDraft(d => ({ ...d, assignee: e.target.value }))}><option value="">先保存，稍后分派</option>{members.map(m => <option key={m.sessionId} value={m.sessionId}>{m.name}</option>)}</select></Field>}
+      </fieldset> : draft.mode === 'task' && <Field label="分派给"><select className={input} value={draft.assignee} onChange={e => setDraft(d => ({ ...d, assignee: e.target.value }))}><option value="">先保存，稍后分派</option>{members.map(m => <option key={m.sessionId} value={m.sessionId}>{m.name}</option>)}</select></Field>}
       <details className="border-y border-border/15"><summary className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground">验收标准与更多设置{(draft.acceptance || draft.constraints) && <span className="text-primary">已补充</span>}</summary><div className="space-y-3 pb-4">
         <Field label="验收标准（选填）"><textarea className={`${input} min-h-20 resize-y`} value={draft.acceptance} onChange={e => setDraft(d => ({ ...d, acceptance: e.target.value }))} placeholder="什么结果满足要求？" /></Field>
         <Field label="约束（选填）"><textarea className={`${input} min-h-20 resize-y`} value={draft.constraints} onChange={e => setDraft(d => ({ ...d, constraints: e.target.value }))} placeholder="必须保留什么？哪些操作需要先问你？" /></Field>

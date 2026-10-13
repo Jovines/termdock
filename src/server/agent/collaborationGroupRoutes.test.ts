@@ -40,6 +40,17 @@ describe('authoritative collaboration membership HTTP API', () => {
     const result = await save({ name: 'Mixed', sessionIds: ['custom', 'shell'] });
     expect(result.status).toBe(200); expect(result.body.group.sessionIds).toEqual(['custom', 'shell']);
   });
+  it('web reads the administrator rename from the shared store and rejects an old web form revision', async () => {
+    const original = store.save({ name: 'Long title', sessionIds: ['custom', 'shell'] });
+    const notified = vi.fn(() => store.getLocalGroupMetadata(original.id)); store.subscribe(notified);
+    const renamed = store.renameLocalGroup(original.id, 'Short title', original.updatedAt, 'admin-rename');
+    expect(notified).toHaveReturnedWith(renamed.group);
+    const listed = await (await fetch(url)).json();
+    expect(listed.groups).toContainEqual({ ...original, ...renamed.group });
+    expect(await save({ id: original.id, name: 'Stale title', sessionIds: original.sessionIds, expectedUpdatedAt: original.updatedAt })).toMatchObject({ status: 409, body: { code: 'GROUP_CHANGED', currentUpdatedAt: renamed.group.updatedAt } });
+    const newer = (await save({ id: original.id, name: 'Web title', sessionIds: original.sessionIds, expectedUpdatedAt: renamed.group.updatedAt })).body.group;
+    expect(store.renameLocalGroup(original.id, 'Short title', original.updatedAt, 'admin-rename')).toEqual({ group: { id: newer.id, name: newer.name, updatedAt: newer.updatedAt }, applied: renamed.applied, replayed: true });
+  });
   it('rejects the entire request if any new member disappeared, even when two valid ones remain', async () => {
     const result = await save({ name: 'Race', sessionIds: ['custom', 'shell', 'disappeared'] });
     expect(result).toMatchObject({ status: 409, body: { code: 'MEMBERS_CHANGED' } });

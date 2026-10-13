@@ -761,3 +761,74 @@ it('restores the result view and acceptance when the new version has passed revi
   expect((screen.getByRole('button', { name: '验收此结果' }) as HTMLButtonElement).disabled).toBe(false);
   expect(screen.queryByText('附件布局已完成')).toBeNull();
 });
+
+const launchers = ['claude', 'codex'].map(slug => ({ slug, displayName: slug === 'claude' ? 'Claude Code' : 'Codex', command: slug, accentColor: 'var(--primary)', icon: null }));
+it('defaults provisioning to the group Agent and passes the selected existing coordinator while adding a reviewer', async () => {
+  api.team.mockResolvedValue({ coordinatorSessionId: 'lead', reviewerSessionIds: ['new-worker'] });
+  api.create.mockResolvedValue({ task: task() });
+  setup([], { group: { ...group, sessionIds: ['lead'] }, sessions: [sessions[0]], agents: launchers });
+  expect(await screen.findByRole('combobox', { name: '协作 Agent' })).toHaveProperty('value', 'codex');
+  fireEvent.change(screen.getByRole('combobox', { name: '协调者' }), { target: { value: 'lead' } });
+  fireEvent.change(screen.getByRole('textbox', { name: '协作目标' }), { target: { value: '复用当前协调者' } });
+  fireEvent.click(screen.getByRole('button', { name: '开始协作' }));
+  await waitFor(() => expect(api.team).toHaveBeenCalledWith('team', { agentSlug: 'codex', cwd: '/repo', coordinatorSessionId: 'lead' }));
+  expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ coordinatorSessionId: 'lead', reviewerSessionIds: ['new-worker'] }));
+});
+it('infers from late roster data but keeps an explicit Agent choice during refresh', async () => {
+  const options = { group: { ...group, sessionIds: ['lead'] }, sessions: [], agents: [] };
+  const { rerender } = setup([], options);
+  await screen.findByRole('combobox', { name: '协作 Agent' });
+  rerender(<CollaborationTaskWorkbench {...options} sessions={[sessions[0]]} agents={launchers} active onOpenSession={vi.fn()} />);
+  expect(screen.getByRole('combobox', { name: '协作 Agent' })).toHaveProperty('value', 'codex');
+  fireEvent.change(screen.getByRole('combobox', { name: '协作 Agent' }), { target: { value: 'claude' } });
+  rerender(<CollaborationTaskWorkbench {...options} sessions={[{ ...sessions[0], updatedAt: 2 }]} agents={launchers} active onOpenSession={vi.fn()} />);
+  expect(screen.getByRole('combobox', { name: '协作 Agent' })).toHaveProperty('value', 'claude');
+});
+it('prefers the most common group Agent for new members and preserves a saved manual choice', async () => {
+  const roster = [{ ...sessions[0], agent: { slug: 'claude', displayName: 'Claude Code' } }, sessions[1], { ...sessions[1], sessionId: 'third' }];
+  setup([], { group: { ...group, sessionIds: ['lead', 'worker', 'third'] }, sessions: roster, agents: launchers });
+  fireEvent.change(await screen.findByRole('combobox', { name: '协调者' }), { target: { value: '__new_coordinator__' } });
+  expect(screen.getByRole('combobox', { name: '协作 Agent' })).toHaveProperty('value', 'codex');
+  cleanup(); useCollaborationTaskWorkspace.setState({ views: {}, details: {} });
+  localStorage.setItem(`termdock:tasks:${location.origin}:team:agent`, JSON.stringify('claude'));
+  setup([], { group: { ...group, sessionIds: ['lead'] }, sessions: [sessions[0]], agents: launchers });
+  expect(await screen.findByRole('combobox', { name: '协作 Agent' })).toHaveProperty('value', 'claude');
+});
+it('uses a manually selected member without provisioning when the rest of the team exists', async () => {
+  api.create.mockResolvedValue({ task: task() });
+  setup();
+  fireEvent.change(await screen.findByRole('combobox', { name: '协调者' }), { target: { value: 'worker' } });
+  fireEvent.change(screen.getByRole('textbox', { name: '协作目标' }), { target: { value: '由执行成员协调' } });
+  fireEvent.click(screen.getByRole('button', { name: '开始协作' }));
+  await waitFor(() => expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ coordinatorSessionId: 'worker', reviewerSessionIds: ['lead'] })));
+  expect(api.team).not.toHaveBeenCalled();
+});
+it('requests a new coordinator even for a complete roster and reuses its creation key after a preparation failure', async () => {
+  api.team.mockRejectedValueOnce(Error('启动失败')).mockResolvedValueOnce({ coordinatorSessionId: 'new-lead', reviewerSessionIds: ['worker'] });
+  api.create.mockRejectedValueOnce(Error('目标未提交')).mockResolvedValueOnce({ task: task() });
+  setup([], { agents: launchers });
+  fireEvent.change(await screen.findByRole('combobox', { name: '协调者' }), { target: { value: '__new_coordinator__' } });
+  fireEvent.change(screen.getByRole('textbox', { name: '协作目标' }), { target: { value: '使用新的协调会话' } });
+  fireEvent.click(screen.getByRole('button', { name: '开始协作' }));
+  await screen.findAllByText('启动失败');
+  const input = api.team.mock.calls[0][1];
+  expect(input).toMatchObject({ agentSlug: 'codex', coordinatorSessionId: null, coordinatorCreationKey: expect.any(String) });
+  fireEvent.click(screen.getByRole('button', { name: '开始协作' }));
+  await screen.findByRole('button', { name: '重试提交目标' });
+  expect(api.team.mock.calls[1][1]).toEqual(input);
+  expect(screen.getByRole('combobox', { name: '协调者' })).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: '重试提交目标' }));
+  await waitFor(() => expect(api.create).toHaveBeenCalledTimes(2));
+  expect(api.team).toHaveBeenCalledTimes(2);
+  expect(api.create.mock.calls[1][0]).toMatchObject({ coordinatorSessionId: 'new-lead', reviewerSessionIds: ['worker'] });
+});
+it('blocks a departed selected coordinator instead of silently replacing it', async () => {
+  const { rerender } = setup([], { agents: launchers });
+  fireEvent.change(await screen.findByRole('combobox', { name: '协调者' }), { target: { value: 'lead' } });
+  fireEvent.change(screen.getByRole('textbox', { name: '协作目标' }), { target: { value: '保留选择' } });
+  rerender(<CollaborationTaskWorkbench group={{ ...group, sessionIds: ['worker'] }} sessions={[sessions[1]]} agents={launchers} active onOpenSession={vi.fn()} />);
+  expect(screen.getByRole('combobox', { name: '协调者' })).toHaveProperty('value', 'lead');
+  expect(screen.getByText('所选协调者已离组或未运行 Agent，请重新选择。')).toBeTruthy();
+  expect(screen.getByRole('button', { name: '开始协作' })).toHaveProperty('disabled', true);
+  expect(api.team).not.toHaveBeenCalled(); expect(api.create).not.toHaveBeenCalled();
+});
