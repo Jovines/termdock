@@ -923,7 +923,7 @@ export function normalizeCollaborationPanels(value: unknown, depth = 0): Record<
 
 export function normalizeRightSidebarTabs(value: unknown): SettingsDoc['rightSidebarTabs'] {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {};
-  return { architecture: raw.architecture !== false, computer: raw.computer !== false };
+  return { architecture: raw.architecture === true, computer: raw.computer === true };
 }
 
 export function getRightSidebarTabsSetting(): SettingsDoc['rightSidebarTabs'] { return loadSettings().rightSidebarTabs; }

@@ -10,6 +10,7 @@ import {
   normalizeFileSortModes,
   normalizeNewSessionAgentSlug,
   normalizePinnedExplorerRoots,
+  normalizeRightSidebarTabs,
   saveSettingsFile,
   watchPinnedExplorerRootsSetting,
 } from './settings.js';
@@ -122,14 +123,26 @@ describe('settings persistence', () => {
   it('preserves independent sidebar tab choices across reloads and partial changes', () => {
     const file = tempSettingsPath();
     const defaults = loadSettingsFile(file);
-    expect(defaults.rightSidebarTabs).toEqual({ architecture: true, computer: true });
-    defaults.rightSidebarTabs.architecture = false;
+    expect(defaults.rightSidebarTabs).toEqual({ architecture: false, computer: false });
+    expect(defaults.androidPanel.enabled).toBe(false);
+    defaults.rightSidebarTabs.architecture = true;
+    defaults.androidPanel.enabled = true;
     saveSettingsFile(defaults, file);
     const reloaded = loadSettingsFile(file);
-    expect(reloaded.rightSidebarTabs).toEqual({ architecture: false, computer: true });
-    reloaded.rightSidebarTabs.computer = false;
+    expect(reloaded.rightSidebarTabs).toEqual({ architecture: true, computer: false });
+    expect(reloaded.androidPanel.enabled).toBe(true);
+    reloaded.rightSidebarTabs.computer = true;
+    reloaded.rightSidebarTabs.architecture = false;
+    reloaded.androidPanel.enabled = false;
     saveSettingsFile(reloaded, file);
-    expect(loadSettingsFile(file).rightSidebarTabs).toEqual({ architecture: false, computer: false });
+    expect(loadSettingsFile(file).rightSidebarTabs).toEqual({ architecture: false, computer: true });
+    expect(loadSettingsFile(file).androidPanel.enabled).toBe(false);
+  });
+
+  it('defaults missing or invalid sidebar choices to disabled while preserving explicit choices', () => {
+    expect(normalizeRightSidebarTabs(undefined)).toEqual({ architecture: false, computer: false });
+    expect(normalizeRightSidebarTabs({ architecture: true })).toEqual({ architecture: true, computer: false });
+    expect(normalizeRightSidebarTabs({ architecture: 'true', computer: false })).toEqual({ architecture: false, computer: false });
   });
 
   it('defaults the running-session button to disabled and preserves an enabled preference', () => {

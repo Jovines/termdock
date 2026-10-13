@@ -6653,8 +6653,8 @@ export function RightSidebar(
     () => useSidebarStore.getState().rightTab === 'android',
   );
   const [androidTabEnabled, setAndroidTabEnabled] = useState(false);
-  const [optionalTabs, setOptionalTabs] = useState({ architecture: true, computer: true });
-  const optionalTabChangesRef = useRef(new Set<'architecture' | 'computer'>());
+  const [optionalTabs, setOptionalTabs] = useState({ architecture: false, computer: false });
+  const optionalTabChangesRef = useRef(new Set<'architecture' | 'computer' | 'android'>());
   // dock 到分屏时由 App 顶层持有投屏实例，侧栏这里不再挂第二个流。
   const androidDock = useCollaborationPanelDock(state => state.docks[ANDROID_DOCK_GROUP]);
   const androidDocked = Boolean(androidDock);
@@ -7841,16 +7841,19 @@ export function RightSidebar(
     let cancelled = false;
     void getSettings().then(settings => {
       if (cancelled) return;
-      if (settings.androidPanel) setAndroidTabEnabled(settings.androidPanel.enabled === true);
+      if (!optionalTabChangesRef.current.has('android')) {
+        setAndroidTabEnabled(settings.androidPanel?.enabled === true);
+      }
       setOptionalTabs(current => ({
-        architecture: optionalTabChangesRef.current.has('architecture') ? current.architecture : settings.rightSidebarTabs?.architecture !== false,
-        computer: optionalTabChangesRef.current.has('computer') ? current.computer : settings.rightSidebarTabs?.computer !== false,
+        architecture: optionalTabChangesRef.current.has('architecture') ? current.architecture : settings.rightSidebarTabs?.architecture === true,
+        computer: optionalTabChangesRef.current.has('computer') ? current.computer : settings.rightSidebarTabs?.computer === true,
       }));
     }).catch(() => { /* 读取失败保留默认显示选择 */ });
     return () => { cancelled = true; };
   }, []);
 
   const toggleAndroidTab = useCallback((enabled: boolean) => {
+    optionalTabChangesRef.current.add('android');
     setAndroidTabEnabled(enabled);
     if (enabled) setRightTab('android');
     else if (useSidebarStore.getState().rightTab === 'android') setRightTab('files');

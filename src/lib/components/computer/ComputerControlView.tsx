@@ -68,7 +68,12 @@ export default function ComputerControlView() {
   const [keyboardFocused, setKeyboardFocused] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const keyboardFullHeight = useRef(0);
-  const touchDevice = navigator.maxTouchPoints > 0 || window.innerWidth <= 640;
+  const [touchDevice, setTouchDevice] = useState(() => navigator.maxTouchPoints > 0 || window.innerWidth <= 640);
+  useEffect(() => {
+    const update = () => setTouchDevice(navigator.maxTouchPoints > 0 || window.innerWidth <= 640);
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
   const keyboardActive = panel === 'keyboard' && keyboardFocused && (!touchDevice || !window.visualViewport || keyboardVisible);
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef<ComputerZoom | null>(null);
@@ -308,6 +313,13 @@ export default function ComputerControlView() {
     return () => { viewport.removeEventListener('resize', update); viewport.removeEventListener('scroll', update); if (frame) { frame.style.height = ''; frame.style.top = ''; } };
   }, [connected, panel, expanded, keyboardFocused]);
 
+  const zoomControls = <div className="flex shrink-0 items-center text-xs" role="group" aria-label={t('computer.desktopZoom')} title={touchDevice ? t('computer.pinchHint') : undefined}>
+    <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" aria-label={t('computer.zoomOut')} disabled={zoom <= 1} onPointerDown={event => event.preventDefault()} onClick={() => zoomRef.current?.set(zoom / 1.25)}><ZoomOut size={16} /></button>
+    <button type="button" className="min-h-11 min-w-11" aria-label={t('computer.resetZoom')} onPointerDown={event => event.preventDefault()} onClick={resetZoom}>{Math.round(zoom * 100)}%</button>
+    <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" aria-label={t('computer.zoomIn')} disabled={zoom >= 8} onPointerDown={event => event.preventDefault()} onClick={() => zoomRef.current?.set(zoom * 1.25)}><ZoomIn size={16} /></button>
+    {touchDevice && <span className="hidden pr-2 text-[10px] text-muted-foreground sm:inline">{t('computer.pinchHint')}</span>}
+  </div>;
+
   const body = (
     <div ref={frameRef} className={`flex min-h-0 flex-col bg-surface text-foreground ${expanded ? 'fixed inset-0 z-modal-panel h-dvh pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]' : 'relative h-full'}`}
       role={expanded ? 'dialog' : undefined} aria-modal={expanded || undefined} aria-label={t('computer.title')}
@@ -321,6 +333,8 @@ export default function ComputerControlView() {
         {connected && saveState === 'saving' && <span role="status" aria-label={t('computer.settingsSaving')} title={t('computer.settingsSaving')}><Loader2 size={12} className="animate-spin text-muted-foreground" /></span>}
         {connected && saveState === 'error' && <button type="button" className={buttonClass} title={t('computer.settingsSaveFailed')} aria-label={t('computer.settingsSaveFailed')} onClick={retry}>! {t('computer.retry')}</button>}
         {busy && <button type="button" className={buttonClass} onClick={disconnect}><Unplug size={14} />{t('computer.cancel')}</button>}
+        {connected && !touchDevice && panel === 'keyboard' && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" onClick={() => togglePanel('keyboard')} aria-label={t('computer.keyboard')} aria-pressed={keyboardActive}><Keyboard size={18} /></button>}
+        {connected && !touchDevice && <button type="button" className={`flex min-h-11 min-w-11 items-center justify-center rounded-md ${panel === 'clipboard' ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('clipboard')} aria-label={t('computer.clipboardTool')} title={t('computer.clipboardTool')} aria-pressed={panel === 'clipboard'}><Clipboard size={18} /></button>}
         {connected && !expanded && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center gap-1 text-xs" onClick={() => setExpanded(true)} aria-label={t('computer.fullscreen')}><Maximize2 size={16} />{t('computer.expand')}</button>}
         {connected && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" onClick={() => togglePanel('tools')} aria-label={t('computer.tools')} aria-expanded={panel === 'tools'}><Settings2 size={18} /></button>}
       </div>
@@ -388,16 +402,20 @@ export default function ComputerControlView() {
         </details>
         </div>
       </div>}
-      {connected && panel === 'tools' && <button type="button" className="absolute inset-x-0 bottom-14 top-12 z-20 bg-background/40" aria-label={t('computer.returnToDesktop')} onClick={() => setPanel(null)} />}
+      {connected && panel === 'tools' && <button type="button" className={`absolute inset-x-0 ${touchDevice ? 'bottom-14' : 'bottom-0'} top-12 z-20 bg-background/40`} aria-label={t('computer.returnToDesktop')} onClick={() => setPanel(null)} />}
       {connected && <div hidden={panel !== 'tools'} className={`${panel === 'tools' ? 'flex' : 'hidden'} absolute inset-x-3 top-14 z-30 max-h-[calc(100%-7rem)] flex-wrap items-center gap-3 overflow-y-auto rounded-lg border border-border bg-surface px-4 py-3 text-xs shadow-lg [&_button]:min-h-11 [&_select]:min-h-11 [&_label]:min-h-11`} role="region" aria-label={t('computer.tools')}>
         <div className="flex w-full items-center justify-between"><span className="font-medium">{t('computer.tools')}</span><button type="button" className="flex min-w-11 items-center justify-center" aria-label={t('computer.closeTools')} onClick={() => setPanel(null)}><X size={18} /></button></div>
-        <div className="flex w-full items-center gap-2">
+        {touchDevice && <div className="flex w-full items-center gap-2">
           <div className="inline-flex rounded-md bg-background p-0.5" role="group" aria-label={t('computer.touchMode')}>
             {(['trackpad', 'direct'] as const).map(mode => <button key={mode} type="button"
               className={`min-h-9 rounded px-3 text-xs ${touchMode === mode ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface'}`}
               aria-pressed={touchMode === mode} onClick={() => chooseTouchMode(mode)}>{t(mode === 'trackpad' ? 'computer.trackpadMode' : 'computer.directTouchMode')}</button>)}
           </div>
-        </div>
+        </div>}
+        {!touchDevice && <>
+          {zoomControls}
+          <button type="button" className={buttonClass} disabled={viewOnly} onClick={() => togglePanel('keyboard')}><Keyboard size={14} />{t('computer.keyboard')}</button>
+        </>}
         <label className="flex min-h-9 items-center gap-1.5"><input type="checkbox" checked={viewOnly} onChange={event => setViewOnly(event.target.checked)} />{t('computer.viewOnly')}</label>
         <button type="button" className={buttonClass} onClick={() => { zoomRef.current?.set(1); change(value => ({ ...value, fit: !value.fit })); void flush(); }}>{t(fit ? 'computer.actualSize' : 'computer.fit')}</button>
         <select className={`${buttonClass} min-w-0 bg-surface`} aria-label={t('computer.shortcuts')} value="" disabled={viewOnly} onChange={event => {
@@ -420,7 +438,7 @@ export default function ComputerControlView() {
         </div>}
       </div>
       <div hidden={panel !== 'tools'}>
-        {connected && !viewOnly && <p className="shrink-0 border-t border-border px-2 py-1 text-[10px] leading-relaxed text-muted-foreground">{t(touchMode === 'trackpad' ? 'computer.trackpadHint' : 'computer.directTouchHint')}</p>}
+        {connected && touchDevice && !viewOnly && <p className="shrink-0 border-t border-border px-2 py-1 text-[10px] leading-relaxed text-muted-foreground">{t(touchMode === 'trackpad' ? 'computer.trackpadHint' : 'computer.directTouchHint')}</p>}
       </div>
       {connected && panel === 'keyboard' && !viewOnly && <>
         <ComputerKeyboardInput inputRef={keyboardInputRef} onFocusChange={setKeyboardFocused} sendText={sendText} sendKey={key => sendKeys(key === 'tab' ? [[0xff09, 'Tab']] : key === 'delete' ? [[0xffff, 'Delete']] : shortcuts[key])} />
@@ -443,22 +461,19 @@ export default function ComputerControlView() {
         <p role="status" className="text-[10px] leading-relaxed text-muted-foreground">{clipboardSent ? t('computer.clipboardSent') : t('computer.clipboardHint', { shortcut: pasteLabel })}</p>
         {error && <p role="alert" className="text-xs text-destructive">{t(error)}</p>}
       </form>}
-      {connected && <div className="flex shrink-0 items-center justify-center gap-2 border-t border-border bg-surface px-2 text-xs" role="group" aria-label={t('computer.desktopZoom')}>
-        <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" aria-label={t('computer.zoomOut')} disabled={zoom <= 1} onPointerDown={event => event.preventDefault()} onClick={() => zoomRef.current?.set(zoom / 1.25)}><ZoomOut size={16} /></button>
-        <button type="button" className="min-h-11 min-w-16" aria-label={t('computer.resetZoom')} onPointerDown={event => event.preventDefault()} onClick={resetZoom}>{Math.round(zoom * 100)}%</button>
-        <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" aria-label={t('computer.zoomIn')} disabled={zoom >= 8} onPointerDown={event => event.preventDefault()} onClick={() => zoomRef.current?.set(zoom * 1.25)}><ZoomIn size={16} /></button>
-        <span className="text-[10px] text-muted-foreground">{t('computer.pinchHint')}</span>
-      </div>}
-      {connected && <div className={`relative z-30 grid shrink-0 ${panel === 'keyboard' ? 'grid-cols-5' : 'grid-cols-3'} border-t border-border bg-surface px-1 py-1 text-[11px]`}>
-        <button type="button" className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md ${keyboardActive ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('keyboard')} aria-pressed={keyboardActive}><Keyboard size={18} />{t('computer.keyboard')}</button>
-        <button type="button" className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md ${panel === 'clipboard' ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('clipboard')} aria-pressed={panel === 'clipboard'}><Clipboard size={18} />{t('computer.clipboardTool')}</button>
-        {panel === 'keyboard' ? <>
-          <button type="button" className="min-h-11 rounded-md text-sm" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys([[0xff09, 'Tab']])}>Tab</button>
-          <button type="button" className="min-h-11 rounded-md text-lg" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys(shortcuts.backspace)}>⌫</button>
-          <button type="button" className="min-h-11 rounded-md text-lg" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys(shortcuts.enter)}>↵</button>
-        </> : <>
-          <button type="button" className="flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md" disabled={viewOnly} onClick={() => chooseTouchMode(touchMode === 'trackpad' ? 'direct' : 'trackpad')} aria-label={t('computer.switchTouchMode')}><MousePointer2 size={18} />{t(touchMode === 'trackpad' ? 'computer.trackpadMode' : 'computer.directTouchMode')}</button>
-        </>}
+      {connected && touchDevice && <div className="relative z-30 flex shrink-0 items-center border-t border-border bg-surface px-1 py-1 text-[11px]">
+        <div className={`grid min-w-0 flex-1 ${panel === 'keyboard' ? 'grid-cols-5' : 'grid-cols-3'}`}>
+          <button type="button" className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md ${keyboardActive ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('keyboard')} aria-pressed={keyboardActive}><Keyboard size={18} />{t('computer.keyboard')}</button>
+          <button type="button" className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md ${panel === 'clipboard' ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('clipboard')} aria-pressed={panel === 'clipboard'}><Clipboard size={18} />{t('computer.clipboardTool')}</button>
+          {panel === 'keyboard' ? <>
+            <button type="button" className="min-h-11 rounded-md text-sm" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys([[0xff09, 'Tab']])}>Tab</button>
+            <button type="button" className="min-h-11 rounded-md text-lg" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys(shortcuts.backspace)}>⌫</button>
+            <button type="button" className="min-h-11 rounded-md text-lg" onPointerDown={event => event.preventDefault()} onClick={() => sendKeys(shortcuts.enter)}>↵</button>
+          </> : <>
+            <button type="button" className="flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-md" disabled={viewOnly} onClick={() => chooseTouchMode(touchMode === 'trackpad' ? 'direct' : 'trackpad')} aria-label={t('computer.switchTouchMode')}><MousePointer2 size={18} />{t(touchMode === 'trackpad' ? 'computer.trackpadMode' : 'computer.directTouchMode')}</button>
+          </>}
+        </div>
+        {zoomControls}
       </div>}
     </div>
   );

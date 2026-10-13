@@ -82,6 +82,58 @@ async function ready() {
 }
 
 describe('computer targets', () => {
+  it('uses a compact desktop header and keeps touch controls available after resizing without reconnecting', async () => {
+    await ready();
+    fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: '连接' }));
+    await waitFor(() => expect(mocks.clients).toHaveLength(1));
+    act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+    expect(screen.queryByRole('button', { name: '键盘' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '切换触摸方式' })).toBeNull();
+    expect(screen.queryByRole('group', { name: '桌面缩放' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '剪贴板' }));
+    expect(screen.getByRole('textbox', { name: '发送剪贴板' })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '发送剪贴板' }), { key: 'Escape' });
+    expect(screen.queryByRole('textbox', { name: '发送剪贴板' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '控制设置' }));
+    expect(screen.getByRole('group', { name: '桌面缩放' })).toBeTruthy();
+    expect(screen.queryByRole('group', { name: '触摸方式' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+    expect(document.activeElement).toBe(screen.getByLabelText('直接输入到电脑'));
+    fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+    expect(screen.queryByLabelText('直接输入到电脑')).toBeNull();
+    vi.stubGlobal('innerWidth', 390);
+    fireEvent(window, new Event('resize'));
+    expect(screen.getByRole('button', { name: '键盘' })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: '剪贴板' })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: '切换触摸方式' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: '桌面缩放' })).toBeTruthy();
+    vi.stubGlobal('innerWidth', 1440);
+    fireEvent(window, new Event('resize'));
+    expect(screen.queryByRole('button', { name: '键盘' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '切换触摸方式' })).toBeNull();
+    expect(mocks.clients).toHaveLength(1);
+  });
+  it('retains touch controls on a large touchscreen', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false })));
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const before = Object.getOwnPropertyDescriptor(navigator, 'maxTouchPoints');
+    Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 5 });
+    try {
+      await ready();
+      fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+      fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+      fireEvent.click(screen.getByRole('button', { name: '连接' }));
+      await waitFor(() => expect(mocks.clients).toHaveLength(1));
+      act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+      expect(screen.getByRole('button', { name: '键盘' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: '切换触摸方式' })).toBeTruthy();
+    } finally {
+      if (before) Object.defineProperty(navigator, 'maxTouchPoints', before);
+      else Reflect.deleteProperty(navigator, 'maxTouchPoints');
+    }
+  });
   it('tracks software keyboard dismissal separately from the input panel and reopens it on the next tap', async () => {
     const beforeWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
@@ -106,6 +158,7 @@ describe('computer targets', () => {
     } finally { Object.defineProperty(window, 'innerWidth', { configurable: true, value: beforeWidth }); }
   });
   it('keeps VNC keyboard focus during mouse use and restores canvas focus after closing the keyboard', async () => {
+    vi.stubGlobal('innerWidth', 390);
     mocks.platform = 'darwin';
     await ready();
     fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
@@ -243,6 +296,7 @@ describe('computer targets', () => {
     }
   });
   it('keeps actual trackpad taps active while the phone keyboard is open, without taking its focus', async () => {
+    vi.stubGlobal('innerWidth', 390);
     localStorage.setItem('termdock:computer-touch-mode:v1', 'trackpad');
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });

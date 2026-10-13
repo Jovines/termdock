@@ -10,6 +10,10 @@ import { RightSidebar } from './RightSidebar';
 vi.mock('./Sidebar', () => ({ Sidebar: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock('./ArchitecturePanel', () => ({ ArchitecturePanel: () => <div>Architecture content</div> }));
 vi.mock('../computer/ComputerControlView', () => ({ default: () => <div>Computer content</div> }));
+vi.mock('../android/AndroidMirrorView', () => ({
+  AndroidMirrorView: () => <div>Device content</div>,
+  ANDROID_DOCK_GROUP: 'android-mirror',
+}));
 vi.mock('../../terminal/api', async original => ({
   ...await original<typeof import('../../terminal/api')>(),
   getSettings: vi.fn(),
@@ -35,7 +39,68 @@ afterEach(() => {
 });
 
 describe('optional right sidebar tabs', () => {
+  const tabs = [
+    { label: '架构', menu: '显示架构 Tab', key: 'architecture', patch: { rightSidebarTabs: { architecture: true } } },
+    { label: '电脑', menu: '显示电脑 Tab', key: 'computer', patch: { rightSidebarTabs: { computer: true } } },
+    { label: '设备', menu: '显示设备 Tab', key: 'android', patch: { androidPanel: { enabled: true } } },
+  ] as const;
+
+  it.each([800, 360])('defaults all three tabs to hidden and saves opt-in choices at width %s', async width => {
+    render(sidebar(width));
+    await act(async () => {});
+    fireEvent.click(screen.getAllByRole('button', { name: '更多操作' })[0]);
+    for (const tab of tabs) {
+      expect(screen.queryByRole('button', { name: tab.label })).toBeNull();
+      expect(screen.getByRole('menuitemcheckbox', { name: tab.menu }).getAttribute('aria-checked')).toBe('false');
+    }
+    expect(updateSettings).not.toHaveBeenCalled();
+    for (const tab of tabs) {
+      fireEvent.click(screen.getByRole('menuitemcheckbox', { name: tab.menu }));
+      expect(screen.getByRole('button', { name: tab.label })).toBeTruthy();
+      expect(useSidebarStore.getState().rightTab).toBe(tab.key);
+      expect(updateSettings).toHaveBeenCalledWith(tab.patch);
+    }
+  });
+
+  it('restores saved choices for all three tabs on each mount', async () => {
+    vi.mocked(getSettings).mockResolvedValue({
+      locale: 'zh', rightSidebarTabs: { architecture: true, computer: false }, androidPanel: { enabled: true },
+    } as Awaited<ReturnType<typeof getSettings>>);
+    for (let mount = 0; mount < 2; mount++) {
+      const view = render(sidebar());
+      await waitFor(() => expect(screen.getByRole('button', { name: '设备' })).toBeTruthy());
+      expect(screen.getByRole('button', { name: '架构' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: '电脑' })).toBeNull();
+      view.unmount();
+    }
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it.each(tabs)('preserves a new $label choice while initial settings are still loading', async tab => {
+    let resolveSettings!: (settings: Awaited<ReturnType<typeof getSettings>>) => void;
+    vi.mocked(getSettings).mockReturnValue(new Promise(resolve => { resolveSettings = resolve; }));
+    render(sidebar());
+    fireEvent.click(screen.getAllByRole('button', { name: '更多操作' })[0]);
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: tab.menu }));
+    await act(async () => resolveSettings({
+      rightSidebarTabs: { architecture: false, computer: false }, androidPanel: { enabled: false },
+    } as Awaited<ReturnType<typeof getSettings>>));
+    expect(screen.getByRole('button', { name: tab.label })).toBeTruthy();
+    expect(screen.getByRole('menuitemcheckbox', { name: tab.menu }).getAttribute('aria-checked')).toBe('true');
+    expect(updateSettings).toHaveBeenCalledWith(tab.patch);
+  });
+
+  it('keeps all three tabs hidden when loading settings fails', async () => {
+    vi.mocked(getSettings).mockRejectedValue(new Error('offline'));
+    render(sidebar());
+    await act(async () => {});
+    for (const tab of tabs) expect(screen.queryByRole('button', { name: tab.label })).toBeNull();
+  });
+
   it.each([800, 360])('can hide and restore both tabs at width %s', async width => {
+    vi.mocked(getSettings).mockResolvedValue({
+      locale: 'zh', rightSidebarTabs: { architecture: true, computer: true },
+    } as Awaited<ReturnType<typeof getSettings>>);
     render(sidebar(width));
     await act(async () => {});
     fireEvent.click(screen.getAllByRole('button', { name: '更多操作' })[0]);
