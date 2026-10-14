@@ -39,6 +39,18 @@ describe('collaboration CLI contract', () => {
     expect(() => parseCollaborationCommand(['rebind', '--pane', '3'])).toThrow(/pane/);
     expect(() => parseCollaborationCommand(['send', 'peer', 'body', '--pane', '%3'])).toThrow(/not supported/);
   });
+  it('queries exact route evidence with capability gating and never sends a rebind or body', async () => {
+    const command = parseCollaborationCommand(['route', 'get', 'target']);
+    expect(command).toMatchObject({ action: 'route', operation: 'get', target: 'target' });
+    for (const argv of [['route'], ['route', 'get'], ['route', 'set', 'target'], ['route', 'get', 'target', '--pane', '%2']]) expect(() => parseCollaborationCommand(argv)).toThrow();
+    const old = fixture([{ route_diagnostics: false }]);
+    expect(await executeCollaborationCommand(command, { sessionId: 'source' }, old.io)).toBe(1); expect(old.calls).toHaveLength(1);
+    const current = fixture([{ route_diagnostics: true }, { ok: true, route: { identity: { recovery: 'confirmation-required' } } }]);
+    expect(await executeCollaborationCommand(command, { sessionId: 'source' }, current.io)).toBe(0);
+    expect(current.calls.map(call => call[0])).toEqual(['GET', 'GET']);
+    expect(current.calls[1][1]).toContain('/route/target');
+    expect(JSON.parse(current.output[0])).toMatchObject({ route: { identity: { recovery: 'confirmation-required' } } });
+  });
   it('waits for delivery and emits an identifier without repeating the full sent body', async () => {
     const fixture_ = fixture([{ message_id: 'm', thread_id: 't', status: 'pending', messages: [{ content: 'large evidence' }] }, { message_id: 'm', thread_id: 't', status: 'delivered' }]);
     const exit = await executeCollaborationCommand(parseCollaborationCommand(['send', 'peer', 'body', '--wait-until', 'delivered']), { backendSessionId: 'b' }, fixture_.io);

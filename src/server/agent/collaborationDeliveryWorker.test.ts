@@ -209,3 +209,31 @@ describe('background collaboration delivery', () => {
     expect(write).toHaveBeenCalledTimes(1);
   });
 });
+
+it('durable local messages in federated groups wake the worker and expose identity blocking without a terminal write', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'td-fed-local-worker-'));
+  const store = new CollaborationStore(path.join(directory, 'messages.json'));
+  const group = { id: 'cross-local', name: 'Cross', sessionIds: ['sender', 'target', 'remote:https%3A%2F%2Fother.example:remote'], federated: true, remoteSessions: [], createdAt: 1, updatedAt: 1 };
+  store.mergeFederatedGroup(group);
+  const identity = { expected: { serverPid: 1, sessionId: '$1', paneId: '%1', panePid: 2, agentSlug: 'fixture', nativeSessionId: 'old' },
+    observed: [], truncated: false, recovery: 'confirmation-required' as const, reason: 'NATIVE_IDENTITY_UNCONFIRMED', rebind_command: 'td collab --session target rebind' };
+  const write = vi.fn(async (_messages: CollaborationMessage[]) => undefined), resolver = vi.fn(async (): Promise<CollaborationRoute> => ({ state: 'identity-mismatch', reason: 'TMUX_PANE_CHANGED', diagnostics: identity, write }));
+  const worker = new CollaborationDeliveryWorker({ store, peers: () => [], isLocal: id => !id.startsWith('remote:'), resolve: resolver, onError: error => { throw error; } });
+  try {
+    worker.start(); await worker.tick();
+    const message: CollaborationMessage = store.send({ groupId: group.id, fromSessionId: 'sender', toSessionIds: ['target'], kind: 'message', content: 'Original', idempotencyKey: 'once' })[0];
+    await vi.waitFor(() => expect(store.receipt(message.id).last_error).toBe('TMUX_PANE_CHANGED'));
+    expect(store.receipt(message.id)).toMatchObject({ status: 'pending', attempt_count: 0, delivered_at: null,
+      delivery: { stage: 'blocked', error: 'TMUX_PANE_CHANGED', requires_confirmation: true, route: identity } });
+    expect(worker.diagnostics('target')).toMatchObject({ started: true, pending_count: 1 }); expect(write).not.toHaveBeenCalled();
+    const later = store.send({ groupId: group.id, fromSessionId: 'sender', toSessionIds: ['target'], kind: 'message', content: 'Later', idempotencyKey: 'later' })[0];
+    await vi.waitFor(() => expect(store.receipt(later.id).last_error).toBe('TMUX_PANE_CHANGED'));
+    expect(store.receipt(later.id)).toMatchObject({ attempt_count: 0, delivery: { stage: 'blocked' } });
+    resolver.mockResolvedValue({ state: 'ready', write });
+    await worker.reconfigure('target', async () => undefined); await worker.run('target'); await worker.run('target');
+    expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 1, thread_id: message.threadId, idempotency_key: 'once' });
+    expect(store.inbox('target')).toHaveLength(2); expect(write).toHaveBeenCalledTimes(2);
+    expect(write.mock.calls.flatMap(([messages]) => messages.map(item => item.id)).sort()).toEqual([message.id, later.id].sort());
+    expect(store.hasUnconfirmedDelivery('target')).toBe(false);
+  } finally { worker.stop(); fs.rmSync(directory, { recursive: true, force: true }); }
+});

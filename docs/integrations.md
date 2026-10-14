@@ -1169,3 +1169,76 @@ TD/native session ID、消息/reply、事件/consumer 历史。没有 Agent 启�
 并发不同键竞争/同键重放、删除/跨服务、管理员 Unix 路由/CLI 权限及 JSON、网页列表
 回读和旧网页表单版本冲突。DevBox 业务组及真实 macOS/iOS 显示尚待接入方实机验收，
 不以源码/模拟回归代替其运行现场。
+
+## 1.4.321：普通协作会话的承载变化、阻断诊断与恢复
+
+最低 CLI/实际服务均为 **1.4.321**；普通协作协议仍为 2，integration protocol 仍为 1。
+当前 CLI 版本不能替代实际服务版本；普通成员使用
+`td collab --session <自身ID> capabilities --json` 回读 `server_version`、
+`route_diagnostics=true`、`route_identity_recovery=true`、
+`route_identity_recovery_min_version=1.4.321`。
+
+```sh
+td collab --session <自身ID> route get <精确本地目标ID> --json
+td collab --session <自身ID> message get <原消息ID> --receipt-only --json
+# 只有目标拥有者在自己的真实终端确认“当前承载就是目标”后执行：
+td collab --session <目标自身ID> rebind --pane <当前pane-ID> --json
+```
+
+`route get` 为只读 `GET /operations/orchestration/route/:id`，只允许自身或共享组的本地
+成员；不解析前缀/名称，不替远端拥有者查询其当前进程。旧服务缺能力时 CLI 明确拒绝。
+返回 `route.session_id/binding/worker/observed_at/state/error/identity`：worker 包括
+`started/tick_in_progress/recipient_in_progress/last_tick_at/route/pending_count`；identity
+包括原 `expected`、当前 `observed`（最多 20 项、`truncated`）、`recovery/reason` 和
+拥有者正式 `rebind_command`。只导出承载标识、Agent 类型及原生身份证据元数据，
+没有终端正文、argv、环境或凭据。证据未知即未知，不使用旧缓存 UUID 替代当前身份。
+只读查询不启动/恢复 Agent、改绑或补键，不把进程/身份正确称为输入已就绪。
+
+已绑定的 tmux server/session/pane/PID 变化时，原物理身份保护仍拒绝直接写入。
+消息维持 `status=pending`，诊断会给 `delivery.stage=blocked`、`error=TMUX_PANE_CHANGED`、
+`route_state`、`requires_confirmation` 及 `route` 差异/建议；`attempt_count=0` 表示尚未
+尝试写入，不等于失败后可重发。现有 `message.delivery` 主动事件携带该 receipt；
+网页协作记录也展示绑定变化和投递暂停，保留原正文。跨服务交换在状态不变但错误变化
+时仍同步错误，不因 pending 状态相同而隐去新的阻断。运行服务未采集过的历史差异
+不能由新版本凭空补出；`worker.started` 等字段用于确认当前调度事实。
+
+本地/远端目标依据稳定 `remote:` 地址区分，组是否 federated 不影响组内本地消息进入
+本地 worker。后台 worker 在会话登记加载完成后启动，不等待额外 PTY adoption 或
+tmux 元数据 backfill；订阅消息存储变化并保留定时重试。缺绑定/进程/权限时仍保留原
+消息，诊断拒绝原因，不依赖网页维持投递。此加固不能替代旧现场的运行证据，也不能
+从过去缺少 transport 条目推断唯一内部根因。
+
+承载变化后的**自动**更新仅用于普通 tmux 会话，并同时要求：原生 ID/Agent 类型已知，
+当前可信 provider 独立核验同一原生 ID、同一 Agent，唯一匹配且原逻辑记录/后端/pane
+归属无冲突，没有原待投递消息的未确认写入尝试。对账前再次核验当前候选和登记，
+首次继续写入前再次核验当前原生身份。只改绑定，不启动/恢复/切换原生 Agent。
+当前独立证据 provider 是已配置的 Linux flock-owner 核验；核心不按 Agent 名称或
+TUI 展示字符串分支。argv 的 resume ID 只能作为启动意图元数据，单独不满足自动更新。
+因此没有可靠 provider 的 Mac 冷启动 Codex 等场景需要明确拥有者确认，不能宣称跨
+平台自动身份恢复已通过。独立证据的能力/适用平台由 provider 决定。
+
+原生身份缺失/不同、多匹配、归属不明或此前写入结果不明时，保留原消息并显示
+`confirmation-required` 及对应原因（`NATIVE_IDENTITY_UNCONFIRMED`、
+`MULTIPLE_NATIVE_IDENTITY_MATCHES`、`ROUTE_OWNERSHIP_UNCONFIRMED`、
+`DELIVERY_OUTCOME_UNCONFIRMED`）。拥有者确认当前承载后可用现有 rebind 明确接受当前
+Agent/原生身份；这不是承诺精确恢复旧原生历史，也不要求猜 UUID 或编辑私有记录。
+无运行 tmux 的情况须先通过原会话恢复入口恢复承载，不能靠 rebind 新建。
+
+重新绑定与投递按该逻辑成员的 worker 屏障串行，持久保存 `routeRevision` 和
+`lastRecovery={kind,at,previousPane}`，后者只记录最近一次自动/显式绑定恢复。
+绑定以 routing 文件原子替换提交；失败不采用新绑定。输入队列同时核验 routeRevision，
+旧队列不能在新绑定上继续粘贴/提交。待处理消息已经记录尝试（`attempt_count>0`）而结果
+未确认时，显式 rebind 返回 `ROUTE_DELIVERY_OUTCOME_UNCONFIRMED`，先对账，不能借修复
+重发正文。记录不承诺永久审计或跨掉电的恰好一次输入；原终端传输的写入语义/保留
+边界不变。
+
+`IntegrationSession` 不通过普通 rebind 绕过其代次/精确 UUID/配置与所有者保护，须继续
+用受限 principal 的 `session get/restore`；普通 rebind 对此返回
+`INTEGRATION_SESSION_RESTORE_REQUIRED`。当前修复不改变业务任务、principal、组、
+message/thread/幂等键或历史，不自动补 Enter、不用屏幕文字识别消费；delivered 仍只
+表示终端写入，完成须明确回复。
+
+回归覆盖同组本地消息处于 federated 组、存储变化唤醒/后台阻断、修复后原消息单次
+投递、不同/缺失/弱原生证据、多匹配/归属/未知旧写入拒绝、绑定持久化和失败、
+只读路由权限/CLI、网页暂停提示及加密传输边界。Mac 实际现场的当前原生身份尚未独立确认，原消息尚待拥有者确认及接入方实际服务
+升级/回读后继续投递；不以维护机回归冒充该现场已恢复。

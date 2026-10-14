@@ -645,6 +645,10 @@ export class CollaborationStore {
     this.expire();
     return [...new Set(this.document.messages.filter((message) => message.status === 'pending').map((message) => message.toSessionId))];
   }
+  hasUnconfirmedDelivery(sessionId: string): boolean {
+    return this.document.messages.some(message => message.toSessionId === sessionId && message.status === 'pending'
+      && (this.document.transport?.[message.id]?.attempt_count ?? 0) > 0);
+  }
 
   confirmShell(messageId: string): void {
     const message = this.getMessage(messageId);
@@ -813,6 +817,20 @@ export class CollaborationStore {
     (this.document.transport ??= {})[id] = diagnostic;
     this.persist();
   }
+  /** A route blocks the whole recipient queue, not just its first message. */
+  recordRecipientTransport(sessionId: string, patch: Partial<Omit<TransportDiagnostic, 'attempt_count'>> & { checked_at: number }): void {
+    let changed = false;
+    for (const message of this.document.messages) {
+      if (message.toSessionId !== sessionId || message.status !== 'pending') continue;
+      const previous = this.document.transport?.[message.id];
+      if ((previous?.checked_at ?? 0) > patch.checked_at) continue;
+      const next: TransportDiagnostic = { relay_online: null, peer_reachable: null, next_retry_at: null, last_error: null,
+        ...previous, ...patch, attempt_count: previous?.attempt_count ?? 0 };
+      if (JSON.stringify(previous) === JSON.stringify(next)) continue;
+      (this.document.transport ??= {})[message.id] = next; changed = true;
+    }
+    if (changed) this.persist();
+  }
 
   receipt(id: string, raw = false) {
     const message = this.getMessage(id);
@@ -828,7 +846,10 @@ export class CollaborationStore {
       failure_reason: message.failureReason ?? null, delivery_semantics: message.status === 'stored' ? 'durable_storage' : facts.deliverySource ?? (facts.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'),
       snapshot: message.snapshot ? (raw ? message.snapshot : plainCollaborationSnapshot(message.snapshot)) : null,
       delivery: { status: facts.status,
-        stage: message.status === 'stored' ? 'stored' : facts.deliveredAt !== null ? 'terminal_written' : diagnostic?.remote_received_at ? 'remote_received' : 'queued',
+        stage: message.status === 'stored' ? 'stored' : facts.deliveredAt !== null ? 'terminal_written' : diagnostic?.route_state === 'identity-mismatch' || diagnostic?.last_error === 'TMUX_PANE_CHANGED' ? 'blocked' : diagnostic?.remote_received_at ? 'remote_received' : 'queued',
+        ...(!diagnostic?.route_diagnostics && diagnostic?.last_error === 'TMUX_PANE_CHANGED' ? { requires_confirmation: true } : {}),
+        ...(diagnostic?.route_diagnostics ? { route: diagnostic.route_diagnostics, route_state: diagnostic.route_state,
+          requires_confirmation: diagnostic.route_diagnostics.recovery === 'confirmation-required' } : {}),
         remote_received_at: diagnostic?.remote_received_at ?? null, delivered_at: facts.deliveredAt, error: message.failureReason ?? diagnostic?.last_error ?? null },
       reply: { status: replies.length ? 'received' : 'pending', ack_at: replies.find(reply => reply.responseKind === 'ack')?.createdAt ?? null, reply_ids: replies.map(reply => reply.id) },
       idempotency_key: message.idempotencyKey ?? null,

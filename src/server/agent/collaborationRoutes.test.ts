@@ -19,11 +19,22 @@ describe('collaboration API with arbitrary pull consumers', () => {
     app.use(collaborationRoutes({ store, resolveSession: (body) => ['a', 'b', 'outsider'].includes(String(body.session)) ? String(body.session) : null,
       deliver: () => ({ delivered: [] }),
       rebind: async (sessionId, pane) => ({ sessionId, pane, state: 'recovering' }),
+      diagnoseRoute: async id => ({ session_id: id, worker: { started: true, recipient_in_progress: false }, identity: { recovery: 'confirmation-required' } }),
       resolveNames: (ids) => Object.fromEntries(ids.map((id) => [id, id === 'a' ? '一号 Agent' : id === 'b' ? '二号 Agent' : null])),
       renameSession: async (sessionId, name) => { renamed.push([sessionId, name]);
         return renamed.length > 1 ? { ok: false, code: 'SESSION_NOT_FOUND', error: 'gone' } : { ok: true }; } }));
     server = await new Promise<Server>((resolve) => { const running = app.listen(0, '127.0.0.1', () => resolve(running)); });
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  });
+  it('provides same-group read-only route diagnostics without changing messages or exposing outsiders', async () => {
+    const group = store.list()[0];
+    const message = store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'message', content: 'Original' })[0];
+    const before = fs.readFileSync(path.join(directory, 'messages.json'), 'utf8');
+    expect(await (await fetch(`${url}/route/b?session=a`)).json()).toMatchObject({ ok: true, route: { session_id: 'b', worker: { started: true }, identity: { recovery: 'confirmation-required' } } });
+    expect((await fetch(`${url}/route/b?session=outsider`)).status).toBe(403);
+    expect((await fetch(`${url}/route/not-a-member?session=a`)).status).toBe(403);
+    expect(fs.readFileSync(path.join(directory, 'messages.json'), 'utf8')).toBe(before);
+    expect(store.receipt(message.id)).toMatchObject({ status: 'pending', attempt_count: 0, reply_ids: [] });
   });
   it('persists Agent replies to an integration without terminal delivery, including idempotent retries and exact original correlation', async () => {
     const group = store.list()[0];

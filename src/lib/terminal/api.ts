@@ -3902,6 +3902,7 @@ export interface CollaborationMessage {
   storedAt?: number;
   responseKind?: 'ack' | 'progress' | 'result';
   failureReason?: string | null;
+  delivery?: { stage: string; error?: string | null; requires_confirmation?: boolean };
   metadata?: Record<string, unknown>;
   task?: { task_id: string; status: 'ack' | 'working' | 'blocked' | 'complete' | 'failed'; progress?: number; evidence?: unknown; blocker?: string };
   sequence?: number;

@@ -945,3 +945,17 @@ it('labels integration messages and stored replies as background facts rather th
   expect(screen.getByText('答复已持久保存 · 供后台接收')).toBeTruthy();
   expect(screen.queryByText('已写入接收方终端 · 等待接手确认')).toBeNull();
 });
+
+it('shows a preserved pending message with binding blocking instead of presenting only a silent queue', async () => {
+  const user = userEvent.setup();
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [{ id: 'blocked-group', name: '绑定异常', sessionIds: ['one'], createdAt: 1, updatedAt: 1 }], sessions: [] });
+  apiMocks.listCollaborationMessages.mockResolvedValue({ messages: [
+    { id: 'original', kind: 'message', content: '保留的交接正文', threadId: 'thread', createdAt: 1, fromSessionId: 'one', toSessionId: 'one', status: 'pending', delivery: { stage: 'blocked', error: 'TMUX_PANE_CHANGED', requires_confirmation: true } },
+  ] });
+  render(<AgentOperationsPanel activeSessionId="one" initialCollaborationGroupId="blocked-group" onClose={() => undefined} onNewSession={() => undefined} />);
+  await user.click(await screen.findByRole('button', { name: '成员与消息' }));
+  expect(await screen.findByText('保留的交接正文')).toBeTruthy();
+  expect(screen.getByText('目标会话绑定已变化，投递暂停。原消息已保留，请确认目标会话后继续。')).toBeTruthy();
+  expect(screen.queryByText('已写入接收方终端 · 等待接手确认')).toBeNull();
+  expect(apiMocks.sendCollaborationMessage).not.toHaveBeenCalled();
+});

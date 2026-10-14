@@ -20,6 +20,8 @@ export interface CollaborationBinding {
   agentSlug: string | null;
   nativeSessionId: string | null;
   pane: CollaborationPaneBinding | null;
+  routeRevision?: string;
+  lastRecovery?: { kind: 'native-identity' | 'owner-confirmed'; at: number; previousPane: CollaborationPaneBinding | null };
 }
 
 export class CollaborationRoutingStore {
@@ -37,6 +39,9 @@ export class CollaborationRoutingStore {
             || !/^%\d+$/.test(binding.pane.paneId) || !/^\$\d+$/.test(binding.pane.sessionId) || typeof binding.pane.agentSlug !== 'string'))) {
           throw new Error('Invalid collaboration binding');
         }
+        if (binding.routeRevision !== undefined && (typeof binding.routeRevision !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(binding.routeRevision))) throw new Error('Invalid route revision');
+        if (binding.lastRecovery !== undefined && (!binding.lastRecovery || !['native-identity', 'owner-confirmed'].includes(binding.lastRecovery.kind)
+          || !Number.isSafeInteger(binding.lastRecovery.at))) throw new Error('Invalid route recovery record');
         this.bindings.set(binding.sessionId, binding);
       }
     } catch (error) {
@@ -58,6 +63,11 @@ export class CollaborationRoutingStore {
 
   ownerOfBackend(id: string): string | null {
     return [...this.bindings.values()].find((binding) => binding.backendSessionId === id)?.sessionId ?? null;
+  }
+
+  hasOtherPaneOwner(id: string, pane: CollaborationPaneBinding): boolean {
+    return [...this.bindings.values()].some(binding => binding.sessionId !== id && binding.pane
+      && binding.pane.serverPid === pane.serverPid && binding.pane.sessionId === pane.sessionId && binding.pane.paneId === pane.paneId);
   }
 
   bind(binding: CollaborationBinding): void {
@@ -90,6 +100,41 @@ export class CollaborationRoutingStore {
 export interface CollaborationPaneCandidate extends CollaborationPaneBinding {
   cwd: string;
   isShell?: boolean;
+  nativeIdentitySource?: 'argv' | 'linux-flock-owner' | null;
+  nativeIdentityFailure?: string | null;
+  nativeIdentityVerified?: boolean;
+}
+
+/** Metadata only: never terminal text, argv, environment or credentials. */
+export interface CollaborationRouteIdentity {
+  expected: CollaborationPaneBinding | null;
+  observed: Array<CollaborationPaneBinding & { nativeIdentitySource: string | null; nativeIdentityFailure: string | null; nativeIdentityVerified: boolean }>;
+  truncated: boolean;
+  recovery: 'unchanged' | 'automatic' | 'confirmation-required';
+  reason: string | null;
+  rebind_command: string;
+}
+
+export function assessCollaborationRouteIdentity(binding: CollaborationBinding, panes: CollaborationPaneCandidate[], ownershipConfirmed: boolean, unconfirmedWrite: boolean) {
+  const selected = selectCollaborationPane(binding, panes);
+  const metadata = (pane: CollaborationPaneCandidate): CollaborationPaneBinding => ({ serverPid: pane.serverPid, sessionId: pane.sessionId,
+    paneId: pane.paneId, panePid: pane.panePid, agentSlug: pane.agentSlug, nativeSessionId: pane.nativeSessionId });
+  const diagnostics: CollaborationRouteIdentity = { expected: binding.pane ? { ...binding.pane } : null,
+    observed: panes.slice(0, 20).map(pane => ({ ...metadata(pane), nativeIdentitySource: pane.nativeIdentitySource ?? null, nativeIdentityFailure: pane.nativeIdentityFailure ?? null, nativeIdentityVerified: pane.nativeIdentityVerified === true })),
+    truncated: panes.length > 20, recovery: 'unchanged', reason: null,
+    rebind_command: `td collab --session ${binding.sessionId} rebind${panes.length === 1 ? ` --pane ${panes[0].paneId}` : ''}` };
+  if (selected.state !== 'identity-mismatch') return { ...selected, diagnostics };
+  const nativeId = binding.pane?.nativeSessionId ?? binding.nativeSessionId;
+  const slug = binding.pane?.agentSlug || binding.agentSlug;
+  const matching = panes.filter(pane => !pane.isShell && pane.agentSlug === slug && pane.nativeSessionId === nativeId
+    && !pane.nativeIdentityFailure && pane.nativeIdentityVerified === true);
+  diagnostics.recovery = 'confirmation-required';
+  diagnostics.reason = unconfirmedWrite ? 'DELIVERY_OUTCOME_UNCONFIRMED' : !ownershipConfirmed ? 'ROUTE_OWNERSHIP_UNCONFIRMED'
+    : !nativeId || !slug ? 'NATIVE_IDENTITY_UNCONFIRMED' : matching.length > 1 ? 'MULTIPLE_NATIVE_IDENTITY_MATCHES'
+      : matching.length !== 1 ? 'NATIVE_IDENTITY_UNCONFIRMED' : null;
+  if (diagnostics.reason) return { ...selected, diagnostics };
+  diagnostics.recovery = 'automatic';
+  return { state: 'ready' as const, pane: matching[0], diagnostics };
 }
 
 // Once pinned, changing the active pane cannot change the recipient. A reused

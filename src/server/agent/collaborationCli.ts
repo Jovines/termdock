@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError, canonicalShortId } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'events' | 'session' | 'task' | 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
+  action: 'events' | 'session' | 'task' | 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'route' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
   target?: string; message?: string; groupId?: string; sessionId?: string; sessionIds?: string[]; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
@@ -178,6 +178,16 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     Obtain pins from each administrator's transport info over a trusted
     channel. Registered servers deliver without an open browser or Desktop client)
   rebind [--pane %3] (explicitly bind this peer to its current Agent; resumes queued delivery)
+  route get <exact-local-session-id> (read-only runtime/binding diagnostics; same-group access)
+    Minimum CLI/service 1.4.321, route_diagnostics / route_identity_recovery.
+    Shows worker start/tick state, recorded and current pane/native evidence,
+    recovery choice and owner rebind command; no argv/env/screen/credentials.
+    Changed panes auto-rebind only with fresh exact native identity, same Agent,
+    unique unowned runtime and no unconfirmed earlier write. Unknown identity
+    requires the owner to confirm from their actual terminal using rebind.
+    Pending messages stay on the original ID/thread; never resend the body.
+    A pending prior attempt prevents rebind: ROUTE_DELIVERY_OUTCOME_UNCONFIRMED.
+    Ordinary tmux binding recovery is distinct from integration session restore.
   drive <session-id> approve|enter|escape|space|left|right|up|down|capture
   drive <session-id> run <command…>
     (drive the terminal of a member session you share a group with — terminal
@@ -257,7 +267,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     positional.push('capture');
   }
   const action = (requestedAction === 'capture' ? 'drive' : requestedAction === 'traits' ? 'role' : requestedAction) as CollaborationCommand['action'];
-  if (!['events', 'session', 'task', 'status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['events', 'session', 'task', 'status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'route', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (typeof options.session === 'string' && !options.session.trim()) throw new Error('--session requires a non-empty full Termdock session id');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
@@ -333,6 +343,9 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
       command.sessionId = positional.shift();
       if (!command.groupId || !command.sessionId || positional.length) throw new Error('Usage: td collab role unset <group-id> <session-id>');
     } else throw new Error('Usage: td collab role list|set|unset (see td collab --help)');
+  } else if (action === 'route') {
+    command.operation = positional.shift(); command.target = positional.shift();
+    if (command.operation !== 'get' || !command.target || !/^[a-zA-Z0-9._-]{1,80}$/.test(command.target) || positional.length) throw new Error('Usage: td collab route get <exact-local-session-id>');
   } else if (action === 'rename') {
     command.sessionId = positional.shift();
     command.name = positional.join(' ');
@@ -355,7 +368,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   const byAction: Record<string, string[]> = {
     events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key', 'generation', 'name'],
     task: ['purpose', 'to-event', 'decision', 'source', 'external-actor', 'external-message-id', 'metadata', 'work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
-    rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
+    rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], route: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
@@ -582,6 +595,11 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       return 0;
     }
     if (command.action === 'rebind') { output(await request('POST', '/route/rebind', { pane: o.pane ?? null })); return 0; }
+    if (command.action === 'route') {
+      const capability = await request('GET', '/capabilities');
+      if (capability.route_diagnostics !== true) throw new Error('ROUTE_DIAGNOSTICS_UNAVAILABLE: minimum CLI/running service 1.4.321');
+      output(await request('GET', `/route/${encodeURIComponent(command.target!)}`)); return 0;
+    }
     if (command.action === 'inbox') {
       let cursor = o.cursor as string | undefined;
       do {

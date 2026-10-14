@@ -57,7 +57,7 @@ export function resolveCollaborationBackend<T extends LiveBackend>(
   const owner = routing.ownerOfBackend(id);
   if (owner && owner !== record.sessionId) return null;
   if (records.some((other) => other.sessionId !== record.sessionId && other.backendSessionId === id)) return null;
-  routing.bind({ sessionId: record.sessionId, backendSessionId: id, mode: backend.mode,
+  routing.bind({ ...binding, sessionId: record.sessionId, backendSessionId: id, mode: backend.mode,
     tmuxSessionName: backend.tmuxSessionName,
     agentSlug: binding?.agentSlug ?? backend.agent?.slug ?? record.agentResume?.slug ?? null,
     nativeSessionId: binding?.nativeSessionId ?? backend.agentSession?.sessionId ?? record.agentResume?.sessionId ?? null,

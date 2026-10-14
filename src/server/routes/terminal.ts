@@ -153,7 +153,7 @@ import { SessionSearchStore, type SessionSearchMetadata } from '../agent/session
 import { NativeSessionSearch } from '../agent/nativeSessionSearch.js';
 import { CollaborationError } from '../agent/collaborationProtocol.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
-import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, type CollaborationBinding, type CollaborationPaneBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
+import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, assessCollaborationRouteIdentity, type CollaborationBinding, type CollaborationPaneBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
 import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane,
   type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
@@ -1095,6 +1095,9 @@ process.on('SIGINT', () => { void shutdownWithRecordings(); });
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 void (async () => {
   await Promise.all([loadGlobalSessionStateFromDisk(), loadTmuxRecoveryStateFromDisk()]);
+  // Delivery needs the loaded inventory, not optional PTY adoption/metadata backfill.
+  // Those steps must not leave durable messages without a background scheduler.
+  collaborationDeliveryWorker.start();
   await watchGlobalSessionStateFile();
   // pty-host adoption runs after the state load (its record upserts must not
   // be clobbered) and before pruning (surviving shell records' backends are
@@ -1104,7 +1107,6 @@ void (async () => {
   });
   pruneOrphanSessions();
   await backfillPersistedTmuxMetadata();
-  collaborationDeliveryWorker.start();
 })();
 caffeinateManager.startNetworkMonitor();
 
@@ -2032,12 +2034,14 @@ function terminalInputGuard(record: PersistedClientSession): TerminalInputGuard 
   const frontendSessionId = record.sessionId;
   const backendSessionId = record.backendSessionId;
   const launchId = record.agentLaunchGeneration ?? null;
+  const routeRevision = collaborationRouting.get(frontendSessionId)?.routeRevision ?? null;
   const backend = backendSessionId ? terminalSessions.get(backendSessionId) : undefined;
   return () => {
     const latest = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
     if (!latest) throw new Error('SESSION_REMOVED');
     const instanceMatches = !backendSessionId || terminalSessions.get(backendSessionId) === backend;
-    if ((latest.agentLaunchGeneration ?? null) !== launchId || latest.backendSessionId !== backendSessionId || !instanceMatches) {
+    if ((collaborationRouting.get(frontendSessionId)?.routeRevision ?? null) !== routeRevision
+      || (latest.agentLaunchGeneration ?? null) !== launchId || latest.backendSessionId !== backendSessionId || !instanceMatches) {
       throw new TerminalInputTargetChangedError({ expected_backend_session_id: backendSessionId, current_backend_session_id: latest.backendSessionId,
         expected_launch_id: launchId, current_launch_id: latest.agentLaunchGeneration ?? null, backend_instance_matches: instanceMatches });
     }
@@ -2146,6 +2150,7 @@ export function resolveStableFederationSessionId(id: string): string | null {
 
 function collaborationRemoteSessions() {
   return Array.from(new Map(collaborationStore.list().flatMap((group) => group.remoteSessions ?? [])
+    .filter(session => session.sessionId.startsWith('remote:'))
     .map((session) => {
       const facts = collaborationStore.sessionFacts(session.sessionId, false);
       const { currentTask: _currentTask, ...terminalSession } = session;
@@ -2157,8 +2162,7 @@ function collaborationRemoteSessions() {
 }
 
 function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number; serviceUnavailable?: boolean; waitable?: boolean; reason?: string } {
-  const remote = collaborationRemoteSessions().find((session) => session.sessionId === frontendSessionId);
-  if (remote) {
+  if (frontendSessionId.startsWith('remote:')) {
     return { delivered: [], pending: collaborationStore.pendingCount(frontendSessionId), waitable: true,
       reason: '跨服务消息已入队，服务后台正在投递；使用 message get 查看送达回执或注册、重试原因。' };
   }
@@ -2207,7 +2211,7 @@ function formatLocalCollaborationMessages(frontendSessionId: string, messages: C
  *  agent-keyed selector can never reach it. Delivery still needs an agent (the
  *  confirm gate and prompt formatting assume a TUI); driving a terminal —
  *  run/capture — is a shell operation and works on any pane. */
-async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false, freshProcess = false): Promise<ReturnType<typeof selectCollaborationPane>> {
+async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false, freshProcess = false, describeNativeFailure = false): Promise<ReturnType<typeof selectCollaborationPane> & { candidates?: CollaborationPaneCandidate[] }> {
   if (!binding.tmuxSessionName) return { state: 'offline', reason: 'TMUX_BINDING_MISSING' };
   const name = `=${binding.tmuxSessionName}`;
   try { await runTmux(['has-session', '-t', name]); }
@@ -2228,13 +2232,15 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
     const program = await resolveTmuxPaneProgram(pane, true, nativeProcessIdentity || freshProcess);
     const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
     const identity = nativeProcessIdentity ? await observeProgramNativeIdentity(agent, program)
-      : { nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null, failure: null };
-    if (identity.failure) integrationError(identity.failure === 'NATIVE_SESSION_IDENTITY_CONFLICT'
+      : { nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null, failure: null, source: null };
+    if (identity.failure && !describeNativeFailure) integrationError(identity.failure === 'NATIVE_SESSION_IDENTITY_CONFLICT'
       ? 'NATIVE_SESSION_ID_MISMATCH' : 'NATIVE_SESSION_OWNER_UNCONFIRMED', 'Current process native identity evidence conflicts or cannot be uniquely verified', 409);
     const nativeSessionId = identity.nativeId;
     return { serverPid, sessionId: layout.sessionId, paneId: pane.id, panePid: pane.pid,
       agentSlug: agent?.slug ?? '', nativeSessionId, cwd: pane.currentPath,
-      isShell: shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') };
+      isShell: shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? ''),
+      ...(nativeProcessIdentity ? { nativeIdentitySource: identity.source, nativeIdentityFailure: identity.failure,
+        nativeIdentityVerified: identity.source === 'linux-flock-owner' && !identity.failure } : {}) };
   }));
   const candidates = requestedPane ? panes.filter((pane) => pane.paneId === requestedPane) : panes;
   if (allowPlainPane && !binding.pane) {
@@ -2242,23 +2248,52 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
     // pane so a plain shell member is drivable (run/capture are shell ops).
     return selectDrivePane(binding, candidates, layout.activePaneId);
   }
-  return selectCollaborationPane(binding, candidates);
+  return { ...selectCollaborationPane(binding, candidates), candidates };
+}
+
+function routeOwnershipConfirmed(frontendSessionId: string, binding: CollaborationBinding, panes: CollaborationPaneCandidate[]): boolean {
+  const record = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
+  return !!record && record.mode === 'tmux' && record.tmuxSessionName === binding.tmuxSessionName
+    && !globalSessionState.sessions.some(other => other.sessionId !== frontendSessionId && (other.tmuxSessionName === binding.tmuxSessionName
+      || !!binding.backendSessionId && other.backendSessionId === binding.backendSessionId))
+    && (!binding.backendSessionId || [null, frontendSessionId].includes(collaborationRouting.ownerOfBackend(binding.backendSessionId)))
+    && panes.every(pane => !collaborationRouting.hasOtherPaneOwner(frontendSessionId, pane));
+}
+function routeHasUnconfirmedWrite(frontendSessionId: string): boolean {
+  return collaborationStore.hasUnconfirmedDelivery(frontendSessionId);
+}
+async function describeCollaborationRoute(frontendSessionId: string) {
+  const record = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
+  if (!record) throw new Error('SESSION_REMOVED');
+  const binding = collaborationRouting.get(frontendSessionId);
+  if (!binding || binding.mode !== 'tmux') return { session_id: frontendSessionId, binding,
+    worker: collaborationDeliveryWorker.diagnostics(frontendSessionId), identity: null };
+  const inspected = await inspectCollaborationTmux(binding, null, false, true, true, true);
+  const assessment = assessCollaborationRouteIdentity(binding, inspected.candidates ?? [],
+    routeOwnershipConfirmed(frontendSessionId, binding, inspected.candidates ?? []), routeHasUnconfirmedWrite(frontendSessionId));
+  return { session_id: frontendSessionId, binding, worker: collaborationDeliveryWorker.diagnostics(frontendSessionId),
+    observed_at: Date.now(), state: inspected.state, error: inspected.reason ?? null, identity: assessment.diagnostics,
+    integration_managed: record.tmuxSessionName?.startsWith('wt-integration-') ?? false };
 }
 
 async function rebindCollaborationRoute(frontendSessionId: string, paneId: string | null) {
   await collaborationDeliveryWorker.reconfigure(frontendSessionId, async () => {
     const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
     if (!record) throw new Error('SESSION_REMOVED');
+    if (record.tmuxSessionName?.startsWith('wt-integration-')) throw new Error('INTEGRATION_SESSION_RESTORE_REQUIRED: use the owning principal session restore lifecycle');
     const previous = collaborationRouting.get(frontendSessionId);
+    if (routeHasUnconfirmedWrite(frontendSessionId)) throw new Error('ROUTE_DELIVERY_OUTCOME_UNCONFIRMED: inspect prior write outcome before rebinding; the body is not replayed');
     const binding: CollaborationBinding = {
       sessionId: frontendSessionId, backendSessionId: previous?.backendSessionId ?? record.backendSessionId,
       mode: record.mode, tmuxSessionName: record.tmuxSessionName ?? previous?.tmuxSessionName ?? null,
       agentSlug: null, nativeSessionId: null, pane: null,
+      routeRevision: crypto.randomUUID(), lastRecovery: { kind: 'owner-confirmed', at: Date.now(), previousPane: previous?.pane ?? null },
     };
     if (binding.mode === 'tmux') {
       const inspected = await inspectCollaborationTmux(binding, paneId);
       if (inspected.state !== 'ready' || !inspected.pane) throw new Error(inspected.reason ?? 'AGENT_NOT_RUNNING');
       const pane = inspected.pane;
+      if (!routeOwnershipConfirmed(frontendSessionId, binding, [pane])) throw new Error('ROUTE_OWNERSHIP_UNCONFIRMED');
       binding.pane = { serverPid: pane.serverPid, sessionId: pane.sessionId, paneId: pane.paneId, panePid: pane.panePid,
         agentSlug: pane.agentSlug, nativeSessionId: pane.nativeSessionId };
       binding.agentSlug = pane.agentSlug;
@@ -2286,6 +2321,7 @@ async function rebindCollaborationRoute(frontendSessionId: string, paneId: strin
  * snapshot of the recipient after the write, and the sender judges from that.
  */
 async function resolveCollaborationRoute(frontendSessionId: string): Promise<CollaborationRoute> {
+  let recoveredNativeIdentity = false;
   let record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
   if (!record) return { state: 'offline', reason: 'SESSION_REMOVED' };
   if (record.tmuxSessionName?.startsWith('wt-integration-') && !integrationDeliveryGuard) return { state: 'unavailable', reason: 'INTEGRATION_RUNTIME_UNAVAILABLE' };
@@ -2298,7 +2334,26 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     agentSlug: record.agentResume?.slug ?? null, nativeSessionId: record.agentResume?.sessionId ?? null, pane: null,
   };
   if (binding.mode === 'tmux') {
-    const inspected = await inspectCollaborationTmux(binding, undefined, false, Boolean(record.agentLaunchCheck?.nativeSessionId), Boolean(record.agentLaunchCheck));
+    let inspected = await inspectCollaborationTmux(binding, undefined, false, Boolean(record.agentLaunchCheck?.nativeSessionId), Boolean(record.agentLaunchCheck));
+    if (inspected.state === 'identity-mismatch' && !record.tmuxSessionName?.startsWith('wt-integration-')) {
+      const observed = await inspectCollaborationTmux(binding, null, false, true, true, true);
+      const assessment = assessCollaborationRouteIdentity(binding, observed.candidates ?? [],
+        routeOwnershipConfirmed(frontendSessionId, binding, observed.candidates ?? []), routeHasUnconfirmedWrite(frontendSessionId));
+      if (assessment.diagnostics.recovery !== 'automatic' || !assessment.pane) return { state: 'identity-mismatch', reason: 'TMUX_PANE_CHANGED', diagnostics: assessment.diagnostics };
+      const previous = collaborationRouting.get(frontendSessionId);
+      if (JSON.stringify(previous) !== JSON.stringify(binding)) return { state: 'recovering', reason: 'ROUTE_CHANGED_DURING_RECOVERY' };
+      const verify = await inspectCollaborationTmux(binding, null, false, true, true, true);
+      const confirmed = assessCollaborationRouteIdentity(binding, verify.candidates ?? [],
+        routeOwnershipConfirmed(frontendSessionId, binding, verify.candidates ?? []), routeHasUnconfirmedWrite(frontendSessionId));
+      if (confirmed.diagnostics.recovery !== 'automatic' || !confirmed.pane || JSON.stringify(confirmed.pane) !== JSON.stringify(assessment.pane)) {
+        return { state: 'identity-mismatch', reason: 'ROUTE_CHANGED_DURING_RECOVERY', diagnostics: confirmed.diagnostics };
+      }
+      binding = { ...binding, pane: confirmed.pane, routeRevision: crypto.randomUUID(),
+        lastRecovery: { kind: 'native-identity', at: Date.now(), previousPane: binding.pane } };
+      collaborationRouting.bind(binding);
+      inspected = { state: 'ready', pane: confirmed.pane };
+      recoveredNativeIdentity = true;
+    }
     assertGeneration();
     if (inspected.state !== 'ready' || !inspected.pane) return inspected;
     record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
@@ -2332,6 +2387,13 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     const assertCurrent = terminalInputGuard(globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId)!);
     return { state: 'ready', isShell: pane.isShell, capture: async () => captureTmuxPaneText(runTmux, pinned), write: async (messages) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
+      if (recoveredNativeIdentity) {
+        const current = await inspectCollaborationTmux(binding, null, false, true, true, true);
+        const proof = current.candidates?.find(candidate => candidate.serverPid === pinned.serverPid && candidate.sessionId === pinned.sessionId
+          && candidate.paneId === pinned.paneId && candidate.panePid === pinned.panePid);
+        if (!proof?.nativeIdentityVerified || proof.nativeIdentityFailure || proof.nativeSessionId !== pinned.nativeSessionId
+          || proof.agentSlug !== pinned.agentSlug || !routeOwnershipConfirmed(frontendSessionId, binding, [proof])) throw new Error('ROUTE_NATIVE_IDENTITY_CHANGED_BEFORE_WRITE');
+      }
       await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin, () => { assertGeneration(); assertCurrent(); });
       backend!.lastActivity = Date.now();
     } };
@@ -7217,7 +7279,8 @@ router.get('/operations/collaboration-groups/:groupId/messages', (req, res) => {
   const { group, ambiguous } = resolveGroupParam(req.params.groupId);
   if (ambiguous) return ambiguousGroupResponse(res, ambiguous);
   if (!group) return res.status(404).json({ error: '协作组不存在' });
-  res.json({ messages: collaborationStore.listMessages(group.id, Number(req.query.limit) || 200) });
+  res.json({ messages: collaborationStore.listMessages(group.id, Number(req.query.limit) || 200)
+    .map(message => ({ ...message, delivery: collaborationStore.receipt(message.id).delivery })) });
 });
 
 router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => {
@@ -7500,7 +7563,7 @@ router.post('/operations/orchestration/drive', async (req, res) => {
 });
 
 router.use('/operations/orchestration', collaborationRoutes({ store: collaborationStore, resolveSession: resolveFrontendSessionId,
-  deliver: tryDeliverCollaborationInbox, rebind: rebindCollaborationRoute,
+  deliver: tryDeliverCollaborationInbox, rebind: rebindCollaborationRoute, diagnoseRoute: describeCollaborationRoute,
   resolveNames: (ids) => {
     const names = new Map([...collaborationRemoteSessions(),
       ...globalSessionState.sessions.map(orchestrationSessionSnapshot)].map((session) => [session.sessionId, session.name]));

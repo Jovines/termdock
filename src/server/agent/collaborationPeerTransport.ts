@@ -268,7 +268,8 @@ export class CollaborationPeerTransport {
         || message.toSessionId.startsWith('remote:')) return [];
       const facts = terminalMessage(message);
       const known = Array.isArray(packet.known) ? packet.known.find((item: any) => item?.id === message.id) : undefined;
-      if (known && known.status === facts.status && known.deliveredAt === facts.deliveredAt && known.shellConfirmed === message.shellConfirmed && (known.hasSnapshot || !message.snapshot)) return [];
+      if (known && known.status === facts.status && known.deliveredAt === facts.deliveredAt && known.shellConfirmed === message.shellConfirmed && (known.hasSnapshot || !message.snapshot)
+        && known.last_error === (store.diagnostic(message.id)?.last_error ?? null)) return [];
       const receipt = store.receipt(message.id);
       return [{ id: message.id, status: facts.status, deliveredAt: facts.deliveredAt,
         snapshot: (receipt.snapshot ?? '').slice(0, 16000) || null, deliverySource: facts.deliverySource,
@@ -334,7 +335,7 @@ export class CollaborationPeerTransport {
         for (const message of payloads) {
           const result = await client.request({ type: 'collaboration-exchange', groupId: b.groupId,
             context: mapContext(store.context(b.groupId), id => id.startsWith('remote:') ? id : remoteSession(b.localOrigin, id)),
-            ids: batch.map(m => m.id), known: batch.map(m => ({ id: m.id, status: m.status, deliveredAt: m.deliveredAt, hasSnapshot: !!m.snapshot, shellConfirmed: m.shellConfirmed })), ...(message ? { message } : {}) });
+            ids: batch.map(m => m.id), known: batch.map(m => ({ id: m.id, status: m.status, deliveredAt: m.deliveredAt, hasSnapshot: !!m.snapshot, shellConfirmed: m.shellConfirmed, last_error: store.diagnostic(m.id)?.last_error ?? null })), ...(message ? { message } : {}) });
           if (Array.isArray(result.activity)) for (const item of result.activity.slice(0, 500)) {
             if (!item || typeof item.sessionId !== 'string' || item.sessionId.startsWith('remote:')) continue;
             const id = remoteSession(b.peer.origin, item.sessionId);

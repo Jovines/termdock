@@ -1235,6 +1235,7 @@ export function CollaborationTab({ fullWorkspace = false, initialView = 'tasks',
       <section className="mt-4"><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h4 className="text-[11px] font-medium text-foreground">协作记录</h4><span className="text-[9px] text-muted-foreground">{activities.length} 条</span></div>
         <div className="divide-y divide-border/10 border-y border-border/10 [overflow-wrap:anywhere]">
         {activities.map((activity) => <div key={activity.key} className="px-2 py-3"><div className="flex items-center gap-2 text-[9px] text-muted-foreground"><span className="font-medium text-primary">{activity.responseKind === 'ack' ? '收到确认' : activity.responseKind === 'progress' ? '进展' : activity.responseKind === 'result' ? '结果' : messageKindLabel(activity.kind)}</span><span>{activity.fromName}</span><span>→</span><span className="truncate">{activity.toNames.join('、')}</span><span className="ml-auto shrink-0">{new Date(activity.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div><p className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">{activity.content}</p><p className="mt-1 text-[9px] text-muted-foreground">{activity.status === 'pending' ? '已入队 · 等待投递' : activity.status === 'failed' ? '投递失败' : activity.status === 'expired' ? '消息已过期，未继续投递' : activity.status === 'stored' ? '答复已持久保存 · 供后台接收' : '已写入接收方终端 · 等待接手确认'}</p>
+          {activity.deliveryErrors.map(error => <p key={error} role="status" className="mt-1 text-[10px] text-destructive">{error === 'TMUX_PANE_CHANGED' ? '目标会话绑定已变化，投递暂停。原消息已保留，请确认目标会话后继续。' : `投递暂停：${error}。原消息已保留，请检查目标会话。`}</p>)}
           {(activity.task || activity.failureReason) && <details className="mt-2 text-[10px] text-muted-foreground"><summary className="cursor-pointer">任务详情与证据</summary><pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(activity.task ?? { failure_reason: activity.failureReason }, null, 2)}</pre></details>}
         </div>)}
         {activities.length === 0 && <Empty text={messagesLoading ? "正在加载协作记录…" : "还没有消息。可以直接给成员发送说明或问题。"} />}
@@ -1483,7 +1484,7 @@ function collapseCollaborationMessages(messages: CollaborationMessage[], session
   const sessionsById = new Map(sessions.map((session) => [session.sessionId, collaborationSessionName(session, sessions)!]));
   const grouped = new Map<string, {
     key: string; kind: CollaborationMessageKind; content: string; createdAt: number;
-    fromName: string; toNames: string[]; status: CollaborationMessage['status']; responseKind?: CollaborationMessage['responseKind']; task?: CollaborationMessage['task']; failureReason?: string | null;
+    fromName: string; toNames: string[]; status: CollaborationMessage['status']; responseKind?: CollaborationMessage['responseKind']; task?: CollaborationMessage['task']; failureReason?: string | null; deliveryErrors: string[];
   }>();
   for (const message of messages) {
     const key = `${message.threadId}:${message.createdAt}:${message.fromSessionId ?? message.integrationOrigin?.integrationId ?? 'user'}:${message.kind}:${message.responseKind ?? ''}:${JSON.stringify(message.task ?? null)}:${message.content}`;
@@ -1491,6 +1492,7 @@ function collapseCollaborationMessages(messages: CollaborationMessage[], session
     const recipient = message.toPrincipalId ? `后台接入 ${message.toPrincipalId}` : sessionsById.get(message.toSessionId) ?? message.toSessionId.slice(0, 8);
     if (existing) {
       existing.toNames.push(recipient);
+      if (message.delivery?.stage === 'blocked' && message.delivery.error && !existing.deliveryErrors.includes(message.delivery.error)) existing.deliveryErrors.push(message.delivery.error);
       const rank = { failed: -2, expired: -1, pending: 0, delivered: 1, read: 2, stored: 3 } as const;
       if (rank[message.status] < rank[existing.status]) existing.status = message.status;
       continue;
@@ -1499,6 +1501,7 @@ function collapseCollaborationMessages(messages: CollaborationMessage[], session
       key, kind: message.kind, content: message.content, createdAt: message.createdAt,
       fromName: message.fromSessionId ? sessionsById.get(message.fromSessionId) ?? message.fromSessionId.slice(0, 8) : message.integrationOrigin ? `后台接入 ${message.integrationOrigin.integrationId}` : '你',
       toNames: [recipient], status: message.status, responseKind: message.responseKind, task: message.task, failureReason: message.failureReason,
+      deliveryErrors: message.delivery?.stage === 'blocked' && message.delivery.error ? [message.delivery.error] : [],
     });
   }
   return [...grouped.values()].sort((a, b) => b.createdAt - a.createdAt);

@@ -145,6 +145,8 @@ export function extrasFromBody(body: Record<string, unknown>): MessageExtras {
     task: body.task as TaskEnvelope | undefined, expiresAt: body.expires_at as number | undefined });
 }
 export interface TransportDiagnostic {
+  route_state?: string;
+  route_diagnostics?: import('./collaborationRouting.js').CollaborationRouteIdentity;
   remote_received_at?: number;
   relay_online: boolean | null;
   peer_reachable: boolean | null;

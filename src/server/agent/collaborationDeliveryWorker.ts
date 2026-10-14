@@ -1,10 +1,11 @@
 import type { CollaborationStore, CollaborationMessage } from './collaborationStore.js';
-import type { CollaborationRouteState } from './collaborationRouting.js';
+import type { CollaborationRouteState, CollaborationRouteIdentity } from './collaborationRouting.js';
 
 export interface CollaborationRoute {
   state: CollaborationRouteState;
   isShell?: boolean;
   reason?: string;
+  diagnostics?: CollaborationRouteIdentity;
   write?: (messages: CollaborationMessage[]) => Promise<void>;
   /** Best-effort capture of the recipient terminal after a successful write. */
   capture?: () => Promise<string>;
@@ -17,6 +18,8 @@ export class CollaborationDeliveryWorker {
   private submitted = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking: Promise<void> | null = null;
+  private unsubscribe?: () => void;
+  private lastTickAt: number | null = null;
 
   constructor(private readonly options: {
     store: CollaborationStore;
@@ -33,12 +36,19 @@ export class CollaborationDeliveryWorker {
     if (this.timer) return;
     this.timer = setInterval(() => { void this.tick(); }, 2_000);
     this.timer.unref?.();
+    this.unsubscribe = this.options.store.subscribe(() => { queueMicrotask(() => { if (this.timer) void this.tick(); }); });
     void this.tick();
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.unsubscribe?.(); this.unsubscribe = undefined;
+  }
+
+  diagnostics(id: string) {
+    return { started: this.timer !== null, tick_in_progress: this.ticking !== null, recipient_in_progress: this.running.has(id),
+      last_tick_at: this.lastTickAt, route: this.state(id), pending_count: this.options.store.pendingCount(id) };
   }
 
   state(id: string) {
@@ -58,6 +68,7 @@ export class CollaborationDeliveryWorker {
   }
 
   private async tickOnce(): Promise<void> {
+    this.lastTickAt = Date.now();
     try {
       const ids = [...new Set([...this.options.peers(), ...this.options.store.pendingRecipients()])].filter(this.options.isLocal);
       // Bound process probes/attachments while keeping a broken peer from
@@ -86,10 +97,8 @@ export class CollaborationDeliveryWorker {
       await configure();
       this.failures.delete(id);
       this.states.delete(id);
-      for (const message of this.options.store.inbox(id, { pendingOnly: true, limit: 200 })) {
-        const diagnostic = this.options.store.diagnostic(message.id);
-        if (diagnostic) this.options.store.recordTransport(message.id, { ...diagnostic, next_retry_at: null, last_error: null });
-      }
+      this.options.store.recordRecipientTransport(id, { next_retry_at: null, last_error: null,
+        route_state: undefined, route_diagnostics: undefined, checked_at: Date.now() });
     }).finally(() => {
       if (this.running.get(id) === operation) this.running.delete(id);
     });
@@ -105,7 +114,14 @@ export class CollaborationDeliveryWorker {
       this.complete(id, first);
       return;
     }
-    if (first && (store.diagnostic(first.id)?.next_retry_at ?? 0) > Date.now()) return;
+    if (first && (store.diagnostic(first.id)?.next_retry_at ?? 0) > Date.now()) {
+      const diagnostic = store.diagnostic(first.id);
+      if (diagnostic?.route_state === 'identity-mismatch') {
+        const { attempt_count: _, ...blocked } = diagnostic;
+        store.recordRecipientTransport(id, blocked);
+      }
+      return;
+    }
     this.states.set(id, { state: 'recovering', reason: null, checkedAt: Date.now() });
     let route: CollaborationRoute;
     try { route = await this.options.resolve(id); }
@@ -116,7 +132,7 @@ export class CollaborationDeliveryWorker {
     const pending = store.inbox(id, { pendingOnly: true, limit: 1 });
     if (!pending.length) return;
     if (route.state !== 'ready' || !route.write) {
-      this.retry(id, pending, route.reason ?? route.state, false);
+      this.retry(id, pending, route.reason ?? route.state, false, route);
       return;
     }
     const message = pending[0]!;
@@ -171,10 +187,15 @@ export class CollaborationDeliveryWorker {
     this.failures.delete(id);
   }
 
-  private retry(id: string, messages: CollaborationMessage[], reason: string, reachable: boolean): void {
+  private retry(id: string, messages: CollaborationMessage[], reason: string, reachable: boolean, route?: CollaborationRoute): void {
     const failures = (this.failures.get(id) ?? 0) + 1;
     this.failures.set(id, failures);
     const next = Date.now() + Math.min(30_000, 2_000 * 2 ** Math.min(failures - 1, 4));
+    if (route) {
+      this.options.store.recordRecipientTransport(id, { relay_online: null, peer_reachable: reachable, next_retry_at: next,
+        last_error: reason, checked_at: Date.now(), route_state: route.state, route_diagnostics: route.diagnostics });
+      return;
+    }
     for (const message of messages) this.options.store.recordTransport(message.id, {
       relay_online: null, peer_reachable: reachable,
       attempt_count: this.options.store.diagnostic(message.id)?.attempt_count ?? 0,

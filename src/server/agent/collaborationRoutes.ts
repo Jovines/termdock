@@ -30,6 +30,7 @@ type Dependencies = {
   resolveSession: (input: Record<string, unknown>) => string | null;
   deliver: (id: string) => DeliveryOutcome | Promise<DeliveryOutcome>;
   rebind?: (id: string, pane: string | null) => Promise<unknown>;
+  diagnoseRoute?: (id: string) => Promise<unknown>;
   /** Human-readable names for member sessions; absent ids become null so
    * consumers can fall back to the raw session id. */
   resolveNames?: (sessionIds: string[]) => Record<string, string | null>;
@@ -37,7 +38,7 @@ type Dependencies = {
    * group-scoped). Callers must already share a group with the target. */
   renameSession?: (sessionId: string, name: string) => Promise<{ ok: boolean; code?: string; error?: string }>;
 };
-export function collaborationRoutes({ store, resolveSession, deliver, rebind, resolveNames, renameSession }: Dependencies): Router {
+export function collaborationRoutes({ store, resolveSession, deliver, rebind, diagnoseRoute, resolveNames, renameSession }: Dependencies): Router {
   const router = Router();
   const run = (handler: (req: Request, res: Response, sessionId: string) => void | Promise<void>) => async (req: Request, res: Response) => {
     try {
@@ -106,6 +107,13 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     }
     res.json({ ok: true, route: await rebind(sessionId, pane ?? null) });
   }));
+  router.get('/route/:id', run(async (req, res, sessionId) => {
+    const id = String(req.params.id);
+    if (id !== sessionId && !store.groupsForSession(sessionId).some(group => group.sessionIds.includes(id))) throw new CollaborationError('NOT_A_GROUP_MEMBER', 'Route diagnostics require a shared group', 403);
+    if (id.startsWith('remote:')) throw new CollaborationError('REMOTE_ROUTE_DIAGNOSTICS_UNSUPPORTED', 'Query the owning service for the current runtime evidence', 409);
+    if (!diagnoseRoute) throw new CollaborationError('ROUTE_DIAGNOSTICS_UNAVAILABLE', 'The running service does not support route diagnostics (minimum 1.4.321)', 409);
+    res.json({ ok: true, route: await diagnoseRoute(id) });
+  }));
   /** Accepts the short id a terminal shows as well as the full one; an
    *  ambiguous prefix is refused rather than guessed, so a reply can never
    *  land on the wrong thread. */
@@ -157,6 +165,7 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, re
     }
   };
   router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, server_version: getTermdockVersion(), limits: COLLAB_LIMITS,
+    route_diagnostics: !!diagnoseRoute, route_identity_recovery: !!diagnoseRoute, route_identity_recovery_min_version: '1.4.321',
     task_workflow: { version: 2, command: 'td collab task', single_authority: true, explicit_reports: true,
       managed_goals: true, automatic_review: true, dependency_dispatch: true, isolated_worktrees: true, encrypted_commit_transfer: true,
       durable_questions: true, user_acceptance: true, versioned_artifacts: true, independent_reviews: true,

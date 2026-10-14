@@ -130,3 +130,20 @@ it('requires durable administrator authority for browser peer registration, not 
   expect(() => assertPeerRegistrationAuthority(request)).not.toThrow();
   expect(authorize).toHaveBeenCalledWith({ subjectId: 'browser', serviceId: 'service', action: 'authorization.manage' });
 });
+
+it('returns a newly blocked reason when a peer already knows the unchanged pending status and snapshot', async () => {
+  const f = await setup();
+  vi.spyOn(f.stores[1], 'markDelivered').mockReturnValue([]);
+  f.configure();
+  const original = f.stores[0].send({ groupId: 'cross-test', fromSessionId: 'agent', toSessionIds: [remoteSession(f.nodes[1].origin, 'agent')], kind: 'message', content: 'Original' })[0];
+  await vi.waitFor(() => expect(f.stores[1].getMessage(original.id)).not.toBeNull());
+  const recipient = f.stores[1].getMessage(original.id)!;
+  f.stores[1].recordTransport(original.id, { relay_online: null, peer_reachable: false, attempt_count: 0, next_retry_at: null, last_error: 'TMUX_PANE_CHANGED', checked_at: Date.now() });
+  const result = f.transports[1].receive(f.nodes[0].serviceId, { id: 'status-check', type: 'collaboration-exchange', groupId: 'cross-test', ids: [original.id],
+    known: [{ id: original.id, status: recipient.status, deliveredAt: recipient.deliveredAt, shellConfirmed: recipient.shellConfirmed, hasSnapshot: true, last_error: null }] } as Packet);
+  expect(result.receipts).toEqual(expect.arrayContaining([expect.objectContaining({ id: original.id, status: 'pending', last_error: 'TMUX_PANE_CHANGED' })]));
+  await vi.waitFor(() => { f.transports[0].wake(); expect(f.stores[0].receipt(original.id).last_error).toBe('TMUX_PANE_CHANGED'); });
+  expect(f.stores[0].receipt(original.id)).toMatchObject({ status: 'pending', delivery: { stage: 'blocked', requires_confirmation: true } });
+  expect(f.stores[1].inbox('agent')).toHaveLength(1);
+  expect(f.deliveries[1]).toHaveBeenCalledTimes(1);
+});
