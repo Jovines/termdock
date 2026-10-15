@@ -1242,3 +1242,52 @@ message/thread/幂等键或历史，不自动补 Enter、不用屏幕文字识�
 投递、不同/缺失/弱原生证据、多匹配/归属/未知旧写入拒绝、绑定持久化和失败、
 只读路由权限/CLI、网页暂停提示及加密传输边界。Mac 实际现场的当前原生身份尚未独立确认，原消息尚待拥有者确认及接入方实际服务
 升级/回读后继续投递；不以维护机回归冒充该现场已恢复。
+
+
+## 1.4.322：启动代次一致性与输入检查诊断
+
+最低实际服务 **1.4.322**，配套 CLI 也升级至 1.4.322。`capabilities` 回读：
+`agent_launch_generation_consistency=true`、
+`agent_launch_generation_consistency_min_version=1.4.322`、
+`terminal_input_check_diagnostics=true`。普通协作协议仍为 2，integration protocol 仍为 1；
+不新增权限。只更新 CLI 不会改变正在运行的旧服务。
+
+启动代次是 TD 服务生成的 `agentLaunchGeneration`，与原生 Agent UUID、
+IntegrationSession 的数值 `generation` 分别记录。同一 backend 在启动准备时从 null
+变为新的启动 UUID 是正常动作。名称、cwd、原生身份元数据等整记录更新过去可能
+携带 await 之前的旧启动字段写回；本版将启动字段交由专门的比较后更新路径管理，
+普通元数据更新继承当前启动代次与一次性检查，不能覆盖或复活旧值。
+
+启动操作在写入本次代次后、持久化之前捕获自己的输入检查令牌，并在持久化返回、
+承载解析、获取输入队列及粘贴/提交前持续使用它。冷启动、精确恢复、显式 cold retry
+和普通启动共用这条保护；不会为了继续输入而采纳后来出现的启动代次。启动状态
+落盘失败时不输入。真实 backend 对象/ID、绑定版本、tmux pane 或启动代次变化仍拒绝，
+保留 `TERMINAL_INPUT_TARGET_CHANGED` / `TMUX_PANE_CHANGED` 等错误。
+
+管理员沿现有入口读取已保存的诊断：
+
+```sh
+td integration diagnostics <TD-session-id>
+```
+
+`launch_diagnostics.steps` 追加可选阶段 `guard_captured / runtime_resolving / runtime_resolved`；
+既有 `queue_wait / queue_acquired / paste_* / submit_*` 保留。拒绝时
+`target_change` 可含 `check_phase / guard_captured_at / checked_at`，以及
+`expected_launch_id / current_launch_id`、backend ID/实例比较、绑定版本比较。
+`check_phase` 包含 `launch_state_commit / guard_capture / launch_persisted / runtime_resolve /
+runtime_resolved / queue_acquired / before_paste / before_submit`。时间是 TD 检查时间，
+不是内核首字节写入时间；不包含正文、argv、环境或凭据。旧记录不补造缺失的证据。
+
+这次修复不增加自动重试：原 create 同键只回读原操作。失败现场保留，先用
+`session get` 核对当前事实；明确授权后才按现有 `session retry-cold` 契约显式操作，
+必须满足无原生 UUID、无 TD 消息历史或待投递、精确原 shell、配置指纹与代次等条件。
+已有原生 UUID 的会话继续精确 restore，不能以 cold retry 替代。消息正文不因升级重发。
+
+升级由现场唯一维护者协调：保留现有 HTTPS/鉴权参数，仅替换并重启 TD 服务；
+核对在跑 tmux/Agent 完整身份没有变化，再回读实际服务版本和以上能力。
+本版不要求重启、重建或重试业务 Agent，不更改 launch profile、sandbox 或业务调度。
+终端动作仍是粘贴一次、50ms 后发送一次回车；TD 仍不保证应用提交、消费或执行完成。
+
+确定性交错回归覆盖延迟改名/元数据回写、清除检查、持久化等待、输入队列等待、
+真实第二次启动、backend 替换及重新绑定；发生真实换代时，旧输入及旧的延迟回车
+仍被拒绝。测试证明 TD 一致性与终端写入边界，不代替私有 Agent 的实机消费验收。

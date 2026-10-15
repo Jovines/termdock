@@ -16,6 +16,7 @@ export interface CollaborationTaskEvent {
   id: string; sequence: number; kind: string; actor: TaskMember | null;
   content: string; createdAt: number; attemptId: string | null;
   reportStatus?: TaskReportStatus; evidence?: unknown; artifactId?: string; target?: TaskMember;
+  summary?: string;
   source?: 'system' | 'user' | 'integration';
   origin?: TaskOrigin;
   replyToEventId?: string;
@@ -46,7 +47,7 @@ export interface CollaborationTaskAttempt {
   id: string; assignee: TaskMember; createdAt: number;
   threadId: string; messageId?: string; deliveryStatus?: 'pending' | 'delivered' | 'failed' | 'expired';
   deliveredAt?: number | null; deliveryError?: string | null;
-  report?: { status: TaskReportStatus; content: string; evidence?: unknown; createdAt: number; summary?: string };
+  report?: { status: TaskReportStatus; content: string; evidence?: unknown; createdAt: number; summary?: string; summarySource?: 'explicit' | 'excerpt' };
 }
 export interface CollaborationTask {
   /** Missing on old records means interactive. Automation is a standalone background record. */

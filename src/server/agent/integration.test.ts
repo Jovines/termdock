@@ -934,7 +934,8 @@ it('exposes authenticated cold retry and admin-only launch diagnostics on the re
   });
   const f = await runtimeFixture(fake.api);
   const id = (await f.request('POST', '/sessions', { launch_profile: 'agent', cwd: dir, idempotency_key: 'create' })).body.session.session_id;
-  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ session_cold_retry: true, session_launch_diagnostics: true, session_cold_retry_min_version: '1.4.314' });
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ session_cold_retry: true, session_launch_diagnostics: true, session_cold_retry_min_version: '1.4.314',
+    agent_launch_generation_consistency: true, agent_launch_generation_consistency_min_version: '1.4.322', terminal_input_check_diagnostics: true });
   const route = `/admin/sessions/${id}/restore-diagnostics`;
   expect(await f.request('GET', route)).toMatchObject({ status: 401 });
   const admin = { 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };

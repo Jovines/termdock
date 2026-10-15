@@ -18,7 +18,7 @@ export async function executeTaskCommand(command: CollaborationCommand,
     plan: [...bodyOptions, 'attempt', 'evidence'], review: [...bodyOptions, 'artifact', 'evidence', 'verdict'], comment: bodyOptions,
     'request-review': [...bodyOptions, 'artifact', 'assignee', 'revision'],
     revise: [...bodyOptions, 'revision'], close: [...bodyOptions, 'revision'], reopen: [...bodyOptions, 'revision'],
-    coordinate: [...bodyOptions, 'revision'], pause: [...bodyOptions, 'revision'], resume: [...bodyOptions, 'revision'], retry: [...bodyOptions, 'revision'],
+    coordinate: [...bodyOptions, 'revision', 'summary'], pause: [...bodyOptions, 'revision'], resume: [...bodyOptions, 'revision'], retry: [...bodyOptions, 'revision'],
   };
   for (const flag of Object.keys(o)) if (![...allowed[operation], ...(o.principal ? originOptions : []), 'principal', 'session', 'json', 'jsonl', 'text', 'help'].includes(flag)) throw new Error(`--${flag} is not supported by task ${operation}`);
   if (o.purpose !== undefined) (operation === 'list' ? taskPurposeFilter : taskPurpose)(o.purpose);

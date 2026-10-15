@@ -200,6 +200,8 @@ export class IntegrationRuntime {
       session_startup_input_clear: true, session_startup_input_clear_min_version: '1.4.310',
       agent_launch_process_check: true, agent_launch_process_check_min_version: '1.4.312',
       terminal_input_runtime_fence: true, terminal_input_runtime_fence_min_version: '1.4.313',
+      agent_launch_generation_consistency: true, agent_launch_generation_consistency_min_version: '1.4.322',
+      terminal_input_check_diagnostics: true,
       session_launch_diagnostics: true, session_launch_diagnostics_min_version: '1.4.314',
       session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
       session_rename: true, session_rename_min_version: '1.4.315',

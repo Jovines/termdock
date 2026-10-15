@@ -62,6 +62,12 @@ export const INTEGRATION_HELP = `td integration — local scoped integration adm
   diagnostics <TD-session-id> (read stored launch/restore diagnostics; administrator only)
     1.4.314 adds phase/timestamps, paste/submit write facts and target-change
     evidence; no argv/environment/credentials or application readiness claim.
+    1.4.322 adds guard_captured/runtime_resolving/runtime_resolved stages and
+    target_change.check_phase/guard_captured_at/checked_at, launch IDs and route revisions.
+    Check actual server agent_launch_generation_consistency=true (minimum 1.4.322),
+    terminal_input_check_diagnostics=true; upgrading only the CLI does not fix a running service.
+    TERMINAL_INPUT_TARGET_CHANGED still rejects an actually replaced target.
+    create never auto-retries; retry-cold remains a separate, explicitly authorized operation.
     Prior versions cannot reconstruct missing launch evidence retroactively.
   create --file <policy.json> --credential-file <private-output.json>
   update --file <policy.json> (same identity/group; preserves the credential)

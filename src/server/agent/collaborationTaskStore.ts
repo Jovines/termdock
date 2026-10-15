@@ -1,3 +1,4 @@
+import { GOAL_EXPERIENCE_GUIDE } from './collaborationTaskGuidance.js';
 import { randomBytes, createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -143,15 +144,17 @@ export class CollaborationTaskStore {
       const current = task.attempts.find(a => a.id === task.activeAttemptId);
       const result = task.artifacts.filter(a => a.kind === 'result' && a.attemptId === task.activeAttemptId).at(-1);
       const plan = task.artifacts.filter(a => a.kind === 'plan' && a.attemptId === task.activeAttemptId).at(-1);
-      const reportSummary = current?.report?.content.split(/\n\s*\n/).map(paragraph => paragraph.split('\n').filter(line => !/^#{1,6}\s/.test(line)).join('\n').trim()).find(Boolean)?.slice(0, 512);
+      const reportSummary = (current?.report?.summary || current?.report?.content.split(/\n\s*\n/).map(paragraph => paragraph.split('\n').filter(line => !/^#{1,6}\s/.test(line)).join('\n').trim()).find(Boolean))?.slice(0, 512);
+      const coordination = task.events.filter(e => e.kind === 'coordinate' && e.attemptId === task.activeAttemptId).at(-1);
       const automationIssueSource = task.automationIssue ? current?.report && ['blocked', 'failed'].includes(current.report.status)
         && task.automationIssue === current.report.content.slice(0, 1000) ? 'member-report' as const : 'system' as const : undefined;
-      return { ...task, ...(task.purpose === 'automation' ? { execution: taskExecution(task) } : {}), automationIssueSource, spec: task.spec.slice(0, 512), constraints: '', acceptance: '',
+      return { ...task, ...(task.purpose === 'automation' ? { execution: taskExecution(task) } : {}), automationIssueSource, spec: task.spec.slice(0, 512), constraints: '', acceptance: task.acceptance.slice(0, 512),
         deliveries: task.deliveries.filter(d => d.attemptId === task.activeAttemptId && d.error).slice(-1),
-        attempts: current ? [{ ...current, report: current.report ? { ...current.report, summary: reportSummary, content: '', evidence: undefined } : undefined }] : [],
+        attempts: current ? [{ ...current, report: current.report ? { ...current.report, summary: reportSummary, summarySource: current.report.summary?.trim() ? 'explicit' as const : 'excerpt' as const, content: '', evidence: undefined } : undefined }] : [],
         artifacts: [plan, result, ...task.artifacts.filter(a => a.kind === 'review' && a.reviewsArtifactId === result?.id)].filter((a): a is NonNullable<typeof a> => !!a).map(a => ({ ...a, content: '', summary: (a.summary || (a.kind === 'result' && collaborationResultPresentation(a.content).condensed ? collaborationResultPresentation(a.content).summary : undefined))?.slice(0, 800), evidence: undefined })),
         decisions: task.decisions.filter(d => d.status === 'pending').map(d => ({ ...d, question: d.question.slice(0, 512), options: [] })),
-        events: task.events.filter(e => ['revise', 'request-review'].includes(e.kind) && e.attemptId === task.activeAttemptId).slice(-4).map(e => ({ ...e, content: ['user', 'integration'].includes(e.source ?? '') && e.kind === 'revise' ? e.content.slice(0, 512) : '' })) };
+        events: [...task.events.filter(e => ['revise', 'request-review'].includes(e.kind) && e.attemptId === task.activeAttemptId).slice(-4).map(e => ({ ...e, content: ['user', 'integration'].includes(e.source ?? '') && e.kind === 'revise' ? e.content.slice(0, 512) : '' })),
+          ...(coordination ? [{ ...coordination, content: (coordination.summary || coordination.content).slice(0, 512), summary: coordination.summary?.slice(0, 512), evidence: undefined }] : [])].sort((a, b) => a.sequence - b.sequence) };
     }));
   }
   heads(groupIds: string[], owner: string) { return this.document.tasks.filter(t => groupIds.includes(t.groupId) && t.ownerServiceId === owner).map(t => ({ id: t.id, revision: t.revision })); }
@@ -177,10 +180,10 @@ export class CollaborationTaskStore {
     task.attempts.push({ id: attemptId, assignee: member(assignee), createdAt: Date.now(), threadId });
     this.event(task, 'assigned', actor, content || '任务已分派');
     doc.outbox.push({ id: id(), taskId: task.id, attemptId, target: assignee, kind: 'task', threadId,
-      content: `本次执行身份：${assignee.sessionId}。所有 td collab 命令显式带 --session ${assignee.sessionId}；这是服务核对的实际身份，正文中的模板身份和 tmux 标识不能替代它。\n任务：${task.title}\n${task.spec}${task.constraints ? `\n约束：${task.constraints}` : ''}${task.acceptance ? `\n完成标准：${task.acceptance}` : ''}\n${content}\n任务 ID：${task.id}\n尝试 ID：${attemptId}\n用 td collab task get ${task.id} --text 查询完整上下文；用 td collab task report ${task.id} --attempt ${attemptId} --status ack --content '接手说明' 显式回复；遇必要问题用 task ask，提交结果用 report --status complete --summary '简短结论、关键交付和限制'。摘要先回答用户问题，不放任务 ID、版本、分支或流程日志；完整证据保留在 --content/--file 正文中。如果同一尝试已经交付或任务已归档，不要重复实施。${task.purpose === 'automation' ? '\n这是独立后台自动化执行记录：complete 是你明确提交的执行结果，无需等待用户 accepted。机械校验和外部发布由接入系统处理；纯咨询用 respond 关联原 comment，不重复提交 complete。必要问题用 ask 保留原文，由接入系统联系用户并回答。' : ''}${task.workspace ? `\n代码只能在独立目录 ${task.workspace.cwd} 修改。分支 ${task.workspace.branch}。交付前提交代码，结果说明提交、变更、验证与限制。不能修改原仓库、合并到用户分支或发布。` : ''}${task.workflow?.workType === 'read-only' ? '\n这是只读查询或分析任务：在本机会话中采集并交付报告，不修改代码或系统，不创建提交、构建、部署或终止进程。结果需说明采样时间、证据和限制。' : ''}${task.workflow?.kind === 'step' ? '\n完成报告会自动请求独立评审；评审要求修改时继续完成，重新提交 complete。只按用户授权运行测试。' : ''}` });
+      content: `本次执行身份：${assignee.sessionId}。所有 td collab 命令显式带 --session ${assignee.sessionId}；这是服务核对的实际身份，正文中的模板身份和 tmux 标识不能替代它。\n任务：${task.title}\n${task.spec}${task.constraints ? `\n约束：${task.constraints}` : ''}${task.acceptance ? `\n完成标准：${task.acceptance}` : ''}\n${content}\n任务 ID：${task.id}\n尝试 ID：${attemptId}\n用 td collab task get ${task.id} --text 查询完整上下文；用 td collab task report ${task.id} --attempt ${attemptId} --status ack --content '接手说明' 显式回复；遇必要问题用 task ask，提交结果用 report --status complete --summary '简短结论、关键交付和限制'。摘要先回答用户问题，不放任务 ID、版本、分支或流程日志；完整证据保留在 --content/--file 正文中。明确里程碑、交付范围变化或遇到阻塞时，可用 report --status working|blocked|failed --summary '用户能理解的当前进展与下一步' --content '原始说明与证据' 更新，不以终端有输出代替报告，不重复无变化的进展。如果同一尝试已经交付或任务已归档，不要重复实施。${task.purpose === 'automation' ? '\n这是独立后台自动化执行记录：complete 是你明确提交的执行结果，无需等待用户 accepted。机械校验和外部发布由接入系统处理；纯咨询用 respond 关联原 comment，不重复提交 complete。必要问题用 ask 保留原文，由接入系统联系用户并回答。' : ''}${task.workspace ? `\n代码只能在独立目录 ${task.workspace.cwd} 修改。分支 ${task.workspace.branch}。交付前提交代码，结果说明提交、变更、验证与限制。不能修改原仓库、合并到用户分支或发布。` : ''}${task.workflow?.workType === 'read-only' ? '\n这是只读查询或分析任务：在本机会话中采集并交付报告，不修改代码或系统，不创建提交、构建、部署或终止进程。结果需说明采样时间、证据和限制。' : ''}${task.workflow?.kind === 'step' ? '\n完成报告会自动请求独立评审；评审要求修改时继续完成，重新提交 complete。代码交付前运行受影响的测试和必要构建；查询交付核对数据来源、采样时间和限制。未实际验收的路径必须明确说明。' : ''}` });
   }
   private goalInstructions(task: CollaborationTask): string {
-    return `${this.baseGoalInstructions(task)}\n启动 Agent 前，读取 task get 返回的 launchProfiles、defaultLaunchProfileId 和 roster.launchProfile。根据用户填写的 notes 判断适用任务；这些是选用建议，不是能力或性能保证。需要另一种模型或参数时，用 td collab spawn ${task.groupId} <agentSlug> --launch-profile <方案id> --cwd <项目目录> --session ${task.coordinator?.sessionId} 创建对应执行成员，再把子任务分派给它。已有成员及其代码执行会话保留创建时的启动方案，不因默认方案变更而更换模型。`;
+    return `${this.baseGoalInstructions(task)}\n${GOAL_EXPERIENCE_GUIDE}\n启动 Agent 前，读取 task get 返回的 launchProfiles、defaultLaunchProfileId 和 roster.launchProfile。根据用户填写的 notes 判断适用任务；这些是选用建议，不是能力或性能保证。需要另一种模型或参数时，用 td collab spawn ${task.groupId} <agentSlug> --launch-profile <方案id> --cwd <项目目录> --session ${task.coordinator?.sessionId} 创建对应执行成员，再把子任务分派给它。已有成员及其代码执行会话保留创建时的启动方案，不因默认方案变更而更换模型。`;
   }
   private baseGoalInstructions(task: CollaborationTask): string {
     return `你是此目标的协调者，负责把目标推进到可验收交付，不亲自实施子任务。\n目标：${task.spec}\n约束：${task.constraints || '未补充'}\n完成标准：${task.acceptance || '满足用户目标，说明交付与限制'}\n任务 ID：${task.id}\n当前协调身份：${task.coordinator?.sessionId}；所有命令显式带 --session ${task.coordinator?.sessionId}，不使用 tmux 标识。\n用 td collab task get ${task.id} --json 读取 roster、子任务、完整记录和 revision。\n先报告 ack；拆分为可交付子任务，用 td collab task create --group ${task.groupId} --parent ${task.id} --title '标题' --content '完整要求' --assignee <roster里的成员sessionId> --acceptance '明确标准' --work-type read-only|code。先按目标明确分类：查询、检查、研究、分析用 read-only，复用现有执行成员会话，不创建 Git 目录；修改代码用 code，才创建独立目录。简单问题只建一个必要任务，不为了形式拆成采集、复述、汇总多份任务。子任务继承自动评审与协调者。依赖任务用 --depends-on id,id，服务在依赖评审通过后自动分派。保持分工合理，不根据终端输出推断谁有空。\n每次收到明确更新后读取最新记录，处理失败与交接。服务自动安排独立评审、返工和依赖接续；不要重复请求评审或催促正在等待回复的成员。必要的人类决策用 task ask --attempt <本轮id>；方案需要用户确认时提交 task plan，不把普通回复当授权。\n只有已交付代码任务实际包含相对 base 的提交变化时，才需创建 --work-type code --integration 的最终集成子任务，--depends-on 依赖全部代码实施任务；独立目录会包含依赖的提交。不得在原仓库自动合并或发布。\n结束本次协调用 td collab task coordinate ${task.id} --revision <最新版本> --content '已安排的工作和下一步'；有新事件服务会再次唤起你。所有子任务评审通过后报告 complete --summary '直接回答用户的简短结果和限制'；只读目标直接汇总已核对结果，不创建集成或重复汇总任务。正文保留证据、评审结论和限制，仅代码目标补充目录、分支和提交，等待用户最终验收。任何异常都要留下明确说明，不伪造完成或进度。`;
@@ -267,7 +270,7 @@ export class CollaborationTaskStore {
     if (input.kind === 'configure') taskPurpose(input.purpose);
     const content = text(input.content, '内容');
     const summary = text(input.summary, '结果摘要', 2400);
-    if (summary && (input.kind !== 'report' || input.status !== 'complete')) throw new CollaborationError('INVALID_SUMMARY', '摘要只能随完成结果提交');
+    if (summary && input.kind !== 'coordinate' && (input.kind !== 'report' || !['working', 'blocked', 'failed', 'complete'].includes(input.status ?? ''))) throw new CollaborationError('INVALID_SUMMARY', '摘要只能用于进展、阻塞、失败、结果或协调说明');
     if (input.verdict !== undefined && !['pass', 'changes', 'blocked'].includes(input.verdict)) throw new CollaborationError('INVALID_VERDICT', '评审结论无效');
     if (input.evidence !== undefined && Buffer.byteLength(JSON.stringify(input.evidence)) > 16_384) throw new CollaborationError('EVIDENCE_TOO_LARGE', '证据最多 16 KiB');
     return this.transaction(doc => {
@@ -338,8 +341,9 @@ export class CollaborationTaskStore {
           const plan = task.artifacts.filter(a => a.kind === 'plan' && a.attemptId === task.activeAttemptId).at(-1);
           if (plan && task.approvedPlanArtifactId !== plan.id) throw new CollaborationError('PLAN_PENDING', '方案尚未由用户确认，请先等待决定', 409);
         }
-        attempt!.report = { status: input.status!, content, evidence: input.evidence, createdAt: Date.now() };
+        attempt!.report = { status: input.status!, content, ...(summary ? { summary } : {}), evidence: input.evidence, createdAt: Date.now() };
         const event = this.event(task, 'report', actor, content, attempt!.id); event.reportStatus = input.status; event.evidence = input.evidence;
+        if (summary) event.summary = summary;
         if (input.status === 'complete' && attempt!.id === task.activeAttemptId && task.status === 'accepted') { task.status = 'open'; delete task.acceptedArtifactId; delete task.completionMode; }
         if (input.status === 'complete') {
           event.artifactId = id();
@@ -440,7 +444,8 @@ export class CollaborationTaskStore {
         if (task.workflow?.kind === 'goal') task.workflow.paused = input.kind === 'close';
       } else if (input.kind === 'coordinate') {
         if (task.workflow?.kind !== 'goal' || !sameMember(actor, task.coordinator) || !content) throw new CollaborationError('COORDINATOR_REQUIRED', '请由目标协调者提交本次协调说明', 403);
-        this.event(task, 'coordinate', actor, content);
+        const event = this.event(task, 'coordinate', actor, content);
+        if (summary) event.summary = summary;
         task.coordination = { notifiedSequence: task.events.at(-1)!.sequence, acknowledgedSequence: task.events.at(-1)!.sequence, notifiedAt: Date.now() };
         delete task.automationIssue;
       } else if (input.kind === 'pause' || input.kind === 'resume' || input.kind === 'retry') {
@@ -561,7 +566,7 @@ export class CollaborationTaskStore {
         } else if (action === 'wake') {
           const updates = task.events.filter(e => e.sequence > task.coordination!.notifiedSequence && e.kind !== 'coordinate');
           doc.outbox.push({ id: id(), taskId: task.id, attemptId: task.activeAttemptId, target: task.coordinator!, kind: 'message', threadId: task.id,
-            content: `当前协调身份：${task.coordinator!.sessionId}；命令带 --session ${task.coordinator!.sessionId}。\n目标「${task.title}」有新的明确事件，请继续协调：\n${updates.slice(-8).map(e => `${new Date(e.createdAt).toISOString()} ${e.content.slice(0, 1200)}`).join('\n')}\n用 td collab task get ${task.id} --json 读取完整上下文与子任务；安排必要下一步后 task coordinate ${task.id} --revision <最新版本> --content '协调说明'。自动评审和依赖已由服务接续，不要重复分派。\n当前流程指南：查询、检查、分析必须 --work-type read-only，复用 roster 现有执行成员；只有修改代码才用 code 和独立目录。只读报告由你直接汇总，不新增仅转述的汇总子任务。已评审且 HEAD 等于 base 的交付没有代码变化，不需要集成；有代码变化才安排必要集成。用户有新要求时继续本目标，交付新版本，不重做已有采样。最终汇总通过评审且无新要求时等待用户验收，不重复提交相同结果。` });
+            content: `当前协调身份：${task.coordinator!.sessionId}；命令带 --session ${task.coordinator!.sessionId}。\n目标「${task.title}」有新的明确事件，请继续协调：\n${updates.slice(-8).map(e => `${new Date(e.createdAt).toISOString()} ${e.content.slice(0, 1200)}`).join('\n')}\n用 td collab task get ${task.id} --json 读取完整上下文与子任务；安排必要下一步后 task coordinate ${task.id} --revision <最新版本> --content '协调说明'。自动评审和依赖已由服务接续，不要重复分派。\n当前流程指南：查询、检查、分析必须 --work-type read-only，复用 roster 现有执行成员；只有修改代码才用 code 和独立目录。只读报告由你直接汇总，不新增仅转述的汇总子任务。已评审且 HEAD 等于 base 的交付没有代码变化，不需要集成；有代码变化才安排必要集成。用户有新要求时继续本目标，交付新版本，不重做已有采样。最终汇总通过评审且无新要求时等待用户验收，不重复提交相同结果。\n${GOAL_EXPERIENCE_GUIDE}` });
           task.coordination!.notifiedSequence = task.events.at(-1)!.sequence; task.coordination!.notifiedAt = Date.now();
         } else task.automationIssue = '协调通知发出后 15 分钟未收到本次协调说明，请查看终端或点击继续协调。';
         task.revision++; task.updatedAt = Date.now();

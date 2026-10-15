@@ -110,10 +110,12 @@ it.each(['shell', 'absent', 'ready'] as const)('reconciles interrupted retry by 
 });
 it('records structured fencing evidence, not raw exception text', async () => {
   const f = await fixture();
-  f.api.retryCold = vi.fn(async (_r, _p, progress) => { progress('queue_wait'); progress('queue_acquired'); throw new TerminalInputTargetChangedError({ expected_launch_id: 'old', current_launch_id: 'new', expected_backend_session_id: 'b1', current_backend_session_id: 'b2', backend_instance_matches: false }); });
+  f.api.retryCold = vi.fn(async (_r, _p, progress) => { progress('guard_captured'); progress('runtime_resolving'); progress('runtime_resolved'); progress('queue_wait'); progress('queue_acquired'); throw new TerminalInputTargetChangedError({ expected_launch_id: 'old', current_launch_id: 'new', expected_backend_session_id: 'b1', current_backend_session_id: 'b2', backend_instance_matches: false, check_phase: 'queue_acquired', guard_captured_at: 100, checked_at: 200, expected_route_revision: 'r1', current_route_revision: 'r2' }); });
   const failed = await f.sessions.retryCold(f.p, f.created.session_id, 1, 'retry');
   expect(failed).toMatchObject({ state: 'failed', error_code: 'TERMINAL_INPUT_TARGET_CHANGED' });
-  expect(f.sessions.launchDiagnostics(failed.session_id).launch_diagnostics).toMatchObject({ phase: 'queue_acquired', paste: 'not_attempted', submit: 'not_attempted', target_change: { expected_launch_id: 'old', current_launch_id: 'new' } });
+  expect(f.sessions.launchDiagnostics(failed.session_id).launch_diagnostics).toMatchObject({ phase: 'queue_acquired', paste: 'not_attempted', submit: 'not_attempted', target_change: { expected_launch_id: 'old', current_launch_id: 'new', check_phase: 'queue_acquired', guard_captured_at: 100, checked_at: 200, expected_route_revision: 'r1', current_route_revision: 'r2' } });
+  const restarted = new IntegrationSessions(f.file, f.api); sessionsToClose.push(restarted);
+  expect(restarted.launchDiagnostics(failed.session_id).launch_diagnostics?.target_change).toMatchObject({ check_phase: 'queue_acquired', guard_captured_at: 100, checked_at: 200 });
 });
 it('masks unclassified errors rather than saving private output', async () => {
   const f = await fixture(); f.api.retryCold = vi.fn(async () => { throw new Error('PRIVATE argv credential and stdout'); });

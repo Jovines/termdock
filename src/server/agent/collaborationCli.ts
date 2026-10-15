@@ -21,13 +21,14 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     [--purpose interactive|automation]（默认 interactive；automation 是独立后台记录，无需用户验收）
   task assign <任务id> --assignee <成员id> --revision <当前版本>
   task report <任务id> --attempt <尝试id> --status ack|working|blocked|complete|failed --content <正文>
+    working/blocked/failed/complete 支持 --summary；正文保留完整证据。
   task ask <任务id> --attempt <尝试id> --content <问题> [--options '["选项一","选项二"]']
   task plan <任务id> --attempt <尝试id> --content <方案>
   task review <任务id> --artifact <交付物id> --verdict pass|changes|blocked --content <独立评审>
   task request-review <任务id> --artifact <版本id> --assignee <评审成员id> --revision <当前版本>
   task comment <任务id> --content <补充说明>
   task revise|close|reopen <任务id> --revision <当前版本> [--content <说明>]
-  task coordinate <目标id> --revision <当前版本> --content <本次协调说明>
+  task coordinate <目标id> --revision <当前版本> [--summary <用户可读进展>] --content <完整协调说明>
   task pause|resume|retry <任务id> --revision <当前版本>
   task create 支持 --managed --coordinator <成员id> --reviewers <成员id,成员id>；子任务用 --work-type read-only|code 分类，代码默认独立目录
   正文支持 --file <文本文件> 或 --stdin；变更支持 --idempotency-key。
@@ -83,6 +84,9 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     不终止 Agent、不重建消失的承载、不自动补键；未知消息历史或操作结果拒绝。
     用 session get 查当前状态；同键回读原操作，重启不自动再启动。
     诊断由管理员 td integration diagnostics <id> 回读，需 session_launch_diagnostics=true。
+    启动代次一致性修复需实际服务1.4.322及agent_launch_generation_consistency=true；只升级CLI不生效。
+    terminal_input_check_diagnostics=true时可查guard捕获/承载解析/队列阶段及target_change.check_phase。
+    TERMINAL_INPUT_TARGET_CHANGED仍拒绝真实换代，不据此自动重试或重复发送正文。
     失败码：SESSION_COLD_RETRY_NATIVE_BOUND/SESSION_COLD_RETRY_NOT_FAILED；
     SESSION_MESSAGE_HISTORY_PRESENT/SESSION_MESSAGE_HISTORY_UNCONFIRMED；
     SESSION_COLD_RETRY_RUNTIME_UNCONFIRMED/SESSION_COLD_RETRY_UNSUPPORTED；

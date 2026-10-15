@@ -26,7 +26,11 @@ Termdock 跟踪消息传输；Agent 或其他接入方显式报告接手、进�
 4. 服务为最新交付选择另一位成员评审。`review --verdict pass|changes|blocked` 是明确结论；`changes` 自动交回执行者并等待新版本，`pass` 接续子任务，`blocked` 保留原因。每轮最多自动返工 3 次，之后交给协调者调整方案。旧版本评审不能推动当前分派。
 5. 代码目标需要 `--integration` 子任务，依赖全部未关闭的实施任务。服务把已评审提交合入独立集成目录，集成交付通过评审后，协调者才能汇总最终结果。最终结果再次独立评审，用户决定验收或要求修改。
 
-必要问题、方案确认、异常和最终验收集中在侧栏「需要你处理」，点击直接进入对应任务。协调者用 `task coordinate --revision ... --content ...` 保存本次安排；子任务的明确事件会持久化唤起下一次协调。通知之后 15 分钟未收到协调说明时显示事实提示，不推断 Agent 卡死。页面关闭不影响服务端推进。
+必要问题、方案确认、异常和最终验收集中在侧栏「需要你处理」，点击直接进入对应任务。协调者用 `task coordinate --revision ... --summary ... --content ...` 保存本次安排；子任务的明确事件会持久化唤起下一次协调。通知之后 15 分钟未收到协调说明时显示事实提示，不推断 Agent 卡死。页面关闭不影响服务端推进。
+
+看板默认一张卡片对应一个用户目标，执行子任务附在原目标中；同一目标的跟进和返工不另起顶层卡片。卡片显示已记录工作数、执行交付已评审数、最新明确协调或执行报告，以及下一步。执行交付齐备仍需协调者汇总、总结果评审和用户验收；这些状态不会因为终端有输出而自动推断。
+
+目标详情默认展开尚待完成的工作：每项说明交付标准、负责人和未满足的依赖；已完成的执行交付可展开查看。列表保留最近协调摘要，完整技术说明在原始更新里。进展、阻塞、失败报告和 `task coordinate` 支持 `--summary`，摘要和原始正文、时间同时保存；没有摘要的旧记录按原文显示，不重写历史。新增目标可在更多设置中填写简短的目标名称，避免“好的、按这个计划”等对话回复成为看板标题。
 
 ```sh
 td collab task create --group <组ID> --managed --coordinator <协调成员ID> \
@@ -37,7 +41,8 @@ td collab task create --group <组ID> --parent <目标ID> --assignee <执行模�
 td collab task create --group <组ID> --parent <目标ID> --assignee <执行模板ID> \
   --integration --depends-on <实施任务ID,实施任务ID> --title '集成' --content '集成全部交付'
 td collab task review <任务ID> --artifact <版本ID> --verdict pass --content '结论及证据'
-td collab task coordinate <目标ID> --revision <当前版本> --content '本次安排与下一步'
+td collab task coordinate <目标ID> --revision <当前版本> \
+  --summary '已安排两项实现，依赖交付后集成；目前不需要你处理' --content '完整拆分、产物与依赖说明'
 ```
 
 独立 worktree 和执行记录放在 `~/.termdock/task-workspaces`，以目标启动后的已提交 HEAD 固定基线，原目录未提交改动不进入任务目录。成员提交、评审和集成都不自动改写原分支，不自动发布。依赖提交不在执行机器时，通过既有 Noise RPC 分片传递已评审版本的 Git bundle，校验提交、基线、长度与 SHA-256 后导入；每个提交包最多 128 MiB。基线缺失、合并冲突、非 Git 目录、Agent 不可用等均保留具体原因和现场；非代码任务可关闭独立目录选项。仅有会话范围授权的远端不能自动创建新成员，需要完整协作授权或使用现有会话。

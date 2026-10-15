@@ -1894,7 +1894,7 @@ export function LeftSidebar(
       </div>}
       {/* Session list */}
       <div ref={sessionListRef} className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
-        {(taskInbox.length > 0 || taskInboxError) && <section className="mb-2 rounded-lg border border-primary/20 bg-primary/5" aria-label="协作待处理事项">
+        {taskInbox.length > 0 && <section className="mb-2 rounded-lg border border-primary/20 bg-primary/5" aria-label="协作待处理事项">
           <button type="button" className="flex min-h-11 w-full items-center gap-2 px-3 text-left text-xs text-primary" aria-expanded={inboxExpanded} onClick={() => setInboxExpanded(v => !v)}><RiWorkflowLine size={14} /><span className="min-w-0 flex-1">需要你处理</span><span>{taskInbox.length}</span><RiChevronRightLine size={12} className={inboxExpanded ? 'rotate-90' : ''} /></button>
           {inboxExpanded && <div className="space-y-1 p-1 pt-0">{taskInboxError && <p role="alert" className="px-2 py-2 text-[11px] text-destructive">{taskInboxError}<button type="button" className="ml-2 text-primary" onClick={() => void useCollaborationTaskInbox.getState().refresh()}>重试</button></p>}{taskInbox.map(task => <button key={task.id} type="button" className="min-h-11 w-full rounded-md px-2 py-2 text-left hover:bg-surface-2" onClick={() => {
             requestCollaborationTask(task.groupId, task.id);

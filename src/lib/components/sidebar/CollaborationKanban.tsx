@@ -1,3 +1,4 @@
+import { collaborationGoalTracking, collaborationUpdatePreview } from '../../collaboration/taskTracking';
 import { collaborationBoardStatus, collaborationBoardTasks } from '../../collaboration/boardTasks';
 import { CollaborationExecutionPreview } from './CollaborationExecutionPreview';
 import { CollaborationReportMeta } from './CollaborationReportMeta';
@@ -168,7 +169,8 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
               const attempt = actionable.attempts.find(a => a.id === actionable.activeAttemptId);
               const question = actionable.decisions.find(d => d.status === 'pending');
               const stage = collaborationTaskStage(actionable);
-              const displayStage = collaborationBoardStatus(actionable, row.children);
+              const tracking = collaborationGoalTracking(task, row.children);
+              const displayStage = row.attention ? collaborationBoardStatus(actionable) : task.workflow?.kind === 'goal' ? tracking.label : collaborationBoardStatus(actionable, row.children);
               const blockers = collaborationTaskBlockers(actionable);
               const blocker = blockers[0];
               const systemBlocker = blockers.find(entry => entry.source === 'system');
@@ -178,7 +180,7 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
               const actionLabel = question ? '回答问题' : unknownRecord ? '查看详情核对记录' : blocker?.source === 'member' && systemBlocker ? '查看条件与异常处理' : blocker?.source === 'member' ? '查看阻塞并补充条件' : issue ? '查看原因与处理' : stage === '等待你验收' ? '查看结果并验收' : stage === '需要你确认方案' ? '查看并确认方案' : '查看任务并处理';
               const result = actionable.artifacts.filter(a => a.kind === 'result' && a.attemptId === actionable.activeAttemptId).at(-1);
               const followup = actionable.events.filter(e => e.kind === 'revise' && e.source === 'user' && e.attemptId === actionable.activeAttemptId && (!result || e.createdAt >= result.createdAt)).at(-1);
-              const preview = question ? question.question || '成员提出了一个问题，打开后可查看并回答。' : blocker?.summary || followup?.content || (result?.summary || (attempt?.report?.content ? collaborationResultPresentation(attempt.report.content).summary : attempt?.report?.summary || ''));
+              const preview = question ? question.question || '成员提出了一个问题，打开后可查看并回答。' : blocker?.summary || followup?.content || (task.workflow?.kind === 'goal' && !row.attention && tracking.latest ? result?.summary || collaborationUpdatePreview(tracking.latest) : result?.summary || (attempt?.report?.content ? collaborationResultPresentation(attempt.report.content).summary : attempt?.report?.summary || ''));
               const parent = tasks.find(t => t.id === task.parentTaskId);
               return <article key={task.id} aria-label={task.title} className={`overflow-hidden rounded-xl border bg-surface text-left shadow-sm ${selectedId === task.id ? 'border-primary/60' : issue ? 'border-destructive/35' : 'border-border/20'}`}>
               <button type="button" data-task-id={task.id} aria-pressed={selectedId === task.id} className="block w-full rounded-xl p-4 text-left transition hover:bg-surface-2/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" onClick={() => onSelect(actionable.id)}>
@@ -187,14 +189,16 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
                 <span className={`mt-3 flex items-center gap-1.5 text-xs ${issue && blocker?.source !== 'member' ? 'text-destructive' : attention ? 'text-primary' : 'text-muted-foreground'}`}>{issue && blocker?.source !== 'member' && <AlertTriangle size={13} className="shrink-0" />}{displayStage}</span>
                 {row.attention && <span className="mt-2 block truncate text-[11px] text-muted-foreground">来自执行任务：{row.attention.title}</span>}
                 {row.attention && row.attentionCount > 1 && <span className="mt-1 block text-[11px] text-primary">共 {row.attentionCount} 项执行需要你处理</span>}
+                {task.workflow?.kind === 'goal' && !row.attention && <span className="mt-2 block text-xs leading-5 text-muted-foreground">{tracking.next}</span>}
                 {preview && <span className="mt-2 line-clamp-3 break-words text-xs leading-5 text-foreground/80">{preview}</span>}
                 {systemBlocker && blocker?.source === 'member' && <span className="mt-2 block line-clamp-2 break-words text-xs leading-5 text-destructive">{systemBlocker.label}：{systemBlocker.summary}</span>}
                 {unknownRecord && <span className="mt-2 block line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{unknownRecord.label}：{unknownRecord.summary}</span>}
                 {attention && <span className={`mt-4 flex min-h-9 items-center justify-between rounded-lg px-2.5 text-xs font-medium ${issue ? 'bg-destructive/10 text-destructive' : 'bg-primary/10 text-primary'}`}>{actionLabel}<ArrowUpRight size={14} /></span>}
                 {!attention && (task.status === 'accepted' || task.artifacts.some(a => a.kind === 'result' && a.attemptId === task.activeAttemptId)) && <span className="mt-3 flex min-h-9 items-center justify-between text-xs font-medium text-primary">{followup ? "查看跟进" : "查看结果"}<ArrowUpRight size={14} /></span>}
+                {!attention && task.workflow?.kind === 'goal' && !result && <span className="mt-3 flex min-h-9 items-center justify-between text-xs font-medium text-primary">查看拆分与进展<ArrowUpRight size={14} /></span>}
               </button>
               <CollaborationExecutionPreview task={task} children={row.children} onSelect={onSelect} />
-              <div className="mx-4 border-t border-border/10 py-3 text-[11px] text-muted-foreground"><span className="block truncate">{row.attention ? '待处理任务负责人：' : task.workflow?.kind === 'goal' ? '协调者：' : '负责人：'}{attempt ? name(actionable, attempt.assignee) : actionable.scheduledAssignee ? name(actionable, actionable.scheduledAssignee) : '未分派'}</span><CollaborationReportMeta task={actionable} now={now} compact /></div>
+              <div className="mx-4 border-t border-border/10 py-3 text-[11px] text-muted-foreground"><span className="block truncate">{row.attention ? '待处理任务负责人：' : task.workflow?.kind === 'goal' ? '协调者：' : '负责人：'}{attempt ? name(actionable, attempt.assignee) : actionable.scheduledAssignee ? name(actionable, actionable.scheduledAssignee) : '未分派'}</span>{task.workflow?.kind === 'goal' && !attention && !row.attention && tracking.latest ? <time className="mt-1 block text-[11px]" dateTime={new Date(tracking.latest.createdAt).toISOString()}>{tracking.latest.source} · {new Date(tracking.latest.createdAt).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}</time> : <CollaborationReportMeta task={actionable} now={now} compact />}</div>
               </article>;
             })}{!records.length && <p className="px-2 py-3 text-xs leading-6 text-muted-foreground/70">{query || scope !== 'all' ? '没有匹配的任务' : tasks.length ? '暂无任务' : l.hint}</p>}</div>
           </section>;

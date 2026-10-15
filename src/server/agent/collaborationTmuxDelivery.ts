@@ -61,6 +61,7 @@ export function writeCollaborationTmuxPane(
   progress?.('queue_wait');
   return serializeTerminalInput(paneInputKey(pane), () => {
     progress?.('queue_acquired');
+    assertCurrent?.('queue_acquired');
     return writeTmuxPrompt(run, pane, prompt, stdin, assertCurrent, progress);
   });
 }
@@ -75,7 +76,7 @@ async function writeTmuxPrompt(
   progress?: PromptWriteProgress,
 ): Promise<void> {
   await assertSamePane(run, pane);
-  assertCurrent?.();
+  assertCurrent?.('before_paste');
   // A fixed pane target is independent of the current window, keyboard focus
   // and browser presence. Delivery goes through a named tmux buffer rather
   // than `send-keys -l`: while a pane is in copy-mode, literal bytes are
@@ -109,7 +110,7 @@ async function writeTmuxPrompt(
     progress?.('paste_written');
     await waitForPromptSubmit();
     await assertSamePane(run, pane);
-    assertCurrent?.();
+    assertCurrent?.('before_submit');
     progress?.('submit_attempted');
     await run([
       // The submit key rides outside the paste block: inside it, an editor

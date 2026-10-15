@@ -26,12 +26,12 @@ export function writeBracketedPrompt(target: { write: (data: string) => void }, 
   progress?.('queue_wait');
   return serializeTerminalInput(target, async () => {
     progress?.('queue_acquired');
-    assertCurrent?.();
+    assertCurrent?.('queue_acquired');
     progress?.('paste_attempted');
     target.write(buildBracketedPasteBytes(prompt));
     progress?.('paste_written');
     await waitForPromptSubmit();
-    assertCurrent?.();
+    assertCurrent?.('before_submit');
     progress?.('submit_attempted');
     target.write('\r');
     progress?.('submit_written');

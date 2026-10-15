@@ -78,3 +78,11 @@ it('keeps original report and attempt after retry or comment updates; a newer wo
   expect(taskReportPresentation(views(task.id).summary)).toMatchObject({ status: 'working', createdAt: reportedAt + 9 * 60000 });
   expect(store.get(task.id)?.events.some(event => event.kind === 'report' && event.reportStatus === 'blocked')).toBe(true);
 });
+it('retains explicit working summaries and their original bodies across persistence and list projections', () => {
+  const task = blocked(); const summary = '权限条件已补齐，当前核对桌面与手机入口。';
+  store.apply(task.id, { kind: 'report', attemptId: task.activeAttemptId!, status: 'working', content: '完整技术记录与证据路径，尚未交付。', summary, idempotencyKey: randomUUID() }, member);
+  expect(views(task.id).summary.attempts[0].report?.summary).toBe(summary);
+  expect(store.get(task.id)?.attempts[0].report?.content).toBe('完整技术记录与证据路径，尚未交付。');
+  expect(store.get(task.id)?.artifacts).toHaveLength(0);
+  expect(store.get(task.id)?.status).toBe('open');
+});

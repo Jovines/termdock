@@ -123,7 +123,7 @@ describe('classified collaboration workflows', () => {
     const root = goal(), child = step(root, 'read-only'); store.activateScheduled(child.id, child.revision, worker); finish(child);
     const reloaded = new CollaborationTaskStore(join(dir, 'tasks.json'));
     expect(reloaded.list(['team'], true).find(t => t.id === child.id)?.artifacts[0]).toMatchObject({ summary: '窗口内未见过载；仅采样 20 秒。', content: '' });
-    expect(() => apply(root.id, { kind: 'report', attemptId: root.activeAttemptId!, status: 'ack', summary: '不应产生结果摘要', content: '接手' }, lead)).toThrow('摘要只能随完成结果提交');
+    expect(() => apply(root.id, { kind: 'report', attemptId: root.activeAttemptId!, status: 'ack', summary: '不应产生结果摘要', content: '接手' }, lead)).toThrow('摘要只能用于');
   });
   it('dispatches the actual prepared identity rather than a worker template', () => {
     const root = goal(), child = step(root, 'code'), actual = { serviceId: owner, sessionId: 'actual' };
@@ -287,4 +287,13 @@ describe('classified collaboration workflows', () => {
     expect(store.get(root.id)!.decisions[0].options).toEqual(['桌面', '手机']);
   });
 
+});
+it('keeps a bounded current coordination summary in the board response without changing the original explanation', () => {
+  const root = goal();
+  const full = '完整安排和证据。'.repeat(200);
+  apply(root.id, { kind: 'coordinate', expectedRevision: root.revision, content: full, summary: '已安排两项实现，依赖完成后集成；不需要用户额外处理。' }, lead);
+  expect(store.get(root.id)?.events.at(-1)).toMatchObject({ kind: 'coordinate', content: full });
+  const summary = store.list(['team'], true).find(t => t.id === root.id)!;
+  expect(summary.events.at(-1)).toMatchObject({ kind: 'coordinate', content: '已安排两项实现，依赖完成后集成；不需要用户额外处理。' });
+  expect(store.pending(root.id).find(m => m.kind === 'task')?.content).toContain('跟进与返工沿用原目标');
 });
