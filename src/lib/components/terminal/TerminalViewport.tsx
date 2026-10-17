@@ -13,6 +13,7 @@ import { Terminal, type FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { createNativeWebLinkHandler } from '../../terminal/nativeWebLinks';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -3949,7 +3950,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
           const fitAddon = new FitAddon();
           terminal.loadAddon(fitAddon);
-          terminal.loadAddon(new WebLinksAddon());
+          const nativeWebLinkHandler = createNativeWebLinkHandler(
+            window.termdockDesktop,
+            url => { window.open(url); },
+          );
+          terminal.loadAddon(new WebLinksAddon(nativeWebLinkHandler));
           terminal.registerLinkProvider(createTerminalPathLinkProvider(terminal, (path, line) => {
             directoryLinkActivateRef.current?.(path, line);
           }));
