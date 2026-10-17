@@ -17,6 +17,10 @@ export async function supportsTmuxClientFeatures(binary: string): Promise<boolea
 
 export function buildTmuxAttachArgs(sessionName: string, supportsFeatures: boolean): string[] {
   return [
+    // The Web/native terminal consumes UTF-8 regardless of the server launcher's
+    // locale. GUI-launched services may inherit C; tmux otherwise emits _ for
+    // non-ASCII cells before the encrypted output ever reaches the renderer.
+    '-u',
     ...(supportsFeatures ? ['-T', 'RGB,sync'] : []),
     'attach-session', '-t', sessionName,
   ];

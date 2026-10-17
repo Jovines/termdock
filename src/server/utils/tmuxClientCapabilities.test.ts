@@ -14,7 +14,7 @@ describe('tmux client capability compatibility', () => {
     expect(supported).toBe(true);
     expect(execFile).toHaveBeenCalledWith('/opt/bin/tmux', ['-T', 'RGB,sync', '-V'], { timeout: 5000 }, expect.any(Function));
     expect(buildTmuxAttachArgs('work session', supported)).toEqual([
-      '-T', 'RGB,sync', 'attach-session', '-t', 'work session',
+      '-u', '-T', 'RGB,sync', 'attach-session', '-t', 'work session',
     ]);
   });
 
@@ -23,7 +23,7 @@ describe('tmux client capability compatibility', () => {
       execFile.mockImplementation((_binary, _args, _options, callback) => callback(new Error(message)));
       const supported = await supportsTmuxClientFeatures('tmux');
       expect(supported).toBe(false);
-      expect(buildTmuxAttachArgs('legacy', supported)).toEqual(['attach-session', '-t', 'legacy']);
+      expect(buildTmuxAttachArgs('legacy', supported)).toEqual(['-u', 'attach-session', '-t', 'legacy']);
     },
   );
 
