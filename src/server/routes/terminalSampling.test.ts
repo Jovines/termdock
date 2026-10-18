@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import ts from 'typescript';
 import { afterEach, expect, it, vi } from 'vitest';
 import { SharedSessionSampler, SharedSnapshotCache } from '../utils/sharedSampling.js';
+import { TerminalPasteBuffer } from '../utils/terminalPasteBuffer.js';
 import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
 import { TerminalOutputDelivery, resolveTerminalReplayCursor } from '../utils/terminalOutputDelivery.js';
 import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
@@ -125,7 +126,7 @@ it('keeps the real WS handler PTYs through flow pauses, while unsubscribe/reconn
     const TMUX_POLL_INTERVAL = 500, ACTIVE_PROGRAM_POLL_INTERVAL = 1200;
     globalThis.attachSse = ${sseHandler};
   `, {
-    SharedSessionSampler, TerminalClientAttachment, TmuxInitialScreen, TerminalOutputDelivery, resolveTerminalReplayCursor,
+    SharedSessionSampler, TerminalClientAttachment, TerminalPasteBuffer, TmuxInitialScreen, TerminalOutputDelivery, resolveTerminalReplayCursor,
     terminalSessions: new Map([['backend', session]]), wsClients: new Map(),
     outputDeliveries: new WeakMap(), independentTmuxClients: new WeakSet(), independentTmuxReplays: new WeakMap(),
     TERMINAL_STREAM_EPOCH: 'test', attachmentSpawnBackoff: { check: () => {}, spawn: (fn: () => unknown) => fn() },

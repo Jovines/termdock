@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 import { useEffect } from 'react';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
+import {createInviteLink} from './inviteLink';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); return { request, fetch, connect: vi.fn(), invalidate: vi.fn(), saved: vi.fn(), accessProps: {} as Record<string, any>, client: { request, fetch, targetPeerId: 'service' } }; });
+const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); return { request, fetch, connect: vi.fn(), authenticate:vi.fn(), invalidate: vi.fn(), saved: vi.fn(), accessProps: {} as Record<string, any>, client: { request, fetch, targetPeerId: 'service',closed:false } }; });
 vi.mock('./browserIntegration', () => ({
   SECURE_STATE_EVENT: 'termdock:secure-state',
   preferDirectConnection: vi.fn(), currentConnectionPath: () => 'direct', connectionRoutes: () => [],
   connectionAddresses: (item: { url: string; serviceOrigin?: string; targetPeerId: string; routes?: { url: string; targetPeerId: string }[] }) => [item.serviceOrigin || item.url, ...(item.routes || []).filter(route => route.targetPeerId === item.targetPeerId).map(route => route.url)],
-  connectDevice: mocks.connect, connectOpenService: vi.fn(), getIdentity: async () => ({ peerId: 'phone' }),
+  authenticateKnownConnection:mocks.authenticate,connectDevice: mocks.connect, connectOpenService: vi.fn(), getIdentity: async () => ({ peerId: 'phone' }),
   currentSecureClient: () => mocks.client, currentEntryClient: () => undefined,
   getActiveClient: async () => mocks.client, savedConnection: mocks.saved,
   invalidateSecureTransport: mocks.invalidate,
@@ -29,8 +33,8 @@ beforeEach(() => {
   localStorage.clear(); sessionStorage.clear(); delete window.__termdockWorkspaceHost;
   setConnectionRecovery('ready');
   mocks.request.mockReset().mockResolvedValue(permitted); mocks.invalidate.mockReset(); mocks.connect.mockReset().mockResolvedValue(undefined);
-  mocks.fetch.mockReset(); mocks.client = { request: mocks.request, fetch: mocks.fetch, targetPeerId: 'service' };
-  mocks.saved.mockReturnValue({ url: 'https://service.example', targetPeerId: 'service' });
+  mocks.authenticate.mockReset().mockResolvedValue(undefined);mocks.fetch.mockReset(); mocks.client = { request: mocks.request, fetch: mocks.fetch, targetPeerId: 'service',closed:false };
+  mocks.saved.mockReturnValue({ url: 'https://service.example', targetPeerId: 'service',closed:false });
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
 });
 afterEach(() => { cleanup(); delete window.__termdockWorkspaceHost; delete window.termdockDesktop; vi.restoreAllMocks(); });
@@ -199,7 +203,7 @@ describe('entry recovery and invitation address contract', () => {
     expect(screen.queryByText('Active terminal')).toBeNull();
   });
   it.each(['loopback-only', 'disabled', 'conflict', 'error', 'active'])('keeps current invite origin and recommends only published domain for %s', async status => {
-    mocks.saved.mockReturnValue({ url: 'https://localhost:9881', serviceOrigin: 'https://localhost:9881', targetPeerId: 'service' });
+    mocks.saved.mockReturnValue({ url: 'https://localhost:9881', serviceOrigin: 'https://localhost:9881', targetPeerId: 'service',closed:false });
     mocks.fetch.mockResolvedValue(Response.json({ localAccess: { status, url: 'https://computer.termdock.local:9881', interfaces: [] } }));
     mocks.request.mockImplementation(async (input: { type: string }) => input.type === 'invite-create' ? { code: 'b'.repeat(32), expiresAt: Date.now() + 600000 } : permitted);
     // A valid service ID is needed for the invitation format.
@@ -217,4 +221,99 @@ describe('entry recovery and invitation address contract', () => {
     expect(parseInviteLink(custom.url).serviceOrigin).toBe('https://[::1]:9881');
     expect(mocks.fetch.mock.calls).toHaveLength(1); // No silent origin substitution request.
   });
+});
+
+describe('native target display without authorization side effects', () => {
+  it.each([
+    { url: 'https://entry.example', serviceOrigin: 'https://target.example', label: 'Actual target' },
+    { url: 'http://127.0.0.1:9834', label: 'This machine' },
+  ])('shows the original target $label before URL-only password authorization', async native => {
+    vi.resetModules(); mocks.saved.mockReturnValue(undefined);
+    window.termdockDesktop = { getServiceConnection: vi.fn().mockResolvedValue(native) } as unknown as NonNullable<Window['termdockDesktop']>;
+    const { SecureAccessGate: Gate } = await import('./SecureAccessGate');
+    render(<Gate><div>Terminal</div></Gate>);
+    await screen.findByText('Password login');
+    expect(screen.getByText(native.serviceOrigin || native.url)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage before login' }));
+    await screen.findByText('Service management');
+    expect(mocks.accessProps.currentServiceOrigin).toBe(native.serviceOrigin || native.url);
+    expect(mocks.accessProps.currentServiceName).toBe(native.label);
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+  it('keeps the old browser display when no native bridge exists', async () => {
+    vi.resetModules(); mocks.saved.mockReturnValue(undefined);
+    const { SecureAccessGate: Gate } = await import('./SecureAccessGate');
+    render(<Gate><div>Terminal</div></Gate>);
+    await screen.findByText('Password login');
+    expect(screen.getByText(location.origin)).toBeTruthy();
+  });
+  it('ignores the unmounted component native promise when a new window target is shown', async () => {
+    vi.resetModules(); mocks.saved.mockReturnValue(undefined);
+    let finish!: (value: unknown) => void;
+    window.termdockDesktop = { getServiceConnection: () => new Promise(resolve => { finish = resolve; }) } as unknown as NonNullable<Window['termdockDesktop']>;
+    const { SecureAccessGate: Gate } = await import('./SecureAccessGate');
+    const old = render(<Gate><div>Terminal</div></Gate>); old.unmount();
+    window.termdockDesktop = { getServiceConnection: async () => ({ url: 'https://new-window.example', label: 'New window' }) } as unknown as NonNullable<Window['termdockDesktop']>;
+    render(<Gate><div>Terminal</div></Gate>);
+    await screen.findByText('https://new-window.example');
+    await act(async () => finish({ url: 'https://old-window.example', label: 'Old window' }));
+    expect(screen.queryByText('https://old-window.example')).toBeNull();
+    expect(screen.getByText('https://new-window.example')).toBeTruthy();
+  });
+  it.each([true, false])('does not overwrite a new target with a late native directory result (pinned=%s)', async pinned => {
+    vi.resetModules(); mocks.saved.mockReturnValue(undefined);
+    let finish!: (value: unknown) => void;
+    window.termdockDesktop = { getServiceConnection: () => new Promise(resolve => { finish = resolve; }) } as unknown as NonNullable<Window['termdockDesktop']>;
+    const { SecureAccessGate: Gate } = await import('./SecureAccessGate');
+    render(<Gate><div>Terminal</div></Gate>);
+    const newer = { url: 'https://new.example', serviceOrigin: 'https://new.example', serviceName: 'Newer target', ...(pinned ? { targetPeerId: 'new-target' } : {}) };
+    mocks.saved.mockReturnValue(newer); mocks.request.mockResolvedValue({ type: 'result', fullService: false, grants: [] });
+    await act(async () => finish({ url: 'https://stale.example', serviceOrigin: 'https://stale.example', label: 'Stale target', ...(pinned ? { targetPeerId: 'stale-target' } : {}) }));
+    await screen.findByText('Password login');
+    expect(screen.getByText(newer.url)).toBeTruthy(); expect(screen.queryByText('https://stale.example')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage before login' }));
+    await screen.findByText('Service management');
+    expect(mocks.accessProps.currentServiceName).toBe('Newer target');
+  });
+});
+
+
+describe('actual Preview bridge invitation receipt after real Gate permission success',()=>{
+ const peer='12D3KooW'+'a'.repeat(44),entry='12D3KooW'+'b'.repeat(44);
+ const originalFetch=window.fetch,originalSocket=window.WebSocket;
+ const invitation=createInviteLink({v:1,serviceId:peer,entryServiceId:entry,entryUrl:'https://entry.example',serviceUrl:'https://service.example',routeOnly:true,routeCode:'x'.repeat(32)});
+ const source=fs.readFileSync('desktop-rust/renderer/bridge.js','utf8');
+ function install(invite=invitation){
+  window.fetch=originalFetch||vi.fn(async()=>Response.json({}));window.WebSocket=originalSocket;
+  Object.assign(window,{__TD_PREVIEW_BOOT__:{origin:location.origin,origins:['https://entry.example','https://service.example'],defaultRoute:1,platform:'darwin',connection:{url:'https://entry.example',serviceOrigin:'https://service.example',targetPeerId:peer,entryServiceId:entry,label:'Owned'},invitation:invite},__TAURI_INTERNALS__:{invoke:async(_command:string,args:{op:string})=>args.op==='connections'?[]:{}}});
+  vm.runInNewContext(source,{window,location,navigator,sessionStorage,Request,Response,URL,TypeError,Error,Uint8Array,TextEncoder,crypto:webcrypto,atob,Number,Promise,Object,Set,String,JSON,queueMicrotask});
+ }
+ beforeEach(()=>{vi.stubGlobal('crypto',webcrypto);mocks.client.targetPeerId=peer;mocks.saved.mockReturnValue({url:'https://service.example',targetPeerId:peer});install();});
+ afterEach(()=>{window.fetch=originalFetch;window.WebSocket=originalSocket;Reflect.deleteProperty(window,'__TAURI_INTERNALS__');vi.unstubAllGlobals();});
+ it.each(['password','pairing'] as const)('%s callback acknowledges only after actual permissions and a new document still reads normal permissions',async entry=>{
+  render(<SecureAccessGate><div>Owned terminal</div></SecureAccessGate>);await screen.findByText('Service management');
+  expect(sessionStorage.getItem('termdock-secure-preview-invitation-v1')).toBeNull();
+  await act(async()=>{if(entry==='password')await mocks.accessProps.onConnectWithPassword({},'controlled');else await mocks.accessProps.onConnect({url:'https://service.example',targetPeerId:peer,pairingCode:'controlled'});});await screen.findByText('Owned terminal');
+  const marker=sessionStorage.getItem('termdock-secure-preview-invitation-v1')!;expect(marker).not.toContain(invitation);expect(JSON.parse(marker).fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  const reads=mocks.request.mock.calls.filter(([message])=>message.type==='permissions').length;expect(reads).toBeGreaterThan(0);
+  cleanup();install();expect((await window.termdockDesktop!.getServiceConnection!())?.invitation).toBeUndefined();
+  render(<SecureAccessGate><div>Restored terminal</div></SecureAccessGate>);await screen.findByText('Restored terminal');
+  expect(mocks.request.mock.calls.filter(([message])=>message.type==='permissions').length).toBeGreaterThan(reads);expect(mocks.connect).toHaveBeenCalledTimes(entry==='pairing'?1:0);
+ });
+ it('failed permissions do not acknowledge the invitation',async()=>{
+  render(<SecureAccessGate><div>Owned terminal</div></SecureAccessGate>);await screen.findByText('Service management');mocks.request.mockRejectedValue(new Error('Controlled denied'));
+  await expect(mocks.accessProps.onConnectWithPassword({},'controlled')).rejects.toThrow();
+  expect(sessionStorage.getItem('termdock-secure-preview-invitation-v1')).toBeNull();expect((await window.termdockDesktop!.getServiceConnection!())?.invitation).toBe(invitation);
+ });
+ it('ordinary pairing success before a failed permission read does not consume the original invitation stamp',async()=>{
+  render(<SecureAccessGate><div>Owned terminal</div></SecureAccessGate>);await screen.findByText('Service management');mocks.request.mockRejectedValue(new Error('Controlled denied'));
+  await expect(mocks.accessProps.onConnect({url:'https://service.example',targetPeerId:peer,pairingCode:'controlled'})).rejects.toThrow();
+  expect(mocks.connect).toHaveBeenCalledTimes(1);expect(sessionStorage.getItem('termdock-secure-preview-invitation-v1')).toBeNull();expect((await window.termdockDesktop!.getServiceConnection!())?.invitation).toBe(invitation);
+ });
+ it.each(['client','target','page'] as const)('a late successful permission response cannot acknowledge after %s changes',async change=>{
+  render(<SecureAccessGate><div>Owned terminal</div></SecureAccessGate>);await screen.findByText('Service management');let finish!:(value:typeof permitted)=>void;
+  mocks.request.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));const pending=mocks.accessProps.onConnectWithPassword({},'controlled');await waitFor(()=>expect(finish).toBeTypeOf('function'));
+  if(change==='client')mocks.client={...mocks.client,closed:true};else if(change==='target')mocks.saved.mockReturnValue({url:'https://other.example',targetPeerId:entry});else fireEvent(window,new Event('pagehide'));
+  await act(async()=>{finish(permitted);await pending;});expect(sessionStorage.getItem('termdock-secure-preview-invitation-v1')).toBeNull();
+ });
 });

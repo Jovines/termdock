@@ -5,7 +5,7 @@ import { readDeviceProfile } from './readDeviceProfile';
 import { currentConnectionPath, currentEntryClient } from './browserIntegration';
 import type { DeviceProfile } from '../../server/federation/deviceProfile';
 import { defaultDeviceName } from './deviceName';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import FederationAccess, { type FederationGrant, type FederationInviteInput } from '../../components/FederationAccess';
 import { connectDevice, connectionRoutes, connectionAddresses, createEntryInvitation, authenticateKnownConnection, preferDirectConnection, connectServiceAddress, connectOpenService, currentSecureClient, getActiveClient, getIdentity, invalidateSecureTransport, savedConnection, SECURE_STATE_EVENT, type ConnectionIntent } from './browserIntegration';
 import { createInviteLink, parseInviteLink } from './inviteLink';
@@ -31,13 +31,16 @@ const initialInvitation = (() => {
 })();
 const OPEN_SESSION_KEY = 'termdock-secure-open-session';
 let localPairing: Promise<unknown> | undefined;
-let nativeConnection: ReturnType<NonNullable<NonNullable<Window['termdockDesktop']>['getServiceConnection']>> | undefined;
 function pendingSession(): string | undefined {
   try { const value = JSON.parse(sessionStorage.getItem(OPEN_SESSION_KEY) ?? 'null'); return value?.serviceId === savedConnection()?.targetPeerId ? value.sessionId : undefined; } catch { return undefined; }
 }
 
 export function SecureAccessGate({ children }: { children: ReactNode }) {
   const { t } = useI18n();
+  const nativeConnectionRef = useRef<ReturnType<NonNullable<NonNullable<Window['termdockDesktop']>['getServiceConnection']>>>();
+  const pageGeneration = useRef(0);
+  useEffect(() => { const expire=()=>{pageGeneration.current++;};window.addEventListener('pagehide',expire);return()=>{expire();window.removeEventListener('pagehide',expire);}; }, []);
+  const [nativeTarget, setNativeTarget] = useState<Pick<ServiceConnection, 'url' | 'serviceOrigin' | 'label' | 'targetPeerId'>>();
   const [incomingInvitation, setIncomingInvitation] = useState(initialInvitation);
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(!!initialInvitation);
@@ -52,6 +55,10 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [loadingAccess, setLoadingAccess] = useState(false);
   const [accessError, setAccessError] = useState('');
   const [serviceName, setServiceName] = useState(savedConnection()?.serviceName ?? location.hostname);
+  const selectedDisplay = savedConnection();
+  const displayOrigin = selectedDisplay?.serviceOrigin || selectedDisplay?.url || nativeTarget?.serviceOrigin || nativeTarget?.url || location.origin;
+  const nativeMatchesSelection = !selectedDisplay || (selectedDisplay.targetPeerId === nativeTarget?.targetPeerId && (selectedDisplay.serviceOrigin || selectedDisplay.url) === (nativeTarget?.serviceOrigin || nativeTarget?.url));
+  const displayName = selectedDisplay?.serviceName || (nativeMatchesSelection ? nativeTarget?.label : undefined) || serviceName;
   const [remoteSession, setRemoteSession] = useState<string | undefined>(pendingSession);
   const [showConnectionDetails, setShowConnectionDetails] = useState(false);
   useEffect(() => {
@@ -102,8 +109,23 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     return () => { stopped = true; window.removeEventListener('termdock:open-remote-session', handler); };
   }, []);
   const readPermissions = async (timeoutMs = 5000) => {
+    const generation=pageGeneration.current,selection=savedConnection();
     const client = await getActiveClient();
     const permissions = await readDeviceAuthorization(client, { timeoutMs });
+    const acknowledge=window.termdockDesktop?.acknowledgeServiceInvitation,stamp=nativeConnectionRef.current;
+    if(acknowledge&&stamp){
+      const native=await stamp;
+      const current=()=>generation===pageGeneration.current&&stamp===nativeConnectionRef.current&&client===currentSecureClient()&&!client.closed&&selection===savedConnection()&&selection?.targetPeerId===client.targetPeerId&&native?.targetPeerId===client.targetPeerId;
+      if(native?.invitation&&current()){
+        try{
+          const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(native.invitation));
+          const fingerprint=Array.from(new Uint8Array(bytes),byte=>byte.toString(16).padStart(2,'0')).join('');
+          if(current()&&await acknowledge({targetPeerId:client.targetPeerId,fingerprint},current)&&current()){
+            nativeConnectionRef.current=Promise.resolve({...native,invitation:undefined});setIncomingInvitation(undefined);
+          }
+        }catch{/* Optional metadata receipt failure never changes authorization. */}
+      }
+    }
     const path = currentConnectionPath();
     const entryId = currentEntryClient()?.targetPeerId;
     void Promise.all([readDeviceProfile(), listServiceConnections()]).then(([profile, directory]) => {
@@ -134,8 +156,19 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       const previous = currentSecureClient();
       try {
         if (IS_WORKSPACE_DOCUMENT && !savedConnection()) throw new Error('工作区的服务记录已移除，请重新添加服务。');
-        nativeConnection ??= window.termdockDesktop?.getServiceConnection?.();
-        const native = await nativeConnection;
+        const selectionKey = () => { const c = savedConnection(); return c ? JSON.stringify([c.targetPeerId, c.url, c.serviceOrigin]) : undefined; };
+        const selectionBefore = selectionKey();
+        nativeConnectionRef.current ??= window.termdockDesktop?.getServiceConnection?.();
+        const native = await nativeConnectionRef.current;
+        if (stopped) return;
+        // Native metadata only affects display. A newer selected target wins;
+        // late results never authorize a device or replace a peer pin.
+        if (native && selectionBefore === selectionKey() && (!savedConnection() || savedConnection()?.targetPeerId === native.targetPeerId)) {
+          try {
+            const url = normalizeServiceAddress(native.serviceOrigin || native.url);
+            setNativeTarget({ url, serviceOrigin: url, label: native.label, targetPeerId: native.targetPeerId });
+          } catch { /* Invalid display metadata retains the existing target. */ }
+        }
         if (native?.invitation) { setIncomingInvitation(parseInviteLink(native.invitation)); setOpen(true); setChecking(false); return; }
         if (!savedConnection()) {
           if (incomingInvitation) { setChecking(false); return; }
@@ -269,11 +302,11 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
       if (activateServiceWorkspace(service)) { setOpen(false); return; }
     }
     await connectDevice(intent);
-    if (nativeConnection) nativeConnection = nativeConnection.then(value => value ? { ...value, invitation: undefined } : null);
-    setIncomingInvitation(undefined);
     setRemoteSession(undefined); sessionStorage.removeItem(OPEN_SESSION_KEY);
     setServiceName(intent.serviceName ?? new URL(intent.url).hostname);
-    await readPermissions(); setOpen(false); setError(false);
+    await readPermissions();
+    if (nativeConnectionRef.current) nativeConnectionRef.current = nativeConnectionRef.current.then(value => value ? { ...value, invitation: undefined } : null);
+    setIncomingInvitation(undefined);setOpen(false); setError(false);
   };
   const openService = async (service: ServiceConnection) => {
     const desktop = window.termdockDesktop;
@@ -336,7 +369,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   return <>
     {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking && !error && !open ? <StartupScreen
       status={showConnectionDetails ? '连接时间较长，仍在等待服务…' : connectionMessage}
-      detail={showConnectionDetails ? serviceName : undefined}
+      detail={showConnectionDetails ? displayName : undefined}
       actionLabel={showConnectionDetails ? '管理服务' : undefined}
       onAction={() => setOpen(true)}
     /> : checking ? <div className="flex h-full min-h-0 flex-col items-center justify-center bg-[var(--chrome-bg)] px-6 text-foreground">
@@ -344,7 +377,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
         <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-surface-2 text-muted-foreground" aria-hidden="true">
           <Terminal size={24} strokeWidth={1.5} />
         </div>
-        <h1 className="max-w-full truncate text-base font-medium tracking-tight" title={serviceName}>{serviceName}</h1>
+        <h1 className="max-w-full truncate text-base font-medium tracking-tight" title={displayName}>{displayName}</h1>
         <div role="status" className="mt-2 flex max-w-full items-center justify-center gap-2 text-xs leading-5 text-muted-foreground">
           {!error && <LoaderCircle size={13} className="shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
           <span>{connectionMessage}</span>
@@ -352,8 +385,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
         {error && <p className="mt-2 text-xs leading-5 text-muted-foreground">{t(savedConnection() ? 'login.savedConnectionRetained' : 'login.continueAfterReconnect')}</p>}
         <button type="button" className="mt-6 min-h-11 rounded-lg px-4 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setOpen(true)}>管理服务</button>
       </div>
-    </div> : <><div className="fixed left-0 right-0 top-[var(--safe-top-inset)] z-chrome sm:right-auto sm:w-72"><ServiceSwitcher /></div><LoginScreen serviceOrigin={savedConnection()?.serviceOrigin || location.origin} onManageServices={() => setOpen(true)} focusEnabled={!open} onLoginSuccess={() => { void readPermissions().catch(() => setError(true)); }} /></>}
-    {open && <FederationAccess onConnect={connect} onClose={() => setOpen(false)} onAddService={addService} onOpenService={openService} onConnectWithPassword={async (connection, password) => { await authenticateKnownConnection(connection, password); await readPermissions(); setOpen(false); }} paired={ready || !!savedConnection()} initialInvite={incomingInvitation} currentServiceName={serviceName} currentServiceId={currentSecureClient()?.targetPeerId || savedConnection()?.targetPeerId} currentServiceOrigin={savedConnection()?.serviceOrigin || location.origin} currentIdentity={deviceIdentity} grants={grants} sessions={sessions} loading={loadingAccess} loadError={accessError} onRetry={() => void refresh()}
+    </div> : <><div className="fixed left-0 right-0 top-[var(--safe-top-inset)] z-chrome sm:right-auto sm:w-72"><ServiceSwitcher /></div><LoginScreen serviceOrigin={displayOrigin} onManageServices={() => setOpen(true)} focusEnabled={!open} onLoginSuccess={() => { void readPermissions().catch(() => setError(true)); }} /></>}
+    {open && <FederationAccess onConnect={connect} onClose={() => setOpen(false)} onAddService={addService} onOpenService={openService} onConnectWithPassword={async (connection, password) => { await authenticateKnownConnection(connection, password); await readPermissions(); setOpen(false); }} paired={ready || !!savedConnection()} initialInvite={incomingInvitation} currentServiceName={displayName} currentServiceId={currentSecureClient()?.targetPeerId || savedConnection()?.targetPeerId} currentServiceOrigin={displayOrigin} currentIdentity={deviceIdentity} grants={grants} sessions={sessions} loading={loadingAccess} loadError={accessError} onRetry={() => void refresh()}
       onRename={async (subjectId, name) => { await (await getActiveClient()).request({ type: 'device-name', subjectId, name }); await refresh(); }}
       hasBackup={!!savedConnection() && connectionRoutes(savedConnection()!).length > 0} inviteAddresses={inviteAddresses} onCreateInvite={canManage ? invite : undefined}
       onRevoke={canManage ? async grantId => { await (await getActiveClient()).request(grantId.startsWith('route:') ? { type: 'route-revoke', grantId: grantId.slice(6) } : { type: 'revoke', grantId }); await refresh(); } : undefined} />}

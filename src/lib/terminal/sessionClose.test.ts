@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { requiresSessionCloseConfirmation } from './sessionClose';
+import { requiresSessionCloseConfirmation, sameSessionCloseBinding } from './sessionClose';
 
 describe('requiresSessionCloseConfirmation', () => {
   const shellNames = new Set(['bash', 'zsh', 'fish']);
@@ -50,5 +50,15 @@ describe('requiresSessionCloseConfirmation', () => {
       promptState: 'running',
       shellNames,
     })).toBe(false);
+  });
+});
+
+describe('close chooser binding identity', () => {
+  it('keeps the original target across active-tab changes and rejects rebuild, service, mode or tmux changes', () => {
+    const target={},client={},opened={id:'one',target,client,backend:'backend-one',mode:'tmux',tmux:'owned-one'};
+    expect(sameSessionCloseBinding(opened,{...opened})).toBe(true);
+    for(const change of [{id:'two'},{backend:'rebuilt'},{backend:null},{target:{}},{client:{}},{mode:'shell'},{tmux:'replacement'}])expect(sameSessionCloseBinding(opened,{...opened,...change})).toBe(false);
+    expect(sameSessionCloseBinding(opened,null)).toBe(false);
+    expect(sameSessionCloseBinding(null,opened)).toBe(false);
   });
 });

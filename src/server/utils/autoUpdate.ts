@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   compareVersions,
+  verifyRunningTermdockInstallation,
   updateTermdockFromOfficialRegistry,
   type NpmUpdateFallbackStage,
   type NpmUpdateResult,
@@ -36,6 +37,8 @@ interface AutoUpdateDependencies {
   broadcast: (state: TermdockUpdateState) => void;
   requestRestart: () => void;
   updateRunner?: UpdateRunner;
+  verifyInstalled?: (version: string) => void;
+  verifyRestartEntry?: () => void;
   log?: (message: string) => void;
 }
 
@@ -80,12 +83,12 @@ export class TermdockAutoUpdateManager {
     if (this.initialTimer || this.intervalTimer) return;
     this.initialTimer = setTimeout(() => {
       this.initialTimer = null;
-      void this.checkNow();
+      void this.checkNow(false);
     }, AUTO_UPDATE_INITIAL_DELAY_MS);
     this.initialTimer.unref?.();
 
     this.intervalTimer = setInterval(() => {
-      void this.checkNow();
+      void this.checkNow(false);
     }, AUTO_UPDATE_INTERVAL_MS);
     this.intervalTimer.unref?.();
   }
@@ -97,12 +100,16 @@ export class TermdockAutoUpdateManager {
     this.intervalTimer = null;
   }
 
-  checkNow(): Promise<TermdockUpdateState> {
+  checkNow(explicit = true): Promise<TermdockUpdateState> {
+    // Failed installation validation requires a user-requested check, not a timer retry.
+    if (!explicit && this.state.status === 'error' && hasPendingTermdockUpdate(this.state)) return Promise.resolve(this.getState());
     // Once an installed update is waiting for explicit confirmation, periodic
     // checks must never turn any external state change into implicit consent.
     // Keep the reminder until the user confirms or restarts manually.
     if (this.state.status === 'ready' && hasPendingTermdockUpdate(this.state)) {
-      return Promise.resolve(this.getState());
+      try { this.verifyInstalled(this.state.latestVersion!); return Promise.resolve(this.getState()); }
+      catch (error) { this.installationError(error); if (!explicit) return Promise.resolve(this.getState()); }
+      // Only the explicit check repairs an invalid pending installation; never restart here.
     }
     if (this.checkPromise) return this.checkPromise;
     this.checkPromise = this.runCheck().finally(() => {
@@ -115,9 +122,25 @@ export class TermdockAutoUpdateManager {
     if (this.state.status !== 'ready' || !hasPendingTermdockUpdate(this.state)) {
       throw new Error('No installed Termdock update is waiting for restart.');
     }
+    try {
+      this.verifyInstalled(this.state.latestVersion!);
+      if (process.env.TERMDOCK_SUPERVISED !== '1' || !process.connected) throw new Error('Automatic restart requires the verified supervised Termdock entry; restart manually.');
+      this.dependencies.verifyRestartEntry?.();
+    }
+    catch (error) { this.installationError(error); throw error; }
     this.setState({ ...this.state, status: 'restarting', error: null });
-    this.dependencies.requestRestart();
+    try { this.dependencies.requestRestart(); }
+    catch (error) { this.installationError(error); throw error; }
     return this.getState();
+  }
+
+  private verifyInstalled(version: string): void {
+    (this.dependencies.verifyInstalled ?? verifyRunningTermdockInstallation)(version);
+  }
+
+  private installationError(error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    this.setState({ ...this.state, status: 'error', error: detail });
   }
 
   private async runCheck(): Promise<TermdockUpdateState> {
@@ -153,6 +176,7 @@ export class TermdockAutoUpdateManager {
         return this.getState();
       }
 
+      this.verifyInstalled(result.latestVersion);
       this.setState({
         status: 'ready',
         currentVersion: result.currentVersion,
@@ -186,13 +210,19 @@ export class TermdockAutoUpdateManager {
       if (typeof value.latestVersion !== 'string') return fallback;
       if (compareVersions(this.dependencies.currentVersion, value.latestVersion) >= 0) return fallback;
       if (value.status !== 'ready' && value.status !== 'restarting' && value.status !== 'error') return fallback;
+      let restoredStatus = value.status === 'restarting' ? 'ready' : value.status;
+      let restoredError = typeof value.error === 'string' ? value.error : null;
+      if (restoredStatus === 'ready') {
+        try { this.verifyInstalled(value.latestVersion); }
+        catch (error) { restoredStatus = 'error'; restoredError = error instanceof Error ? error.message : String(error); }
+      }
       return {
-        status: value.status === 'restarting' ? 'ready' : value.status,
+        status: restoredStatus,
         currentVersion: this.dependencies.currentVersion,
         latestVersion: value.latestVersion,
         source: value.source === 'configured' ? 'configured' : 'official',
         checkedAt: typeof value.checkedAt === 'number' ? value.checkedAt : null,
-        error: typeof value.error === 'string' ? value.error : null,
+        error: restoredError,
       };
     } catch {
       return fallback;

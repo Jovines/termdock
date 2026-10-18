@@ -1,3 +1,6 @@
+import { TerminalEngineSettings } from './lib/components/settings/TerminalEngineSettings';
+import { isNativeRendererReady, subscribeNativeRenderer } from './lib/terminal/nativeLifetime';
+import { confirmPageAction, runConfirmedPageAction, showPageFeedback } from './lib/desktop/pageFeedback';
 import { readBrowserServices } from './lib/services/serviceDirectory';
 import { parseArchitectureLink, consumeArchitectureLink, queueArchitectureLink } from './lib/architecture/link';
 import { sessionCreationErrorKey, type NewSessionCreationResult, type NewSessionRequestOptions } from './lib/terminal/newSessionRequest';
@@ -8,7 +11,7 @@ import { LoadingSpinner as RiLoaderLine, LoadingSpinner as RiLoaderCircle } from
 import { MobileSetupGuide } from './lib/components/settings/MobileSetupGuide';
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
 import { ViewportDiagnostics } from './lib/components/terminal/ViewportDiagnostics';
-import { savedConnection } from './lib/federation/browserIntegration';
+import { savedConnection, currentSecureClient, SECURE_STATE_EVENT } from './lib/federation/browserIntegration';
 import { consumeWorkspaceSession, getWorkspaceHost, reportWorkspace, activateServiceWorkspace } from './lib/services/workspaceHost';
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
@@ -52,7 +55,8 @@ import { readCachedSessionPersistenceSnapshot } from './lib/hooks/useSessionPers
 import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
 import { markStartupMilestone } from './lib/utils/startupPerformance';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
-import { requiresSessionCloseConfirmation } from './lib/terminal/sessionClose';
+import { requiresSessionCloseConfirmation, sameSessionCloseBinding } from './lib/terminal/sessionClose';
+import { SessionCloseConfirmationKeyboard } from './lib/components/SessionCloseConfirmationKeyboard';
 import { getSessionFontSize, setSessionFontSize } from './lib/terminal/sessionFontSize';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
@@ -531,6 +535,25 @@ function reorderSessionsByIds<T extends { id: string }>(items: T[], orderedIds: 
 
 const CollaborationMainWorkspace = React.lazy(() => import('./lib/components/sidebar/CollaborationMainWorkspace'));
 
+export function RendererPreferenceControls({sessionId,children}:{sessionId:string|null;children:React.ReactNode}) {
+  const snapshot=React.useCallback(()=>isNativeRendererReady(sessionId?`terminal::${sessionId}`:null),[sessionId]);
+  const actualNative=React.useSyncExternalStore(subscribeNativeRenderer,snapshot,()=>false);
+  return actualNative?null:<>{children}</>;
+}
+export function RendererPreferenceNotice({locale}:{locale:string}) {
+  return <p data-terminal-renderer-scope="browser-fallback" className="text-[11px] text-muted-foreground">{locale === 'zh' ? '这些设置适用于浏览器和后备终端；原生终端使用 Ghostty。' : 'These preferences apply to browser and fallback terminals; native terminals use Ghostty.'}</p>;
+}
+
+/** One confirmation belongs to one live service/page, including the CSRF await. */
+export async function runServiceUpdateConfirmation(lock: { busy: boolean }, action: {
+  confirm: () => boolean | Promise<boolean>; current: () => boolean;
+  submit: (current: () => boolean) => Promise<TermdockUpdateState>;
+  apply: (state: TermdockUpdateState) => void; pending: (value: boolean) => void;
+  failure: (message: string) => void; expiredMessage: string;
+}) {
+  return runConfirmedPageAction(lock,action);
+}
+
 function App() {
   const { t, locale, setLocale } = useI18n();
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
@@ -565,6 +588,16 @@ function App() {
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
   const [termdockUpdateState, setTermdockUpdateState] = React.useState<TermdockUpdateState | null>(null);
   const [updateActionPending, setUpdateActionPending] = React.useState(false);
+  const updateActionLock = useRef({ busy: false });
+  const updatePageEpoch = useRef(0);
+  const updateLatestVersion = useRef(termdockUpdateState?.latestVersion);
+  updateLatestVersion.current = termdockUpdateState?.latestVersion;
+  const [updateActionError, setUpdateActionError] = useState<string | null>(null);
+  useEffect(() => {
+    const invalidate = () => { updatePageEpoch.current++; };
+    for (const event of ['pagehide', 'auth:unauthorized', SECURE_STATE_EVENT]) window.addEventListener(event, invalidate);
+    return () => { invalidate(); for (const event of ['pagehide', 'auth:unauthorized', SECURE_STATE_EVENT]) window.removeEventListener(event, invalidate); };
+  }, []);
   const [serverHealthState, setServerHealthState] = React.useState<ServerHealthState | null>(null);
   const desktopBridge = React.useMemo(() => getTermdockDesktopBridge(), []);
   const desktopUpdateSupported = Boolean(
@@ -575,6 +608,8 @@ function App() {
   const [desktopSnapshot, setDesktopSnapshot] = React.useState<DesktopNativeSnapshot | null>(null);
   const [desktopUpdateState, setDesktopUpdateState] = React.useState<DesktopAppUpdateState | null>(null);
   const [desktopUpdatePending, setDesktopUpdatePending] = React.useState(false);
+  const desktopUpdateLock=useRef({busy:false});
+  const desktopUpdateCurrent=useRef(desktopUpdateState);desktopUpdateCurrent.current=desktopUpdateState;
   const [desktopActionMessage, setDesktopActionMessage] = React.useState<string | null>(null);
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
   const [rightSidebarFilePreviewOpenByRoot, setRightSidebarFilePreviewOpenByRoot] = React.useState<RightSidebarFilePreviewOpenCache>(() => (
@@ -757,23 +792,27 @@ function App() {
     try {
       setServerHealthState(await dismissServerHealthIncident());
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      showPageFeedback(error instanceof Error ? error.message : String(error));
     }
   }, []);
 
   const handleConfirmUpdateRestart = useCallback(async () => {
     const latestVersion = termdockUpdateState?.latestVersion;
     if (!latestVersion || updateActionPending) return;
-    if (!window.confirm(t('sidebar.updateRestartConfirm', { version: latestVersion }))) return;
-    setUpdateActionPending(true);
-    try {
-      setTermdockUpdateState(await confirmTermdockUpdateRestart());
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
-    } finally {
-      setUpdateActionPending(false);
-    }
-  }, [termdockUpdateState?.latestVersion, t, updateActionPending]);
+    const epoch = updatePageEpoch.current, target = savedConnection(), client = currentSecureClient();
+    const current = () => epoch === updatePageEpoch.current && target === savedConnection()
+      && client === currentSecureClient() && !client?.closed && updateLatestVersion.current === latestVersion;
+    const pageConfirmation = desktopBridge?.confirmationUI === 'page-v1' && typeof desktopBridge.confirm === 'function';
+    setUpdateActionError(null);
+    await runServiceUpdateConfirmation(updateActionLock.current, {
+      current, submit: confirmTermdockUpdateRestart, apply: setTermdockUpdateState, pending: setUpdateActionPending,
+      expiredMessage: locale === 'zh' ? '连接已变化，请重新确认。' : 'Connection changed. Please confirm again.',
+      confirm: () => pageConfirmation ? desktopBridge.confirm!({ title: t('sidebar.updateRestart'),
+        message: t('sidebar.updateRestartConfirm', { version: latestVersion }), confirmLabel: t('sidebar.updateRestart'), cancelLabel: t('common.cancel') })
+        : window.confirm(t('sidebar.updateRestartConfirm', { version: latestVersion })),
+      failure: message => { if (pageConfirmation) setUpdateActionError(message); else window.alert(message); },
+    });
+  }, [termdockUpdateState?.latestVersion, t, updateActionPending, desktopBridge, locale]);
 
   const handleRetryUpdate = useCallback(async () => {
     if (updateActionPending) return;
@@ -781,7 +820,7 @@ function App() {
     try {
       setTermdockUpdateState(await checkTermdockUpdate());
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      showPageFeedback(error instanceof Error ? error.message : String(error));
     } finally {
       setUpdateActionPending(false);
     }
@@ -800,17 +839,17 @@ function App() {
   }, [desktopBridge, desktopUpdatePending]);
 
   const handleInstallDesktopUpdate = useCallback(async () => {
-    if (!desktopBridge?.installDesktopUpdate || desktopUpdatePending || desktopUpdateState?.status !== 'ready') return;
-    if (!window.confirm(t('settings.desktopUpdateRestartConfirm'))) return;
-    setDesktopUpdatePending(true);
-    try {
-      setDesktopUpdateState(await desktopBridge.installDesktopUpdate());
-    } catch (error) {
-      setDesktopActionMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDesktopUpdatePending(false);
-    }
-  }, [desktopBridge, desktopUpdatePending, desktopUpdateState?.status, t]);
+    const ready=desktopUpdateState;
+    if(!desktopBridge?.installDesktopUpdate||desktopUpdatePending||ready?.status!=='ready')return;
+    const epoch=updatePageEpoch.current,target=savedConnection(),client=currentSecureClient();
+    const current=()=>epoch===updatePageEpoch.current&&ready===desktopUpdateCurrent.current&&ready.status==='ready'&&target===savedConnection()&&client===currentSecureClient()&&!client?.closed;
+    await runConfirmedPageAction(desktopUpdateLock.current,{
+      current,confirm:()=>confirmPageAction({title:t('settings.desktopUpdateRestartConfirm'),message:t('settings.desktopUpdateRestartConfirm'),confirmLabel:t('sidebar.updateRestart'),cancelLabel:t('common.cancel')}),
+      submit:async()=>{if(!current())throw new Error('Desktop update context changed');return desktopBridge.installDesktopUpdate!();},
+      apply:setDesktopUpdateState,pending:setDesktopUpdatePending,failure:setDesktopActionMessage,
+      expiredMessage:locale==='zh'?'连接已变化，请重新确认。':'Connection changed. Please confirm again.',
+    });
+  }, [desktopBridge, desktopUpdatePending, desktopUpdateState, t, locale]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorTheme;
@@ -919,6 +958,27 @@ function App() {
   }, []);
   const mobileDestroyTargetActiveRef = useRef(false);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
+  const sidebarCloseIdentity = React.useRef<{
+    id: string; target: ReturnType<typeof savedConnection>; client: ReturnType<typeof currentSecureClient>;
+    backend: string | null; mode: string; tmux: string | null;
+  } | null>(null);
+  const beginSidebarCloseConfirmation = useCallback((id: string) => {
+    const session = sessions.find(candidate => candidate.id === id);
+    if (!session) return;
+    sidebarCloseIdentity.current = { id, target: savedConnection(), client: currentSecureClient(),
+      backend: useTerminalStore.getState().sessions.get(id)?.terminalSessionId ?? null,
+      mode: session.mode, tmux: session.tmuxSessionName };
+    setSidebarCloseChoiceSessionId(id);
+  }, [sessions]);
+  const isSidebarCloseIdentityCurrent = useCallback(() => {
+    const identity = sidebarCloseIdentity.current;
+    const session = identity && sessions.find(candidate => candidate.id === identity.id);
+    return !!identity && !identity.client?.closed && sameSessionCloseBinding(identity, session ? {
+      id: session.id, target: savedConnection(), client: currentSecureClient(),
+      backend: useTerminalStore.getState().sessions.get(session.id)?.terminalSessionId ?? null,
+      mode: session.mode, tmux: session.tmuxSessionName,
+    } : null);
+  }, [sessions]);
   const [sidebarCloseAnchor, setSidebarCloseAnchor] = useState<{ x: number; y: number } | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   // 移动端重命名卡片每次打开只自动聚焦一次——父组件会随终端输出频繁重渲染，
@@ -1764,7 +1824,7 @@ function App() {
       shellNames: SHELL_NAMES,
     })) {
       setSidebarCloseAnchor(null);
-      setSidebarCloseChoiceSessionId(session.id);
+      beginSidebarCloseConfirmation(session.id);
       setTmuxKillError(null);
     } else if (session) {
       window.dispatchEvent(new CustomEvent('close-terminal-session', {
@@ -1776,7 +1836,7 @@ function App() {
       }));
     }
     return true;
-  }, [isDesktopViewport, sessions, terminalSessions]);
+  }, [isDesktopViewport, sessions, terminalSessions, beginSidebarCloseConfirmation]);
 
   // 顶栏 tab 分组（贯穿式胶囊）：groups = 按 cwd 聚拢的组，每组一个胶囊容器。
   const { groups: tabGroups, arranged: arrangedSessions } = React.useMemo(
@@ -2842,9 +2902,9 @@ function App() {
       return;
     }
     setSidebarCloseAnchor(event ? { x: event.clientX, y: event.clientY } : null);
-    setSidebarCloseChoiceSessionId(sessionId);
+    beginSidebarCloseConfirmation(sessionId);
     setTmuxKillError(null);
-  }, [sessions, terminalSessions, dispatchCloseSession]);
+  }, [sessions, terminalSessions, dispatchCloseSession, beginSidebarCloseConfirmation]);
 
   useEffect(() => {
     if (!desktopBridge) return;
@@ -2853,7 +2913,7 @@ function App() {
       if (command === 'new-session') {
         dispatchNewSession();
       } else if (command === 'close-session') {
-        if (activeSessionId) handleSidebarCloseSession(activeSessionId);
+        if (activeSessionId && !sidebarCloseChoiceSessionId) handleSidebarCloseSession(activeSessionId);
       } else if (command === 'previous-session' || command === 'next-session') {
         window.dispatchEvent(new CustomEvent('cycle-terminal-session', {
           detail: { direction: command === 'next-session' ? 'next' : 'prev' },
@@ -2872,6 +2932,7 @@ function App() {
     return () => window.removeEventListener('termdock:native-command', handleNativeCommand);
   }, [
     activeSessionId,
+    sidebarCloseChoiceSessionId,
     desktopBridge,
     dispatchNewSession,
     handleSidebarCloseSession,
@@ -2886,7 +2947,11 @@ function App() {
     [sessions, sidebarCloseChoiceSessionId],
   );
   const confirmSidebarCloseSession = useCallback(() => {
-    if (!sidebarCloseChoiceSession) return;
+    if (!sidebarCloseChoiceSession || !isSidebarCloseIdentityCurrent()) {
+      setSidebarCloseChoiceSessionId(null);
+      setSidebarCloseAnchor(null);
+      return;
+    }
     dispatchCloseSession({
       sessionId: sidebarCloseChoiceSession.id,
       source: 'sidebar',
@@ -2894,28 +2959,29 @@ function App() {
     });
     setSidebarCloseChoiceSessionId(null);
     setSidebarCloseAnchor(null);
-  }, [sidebarCloseChoiceSession, dispatchCloseSession]);
+  }, [sidebarCloseChoiceSession, dispatchCloseSession, isSidebarCloseIdentityCurrent]);
 
-  useEffect(() => {
-    if (!sidebarCloseChoiceSession) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        setSidebarCloseChoiceSessionId(null);
-        setSidebarCloseAnchor(null);
-        setTmuxKillError(null);
-        return;
-      }
-      if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
-      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      if (!event.repeat) confirmSidebarCloseSession();
+  const sidebarCloseConfirmButton = React.useRef<HTMLButtonElement>(null);
+  const cancelSidebarCloseSession = useCallback(() => {
+    setSidebarCloseChoiceSessionId(null);
+    setSidebarCloseAnchor(null);
+    setTmuxKillError(null);
+  }, []);
+
+  React.useLayoutEffect(() => {
+    if (!sidebarCloseChoiceSessionId) return;
+    const validate = () => { if (!isSidebarCloseIdentityCurrent()) cancelSidebarCloseSession(); };
+    const unauthorized = () => cancelSidebarCloseSession();
+    validate();
+    const unsubscribe = useTerminalStore.subscribe(validate);
+    window.addEventListener(SECURE_STATE_EVENT, validate);
+    window.addEventListener('auth:unauthorized', unauthorized);
+    return () => {
+      unsubscribe();
+      window.removeEventListener(SECURE_STATE_EVENT, validate);
+      window.removeEventListener('auth:unauthorized', unauthorized);
     };
-    window.addEventListener('keydown', handler, true);
-    return () => window.removeEventListener('keydown', handler, true);
-  }, [sidebarCloseChoiceSession, confirmSidebarCloseSession]);
+  }, [sidebarCloseChoiceSessionId, terminalSessions, isSidebarCloseIdentityCurrent, cancelSidebarCloseSession]);
 
   const sidebarCloseChoiceDisplayName = React.useMemo(() => {
     if (!sidebarCloseChoiceSession) return '';
@@ -3208,10 +3274,12 @@ function App() {
 
   const body = (
     <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
+      {updateActionError && <div role="alert" data-update-restart-error className="fixed right-3 top-3 z-toast flex max-w-md items-start gap-3 rounded-xl border border-border bg-surface p-3 text-sm text-foreground shadow-xl"><p className="break-words">{updateActionError}</p><button type="button" className="shrink-0 text-primary" aria-label={t('common.close')} onClick={() => setUpdateActionError(null)}>{t('common.close')}</button></div>}
       {architectureLinkError && <div role="alert" className="flex shrink-0 items-center gap-2 bg-surface-2 px-3 py-2 text-xs"><p className="min-w-0 flex-1 break-words">{architectureLinkError}</p><button type="button" className="min-h-11 px-2 text-primary" onClick={() => setArchitectureLinkError('')}>{t('common.close')}</button></div>}
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <CollaborationWorkspaceFrame rightInset={pinnedRightSidebarInset} workspace={mainCollaborationGroup && <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开协作工作区…</div>}><CollaborationMainWorkspace key={mainCollaborationGroup} groupId={mainCollaborationGroup} activeSessionId={activeSessionId} defaultSessionMode={newSessionMode} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} onToggleRightSidebar={handleToggleRightSidebar} rightSidebarOpen={sidebarRightOpen || showPinnedRight} /></React.Suspense>}>
           <div
+            data-termdock-window-header="true"
             className={`${isDesktopViewport ? 'absolute inset-x-0 top-0 z-20' : 'relative'} shrink-0 items-center gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
               showPinnedLeft
                 ? 'flex justify-end'
@@ -3536,6 +3604,7 @@ function App() {
                 desktopRightSidebarEnabled={isDesktopViewport}
                 onToggleRightSidebar={handleToggleRightSidebar}
                 desktopFloatingTitle={isDesktopViewport}
+                desktopLeftSidebarPinned={showPinnedLeft}
                 desktopPinnedLeftSidebarWidth={showPinnedLeft ? sidebarLeftWidth : 0}
                 desktopViewportWidth={viewportWidth}
                 onSessionDataUpdate={handleSessionDataUpdate}
@@ -3630,8 +3699,10 @@ function App() {
 
                 <WorkspaceRetentionSettings />
 
-                {/* Renderer */}
-                <div className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">
+                {/* Preferences stay saved, but only the selected browser/fallback exposes them. */}
+                <TerminalEngineSettings locale={locale}>
+                <RendererPreferenceControls sessionId={activeSessionId}>
+                <div data-terminal-renderer-controls="browser-fallback" className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">
                   <div className="flex items-center gap-2">
                     <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.render')}</span>
                     <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
@@ -3652,7 +3723,10 @@ function App() {
                       })}
                     </div>
                   </div>
+                  <RendererPreferenceNotice locale={locale}/>
                 </div>
+                </RendererPreferenceControls>
+                </TerminalEngineSettings>
 
                 {/* Theme */}
                 <div className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">
@@ -4194,6 +4268,13 @@ function App() {
       {/* Destructive confirmation for tmux sessions */}
       {sidebarCloseChoiceSession && (
         <>
+          <SessionCloseConfirmationKeyboard
+            sessionId={sidebarCloseChoiceSession.id}
+            confirmButton={sidebarCloseConfirmButton}
+            onConfirm={confirmSidebarCloseSession}
+            onCancel={cancelSidebarCloseSession}
+            isCurrent={isSidebarCloseIdentityCurrent}
+          />
           <button
             type="button"
             className="fixed inset-0 z-menu-backdrop bg-[var(--app-backdrop-soft)] backdrop-blur-sm cursor-default animate-fade-in"
@@ -4223,6 +4304,7 @@ function App() {
             <div className="flex flex-col py-1">
               <button
                 type="button"
+                ref={sidebarCloseConfirmButton}
                 onClick={confirmSidebarCloseSession}
                 className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-destructive transition hover:bg-destructive/10"
               >

@@ -4,10 +4,13 @@ import { CollaborationExecutionArchives } from './CollaborationExecutionArchives
 import { completedTaskSessions } from '../../collaboration/completedSessions';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
-import { collaborationServiceLabel } from '../../collaboration/display';
+import { collaborationServiceLabel, collaborationRemoteConnection } from '../../collaboration/display';
 import { openCollaborationMessagesPanel } from '../../collaboration/panelPreferences';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useCollaborationTaskInbox, requestCollaborationTask } from '../../stores/useCollaborationTaskInbox';
+import { SECURE_READY_EVENT } from '../../federation/connectionRecovery';
+import { startVisiblePolling } from './startVisiblePolling';
+import { compareVersions } from '../../utils/version';
 import { collaborationTaskStage } from '../../collaboration/taskState';
 import { openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../../collaboration/panelPreferences';
 import { SessionNoticeUnreadBadge } from '../SessionNoticeUnreadBadge';
@@ -21,13 +24,12 @@ import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
   ChevronRight as RiChevronRightLine,
-  Pin as RiPushpinLine,
-  PinOff as RiPinOffLine,
   Columns2 as RiSplitLine,
   Rows2 as RiRowsLine,
   Grid2X2 as RiGridLine,
   Unlink as RiUnlinkLine,
   ChartBar as RiChartBarLine,
+  Settings as RiSettingsLine,
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
   Workflow as RiWorkflowLine,
@@ -60,9 +62,9 @@ import {
   type ServerHealthState,
 } from '../../terminal/api';
 import { NewSessionComposer } from './NewSessionComposer';
+import { SidebarHeader } from './SidebarHeader';
 import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
 import { AgentOperationsPanel } from './AgentOperationsPanel';
-import { SidebarUtilityActions } from './SidebarUtilityActions';
 import { SwipeToCloseSession } from './SwipeToCloseSession';
 import { RecoverableSessions } from './RecoverableSessions';
 import { CollaborationGroupActions } from './CollaborationGroupActions';
@@ -326,10 +328,7 @@ export function LeftSidebar(
   const taskInboxError = useCollaborationTaskInbox(state => state.error);
   const [inboxExpanded, setInboxExpanded] = useState(false);
   useEffect(() => {
-    const refresh = () => { if (!document.hidden) void useCollaborationTaskInbox.getState().refresh(); };
-    refresh(); const timer = window.setInterval(refresh, 5000);
-    document.addEventListener('visibilitychange', refresh);
-    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', refresh); };
+    return startVisiblePolling(() => { void useCollaborationTaskInbox.getState().refresh(); }, 5000, [SECURE_READY_EVENT]);
   }, []);
   const openAgentOperations = async (groupId: string | null): Promise<boolean> => {
     setNewSessionComposerOpen(false);
@@ -358,9 +357,16 @@ export function LeftSidebar(
     selectAgent: selectNewSessionAgent,
   } = useNewSessionAgentPreference();
   const splitLayoutMenuRef = useRef<HTMLDivElement | null>(null);
+  let hasNewerUpdate = false;
+  if (updateState?.latestVersion) {
+    try {
+      hasNewerUpdate = compareVersions(updateState.latestVersion, updateState.currentVersion) > 0;
+    } catch {
+      // Invalid state cannot establish an available update; Settings still shows its error.
+    }
+  }
   const pendingUpdate = Boolean(
-    updateState?.latestVersion
-    && ['installing', 'ready', 'restarting', 'error'].includes(updateState.status),
+    hasNewerUpdate && updateState && ['checking', 'installing', 'ready', 'restarting', 'error'].includes(updateState.status),
   );
   // 两个点各有各的指向：红的=服务出过事（点开设置看详情），琥珀的=有更新。
   // 同时亮时并排显示，不让其中一个把另一个盖掉。
@@ -416,22 +422,21 @@ export function LeftSidebar(
       if (refreshId !== collaborationRefreshIdRef.current) return;
       setRawCollaborationGroups(Array.isArray(data.groups) ? data.groups : []);
     } catch {
-      // Collaboration is additive navigation metadata. Keep the last good
-      // snapshot when the operations endpoint is temporarily unavailable.
+      if (refreshId !== collaborationRefreshIdRef.current) return;
+      // Preserve navigation, but expire connectivity when its read fails.
+      setRawCollaborationGroups(groups => groups.map(group => ({ ...group,
+        remoteSessions: group.remoteSessions?.map(session => ({ ...session, status: 'offline', serviceConnected: false })),
+      })));
     }
   }, []);
 
   useEffect(() => subscribeCollaborationGroups((data) => setRawCollaborationGroups(data.groups)), []);
 
   useEffect(() => {
-    void refreshCollaborationGroups();
-    const interval = window.setInterval(() => void refreshCollaborationGroups(), 10_000);
-    const handleFocus = () => void refreshCollaborationGroups();
-    window.addEventListener('focus', handleFocus);
+    const stopPolling = startVisiblePolling(() => { void refreshCollaborationGroups(); }, 10_000, ['focus', SECURE_READY_EVENT]);
     return () => {
       collaborationRefreshIdRef.current += 1;
-      window.clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
+      stopPolling();
     };
   }, [refreshCollaborationGroups]);
 
@@ -1746,8 +1751,12 @@ export function LeftSidebar(
           )}
         </Droppable>
         <CollaborationExecutionArchives groupId={collaboration.id} version={archivesVersion} onRestore={async session => { setNewSessionComposerOpen(false); window.dispatchEvent(new CustomEvent('new-terminal-session', { detail: { mode: 'tmux', cwd: session.cwd, preferredFrontendSessionId: session.sessionId, requireExisting: true } })); await refreshCollaborationGroups(); useCollaborationNavigation.getState().terminal(); closeIfOverlay(); }} />
-        {collaboration.remoteSessions?.map((remote) => <button
-          key={remote.sessionId} type="button" title={`${collaborationServiceLabel(remote)} · ${remote.serviceConnected === false ? '服务不可达，消息尚未送达' : remote.status}`}
+        {collaboration.remoteSessions?.map((remote) => {
+          const connection = collaborationRemoteConnection(remote);
+          const connected = connection === 'connected';
+          const connectionLabel = connection === 'unknown' ? '连接状态未知' : '连接已断开';
+          return <button
+          key={remote.sessionId} type="button" title={`${collaborationServiceLabel(remote)} · ${connected ? '服务已连接' : connectionLabel}`}
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
           onClick={() => {
             setNewSessionComposerOpen(false);
@@ -1755,11 +1764,11 @@ export function LeftSidebar(
               void openAgentOperations(collaboration.id);
             });
           }}>
-          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${remote.serviceConnected === false ? 'bg-muted-foreground' : 'bg-primary'}`} />
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${connected ? 'bg-primary' : 'bg-muted-foreground'}`} />
           <span className="min-w-0 flex-1 truncate">{remote.name}</span>
           <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{collaborationServiceLabel(remote)}</span>
-          {remote.serviceConnected === false && <span className="shrink-0 text-[9px]">不可达</span>}
-        </button>)}
+          {!connected && <span className="shrink-0 text-[9px]">{connectionLabel}</span>}
+        </button>; })}
         </>}
         </div>
         {/* Keep the workgroup drop area below the rows, never over a sortable member. */}
@@ -1847,46 +1856,22 @@ export function LeftSidebar(
 
   const inner = (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      {/* Header — single compact row */}
-      <div data-session-sidebar-header className="relative z-20 shrink-0 px-3 py-0.5">
-        <div aria-hidden="true" className="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-px bg-border opacity-40" />
-        <div className="flex w-full items-center gap-1.5">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[12px] font-medium text-muted-foreground">{t('sidebar.sessions')}</span>
-              <span className="text-[11px] text-muted-foreground">{sessions.length}</span>
-              {runningCount > 0 && (
-                <span className="ml-0.5 flex items-center">
-                  <AgentCountBadge count={runningCount} tone="running" title={t('agent.aiRunning')} />
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <button
-              data-session-sidebar-header-action
-              type="button"
-              onClick={() => { setNewSessionComposerOpen(false); void openAgentOperations(null); }}
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-primary/15 hover:text-primary active:scale-95"
-              aria-label="Agent 工作台"
-              title="Agent 工作台"
-            >
-              <RiWorkflowLine size={16} />
-            </button>
-          {(!push || pinned) && (
-            <button
-              data-session-sidebar-header-action
-              type="button"
-              onClick={onClose}
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
-              aria-label={t('common.close')}
-            >
-              <RiCloseLine size={16} />
-            </button>
-          )}
-          </div>
-        </div>
-      </div>
+      <SidebarHeader
+        label={t('sidebar.sessions')}
+        count={sessions.length}
+        badge={runningCount > 0 ? <AgentCountBadge count={runningCount} tone="running" title={t('agent.aiRunning')} /> : null}
+        pinned={!!pinned}
+        onClose={onClose}
+        onTogglePinned={onTogglePinned ? () => { setNewSessionComposerOpen(false); onTogglePinned(); } : undefined}
+        serverAttention={serverAttention}
+        onOpenSettings={() => { setNewSessionComposerOpen(false); onOpenSettings(); }}
+        actions={[
+          ...(onOpenQuota ? [{ label: t('sidebar.subscriptionQuota'), icon: RiChartBarLine, onSelect: () => { setNewSessionComposerOpen(false); onOpenQuota(); } }] : []),
+          { label: 'Agent 工作台', icon: RiWorkflowLine, onSelect: () => { setNewSessionComposerOpen(false); void openAgentOperations(null); } },
+          { label: '服务与设备', icon: RiServerLine, onSelect: () => { setNewSessionComposerOpen(false); openServiceAccess(); } },
+          { label: t('sidebar.settings'), icon: RiSettingsLine, onSelect: () => { setNewSessionComposerOpen(false); onOpenSettings(); } },
+        ]}
+      />
 
       {collaborationActionError && <div role="alert" className="mx-2 mt-2 flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
         <span className="min-w-0 flex-1">{collaborationActionError}</span>
@@ -1895,8 +1880,8 @@ export function LeftSidebar(
       {/* Session list */}
       <div ref={sessionListRef} className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
         {taskInbox.length > 0 && <section className="mb-2 rounded-lg border border-primary/20 bg-primary/5" aria-label="协作待处理事项">
-          <button type="button" className="flex min-h-11 w-full items-center gap-2 px-3 text-left text-xs text-primary" aria-expanded={inboxExpanded} onClick={() => setInboxExpanded(v => !v)}><RiWorkflowLine size={14} /><span className="min-w-0 flex-1">需要你处理</span><span>{taskInbox.length}</span><RiChevronRightLine size={12} className={inboxExpanded ? 'rotate-90' : ''} /></button>
-          {inboxExpanded && <div className="space-y-1 p-1 pt-0">{taskInboxError && <p role="alert" className="px-2 py-2 text-[11px] text-destructive">{taskInboxError}<button type="button" className="ml-2 text-primary" onClick={() => void useCollaborationTaskInbox.getState().refresh()}>重试</button></p>}{taskInbox.map(task => <button key={task.id} type="button" className="min-h-11 w-full rounded-md px-2 py-2 text-left hover:bg-surface-2" onClick={() => {
+          {taskInbox.length > 0 && <button type="button" className="flex min-h-11 w-full items-center gap-2 px-3 text-left text-xs text-primary" aria-expanded={inboxExpanded} onClick={() => setInboxExpanded(v => !v)}><RiWorkflowLine size={14} /><span className="min-w-0 flex-1">需要你处理</span><span>{taskInbox.length}</span><RiChevronRightLine size={12} className={inboxExpanded ? 'rotate-90' : ''} /></button>}
+          {(inboxExpanded || taskInbox.length === 0) && <div className="space-y-1 p-1 pt-0">{taskInboxError && <p role="alert" className="px-2 py-2 text-[11px] text-destructive">{taskInboxError}<button type="button" className="ml-2 text-primary" onClick={() => void useCollaborationTaskInbox.getState().refresh()}>重试</button></p>}{taskInbox.map(task => <button key={task.id} type="button" className="min-h-11 w-full rounded-md px-2 py-2 text-left hover:bg-surface-2" onClick={() => {
             requestCollaborationTask(task.groupId, task.id);
             void openAgentOperations(task.groupId).then(opened => { if (opened) requestCollaborationTask(task.groupId, task.id); });
           }}><span className="block truncate text-xs text-foreground">{task.title}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground">{rawCollaborationGroups.find(g => g.id === task.groupId)?.name ?? '协作组'} · {collaborationTaskStage(task)}</span></button>)}</div>}
@@ -2110,18 +2095,20 @@ export function LeftSidebar(
               <div className="mb-1 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.10)] px-2.5 py-2.5 text-foreground">
                 <div className="flex items-start gap-2">
                   <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[rgb(var(--warning-rgb)_/_0.16)] text-[color:var(--warning)]">
-                    <RiRefreshLine size={13} className={updateState.status === 'installing' || updateState.status === 'restarting' ? 'animate-spin' : ''} />
+                    <RiRefreshLine size={13} className={updateState.status === 'checking' || updateState.status === 'installing' || updateState.status === 'restarting' ? 'animate-spin' : ''} />
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block font-semibold">{t('sidebar.updateAvailable', { version: updateState.latestVersion })}</span>
                     <span className="mt-0.5 block text-[10.5px] leading-relaxed text-muted-foreground">
-                      {updateState.status === 'installing'
+                      {updateState.status === 'checking'
+                        ? t('settings.updateChecking')
+                        : updateState.status === 'installing'
                         ? t('sidebar.updateInstalling')
                         : updateState.status === 'ready'
                           ? t('sidebar.updateReady')
                           : updateState.status === 'restarting'
                             ? t('sidebar.updateRestarting')
-                            : t('sidebar.updateFailed')}
+                            : (updateState.error || t('sidebar.updateFailed'))}
                     </span>
                   </span>
                 </div>
@@ -2147,35 +2134,7 @@ export function LeftSidebar(
                 )}
               </div>
           )}
-          footerActions={(
-            <SidebarUtilityActions
-              serverAttention={serverAttention}
-              onOpenSettings={() => { setNewSessionComposerOpen(false); onOpenSettings(); }}
-              actions={[
-                ...(onOpenQuota ? [{
-                  label: t('sidebar.subscriptionQuota'),
-                  icon: RiChartBarLine,
-                  onSelect: () => { setNewSessionComposerOpen(false); onOpenQuota(); },
-                }] : []),
-                {
-                  label: 'Agent 工作台',
-                  icon: RiWorkflowLine,
-                  onSelect: () => { setNewSessionComposerOpen(false); void openAgentOperations(null); },
-                },
-                {
-                  label: '服务与设备',
-                  icon: RiServerLine,
-                  onSelect: () => { setNewSessionComposerOpen(false); openServiceAccess(); },
-                },
-                ...(onTogglePinned ? [{
-                  label: pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar'),
-                  icon: pinned ? RiPinOffLine : RiPushpinLine,
-                  separated: true,
-                  onSelect: () => { setNewSessionComposerOpen(false); onTogglePinned(); },
-                }] : []),
-              ]}
-            />
-          )}
+
         />
       )}
 

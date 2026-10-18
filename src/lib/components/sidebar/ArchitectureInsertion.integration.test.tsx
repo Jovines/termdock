@@ -27,6 +27,7 @@ vi.mock('../terminal/TerminalViewport', async () => ({
         return props.onInput(terminalSequencePayload(text, options), { ...options, skipModifierTransform: true });
       },
       getDimensions: () => ({ cols: 80, rows: 24 }), serializeSnapshot: () => null,
+      renderer: () => 'web', prepareNativeSession: undefined,
     }, { get: (target: any, key) => key in target ? target[key] : () => {} }) : null);
     useLayoutEffect(() => { props.onReadyChange(true); }, [props.onReadyChange]);
     return <div data-testid={`viewport-${props.sessionId}`} />;
@@ -45,7 +46,7 @@ vi.mock('./Sidebar', () => ({ Sidebar: ({ children }: any) => <div>{children}</d
 vi.mock('../../architecture/api', () => ({ readArchitecture: vi.fn(async () => env.map), listArchitectures: vi.fn(async () => []) }));
 vi.mock('./HtmlPreviewFrame', () => ({ HtmlPreviewFrame: () => null }));
 vi.mock('../../terminal/api', async original => ({ ...await original<any>(),
-  getSettings: vi.fn(async () => ({})), listDirectory: vi.fn(async () => ({ entries: [], path: '/project' })),
+  getSettings: vi.fn(async () => ({ rightSidebarTabs: { architecture: true } })), listDirectory: vi.fn(async () => ({ entries: [], path: '/project' })),
   readFileContent: vi.fn(async () => ({ path: '/project/src/demo.ts', content: 'first\nsecond', size: 12, modified: '', binary: false })),
   loadContextDraft: vi.fn(async () => ({ text: '' })), saveContextDraft: vi.fn(async () => ({})),
   openSessionInventoryEntry: vi.fn(async () => ({})), updateSessionInventoryEntry: vi.fn(async () => ({})),

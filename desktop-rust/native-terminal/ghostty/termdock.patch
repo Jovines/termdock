@@ -1,0 +1,1990 @@
+--- a/build.zig
++++ b/build.zig
+@@ -101,6 +101,17 @@
+         &deps,
+     );
+ 
++    // A single-architecture static embedded library, without Xcode bundling.
++    const td_lib_step = b.step("td-lib", "Build Termdock external-only Ghostty");
++    const td_install = b.addInstallFile(libghostty_static.output, "lib/libghostty.a");
++    td_lib_step.dependOn(&td_install.step);
++    if (libghostty_static.archive_manifest) |manifest| {
++        const audit = b.addInstallFile(manifest, "share/termdock-ghostty/archive-members.json");
++        td_lib_step.dependOn(&audit.step);
++    }
++    const td_header = b.addInstallHeaderFile(b.path("include/ghostty.h"), "ghostty.h");
++    td_lib_step.dependOn(&td_header.step);
++
+     // libghostty-vt
+     const libghostty_vt_shared = shared: {
+         if (config.target.result.cpu.arch.isWasm()) {
+@@ -147,7 +158,10 @@
+ 
+     // macOS only artifacts. These will error if they're initialized for
+     // other targets.
+-    if (config.target.result.os.tag.isDarwin()) {
++    if (config.target.result.os.tag.isDarwin() and
++        (config.emit_xcframework or config.emit_macos_app))
++    {
++        // Initialize only requested artifacts: td-lib must not probe iOS SDKs.
+         // Ghostty xcframework
+         const xcframework = try buildpkg.GhosttyXCFramework.init(
+             b,
+@@ -163,18 +177,18 @@
+             if (i18n) |v| v.install();
+         }
+ 
+-        // Ghostty macOS app
+-        const macos_app = try buildpkg.GhosttyXcodebuild.init(
+-            b,
+-            &config,
+-            .{
+-                .xcframework = &xcframework,
+-                .docs = &docs,
+-                .i18n = if (i18n) |v| &v else null,
+-                .resources = &resources,
+-            },
+-        );
++        // Xcodebuild is irrelevant to a standalone external static library.
+         if (config.emit_macos_app) {
++            const macos_app = try buildpkg.GhosttyXcodebuild.init(
++                b,
++                &config,
++                .{
++                    .xcframework = &xcframework,
++                    .docs = &docs,
++                    .i18n = if (i18n) |v| &v else null,
++                    .resources = &resources,
++                },
++            );
+             macos_app.install();
+         }
+     }
+@@ -202,7 +216,7 @@
+ 
+         // On macOS we can run the macOS app. For "run" we always force
+         // a native-only build so that we can run as quickly as possible.
+-        if (config.target.result.os.tag.isDarwin()) {
++        if (config.target.result.os.tag.isDarwin() and config.emit_macos_app) {
+             const xcframework_native = try buildpkg.GhosttyXCFramework.init(
+                 b,
+                 &deps,
+--- a/pkg/macos/main.zig
++++ b/pkg/macos/main.zig
+@@ -19,7 +19,8 @@
+     @cInclude("CoreText/CoreText.h");
+     @cInclude("CoreVideo/CoreVideo.h");
+     @cInclude("CoreVideo/CVPixelBuffer.h");
+-    @cInclude("QuartzCore/CALayer.h");
++    // CALayer is Objective-C-only on SDK13.1. Layers use objc dispatch;
++    // animation constants are explicit externs, so no C import is required.
+     @cInclude("IOSurface/IOSurfaceRef.h");
+     @cInclude("dispatch/dispatch.h");
+     @cInclude("os/log.h");
+--- a/pkg/macos/video/pixel_format.zig
++++ b/pkg/macos/video/pixel_format.zig
+@@ -52,7 +52,12 @@
+     /// 30 bit RGB, 10-bit big-endian samples, 2 unused padding bits (at least significant end).
+     @"30RGB" = c.kCVPixelFormatType_30RGB,
+     /// 30 bit RGB, 10-bit big-endian samples, 2 unused padding bits (at most significant end), video-range (64-940).
+-    @"30RGB_r210" = c.kCVPixelFormatType_30RGB_r210,
++    // Apple SDK27 CVPixelBuffer.h: 'r210' (0x72323130), NOT older 'R10k'.
++    // The format value stays identical when SDK13.1 lacks the declaration.
++    @"30RGB_r210" = if (@hasDecl(c, "kCVPixelFormatType_30RGB_r210"))
++        c.kCVPixelFormatType_30RGB_r210
++    else
++        0x72323130,
+     /// Component Y'CbCr 8-bit 4:2:2, ordered Cb Y'0 Cr Y'1
+     @"422YpCbCr8" = c.kCVPixelFormatType_422YpCbCr8,
+     /// Component Y'CbCrA 8-bit 4:4:4:4, ordered Cb Y' Cr A
+@@ -64,7 +69,11 @@
+     /// Component Y'CbCrA 16-bit 4:4:4:4, ordered A Y' Cb Cr, full range alpha, video range Y'CbCr, 16-bit little-endian samples.
+     @"4444AYpCbCr16" = c.kCVPixelFormatType_4444AYpCbCr16,
+     /// Component AY'CbCr single precision floating-point 4:4:4:4
+-    @"4444AYpCbCrFloat" = c.kCVPixelFormatType_4444AYpCbCrFloat,
++    // Apple SDK27 CVPixelBuffer.h: 'r4fl'; same AY'CbCr layout/range.
++    @"4444AYpCbCrFloat" = if (@hasDecl(c, "kCVPixelFormatType_4444AYpCbCrFloat"))
++        c.kCVPixelFormatType_4444AYpCbCrFloat
++    else
++        0x7234666c,
+     /// Component Y'CbCr 8-bit 4:4:4, ordered Cr Y' Cb, video range Y'CbCr
+     @"444YpCbCr8" = c.kCVPixelFormatType_444YpCbCr8,
+     /// Component Y'CbCr 10,12,14,16-bit 4:2:2
+--- a/src/App.zig
++++ b/src/App.zig
+@@ -577,8 +577,9 @@
+     pub fn push(self: Mailbox, msg: Message, timeout: Queue.Timeout) Queue.Size {
+         const result = self.mailbox.push(msg, timeout);
+ 
+-        // Wake up our app loop
+-        self.rt_app.wakeup();
++        // A headless unit-test host drains the real mailbox directly. It has
++        // no GUI wakeup method; shipping embedded/AppKit is unchanged.
++        if (comptime !(builtin.is_test and apprt.runtime == apprt.none)) self.rt_app.wakeup();
+ 
+         return result;
+     }
+--- a/src/Surface.zig
++++ b/src/Surface.zig
+@@ -2681,7 +2681,10 @@
+ /// Change the cell size for the terminal grid. This can happen as
+ /// a result of changing the font size at runtime.
+ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
+-    // Update our cell size within our size struct
++    var candidate = self.size;
++    candidate.cell = size;
++    if (!candidate.tdValid()) return error.TermdockSizeBudget;
++    // Update our cell size only after intermediate geometry was preflighted.
+     self.size.cell = size;
+     self.balancePaddingIfNeeded();
+ 
+@@ -2770,7 +2773,10 @@
+ }
+ 
+ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
+-    // Save our screen size
++    var candidate = self.size;
++    candidate.screen = size;
++    if (!candidate.tdValid()) return error.TermdockSizeBudget;
++    // Save our screen size only after the exact grid was preflighted.
+     self.size.screen = size;
+     self.balancePaddingIfNeeded();
+ 
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -528,6 +528,9 @@
+     };
+ 
+     pub fn init(self: *Surface, app: *App, opts: Options) !void {
++        if (opts.backend_type != .external or opts.write_callback == null or
++            opts.resize_callback == null or opts.command != null or
++            opts.initial_input != null) return error.TermdockExternalRequired;
+         self.* = .{
+             .app = app,
+             .platform = try .init(opts.platform_tag, opts.platform),
+@@ -1665,6 +1668,11 @@
+         app: *App,
+         opts: *const apprt.Surface.Options,
+     ) !*Surface {
++        // Fail closed, including binding-created inherited surfaces. No Exec
++        // backend, shell, initial command, or missing callback is permitted.
++        if (opts.backend_type != .external or opts.write_callback == null or
++            opts.resize_callback == null or opts.command != null or
++            opts.initial_input != null) return error.TermdockExternalRequired;
+         return try app.newSurface(opts.*);
+     }
+ 
+@@ -1970,6 +1978,125 @@
+     ) void {
+         assert(surface.usesExternalBackend());
+         surface.core_surface.io.processOutput(ptr[0..len]);
++    }
++
++    // Preflight uses Ghostty's actual font grid metrics at prospective DPI,
++    // without changing the live surface, terminal, NSView, or renderer.
++    fn tdProspectiveSize(surface: *Surface, w: u32, h: u32, scale: f64) !renderer.Size {
++        if (!std.math.isFinite(scale) or scale < 1 or scale > 4 or
++            w == 0 or h == 0 or w > 131072 or h > 131072)
++            return error.TermdockSizeBudget;
++        var desired = surface.core_surface.font_size;
++        desired.xdpi = @intFromFloat(scale * font.face.default_dpi);
++        desired.ydpi = desired.xdpi;
++        const key, const grid = try surface.app.core_app.font_grid_set.ref(
++            &surface.core_surface.config.font,
++            desired,
++        );
++        defer surface.app.core_app.font_grid_set.deref(key);
++        const result: renderer.Size = .{
++            .screen = .{ .width = w, .height = h },
++            .cell = .{ .width = grid.metrics.cell_width, .height = grid.metrics.cell_height },
++            .padding = .{},
++        };
++        if (!result.tdValid()) return error.TermdockSizeBudget;
++        // setCellSize during scale change queues an intermediate resize at the
++        // OLD physical window size. Check that before font/DPI mutation too.
++        var intermediate = result;
++        intermediate.screen = surface.core_surface.size.screen;
++        if (!intermediate.tdValid()) return error.TermdockSizeBudget;
++        const old = surface.core_surface.size.grid();
++        const final = result.grid();
++        if (@as(usize, old.columns) * @max(old.rows, final.rows) > 262144 or
++            @as(usize, final.columns) * old.rows > 262144)
++            return error.TermdockSizeBudget;
++        return result;
++    }
++    export fn td_ghostty_size_valid(surface: *Surface, w: u32, h: u32, scale: f64) bool {
++        _ = tdProspectiveSize(surface, w, h, scale) catch return false;
++        return true;
++    }
++    export fn td_ghostty_resize_checked(surface: *Surface, w: u32, h: u32, scale: f64) bool {
++        _ = tdProspectiveSize(surface, w, h, scale) catch return false;
++        const content_scale: apprt.ContentScale = .{ .x = @floatCast(scale), .y = @floatCast(scale) };
++        surface.core_surface.contentScaleCallback(content_scale) catch return false;
++        surface.content_scale = content_scale;
++        const size: apprt.SurfaceSize = .{ .width = w, .height = h };
++        surface.core_surface.sizeCallback(size) catch return false;
++        surface.size = size;
++        return true;
++    }
++    export fn td_ghostty_update_config(surface: *Surface, config: *const Config) bool {
++        surface.core_surface.updateConfig(config) catch return false;
++        return true;
++    }
++
++    export fn td_ghostty_history(surface: *Surface, requested: u32) void {
++        const io = &surface.core_surface.io;
++        io.renderer_state.mutex.lock();
++        defer io.renderer_state.mutex.unlock();
++        io.terminal.td_remote = true;
++        var it = io.terminal.screens.all.iterator();
++        while (it.next()) |entry| {
++            entry.value.*.td_history_rows = @min(requested, 100000);
++            entry.value.*.pages.td_max_bytes = 32 * 1024 * 1024;
++        }
++    }
++
++    export fn td_ghostty_flush_sync(surface: *Surface) void {
++        surface.core_surface.io.resetSynchronizedOutput();
++    }
++
++    export fn td_ghostty_viewport(surface: *Surface) usize {
++        const io = &surface.core_surface.io;
++        io.renderer_state.mutex.lock();
++        defer io.renderer_state.mutex.unlock();
++        return io.terminal.screens.active.pages.scrollbar().offset;
++    }
++    export fn td_ghostty_restore_viewport(surface: *Surface, offset: usize) bool {
++        const io = &surface.core_surface.io;
++        io.renderer_state.mutex.lock();
++        defer io.renderer_state.mutex.unlock();
++        const pages = &io.terminal.screens.active.pages;
++        const bar = pages.scrollbar();
++        if (offset > bar.total -| bar.len) return false;
++        pages.scroll(.{ .row = offset });
++        io.terminal.flags.dirty.clear = true;
++        io.renderer_wakeup.notify() catch return false;
++        return true;
++    }
++    export fn td_ghostty_render_stats(surface: *Surface, attempts: *u64, presents: *u64) void {
++        attempts.* = surface.core_surface.renderer.td_attempts.load(.monotonic);
++        presents.* = surface.core_surface.renderer.td_submissions.load(.monotonic);
++    }
++
++    export fn td_ghostty_bind_yield(surface: *Surface, userdata: ?*anyopaque, callback: *const fn (?*anyopaque) callconv(.c) bool) void {
++        surface.core_surface.io.terminal_stream.handler.td_gui_userdata = userdata;
++        surface.core_surface.io.terminal_stream.handler.td_gui_yield = callback;
++    }
++
++    // Termdock's private ABI. Called by its one serialized feed worker.
++    // Renderer/terminal state is protected by the same Ghostty mutex.
++    export fn td_ghostty_feed(surface: *Surface, ptr: [*]const u8, len: usize) bool {
++        if (!surface.usesExternalBackend() or len > 256 * 1024 or
++            surface.core_surface.io.terminal_stream.handler.td_gui_yield == null) return false;
++        surface.core_surface.io.tdProcessOutput(ptr[0..len]) catch return false;
++        return true;
++    }
++
++    // Flush pending resize and every prior input/query response on the real IO
++    // thread. The caller must keep userdata alive until callback or surface free.
++    export fn td_ghostty_barrier(
++        surface: *Surface,
++        userdata: ?*anyopaque,
++        callback: *const fn (?*anyopaque, bool) callconv(.c) void,
++    ) bool {
++        if (!surface.usesExternalBackend()) return false;
++        surface.core_surface.io.queueMessage(.{ .td_barrier = .{
++            .userdata = userdata,
++            .callback = callback,
++        } }, .unlocked);
++        return true;
+     }
+ 
+     // =========================================================================
+--- a/src/build/Config.zig
++++ b/src/build/Config.zig
+@@ -75,7 +75,14 @@
+         if (result.result.os.tag == .macos and
+             builtin.target.os.tag.isDarwin())
+         {
++            const requested_min = result.query.os_version_min;
+             result = genericMacOSTarget(b, result.query.cpu_arch);
++            // Keep the generic CPU workaround without discarding CLI minOS.
++            if (requested_min) |minimum| {
++                var query = result.query;
++                query.os_version_min = minimum;
++                result = b.resolveTargetQuery(query);
++            }
+         }
+ 
+         // If we have no minimum OS version, we set the default based on
+--- a/src/build/GhosttyLib.zig
++++ b/src/build/GhosttyLib.zig
+@@ -13,6 +13,7 @@
+ /// The final static library file
+ output: std.Build.LazyPath,
+ dsym: ?std.Build.LazyPath,
++archive_manifest: ?std.Build.LazyPath = null,
+ 
+ pub fn initStatic(
+     b: *std.Build,
+@@ -61,6 +62,7 @@
+     return .{
+         .step = libtool.step,
+         .output = libtool.output,
++        .archive_manifest = libtool.manifest,
+ 
+         // Static libraries cannot have dSYMs because they aren't linked.
+         .dsym = null,
+--- a/src/build/LibtoolStep.zig
++++ b/src/build/LibtoolStep.zig
+@@ -25,19 +25,27 @@
+ /// The output file from the libtool run.
+ output: LazyPath,
+ 
++/// Per-object byte-preservation and alignment audit.
++manifest: LazyPath,
++
+ /// Run libtool against a list of library files to combine into a single
+ /// static library.
+ pub fn create(b: *std.Build, opts: Options) *LibtoolStep {
+     const self = b.allocator.create(LibtoolStep) catch @panic("OOM");
+ 
+     const run_step = RunStep.create(b, b.fmt("libtool {s}", .{opts.name}));
+-    run_step.addArgs(&.{ "libtool", "-static", "-o" });
++    // Apple CLT rejects Zig archives with 2-byte-aligned Mach-O members.
++    // Preserve every duplicate-named member by extracting to unique raw files.
++    run_step.addArg(b.graph.env_map.get("TERMDOCK_GHOSTTY_PYTHON") orelse "python3");
++    run_step.addFileArg(b.path("src/build/td_libtool.py"));
+     const output = run_step.addOutputFileArg(opts.out_name);
++    const manifest = run_step.addOutputFileArg(b.fmt("{s}.members.json", .{opts.out_name}));
+     for (opts.sources) |source| run_step.addFileArg(source);
+ 
+     self.* = .{
+         .step = &run_step.step,
+         .output = output,
++        .manifest = manifest,
+     };
+ 
+     return self;
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -83,11 +83,9 @@
+     target: std.Build.ResolvedTarget,
+ ) !void {
+     // Update our metallib
+-    self.metallib = .create(b, .{
+-        .name = "Ghostty",
+-        .target = target,
+-        .sources = &.{b.path("src/renderer/shaders/shaders.metal")},
+-    });
++    // Termdock's pinned CLT build embeds the exact default MSL source.
++    // Metal compiles all original pipelines at surface creation.
++    self.metallib = null;
+ 
+     // Change our config
+     const config = try b.allocator.create(Config);
+@@ -380,10 +378,8 @@
+     if (step.rootModuleTarget().os.tag.isDarwin()) {
+         try @import("apple_sdk").addPaths(b, step);
+ 
+-        const metallib = self.metallib.?;
+-        metallib.output.addStepDependencies(&step.step);
+         step.root_module.addAnonymousImport("ghostty_metallib", .{
+-            .root_source_file = metallib.output,
++            .root_source_file = b.path("src/renderer/shaders/shaders.metal"),
+         });
+     }
+ 
+--- /dev/null
++++ b/src/build/td_libtool.py
+@@ -0,0 +1,146 @@
++#!/usr/bin/env python3
++"""Merge Zig archives via raw objects; CLT libtool rejects unaligned members.
++
++Read each physical member, not `ar -x` by name: dependencies contain duplicate
++names. GNU/BSD input offsets may be only 2-byte aligned. Apple libtool sees only
++standalone objects and creates its own aligned archive and symbol index. Audit
++EVERY member afterward before publishing the result, including byte hashes.
++"""
++import hashlib
++import json
++import os
++from pathlib import Path
++import struct
++import subprocess
++import sys
++import tempfile
++
++
++def members(path, require_symbols=False):
++    """Yield (physical index, name, object offset, bytes); reject malformed input."""
++    with Path(path).open('rb') as source:
++        if source.read(8) != b'!<arch>\n':
++            raise ValueError('expected regular single-architecture archive: ' + str(path))
++        strings = None
++        index = 0
++        have_symbols = False
++        while True:
++            header = source.read(60)
++            if not header:
++                if require_symbols and not have_symbols:
++                    raise ValueError("output archive has no symbol index")
++                return
++            if len(header) != 60 or header[58:] != b'`\n':
++                raise ValueError('invalid archive member header')
++            size = int(header[48:58].strip())
++            if size < 0:
++                raise ValueError('negative archive member size')
++            offset = source.tell()
++            data = source.read(size)
++            if len(data) != size:
++                raise ValueError('truncated archive member')
++            if size % 2 and len(source.read(1)) != 1:
++                raise ValueError('missing archive padding')
++            index += 1
++            name = header[:16].rstrip(b' ')
++            if name == b'//':
++                strings = data
++                continue
++            if name in (b'/', b'/SYM64/'):
++                continue
++            if name.startswith(b'#1/'):
++                length = int(name[3:])
++                if length < 0 or length > len(data):
++                    raise ValueError('invalid BSD extended name')
++                name, data = data[:length].rstrip(b'\0'), data[length:]
++                offset += length
++            elif name.startswith(b'/'):
++                if strings is None:
++                    raise ValueError('GNU name without string table')
++                start = int(name[1:])
++                if start < 0 or start >= len(strings):
++                    raise ValueError('invalid GNU name offset')
++                end = strings.find(b'\n', start)
++                if end < 0:
++                    raise ValueError('unterminated GNU name')
++                name = strings[start:end].removesuffix(b'/')
++            else:
++                name = name.removesuffix(b'/')
++            if name.startswith(b'__.SYMDEF'):
++                have_symbols = bool(data)
++                continue
++            if not name or not data:
++                raise ValueError('empty archive object/name')
++            yield index, os.fsdecode(name), offset, data
++
++
++def digest(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++def merge(output, manifest_path, sources, libtool='libtool'):
++    output = Path(output).resolve()
++    output.parent.mkdir(parents=True, exist_ok=True)
++    # The temporary directory remains on the output filesystem for atomic rename.
++    with tempfile.TemporaryDirectory(prefix='td-objects-', dir=output.parent) as work:
++        work = Path(work)
++        objects = []
++        inventory = []
++        for source in sources:
++            for index, name, offset, data in members(source):
++                # td-lib is arm64; also retain the original macOS x86_64 build capability.
++                # Do not silently accept a dropped non-object.
++                if data[:4] != b'\xcf\xfa\xed\xfe' or len(data) < 32 or struct.unpack_from('<I', data, 4)[0] not in (0x0100000c, 0x01000007):
++                    raise ValueError('expected macOS 64-bit Mach-O object: ' + str(source) + ':' + name)
++                unique = 'm%08d.o' % len(objects)
++                obj = work / unique
++                obj.write_bytes(data)
++                objects.append(obj)
++                inventory.append({'source': str(source), 'index': index, 'name': name,
++                                  'input_offset': offset, 'member': unique,
++                                  'size': len(data), 'sha256': digest(data)})
++        if not objects:
++            raise ValueError('no archive objects')
++        if any('\n' in str(p) or '\r' in str(p) for p in objects):
++            raise ValueError('newline in libtool filelist path')
++        filelist = work / 'objects.list'
++        filelist.write_text(''.join(str(p) + '\n' for p in objects))
++        combined = work / output.name
++        process = subprocess.run([libtool, '-static', '-o', str(combined), '-filelist', str(filelist)],
++                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
++        sys.stdout.write(process.stdout)
++        sys.stderr.write(process.stderr)
++        process.check_returncode()
++        if 'ignoring archive member' in process.stderr.lower():
++            raise ValueError('libtool ignored an archive member')
++        expected = {entry['member']: entry for entry in inventory}
++        seen = set()
++        for _, name, offset, data in members(combined, require_symbols=True):
++            if name not in expected or name in seen:
++                raise ValueError('unexpected or duplicate output member: ' + name)
++            entry = expected[name]
++            # Darwin adds <=7 zero bytes at the end of objects for 8-byte alignment.
++            size = entry['size']
++            padding = data[size:]
++            if len(data) < size or digest(data[:size]) != entry['sha256'] or len(padding) > 7 or any(padding):
++                raise ValueError('changed output object bytes: ' + name)
++            if offset % 8:
++                raise ValueError('unaligned output object: ' + name)
++            entry['output_offset'] = offset
++            entry['output_padding'] = len(padding)
++            seen.add(name)
++        if seen != set(expected):
++            raise ValueError('lost archive members: ' + str(sorted(set(expected) - seen)))
++        # Apple's own libtool creates the symbol index; actual fixture linking is
++        # still mandatory and is not replaced by this object preservation audit.
++        manifest = {'objects': len(inventory), 'library_sha256': digest(combined.read_bytes()),
++                    'members': inventory}
++        combined.replace(output)
++        Path(manifest_path).write_text(json.dumps(manifest, indent=2) + '\n')
++        print('td-lib archive: %d objects preserved, all 8-byte aligned' % len(inventory), flush=True)
++
++
++if __name__ == '__main__':
++    if len(sys.argv) < 4:
++        raise SystemExit('usage: td_libtool.py OUTPUT MANIFEST.json SOURCE.a ...')
++    merge(sys.argv[1], sys.argv[2], sys.argv[3:])
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -151,6 +151,10 @@
+         /// to determine if any possible changes have been made to the
+         /// cells for the draw call.
+         cells_rebuilt: bool = false,
++        // Actual damage-gated draw attempts and command submissions. These
++        // counters do not claim GPU completion or display latency.
++        td_attempts: std.atomic.Value(u64) = .init(0),
++        td_submissions: std.atomic.Value(u64) = .init(0),
+ 
+         /// The current GPU uniform values.
+         uniforms: shaderpkg.Uniforms,
+@@ -1487,7 +1491,9 @@
+                 try self.api.presentLastTarget();
+                 return;
+             }
+-            self.cells_rebuilt = false;
++            _ = self.td_attempts.fetchAdd(1, .monotonic);
++            // Damage remains pending on shader/buffer/command failures.
++            errdefer self.cells_rebuilt = true;
+ 
+             // Wait for a frame to be available.
+             const frame = try self.swap_chain.nextFrame();
+@@ -1587,7 +1593,11 @@
+ 
+             // Get a frame context from the graphics API.
+             var frame_ctx = try self.api.beginFrame(self, &frame.target);
+-            defer frame_ctx.complete(sync);
++            defer {
++                frame_ctx.complete(sync);
++                _ = self.td_submissions.fetchAdd(1, .monotonic);
++                self.cells_rebuilt = false;
++            }
+ 
+             {
+                 var pass = frame_ctx.renderPass(&.{.{
+--- a/src/renderer/metal/shaders.zig
++++ b/src/renderer/metal/shaders.zig
+@@ -334,21 +334,18 @@
+ fn initLibrary(device: objc.Object) !objc.Object {
+     const start = try std.time.Instant.now();
+ 
+-    const data = try macos.dispatch.Data.create(
++    const source = try macos.foundation.String.createWithBytes(
+         @embedFile("ghostty_metallib"),
+-        macos.dispatch.queue.getMain(),
+-        macos.dispatch.Data.DESTRUCTOR_DEFAULT,
++        .utf8,
++        false,
+     );
+-    defer data.release();
++    defer source.release();
+ 
+     var err: ?*anyopaque = null;
+     const library = device.msgSend(
+         objc.Object,
+-        objc.sel("newLibraryWithData:error:"),
+-        .{
+-            data,
+-            &err,
+-        },
++        objc.sel("newLibraryWithSource:options:error:"),
++        .{ source, @as(?*anyopaque, null), &err },
+     );
+     try checkError(err);
+ 
+--- a/src/renderer/size.zig
++++ b/src/renderer/size.zig
+@@ -17,6 +17,17 @@
+     screen: ScreenSize,
+     cell: CellSize,
+     padding: Padding,
++
++    // Check before GridSize.update's u16 @intFromFloat, avoiding traps and
++    // oversized allocations for both host and IO-thread resize paths.
++    pub fn tdValid(self: Size) bool {
++        if (self.cell.width == 0 or self.cell.height == 0) return false;
++        const screen = self.screen.subPadding(self.padding);
++        const cols = @max(1, screen.width / self.cell.width);
++        const rows = @max(1, screen.height / self.cell.height);
++        return cols >= 2 and cols <= 65535 and rows <= 65535 and
++            @as(usize, cols) * rows <= 262144;
++    }
+ 
+     /// Return the grid size for this size. The grid size is calculated by
+     /// taking the screen size, removing padding, and dividing by the cell
+@@ -395,3 +406,16 @@
+         try testing.expectEqual(expected, actual);
+     }
+ }
++
++
++test "Termdock exact grid preflight rejects u16 and visible-cell overflow" {
++    const testing = std.testing;
++    var s: Size = .{ .screen = .{ .width = 800, .height = 480 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} };
++    try testing.expect(s.tdValid());
++    s.screen.width = 655360;
++    try testing.expect(!s.tdValid());
++    s.screen = .{ .width = 655350, .height = 100 };
++    try testing.expect(!s.tdValid());
++    s.cell.width = 0;
++    try testing.expect(!s.tdValid());
++}
+--- a/src/terminal/PageList.zig
++++ b/src/terminal/PageList.zig
+@@ -142,6 +142,9 @@
+ /// not include the total allocated amount in the pool which may be more
+ /// than this due to preheating.
+ page_size: usize,
++
++/// Private external-surface cap, including old+new page replacement peaks.
++td_max_bytes: ?usize = null,
+ 
+ /// Maximum size of the page allocation in bytes. This only includes pages
+ /// that are used ONLY for scrollback. If the active area is still partially
+@@ -835,6 +838,7 @@
+             chunk.node.data.capacity,
+             &page_serial,
+             &page_size,
++            self.td_max_bytes,
+         );
+         assert(node.data.capacity.rows >= chunk.end - chunk.start);
+         defer node.data.assertIntegrity();
+@@ -882,6 +886,7 @@
+         .page_serial_min = 0,
+         .page_size = page_size,
+         .explicit_max_size = self.explicit_max_size,
++        .td_max_bytes = self.td_max_bytes,
+         .min_max_size = self.min_max_size,
+         .cols = self.cols,
+         .rows = self.rows,
+@@ -3337,6 +3342,7 @@
+         cap,
+         &self.page_serial,
+         &self.page_size,
++        self.td_max_bytes,
+     );
+ }
+ 
+@@ -3345,12 +3351,18 @@
+     cap: Capacity,
+     serial: *u64,
+     total_size: ?*usize,
++    td_max_bytes: ?usize,
+ ) Allocator.Error!*List.Node {
++    const layout = Page.layout(cap);
++    const pooled = layout.total_size <= std_size;
++    if (td_max_bytes) |budget| {
++        const needed = if (pooled) std_size else layout.total_size;
++        const current = if (total_size) |v| v.* else 0;
++        if (needed > budget or current > budget - needed) return error.OutOfMemory;
++    }
+     var page = try pool.nodes.create();
+     errdefer pool.nodes.destroy(page);
+ 
+-    const layout = Page.layout(cap);
+-    const pooled = layout.total_size <= std_size;
+     const page_alloc = pool.pages.arena.child_allocator;
+ 
+     // It would be better to encode this into the Zig error handling
+@@ -14545,3 +14557,28 @@
+         try testing.expectEqualStrings("https://example.com", link.uri.slice(second_page.memory));
+     }
+ }
++
++test "Termdock page replacement and rich grapheme capacity reject before allocation" {
++    const testing = std.testing;
++    var accounting = testing.FailingAllocator.init(testing.allocator, .{});
++    const alloc = accounting.allocator();
++    var list = try init(alloc, 80, 24, 16 * 1024 * 1024);
++    defer list.deinit();
++    const before = accounting.allocations;
++    const bytes = list.page_size;
++    var cap = list.pages.first.?.data.capacity;
++    list.td_max_bytes = bytes;
++    // Final page would fit, but replacing it would hold both old and new.
++    try testing.expectError(error.OutOfMemory, list.createPage(cap));
++    try testing.expectEqual(before, accounting.allocations);
++    try testing.expectEqual(bytes, list.page_size);
++    list.td_max_bytes = 32 * 1024 * 1024;
++    cap.grapheme_bytes = 64 * 1024 * 1024;
++    try testing.expectError(error.OutOfMemory, list.createPage(cap));
++    try testing.expectEqual(before, accounting.allocations);
++    try testing.expectEqual(bytes, list.page_size);
++    var copy = try list.clone(alloc, .{ .top = .{ .screen = .{} } });
++    defer copy.deinit();
++    try testing.expectEqual(list.td_max_bytes, copy.td_max_bytes);
++    try testing.expectError(error.OutOfMemory, copy.createPage(cap));
++}
+--- a/src/terminal/Parser.zig
++++ b/src/terminal/Parser.zig
+@@ -232,7 +232,7 @@
+         .intermediates = undefined,
+         .params = undefined,
+     };
+-    if (std.valgrind.runningOnValgrind() > 0) {
++    if (!@inComptime() and std.valgrind.runningOnValgrind() > 0) {
+         // Initialize our undefined fields so Valgrind can catch it.
+         // https://github.com/ziglang/zig/issues/19148
+         result.intermediates = undefined;
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -42,6 +42,8 @@
+ /// this because max_size 0 in PageList gets rounded up to two pages so
+ /// we can always have an active screen.
+ no_scrollback: bool = false,
++/// Only enabled for Termdock external surfaces; ordinary upstream tests retain their policies.
++td_history_rows: ?usize = null,
+ 
+ /// The current cursor position
+ cursor: Cursor,
+@@ -246,6 +248,8 @@
+ };
+ 
+ pub const Options = struct {
++    td_history_rows: ?usize = null,
++    td_page_bytes: ?usize = null,
+     cols: size.CellCountInt,
+     rows: size.CellCountInt,
+ 
+@@ -286,6 +290,7 @@
+         opts.max_scrollback,
+     );
+     errdefer pages.deinit();
++    pages.td_max_bytes = opts.td_page_bytes;
+ 
+     // Create our tracked pin for the cursor.
+     const page_pin = try pages.trackPin(.{ .node = pages.pages.first.? });
+@@ -296,6 +301,7 @@
+         .alloc = alloc,
+         .pages = pages,
+         .no_scrollback = opts.max_scrollback == 0,
++        .td_history_rows = opts.td_history_rows,
+         .cursor = .{
+             .x = 0,
+             .y = 0,
+@@ -547,6 +553,7 @@
+         .alloc = alloc,
+         .pages = pages,
+         .no_scrollback = self.no_scrollback,
++        .td_history_rows = self.td_history_rows,
+         .cursor = cursor,
+         .selection = sel,
+         .dirty = self.dirty,
+@@ -782,7 +789,20 @@
+ 
+ /// Scroll the active area and keep the cursor at the bottom of the screen.
+ /// This is a very specialized function but it keeps it fast.
++// Called while Ghostty's terminal mutex is held. Physical row erase updates
++// tracked pins, viewport, cursor caches, styles, and releases empty pages.
++// The immutable byte budget is also a conservative logical cell upper bound.
++pub fn tdTrimHistory(self: *Screen, columns: usize, reserve: usize) void {
++    const requested = self.td_history_rows orelse return;
++    const max_rows = @min(requested, @min(100000, 1000000 / columns)) -| reserve;
++    const history = self.pages.total_rows -| self.pages.rows;
++    if (history > max_rows) {
++        self.eraseRows(.{ .history = .{} }, .{ .history = .{ .y = @intCast(history - max_rows - 1) } });
++    }
++}
++
+ pub fn cursorDownScroll(self: *Screen) !void {
++    self.tdTrimHistory(self.pages.cols, 1);
+     assert(self.cursor.y == self.pages.rows - 1);
+     defer self.assertIntegrity();
+ 
+@@ -897,6 +917,7 @@
+ /// This scrolls the active area at and above the cursor.
+ /// The lines below the cursor are not scrolled.
+ pub fn cursorScrollAbove(self: *Screen) !void {
++    self.tdTrimHistory(self.pages.cols, 1);
+     // We unconditionally mark the cursor row as dirty here because
+     // the cursor always changes page rows inside this function, and
+     // when that happens it can mean the text in the old row needs to
+@@ -10350,3 +10371,17 @@
+     try testing.expectEqual(@as(usize, 1), result.right);
+     try testing.expectEqual(@as(usize, 0), result.left);
+ }
++
++test "Termdock logical history cap clips old rows and keeps active cursor" {
++    const testing = std.testing;
++    var screen = try init(testing.allocator, .{ .cols = 80, .rows = 24, .max_scrollback = 1024 * 1024, .td_history_rows = 100000 });
++    defer screen.deinit();
++    screen.cursorAbsolute(0, 23);
++    for (0..100) |_| try screen.cursorDownScroll();
++    const before = screen.pages.total_rows;
++    screen.tdTrimHistory(65535, 0);
++    try testing.expect(screen.pages.total_rows - screen.pages.rows <= 1000000 / 65535);
++    try testing.expect(screen.pages.total_rows < before);
++    try testing.expectEqual(@as(usize, 23), screen.cursor.y);
++    screen.assertIntegrity();
++}
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -79,6 +79,9 @@
+ mouse_shape: mouse_shape_pkg.MouseShape = .text,
+ 
+ /// These are just a packed set of flags we may set on the terminal.
++/// Remote external-only host: never dereference Kitty file/shared-memory paths.
++td_remote: bool = false,
++
+ flags: packed struct {
+     // This supports a Kitty extension where programs using semantic
+     // prompts (OSC133) can annotate their new prompts with `redraw=0` to
+@@ -222,6 +225,8 @@
+ ) !Terminal {
+     const cols = opts.cols;
+     const rows = opts.rows;
++    if (cols == 0 or rows == 0 or @as(usize, cols) * rows > 262144)
++        return error.TermdockSizeBudget;
+ 
+     var screen_set: ScreenSet = try .init(alloc, .{
+         .cols = cols,
+@@ -2823,6 +2828,9 @@
+     cols: size.CellCountInt,
+     rows: size.CellCountInt,
+ ) !void {
++    if (cols == 0 or rows == 0 or @as(usize, cols) * rows > 262144 or
++        @as(usize, self.cols) * @max(self.rows, rows) > 262144 or
++        @as(usize, cols) * self.rows > 262144) return error.TermdockSizeBudget;
+     // If our cols/rows didn't change then we're done
+     if (self.cols == cols and self.rows == rows) return;
+ 
+@@ -2832,8 +2840,13 @@
+         self.tabstops = try .init(alloc, cols, 8);
+     }
+ 
++    // Clip both screens before reflow at the larger width, preserving the
++    // 1M logical history-cell cap during width changes and primary inactivity.
++    const primary = self.screens.get(.primary).?;
++    primary.tdTrimHistory(@max(self.cols, cols), 0);
++    if (self.screens.get(.alternate)) |alt| alt.tdTrimHistory(@max(self.cols, cols), 0);
++
+     // Resize primary screen, which supports reflow
+-    const primary = self.screens.get(.primary).?;
+     try primary.resize(.{
+         .cols = cols,
+         .rows = rows,
+@@ -2847,6 +2860,9 @@
+         .rows = rows,
+         .reflow = false,
+     });
++
++    primary.tdTrimHistory(cols, 0);
++    if (self.screens.get(.alternate)) |alt| alt.tdTrimHistory(cols, 0);
+ 
+     // Whenever we resize we just mark it as a screen clear
+     self.flags.dirty.clear = true;
+@@ -2914,6 +2930,9 @@
+                     .primary => primary.pages.explicit_max_size,
+                     .alternate => 0,
+                 },
++
++                .td_history_rows = primary.td_history_rows,
++                .td_page_bytes = primary.pages.td_max_bytes,
+ 
+                 // Inherit our Kitty image storage limit from the primary
+                 // screen if we have to initialize.
+--- a/src/terminal/build_options.zig
++++ b/src/terminal/build_options.zig
+@@ -43,7 +43,9 @@
+ 
+         // These are synthesized based on other options.
+         opts.addOption(bool, "kitty_graphics", self.oniguruma);
+-        opts.addOption(bool, "tmux_control_mode", self.oniguruma);
++        // Termdock has one remote byte stream/surface. The fork-only -CC pane
++        // viewer is excluded; ordinary tmux/Vim still use the complete VT core.
++        opts.addOption(bool, "tmux_control_mode", false);
+ 
+         m.addOptions("terminal_options", opts);
+     }
+--- a/src/terminal/kitty/graphics_exec.zig
++++ b/src/terminal/kitty/graphics_exec.zig
+@@ -25,6 +25,16 @@
+     terminal: *Terminal,
+     cmd: *const Command,
+ ) ?Response {
++    if (terminal.td_remote) {
++        if (cmd.transmission()) |transmission| {
++            if (transmission.medium != .direct) return .{
++                .id = transmission.image_id,
++                .image_number = transmission.image_number,
++                .message = "EINVAL: remote surfaces require inline image data",
++            };
++        }
++    }
++
+     // If storage is disabled then we disable the full protocol. This means
+     // we don't even respond to queries so the terminal completely acts as
+     // if this feature is not supported.
+@@ -568,3 +578,16 @@
+         try testing.expect(resp == null);
+     }
+ }
++
++
++test "Termdock remote image paths rejected before any local file access" {
++    const testing = std.testing;
++    var t = try Terminal.init(testing.allocator, .{ .rows = 5, .cols = 5 });
++    defer t.deinit(testing.allocator);
++    t.td_remote = true;
++    const cmd = try command.Parser.parseString(testing.allocator, "a=q,t=f,i=9;L3RtcC9tdXN0LW5vdC1vcGVu");
++    defer cmd.deinit(testing.allocator);
++    const response = execute(testing.allocator, &t, &cmd).?;
++    try testing.expectEqual(@as(u32, 9), response.id);
++    try testing.expectEqualStrings("EINVAL: remote surfaces require inline image data", response.message);
++}
+--- a/src/terminal/osc.zig
++++ b/src/terminal/osc.zig
+@@ -377,7 +377,7 @@
+             // visually easily duplicate them in the Valgrind check below.
+             .buffer = undefined,
+         };
+-        if (std.valgrind.runningOnValgrind() > 0) {
++        if (!@inComptime() and std.valgrind.runningOnValgrind() > 0) {
+             // Initialize our undefined fields so Valgrind can catch it.
+             // https://github.com/ziglang/zig/issues/19148
+             result.buffer = undefined;
+@@ -434,7 +434,7 @@
+         self.writer = null;
+         self.command = .invalid;
+ 
+-        if (std.valgrind.runningOnValgrind() > 0) {
++        if (!@inComptime() and std.valgrind.runningOnValgrind() > 0) {
+             // Initialize our undefined fields so Valgrind can catch it.
+             // https://github.com/ziglang/zig/issues/19148
+             self.buffer = undefined;
+--- a/src/terminal/parse_table.zig
++++ b/src/terminal/parse_table.zig
+@@ -10,6 +10,7 @@
+ //!
+ 
+ const std = @import("std");
++const terminal_options = @import("terminal_options");
+ const parser = @import("Parser.zig");
+ const State = parser.State;
+ const Action = parser.TransitionAction;
+@@ -238,9 +239,11 @@
+         // events
+         single(&result, 0x19, source, source, .put);
+         range(&result, 0, 0x17, source, source, .put);
+-        single(&result, 0x18, source, source, .put); // CAN: override "anywhere" → ground
+-        single(&result, 0x1A, source, source, .put); // SUB: override "anywhere" → ground
+-        single(&result, 0x1B, source, source, .put); // ESC: override "anywhere" → escape
++        if (terminal_options.tmux_control_mode) {
++            single(&result, 0x18, source, source, .put);
++            single(&result, 0x1A, source, source, .put);
++            single(&result, 0x1B, source, source, .put);
++        } // Otherwise retain ordinary CAN/SUB/ESC termination from "anywhere".
+         range(&result, 0x1C, 0x1F, source, source, .put);
+         range(&result, 0x20, 0x7E, source, source, .put);
+         single(&result, 0x7F, source, source, .ignore);
+@@ -264,7 +267,11 @@
+         // terminate the DCS if 0x9C were left as the 8-bit ST. DCS
+         // termination relies entirely on 7-bit ST (ESC \) via the
+         // pending_esc logic in dcs.zig.
+-        range(&result, 0x80, 0xFF, source, source, .put);
++        if (terminal_options.tmux_control_mode) {
++            range(&result, 0x80, 0xFF, source, source, .put);
++        } else {
++            range(&result, 0xA0, 0xFF, source, source, .put);
++        }
+     }
+ 
+     // csi_param
+@@ -412,6 +419,7 @@
+ }
+ 
+ test "dcs_passthrough: ESC stays in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const entry = t[0x1B][@intFromEnum(State.dcs_passthrough)];
+     try @import("std").testing.expectEqual(State.dcs_passthrough, entry.state);
+@@ -419,6 +427,7 @@
+ }
+ 
+ test "dcs_passthrough: CAN stays in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const entry = t[0x18][@intFromEnum(State.dcs_passthrough)];
+     try @import("std").testing.expectEqual(State.dcs_passthrough, entry.state);
+@@ -426,6 +435,7 @@
+ }
+ 
+ test "dcs_passthrough: SUB stays in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const entry = t[0x1A][@intFromEnum(State.dcs_passthrough)];
+     try @import("std").testing.expectEqual(State.dcs_passthrough, entry.state);
+@@ -433,6 +443,7 @@
+ }
+ 
+ test "dcs_passthrough: C1 0x80 stays in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const entry = t[0x80][@intFromEnum(State.dcs_passthrough)];
+     try @import("std").testing.expectEqual(State.dcs_passthrough, entry.state);
+@@ -440,6 +451,7 @@
+ }
+ 
+ test "dcs_passthrough: C1 0x9B (CSI) stays in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const entry = t[0x9B][@intFromEnum(State.dcs_passthrough)];
+     try @import("std").testing.expectEqual(State.dcs_passthrough, entry.state);
+@@ -447,6 +459,7 @@
+ }
+ 
+ test "dcs_passthrough: C1 0x9D (OSC) stays in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const entry = t[0x9D][@intFromEnum(State.dcs_passthrough)];
+     try @import("std").testing.expectEqual(State.dcs_passthrough, entry.state);
+@@ -454,6 +467,7 @@
+ }
+ 
+ test "dcs_passthrough: C1 ST (0x9C) stays in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     // 0x9C is overridden to stay in dcs_passthrough because it appears
+     // as a valid UTF-8 continuation byte (range 0x80-0xBF). Characters
+     // like Ŝ (U+015C → C5 9C) would prematurely terminate the DCS if
+@@ -478,6 +492,7 @@
+ }
+ 
+ test "dcs_passthrough: UTF-8 start bytes (0xC0-0xF4) produce put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const testing = @import("std").testing;
+ 
+@@ -508,6 +523,7 @@
+ }
+ 
+ test "dcs_passthrough: UTF-8 continuation bytes 0xA0-0xBF produce put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const testing = @import("std").testing;
+ 
+@@ -523,6 +539,7 @@
+ }
+ 
+ test "dcs_passthrough: all bytes 0xA0-0xFF stay in dcs_passthrough with put" {
++    if (comptime !terminal_options.tmux_control_mode) return error.SkipZigTest;
+     const t = table;
+     const testing = @import("std").testing;
+ 
+--- a/src/termio.zig
++++ b/src/termio.zig
+@@ -38,3 +38,5 @@
+ 
+     _ = @import("termio/shell_integration.zig");
+ }
++
++test { _ = @import("termio/td_contract.zig"); }
+--- a/src/termio/External.zig
++++ b/src/termio/External.zig
+@@ -415,6 +415,8 @@
+     S.write_len = 0;
+     S.resize_cols = 0;
+ 
++    var td: termio.Termio.ThreadData = undefined;
++    td.backend = .{ .external = .{} };
+     var ext = try External.init(testing.allocator, .{
+         .write_callback = S.writeCallback,
+         .resize_callback = S.resizeCallback,
+@@ -422,7 +424,7 @@
+     defer ext.deinit();
+ 
+     // Test write
+-    try ext.queueWrite(testing.allocator, undefined, "hello", false);
++    try ext.queueWrite(testing.allocator, &td, "hello", false);
+     try testing.expectEqualStrings("hello", S.write_data[0..S.write_len]);
+ 
+     // Test resize
+@@ -444,27 +446,29 @@
+ 
+     S.write_len = 0;
+ 
++    var td: termio.Termio.ThreadData = undefined;
++    td.backend = .{ .external = .{} };
+     var ext = try External.init(testing.allocator, .{
+         .write_callback = S.writeCallback,
+     });
+     defer ext.deinit();
+ 
+     // Without linefeed, CR should pass through unchanged
+-    try ext.queueWrite(testing.allocator, undefined, "a\rb", false);
++    try ext.queueWrite(testing.allocator, &td, "a\rb", false);
+     try testing.expectEqualStrings("a\rb", S.write_data[0..S.write_len]);
+ 
+     // With linefeed, CR should be expanded to CRLF
+     S.write_len = 0;
+-    try ext.queueWrite(testing.allocator, undefined, "a\rb", true);
++    try ext.queueWrite(testing.allocator, &td, "a\rb", true);
+     try testing.expectEqualStrings("a\r\nb", S.write_data[0..S.write_len]);
+ 
+     // Multiple CRs
+     S.write_len = 0;
+-    try ext.queueWrite(testing.allocator, undefined, "\r\r", true);
++    try ext.queueWrite(testing.allocator, &td, "\r\r", true);
+     try testing.expectEqualStrings("\r\n\r\n", S.write_data[0..S.write_len]);
+ 
+     // No CRs — should pass through unchanged even in linefeed mode
+     S.write_len = 0;
+-    try ext.queueWrite(testing.allocator, undefined, "hello", true);
++    try ext.queueWrite(testing.allocator, &td, "hello", true);
+     try testing.expectEqualStrings("hello", S.write_data[0..S.write_len]);
+ }
+--- a/src/termio/Termio.zig
++++ b/src/termio/Termio.zig
+@@ -539,7 +539,15 @@
+     td: *ThreadData,
+     size: renderer.Size,
+ ) !void {
++    if (!size.tdValid()) return error.TermdockSizeBudget;
+     const grid_size = size.grid();
++    self.renderer_state.mutex.lock();
++    const old_cols = self.terminal.cols;
++    const old_rows = self.terminal.rows;
++    self.renderer_state.mutex.unlock();
++    if (@as(usize, old_cols) * @max(old_rows, grid_size.rows) > 262144 or
++        @as(usize, grid_size.columns) * old_rows > 262144)
++        return error.TermdockSizeBudget;
+ 
+     // Update the size of our pty.
+     try self.backend.resize(grid_size, size.terminal());
+@@ -766,11 +774,17 @@
+     // the lock to grab our read data.
+     self.renderer_state.mutex.lock();
+     defer self.renderer_state.mutex.unlock();
+-    self.processOutputLocked(buf);
++    self.processOutputLocked(buf) catch |err| log.err("error processing output: {}", .{err});
++}
++
++pub fn tdProcessOutput(self: *Termio, buf: []const u8) !void {
++    self.renderer_state.mutex.lock();
++    defer self.renderer_state.mutex.unlock();
++    try self.processOutputLocked(buf);
+ }
+ 
+ /// Process output from readdata but the lock is already held.
+-fn processOutputLocked(self: *Termio, buf: []const u8) void {
++fn processOutputLocked(self: *Termio, buf: []const u8) !void {
+     // Schedule a render. We can call this first because we have the lock.
+     self.terminal_stream.handler.queueRender() catch unreachable;
+ 
+@@ -807,12 +821,10 @@
+                 log.err("error recording pty read in inspector err={}", .{err});
+             };
+ 
+-            self.terminal_stream.next(byte) catch |err|
+-                log.err("error processing terminal data: {}", .{err});
++            try self.terminal_stream.next(byte);
+         }
+     } else {
+-        self.terminal_stream.nextSlice(buf) catch |err|
+-            log.err("error processing terminal data: {}", .{err});
++        try self.terminal_stream.nextSlice(buf);
+     }
+ 
+     // If our stream handling caused messages to be sent to the mailbox
+--- a/src/termio/Thread.zig
++++ b/src/termio/Thread.zig
+@@ -297,7 +297,14 @@
+ 
+     // If we're draining, we just drain the mailbox and return.
+     if (self.flags.drain) {
+-        while (mailbox.pop()) |_| {}
++        while (mailbox.pop()) |message| {
++            switch (message) {
++                .td_barrier => |v| v.callback(v.userdata, false),
++                .write_alloc, .write_alloc_direct => |v| v.alloc.free(v.data),
++                .change_config => |v| { v.ptr.deinit(); v.alloc.destroy(v.ptr); },
++                else => {},
++            }
++        }
+         return;
+     }
+ 
+@@ -307,10 +314,20 @@
+     var redraw: bool = false;
+     while (mailbox.pop()) |message| {
+         // If we have a message we always redraw
+-        redraw = true;
++        if (message != .td_barrier) redraw = true;
+ 
+         log.debug("mailbox message={s}", .{@tagName(message)});
+         switch (message) {
++            .td_barrier => |v| {
++                var success = true;
++                if (self.coalesce_data.resize) |size| {
++                    self.coalesce_data.resize = null;
++                    io.resize(data, size) catch {
++                        success = false;
++                    };
++                }
++                v.callback(v.userdata, success);
++            },
+             .color_scheme_report => |v| try io.colorSchemeReport(data, v.force),
+             .crash => @panic("crash request, crashing intentionally"),
+             .change_config => |config| {
+--- a/src/termio/message.zig
++++ b/src/termio/message.zig
+@@ -17,6 +17,11 @@
+     pub const WriteReq = MessageData(u8, 38);
+ 
+     /// Request a color scheme report is sent to the pty.
++    td_barrier: struct {
++        userdata: ?*anyopaque,
++        callback: *const fn (?*anyopaque, bool) callconv(.c) void,
++    },
++
+     color_scheme_report: struct {
+         /// Force write the current color scheme
+         force: bool,
+--- a/src/termio/stream_handler.zig
++++ b/src/termio/stream_handler.zig
+@@ -21,6 +21,10 @@
+ /// unless all of the member fields are copied.
+ pub const StreamHandler = struct {
+     alloc: Allocator,
++    // Parser-feed worker yields to the real GUI host if its bounded app
++    // mailbox fills. The renderer mutex is released before this callback.
++    td_gui_yield: ?*const fn (?*anyopaque) callconv(.c) bool = null,
++    td_gui_userdata: ?*anyopaque = null,
+     size: *renderer.Size,
+     terminal: *terminal.Terminal,
+ 
+@@ -299,10 +303,17 @@
+     ) void {
+         // See messageWriter which has similar logic and explains why
+         // we may have to do this.
+-        if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
++        while (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
+             self.renderer_state.mutex.unlock();
+-            defer self.renderer_state.mutex.lock();
+-            _ = self.surface_mailbox.push(msg, .{ .forever = {} });
++            const proceed = if (self.td_gui_yield) |yield| yield(self.td_gui_userdata) else true;
++            self.renderer_state.mutex.lock();
++            if (!proceed) return; // Host cancelled/failed: private feed cannot ACK.
++            if (self.td_gui_yield == null) {
++                self.renderer_state.mutex.unlock();
++                defer self.renderer_state.mutex.lock();
++                _ = self.surface_mailbox.push(msg, .{ .forever = {} });
++                return;
++            }
+         }
+     }
+ 
+--- /dev/null
++++ b/src/termio/td_contract.zig
+@@ -0,0 +1,273 @@
++//! Headless engine fixture. REAL Termio/StreamHandler/External backend and
++//! bounded engine mailboxes; only the GUI wakeup is a test host callback.
++//! No surface initialization, Exec backend, PTY or renderer is started here.
++const std = @import("std");
++const termio = @import("../termio.zig");
++const renderer = @import("../renderer.zig");
++const apprt = @import("../apprt.zig");
++const App = @import("../App.zig");
++const CoreSurface = @import("../Surface.zig");
++const Config = @import("../config.zig").Config;
++const xev = @import("../global.zig").xev;
++fn wakeup(_: ?*anyopaque) callconv(.c) void {}
++const Capture = struct {
++    bytes: [4096]u8 = undefined,
++    len: usize = 0,
++    resizes: usize = 0,
++    fn write(data: []const u8, userdata: ?*anyopaque) void {
++        const self: *Capture = @ptrCast(@alignCast(userdata.?));
++        std.debug.assert(self.len + data.len <= self.bytes.len);
++        @memcpy(self.bytes[self.len..][0..data.len], data);
++        self.len += data.len;
++    }
++    fn resize(_: u16, _: u16, _: u32, _: u32, userdata: ?*anyopaque) void {
++        const self: *Capture = @ptrCast(@alignCast(userdata.?));
++        self.resizes += 1;
++    }
++};
++const Gui = struct {
++    app: *App.Mailbox.Queue,
++    calls: usize = 0,
++    messages: usize = 0,
++    fn yield(ctx: ?*anyopaque) callconv(.c) bool {
++        const self: *Gui = @ptrCast(@alignCast(ctx.?));
++        self.calls += 1;
++        while (self.app.pop()) |_| {
++            self.messages += 1;
++        }
++        return true;
++    }
++};
++fn drain(io: *termio.Termio, data: *termio.Termio.ThreadData, app: *App.Mailbox.Queue, render: *renderer.Thread.Mailbox) !void {
++    while (io.mailbox.spsc.queue.pop()) |message| switch (message) {
++        .write_small => |v| try io.queueWrite(data, v.data[0..v.len], false),
++        .write_stable => |v| try io.queueWrite(data, v, false),
++        .write_alloc => |v| {
++            defer v.alloc.free(v.data);
++            try io.queueWrite(data, v.data, false);
++        },
++        else => {},
++    };
++    while (app.pop()) |_| {}
++    while (render.pop()) |_| {}
++}
++test "Termdock external actual output ignores CC DCS without allocations or extra terminals" {
++    const testing = std.testing;
++    try testing.expect(!termio.StreamHandler.tmux_enabled);
++    try testing.expect(@FieldType(termio.StreamHandler, "tmux_viewer") == void);
++    var accounting = testing.FailingAllocator.init(testing.allocator, .{});
++    const alloc = accounting.allocator();
++    var cfg = try Config.default(alloc);
++    defer cfg.deinit();
++    cfg.@"scrollback-limit" = 16 * 1024 * 1024;
++    cfg.@"cursor-style-blink" = false;
++    cfg.@"clipboard-write" = .deny;
++    var mutex: std.Thread.Mutex = .{};
++    var state: renderer.State = .{ .mutex = &mutex, .terminal = undefined };
++    var async_render = try xev.Async.init();
++    defer async_render.deinit();
++    const render = try renderer.Thread.Mailbox.create(alloc);
++    defer render.destroy(alloc);
++    const app = try App.Mailbox.Queue.create(alloc);
++    defer app.destroy(alloc);
++    // The opaque surface token is queued but NEVER dereferenced. This harness
++    // is not AppKit/Metal validation. Only App.wakeup's initialized fields run.
++    var opaque_surface: CoreSurface = undefined;
++    var rt_app: apprt.App = undefined;
++    if (comptime @hasField(apprt.App, "opts")) {
++        rt_app.opts.wakeup = wakeup;
++        rt_app.opts.userdata = null;
++    }
++    var capture: Capture = .{};
++    var io: termio.Termio = undefined;
++    try io.init(alloc, .{
++        .size = .{ .screen = .{ .width = 800, .height = 480 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} },
++        .full_config = &cfg,
++        .config = try termio.DerivedConfig.init(alloc, &cfg),
++        .backend = .{ .external = try termio.External.init(alloc, .{
++            .write_callback = Capture.write,
++            .write_userdata = &capture,
++            .resize_callback = Capture.resize,
++            .resize_userdata = &capture,
++        }) },
++        .mailbox = try termio.Mailbox.initSPSC(alloc),
++        .renderer_state = &state,
++        .renderer_wakeup = async_render,
++        .renderer_mailbox = render,
++        .surface_mailbox = .{ .surface = &opaque_surface, .app = .{ .rt_app = &rt_app, .mailbox = app } },
++    });
++    defer io.deinit();
++    state.terminal = &io.terminal;
++    io.terminal.td_remote = true;
++    io.terminal.screens.active.td_history_rows = 100000;
++    io.terminal.screens.active.pages.td_max_bytes = 32 * 1024 * 1024;
++    var loop = try xev.Loop.init(.{});
++    defer loop.deinit();
++    var data: termio.Termio.ThreadData = .{
++        .alloc = alloc,
++        .loop = &loop,
++        .renderer_state = &state,
++        .surface_mailbox = io.surface_mailbox,
++        .backend = .{ .external = .{} },
++        .mailbox = &io.mailbox,
++    };
++    try testing.expect(io.backend == .external);
++    try testing.expectEqual(@as(usize, 1), capture.resizes);
++    // Native feed uses EXACTLY this checked processOutput entrypoint.
++    const before_bytes = accounting.allocated_bytes;
++    const before_allocations = accounting.allocations;
++    for (0..10000) |_| {
++        try io.tdProcessOutput("\x1bP1000p%begin 1 1 0\r\n%output %1 evil-pane\r\n%window-add @1\r\n%end 1 1 0\r\n\x1b\\");
++        try drain(&io, &data, app, render);
++    }
++    try testing.expectEqual(before_bytes, accounting.allocated_bytes);
++    try testing.expectEqual(before_allocations, accounting.allocations);
++    try testing.expectEqual(@as(u16, 80), io.terminal.cols);
++    try testing.expectEqual(@as(u16, 24), io.terminal.rows);
++    try testing.expectEqual(@as(usize, 1), io.terminal.screens.all.count());
++    try testing.expectEqual(@as(usize, 0), capture.len);
++    try testing.expectEqual(.ground, io.terminal_stream.parser.state);
++    // More than 64 GUI messages in ONE native feed: the real StreamHandler
++    // yields with renderer mutex released instead of blocking a non-pumping GUI.
++    var gui: Gui = .{ .app = app };
++    io.terminal_stream.handler.td_gui_userdata = &gui;
++    io.terminal_stream.handler.td_gui_yield = Gui.yield;
++    const bells = [_]u8{7} ** 5000;
++    try io.tdProcessOutput(&bells);
++    while (app.pop()) |_| {
++        gui.messages += 1;
++    }
++    try testing.expect(gui.calls > 0);
++    try testing.expectEqual(@as(usize, 5000), gui.messages);
++    try drain(&io, &data, app, render);
++    // Cross-chunk UTF-8/ESC, ordinary tmux/Vim alternate screen and mode state.
++    try io.tdProcessOutput("\x1b[31m\xe4\xb8");
++    try io.tdProcessOutput("\xad\xe6\x96\x87\x1b[0m\x1b[?1h\x1b[?2004h\x1b[?1049hTUI\x1b[?1049l");
++    try drain(&io, &data, app, render);
++    try testing.expectEqual(.primary, io.terminal.screens.active_key);
++    try testing.expect(io.terminal.modes.get(.cursor_keys));
++    try testing.expect(io.terminal.modes.get(.bracketed_paste));
++    const text = try io.terminal.screens.active.dumpStringAlloc(alloc, .{ .active = .{} });
++    defer alloc.free(text);
++    try testing.expect(std.mem.indexOf(u8, text, "中文") != null);
++    try io.tdProcessOutput("\x1b[6n");
++    try drain(&io, &data, app, render);
++    try testing.expectEqualStrings("\x1b[1;5R", capture.bytes[0..capture.len]);
++    try io.queueWrite(&data, "native-key", false);
++    try testing.expect(std.mem.endsWith(u8, capture.bytes[0..capture.len], "native-key"));
++    try io.resize(&data, .{ .screen = .{ .width = 1320, .height = 800 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} });
++    try drain(&io, &data, app, render);
++    try testing.expectEqual(@as(u16, 132), io.terminal.cols);
++    try testing.expectEqual(@as(u16, 40), io.terminal.rows);
++    try testing.expectEqual(@as(usize, 2), capture.resizes);
++    const cols = io.terminal.cols;
++    try testing.expectError(error.TermdockSizeBudget, io.resize(&data, .{ .screen = .{ .width = 655350, .height = 800 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} }));
++    try testing.expectEqual(cols, io.terminal.cols);
++}
++
++fn historyCase(columns: u16, requested: usize) !void {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    var cfg = try Config.default(alloc);
++    defer cfg.deinit();
++    cfg.@"scrollback-limit" = 16 * 1024 * 1024;
++    cfg.@"cursor-style-blink" = false;
++    cfg.@"clipboard-write" = .deny;
++    var mutex: std.Thread.Mutex = .{};
++    var state: renderer.State = .{ .mutex = &mutex, .terminal = undefined };
++    var async_render = try xev.Async.init();
++    defer async_render.deinit();
++    const render = try renderer.Thread.Mailbox.create(alloc);
++    defer render.destroy(alloc);
++    const app = try App.Mailbox.Queue.create(alloc);
++    defer app.destroy(alloc);
++    // The opaque surface token is queued but NEVER dereferenced. This harness
++    // is not AppKit/Metal validation. Only App.wakeup's initialized fields run.
++    var opaque_surface: CoreSurface = undefined;
++    var rt_app: apprt.App = undefined;
++    if (comptime @hasField(apprt.App, "opts")) {
++        rt_app.opts.wakeup = wakeup;
++        rt_app.opts.userdata = null;
++    }
++    var capture: Capture = .{};
++    var io: termio.Termio = undefined;
++    try io.init(alloc, .{
++        .size = .{ .screen = .{ .width = @as(u32, columns) * 10, .height = 480 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} },
++        .full_config = &cfg,
++        .config = try termio.DerivedConfig.init(alloc, &cfg),
++        .backend = .{ .external = try termio.External.init(alloc, .{
++            .write_callback = Capture.write,
++            .write_userdata = &capture,
++            .resize_callback = Capture.resize,
++            .resize_userdata = &capture,
++        }) },
++        .mailbox = try termio.Mailbox.initSPSC(alloc),
++        .renderer_state = &state,
++        .renderer_wakeup = async_render,
++        .renderer_mailbox = render,
++        .surface_mailbox = .{ .surface = &opaque_surface, .app = .{ .rt_app = &rt_app, .mailbox = app } },
++    });
++    defer io.deinit();
++    state.terminal = &io.terminal;
++    io.terminal.td_remote = true;
++    io.terminal.screens.active.td_history_rows = requested;
++    io.terminal.screens.active.pages.td_max_bytes = 32 * 1024 * 1024;
++    var loop = try xev.Loop.init(.{});
++    defer loop.deinit();
++    var data: termio.Termio.ThreadData = .{
++        .alloc = alloc,
++        .loop = &loop,
++        .renderer_state = &state,
++        .surface_mailbox = io.surface_mailbox,
++        .backend = .{ .external = .{} },
++        .mailbox = &io.mailbox,
++    };
++
++    for (0..requested + 300) |_| {
++        try io.tdProcessOutput("line\r\n");
++        try drain(&io, &data, app, render);
++    }
++    const primary = io.terminal.screens.get(.primary).?;
++    try testing.expectEqual(requested, primary.pages.total_rows -| primary.pages.rows);
++    std.debug.print("Termdock history cols={d} requested={d} actual={d} page_bytes={d}\n", .{ columns, requested, primary.pages.total_rows -| primary.pages.rows, primary.pages.page_size });
++    // Style/grapheme overhead uses the SAME finite byte cap, rather than
++    // truncating ordinary histories to an incorrect cell-as-byte amount.
++    var line: [160]u8 = undefined;
++    for (0..300) |i| {
++        const raw = try std.fmt.bufPrint(&line, "\x1b[38;2;{d};{d};{d}mstyled a\xcc\x81\x1b[0m\r\n", .{ i % 256, (i / 256) % 256, (i * 17) % 256 });
++        try io.tdProcessOutput(raw);
++        try drain(&io, &data, app, render);
++        try testing.expect(primary.pages.page_size <= 32 * 1024 * 1024);
++    }
++    try testing.expectEqual(requested, primary.pages.total_rows -| primary.pages.rows);
++    // Resize while primary is INACTIVE. Wide size fits visible shape, but its
++    // requested history no longer fits 1M cells: trim before and after reflow.
++    try io.tdProcessOutput("\x1b[?1049h");
++    try drain(&io, &data, app, render);
++    const alternate = io.terminal.screens.active;
++    try testing.expectEqual(@as(?usize, 32 * 1024 * 1024), alternate.pages.td_max_bytes);
++    try io.resize(&data, .{ .screen = .{ .width = 40960, .height = 480 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} });
++    try drain(&io, &data, app, render);
++    try testing.expectEqual(.alternate, io.terminal.screens.active_key);
++    try testing.expect(primary.pages.total_rows -| primary.pages.rows <= 1000000 / 4096);
++    try testing.expect(primary.pages.page_size <= 32 * 1024 * 1024);
++    try io.resize(&data, .{ .screen = .{ .width = @as(u32, columns) * 10, .height = 480 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} });
++    try io.tdProcessOutput("\x1b[?1049l");
++    try drain(&io, &data, app, render);
++    try testing.expectEqual(.primary, io.terminal.screens.active_key);
++    // Previously pruned rows cannot be resurrected; narrowing restores the
++    // REQUESTED capacity for subsequent remote output, without new PTY/state.
++    for (0..requested + 300) |_| {
++        try io.tdProcessOutput("narrow\r\n");
++        try drain(&io, &data, app, render);
++    }
++    try testing.expectEqual(requested, primary.pages.total_rows -| primary.pages.rows);
++    try testing.expect(primary.pages.page_size <= 32 * 1024 * 1024);
++    primary.assertIntegrity();
++    primary.pages.assertIntegrity();
++}
++test "Termdock real external preserves 5000 and tmux 2000 history rows at 80 and 120 columns" {
++    for ([_]u16{ 80, 120 }) |columns| {
++        for ([_]usize{ 5000, 2000 }) |requested| try historyCase(columns, requested);
++    }
++}
+--- a/src/terminal/main.zig
++++ b/src/terminal/main.zig
+@@ -0,0 +1,2 @@
++pub const td_path_hit = @import("td_path_hit.zig");
++pub const td_snapshot = @import("td_snapshot.zig");
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -794,0 +795,8 @@
++pub fn tdSetHistory(self: *Screen, requested: usize) void {
++    self.td_history_rows=@min(requested,100000);
++    self.no_scrollback=requested==0;
++    self.pages.explicit_max_size=if(requested==0) 0 else 16*1024*1024;
++    self.pages.td_max_bytes=32*1024*1024;
++    self.tdTrimHistory(self.pages.cols,0);
++}
++
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -1823 +1823,4 @@
+-    export fn ghostty_surface_free_text(ptr: *Text) void {
++    // Match include/ghostty.h: the Surface argument is ABI context only.
++    // Text was allocated by global.alloc; only the second argument owns it.
++    export fn ghostty_surface_free_text(surface: *Surface, ptr: *Text) void {
++        _ = surface;
+@@ -1824,0 +1828,6 @@
++    }
++
++    comptime {
++        const FreeTextABI = fn (*Surface, *Text) callconv(.c) void;
++        if (@TypeOf(ghostty_surface_free_text) != FreeTextABI)
++            @compileError("ghostty_surface_free_text must match the two-argument C header ABI");
+@@ -2041,2 +2050 @@
+-            entry.value.*.td_history_rows = @min(requested, 100000);
+-            entry.value.*.pages.td_max_bytes = 32 * 1024 * 1024;
++            entry.value.*.tdSetHistory(if(entry.key==.primary) requested else 0);
+@@ -2047,0 +2056,31 @@
++    }
++
++    export fn td_ghostty_cursor(surface:*Surface,x:*u32,y:*u32) void {
++        const io=&surface.core_surface.io;io.renderer_state.mutex.lock();defer io.renderer_state.mutex.unlock();
++        x.*=io.terminal.screens.active.cursor.x;y.*=io.terminal.screens.active.cursor.y;
++    }
++    export fn td_ghostty_path_hit(surface:*Surface,x:u16,y:u16,ptr:[*]u8,cap:usize,out_len:*usize) bool {
++        if(cap>256*1024)return false;const io=&surface.core_surface.io;io.renderer_state.mutex.lock();defer io.renderer_state.mutex.unlock();
++        var writer=std.Io.Writer.fixed(ptr[0..cap]);@import("../terminal/td_path_hit.zig").capture(&io.terminal,x,y,&writer) catch return false;out_len.*=writer.buffered().len;return true;
++    }
++
++    export fn td_ghostty_snapshot(surface: *Surface, ptr: [*]u8, cap: usize, out_len: *usize) c_int {
++        if (cap > 128 * 1024) return 3;
++        const io=&surface.core_surface.io;io.renderer_state.mutex.lock();defer io.renderer_state.mutex.unlock();
++        const snapshot=@import("../terminal/td_snapshot.zig");
++        if (!snapshot.safe(&io.terminal_stream) or io.terminal_stream.handler.dcs.state != .inactive or io.terminal_stream.handler.apc.state != .inactive) return 1;
++        if (!snapshot.supported(&io.terminal)) return 2;
++        var writer=std.Io.Writer.fixed(ptr[0..cap]);snapshot.exportSnapshot(&io.terminal,&writer) catch return 3;
++        out_len.*=writer.buffered().len;return 0;
++    }
++    export fn td_ghostty_snapshot_finish(surface: *Surface, ptr: [*]const u8, len: usize) bool {
++        if (len > 128 * 1024) return false;
++        var storage:[512*1024]u8=undefined;var fba=std.heap.FixedBufferAllocator.init(&storage);
++        const snapshot=@import("../terminal/td_snapshot.zig");
++        const parsed=std.json.parseFromSlice(snapshot.Captured,fba.allocator(),ptr[0..len],.{}) catch return false;
++        defer parsed.deinit();if(parsed.value.version!=1)return false;
++        const io=&surface.core_surface.io;io.renderer_state.mutex.lock();defer io.renderer_state.mutex.unlock();
++        if (!snapshot.safe(&io.terminal_stream)) return false;
++        parsed.value.state.restore(&io.terminal) catch return false;
++        io.queueMessage(.{.linefeed_mode=io.terminal.modes.get(.linefeed)},.locked);
++        return true;
+--- a/src/terminal/formatter.zig
++++ b/src/terminal/formatter.zig
+@@ -84,0 +85,2 @@
++    /// Termdock checkpoint preserves painted blank/BCE rows. Default output remains unchanged.
++    td_preserve_empty_styles: bool = false,
+@@ -1044 +1046,5 @@
+-            if (!Cell.hasTextAny(cells_subset)) {
++            const painted_blank=self.opts.td_preserve_empty_styles and self.opts.emit.styled() and painted: {
++                for(cells_subset) |cell| {if(!cell.isEmpty() or cell.hasStyling())break :painted true;}
++                break :painted false;
++            };
++            if (!Cell.hasTextAny(cells_subset) and !painted_blank) {
+--- a/src/terminal/td_snapshot.zig
++++ b/src/terminal/td_snapshot.zig
+@@ -0,0 +1,303 @@
++//! Engine-owned bounded VT checkpoint. No image/selection/heap snapshot.
++const std=@import("std");
++const Terminal=@import("Terminal.zig");
++const Screen=@import("Screen.zig");
++const formatter=@import("formatter.zig");
++const modes=@import("modes.zig");
++const options=@import("terminal_options");
++const Selection=@import("Selection.zig");
++pub fn safe(stream:anytype) bool {return stream.parser.state==.ground and stream.utf8decoder.state==0;}
++fn state(screen:*const Screen,w:*std.Io.Writer) !void {
++    try w.writeAll("\x1b[0m\x1b]8;;\x1b\\");
++    var f=formatter.ScreenFormatter.init(screen,.{.emit=.vt,.unwrap=true,.trim=false,.td_preserve_empty_styles=true});f.content=.none;f.extra=.all;try f.format(w);
++}
++fn content(screen:*const Screen,history:u32,w:*std.Io.Writer) !void {
++    try w.writeAll("\x1b[0m\x1b(B\x1b)B\x1b*B\x1b+B\x0f");
++    const p=&screen.pages;
++    const first=p.pin(.{.screen=.{.x=0,.y=@intCast(p.total_rows-|(@as(usize,p.rows)+history))}}) orelse return error.InvalidScreen;
++    const last=p.pin(.{.active=.{.x=p.cols-1,.y=p.rows-1}}) orelse return error.InvalidScreen;
++    var f=formatter.ScreenFormatter.init(screen,.{.emit=.vt,.unwrap=true,.trim=false,.td_preserve_empty_styles=true});f.content=.{.selection=Selection.init(first,last,false)};f.extra=.none;try f.format(w);
++    var trailing:usize=0;var y=p.total_rows;
++    while(y>0 and trailing<p.rows){y-=1;const pin=p.pin(.{.screen=.{.x=0,.y=@intCast(y)}}).?;const cells=pin.cells(.all);var painted=false;for(cells) |cell| {if(cell.hasText() or !cell.isEmpty() or cell.hasStyling()){painted=true;break;}}if(painted)break;trailing+=1;}
++    if(trailing<p.rows)for(0..trailing) |_|try w.writeAll("\r\n");
++}
++const Background=union(enum){palette:u8,rgb:@import("page.zig").Cell.RGB};
++fn background(cell:@import("page.zig").Cell) ?Background {return switch(cell.content_tag){.bg_color_palette=>.{.palette=cell.content.color_palette},.bg_color_rgb=>.{.rgb=cell.content.color_rgb},else=>null};}
++const EmptyRun=struct {screen:@import("ScreenSet.zig").Key,y:u32,x:u16,len:u16,bg:?Background=null};
++const SemanticRun=struct {screen:@import("ScreenSet.zig").Key,y:u32,x:u16,len:u16,value:@import("page.zig").Cell.SemanticContent};
++const RowState=struct {semantic:@import("page.zig").Row.SemanticPrompt=.none,screen:@import("ScreenSet.zig").Key,y:u32,wrap:bool,continuation:bool};
++const ModeCount=@typeInfo(modes.Mode).@"enum".fields.len;
++const Pen=struct {
++ keyboard:@import("kitty/key.zig").FlagStack,semantic:Screen.SemanticPrompt,semantic_content:@import("page.zig").Cell.SemanticContent,semantic_clear:bool,
++ x:u16,y:u16,style:@import("style.zig").Style,protected:bool,wrap:bool,charset:Screen.CharsetState,cursor_style:Screen.CursorStyle,saved:?Screen.SavedCursor,
++ fn capture(screen:*const Screen) Pen {const c=&screen.cursor;return .{.keyboard=screen.kitty_keyboard,.semantic=screen.semantic_prompt,.semantic_content=c.semantic_content,.semantic_clear=c.semantic_content_clear_eol,.x=c.x,.y=c.y,.style=c.style,.protected=c.protected,.wrap=c.pending_wrap,.charset=screen.charset,.cursor_style=c.cursor_style,.saved=screen.saved_cursor};}
++ fn restore(self:Pen,screen:*Screen) !void {
++  if(self.x>=screen.pages.cols or self.y>=screen.pages.rows)return error.InvalidCursor;
++  if(self.saved) |c| {if(c.x>=screen.pages.cols or c.y>=screen.pages.rows)return error.InvalidCursor;}
++  screen.cursorAbsolute(self.x,self.y);screen.cursor.style=self.style;try screen.manualStyleUpdate();
++  screen.cursor.protected=self.protected;screen.cursor.pending_wrap=self.wrap;screen.charset=self.charset;screen.cursor.cursor_style=self.cursor_style;screen.saved_cursor=self.saved;screen.kitty_keyboard=self.keyboard;screen.semantic_prompt=self.semantic;screen.cursor.semantic_content=self.semantic_content;screen.cursor.semantic_content_clear_eol=self.semantic_clear;
++ }
++};
++pub const Metadata=struct {
++ foreground:@import("color.zig").DynamicRGB,background_color:@import("color.zig").DynamicRGB,cursor_color:@import("color.zig").DynamicRGB,palette_original:@import("color.zig").Palette,palette_mask:[256]bool,
++ modes:[ModeCount]bool,saved_modes:[ModeCount]bool,previous_char:?u21,mouse_event:Terminal.MouseEvents,mouse_format:Terminal.MouseFormat,
++ semantic_runs:[]const SemanticRun=&.{},modify_other_keys_2:bool,shell_redraws_prompt:@import("osc.zig").semantic_prompt.Redraw,
++ empty_runs:[]const EmptyRun=&.{},row_states:[]const RowState=&.{},region:Terminal.ScrollingRegion,primary:Pen,alternate:?Pen,active:@import("ScreenSet.zig").Key,
++ fn capture(t:*const Terminal) Metadata {
++  var values:[ModeCount]bool=undefined;var saved_values:[ModeCount]bool=undefined;var palette_mask:[256]bool=undefined;for(0..256) |i| palette_mask[i]=t.colors.palette.mask.isSet(i);
++  inline for(@typeInfo(modes.Mode).@"enum".fields,0..) |field,i| {values[i]=t.modes.get(@enumFromInt(field.value));saved_values[i]=@field(t.modes.saved,field.name);}
++  return .{.modify_other_keys_2=t.flags.modify_other_keys_2,.shell_redraws_prompt=t.flags.shell_redraws_prompt,.foreground=t.colors.foreground,.background_color=t.colors.background,.cursor_color=t.colors.cursor,.palette_original=t.colors.palette.original,.palette_mask=palette_mask,.modes=values,.saved_modes=saved_values,.previous_char=t.previous_char,.mouse_event=t.flags.mouse_event,.mouse_format=t.flags.mouse_format,.region=t.scrolling_region,.primary=Pen.capture(t.screens.get(.primary).?),.alternate=if(t.screens.get(.alternate)) |a| Pen.capture(a) else null,.active=t.screens.active_key};
++ }
++ pub fn restore(self:Metadata,t:*Terminal) !void {
++  // Typed scalar state only. No struct/pointer bytes from the prior process.
++  for(self.empty_runs) |run| {
++   const screen=t.screens.get(run.screen) orelse return error.MissingAlternate;
++   if(run.len==0 or @as(u32,run.x)+run.len>t.cols or run.y>=screen.pages.total_rows)return error.InvalidEmptyRun;
++   const pin=screen.pages.pin(.{.screen=.{.x=run.x,.y=run.y}}) orelse return error.InvalidEmptyRun;
++   const cells=pin.cells(.all);
++   for(cells[run.x..@as(usize,run.x)+run.len]) |*cell| {
++    if(cell.content_tag==.codepoint and cell.wide==.narrow and cell.codepoint()==' ') {
++     if(run.bg) |bg| {
++      if(cell.style_id!=0)pin.node.data.styles.release(pin.node.data.memory,cell.style_id);
++      cell.*=switch(bg){.palette=>|color| .{.content_tag=.bg_color_palette,.content=.{.color_palette=color}},.rgb=>|color| .{.content_tag=.bg_color_rgb,.content=.{.color_rgb=color}}};
++     } else cell.content.codepoint=0;
++    }
++   }
++  }
++  for(self.semantic_runs) |run| {
++   const screen=t.screens.get(run.screen) orelse return error.MissingAlternate;
++   if(run.len==0 or @as(u32,run.x)+run.len>t.cols or run.y>=screen.pages.total_rows)return error.InvalidSemanticRun;
++   const pin=screen.pages.pin(.{.screen=.{.x=0,.y=run.y}}).?;
++   for(pin.cells(.all)[run.x..@as(usize,run.x)+run.len]) |*cell|cell.semantic_content=run.value;
++  }
++  for(self.row_states) |row| {
++   const screen=t.screens.get(row.screen) orelse return error.MissingAlternate;
++   const pin=screen.pages.pin(.{.screen=.{.x=0,.y=row.y}}) orelse return error.InvalidRow;
++   pin.rowAndCell().row.semantic_prompt=row.semantic;pin.rowAndCell().row.wrap=row.wrap;pin.rowAndCell().row.wrap_continuation=row.continuation;
++  }
++  try self.primary.restore(t.screens.get(.primary).?);
++  if(self.alternate) |pen| {try pen.restore(t.screens.get(.alternate) orelse return error.MissingAlternate);}
++  inline for(@typeInfo(modes.Mode).@"enum".fields,0..) |field,i| {t.modes.set(@enumFromInt(field.value),self.modes[i]);@field(t.modes.saved,field.name)=self.saved_modes[i];}
++  if(self.region.top>self.region.bottom or (self.region.top==self.region.bottom and t.rows!=1) or self.region.bottom>=t.rows or (self.region.left>self.region.right or (self.region.left==self.region.right and t.cols!=1)) or self.region.right>=t.cols)return error.InvalidRegion;
++  t.scrolling_region=self.region;
++  t.colors.foreground=self.foreground;t.colors.background=self.background_color;t.colors.cursor=self.cursor_color;t.colors.palette.original=self.palette_original;for(self.palette_mask,0..) |set,i| {if(set)t.colors.palette.mask.set(i) else t.colors.palette.mask.unset(i);}t.flags.dirty.palette=true;
++  t.flags.modify_other_keys_2=self.modify_other_keys_2;t.flags.shell_redraws_prompt=self.shell_redraws_prompt;
++  t.flags.mouse_event=self.mouse_event;t.flags.mouse_format=self.mouse_format;t.previous_char=self.previous_char;
++  if(t.screens.get(self.active)==null)return error.MissingActive;
++  t.screens.switchTo(self.active);t.flags.dirty.clear=true;
++ }
++};
++pub const Captured=struct {version:u32=1,vt:[]const u8,state:Metadata};
++pub fn supported(t:*const Terminal) bool {
++ if(t.modes.get(.synchronized_output))return false;
++ if(t.status_display!=.main or t.flags.mouse_shift_capture!=.null)return false;
++ for([_]@import("ScreenSet.zig").Key{.primary,.alternate}) |key| {
++  const screen=t.screens.get(key) orelse continue;
++  if(screen.cursor.hyperlink!=null or screen.protected_mode!=.off or screen.charset.single_shift!=null)return false;
++
++  const pages=&screen.pages;const start=pages.total_rows-|(@as(usize,pages.rows)+100);
++  for(start..pages.total_rows) |y| {
++   const pin=pages.pin(.{.screen=.{.x=0,.y=@intCast(y)}}) orelse continue;
++   for(pin.cells(.all)) |cell| {if(cell.hyperlink or cell.protected)return false;}
++  }
++  if(comptime options.kitty_graphics){if(screen.kitty_images.loading!=null or screen.kitty_images.images.count()!=0 or screen.kitty_images.placements.count()!=0)return false;}
++ }
++ return true;
++}
++pub fn exportSnapshot(t:*const Terminal,w:*std.Io.Writer) !void {
++ if(!supported(t))return error.Unsupported;
++ var semantics:[8192]SemanticRun=undefined;var semantic_count:usize=0;
++ var runs:[8192]EmptyRun=undefined;var count:usize=0;var row_states:[8192]RowState=undefined;var row_count:usize=0;
++ for([_]@import("ScreenSet.zig").Key{.primary,.alternate}) |key| {
++  const screen=t.screens.get(key) orelse continue;const pages=&screen.pages;
++  const start=pages.total_rows-|(@as(usize,pages.rows)+@as(usize,if(key==.primary) 100 else 0));
++  for(start..pages.total_rows) |y| {
++   const pin=pages.pin(.{.screen=.{.x=0,.y=@intCast(y)}}).?;const cells=pin.cells(.all);var x:usize=0;
++   if(row_count==row_states.len)return error.WriteFailed;
++   const row=pin.rowAndCell().row;row_states[row_count]=.{.screen=key,.y=@intCast(y-start),.wrap=row.wrap,.continuation=row.wrap_continuation,.semantic=row.semantic_prompt};row_count+=1;
++   var sx:usize=0;while(sx<cells.len){const first=sx;const value=cells[sx].semantic_content;while(sx<cells.len and cells[sx].semantic_content==value):(sx+=1){}if(value==.output)continue;if(semantic_count==semantics.len)return error.WriteFailed;semantics[semantic_count]=.{.screen=key,.y=@intCast(y-start),.x=@intCast(first),.len=@intCast(sx-first),.value=value};semantic_count+=1;}
++   while(x<cells.len){if(cells[x].codepoint()!=0 or cells[x].wide!=.narrow){x+=1;continue;}const first=x;const bg=background(cells[x]);while(x<cells.len and cells[x].codepoint()==0 and cells[x].wide==.narrow and std.meta.eql(bg,background(cells[x]))): (x+=1){}
++    if(count==runs.len)return error.WriteFailed;runs[count]=.{.screen=key,.y=@intCast(y-start),.x=@intCast(first),.len=@intCast(x-first),.bg=bg};count+=1;
++   }
++  }
++ }
++ var metadata=Metadata.capture(t);metadata.semantic_runs=semantics[0..semantic_count];metadata.empty_runs=runs[0..count];metadata.row_states=row_states[0..row_count];
++ var bytes:[128*1024]u8=undefined;var vt=std.Io.Writer.fixed(&bytes);try format(t,&vt);
++ try std.json.Stringify.value(Captured{.vt=vt.buffered(),.state=metadata},.{},w);
++}
++pub fn format(t:*const Terminal,w:*std.Io.Writer) !void {
++    try w.writeAll("\x1bc");
++    var tf=formatter.TerminalFormatter.init(t,.vt);tf.content=.none;tf.extra=.none;tf.extra.palette=true;try tf.format(w);
++    const p=t.screens.get(.primary).?;try content(p,100,w);try state(p,w);
++    if(t.screens.get(.alternate)) |a| {
++        // 47 does not clear ALT or implicitly overwrite primary's saved state.
++        try w.writeAll("\x1b[?47h\x1b[0m\x1b[H\x1b[2J");try content(a,0,w);try state(a,w);
++        if(t.screens.active_key==.primary)try w.writeAll("\x1b[?47l");
++    }
++    tf.extra=.all;tf.extra.palette=false;tf.extra.modes=false;tf.extra.screen=.none;try tf.format(w);
++    try w.writeAll("\x1b[?6l");try state(t.screens.active,w);
++    if(t.modes.get(.origin)){try w.writeAll("\x1b[?6h");try w.print("\x1b[{d};{d}H",.{(t.screens.active.cursor.y-|t.scrolling_region.top)+1,(t.screens.active.cursor.x-|t.scrolling_region.left)+1});}
++}
++fn canonical(t:*const Terminal,buf:[]u8) ![]const u8 {var w=std.Io.Writer.fixed(buf);try format(t,&w);return w.buffered();}
++test "Termdock durable two screens modes regions style wide combining incremental output" {
++    const alloc=std.testing.allocator;var a=try Terminal.init(alloc,.{.cols=20,.rows=6});defer a.deinit(alloc);var s=a.vtStream();defer s.deinit();
++    try s.nextSlice("\x1b[31m红色e\xcc\x81 wide界\x1b[0m\r\nnormal\x1b7\x1b[?1049h\x1b[32malternate界\r\n\x1b[2;5r\x1b[?1h\x1b[?1000h\x1b[?2004h\x1b[3;4H");
++    var buf:[128*1024]u8=undefined;const data=try canonical(&a,&buf);const meta=Metadata.capture(&a);
++    var b=try Terminal.init(alloc,.{.cols=20,.rows=6});defer b.deinit(alloc);var r=b.vtStream();defer r.deinit();try r.nextSlice(data);try meta.restore(&b);
++    for(0..a.cols) |x|try std.testing.expectEqual(a.tabstops.get(@intCast(x)),b.tabstops.get(@intCast(x)));
++ try std.testing.expectEqual(a.flags.modify_other_keys_2,b.flags.modify_other_keys_2);try std.testing.expectEqual(a.flags.shell_redraws_prompt,b.flags.shell_redraws_prompt);
++ try std.testing.expectEqual(a.screens.active_key,b.screens.active_key);try std.testing.expectEqualDeep(a.modes.values,b.modes.values);try std.testing.expectEqualDeep(a.modes.saved,b.modes.saved);try std.testing.expectEqual(a.scrolling_region,b.scrolling_region);try std.testing.expectEqual(a.screens.active.cursor.x,b.screens.active.cursor.x);try std.testing.expectEqual(a.screens.active.cursor.y,b.screens.active.cursor.y);try std.testing.expectEqual(a.screens.get(.primary).?.saved_cursor,b.screens.get(.primary).?.saved_cursor);
++    var again:[128*1024]u8=undefined;try std.testing.expectEqualStrings(data,try canonical(&b,&again));
++    try s.nextSlice("after\x1b[?1049l\x1b8Z");try r.nextSlice("after\x1b[?1049l\x1b8Z");try std.testing.expectEqualStrings(try canonical(&a,&buf),try canonical(&b,&again));
++}
++test "Termdock durable safe boundary rejects split UTF8 ESC and bounded overflow" {
++    const alloc=std.testing.allocator;var t=try Terminal.init(alloc,.{.cols=10,.rows=4});defer t.deinit(alloc);var s=t.vtStream();defer s.deinit();
++    try s.nextSlice("\xe4\xb8");try std.testing.expect(!safe(&s));try s.nextSlice("\xad");try std.testing.expect(safe(&s));try s.nextSlice("\x1b[31");try std.testing.expect(!safe(&s));try s.nextSlice("mred");try std.testing.expect(safe(&s));
++    var buf:[16]u8=undefined;var w=std.Io.Writer.fixed(&buf);try std.testing.expectError(error.WriteFailed,format(&t,&w));
++}
++
++fn cellStyle(page:*const @import("page.zig").Page,cell:*const @import("page.zig").Cell) @import("style.zig").Style {
++ return switch(cell.content_tag){
++  .codepoint,.codepoint_grapheme=>if(cell.hasStyling())page.styles.get(page.memory,cell.style_id).* else .{},
++  .bg_color_palette=>.{.bg_color=.{.palette=cell.content.color_palette}},
++  .bg_color_rgb=>.{.bg_color=.{.rgb=.{.r=cell.content.color_rgb.r,.g=cell.content.color_rgb.g,.b=cell.content.color_rgb.b}}},
++ };
++}
++fn structural(a:*const Terminal,b:*const Terminal) !void {
++ for(0..a.cols) |x|try std.testing.expectEqual(a.tabstops.get(@intCast(x)),b.tabstops.get(@intCast(x)));
++ try std.testing.expectEqual(a.screens.active_key,b.screens.active_key);try std.testing.expectEqualDeep(a.modes.values,b.modes.values);try std.testing.expectEqualDeep(a.modes.saved,b.modes.saved);try std.testing.expectEqual(a.scrolling_region,b.scrolling_region);try std.testing.expectEqual(a.previous_char,b.previous_char);try std.testing.expectEqualDeep(a.colors,b.colors);try std.testing.expectEqual(a.flags.mouse_event,b.flags.mouse_event);try std.testing.expectEqual(a.flags.mouse_format,b.flags.mouse_format);
++ for([_]@import("ScreenSet.zig").Key{.primary,.alternate}) |key| {
++  const sa=a.screens.get(key) orelse continue;const sb=b.screens.get(key) orelse return error.MissingAlternate;
++  try std.testing.expectEqualDeep(sa.semantic_prompt,sb.semantic_prompt);try std.testing.expectEqual(sa.cursor.semantic_content,sb.cursor.semantic_content);try std.testing.expectEqual(sa.cursor.semantic_content_clear_eol,sb.cursor.semantic_content_clear_eol);
++  try std.testing.expectEqualDeep(sa.charset,sb.charset);try std.testing.expectEqualDeep(sa.kitty_keyboard,sb.kitty_keyboard);
++  try std.testing.expectEqual(sa.cursor.x,sb.cursor.x);try std.testing.expectEqual(sa.cursor.y,sb.cursor.y);try std.testing.expectEqual(sa.cursor.pending_wrap,sb.cursor.pending_wrap);try std.testing.expectEqualDeep(sa.cursor.style,sb.cursor.style);try std.testing.expectEqualDeep(sa.saved_cursor,sb.saved_cursor);
++  for(0..a.rows) |y| {
++   const pa=sa.pages.pin(.{.active=.{.x=0,.y=@intCast(y)}}).?;const pb=sb.pages.pin(.{.active=.{.x=0,.y=@intCast(y)}}).?;
++   try std.testing.expectEqual(pa.rowAndCell().row.semantic_prompt,pb.rowAndCell().row.semantic_prompt);
++   try std.testing.expectEqual(pa.rowAndCell().row.wrap,pb.rowAndCell().row.wrap);try std.testing.expectEqual(pa.rowAndCell().row.wrap_continuation,pb.rowAndCell().row.wrap_continuation);
++   const ca=pa.cells(.all);const cb=pb.cells(.all);
++   for(ca,cb) |*ac,*bc| {
++    try std.testing.expectEqual(ac.semantic_content,bc.semantic_content);
++    try std.testing.expectEqual(ac.codepoint(),bc.codepoint());try std.testing.expectEqual(ac.wide,bc.wide);
++    try std.testing.expectEqualDeep(background(ac.*),background(bc.*));
++    const as=cellStyle(&pa.node.data,ac);
++    const bs=cellStyle(&pb.node.data,bc);
++    try std.testing.expectEqualDeep(as,bs);
++    try std.testing.expectEqualDeep(pa.node.data.lookupGrapheme(ac),pb.node.data.lookupGrapheme(bc));
++   }
++  }
++ }
++}
++test "Termdock durable JSON actual engine pending wrap BCE origin tabs effective mouse mode and suffix" {
++ const alloc=std.testing.allocator;
++ const samples=[_][]const u8{
++  "\x1b[>3u\x1b[>5uprimary\x1b[?1049h\x1b[=0uALT\x1b[>4;2m",
++  "\x1b]133;A;redraw=0\x1b\\prompt\x1b]133;B;cl=line\x1b\\input",
++  "1234567890",
++  "\x1b]4;2;rgb:12/34/56\x1b\\\x1b]10;rgb:aa/bb/cc\x1b\\\x1b]11;rgb:11/22/33\x1b\\\x1b]12;rgb:33/44/55\x1b\\color",
++  "\x1b[41m\x1b[2J\x1b[0m\x1b[2;3Hcolored blank",
++  "\x1b[2;4r\x1b[?6h\x1b[2;3Horigin\x1b[3g\x1b[3G\x1bH",
++  "\x1b[?1003h\x1b[?1000h\x1b[?1006h\x1b[?1h\x1b[?2004h\x1b7normal",
++  "\x1b[31mprimary\x1b7\x1b[?1049h\x1b[32malt界e\xcc\x81\x1b7\x1b[3;5H",
++ };
++ for(samples) |input| {
++  var a=try Terminal.init(alloc,.{.cols=10,.rows=6});defer a.deinit(alloc);var s=a.vtStream();defer s.deinit();try s.nextSlice(input);
++  var bytes:[128*1024]u8=undefined;var writer=std.Io.Writer.fixed(&bytes);try exportSnapshot(&a,&writer);
++  const parsed=try std.json.parseFromSlice(Captured,alloc,writer.buffered(),.{});defer parsed.deinit();
++  var b=try Terminal.init(alloc,.{.cols=10,.rows=6});defer b.deinit(alloc);var r=b.vtStream();defer r.deinit();try r.nextSlice(parsed.value.vt);try parsed.value.state.restore(&b);try structural(&a,&b);
++  const suffix="Z\x1b[3b\x1b[?1049l\x1b8Q\x1b]104;2\x1b\\\x1b]110\x1b\\\x1b[<u\x1b[<u\x1b[>4;0m";try s.nextSlice(suffix);try r.nextSlice(suffix);try structural(&a,&b);try a.resize(alloc,12,8);try b.resize(alloc,12,8);try structural(&a,&b);
++ }
++}
++test "Termdock durable compact export independent of raw replay 8MiB and retains only tail 100 history" {
++ const alloc=std.testing.allocator;var a=try Terminal.init(alloc,.{.cols=80,.rows=24,.max_scrollback=4*1024*1024});defer a.deinit(alloc);var s=a.vtStream();defer s.deinit();
++ var total:usize=0;for(0..140000) |_| {const line="output beyond raw replay budget aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n";try s.nextSlice(line);total+=line.len;}
++ try std.testing.expect(total>8*1024*1024);
++ var bytes:[128*1024]u8=undefined;var w=std.Io.Writer.fixed(&bytes);try exportSnapshot(&a,&w);
++ const parsed=try std.json.parseFromSlice(Captured,alloc,w.buffered(),.{});defer parsed.deinit();var b=try Terminal.init(alloc,.{.cols=80,.rows=24});defer b.deinit(alloc);var r=b.vtStream();defer r.deinit();try r.nextSlice(parsed.value.vt);try parsed.value.state.restore(&b);
++ try std.testing.expect(b.screens.active.pages.total_rows-|b.rows<=100);try structural(&a,&b);
++}
++test "Termdock durable parser OSC DCS APC multipart kitty unsupported and resize roundtrip" {
++ const alloc=std.testing.allocator;
++ for([_][]const u8{"\x1b]0;partial", "\x1bP$q", "\x1b_Ga=T;AAAA"}) |prefix| {
++  var t=try Terminal.init(alloc,.{.cols=20,.rows=6});defer t.deinit(alloc);var s=t.vtStream();defer s.deinit();try s.nextSlice(prefix);try std.testing.expect(!safe(&s));
++  try s.nextSlice("\x1b\\");try std.testing.expect(safe(&s));
++ }
++ for([_][]const u8{"\x1b[?2026h", "\x1b]8;;https://example.test\x1b\\link"}) |input| {
++  var t=try Terminal.init(alloc,.{.cols=20,.rows=6});defer t.deinit(alloc);var s=t.vtStream();defer s.deinit();try s.nextSlice(input);try std.testing.expect(safe(&s));try std.testing.expect(!supported(&t));
++  var bytes:[128*1024]u8=undefined;var w=std.Io.Writer.fixed(&bytes);try std.testing.expectError(error.Unsupported,exportSnapshot(&t,&w));
++ }
++ if(comptime options.kitty_graphics) {
++  var t=try Terminal.init(alloc,.{.cols=20,.rows=6});defer t.deinit(alloc);
++  t.screens.active.kitty_images.total_limit=1024*1024;
++  var cmd=try @import("kitty/graphics_command.zig").Parser.parseString(alloc,"a=T,f=24,s=1,v=1,m=1;AAAA");defer cmd.deinit(alloc);
++  _=t.kittyGraphics(alloc,&cmd);try std.testing.expect(t.screens.active.kitty_images.loading!=null);try std.testing.expect(!supported(&t));
++ }
++ var a=try Terminal.init(alloc,.{.cols=20,.rows=6});defer a.deinit(alloc);var s=a.vtStream();defer s.deinit();try s.nextSlice("wide界e\xcc\x81 and soft wrap with lines\r\n\x1b[44m\x1b[K\x1b[0m");
++ var bytes:[128*1024]u8=undefined;var w=std.Io.Writer.fixed(&bytes);try exportSnapshot(&a,&w);const p=try std.json.parseFromSlice(Captured,alloc,w.buffered(),.{});defer p.deinit();
++ var b=try Terminal.init(alloc,.{.cols=20,.rows=6});defer b.deinit(alloc);var r=b.vtStream();defer r.deinit();try r.nextSlice(p.value.vt);try p.value.state.restore(&b);try structural(&a,&b);
++ try a.resize(alloc,14,8);try b.resize(alloc,14,8);try structural(&a,&b);try s.nextSlice("suffix界\x1b[6n");try r.nextSlice("suffix界\x1b[6n");try structural(&a,&b);
++}
++
++test "Termdock durable single row and protected cells boundary" {
++ const alloc=std.testing.allocator;var a=try Terminal.init(alloc,.{.cols=10,.rows=1});defer a.deinit(alloc);var s=a.vtStream();defer s.deinit();try s.nextSlice("single row");
++ var bytes:[128*1024]u8=undefined;var w=std.Io.Writer.fixed(&bytes);try exportSnapshot(&a,&w);const p=try std.json.parseFromSlice(Captured,alloc,w.buffered(),.{});defer p.deinit();
++ var b=try Terminal.init(alloc,.{.cols=10,.rows=1});defer b.deinit(alloc);var r=b.vtStream();defer r.deinit();try r.nextSlice(p.value.vt);try p.value.state.restore(&b);try structural(&a,&b);try s.nextSlice("suffix");try r.nextSlice("suffix");try structural(&a,&b);
++ try s.nextSlice("\x1b[1\"qP\x1b[0\"q");try std.testing.expect(!supported(&a));
++}
++
++
++// READONLY REVIEW DIAGNOSTICS ONLY. Production candidate source is unchanged.
++test "Termdock regression compact both screen different charsets" {
++ const alloc=std.testing.allocator;
++ var a=try Terminal.init(alloc,.{.cols=20,.rows=6});defer a.deinit(alloc);var s=a.vtStream();defer s.deinit();
++ try s.nextSlice("\x1b(0pq\x1b[?1049h\x1b(Babc");try std.testing.expect(supported(&a));
++ var bytes:[128*1024]u8=undefined;var w=std.Io.Writer.fixed(&bytes);try exportSnapshot(&a,&w);
++ const p=try std.json.parseFromSlice(Captured,alloc,w.buffered(),.{});defer p.deinit();
++ var b=try Terminal.init(alloc,.{.cols=20,.rows=6});defer b.deinit(alloc);var r=b.vtStream();defer r.deinit();try r.nextSlice(p.value.vt);try p.value.state.restore(&b);try structural(&a,&b);try s.nextSlice("Z\x1b[?1049l\x1b8q");try r.nextSlice("Z\x1b[?1049l\x1b8q");try structural(&a,&b);
++}
++test "Termdock regression compact single column row and cell are valid geometry" {
++ const alloc=std.testing.allocator;
++ for([_][2]u16{.{1,4},.{4,1},.{1,1}}) |size| {
++  var a=try Terminal.init(alloc,.{.cols=size[0],.rows=size[1]});defer a.deinit(alloc);var s=a.vtStream();defer s.deinit();try s.nextSlice("x");
++  try std.testing.expect(supported(&a));var bytes:[128*1024]u8=undefined;var w=std.Io.Writer.fixed(&bytes);try exportSnapshot(&a,&w);
++  const p=try std.json.parseFromSlice(Captured,alloc,w.buffered(),.{});defer p.deinit();var b=try Terminal.init(alloc,.{.cols=size[0],.rows=size[1]});defer b.deinit(alloc);var r=b.vtStream();defer r.deinit();try r.nextSlice(p.value.vt);try p.value.state.restore(&b);try structural(&a,&b);try s.nextSlice("Z");try r.nextSlice("Z");try structural(&a,&b);
++ }
++}
++
++test "Termdock history toggles zero budget and trims immediately" {
++ const alloc=std.testing.allocator;
++ var t=try Terminal.init(alloc,.{.cols=20,.rows=4,.max_scrollback=0});defer t.deinit(alloc);var stream=t.vtStream();defer stream.deinit();
++ const screen=t.screens.get(.primary).?;screen.tdSetHistory(1000);
++ for(0..100) |_|try stream.nextSlice("history\r\n");try std.testing.expect(screen.pages.total_rows>4);
++ screen.tdSetHistory(0);try std.testing.expectEqual(@as(usize,4),screen.pages.total_rows);
++ screen.tdSetHistory(1000);for(0..10) |_|try stream.nextSlice("history\r\n");try std.testing.expect(screen.pages.total_rows>4);
++}
++
++test "Termdock dynamic history keeps effective 16MiB live 32MiB replacement budgets and legacy rows" {
++ const alloc=std.testing.allocator;
++ for([_]u16{80,120}) |cols| {for([_]usize{5000,2000}) |requested| {
++  var t=try Terminal.init(alloc,.{.cols=cols,.rows=24,.max_scrollback=0});defer t.deinit(alloc);var stream=t.vtStream();defer stream.deinit();
++  const screen=t.screens.get(.primary).?;screen.tdSetHistory(requested);
++  try std.testing.expectEqual(@as(usize,16*1024*1024),screen.pages.explicit_max_size);
++  try std.testing.expectEqual(@as(usize,16*1024*1024),screen.pages.maxSize());
++  try std.testing.expectEqual(@as(?usize,32*1024*1024),screen.pages.td_max_bytes);
++  for(0..requested+100) |_|try stream.nextSlice("history\r\n");
++  try std.testing.expectEqual(requested,screen.pages.total_rows-screen.pages.rows);
++  screen.tdSetHistory(1000);try std.testing.expectEqual(@as(usize,1000),screen.pages.total_rows-screen.pages.rows);
++  try t.resize(alloc,cols+10,28);try std.testing.expect(screen.pages.total_rows-screen.pages.rows<=1000);
++  try std.testing.expectEqual(@as(usize,16*1024*1024),screen.pages.maxSize());try std.testing.expect(screen.pages.page_size<=32*1024*1024);
++  screen.tdSetHistory(0);try std.testing.expect(screen.no_scrollback);try std.testing.expectEqual(@as(usize,0),screen.pages.explicit_max_size);try std.testing.expectEqual(@as(usize,28),screen.pages.total_rows);
++  screen.tdSetHistory(2000);try std.testing.expect(!screen.no_scrollback);try std.testing.expectEqual(@as(usize,16*1024*1024),screen.pages.maxSize());
++  for(0..2100) |_|try stream.nextSlice("history\r\n");try std.testing.expectEqual(@as(usize,2000),screen.pages.total_rows-screen.pages.rows);
++  try stream.nextSlice("\x1b[?1049h");var it=t.screens.all.iterator();while(it.next()) |entry|entry.value.*.tdSetHistory(if(entry.key==.primary) 1000 else 0);
++  const alt=t.screens.get(.alternate).?;try std.testing.expect(alt.no_scrollback);try std.testing.expectEqual(@as(usize,0),alt.pages.explicit_max_size);
++  for(0..100) |_|try stream.nextSlice("ALT\r\n");try std.testing.expectEqual(@as(usize,28),alt.pages.total_rows);
++  screen.tdTrimHistory(65535,0);try std.testing.expect(screen.pages.total_rows-screen.pages.rows<=1000000/65535);
++ }}
++ var capped=try Terminal.init(alloc,.{.cols=120,.rows=24,.max_scrollback=0});defer capped.deinit(alloc);var output=capped.vtStream();defer output.deinit();
++ const primary=capped.screens.get(.primary).?;primary.tdSetHistory(100000);
++ for(0..8600) |_|try output.nextSlice("logical-cell-cap\r\n");
++ try std.testing.expectEqual(@as(usize,1000000/120),primary.pages.total_rows-primary.pages.rows);
++ try std.testing.expectEqual(@as(usize,16*1024*1024),primary.pages.maxSize());try std.testing.expect(primary.pages.page_size<=32*1024*1024);
++}
++
+--- a/src/terminal/td_path_hit.zig
++++ b/src/terminal/td_path_hit.zig
+@@ -0,0 +1,32 @@
++//! Bounded read-only cell slice for the existing page path-link matcher.
++const std=@import("std");const Terminal=@import("Terminal.zig");
++pub fn capture(t:*const Terminal,x:u16,y:u16,w:*std.Io.Writer) !void {
++ const p=&t.screens.active.pages;if(x>=p.cols or y>=p.rows)return error.InvalidPoint;
++ const clicked=p.pin(.{.viewport=.{.x=x,.y=y}}) orelse return error.InvalidPoint;
++ const pos=p.pointFromPin(.screen,clicked).?.coord();
++ const count=@min(@as(usize,64),4096/@as(usize,p.cols));if(count==0)return error.TooLarge;
++ const start=@as(usize,pos.y)-|count/2;const end=@min(p.total_rows,start+count);
++ try w.print("{{\"version\":1,\"row\":{d},\"column\":{d},\"rows\":[",.{@as(usize,pos.y)-start,x});
++ for(start..end) |row| {
++  if(row!=start)try w.writeByte(',');const pin=p.pin(.{.screen=.{.x=0,.y=@intCast(row)}}).?;
++  try w.print("{{\"wrapped\":{s},\"cells\":[",.{if(pin.rowAndCell().row.wrap_continuation) "true" else "false"});
++  for(pin.cells(.all),0..) |*cell,i| {
++   if(i!=0)try w.writeByte(',');var text:[4096]u8=undefined;var tw=std.Io.Writer.fixed(&text);
++   const width:u8=switch(cell.wide){.wide=>2,.spacer_tail,.spacer_head=>0,.narrow=>1};
++   if(width>0){const cp=cell.codepoint();var bytes:[4]u8=undefined;const len=std.unicode.utf8Encode(if(cp==0) ' ' else cp,&bytes) catch return error.InvalidCodepoint;try tw.writeAll(bytes[0..len]);
++    if(pin.node.data.lookupGrapheme(cell)) |cps| for(cps) |grapheme| {const n=std.unicode.utf8Encode(grapheme,&bytes) catch return error.InvalidCodepoint;try tw.writeAll(bytes[0..n]);};
++   }
++   const style=if(cell.style_id!=0) pin.node.data.styles.get(pin.node.data.memory,cell.style_id).* else @import("style.zig").Style{};
++   const mode:u8=switch(style.fg_color){.none=>0,.palette=>1,.rgb=>2};const color:u32=switch(style.fg_color){.none=>0,.palette=>|v| v,.rgb=>|v| (@as(u32,v.r)<<16)|(@as(u32,v.g)<<8)|v.b};
++   try std.json.Stringify.value(.{.chars=tw.buffered(),.width=width,.fgMode=mode,.fgColor=color},.{},w);
++  }
++  try w.writeAll("]}");
++ }
++ try w.writeAll("]}");
++}
++test "Termdock path hit read-only bounded engine wide combining colored wrapped cells" {
++ const a=std.testing.allocator;var t=try Terminal.init(a,.{.cols=20,.rows=6});defer t.deinit(a);var s=t.vtStream();defer s.deinit();try s.nextSlice("界e\xcc\x81 \x1b[31m/project/dir/long-file.txt:4");
++ var bytes:[256*1024]u8=undefined;var w=std.Io.Writer.fixed(&bytes);try capture(&t,5,1,&w);const parsed=try std.json.parseFromSlice(std.json.Value,a,w.buffered(),.{});defer parsed.deinit();const rows=parsed.value.object.get("rows").?.array.items;
++ try std.testing.expect(rows[1].object.get("wrapped").?.bool);const cells=rows[0].object.get("cells").?.array.items;try std.testing.expectEqual(@as(i64,2),cells[0].object.get("width").?.integer);try std.testing.expectEqualStrings("e\xcc\x81",cells[2].object.get("chars").?.string);try std.testing.expectEqual(@as(i64,1),cells[4].object.get("fgMode").?.integer);
++ var tiny:[16]u8=undefined;var short=std.Io.Writer.fixed(&tiny);try std.testing.expectError(error.WriteFailed,capture(&t,1,1,&short));
++}

@@ -7,13 +7,13 @@ export class TerminalClipboardVideoError extends Error {}
 
 /** Keep uploads in the renderer, where fetch is bound to the active encrypted
  * service. The desktop preload's isolated-world fetch cannot use that channel. */
-export async function uploadTerminalClipboardImage(image: File): Promise<string> {
+export async function uploadTerminalClipboardImage(image: File, signal?: AbortSignal): Promise<string> {
   if (!image.type.startsWith('image/') || image.size === 0) throw new Error('Clipboard image is empty');
   // System paste events commonly name every screenshot image.png. Keep earlier
   // references intact when several screenshots are pasted in succession.
   const extension = image.type === 'image/jpeg' ? 'jpg' : image.type.split('/')[1].replace(/[^a-z0-9]/gi, '') || 'png';
   const file = new File([image], `termdock-clipboard-${Date.now()}-${crypto.randomUUID()}.${extension}`, { type: image.type });
-  const { files } = await uploadFiles('/tmp', [file]);
+  const { files } = await uploadFiles('/tmp', [file], signal);
   if (!files[0]?.path) throw new Error('Upload did not return an image path');
   return files[0].path;
 }
@@ -100,9 +100,9 @@ export async function readTerminalClipboardFiles(): Promise<{ files: File[]; pat
   return { files, paths };
 }
 
-export async function uploadTerminalClipboardFiles(input: File[]): Promise<string[]> {
+export async function uploadTerminalClipboardFiles(input: File[], signal?: AbortSignal): Promise<string[]> {
   if (!input.length) return [];
-  const { files } = await uploadFiles('/tmp', input);
+  const { files } = await uploadFiles('/tmp', input, signal);
   if (files.length !== input.length || files.some(file => !file.path)) {
     throw new Error('Upload did not return every file path');
   }

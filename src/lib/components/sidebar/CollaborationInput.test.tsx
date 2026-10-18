@@ -32,7 +32,7 @@ it('uploads a browser file and inserts its escaped service path at the caret', a
   const file = new File(['content'], 'file with spaces.txt', { type: 'text/plain' });
   expect(paste(field, [file])).toBe(false);
   await waitFor(() => expect(field.value).toBe(String.raw`前文 /tmp/file\ with\ spaces.txt 后文`));
-  expect(state.upload).toHaveBeenCalledWith('/tmp', [file]);
+  expect(state.upload).toHaveBeenCalledWith('/tmp', [file], undefined);
   expect(onUploadChange.mock.calls).toEqual([[1], [-1]]);
 });
 it('gives pasted screenshots unique upload names instead of overwriting image.png', async () => {

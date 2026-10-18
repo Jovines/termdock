@@ -85,7 +85,18 @@ export class CollaborationDirectory {
       }
     }
     for (const session of this.remote) sessions.set(session.sessionId, session);
-    for (const session of this.local.sessions) sessions.set(session.sessionId, session);
+    // A current-service snapshot may also contain saved remote members. It
+    // cannot override a newer peer observation or certify that peer as online.
+    for (const session of this.local.sessions) {
+      const remote = remoteSessionAddress(session.sessionId);
+      sessions.set(session.sessionId, remote && remote.origin !== this.source.origin && remote.origin !== this.source.peerOrigin
+        ? { ...session, status: 'offline', serviceConnected: false } : session);
+    }
+    for (const session of this.remote) {
+      const service = this.peers.services?.find(service => service.origin === session.serviceOrigin || service.origin === remoteSessionAddress(session.sessionId)?.origin);
+      sessions.set(session.sessionId, service?.connected === false
+        ? { ...session, status: 'offline', serviceConnected: false } : session);
+    }
     return { groups: this.local.groups.map(group => ({ ...group, remoteSessions: group.remoteSessions?.map(session => sessions.get(session.sessionId) ?? session) })), sessions: [...sessions.values()], peers: this.peers, capabilities: this.local.capabilities };
   }
 
@@ -109,7 +120,10 @@ export class CollaborationDirectory {
       this.emit();
       return this.snapshot()!;
     }).catch((error) => {
-      if (generation === this.generation) this.localHealthy = false;
+      if (generation === this.generation) {
+        this.localHealthy = false;
+        this.remote = this.remote.map(session => ({ ...session, status: 'offline', serviceConnected: false }));
+      }
       throw error;
     }).finally(() => { if (this.localInFlight === request) this.localInFlight = null; });
     this.localInFlight = request;

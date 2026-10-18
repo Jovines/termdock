@@ -1,3 +1,5 @@
+import { confirmPageAction, runConfirmedPageAction, showPageFeedback } from '../../desktop/pageFeedback';
+import { savedConnection, currentSecureClient, SECURE_STATE_EVENT } from '../../federation/browserIntegration';
 import { FileTreeLoadingSkeleton } from './FileTreeLoadingSkeleton';
 import { LoadingSpinner as RiLoader, LoadingStatus } from '../ui/Loading';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useId, type DragEvent, type ReactNode } from 'react';
@@ -1314,6 +1316,8 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const [visibleSearchCount, setVisibleSearchCount] = useState(SEARCH_INITIAL_VISIBLE);
   const [contentEntries, setContentEntries] = useState<FileContentSearchEntry[]>([]);
   const [deletingFilePath, setDeletingFilePath] = useState<string | null>(null);
+  const deleteLock=useRef({busy:false}),deletePage=useRef(0),deleteRoot=useRef(rootPath);deleteRoot.current=rootPath;
+  useEffect(()=>{const invalidate=()=>{deletePage.current++;};for(const event of ['pagehide','auth:unauthorized',SECURE_STATE_EVENT])window.addEventListener(event,invalidate);return()=>{invalidate();for(const event of ['pagehide','auth:unauthorized',SECURE_STATE_EVENT])window.removeEventListener(event,invalidate);};},[]);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const searchRequestSeqRef = useRef(0);
   const queryLower = query.trim().toLowerCase();
@@ -1358,23 +1362,26 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   }, [revealDirectory?.nonce, revealDirectory?.path, rootPath]);
 
   const handleFileDeleteRequest = useCallback(async (node: FileTreeNode) => {
-    if (deletingFilePath || node.type === 'directory') return;
-    if (!window.confirm(t('fileTree.deleteFileConfirm', { name: node.name }))) return;
-
-    setDeletingFilePath(node.path);
-    try {
-      await deleteFile(node.path);
-      useSidebarStore.getState().applyFileWatchEvents([{ type: 'deleted', path: node.path }]);
-      setSearchEntries((entries) => entries.filter((entry) => entry.path !== node.path));
-      setContentEntries((entries) => entries.filter((entry) => entry.path !== node.path));
-      if (pinnedPaths.has(node.path)) onFilePinToggle?.(node.path);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      window.alert(t('fileTree.deleteFileFailed', { message }));
-    } finally {
-      setDeletingFilePath(null);
-    }
-  }, [deletingFilePath, onFilePinToggle, pinnedPaths, t]);
+    if(deleteLock.current.busy||node.type==='directory')return;
+    const epoch=deletePage.current,target=savedConnection(),client=currentSecureClient(),root=rootPath;
+    const parent=node.path.slice(0,node.path.lastIndexOf('/'))||'/';
+    const lookup=()=>useSidebarStore.getState().directoryCache.get(parent)?.find(entry=>entry.path===node.path);
+    const identity=(file:FileTreeNode)=>JSON.stringify([file.path,file.name,file.type,file.isSymlink,file.modified]);
+    const original=identity(node),known=lookup(),knownIdentity=known?identity(known):null;let completed=false;
+    const current=()=>{const file=lookup();return epoch===deletePage.current&&root===deleteRoot.current&&target===savedConnection()&&client===currentSecureClient()&&!client?.closed
+      &&identity(node)===original&&(file?identity(file)===(knownIdentity??original):knownIdentity===null||completed);};
+    await runConfirmedPageAction(deleteLock.current,{
+      current,confirm:()=>confirmPageAction({title:t('fileTree.deleteFile'),message:t('fileTree.deleteFileConfirm',{name:node.name}),confirmLabel:t('fileTree.deleteFile'),cancelLabel:t('common.cancel')}),
+      submit:async guard=>{await deleteFile(node.path,guard);completed=true;},
+      apply:()=>{
+        useSidebarStore.getState().applyFileWatchEvents([{type:'deleted',path:node.path}]);
+        setSearchEntries(entries=>entries.filter(entry=>entry.path!==node.path));setContentEntries(entries=>entries.filter(entry=>entry.path!==node.path));
+        if(pinnedPaths.has(node.path))onFilePinToggle?.(node.path);
+      },
+      pending:value=>{if(epoch===deletePage.current)setDeletingFilePath(value?node.path:null);},
+      failure:message=>showPageFeedback(t('fileTree.deleteFileFailed',{message})),expiredMessage:'File deletion context changed',
+    });
+  }, [rootPath,onFilePinToggle,pinnedPaths,t]);
 
   // Load root directory
   useEffect(() => {

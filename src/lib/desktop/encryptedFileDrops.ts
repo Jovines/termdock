@@ -1,6 +1,8 @@
 import { selectedTarget } from '../federation/clientScope';
 import type { NativeFileDropPayload } from './nativeBridge';
 
+let dropOperationSequence = 0;
+
 export function canUseLocalDroppedPaths(pageOrigin: string, target: ReturnType<typeof selectedTarget>): boolean {
   if (!target) return false;
   try {
@@ -13,6 +15,8 @@ export function canUseLocalDroppedPaths(pageOrigin: string, target: ReturnType<t
 /** Capture remote drops before legacy desktop preload's document listener.
  * Local same-service paths can still be resolved by Electron's webUtils. */
 export function installEncryptedFileDrops(deliver: (payload: NativeFileDropPayload) => void): () => void {
+  const active = new Set<() => void>(), timers = new Set<number>();
+  const controllers = new WeakMap<HTMLElement, AbortController>();
   const targetFor = (event: DragEvent) => event.target instanceof Element
     ? event.target.closest<HTMLElement>('[data-termdock-terminal-dropzone]') : null;
   const remote = () => !canUseLocalDroppedPaths(location.origin, selectedTarget());
@@ -27,23 +31,48 @@ export function installEncryptedFileDrops(deliver: (payload: NativeFileDropPaylo
     const target = targetFor(event), files = Array.from(event.dataTransfer?.files ?? []);
     if (!target || !files.length || !remote()) return;
     event.preventDefault(); event.stopImmediatePropagation();
+    controllers.get(target)?.abort();
+    const controller = new AbortController();controllers.set(target,controller);
     const sessionKey = target.dataset.termdockTerminalDropzone ?? '';
+    const selected = selectedTarget(), ownerKey = target.dataset.termdockTerminalOwner;
+    const targetPeerId = selected?.targetPeerId ?? null;
+    const operation = String(++dropOperationSequence);
+    const isCurrent = () => !controller.signal.aborted && target.isConnected
+      && target.dataset.termdockTerminalDropzone === sessionKey
+      && target.dataset.nativeFileDropOperation === operation
+      && selectedTarget() === selected && selectedTarget()?.targetPeerId === targetPeerId
+      && target.dataset.termdockTerminalOwner === ownerKey;
+    const discardStale = () => { if (isCurrent()) return false; if (target.dataset.nativeFileDropOperation === operation) { delete target.dataset.nativeFileDrag; delete target.dataset.nativeFileDropState; delete target.dataset.nativeFileDropOperation; } return true; };
+    target.dataset.nativeFileDropOperation = operation;
     target.dataset.nativeFileDrag = 'true'; target.dataset.nativeFileDropState = 'uploading';
-    void import('../terminal/api').then(({ uploadFiles }) => uploadFiles('/tmp', files)).then(result => {
+    const cancelStale = (event?: Event) => { if (event?.type === 'auth:unauthorized' || event?.type === 'pagehide' || !isCurrent()) { controller.abort(); discardStale(); } };
+    const observer = new MutationObserver(() => cancelStale());observer.observe(target,{attributes:true,attributeFilter:['data-termdock-terminal-dropzone','data-termdock-terminal-owner','data-native-file-drop-operation']});
+    const cancel = () => { controller.abort(); discardStale(); cleanup(); };
+    const cleanup = () => { observer.disconnect(); for (const name of ['termdock:secure-state','auth:unauthorized','pagehide']) window.removeEventListener(name,cancelStale); active.delete(cancel); };
+    active.add(cancel);for (const name of ['termdock:secure-state','auth:unauthorized','pagehide']) window.addEventListener(name,cancelStale);
+    void import('../terminal/api').then(({ uploadFiles }) => {
+      if (!isCurrent()) throw new DOMException('Drop target changed','AbortError');
+      return uploadFiles('/tmp', files, controller.signal, undefined, isCurrent);
+    }).then(result => {
       if (result.files.length !== files.length || result.files.some(file => !file.path)) throw new Error('Upload did not return every file path');
+      if (discardStale()) return;
       delete target.dataset.nativeFileDrag; delete target.dataset.nativeFileDropState;
+      delete target.dataset.nativeFileDropOperation;
       deliver({ sessionKey, paths: result.files.map(file => file.path) });
     }).catch(error => {
+      if (discardStale()) return;
       target.dataset.nativeFileDropState = 'error';
       target.dispatchEvent(new CustomEvent('termdock:file-drop-error', { bubbles: true, detail: error instanceof Error ? error.message : 'File upload failed' }));
-      window.setTimeout(() => {
-        if (target.dataset.nativeFileDropState === 'error') {
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        if (isCurrent() && target.dataset.nativeFileDropState === 'error') {
           delete target.dataset.nativeFileDrag; delete target.dataset.nativeFileDropState;
+          delete target.dataset.nativeFileDropOperation;
         }
-      }, 3000);
-    });
+      }, 3000);timers.add(timer);
+    }).finally(cleanup);
   };
   window.addEventListener('dragover', dragover, true);
   window.addEventListener('drop', drop, true);
-  return () => { window.removeEventListener('dragover', dragover, true); window.removeEventListener('drop', drop, true); };
+  return () => { window.removeEventListener('dragover', dragover, true); window.removeEventListener('drop', drop, true); for(const cancel of active)cancel(); for(const timer of timers)clearTimeout(timer);timers.clear(); };
 }

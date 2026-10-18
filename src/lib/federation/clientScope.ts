@@ -22,10 +22,17 @@ export function readSelectedTarget(): SavedTarget | null {
 }
 // Each tab captures its own target. Another tab switching services cannot redirect this one.
 let selected = readSelectedTarget();
+const targetListeners = new Set<(target: SavedTarget | null) => void>();
 export const BOOT_SERVICE_ID = selected?.targetPeerId ?? 'unpaired';
 export function selectedTarget(): SavedTarget | null { return selected; }
+export function subscribeSelectedTarget(listener: (target: SavedTarget | null) => void): () => void {
+  targetListeners.add(listener);
+  return () => targetListeners.delete(listener);
+}
+function announceSelectedTarget(): void { for (const listener of targetListeners) listener(selected); }
 export function saveSelectedTarget(value: SavedTarget): void {
   selected = value;
+  announceSelectedTarget();
   // Child workspaces must not change the root document's boot target. Their
   // address/route metadata is already persisted in the shared service directory.
   if (IS_WORKSPACE_DOCUMENT) return;
@@ -34,6 +41,7 @@ export function saveSelectedTarget(value: SavedTarget): void {
 }
 export function clearSelectedTarget(): void {
   selected = null;
+  announceSelectedTarget();
   if (IS_WORKSPACE_DOCUMENT) return;
   localStorage.removeItem(TARGET_KEY); sessionStorage.removeItem(TARGET_KEY); localStorage.removeItem(ENTRY_KEY);
 }

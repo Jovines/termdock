@@ -6202,6 +6202,8 @@ export function FilePreview({
         </div>
         {downloadState.status === 'error' && <div role="alert" className="mt-2 text-xs text-destructive">{t('rightSidebar.downloadFailed')}: {downloadState.error}</div>}
         {downloadState.status === 'canceled' && <div role="status" className="mt-2 text-xs text-muted-foreground">{t('rightSidebar.downloadCanceled')}</div>}
+        {downloadState.status === 'saved' && <div role="status" className="mt-2 text-xs text-muted-foreground">{t('rightSidebar.downloadSaved')}</div>}
+        {downloadState.status === 'started' && <div role="status" className="mt-2 text-xs text-muted-foreground">{t('rightSidebar.downloadStarted')}</div>}
         {fileSearchOpen && searchableFilePreview && (
           <div className="mt-2 flex min-w-0 items-center gap-1.5" data-file-preview-search>
             <div className="flex min-w-0 flex-1 items-center rounded-lg bg-surface-2 px-2 focus-within:bg-surface-elevated">

@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { downloadFile, type DownloadResult } from '../terminal/api';
 import { useFileDownload } from './useFileDownload';
+import { clearSelectedTarget, saveSelectedTarget } from '../federation/clientScope';
 
 vi.mock('../terminal/api', () => ({ downloadFile: vi.fn() }));
 function deferred<T>() {
@@ -11,7 +12,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-afterEach(() => { cleanup(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); clearSelectedTarget(); vi.resetAllMocks(); });
 
 it.each(['success', 'failure'] as const)('ignores late A %s while B is downloading', async outcome => {
   const a = deferred<DownloadResult>(), b = deferred<DownloadResult>();
@@ -81,4 +82,16 @@ it('keeps a failure visible until retry and clears it while retry is pending', a
   expect(result.current).toMatchObject({ status: 'pending', error: null });
   await act(async () => { retried.resolve('saved'); await second; });
   expect(result.current.status).toBe('saved');
+});
+
+it('aborts an active save immediately when the pinned service target changes', () => {
+  const pending = deferred<DownloadResult>();
+  vi.mocked(downloadFile).mockReturnValueOnce(pending.promise);
+  saveSelectedTarget({ url: 'https://one.test', targetPeerId: 'peer-one' });
+  const { result } = renderHook(() => useFileDownload('/A'));
+  act(() => { void result.current.start(); });
+  const signal = vi.mocked(downloadFile).mock.calls[0][1]!;
+  act(() => saveSelectedTarget({ url: 'https://two.test', targetPeerId: 'peer-two' }));
+  expect(signal.aborted).toBe(true);
+  expect(result.current.status).toBe('canceled');
 });

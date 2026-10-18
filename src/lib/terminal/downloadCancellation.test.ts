@@ -103,11 +103,25 @@ it('reports a native write failure instead of falling through to another save de
   expect(click).not.toHaveBeenCalled();
 });
 
+it('reports browser anchor handoff as started rather than claiming the download completed', async () => {
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  expect(await saveDownloadBlob(new Blob(['bytes']), 'A')).toBe('started');
+  expect(click).toHaveBeenCalledOnce();
+});
+
+it('uses the Preview host writer and reports saved only after its completed receipt', async () => {
+  const save = vi.fn().mockResolvedValue('saved');
+  vi.stubGlobal('termdockDesktop', { saveDownloadBlob: save });
+  expect(await saveDownloadBlob(new Blob(['bytes']), 'A')).toBe('saved');
+  expect(save).toHaveBeenCalledOnce();
+  expect(save.mock.calls[0][1]).toBe('A');
+});
+
 it('distinguishes iOS share dismissal from a successful handoff', async () => {
   const share = vi.fn().mockRejectedValueOnce(new DOMException('Dismissed', 'AbortError')).mockResolvedValueOnce(undefined);
   vi.stubGlobal('navigator', { userAgent: 'iPhone', platform: 'iPhone', share, canShare: () => true });
   expect(await saveDownloadBlob(new Blob(['bytes']), 'A')).toBe('canceled');
-  expect(await saveDownloadBlob(new Blob(['bytes']), 'A')).toBe('saved');
+  expect(await saveDownloadBlob(new Blob(['bytes']), 'A')).toBe('started');
   expect(prepareEncryptedDownload).not.toHaveBeenCalled();
 });
 
@@ -120,4 +134,26 @@ it('does not navigate or start an anchor fallback when canceled while preparing 
   const saving = saveDownloadBlob(new Blob(['bytes']), 'A', controller.signal);
   controller.abort(); attachment.resolve('https://localhost/__termdock-download/123');
   expect(await saving).toBe('canceled'); expect(click).not.toHaveBeenCalled();
+});
+
+it('streams large Preview responses without materializing a Blob', async () => {
+  const stream=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new Uint8Array([1,2,3]));controller.close();}});
+  const body=vi.fn(),save=vi.fn().mockResolvedValue('saved');
+  vi.stubGlobal('termdockDesktop',{saveDownloadStream:save});
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,body:stream,headers:new Headers({'Content-Length':String(129*1024*1024),'Content-Disposition':'attachment; filename="large.bin"'}),blob:body}));
+  expect(await downloadFile('/large.bin')).toBe('saved');expect(body).not.toHaveBeenCalled();
+  expect(save).toHaveBeenCalledWith(stream,'large.bin',{signal:undefined,expectedBytes:129*1024*1024});
+  expect(fetch).toHaveBeenCalledOnce();expect(fetch).toHaveBeenCalledWith('/api/terminal/fs/download?path=%2Flarge.bin');
+});
+it('passes unknown lengths to the stream writer and retains an older Blob-only bridge',async()=>{
+  const stream=new ReadableStream<Uint8Array>({start(c){c.close();}}),save=vi.fn().mockResolvedValue('saved'),blob=vi.fn().mockResolvedValue(new Blob(['old']));
+  vi.stubGlobal('termdockDesktop',{saveDownloadStream:save});vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,body:stream,headers:new Headers(),blob}));
+  expect(await downloadFile('/empty')).toBe('saved');expect(save.mock.calls[0][2].expectedBytes).toBeUndefined();expect(blob).not.toHaveBeenCalled();
+  const legacySave=vi.fn().mockResolvedValue('saved');vi.stubGlobal('termdockDesktop',{saveDownloadBlob:legacySave});
+  expect(await downloadFile('/legacy')).toBe('saved');expect(blob).toHaveBeenCalledOnce();expect(legacySave).toHaveBeenCalledOnce();
+});
+it('does not fall back to Blob or ordinary HTTP after a Preview stream fails',async()=>{
+  const stream=new ReadableStream<Uint8Array>(),blob=vi.fn();vi.stubGlobal('termdockDesktop',{saveDownloadStream:vi.fn().mockRejectedValue(new Error('disconnected'))});
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,body:stream,headers:new Headers(),blob}));
+  await expect(downloadFile('/private')).rejects.toThrow('disconnected');expect(blob).not.toHaveBeenCalled();expect(fetch).toHaveBeenCalledOnce();
 });

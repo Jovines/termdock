@@ -2,6 +2,7 @@ import { CollaborationGroupLauncher } from './CollaborationGroupLauncher';
 import { CollaborationLaunchSettings, CollaborationLaunchChoice } from './CollaborationLaunchSettings';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { CollaborationTaskWorkbench } from './CollaborationTaskWorkbench';
+import { startVisiblePolling } from './startVisiblePolling';
 import { freshGroupSettingsDraft, groupSettingsDirty, readGroupSettingsDraft, rebaseGroupSettingsDraft, writeGroupSettingsDraft, type GroupSettingsDraft } from '../../collaboration/groupSettingsDraft';
 import { collaborationMemberLabel, collaborationServiceLabel } from '../../collaboration/display';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
@@ -384,9 +385,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
   }, [acceptCollaboration, groupWorkspace]);
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh({ silent: true }), 10_000);
-    return () => window.clearInterval(timer);
+    return startVisiblePolling(() => { void refresh({ silent: true }); }, 10_000, ['focus', SECURE_READY_EVENT, 'pageshow']);
   }, [refresh]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented && !floating) onClose(); };
@@ -995,12 +994,8 @@ export function CollaborationTab({ fullWorkspace = false, initialView = 'tasks',
         .catch((error) => { if (!cancelled && current === version) setMessagesError(error instanceof Error ? error.message : '消息加载失败'); })
         .finally(() => { pending = false; if (!cancelled && current === version) setMessagesLoading(false); });
     };
-    load();
-    const timer = window.setInterval(load, 3_000);
-    document.addEventListener('visibilitychange', load);
-    window.addEventListener(SECURE_READY_EVENT, load);
-    window.addEventListener('pageshow', load);
-    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener('visibilitychange', load); window.removeEventListener(SECURE_READY_EVENT, load); window.removeEventListener('pageshow', load); };
+    const stopPolling = startVisiblePolling(load, 3_000, [SECURE_READY_EVENT, 'pageshow']);
+    return () => { cancelled = true; stopPolling(); };
   }, [selectedGroup?.id, active, floating, floatingVisible]);
 
   useEffect(() => {

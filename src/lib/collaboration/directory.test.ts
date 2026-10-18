@@ -103,3 +103,20 @@ describe('collaboration directory ownership and discovery', () => {
     }
   });
 });
+
+it('a cached remote in the current-service snapshot cannot mask a peer disconnection or recovery', async () => {
+  const peers=vi.fn().mockResolvedValueOnce({sessions:[remoteSession],services:[{origin:'https://peer.test',label:'Peer',connected:true}]})
+    .mockResolvedValueOnce({sessions:[remoteSession],services:[{origin:'https://peer.test',label:'Peer',connected:false}]})
+    .mockResolvedValue({sessions:[remoteSession],services:[{origin:'https://peer.test',label:'Peer',connected:true}]});
+  const directory=create(peers,vi.fn(async()=>({...local,sessions:[localSession,remoteSession],groups:[{...local.groups[0],remoteSessions:[remoteSession]}]})));
+  await directory.load();
+  await vi.waitFor(()=>expect(directory.snapshot()?.peers?.state).toBe('ready'));
+  directory.refreshPeers(true);
+  await vi.waitFor(()=>expect(directory.snapshot()?.peers?.state).toBe('partial'));
+  expect(directory.snapshot()?.groups[0].remoteSessions?.[0]).toMatchObject({serviceConnected:false,status:'offline'});
+  await directory.load();
+  expect(directory.snapshot()?.groups[0].remoteSessions?.[0].serviceConnected).toBe(false);
+  directory.refreshPeers(true);
+  await vi.waitFor(()=>expect(directory.snapshot()?.peers?.state).toBe('ready'));
+  expect(directory.snapshot()?.groups[0].remoteSessions?.[0].serviceConnected).toBe(true);
+});

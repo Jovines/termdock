@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collaborationMemberLabel } from './display';
+import { collaborationMemberLabel, collaborationRemoteConnection } from './display';
 
 describe('collaboration member names', () => {
   it('uses readable Agent names for terminal identifiers and distinguishes peers', () => {
@@ -12,5 +12,14 @@ describe('collaboration member names', () => {
     expect(collaborationMemberLabel(named, [named])).toBe('设计评审');
     const unnamed = { sessionId: 'remote:node:two', name: 'remote:node:two' };
     expect(collaborationMemberLabel(unnamed, [unnamed])).toBe('成员');
+  });
+});
+
+describe('remote connectivity evidence', () => {
+  it('does not turn missing connectivity or a last known task status green', () => {
+    expect(collaborationRemoteConnection({ status: 'working' })).toBe('unknown');
+    expect(collaborationRemoteConnection({ status: 'ready', serviceConnected: false })).toBe('disconnected');
+    expect(collaborationRemoteConnection({ status: 'offline', serviceConnected: true })).toBe('disconnected');
+    expect(collaborationRemoteConnection({ status: 'working', serviceConnected: true })).toBe('connected');
   });
 });

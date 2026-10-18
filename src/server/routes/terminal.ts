@@ -1,3 +1,5 @@
+import { copyTmuxSelection, type TmuxCopySelectionResult } from '../utils/tmuxCopySelection.js';
+import { isConfirmedEmptyTmuxServer } from '../utils/tmuxEmptyServerProbe.js';
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type ShellVerificationFailure } from '../agent/nativeResumeOwner.js';
@@ -14,6 +16,7 @@ import { ensureNodePty } from '../utils/ensureNodePty.js';
 import { PtySpawnBackoff, PtySpawnDeferredError } from '../utils/ptySpawnBackoff.js';
 import { collaborationGroupRoutes } from '../agent/collaborationGroupRoutes.js';
 import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
+import { TerminalPasteBuffer } from '../utils/terminalPasteBuffer.js';
 import { SharedSessionSampler, SharedSnapshotCache, type SampleEvent } from '../utils/sharedSampling.js';
 import { batchTmuxOptions, TmuxMetadataWriter } from '../utils/tmuxMetadataWriter.js';
 import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
@@ -2934,10 +2937,10 @@ function getTmuxBinary(): string {
   return 'tmux';  // fallback to PATH
 }
 
-async function runTmux(args: string[]): Promise<string> {
+async function runTmux(args: string[], options?: { maxBuffer: number }): Promise<string> {
   const { stdout } = await execFileAsync(getTmuxBinary(), args, {
     timeout: 5000,
-    maxBuffer: 2 * 1024 * 1024,
+    maxBuffer: options?.maxBuffer ?? 2 * 1024 * 1024,
     env: buildInteractiveColorEnvironment(process.env),
   });
   return stdout;
@@ -5345,19 +5348,25 @@ async function resolveTmuxClientTty(sessionName: string, preferredClientPid: num
 
 async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promise<void> {
   let serverWasMissing = false;
+  let serverIsEmpty = false;
+  let sessionExists = false;
   try {
     await runTmux(['has-session', '-t', sessionName]);
-    await ensureTmuxColorEnvironment(sessionName);
-    return;
+    sessionExists = true;
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     serverWasMissing = isTmuxServerMissingMessage(errorMessage);
     if (!isTmuxSessionMissingMessage(errorMessage)) {
-      throw error;
+      serverIsEmpty = await isConfirmedEmptyTmuxServer(error, sessionName, runTmux);
+      if (!serverIsEmpty) throw error;
     }
   }
 
-  if (!serverWasMissing) {
+  if (sessionExists) {
+    await ensureTmuxColorEnvironment(sessionName);
+    return;
+  }
+  if (!serverWasMissing && !serverIsEmpty) {
     await ensureTmuxColorEnvironment();
   }
 
@@ -9051,7 +9060,9 @@ router.post('/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
   const data = typeof req.body === 'string' ? req.body : '';
 
   try {
-    session.ptyProcess.write(data);
+    const paste = new TerminalPasteBuffer(() => {});
+    const parts = paste.complete(data);
+    for (const part of parts) session.ptyProcess.write(part);
     session.lastActivity = Date.now();
     res.json({ success: true });
   } catch (error) {
@@ -9246,7 +9257,7 @@ router.post('/:sessionId/tmux', async (req, res) => {
       return res.json({ success: true, layout });
     }
 
-    return res.json({ success: true });
+    return res.json({ success: true, ...(result.selection ? { selection: result.selection } : {}) });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     console.error(`Failed to execute tmux action ${action}:`, errorMessage);
@@ -9350,10 +9361,14 @@ async function executeTmuxAction(
   action: string,
   body: Record<string, unknown>,
   control?: TmuxControl,
-): Promise<{ shouldBroadcastLayout: boolean; error?: string }> {
+): Promise<{ shouldBroadcastLayout: boolean; error?: string; selection?: TmuxCopySelectionResult }> {
   let shouldBroadcastLayout = true;
 
   switch (action) {
+    case 'copy-selection': {
+      const selection = await copyTmuxSelection(tmuxTarget, runTmux);
+      return { shouldBroadcastLayout: false, selection };
+    }
     case 'select-pane': {
       const paneId = typeof body.paneId === 'string' ? body.paneId : '';
       if (!paneId) return { shouldBroadcastLayout: false, error: 'paneId is required' };
@@ -9732,6 +9747,13 @@ export function handleTerminalWebSocket(
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(event));
   });
 
+  const pasteInput = new TerminalPasteBuffer(error => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: 'error', error }));
+      ws.close(1008, 'Incomplete terminal paste');
+    }
+  });
+
   // Handle client → server messages
   ws.on('message', async (raw) => {
     const messageReceivedAt = performance.now();
@@ -9746,18 +9768,26 @@ export function handleTerminalWebSocket(
       switch (msg.type) {
         case 'input': {
           if (typeof msg.data === 'string' && msg.data.length > 0) {
-            const data = msg.data;
-            if (attachment) {
-              session.lastActivity = Date.now();
-              attachment.write(data);
-            } else if (session.mode === 'tmux') {
-              await enqueueTmuxIo(session, async () => {
+            let parts: string[];
+            try { parts = pasteInput.push(msg.data); }
+            catch (error) {
+              ws.send(JSON.stringify({ type: 'error', error: getErrorMessage(error) }));
+              ws.close(1008, 'Invalid terminal paste');
+              return;
+            }
+            for (const data of parts) {
+              if (attachment) {
+                session.lastActivity = Date.now();
+                attachment.write(data);
+              } else if (session.mode === 'tmux') {
+                await enqueueTmuxIo(session, async () => {
+                  session.lastActivity = Date.now();
+                  session.ptyProcess.write(data);
+                });
+              } else {
                 session.lastActivity = Date.now();
                 session.ptyProcess.write(data);
-              });
-            } else {
-              session.lastActivity = Date.now();
-              session.ptyProcess.write(data);
+              }
             }
           }
           break;
@@ -9834,8 +9864,13 @@ export function handleTerminalWebSocket(
               msg as unknown as Record<string, unknown>,
               session.tmuxControl,
             );
+          }).catch((error): Awaited<ReturnType<typeof executeTmuxAction>> => {
+            // A correlated copy failure must settle this socket's request, not
+            // become an unrelated terminal error followed by a 30-second wait.
+            if (msg.action !== 'copy-selection') throw error;
+            return { shouldBroadcastLayout: false, error: getErrorMessage(error) || 'Tmux selection copy failed' };
           });
-          ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: !result.error, error: result.error }));
+          ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: !result.error, error: result.error, ...(result.selection ? { selection: result.selection } : {}) }));
           if (result.shouldBroadcastLayout && session.tmuxSessionName) {
             try {
               const layout = await getTmuxLayout(session.tmuxSessionName);
@@ -9922,6 +9957,7 @@ export function handleTerminalWebSocket(
 
   // Cleanup on close
   ws.on('close', () => {
+    pasteInput.clear();
     initialScreen?.cancel();
     initialScreen = null;
     attachment?.close();

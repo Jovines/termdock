@@ -21,3 +21,9 @@ export function collaborationMemberLabel<T extends { sessionId: string; name: st
   const peers = members.filter(member => humanName(member) === name);
   return peers.length > 1 ? `${name} ${peers.findIndex(member => member.sessionId === session.sessionId) + 1}` : name;
 }
+
+/** A saved member or its last task status is not evidence of connectivity. */
+export function collaborationRemoteConnection(session: { serviceConnected?: boolean; status?: string }): 'connected' | 'disconnected' | 'unknown' {
+  if (session.serviceConnected === false || ['offline', 'disconnected', 'service-unreachable', 'closed', 'exited'].includes(session.status ?? '')) return 'disconnected';
+  return session.serviceConnected === true ? 'connected' : 'unknown';
+}

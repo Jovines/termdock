@@ -6,6 +6,7 @@ import { collaborationResultPresentation } from '../../collaboration/resultPrese
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, ArrowUpRight, Circle, CircleCheck, MessageCircle, MoreHorizontal, Play, Search, SlidersHorizontal, X } from 'lucide-react';
 import { collaborationTaskBlockers, collaborationTaskNeedsAttention, collaborationTaskStage } from '../../collaboration/taskState';
+import { startVisiblePolling } from './startVisiblePolling';
 import type { CollaborationTaskView, TaskMember } from '../../terminal/api';
 
 export type TaskLane = 'backlog' | 'running' | 'attention' | 'done';
@@ -31,7 +32,7 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
   const previousWidth = useRef(0);
   const scrollingToLane = useRef<TaskLane | null>(null);
   const [now, setNow] = useState(Date.now);
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
+  useEffect(() => startVisiblePolling(() => setNow(Date.now()), 30_000), []);
   const [desktop, setDesktop] = useState(false);
   useEffect(() => {
     const observer = new ResizeObserver(entries => {

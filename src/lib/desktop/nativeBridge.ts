@@ -42,8 +42,23 @@ export interface DesktopAppUpdateState {
   error: string | null;
 }
 
+export type TerminalEngine = 'web' | 'native';
+export interface TerminalEngineState { selected:TerminalEngine; active:TerminalEngine; nativeSupported:boolean; targetVerified?:boolean; epoch:string }
 export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
+  terminalEngine?: {
+    ready:Promise<TerminalEngineState>;
+    getState():Promise<TerminalEngineState>;
+    set(engine:TerminalEngine):Promise<TerminalEngineState>;
+  };
   platform: string;
+  /** Explicit Preview page-dialog capability; legacy Electron/browser omit it. */
+  confirmationUI?: 'page-v1';
+  confirm?(options: { title: string; message: string; confirmLabel: string; cancelLabel: string }): Promise<boolean>;
+  /** Bounded, visible page feedback; no business operation or approval. */
+  alert?(message:string):void;
+  /** Metadata receipt after real page authorization; never grants permission. */
+  acknowledgeServiceInvitation?(options: { targetPeerId: string; fingerprint: string }, isCurrent: () => boolean): Promise<boolean>;
+  nativeTerminal?: NativeTerminalBridge;
   deviceInfo?(): Promise<import('../../server/federation/deviceProfile').DeviceProfile>;
   /** Versioned discovery/mutation contract; legacy clients omit this object. */
   collaboration?: { protocolVersion: number; peers: boolean; save: boolean };
@@ -73,6 +88,9 @@ export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   readClipboardFiles?(options?: { localServiceId?: string }): Promise<Array<{ name: string; bytes?: ArrayBuffer; type?: string; path?: string }>>;
   /** Native PNG bytes only; the renderer owns encrypted upload and target routing. */
   readClipboardImage?(): Promise<ArrayBuffer | null>;
+  /** Preview saves page-fetched encrypted download bytes through a bounded native transfer. */
+  saveDownloadBlob?(blob: Blob, filename: string, signal?: AbortSignal): Promise<'saved' | 'started' | 'canceled'>;
+  saveDownloadStream?(stream: ReadableStream<Uint8Array>, filename: string, options?: { signal?: AbortSignal; expectedBytes?: number }): Promise<'saved' | 'canceled'>;
   /** Legacy isolated preload uploader. New UI must upload in the encrypted renderer. */
   pasteClipboardImage?(): Promise<string | null>;
   onNativeFileDrop(
@@ -141,4 +159,18 @@ export function subscribeNativeFileDrops(
   return () => {
     nativeFileDropListeners.delete(listener);
   };
+}
+
+export interface NativeTerminalEvent {
+  token: string; epoch: string;
+  event: { type: string; focused?:boolean; revision?:number; status?: 'TooLarge' | 'Unreadable' | 'WriteFailed'; sequence?: number; base64?: string; cols?: number; rows?: number; text?: string; message?: string; key?: string; keyCode?: number; modifiers?: number; wheel?: {deltaY:number;x:number;y:number;width:number;height:number;cellHeight:number;modifiers:number;precise:boolean}; position?: {x:number;y:number;rows:number} };
+}
+export interface NativeTerminalBridge {
+  readonly available: boolean;
+  request(request: Record<string, unknown>): Promise<unknown>;
+  subscribe(listener: (event: NativeTerminalEvent) => void): () => void;
+}
+export function supportsNativeTerminal(): boolean {
+  const native = getTermdockDesktopBridge()?.nativeTerminal;
+  return native?.available === true && typeof native.request === 'function' && typeof native.subscribe === 'function';
 }

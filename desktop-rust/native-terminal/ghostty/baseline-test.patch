@@ -1,0 +1,85 @@
+--- a/src/terminal/Parser.zig
++++ b/src/terminal/Parser.zig
+@@ -232,7 +232,7 @@
+         .intermediates = undefined,
+         .params = undefined,
+     };
+-    if (std.valgrind.runningOnValgrind() > 0) {
++    if (!@inComptime() and std.valgrind.runningOnValgrind() > 0) {
+         // Initialize our undefined fields so Valgrind can catch it.
+         // https://github.com/ziglang/zig/issues/19148
+         result.intermediates = undefined;
+--- a/src/terminal/osc.zig
++++ b/src/terminal/osc.zig
+@@ -377,7 +377,7 @@
+             // visually easily duplicate them in the Valgrind check below.
+             .buffer = undefined,
+         };
+-        if (std.valgrind.runningOnValgrind() > 0) {
++        if (!@inComptime() and std.valgrind.runningOnValgrind() > 0) {
+             // Initialize our undefined fields so Valgrind can catch it.
+             // https://github.com/ziglang/zig/issues/19148
+             result.buffer = undefined;
+@@ -434,7 +434,7 @@
+         self.writer = null;
+         self.command = .invalid;
+ 
+-        if (std.valgrind.runningOnValgrind() > 0) {
++        if (!@inComptime() and std.valgrind.runningOnValgrind() > 0) {
+             // Initialize our undefined fields so Valgrind can catch it.
+             // https://github.com/ziglang/zig/issues/19148
+             self.buffer = undefined;
+--- a/src/termio/External.zig
++++ b/src/termio/External.zig
+@@ -415,6 +415,8 @@
+     S.write_len = 0;
+     S.resize_cols = 0;
+ 
++    var td: termio.Termio.ThreadData = undefined;
++    td.backend = .{ .external = .{} };
+     var ext = try External.init(testing.allocator, .{
+         .write_callback = S.writeCallback,
+         .resize_callback = S.resizeCallback,
+@@ -422,7 +424,7 @@
+     defer ext.deinit();
+ 
+     // Test write
+-    try ext.queueWrite(testing.allocator, undefined, "hello", false);
++    try ext.queueWrite(testing.allocator, &td, "hello", false);
+     try testing.expectEqualStrings("hello", S.write_data[0..S.write_len]);
+ 
+     // Test resize
+@@ -444,27 +446,29 @@
+ 
+     S.write_len = 0;
+ 
++    var td: termio.Termio.ThreadData = undefined;
++    td.backend = .{ .external = .{} };
+     var ext = try External.init(testing.allocator, .{
+         .write_callback = S.writeCallback,
+     });
+     defer ext.deinit();
+ 
+     // Without linefeed, CR should pass through unchanged
+-    try ext.queueWrite(testing.allocator, undefined, "a\rb", false);
++    try ext.queueWrite(testing.allocator, &td, "a\rb", false);
+     try testing.expectEqualStrings("a\rb", S.write_data[0..S.write_len]);
+ 
+     // With linefeed, CR should be expanded to CRLF
+     S.write_len = 0;
+-    try ext.queueWrite(testing.allocator, undefined, "a\rb", true);
++    try ext.queueWrite(testing.allocator, &td, "a\rb", true);
+     try testing.expectEqualStrings("a\r\nb", S.write_data[0..S.write_len]);
+ 
+     // Multiple CRs
+     S.write_len = 0;
+-    try ext.queueWrite(testing.allocator, undefined, "\r\r", true);
++    try ext.queueWrite(testing.allocator, &td, "\r\r", true);
+     try testing.expectEqualStrings("\r\n\r\n", S.write_data[0..S.write_len]);
+ 
+     // No CRs — should pass through unchanged even in linefeed mode
+     S.write_len = 0;
+-    try ext.queueWrite(testing.allocator, undefined, "hello", true);
++    try ext.queueWrite(testing.allocator, &td, "hello", true);
+     try testing.expectEqualStrings("hello", S.write_data[0..S.write_len]);
+ }

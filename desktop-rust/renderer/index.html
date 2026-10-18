@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Termdock Preview</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="center.css"><script src="center.js" defer></script></head>
+<body><main>
+<header><span class="badge">PREVIEW</span><h1>Termdock 连接中心</h1><p>连接已有服务。关闭 Preview 仅退出桌面窗口，服务继续运行。</p></header>
+<section aria-labelledby="connections-title"><h2 id="connections-title">我的服务</h2><div id="connections"></div></section>
+<section><h2>添加服务</h2><form id="connection-form">
+<label>名称<input name="label" maxlength="120" placeholder="例如：家里的 Mac"></label>
+<label>服务地址<input name="url" type="url" required placeholder="https://host:9834"></label>
+<label>目标服务 ID<input name="targetPeerId" placeholder="12D3KooW…（密码服务或中转连接必填）"></label>
+<label>目标原始地址<input name="serviceOrigin" type="url" placeholder="中转时填写目标服务地址"></label>
+<label>入口服务 ID<input name="entryServiceId" placeholder="中转时填写入口服务 ID"></label>
+<label>邀请链接<input name="invitation" placeholder="可选；仅本次打开使用，不保存邀请密钥"></label>
+<div class="actions"><button type="submit">保存并连接</button><button type="button" id="local">连接本机已有服务</button></div>
+</form></section>
+<details><summary>HTTPS 证书信任</summary><p>自签名证书需在 Preview 单独信任。请通过可信渠道核对证书 SHA-256 指纹。信任仅限该地址，证书变化会停止连接。</p>
+<form id="certificate-form"><label>精确 HTTPS 地址<input name="origin" type="url" required placeholder="https://host:9834"></label><label>SHA-256 指纹<input name="fingerprint" required placeholder="64 位十六进制，可带冒号"></label><div class="actions"><button type="submit">保存限定信任</button><button type="button" id="revoke">撤销该地址信任</button></div></form><div id="pins"></div></details>
+<p class="limitations">本版使用现有 React/xterm。原生终端、原生通知、托盘、浮窗、后台 Service Worker 和自动更新尚未启用。密码服务请填写目标服务 ID 或邀请链接；授权在服务页面完成。</p>
+<footer><button id="config" type="button">打开 Preview 配置目录</button><p id="status" role="status" aria-live="polite"></p></footer>
+</main></body></html>

@@ -43,7 +43,10 @@
     "test": "vitest --passWithNoTests",
     "test:ui": "vitest --ui",
     "prepublishOnly": "npm run build",
-    "postinstall": "node scripts/postinstall.mjs"
+    "postinstall": "node scripts/postinstall.mjs",
+    "preview:desktop:dev": "npm --prefix desktop-rust run dev",
+    "preview:desktop:build": "npm --prefix desktop-rust run build",
+    "preview:desktop:test": "npm --prefix desktop-rust run verify"
   },
   "dependencies": {
     "@chainsafe/libp2p-noise": "17.0.0",

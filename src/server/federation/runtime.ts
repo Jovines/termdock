@@ -32,13 +32,23 @@ interface SocketHandlers {
 class LogicalSocket extends EventEmitter {
   readonly OPEN = 1;
   readyState = 1;
-  bufferedAmount = 0;
-  constructor(private channel: PacketChannel, readonly id: string, private canRead: () => boolean) { super(); }
+  get bufferedAmount(): number { return this.channel.queuedBytesFor(this.id); }
+  private readonly maxQueuedBytes: number;
+  constructor(private channel: PacketChannel, readonly id: string, private canRead: () => boolean, maxQueuedBytes = 4 * 1024 * 1024) {
+    super(); this.maxQueuedBytes = maxQueuedBytes;
+  }
   send(data: string): void {
     if (this.readyState !== 1) return;
     if (!this.canRead()) { this.close(4003, 'Authorization revoked'); return; }
+    // Apply the terminal backlog threshold to bytes already queued, leaving a
+    // single protocol-valid record (up to MAX_PACKET) intact. Other logical
+    // streams retain the shared channel budget and its own backpressure guard.
+    if (this.channel.queuedBytesFor(this.id) > this.maxQueuedBytes) {
+      this.close(1013, 'Output consumer is too slow');
+      return;
+    }
     try { this.channel.send({ type: 'ws-data', id: this.id, data }); }
-    catch (error) { this.channel.close(error instanceof Error ? error : new Error('Output transport failed')); this.close(); }
+    catch { this.close(1013, 'Output consumer is too slow'); }
   }
   close(code = 1000, reason = ''): void {
     if (this.readyState !== 1) return;
@@ -104,7 +114,9 @@ export async function createFederationRuntime(app: express.Express, directory: s
     delete request.headers['x-termdock-inner'];
     const subject = request.headers['x-termdock-device'];
     delete request.headers['x-termdock-device'];
-    markEncryptedRequest(request, typeof subject === 'string' ? subject : undefined); app(request, response);
+    const fullService = request.headers['x-termdock-full-service'] === '1';
+    delete request.headers['x-termdock-full-service'];
+    markEncryptedRequest(request, typeof subject === 'string' ? subject : undefined, fullService); app(request, response);
   });
   await new Promise<void>((resolve, reject) => { internal.once('error', reject); internal.listen(0, '127.0.0.1', resolve); });
   const address = internal.address();
@@ -163,7 +175,8 @@ export async function createFederationRuntime(app: express.Express, directory: s
         };
         try {
           httpAllowed(operation.head);
-          const headers = new Headers({ 'x-termdock-inner': internalToken, 'x-termdock-device': subjectId });
+          const headers = new Headers({ 'x-termdock-inner': internalToken, 'x-termdock-device': subjectId,
+            'x-termdock-full-service': full(subjectId) ? '1' : '0' });
           const supplied = operation.head.headers;
           if (supplied && typeof supplied === 'object') for (const [name, value] of Object.entries(supplied)) {
             if (['content-type', 'accept', 'range', 'if-none-match', 'if-modified-since'].includes(name.toLowerCase()) && typeof value === 'string') headers.set(name, value);
@@ -415,7 +428,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             else if (url.pathname === '/api/control/ws') check('service.view');
             else if (androidMatch || computer) { if (!full(subjectId)) throw new Error('API_NOT_ALLOWED'); }
             else throw new Error('API_NOT_ALLOWED');
-            const logical = new LogicalSocket(channel, packet.id, () => (androidMatch || computer) ? full(subjectId) : allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]));
+            const logical = new LogicalSocket(channel, packet.id, () => (androidMatch || computer) ? full(subjectId) : allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]), match ? 1024 * 1024 : undefined);
             sockets.set(packet.id, { socket: logical, sessionId: match?.[1], android: Boolean(androidMatch), computer,
               computerProtocol: computer ? url.searchParams.get('protocol') ?? 'vnc' : undefined });
             logical.once('close', () => sockets.delete(packet.id));

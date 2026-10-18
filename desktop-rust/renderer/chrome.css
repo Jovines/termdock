@@ -1,0 +1,58 @@
+html[data-termdock-desktop='true'] {
+        --safe-top-inset: max(env(safe-area-inset-top, 0px), 38px) !important;
+      }
+      html[data-termdock-desktop='true'] #root {
+        padding-top: 0 !important;
+      }
+      html[data-termdock-desktop='true'] body::after {
+        display: none !important;
+      }
+      html[data-termdock-desktop='true'] #root main > div > div:first-child {
+        padding-left: 80px !important;
+        position: relative;
+        -webkit-app-region: no-drag;
+      }
+      html[data-termdock-desktop='true'] #root main > div > div:first-child::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        width: min(240px, 25vw);
+        transform: translateX(-50%);
+        pointer-events: none;
+        -webkit-app-region: drag;
+      }
+      html[data-termdock-desktop='true'] #root .h-full.flex.flex-col.app-chrome-bg.border-r > .shrink-0.border-b {
+        padding-left: 80px !important;
+        -webkit-app-region: drag;
+      }
+      html[data-termdock-desktop='true'] #root button,
+      html[data-termdock-desktop='true'] #root a,
+      html[data-termdock-desktop='true'] #root input,
+      html[data-termdock-desktop='true'] #root textarea,
+      html[data-termdock-desktop='true'] #root select,
+      html[data-termdock-desktop='true'] #root [data-rbd-draggable-id] {
+        -webkit-app-region: no-drag;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] {
+        padding-top: 0 !important;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'][style*='pointer-events: auto'] {
+        transform: none !important;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] > div:first-child {
+        -webkit-app-region: no-drag;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] > div:first-child > div:first-child > .min-w-0.flex-1 {
+        -webkit-app-region: drag;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] div:has(> [data-right-search]) + div:has(> button[aria-pressed]) {
+        width: fit-content !important;
+        margin-left: auto !important;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] div:has(> [data-right-search]) + div:has(> button[aria-pressed]) > button {
+        flex: none !important;
+        padding: 0.125rem 0.5rem !important;
+        font-size: 10px !important;
+      }

@@ -85,6 +85,7 @@ describe('browser federation entry routing', () => {
   });
   it.each([
     [401, { code: 'INVALID_PASSWORD', error: 'private-proof-details' }, 'invalidPassword'],
+    [404, { error: 'private-route-not-found' }, 'unavailable'],
     [503, { error: 'private-server-stack' }, 'unavailable'],
     [429, { code: 'RATE_LIMITED', retryAfterMs: 12345, error: 'private-rate-details' }, 'rateLimited'],
   ] as const)('keeps public bootstrap status %s distinct without exposing upstream details', async (status, body, reason) => {
@@ -138,9 +139,9 @@ describe('browser federation entry routing', () => {
     const document = { version: 1, generatedAt: '2026-10-09T09:00:00Z', summary: 'Remote project',
       perspectives: [{ id: 'overview', title: 'Overview', summary: '',
         nodes: [{ id: 'server', title: 'Server', summary: '', files: [{ path: 'src/server.ts', line: 2 }] }], edges: [] }] };
-    const business = vi.fn(async (input: string) => input.startsWith('/api/terminal/fs/list?')
-      ? Response.json({ entries: [{ name: 'feature-Upload-12345678.json', isDirectory: false }] })
-      : Response.json({ content: JSON.stringify(document), binary: false, truncated: false }));
+    const business = vi.fn(async (input: string) => input.startsWith('/api/terminal/architecture/documents?')
+      ? Response.json({ files: ['.termdock/architectures/feature-Upload-12345678.json'] })
+      : Response.json({ document, revision: null }));
     mocks.connect.mockImplementation(async args => {
       if (mode === 'relay' && args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('direct unavailable');
       return Object.assign(await base(args), { fetch: business });
@@ -156,10 +157,10 @@ describe('browser federation entry routing', () => {
     const { listArchitectures, readArchitecture } = await import('../architecture/api');
     const controller = new AbortController();
     expect(await readArchitecture('/remote project', controller.signal)).toEqual(document);
-    expect(business).toHaveBeenCalledWith('/api/terminal/fs/read?path=%2Fremote+project%2F.termdock%2Farchitecture.json&action=view_architecture', expect.objectContaining({ signal: controller.signal, cache: 'no-store' }));
+    expect(business).toHaveBeenCalledWith('/api/terminal/architecture/document?file=.termdock%2Farchitecture.json&root=%2Fremote+project', expect.objectContaining({ signal: controller.signal, cache: 'no-store' }));
     expect(await listArchitectures('/remote project', controller.signal)).toEqual(['.termdock/architectures/feature-Upload-12345678.json']);
-    expect(business).toHaveBeenCalledWith('/api/terminal/fs/list?path=%2Fremote+project%2F.termdock%2Farchitectures&action=list_architectures&showHidden=false', expect.objectContaining({ signal: controller.signal, cache: 'no-store' }));
-    business.mockResolvedValueOnce(Response.json({ error: 'Path does not exist: /remote project/.termdock/architecture.json' }, { status: 403 }));
+    expect(business).toHaveBeenCalledWith('/api/terminal/architecture/documents?root=%2Fremote+project', expect.objectContaining({ signal: controller.signal, cache: 'no-store' }));
+    business.mockResolvedValueOnce(Response.json({ document: null, revision: null }));
     expect(await readArchitecture('/remote project', controller.signal)).toBeNull();
     business.mockRejectedValueOnce(new Error('Secure connection closed'));
     await expect(readArchitecture('/remote project', controller.signal)).rejects.toThrow('Secure connection closed');
@@ -185,7 +186,9 @@ describe('browser federation entry routing', () => {
     const previous = await integration.connectDevice(target);
     integration.installEncryptedFetch(); vi.stubGlobal('fetch', window.fetch);
     const api = await import('../terminal/api');
-    const brokenBody = () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('Secure connection closed')); } }));
+    const brokenBody = () => new Response(new ReadableStream({ start(controller) {
+      controller.error(Object.assign(new Error('Unexpected EOF - stream closed while reading 0/1 bytes'), { name: 'UnexpectedEOFError' }));
+    } }));
     business.mockImplementationOnce(async () => brokenBody()).mockImplementationOnce(async () => brokenBody());
     const connectedBefore = mocks.connect.mock.calls.length;
     expect(await Promise.all([api.listCollaborationTasks('test'), api.listCollaborationMessages('test')])).toEqual([{ tasks: [], messages: [] }, { tasks: [], messages: [] }]);
@@ -210,14 +213,28 @@ describe('browser federation entry routing', () => {
     const controller = new AbortController();
     const read = vi.fn(async () => {
       if (scenario === 'abort') controller.abort();
-      if (scenario === 'switch') mocks.saved.mockReturnValue({ ...target, targetPeerId: 'C' });
-      throw new Error('Secure connection closed');
+      if (scenario === 'switch') mocks.saved.mockReturnValue({ ...target, url: 'https://alternate.example' });
+      throw scenario === 'switch'
+        ? Object.assign(new Error('Unexpected EOF - stream closed while reading 0/1 bytes'), { name: 'UnexpectedEOFError' })
+        : new Error('Secure connection closed');
     });
     if (scenario === 'unavailable') mocks.connect.mockRejectedValue(new Error('network unavailable'));
     await expect(scenario === 'write' ? api.updateCollaborationTask('task', { kind: 'revise', content: 'follow up', idempotencyKey: 'one' })
-      : integration.readWithSecureReconnect(read, controller.signal)).rejects.toThrow(scenario === 'unavailable' ? 'network unavailable' : 'Secure connection closed');
+      : integration.readWithSecureReconnect(read, controller.signal)).rejects.toThrow(scenario === 'unavailable' ? 'network unavailable'
+        : scenario === 'switch' ? 'Unexpected EOF - stream closed while reading 0/1 bytes' : 'Secure connection closed');
     expect(scenario === 'write' ? business : read).toHaveBeenCalledOnce();
     expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['switch','abort'] as const)('rejects a first successful read completed after %s without retry',async scenario=>{
+    const integration=await import('./browserIntegration');
+    const target={url:'https://b.example',targetPeerId:'B'};mocks.saved.mockReturnValue(target);
+    const controller=new AbortController();let finish!:(value:string)=>void;
+    const read=vi.fn(()=>new Promise<string>(resolve=>{finish=resolve;}));
+    const result=integration.readWithSecureReconnect(read,controller.signal);
+    if(scenario==='switch')mocks.saved.mockReturnValue({...target,url:'https://other.example'});else controller.abort();
+    finish('old body');await expect(result).rejects.toThrow(scenario==='switch'?'Secure read target changed':'aborted');
+    expect(read).toHaveBeenCalledTimes(1);expect(mocks.connect).not.toHaveBeenCalled();
   });
 
   it.each(['init', 'request', 'override', 'already-aborted'] as const)('honors %s cancellation while the first encrypted connection is pending', async mode => {

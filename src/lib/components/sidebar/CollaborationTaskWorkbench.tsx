@@ -6,6 +6,7 @@ import { collaborationResultPresentation } from '../../collaboration/resultPrese
 import { CollaborationInput } from './CollaborationInput';
 import { isKeyboardLayerSource } from '../../hooks/useKeyboardLayer';
 import { CollaborationKanban } from './CollaborationKanban';
+import { startVisiblePolling } from './startVisiblePolling';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, ArrowUpRight, Check, ChevronRight, Circle, CircleCheck, ExternalLink, MessageCircle, Plus, RefreshCw, Search, Send, X } from 'lucide-react';
 import { collaborationTaskBlockers, collaborationTaskStage as taskStage, collaborationTaskNeedsAttention as needsAttention, taskReportLabels as labels } from '../../collaboration/taskState';
@@ -173,13 +174,7 @@ export function CollaborationTaskWorkbench({ group, sessions, active, onOpenSess
   };
   useEffect(() => {
     if (!active) return;
-    void refresh();
-    const tick = () => { if (!document.hidden && navigator.onLine !== false) void refresh(); };
-    const timer = setInterval(tick, 2500);
-    document.addEventListener('visibilitychange', tick);
-    window.addEventListener(SECURE_READY_EVENT, tick);
-    window.addEventListener('pageshow', tick);
-    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', tick); window.removeEventListener(SECURE_READY_EVENT, tick); window.removeEventListener('pageshow', tick); };
+    return startVisiblePolling(() => { if (navigator.onLine !== false) void refresh(); }, 2500, [SECURE_READY_EVENT, 'pageshow']);
     // The parent keys this component by group, isolating drafts and late requests.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, group.id]);

@@ -272,7 +272,7 @@ export interface CreateTerminalOptions {
 }
 
 export interface TmuxActionPayload {
-  action: 'select-pane' | 'select-window' | 'split-pane' | 'close-pane' | 'copy-mode' | 'scroll' | 'new-window' | 'switch-session';
+  action: 'select-pane' | 'select-window' | 'split-pane' | 'close-pane' | 'copy-mode' | 'copy-selection' | 'scroll' | 'new-window' | 'switch-session';
   paneId?: string;
   windowId?: string;
   direction?: 'h' | 'v' | 'up' | 'down';
@@ -280,6 +280,14 @@ export interface TmuxActionPayload {
   lines?: number;
   tmuxSessionName?: string;
 }
+
+export interface TmuxCopySelection {
+  status: 'copied' | 'empty';
+  paneId: string;
+  text: string;
+  bytes: number;
+}
+export interface TmuxActionResult { success: boolean; layout?: TmuxLayout; selection?: TmuxCopySelection }
 
 // Stream Connection Options
 export interface TerminalStreamOptions {
@@ -323,7 +331,7 @@ export interface TerminalAPI {
   close(sessionId: string): Promise<void>;
   restartSession?(currentSessionId: string, options: CreateTerminalOptions): Promise<TerminalSession>;
   forceKill?(options: ForceKillOptions): Promise<void>;
-  tmuxAction?(sessionId: string, payload: TmuxActionPayload): Promise<{ success: boolean; layout?: TmuxLayout }>;
+  tmuxAction?(sessionId: string, payload: TmuxActionPayload): Promise<TmuxActionResult>;
   listTmuxSessions?(): Promise<TmuxSessionSummary[]>;
   getTmuxStatus?(): Promise<TmuxStatus>;
   checkHealth?(sessionId: string): Promise<{

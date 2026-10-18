@@ -1,0 +1,47 @@
+// Opt-in owned receiver contract only: no physical keys, system clipboard,
+// service PTY or OS update. Every call uses normal production capabilities.
+(async()=>{
+ const nonce=window.__TD_NATIVE_GATE_NONCE,pageEpoch=window.__TD_NATIVE_GATE_EPOCH;
+ const prior=window.__TD_NATIVE_GATE_STATE;
+ if(window.__TD_NATIVE_GATE_RUNNING){
+  if(prior?.pageEpoch!==pageEpoch){if(prior)prior.cancelled=true;tdNativeGateSignal(nonce,'result',{ok:false,pageEpoch,progressIndex:0,steps:[],acks:[],stages:[],previousPageEpoch:prior?.pageEpoch??null,previousFinished:!!prior?.finished,error:'Interaction receiver crossed epoch; previous result unknown; no restart'});}
+  return;
+ }
+ window.__TD_NATIVE_GATE_RUNNING=true;
+ const state=window.__TD_NATIVE_GATE_STATE={pageEpoch,steps:[],acks:[],stages:[],stageDropped:0,lastAction:null,finished:false};
+ const steps=state.steps,acks=state.acks,stages=state.stages,events=[];let index=0,token,epoch,sequence=0,cursor=0;
+ const assert=(ok,message)=>{if(!ok)throw Error(message);},pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+ const current=()=>{if(state.cancelled||window.__TD_NATIVE_GATE_EPOCH!==pageEpoch)throw Error('Interaction receiver epoch changed; no retry');};
+ const publish=(phase,detail)=>{current();if(detail)state.lastAction=detail;if(stages.length===128){stages.shift();state.stageDropped++;}stages.push({pageEpoch,index:++index,phase,detail});tdNativeGateSignal(nonce,'progress',{pageEpoch,progressIndex:index,phase,lastAction:state.lastAction,steps,acks,stages,stageDropped:state.stageDropped});};
+ const until=async(test,message)=>{const start=performance.now();while(!await test()){current();if(performance.now()-start>12000)throw Error(message);await pause(10);}};
+ const record=(name,value)=>{assert(steps.length<64,'Interaction step bound');steps.push({name,value});publish('step-complete');};
+ let unsubscribe;
+ try{
+  assert(!window.__TD_NATIVE_GATE_INTERRUPTED,'Unexpected receiver epoch; no restart');publish('interaction-receiver-entered');
+  await until(()=>window.termdockDesktop?.nativeTerminal?.available,'Normal native bridge unavailable');
+  const bridge=window.termdockDesktop.nativeTerminal;unsubscribe=bridge.subscribe(value=>{assert(events.length<4096,'Interaction event bound');events.push(value);});
+  const request=tdNativeGateRequester(bridge,()=>token,pause,(phase,detail)=>publish(phase,{action:detail.action,attempt:detail.attempt,token:detail.token,sequence:detail.sequence,status:detail.receipt?.status,error:detail.error}));
+  const base={view:'owned-interaction-receiver',session:'controlled-no-PTY',device:'controlled-device',fontSize:13,viewportWidth:innerWidth,viewportHeight:innerHeight,options:{columns:80,rows:24,history:5000,palette:{ansi:Array.from({length:16},(_,i)=>[i*15,i*15,i*15]),foreground:[206,205,195],background:[28,27,26],cursor:[206,205,195],selection:[64,62,60]},font:{family:'JetBrainsMonoNL NFM',features:['+liga'],letter_spacing:1,extra_height_percent:5,weight:400,weight_bold:700,contrast:450,bold_is_bright:true}}};
+  const rect={x:8,y:8,width:Math.min(700,innerWidth-16),height:Math.min(400,innerHeight-16),viewportWidth:innerWidth,viewportHeight:innerHeight};
+  const layout=async()=>{const value=await request('layout');assert(value.complete&&value.token===token&&value.epoch===epoch,'Actual layout receipt mismatch');return value;};
+  const create=async()=>{const value=await request('create',base);token=value.token;epoch=value.epoch;sequence=value.sequence;await layout();await request('rect',rect);await layout();return value;};
+  const write=async(bytes,name)=>{if(typeof bytes==='string')bytes=new TextEncoder().encode(bytes);for(let offset=0;offset<bytes.length;offset+=262144){const part=bytes.slice(offset,offset+262144),start=events.length,cap=token,seq=++sequence,streamCursor={seq:++cursor,epoch:'owned-interaction-stream'};let text='';for(let n=0;n<part.length;n+=8192)text+=String.fromCharCode(...part.subarray(n,n+8192));const reply=await request('write',{sequence:seq,base64:btoa(text),replay:false,replayEnd:true,cursor:streamCursor});assert(reply.pending===seq,'Write must return Pending');await until(()=>events.slice(start).some(value=>value.token===cap&&value.epoch===epoch&&value.event.type==='ack'&&value.event.sequence===seq),'Actual receiver consumption ACK missing');const ack=events.slice(start).find(value=>value.token===cap&&value.epoch===epoch&&value.event.type==='ack'&&value.event.sequence===seq);assert(acks.length<128,'Interaction ACK bound');acks.push({step:name,token:ack.token,epoch:ack.epoch,sequence:ack.event.sequence,event:{...ack.event},streamCursor});publish('actual-consumption-ack');await layout();}};
+  const read=async(selection=false)=>{const start=events.length,cap=token,value=await request('copy',{selection});let text=null;if(value.status==='Copied'){await until(()=>events.slice(start).some(e=>e.token===cap&&e.event.type==='selection'),'Copied result without owned text');text=events.slice(start).find(e=>e.token===cap&&e.event.type==='selection').event.text;}return{status:value.status,text};};
+  const capture=()=>request('capture',{sequence,cursor:{seq:cursor,epoch:'owned-interaction-stream'}});
+  await create();const initial=await request('inspect');assert(initial.mainThread&&initial.sibling&&initial.surfaces===1,'Actual main-thread single receiver missing');record('actual owned Ghostty receiver',{mainThread:initial.mainThread,sibling:initial.sibling,surfaces:initial.surfaces});
+  for(const [name,prefix] of [['OSC','\x1b]0;unfinished'],['DCS','\x1bP$q unfinished'],['UTF8',new Uint8Array([0xe4])]]){
+   await write('preclear '+name+'\r\n','before '+name);await capture();await write(prefix,'partial '+name);assert((await capture()).status==='Unsafe','Partial '+name+' captured as safe');
+   const oldToken=token,value=await request('localReset');assert(value.token!==oldToken&&value.sequence===0&&value.baseline.seq===cursor&&value.baseline.epoch==='owned-interaction-stream','Reset did not preserve only the actual consumed stream cursor');token=value.token;epoch=value.epoch;sequence=0;await layout();await request('rect',rect);await layout();
+   let rejected=false;try{await request('layout',{},oldToken);}catch(error){rejected=tdNativeGateExpectedRejection(error);}assert(rejected,'Old local-reset capability accepted');
+   const neutral=await capture();assert(neutral.data,'Neutral clear checkpoint missing');const empty=await read();assert(empty.status==='Empty'||empty.status==='Copied'&&empty.text.trim()==='','Old cleared text survived');
+   await write('new '+name+' 中\r\n','new suffix '+name);const live=await read();assert(live.status==='Copied'&&live.text.includes('new '+name)&&!live.text.includes('preclear')&&!live.text.includes('unfinished')&&!live.text.includes('�'),'Parser/reset suffix differed');
+   // A new receiver restores the neutral checkpoint, never the old screen.
+   await request('destroy');await create();const restored=await request('restore',{snapshot:neutral});assert(restored?.baseline?.seq===neutral.cursor.seq,'Neutral restore baseline mismatch');token=restored.token;epoch=restored.epoch;sequence=restored.sequence;await layout();await request('rect',rect);await layout();const cold=await read();assert(cold.status==='Empty'||cold.status==='Copied'&&cold.text.trim()==='','Cold neutral restore resurrected old text');
+   record('actual partial '+name+' local reset and neutral capture/restore',{oldTokenRejected:rejected,baseline:value.baseline,emptyStatus:empty.status,coldStatus:cold.status,neutralRestored:true});
+  }
+  await write('find-me\r\n','search input');await request('search',{needle:'find',direction:0});await layout();const ended=await request('search',{needle:'',direction:2});assert(ended.total===0&&ended.selected===-1,'Search end receipt mismatch');await layout();await request('search',{needle:'me',direction:0});await layout();await request('search',{needle:'',direction:2});await layout();await write('after-search\r\n','after search end');assert((await read()).text.includes('after-search'),'Search end interrupted later output');record('actual search_end/reopen and continued feed',ended);
+  await request('history',{history:5000});await layout();await write(('中'.repeat(100)+'\r\n').repeat(1200),'bounded over-limit selection');await request('command',{command:'select_all'});await layout();const tooLarge=await read(true);assert(tooLarge.status==='TooLarge'&&tooLarge.text===null,'Large text did not return nonfatal bounded result');await write('continued-after-copy\r\n','continued copy');await request('rect',{...rect,width:rect.width-16});await layout();assert((await request('inspect')).surfaces===1,'Copy limit detached the receiver');record('actual >256KiB read/free result and continued feed/resize',{status:tooLarge.status,returnedAfterProductionFree:true,allocatorInstrumentation:false,clipboardTouched:false});
+  await request('retireView',{view:base.view,token});record('owned receiver detached',true);state.finished=true;publish('interaction-receiver-complete');tdNativeGateSignal(nonce,'result',{ok:true,pageEpoch,progressIndex:index,steps,acks,stages,stageDropped:state.stageDropped,physicalKeysTested:false,clipboardTouched:false,parserAndHostOnly:true});
+ }catch(error){if(state.cancelled||window.__TD_NATIVE_GATE_EPOCH!==pageEpoch)return;state.finished=true;tdNativeGateSignal(nonce,'result',{ok:false,pageEpoch,progressIndex:index,error:String(error),lastAction:state.lastAction,steps,acks,stages,stageDropped:state.stageDropped});}
+ finally{unsubscribe?.();}
+})();

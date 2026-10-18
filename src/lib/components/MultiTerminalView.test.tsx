@@ -25,7 +25,7 @@ vi.mock('swiper/react', () => ({
 }));
 vi.mock('./views/TerminalView', () => ({
   TerminalView: (props: {
-    sessionId: string; isActive: boolean;
+    sessionId: string; isActive: boolean; focusSuspended: boolean;
     onStreamReadyChange: (id: string, ready: boolean) => void;
     onViewportReadyChange: (id: string, ready: boolean) => void;
     onContentReadyChange: (id: string, ready: boolean) => void;
@@ -35,7 +35,7 @@ vi.mock('./views/TerminalView', () => ({
       props.onViewportReadyChange(props.sessionId, true);
       props.onContentReadyChange(props.sessionId, true);
     }, [props.sessionId]);
-    return <div className="terminal-viewport-container"><textarea data-terminal-input-anchor="true" aria-label={`Terminal ${props.sessionId}`} data-active={props.isActive} /></div>;
+    return <div className="terminal-viewport-container"><textarea data-terminal-input-anchor="true" aria-label={`Terminal ${props.sessionId}`} data-active={props.isActive} data-focus-suspended={props.focusSuspended} /></div>;
   },
 }));
 vi.mock('./FreeSplitLayout', () => ({
@@ -97,6 +97,26 @@ describe('MultiTerminalView session recovery and keyboard ownership', () => {
   });
 
   afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  it('suspends actual terminal callers for a close chooser and restores the remaining active session after close', async () => {
+    const updates=vi.fn();
+    const view=render(<MultiTerminalView onSessionDataUpdate={updates} terminalFocusAvailable/>);
+    await waitFor(()=>expect(screen.getByRole('textbox',{name:'Terminal one'})).toBeTruthy());
+    view.rerender(<MultiTerminalView onSessionDataUpdate={updates} terminalFocusAvailable={false}/>);
+    for(const node of screen.getAllByRole('textbox'))expect(node.getAttribute('data-focus-suspended')).toBe('true');
+    dispatch('close-terminal-session',{sessionId:'one',source:'sidebar',closeMode:'destroy'});
+    await waitFor(()=>expect(screen.queryByRole('textbox',{name:'Terminal one'})).toBeNull());
+    view.rerender(<MultiTerminalView onSessionDataUpdate={updates} terminalFocusAvailable/>);
+    await waitFor(()=>expect(updates.mock.lastCall?.[0].activeSessionId).not.toBe('one'));
+    const active=screen.getAllByRole('textbox').find(node=>node.getAttribute('data-active')==='true');
+    expect(active).toBeTruthy();expect(active!.getAttribute('data-focus-suspended')).toBe('false');
+    expect(api.closeTerminal).toHaveBeenCalledWith('backend-one');
+    // Escape/cancel leaves this session mounted and restores input eligibility.
+    view.rerender(<MultiTerminalView onSessionDataUpdate={updates} terminalFocusAvailable={false}/>);
+    view.rerender(<MultiTerminalView onSessionDataUpdate={updates} terminalFocusAvailable/>);
+    expect(active!.getAttribute('data-focus-suspended')).toBe('false');
+    expect(api.closeTerminal).toHaveBeenCalledTimes(1);
+  });
 
   async function ready() {
     const updates = vi.fn();
@@ -352,4 +372,37 @@ describe('MultiTerminalView session recovery and keyboard ownership', () => {
     dispatch('close-terminal-session-by-backend', 'rebuilt-backend');
     await waitFor(() => expect(api.removeSessionInventoryEntry).toHaveBeenCalledWith('one'));
   });
+  it('split window chrome follows actual platform/Preview/pin facts and preserves pane mounts on pin changes',async()=>{
+    const updates=vi.fn();
+    const previousBridge=window.termdockDesktop,previousPreview=document.documentElement.dataset.termdockPreview;
+    window.termdockDesktop={platform:'darwin'} as any;document.documentElement.dataset.termdockPreview='true';
+    const props={desktopFloatingTitle:true,desktopLeftSidebarPinned:false,onSessionDataUpdate:updates};
+    const view=render(<MultiTerminalView {...props}/>);
+    try{
+      await waitFor(()=>expect(screen.getByRole('textbox',{name:'Terminal one'})).toBeTruthy());
+      expect(view.container.querySelector('[data-split-window-header]')).toBeNull();
+      dispatch('combine-terminal-split-sessions',{primaryId:'one',secondaryId:'two'});
+      await waitFor(()=>expect(view.container.querySelector('[data-split-window-header]')).toBeTruthy());
+      const header=view.container.querySelector('[data-split-window-header]')!;
+      expect(header.getAttribute('data-termdock-window-header')).toBe('true');expect(header.textContent).toBe('Split group');
+      dispatch('rename-terminal-split-workspace',{workspaceId:updates.mock.lastCall![0].splitWorkspaces[0].id,name:'Build and logs'});
+      expect(header.textContent).toBe('Build and logs');
+      expect(header.className).toContain('h-[46px]');expect(header.className).toContain('shrink-0');expect(header.className).toContain('pl-[88px]');
+      const one=screen.getByRole('textbox',{name:'Terminal one'}),two=screen.getByRole('textbox',{name:'Terminal two'});
+      // Header precedes the grid in the same flex column. Existing grid/terminal
+      // ResizeObservers receive its changed available height without remounts.
+      expect(header.parentElement!.className).toContain('flex-col');expect(header.nextElementSibling).toBeTruthy();
+      view.rerender(<MultiTerminalView {...props} desktopLeftSidebarPinned/>);
+      expect(view.container.querySelector('[data-split-window-header]')).toBeNull();
+      expect(screen.getByRole('textbox',{name:'Terminal one'})).toBe(one);expect(screen.getByRole('textbox',{name:'Terminal two'})).toBe(two);
+      view.rerender(<MultiTerminalView {...props}/>);expect(view.container.querySelector('[data-split-window-header]')).toBeTruthy();
+      for(const platform of ['linux','win32']){window.termdockDesktop={platform} as any;view.rerender(<MultiTerminalView {...props}/>);expect(view.container.querySelector('[data-split-window-header]')).toBeNull();}
+      window.termdockDesktop=undefined;view.rerender(<MultiTerminalView {...props}/>);expect(view.container.querySelector('[data-split-window-header]')).toBeNull();
+      window.termdockDesktop={platform:'darwin'} as any;
+      delete document.documentElement.dataset.termdockPreview;view.rerender(<MultiTerminalView {...props}/>);expect(view.container.querySelector('[data-split-window-header]')).toBeNull();
+      document.documentElement.dataset.termdockPreview='true';view.rerender(<MultiTerminalView {...props} desktopFloatingTitle={false}/>);expect(view.container.querySelector('[data-split-window-header]')).toBeNull();
+      view.rerender(<MultiTerminalView {...props}/>);expect(view.container.querySelector('[data-split-window-header]')).toBeTruthy();
+    }finally{window.termdockDesktop=previousBridge;if(previousPreview===undefined)delete document.documentElement.dataset.termdockPreview;else document.documentElement.dataset.termdockPreview=previousPreview;}
+  });
+
 });

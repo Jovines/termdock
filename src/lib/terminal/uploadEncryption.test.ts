@@ -1,9 +1,11 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const uploadTarget=vi.hoisted(()=>({value:null as null|{targetPeerId:string}}));
+vi.mock('../federation/clientScope',()=>({selectedTarget:()=>uploadTarget.value}));
 vi.mock('../federation/browserIntegration', () => ({ secureSocket: vi.fn() }));
 import { resetCsrfTokenCache, uploadFiles } from './api';
 
-beforeEach(() => resetCsrfTokenCache());
+beforeEach(() => {resetCsrfTokenCache();uploadTarget.value=null;});
 afterEach(() => vi.unstubAllGlobals());
 
 describe('file upload encryption boundary', () => {
@@ -79,4 +81,12 @@ describe('file upload encryption boundary', () => {
     vi.stubGlobal('fetch', vi.fn(async input => input === '/api/csrf-token' ? Response.json({ csrfToken: 'secure-channel' }) : Response.json(response, { status: 500 })));
     await expect(uploadFiles('/work', [new File(['private'], 'secret.txt')])).rejects.toMatchObject({ result: response, code: 'UPLOAD_FAILED' });
   });
+});
+
+for (const kind of ['target','abort','owner'] as const) it(`a pending CSRF lookup cannot POST file bytes after ${kind} changes`,async()=>{
+ let finish!:(value:Response)=>void;const fetch=vi.fn((input:unknown)=>{if(input==='/api/csrf-token')return new Promise<Response>(r=>{finish=r;});throw new Error('Upload POST must not occur');});vi.stubGlobal('fetch',fetch);
+ uploadTarget.value={targetPeerId:'old'};const controller=new AbortController();let current=true;
+ const pending=uploadFiles('/tmp',[new File(['private'],'owned.txt')],controller.signal,undefined,()=>current);const rejected=expect(pending).rejects.toThrow();
+ if(kind==='target')uploadTarget.value={targetPeerId:'new'};else if(kind==='abort')controller.abort();else current=false;
+ finish(Response.json({csrfToken:'old-token'}));await rejected;expect(fetch.mock.calls.map(call=>call[0])).toEqual(['/api/csrf-token']);
 });

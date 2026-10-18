@@ -1,5 +1,6 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { downloadFile, type DownloadResult } from '../terminal/api';
+import { selectedTarget, subscribeSelectedTarget } from '../federation/clientScope';
 
 export type FileDownloadStatus = 'idle' | 'pending' | DownloadResult | 'error';
 interface DownloadState {
@@ -12,14 +13,22 @@ const IDLE: DownloadState = { status: 'idle', error: null, result: null };
 /** A preview owns its download. Changing/closing it cancels its request. */
 export function useFileDownload(path: string | null, active = true) {
   const [state, setState] = useState<DownloadState>(IDLE);
-  const request = useRef<AbortController | null>(null);
+  const request = useRef<{ controller: AbortController; targetPeerId: string | undefined } | null>(null);
+
+  useEffect(() => subscribeSelectedTarget((target) => {
+    const current = request.current;
+    if (!current || current.targetPeerId === target?.targetPeerId) return;
+    request.current = null;
+    current.controller.abort(new DOMException('Download target changed', 'AbortError'));
+    setState({ status: 'canceled', error: null, result: 'canceled' });
+  }), []);
 
   useLayoutEffect(() => {
     setState(IDLE);
     return () => {
       const previous = request.current;
       request.current = null;
-      previous?.abort();
+      previous?.controller.abort();
     };
   }, [path, active]);
 
@@ -27,23 +36,24 @@ export function useFileDownload(path: string | null, active = true) {
     const previous = request.current;
     if (!previous) return;
     request.current = null;
-    previous.abort();
+    previous.controller.abort();
     setState({ status: 'canceled', error: null, result: 'canceled' });
   }, []);
 
   const start = useCallback(async () => {
     if (!active || !path || request.current) return;
     const controller = new AbortController();
-    request.current = controller;
+    const targetPeerId = selectedTarget()?.targetPeerId;
+    request.current = { controller, targetPeerId };
     setState({ status: 'pending', error: null, result: null });
     try {
       const result = await downloadFile(path, controller.signal);
-      if (request.current !== controller) return;
+      if (request.current?.controller !== controller) return;
       request.current = null;
       const settled = controller.signal.aborted ? 'canceled' : result;
       setState({ status: settled, error: null, result: settled });
     } catch (error) {
-      if (request.current !== controller) return;
+      if (request.current?.controller !== controller) return;
       request.current = null;
       if (controller.signal.aborted) {
         setState({ status: 'canceled', error: null, result: 'canceled' });

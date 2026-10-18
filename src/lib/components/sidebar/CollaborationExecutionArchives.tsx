@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Archive, RefreshCw } from 'lucide-react';
 import { listExecutionArchives, restoreExecutionSession, type ExecutionArchive, type OrchestrationSession } from '../../terminal/api';
+import { startVisiblePolling } from './startVisiblePolling';
 
 export function CollaborationExecutionArchives({ groupId, version, onRestore }: {
   groupId: string; version: number; onRestore: (session: OrchestrationSession) => Promise<void>;
@@ -15,8 +16,8 @@ export function CollaborationExecutionArchives({ groupId, version, onRestore }: 
       try { const result = await listExecutionArchives(); if (alive) setEntries(result.entries.filter(entry => entry.groups.some(group => group.id === groupId))); }
       catch { /* Navigation retains its last successful snapshot while reconnecting. */ }
     };
-    void load(); const timer = setInterval(() => { if (!document.hidden) void load(); }, 10000);
-    return () => { alive = false; clearInterval(timer); };
+    const stopPolling = startVisiblePolling(() => { void load(); }, 10000);
+    return () => { alive = false; stopPolling(); };
   }, [groupId, version]);
   const restore = async (entry: ExecutionArchive) => {
     if (pending.current) return;

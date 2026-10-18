@@ -7,7 +7,8 @@ vi.mock('../federation/browserIntegration', () => ({
   secureSocket: (url: string) => new WebSocket(url),
 }));
 
-import { closeTerminal, connectTerminalStream, reconnectTerminalConnectionNow, resetCsrfTokenCache, sendTerminalInput } from './api';
+import { closeTerminal, connectTerminalStream, reconnectTerminalConnectionNow, resetCsrfTokenCache, sendTerminalInput, sendTmuxAction, TerminalInputError } from './api';
+import { PacketQueueBackpressureError } from '../../server/federation/packets.js';
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -141,6 +142,136 @@ describe('closeTerminal attach lifetime', () => {
     expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'input', data: 'continue' }));
   });
 
+  it('keeps the rejected and remaining queued input after a synchronous frame refusal', async () => {
+    const disconnect = connectTerminalStream('input-refusal-order', vi.fn(), vi.fn());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await sendTerminalInput('input-refusal-order', 'first');
+    await sendTerminalInput('input-refusal-order', 'second');
+    await sendTerminalInput('input-refusal-order', 'third');
+    const attempted: string[] = [];
+    const accepted: string[] = [];
+    socket.send.mockImplementationOnce((message: string) => { attempted.push(message); accepted.push(message); });
+    socket.send.mockImplementationOnce((message: string) => { attempted.push(message); throw new PacketQueueBackpressureError(); });
+    socket.open();
+    expect(attempted).toEqual([
+      JSON.stringify({ type: 'input', data: 'first' }),
+      JSON.stringify({ type: 'input', data: 'second' }),
+    ]);
+    socket.send.mockImplementation(message => { attempted.push(message); accepted.push(message); });
+    vi.advanceTimersByTime(50);
+    expect(attempted).toEqual([
+      JSON.stringify({ type: 'input', data: 'first' }),
+      JSON.stringify({ type: 'input', data: 'second' }),
+      JSON.stringify({ type: 'input', data: 'second' }),
+      JSON.stringify({ type: 'input', data: 'third' }),
+    ]);
+    expect(attempted.filter(message => message === JSON.stringify({ type: 'input', data: 'first' }))).toHaveLength(1);
+    expect(accepted).toEqual([
+      JSON.stringify({ type: 'input', data: 'first' }),
+      JSON.stringify({ type: 'input', data: 'second' }),
+      JSON.stringify({ type: 'input', data: 'third' }),
+    ]);
+    disconnect();
+  });
+
+  it('releases sent input slots during repeated partial progress without draining the queue', async () => {
+    const disconnect = connectTerminalStream('input-partial-progress', vi.fn(), vi.fn());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    for (let index = 0; index < 70; index++) await sendTerminalInput('input-partial-progress', `initial-${index}`);
+    const accepted: string[] = [];
+    let inputAttempts = 0;
+    socket.send.mockImplementation((message: string) => {
+      const parsed = JSON.parse(message);
+      if (parsed.type !== 'input') return;
+      inputAttempts++;
+      if (inputAttempts % 2 === 0) throw new PacketQueueBackpressureError();
+      accepted.push(parsed.data);
+    });
+    socket.open();
+    for (let index = 0; index < 70; index++) {
+      await sendTerminalInput('input-partial-progress', `later-${index}`);
+      vi.advanceTimersByTime(index === 0 ? 40 : 100);
+    }
+    for (let index = 0; index < 70; index++) vi.advanceTimersByTime(100);
+    expect(accepted).toEqual([
+      ...Array.from({ length: 70 }, (_, index) => `initial-${index}`),
+      ...Array.from({ length: 70 }, (_, index) => `later-${index}`),
+    ]);
+    disconnect();
+  });
+
+  it('bounds CONNECTING input bytes and explicitly rejects oversized or excess paste', async () => {
+    const disconnect = connectTerminalStream('bounded-input', vi.fn(), vi.fn());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await expect(sendTerminalInput('bounded-input', 'x'.repeat(1024 * 1024))).rejects.toThrow('frame limit');
+    const piece = 'y'.repeat(4000);
+    let accepted = 0;
+    while (true) {
+      try { await sendTerminalInput('bounded-input', piece); accepted++; }
+      catch (error) { expect(String(error)).toContain('queue is full'); break; }
+    }
+    expect(accepted).toBeGreaterThan(0);
+    socket.open();
+    vi.advanceTimersByTime(40);
+    expect(socket.send).toHaveBeenCalledTimes(accepted);
+    expect(socket.send.mock.calls.every(([message]) => message === JSON.stringify({ type: 'input', data: piece }))).toBe(true);
+    disconnect();
+  });
+
+  it('rejects an input whose real ws-data JSON envelope exceeds the record limit', async () => {
+    const disconnect = connectTerminalStream('outer-frame-limit', vi.fn(), vi.fn());
+    const socket = FakeWebSocket.instances.at(-1)!;
+    const data = '"'.repeat(524_262);
+    const message = JSON.stringify({ type: 'input', data });
+    const messageBytes = new TextEncoder().encode(message).byteLength;
+    const outer = JSON.stringify({ id: '0'.repeat(36), type: 'ws-data', data: message });
+    expect(messageBytes).toBeLessThan(1024 * 1024);
+    expect(new TextEncoder().encode(outer).byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    await expect(sendTerminalInput('outer-frame-limit', data)).rejects.toThrow('encrypted socket frame limit');
+    socket.open();
+    expect(socket.send).not.toHaveBeenCalled();
+    disconnect();
+  });
+
+  it('surfaces permanent send errors once instead of retrying the same frame forever', async () => {
+    const onError = vi.fn();
+    const disconnect = connectTerminalStream('permanent-input-error', vi.fn(), onError);
+    const socket = FakeWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.send.mockImplementation(() => { throw new Error('Record too large'); });
+    await expect(sendTerminalInput('permanent-input-error', 'input'))
+      .rejects.toMatchObject({ name: 'TerminalInputError', code: 'TERMINAL_INPUT_REJECTED', message: 'Record too large' });
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0][0]).toBeInstanceOf(TerminalInputError);
+    expect(onError.mock.calls[0][0].message).toBe('Record too large');
+    expect(onError.mock.calls[0][1]).toBe(true);
+    vi.advanceTimersByTime(60_000);
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    disconnect();
+  });
+
+  it('bounds retries for persistent typed byte-budget backpressure', async () => {
+    const onError = vi.fn();
+    const disconnect = connectTerminalStream('persistent-input-backpressure', vi.fn(), onError);
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await sendTerminalInput('persistent-input-backpressure', 'input');
+    const inputMessage = JSON.stringify({ type: 'input', data: 'input' });
+    let inputAttempts = 0;
+    socket.send.mockImplementation((message: string) => {
+      if (message !== inputMessage) return;
+      inputAttempts++;
+      throw new PacketQueueBackpressureError();
+    });
+    socket.open();
+    vi.advanceTimersByTime(60_000);
+    expect(inputAttempts).toBe(20);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0][0].message).toContain('repeated encrypted-channel backpressure');
+    expect(onError.mock.calls[0][1]).toBe(true);
+    disconnect();
+  });
+
   it('treats 404 as confirmed removal and closes the attach', async () => {
     mockDelete(() => Promise.resolve(new Response(null, { status: 404 })));
     const { socket } = attach();
@@ -170,4 +301,29 @@ describe('closeTerminal attach lifetime', () => {
     vi.advanceTimersByTime(20_000);
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
+});
+
+it('tmux copy responses stay on their encrypted socket and preserve selection metadata',async()=>{
+ const a=attach('copy-a'),b=attach('copy-b');let resolved=false;
+ const copying=sendTmuxAction('copy-a',{action:'copy-selection'}).then(value=>{resolved=true;return value;});
+ const request=JSON.parse(a.socket.send.mock.lastCall![0]);expect(request.action).toBe('copy-selection');
+ b.socket.receive({type:'tmux-result',reqId:request.reqId,success:true,selection:{status:'copied',paneId:'%2',text:'wrong',bytes:5}});await Promise.resolve();expect(resolved).toBe(false);
+ a.socket.receive({type:'tmux-result',reqId:request.reqId,success:true,selection:{status:'copied',paneId:'%1',text:'owned',bytes:5}});
+ expect(await copying).toMatchObject({selection:{paneId:'%1',text:'owned',bytes:5}});expect(b.socket.send).not.toHaveBeenCalled();
+});
+
+for(const message of ['Tmux selection exceeds the 256 KiB copy limit','Tmux selection read failed','Tmux selection target changed while copying'])it(`correlated tmux copy rejects immediately: ${message}`,async()=>{
+ const {socket}=attach('copy-error');const fetchMock=vi.fn();vi.stubGlobal('fetch',fetchMock);
+ const copying=sendTmuxAction('copy-error',{action:'copy-selection'});const rejected=expect(copying).rejects.toThrow(message);
+ const request=JSON.parse(socket.send.mock.lastCall![0]);socket.receive({type:'tmux-result',reqId:request.reqId,success:false,error:message});await rejected;expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('new input cannot bypass an active backpressure retry timer',async()=>{
+ const {socket}=attach('input-backoff');
+ socket.send.mockImplementationOnce(()=>{throw new PacketQueueBackpressureError();});
+ await sendTerminalInput('input-backoff','first');expect(socket.send).toHaveBeenCalledTimes(1);
+ await sendTerminalInput('input-backoff','second');await sendTerminalInput('input-backoff','third');
+ expect(socket.send).toHaveBeenCalledTimes(1);vi.advanceTimersByTime(49);expect(socket.send).toHaveBeenCalledTimes(1);
+ vi.advanceTimersByTime(1);expect(socket.send.mock.calls.slice(1).map(([raw])=>JSON.parse(raw).data)).toEqual(['first','second','third']);
+ const disconnect=disconnects.pop()!;disconnect();expect(vi.getTimerCount()).toBe(0);
 });

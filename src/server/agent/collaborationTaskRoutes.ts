@@ -1,6 +1,7 @@
 import { Router, type Request } from 'express';
 import { CollaborationError } from './collaborationProtocol.js';
 import { assertPeerRegistrationAuthority } from './collaborationPeerTransport.js';
+import { hasEncryptedServiceAccess } from '../federation/requestContext.js';
 import type { CollaborationTaskService } from './collaborationTaskService.js';
 import type { CollaborationService } from './collaborationService.js';
 import type { CollaborationStore } from './collaborationStore.js';
@@ -18,7 +19,9 @@ export function collaborationTaskRoutes(options: { agent: boolean; store: Collab
     const peers = req.app.locals.collaborationService as CollaborationService | undefined;
     if (!tasks || !peers) throw new CollaborationError('TASK_SERVICE_STARTING', '任务服务正在启动，请稍后重试', 503);
     if (!options.agent) {
-      try { assertPeerRegistrationAuthority(req); }
+      // Reading the inbox does not register peers or create durable authority.
+      // Open-mode full-service viewers may read; mutations still require admin.
+      try { if (!(['GET', 'HEAD'].includes(req.method) && hasEncryptedServiceAccess(req))) assertPeerRegistrationAuthority(req); }
       catch { throw new CollaborationError('TASK_PERMISSION_DENIED', '当前连接无权处理协作任务', 403); }
       return { tasks, peers, actor: null };
     }

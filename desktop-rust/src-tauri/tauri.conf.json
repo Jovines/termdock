@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Termdock Preview",
+  "version": "0.1.0",
+  "identifier": "com.jovines.termdock.preview",
+  "build": {
+    "frontendDist": "../.renderer-dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-src 'none'; object-src 'none'; base-uri 'none'",
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "infoPlist": "Info.plist"
+    },
+    "icon": [
+      "../../desktop/assets/Termdock.icns",
+      ".runtime-icons/icon.png"
+    ],
+    "resources": {
+      "../.workspace-dist/": "workspace/",
+      "../.native-resources/": "native-terminal/"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [],
+      "requireSignedVersion": true
+    }
+  }
+}

@@ -49,7 +49,7 @@ describe('login feedback and focus ownership', () => {
 it.each([
   ['connectionFailed', 'Could not sign in. Check the connection and try again.'],
   ['identityMismatch', 'The service identity has changed. Check the address with its owner before trying again.'],
-  ['unavailable', 'Password sign-in is unavailable on this service. Check the address or ask its owner for an invitation.'],
+  ['unavailable', 'Password sign-in is temporarily unavailable. Check the connection and try again.'],
   ['authorizationRequired', 'This device needs authorization. Ask the service owner for a new invitation.'],
 ])('provides safe, distinct feedback for %s and permits retry', async (reason, message) => {
   mocks.login.mockResolvedValue({ ok: false, reason, error: '/private/credential-secret' });

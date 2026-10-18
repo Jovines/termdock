@@ -1,0 +1,18 @@
+[
+ {"menu":"应用","id":"settings","label":"设置…","accelerator":"CmdOrCtrl+,","event":"termdock:open-settings"},
+ {"menu":"应用","id":"new-connection","label":"新建连接或切换服务…","accelerator":"CmdOrCtrl+N"},
+ {"menu":"文件","id":"new-session","label":"新建会话","accelerator":"CmdOrCtrl+T"},
+ {"menu":"文件","id":"close-session","label":"关闭当前会话","accelerator":"CmdOrCtrl+W"},
+ {"menu":"文件","id":"previous-session","label":"上一个会话","accelerator":"CmdOrCtrl+Shift+["},
+ {"menu":"文件","id":"next-session","label":"下一个会话","accelerator":"CmdOrCtrl+Shift+]"},
+ {"menu":"文件","id":"previous-attention","label":"上一个待处理","accelerator":"CmdOrCtrl+Alt+["},
+ {"menu":"文件","id":"next-attention","label":"下一个待处理","accelerator":"CmdOrCtrl+Alt+]"},
+ {"menu":"显示","id":"toggle-left-sidebar","label":"切换会话侧栏","accelerator":"CmdOrCtrl+B"},
+ {"menu":"显示","id":"toggle-right-sidebar","label":"切换文件侧栏","accelerator":"CmdOrCtrl+Shift+B"},
+ {"menu":"显示","id":"reload","label":"Reload","accelerator":"CmdOrCtrl+R"},
+ {"menu":"显示","id":"force-reload","label":"Force Reload","accelerator":"CmdOrCtrl+Shift+R"},
+ {"menu":"显示","id":"reset-zoom","label":"Actual Size","accelerator":"CmdOrCtrl+0"},
+ {"menu":"显示","id":"zoom-in","label":"Zoom In","accelerator":"CmdOrCtrl+NumpadAdd"},
+ {"menu":"显示","id":"zoom-out","label":"Zoom Out","accelerator":"CmdOrCtrl+-"},
+ {"menu":"窗口","id":"connection-center","label":"连接中心","accelerator":"CmdOrCtrl+Shift+O"}
+]

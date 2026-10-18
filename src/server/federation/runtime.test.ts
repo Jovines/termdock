@@ -10,10 +10,12 @@ import { createFederationRuntime, type FederationRuntimeOptions } from './runtim
 import { createIdentity, secureConnection, type Identity } from './secureProtocol.js';
 import { socketDuplex } from './socketDuplex.js';
 import { PacketChannel, fromBase64, toBase64, type Packet } from './packets.js';
+import { collaborationTaskRoutes } from '../agent/collaborationTaskRoutes.js';
+import type { CollaborationStore } from '../agent/collaborationStore.js';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
-async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenAccess = false) {
+async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenAccess = false, onComputer?: (socket: WebSocket) => void) {
   const directory = mkdtempSync(join(tmpdir(), 'termdock-e2ee-test-'));
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   const app = express(); app.use(express.json());
@@ -37,12 +39,13 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
   app.get('/api/terminal/session-inventory', (_req, res) => res.json(inventory));
   app.get('/api/terminal/:session/health', (req, res) => res.json({ output: 'private-terminal-output', session: req.params.session }));
   app.post('/api/terminal/:session/input', (req, res) => { input(req.body); res.json({ success: true }); });
-  let terminal: WebSocket | undefined;
+  let terminal: WebSocket | undefined, computer: WebSocket | undefined;
   const terminalOptions = vi.fn();
   const issueRouteTicket = vi.fn(() => ({ routeToken: 'test-route-ticket', expiresAt: Date.now() + 30_000 }));
   const runtime = await createFederationRuntime(app, directory, {
     terminal(socket, _session, _client, options, dimensions) { terminal = socket; terminalOptions(options, dimensions); socket.on('message', data => received(JSON.parse(String(data)))); socket.send(JSON.stringify({ type: 'output', data: 'private-terminal-output' })); },
     control(socket) { socket.on('message', data => received(JSON.parse(String(data)))); },
+    computer(socket) { computer = socket; onComputer?.(socket); },
   }, { resolveSessionId: id => id === 'one' || id === 'one-new' ? 'source-one' : id, issueRouteTicket, ...runtimeOptions });
   cleanup.push(() => runtime.close());
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -86,12 +89,39 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
         if (packet.type === 'end' || packet.type === 'error') return packets;
       }
     }
-    return { identity, channel, take, pair, http, wire };
+    return { identity, channel, take, pair, http, wire, pendingPackets: () => pending,
+      pauseReads() { (socket as unknown as { _socket?: { pause(): void } })._socket?.pause(); },
+      resumeReads() { (socket as unknown as { _socket?: { resume(): void } })._socket?.resume(); } };
   }
-  return { app, directory, connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, terminal: () => terminal, inventory };
+  return { app, directory, connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, terminal: () => terminal, computer: () => computer, inventory };
 }
 
 describe('federation runtime over real encrypted WebSocket', () => {
+  it('lets open full-service devices read the task inbox without granting peer administration', async () => {
+    let enabled = false;
+    const spy = vi.spyOn(authProtection, 'isAuthEnabled').mockImplementation(() => enabled);
+    cleanup.push(() => spy.mockRestore());
+    const f = await fixture({}, true), client = await f.connect();
+    const list = vi.fn(() => []);
+    f.app.locals.passwordRuntime = f.runtime;
+    f.app.locals.collaborationTasks = { list };
+    f.app.locals.collaborationService = {};
+    f.app.use('/api/terminal/operations/collaboration-tasks', collaborationTaskRoutes({ agent: false,
+      store: { list: () => [{ id: 'group' }] } as unknown as CollaborationStore, resolveSession: () => null }));
+    const path = '/api/terminal/operations/collaboration-tasks';
+    expect((await client.http('open-inbox', 'GET', path))[0]).toMatchObject({ type: 'head', status: 200 });
+    expect(list).toHaveBeenCalledOnce();
+    expect((await client.http('open-mutation', 'POST', path))[0]).toMatchObject({ type: 'head', status: 403 });
+    expect(f.runtime.store.list()).toEqual([]);
+    enabled = true;
+    f.runtime.store.grant({ subjectId: client.identity.peerId, scope: { kind: 'service' }, actions: ['service.view'] });
+    expect((await client.http('narrow-inbox', 'GET', path))[0]).toMatchObject({ type: 'error' });
+    expect(list).toHaveBeenCalledOnce();
+    client.channel.send({ type: 'http', id: 'spoof-inbox', method: 'GET', path,
+      headers: { 'x-termdock-full-service': '1' } });
+    expect(await client.take('spoof-inbox')).toMatchObject({ type: 'error' });
+    expect(list).toHaveBeenCalledOnce();
+  });
   it('reads and edits native architecture through the encrypted channel with separate file grants', async () => {
     const f = await fixture();
     const { architectureRoutes } = await import('../architecture/routes.js');
@@ -232,6 +262,88 @@ describe('federation runtime over real encrypted WebSocket', () => {
     expect(await client.take('terminal')).toMatchObject({ type: 'ws-close', code: 4003 });
     client.channel.send({ type: 'http', id: 'revoked', method: 'GET', path: '/api/terminal/one/health' });
     expect(await client.take('revoked')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  });
+  it('rejects only a slow logical terminal stream while the same Noise channel serves HTTP', async () => {
+    const f = await fixture(), client = await f.connect();
+    f.runtime.store.grant({ subjectId: client.identity.peerId, scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view', 'session.input'] });
+    client.channel.send({ type: 'ws-open', id: 'small-terminal', path: '/api/terminal/one/ws' });
+    await client.take('small-terminal', 'ws-ready'); await client.take('small-terminal', 'ws-data');
+    client.channel.send({ type: 'ws-open', id: 'slow-terminal', path: '/api/terminal/one/ws' });
+    await client.take('slow-terminal', 'ws-ready');
+    await client.take('slow-terminal', 'ws-data');
+
+    // Synchronous production sends outrun the Noise sink. The per-logical
+    // queued-byte ceiling must close this terminal only, not its channel.
+    const queuedSamples: number[] = [];
+    const originalQueuedBytesFor = PacketChannel.prototype.queuedBytesFor;
+    const queuedSpy = vi.spyOn(PacketChannel.prototype, 'queuedBytesFor').mockImplementation(function (this: PacketChannel, id: string) {
+      const queued = originalQueuedBytesFor.call(this, id);
+      if (id === 'slow-terminal') queuedSamples.push(queued);
+      return queued;
+    });
+    const output = JSON.stringify({ type: 'output', data: 'x'.repeat(700 * 1024) });
+    f.terminal()!.send(output);
+    const firstBufferedAmount = f.terminal()!.bufferedAmount;
+    expect(firstBufferedAmount).toBeGreaterThan(0);
+    expect(firstBufferedAmount).toBeLessThanOrEqual(1024 * 1024);
+    for (let index = 1; index < 8; index++) f.terminal()!.send(output);
+    expect(await client.take('slow-terminal', 'ws-close')).toMatchObject({ code: 1013 });
+    queuedSpy.mockRestore();
+    expect(Math.max(...queuedSamples)).toBeGreaterThan(0);
+
+    client.channel.send({ type: 'ws-data', id: 'small-terminal', data: JSON.stringify({ type: 'input', data: 'x' }) });
+    await vi.waitFor(() => expect(f.received).toHaveBeenCalledWith({ type: 'input', data: 'x' }));
+    const requestMs: number[] = [];
+    for (let index = 0; index < 20; index++) {
+      const started = performance.now();
+      const response = await client.http(`still-alive-${index}`, 'GET', '/api/terminal/one/health');
+      requestMs.push(performance.now() - started);
+      expect(response[0]).toMatchObject({ type: 'head', status: 200 });
+      expect(response.at(-1)?.type).toBe('end');
+    }
+    requestMs.sort((a, b) => a - b);
+    console.info(`real Noise/WebSocket loopback; PacketChannel queued record bytes through sink yield (not NIC send/peer ACK): peak=${Math.max(...queuedSamples)}, small HTTP p95=${requestMs[Math.ceil(requestMs.length * 0.95) - 1].toFixed(2)}ms (n=${requestMs.length})`);
+  });
+  it('rejects a 257th queued logical frame without ending the Noise channel', async () => {
+    const f = await fixture(), client = await f.connect();
+    f.runtime.store.grant({ subjectId: client.identity.peerId, scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view', 'session.input'] });
+    client.channel.send({ type: 'ws-open', id: 'small-terminal', path: '/api/terminal/one/ws' });
+    await client.take('small-terminal', 'ws-ready'); await client.take('small-terminal', 'ws-data');
+    client.channel.send({ type: 'ws-open', id: 'busy-terminal', path: '/api/terminal/one/ws' });
+    await client.take('busy-terminal', 'ws-ready'); await client.take('busy-terminal', 'ws-data');
+
+    const smallFrame = JSON.stringify({ type: 'output', data: 'x'.repeat(3 * 1024) });
+    client.pauseReads();
+    for (let index = 0; index < 257; index++) f.terminal()!.send(smallFrame);
+    expect(f.terminal()!.readyState).toBe(3);
+    const queuedBytesAtCountRejection = f.terminal()!.bufferedAmount;
+    expect(queuedBytesAtCountRejection).toBeGreaterThan(0);
+    expect(queuedBytesAtCountRejection).toBeLessThan(1024 * 1024);
+    client.resumeReads();
+    const acceptedFrames: Packet[] = [];
+    for (let index = 0; index < 256; index++) acceptedFrames.push(await client.take('busy-terminal', 'ws-data'));
+    expect(acceptedFrames).toHaveLength(256);
+    expect(client.pendingPackets().some(packet => packet.id === 'busy-terminal' && packet.type === 'ws-close')).toBe(false);
+
+    client.channel.send({ type: 'ws-data', id: 'small-terminal', data: JSON.stringify({ type: 'input', data: 'x' }) });
+    await vi.waitFor(() => expect(f.received).toHaveBeenCalledWith({ type: 'input', data: 'x' }));
+    const requestMs: number[] = [];
+    for (let index = 0; index < 20; index++) {
+      const started = performance.now();
+      const response = await client.http(`count-alive-${index}`, 'GET', '/api/terminal/one/health');
+      requestMs.push(performance.now() - started);
+      expect(response.at(-1)?.type).toBe('end');
+    }
+    requestMs.sort((a, b) => a - b);
+    console.info(`real Noise/WebSocket TCP-read pause: 257 x 3-KiB frames, 256 accepted; queued bytes at count rejection=${queuedBytesAtCountRejection} (<1 MiB); local cleanup ran, no ws-close fit in full queue; sibling input and HTTP survived; small HTTP p95=${requestMs[Math.ceil(requestMs.length * 0.95) - 1].toFixed(2)}ms (n=${requestMs.length})`);
+  });
+  it('preserves a legal 1.5 MiB single WebSocket frame on the non-terminal computer path', async () => {
+    const f = await fixture(), client = await f.connect(); await client.pair();
+    client.channel.send({ type: 'ws-open', id: 'computer', path: '/api/computer/ws?protocol=vnc&host=127.0.0.1' });
+    await client.take('computer', 'ws-ready');
+    const media = JSON.stringify({ type: 'data', data: 'x'.repeat(1536 * 1024) });
+    f.computer()!.send(media);
+    expect((await client.take('computer', 'ws-data')).data).toBe(media);
   });
   it('keeps a session-scoped grant valid after the backend session id is replaced', async () => {
     const f = await fixture(), owner = await f.connect(); await owner.pair();

@@ -12,6 +12,7 @@ import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { SplitPaneTitle } from './SplitPaneTitle';
+import { getTermdockDesktopBridge } from '../desktop/nativeBridge';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { VIEWPORT_LAYOUT_CHANGE_EVENT } from '../hooks/useViewportHeight';
 import {
@@ -374,6 +375,7 @@ interface MultiTerminalViewProps {
   desktopRightSidebarEnabled?: boolean;
   onToggleRightSidebar?: () => void;
   desktopFloatingTitle?: boolean;
+  desktopLeftSidebarPinned?: boolean;
   desktopPinnedLeftSidebarWidth?: number;
   desktopViewportWidth?: number;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
@@ -425,6 +427,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   desktopRightSidebarEnabled = false,
   onToggleRightSidebar,
   desktopFloatingTitle = false,
+  desktopLeftSidebarPinned = false,
   desktopPinnedLeftSidebarWidth = 0,
   desktopViewportWidth = 0,
   onStatusChange,
@@ -433,6 +436,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   onInitialRecoveryRequired,
 }) => {
   const { t } = useI18n();
+  const showSplitWindowHeader = desktopFloatingTitle && !desktopLeftSidebarPinned
+    && getTermdockDesktopBridge()?.platform === 'darwin'
+    && document.documentElement.dataset.termdockPreview === 'true';
   const debugSession = useMemo(() => createDebugLogger('session'), []);
   const debugTerminal = useMemo(() => createDebugLogger('terminal'), []);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
@@ -2234,7 +2240,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             colorTheme={colorTheme}
             toolbarPresets={toolbarPresets}
             isActive={isActive}
-            focusSuspended={pendingSwitchSessionId !== null}
+            focusSuspended={!terminalFocusAvailable || pendingSwitchSessionId !== null}
             deferCursorUntilPositioned={
               pendingSwitchSessionId === session.id
               || (session.mode === 'tmux' && !contentReadySessionIds.has(session.id))
@@ -2448,6 +2454,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                         : undefined
                       }
                     >
+                    {showSplitWindowHeader && !isMobileLayout && <header
+                      data-termdock-window-header="true"
+                      data-split-window-header="true"
+                      className="flex h-[46px] min-h-[46px] shrink-0 items-center app-chrome-bg pl-[88px] pr-3 text-[12px] text-muted-foreground"
+                    ><span className="min-w-0 truncate">{workspace?.name || t('tab.splitWorkspace')}</span></header>}
                     <FreeSplitLayout layoutId={slide.key} preset={workspace?.layout ?? 'horizontal'} initialTree={legacySplitTree(slide.sessions.map(session => session.id), effectiveLayout, workspace?.ratios, workspace?.gridColumnRatios, workspace?.gridRowRatios)} mobile={isMobileLayout}
                       focusId={mobileKeyboardFocusMode ? mobileKeyboardOpenSessionId : null}
                       panes={slide.sessions.map(session => ({ id: session.id, content: renderTerminal(session, {

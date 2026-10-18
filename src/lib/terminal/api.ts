@@ -1,8 +1,10 @@
+import { closeNativeSession, closeAllNativeSessions } from './nativeLifetime';
 import { pollConnectionQuality, receiveQualityPong } from './connectionQuality';
 import { collaborationServiceLabel } from '../collaboration/display';
 import { listServiceConnections, observeServiceConnections } from '../services/serviceDirectory';
 import { CollaborationDirectory, remoteSessionAddress, type CollaborationDirectoryData } from '../collaboration/directory';
 import { selectedTarget } from '../federation/clientScope';
+import { getTermdockDesktopBridge } from '../desktop/nativeBridge';
 import { prepareEncryptedDownload } from './secureDownload';
 import { clearTerminalSnapshots } from '../utils/terminalSnapshotCache';
 import { currentSecureClient, readWithSecureReconnect, secureSocket } from '../federation/browserIntegration';
@@ -18,6 +20,8 @@ import type {
   AgentIndicator,
   AgentStatusDetail,
   TmuxActionPayload,
+  TmuxActionResult,
+  TmuxCopySelection,
   TmuxLayout,
   TmuxSessionSummary,
   TmuxStatus,
@@ -45,6 +49,11 @@ export class TerminalApiError extends Error {
     super(message);
     this.name = 'TerminalApiError';
   }
+}
+
+export class TerminalInputError extends Error {
+  readonly code = 'TERMINAL_INPUT_REJECTED';
+  constructor(message: string) { super(message); this.name = 'TerminalInputError'; }
 }
 
 /** Full agent-status payload pushed by the server (OSC 777 hook-driven). */
@@ -132,8 +141,10 @@ export async function checkTermdockUpdate(): Promise<TermdockUpdateState> {
   return response.json() as Promise<TermdockUpdateState>;
 }
 
-export async function confirmTermdockUpdateRestart(): Promise<TermdockUpdateState> {
+export async function confirmTermdockUpdateRestart(isCurrent?: () => boolean): Promise<TermdockUpdateState> {
+  if (isCurrent && !isCurrent()) throw new TerminalApiError('Update confirmation expired');
   const csrfTokenHeader = await getCsrfToken();
+  if (isCurrent && !isCurrent()) throw new TerminalApiError('Update confirmation expired');
   const response = await fetch('/api/terminal/update/restart', {
     method: 'POST',
     headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
@@ -425,7 +436,9 @@ interface WsConnection {
   acknowledgedFlowSeq?: number;
   appliedSeq?: number;
   // 输入端缓冲：WS 没开时把用户输入暂存，连上后批量 flush，避免短线期间丢字。
-  pendingInputs: string[];
+  pendingInputs: PendingInputQueue;
+  inputRetryDelayMs: number;
+  inputRetryAttempts: number;
   // 仅在拥塞时启用短窗口批量 flush，快网保持逐条直发。
   inputFlushTimer: ReturnType<typeof setTimeout> | null;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
@@ -445,6 +458,9 @@ interface WsConnection {
 const wsConnections = new Map<string, WsConnection>();
 const outputSubscriptions = new Map<string, boolean>();
 
+interface PendingTerminalInput { readonly message: string; readonly bytes: number }
+interface PendingInputQueue { readonly items: Array<PendingTerminalInput | undefined>; head: number; bytes: number }
+
 export function getTerminalConnectionQuality(sessionId: string) {
   return pollConnectionQuality(wsConnections.get(sessionId)?.ws);
 }
@@ -454,56 +470,122 @@ type LinkQuality = 'good' | 'degraded' | 'congested';
 const INPUT_MICROBATCH_MS_DEGRADED = 24;
 const INPUT_MICROBATCH_MS_CONGESTED = 40;
 const INPUT_PENDING_CONGESTED_THRESHOLD = 40;
+const INPUT_FRAME_MAX_BYTES = 1024 * 1024;
+const INPUT_QUEUE_MAX_BYTES = 1024 * 1024;
+const INPUT_ENCRYPTED_RECORD_MAX_BYTES = 2 * 1024 * 1024;
+const INPUT_SECURE_SOCKET_ID_LENGTH = 36;
+const INPUT_BLOCKED_RETRY_INITIAL_MS = 50;
+const INPUT_BLOCKED_RETRY_MAX_MS = 1000;
+const INPUT_BLOCKED_MAX_ATTEMPTS = 20;
+const inputEncoder = new TextEncoder();
+
+function pendingInputCount(queue: PendingInputQueue): number { return queue.items.length - queue.head; }
+function compactPendingInputs(queue: PendingInputQueue): void {
+  if (queue.head === queue.items.length) { queue.items.length = 0; queue.head = 0; }
+  else if (queue.head >= 64 && queue.head * 2 >= queue.items.length) { queue.items.splice(0, queue.head); queue.head = 0; }
+}
+
+function fitsEncryptedInputRecord(message: string): boolean {
+  // SecureClient wraps the SecureSocket payload as { id, type: 'ws-data', data }.
+  // The UUID length is fixed, so this measures the exact second JSON escaping
+  // that PacketChannel.send encodes, including its outer envelope.
+  const outer = JSON.stringify({ id: '0'.repeat(INPUT_SECURE_SOCKET_ID_LENGTH), type: 'ws-data', data: message });
+  return inputEncoder.encode(outer).byteLength <= INPUT_ENCRYPTED_RECORD_MAX_BYTES;
+}
+
+function isTransientInputBackpressure(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'PACKET_QUEUE_BACKPRESSURE';
+}
+
+function failPendingInputs(conn: WsConnection, error: Error): TerminalInputError {
+  const reported = error instanceof TerminalInputError ? error : new TerminalInputError(error.message);
+  const queue = conn.pendingInputs;
+  queue.items.length = 0;
+  queue.head = 0;
+  queue.bytes = 0;
+  if (conn.inputFlushTimer) { clearTimeout(conn.inputFlushTimer); conn.inputFlushTimer = null; }
+  try { conn.onError?.(reported, true); }
+  finally { conn.disconnect(); }
+  return reported;
+}
 
 function estimateLinkQuality(conn: WsConnection): LinkQuality {
-  if (conn.retryState.retryCount >= 2 || conn.pendingInputs.length >= INPUT_PENDING_CONGESTED_THRESHOLD) {
+  const pendingCount = pendingInputCount(conn.pendingInputs);
+  if (conn.retryState.retryCount >= 2 || pendingCount >= INPUT_PENDING_CONGESTED_THRESHOLD) {
     return 'congested';
   }
-  if (conn.retryState.retryCount >= 1 || conn.pendingInputs.length >= 8) {
+  if (conn.retryState.retryCount >= 1 || pendingCount >= 8) {
     return 'degraded';
   }
   return 'good';
 }
 
-function flushPendingInputs(c: WsConnection): void {
-  if (c.pendingInputs.length === 0 || c.ws.readyState !== WebSocket.OPEN) return;
-  const queued = c.pendingInputs.splice(0);
-  for (const data of queued) {
-    try { c.ws.send(JSON.stringify({ type: 'input', data })); } catch { /* ignore */ }
+function flushPendingInputs(c: WsConnection): TerminalInputError | undefined {
+  const queue = c.pendingInputs;
+  if (pendingInputCount(queue) === 0 || c.ws.readyState !== WebSocket.OPEN) return undefined;
+  while (queue.head < queue.items.length) {
+    const pending = queue.items[queue.head];
+    if (!pending) { queue.head++; compactPendingInputs(queue); continue; }
+    try { c.ws.send(pending.message); }
+    catch (error) {
+      if (!isTransientInputBackpressure(error)) {
+        return failPendingInputs(c, error instanceof Error ? error : new Error(String(error)));
+      }
+      c.inputRetryAttempts++;
+      if (c.inputRetryAttempts >= INPUT_BLOCKED_MAX_ATTEMPTS) {
+        return failPendingInputs(c, new TerminalInputError('Terminal input was not accepted after repeated encrypted-channel backpressure'));
+      }
+      // PacketQueueBackpressureError is raised before PacketChannel enqueues
+      // the frame. Retain this exact item, with bounded retries; other errors
+      // are permanent/unknown and must be surfaced rather than retried.
+      const delay = c.inputRetryDelayMs;
+      c.inputRetryDelayMs = Math.min(INPUT_BLOCKED_RETRY_MAX_MS, delay * 2);
+      if (!c.inputFlushTimer && !c.retryState.isClosed) {
+        c.inputFlushTimer = setTimeout(() => {
+          c.inputFlushTimer = null;
+          scheduleInputFlush(c);
+        }, delay);
+      }
+      return undefined;
+    }
+    queue.bytes -= pending.bytes;
+    queue.items[queue.head] = undefined;
+    queue.head++;
+    compactPendingInputs(queue);
+    c.inputRetryDelayMs = INPUT_BLOCKED_RETRY_INITIAL_MS;
+    c.inputRetryAttempts = 0;
   }
+  return undefined;
 }
 
-function scheduleInputFlush(c: WsConnection): void {
-  if (c.ws.readyState !== WebSocket.OPEN) return;
+function scheduleInputFlush(c: WsConnection): TerminalInputError | undefined {
+  if (c.ws.readyState !== WebSocket.OPEN || c.inputFlushTimer) return undefined;
   const quality = estimateLinkQuality(c);
   if (quality === 'good') {
-    flushPendingInputs(c);
-    return;
-  }
-
-  if (c.inputFlushTimer) {
-    return;
+    return flushPendingInputs(c);
   }
 
   const delay = quality === 'congested' ? INPUT_MICROBATCH_MS_CONGESTED : INPUT_MICROBATCH_MS_DEGRADED;
   c.inputFlushTimer = setTimeout(() => {
     c.inputFlushTimer = null;
-    flushPendingInputs(c);
+    void flushPendingInputs(c);
   }, delay);
+  return undefined;
 }
 
 // Pending tmux request resolvers keyed by reqId.
 const pendingTmuxRequests = new Map<
   string,
-  { resolve: (value: { success: boolean; layout?: TmuxLayout }) => void; reject: (error: Error) => void }
+  { resolve: (value: TmuxActionResult) => void; reject: (error: Error) => void; connection: WebSocket }
 >();
 
-function resolveTmuxRequest(reqId: string, success: boolean, layout?: TmuxLayout, error?: string) {
+function resolveTmuxRequest(reqId: string, success: boolean, layout?: TmuxLayout, error?: string, selection?: TmuxCopySelection, connection?: WebSocket) {
   const entry = pendingTmuxRequests.get(reqId);
-  if (!entry) return;
+  if (!entry || entry.connection !== connection) return;
   pendingTmuxRequests.delete(reqId);
   if (success) {
-    entry.resolve({ success: true, layout });
+    entry.resolve({ success: true, layout, selection });
   } else {
     entry.reject(new Error(error || 'Tmux action failed'));
   }
@@ -535,9 +617,19 @@ function getWebSocketUrl(sessionId: string, sinceSeq: number, epoch?: string, vi
 // 自动带上正确的 since。如果尚未建立连接，则记录在外层 map 等待 connect() 时使用。
 const pendingInitialSeq = new Map<string, number>();
 const pendingSnapshotEpoch = new Map<string, string>();
+/** A fresh native surface has no xterm snapshot/parser baseline. */
+export function discardTerminalSnapshotCursor(sessionId: string): void {
+  pendingInitialSeq.delete(sessionId); pendingSnapshotEpoch.delete(sessionId);
+}
 export function setTerminalSnapshotCursor(sessionId: string, seq: number, epoch: string): void {
   pendingInitialSeq.set(sessionId, seq);
   pendingSnapshotEpoch.set(sessionId, epoch);
+}
+/** Received sequence may seed a native batch boundary only when every store
+ * byte through it is included; it is never a consumption or server ACK. */
+export function getReceivedTerminalCursor(sessionId:string):{seq:number;epoch:string}|null {
+  const conn=wsConnections.get(sessionId);
+  return conn?.streamEpoch&&conn.lastSeq>0?{seq:conn.lastSeq,epoch:conn.streamEpoch}:null;
 }
 export function getAppliedTerminalCursor(sessionId: string): { seq: number; epoch: string } | null {
   const conn = wsConnections.get(sessionId);
@@ -616,7 +708,7 @@ export function connectTerminalStream(
   pendingSnapshotEpoch.delete(sessionId);
   pendingInitialSeq.delete(sessionId);
   // WS 没建立时积累的输入缓冲；每次创建新 conn 时挂到上面。
-  const pendingInputs: string[] = [];
+  const pendingInputs: PendingInputQueue = { items: [], head: 0, bytes: 0 };
   // Guard against onerror + onclose double-fire: only the first one
   // should trigger handleError for a given disconnection.
   let handlingError = false;
@@ -663,6 +755,9 @@ export function connectTerminalStream(
   const cleanup = () => {
     retryState.isClosed = true;
     clearTimeouts();
+    pendingInputs.items.length = 0;
+    pendingInputs.head = 0;
+    pendingInputs.bytes = 0;
     if (conn) {
       stopHeartbeat(conn);
       wsConnections.delete(sessionId);
@@ -741,6 +836,8 @@ export function connectTerminalStream(
       retryState,
       lastSeq,
       pendingInputs,
+      inputRetryDelayMs: INPUT_BLOCKED_RETRY_INITIAL_MS,
+      inputRetryAttempts: 0,
       inputFlushTimer: null,
       heartbeatTimer: null,
       pongTimer: null,
@@ -781,7 +878,7 @@ export function connectTerminalStream(
 
         // Handle tmux-result (correlated response for sendTmuxAction)
         if (msg.type === 'tmux-result' && msg.reqId) {
-          resolveTmuxRequest(msg.reqId, msg.success !== false, msg.layout, msg.error);
+          resolveTmuxRequest(msg.reqId, msg.success !== false, msg.layout, msg.error, msg.selection, ws);
           return;
         }
 
@@ -1053,17 +1150,22 @@ export async function sendTerminalInput(
   data: string
 ): Promise<void> {
   const conn = wsConnections.get(sessionId);
-  if (conn) {
+  if (conn && (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING)) {
+    const message = JSON.stringify({ type: 'input', data });
+    const bytes = inputEncoder.encode(message).byteLength;
+    if (bytes > INPUT_FRAME_MAX_BYTES || !fitsEncryptedInputRecord(message)) {
+      throw new TerminalInputError('Terminal input exceeds the encrypted socket frame limit');
+    }
+    const queue = conn.pendingInputs;
+    if (queue.bytes + bytes > INPUT_QUEUE_MAX_BYTES) throw new TerminalInputError('Terminal input queue is full; retry after the connection recovers');
+    queue.items.push({ message, bytes });
+    queue.bytes += bytes;
+    // CONNECTING retains the bounded queue until onopen; OPEN tries to flush.
     if (conn.ws.readyState === WebSocket.OPEN) {
-      conn.pendingInputs.push(data);
-      scheduleInputFlush(conn);
-      return;
+      const error = scheduleInputFlush(conn);
+      if (error) throw error;
     }
-    if (conn.ws.readyState === WebSocket.CONNECTING) {
-      // 正在握手，先排队等 onopen 一起 flush。
-      conn.pendingInputs.push(data);
-      return;
-    }
+    return;
   }
   // 完全没有 conn（极少数边缘情况：cleanup 后又触发 input），fallback HTTP。
   const csrfTokenHeader = await getCsrfToken();
@@ -1259,7 +1361,7 @@ export async function resizeTerminal(
 export async function sendTmuxAction(
   sessionId: string,
   payload: TmuxActionPayload
-): Promise<{ success: boolean; layout?: TmuxLayout }> {
+): Promise<TmuxActionResult> {
   const conn = wsConnections.get(sessionId);
   if (conn && conn.ws.readyState === WebSocket.OPEN) {
     // 只有 scroll 走 fire-and-forget：高频、连续，没必要往返。
@@ -1272,7 +1374,7 @@ export async function sendTmuxAction(
     }
     return new Promise((resolve, reject) => {
       const reqId = Math.random().toString(36).substring(7);
-      pendingTmuxRequests.set(reqId, { resolve, reject });
+      pendingTmuxRequests.set(reqId, { resolve, reject, connection: conn.ws });
       conn.ws.send(JSON.stringify({ type: 'tmux', reqId, ...payload }));
       setTimeout(() => {
         if (pendingTmuxRequests.has(reqId)) {
@@ -1588,6 +1690,8 @@ export async function reorderSessionInventoryEntries(sessionIds: string[]): Prom
 }
 
 export async function removeSessionInventoryEntry(frontendSessionId: string): Promise<void> {
+  // The local panel was explicitly closed even if the remote DELETE fails.
+  void closeNativeSession(frontendSessionId).catch(() => {});
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/session-inventory/sessions/${encodeURIComponent(frontendSessionId)}`, {
     method: 'DELETE',
@@ -1600,6 +1704,7 @@ export async function removeSessionInventoryEntry(frontendSessionId: string): Pr
 }
 
 export async function clearSessionInventoryEntries(): Promise<void> {
+  void closeAllNativeSessions().catch(() => {});
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/session-inventory/sessions', {
     method: 'DELETE',
@@ -2810,11 +2915,11 @@ function isIOS(): boolean {
 //      PWAs. If share is unavailable, use the already decrypted blob.
 //   3. <a download> blob URL fallback — used everywhere else (Firefox, desktop
 //      Safari). Triggers the browser's native download in a normal tab.
-/** `saved` means the platform save/share handoff completed, not proof of disk persistence. */
-export type DownloadResult = 'saved' | 'canceled';
-
+/** `saved` means committed bytes; `started` means a browser/share handoff was triggered. */
+export type DownloadResult = 'saved' | 'started' | 'canceled';
 export async function downloadFile(filePath: string, signal?: AbortSignal): Promise<DownloadResult> {
   if (signal?.aborted) return 'canceled';
+  const targetPeerId = selectedTarget()?.targetPeerId;
   const url = `/api/terminal/fs/download?path=${encodeURIComponent(filePath)}`;
   try {
     const response = signal ? await fetch(url, { signal }) : await fetch(url);
@@ -2825,14 +2930,21 @@ export async function downloadFile(filePath: string, signal?: AbortSignal): Prom
       throw new Error(error.error || 'Failed to download file');
     }
 
-    const blob = await response.blob();
-    // Some transports/native bridges can settle after abort. Never start saving
-    // bytes from a canceled request, even if its fetch/body ignored the signal.
-    if (signal?.aborted) return 'canceled';
-    const filename = parseFilenameFromContentDisposition(response.headers.get('Content-Disposition') || '')
+    const filename = parseFilenameFromContentDisposition(response.headers?.get?.('Content-Disposition') || '')
       ?? filePath.split('/').pop()?.split('\\').pop()
       ?? 'download';
 
+    const previewStream = getTermdockDesktopBridge()?.saveDownloadStream;
+    if (previewStream && response.body) {
+      const header=response.headers?.get?.('Content-Length');
+      const expected=header!==null&&header!==undefined&&/^\d+$/.test(header)?Number(header):undefined;
+      if(signal?.aborted||selectedTarget()?.targetPeerId!==targetPeerId)return 'canceled';
+      const result=await previewStream(response.body,filename,{signal,expectedBytes:Number.isSafeInteger(expected)?expected:undefined});
+      if(signal?.aborted||selectedTarget()?.targetPeerId!==targetPeerId)return 'canceled';
+      return result;
+    }
+    const blob=await response.blob();
+    if(signal?.aborted||selectedTarget()?.targetPeerId!==targetPeerId)return 'canceled';
     return await saveDownloadBlob(blob, filename, signal);
   } catch (error) {
     if (signal?.aborted) return 'canceled';
@@ -2843,6 +2955,8 @@ export async function downloadFile(filePath: string, signal?: AbortSignal): Prom
 /** Save bytes already fetched through the page, using the native save flow. */
 export async function saveDownloadBlob(blob: Blob, filename: string, signal?: AbortSignal): Promise<DownloadResult> {
   if (signal?.aborted) return 'canceled';
+  const previewSave = getTermdockDesktopBridge()?.saveDownloadBlob;
+  if (previewSave) return previewSave(blob, filename, signal);
   // Prefer the File System Access API when available.
   const showSaveFilePicker = (window as unknown as {
     showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<{
@@ -2897,7 +3011,7 @@ export async function saveDownloadBlob(blob: Blob, filename: string, signal?: Ab
     if (canShare) {
       try {
         await navigator.share({ files: [file] });
-        return 'saved';
+        return 'started';
       } catch (err) {
         if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) return 'canceled';
         // Share failed: keep using the already decrypted bytes below.
@@ -2909,7 +3023,7 @@ export async function saveDownloadBlob(blob: Blob, filename: string, signal?: Ab
     if (signal?.aborted) return 'canceled';
     const attachment = await prepareEncryptedDownload(blob, filename);
     if (signal?.aborted) return 'canceled';
-    if (attachment) { window.location.assign(attachment); return 'saved'; }
+    if (attachment) { window.location.assign(attachment); return 'started'; }
   }
 
   // Fallback: anchor + blob URL.
@@ -2926,11 +3040,13 @@ export async function saveDownloadBlob(blob: Blob, filename: string, signal?: Ab
     URL.revokeObjectURL(objectUrl);
     anchor.remove();
   }, 4000);
-  return 'saved';
+  return 'started';
 }
 
-export async function deleteFile(filePath: string): Promise<void> {
+export async function deleteFile(filePath: string, isCurrent?:()=>boolean): Promise<void> {
+  if(isCurrent&&!isCurrent())throw new Error('File deletion context changed');
   const csrfTokenHeader = await getCsrfToken();
+  if(isCurrent&&!isCurrent())throw new Error('File deletion context changed');
   const params = new URLSearchParams({ path: filePath, confirm: 'true' });
   const response = await fetchWithTimeout(
     `/api/terminal/fs/file?${params}`,
@@ -2960,18 +3076,26 @@ export async function uploadFiles(
   files: File[],
   signal?: AbortSignal,
   onProgress?: (percent: number) => void,
+  isCurrent?: () => boolean,
 ): Promise<UploadFilesResponse> {
   if (files.length > MAX_UPLOAD_FILES) {
     throw new UploadFilesError(`Choose up to ${MAX_UPLOAD_FILES} files per upload. None were uploaded.`, {
       files: [], results: files.map((file, index) => ({ index, name: file.name, status: 'rejected', code: 'UPLOAD_LIMIT' })),
     }, 'UPLOAD_LIMIT');
   }
+  const target = selectedTarget();
+  const confirmOwner = () => {
+    if (signal?.aborted) throw signal.reason ?? new DOMException('Upload cancelled', 'AbortError');
+    if (selectedTarget() !== target || isCurrent?.() === false) throw new Error('Upload target changed');
+  };
+  confirmOwner();
   const formData = new FormData();
   for (const file of files) {
     formData.append('files', file);
   }
   const url = `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}&fileCount=${files.length}`;
   const csrfTokenHeader = await getCsrfToken();
+  confirmOwner();
   // Use the encrypted fetch transport even before a Service Worker controls this
   // page. Native XHR would transmit file bytes outside the end-to-end channel.
   onProgress?.(0);
@@ -2984,6 +3108,7 @@ export async function uploadFiles(
     headers['Content-Type'] = encoded.headers.get('Content-Type')!;
     body = await encoded.blob();
   }
+  confirmOwner();
   const response = await fetchWithTimeout(
     url,
     { method: 'POST', headers, body, signal,
@@ -2998,6 +3123,7 @@ export async function uploadFiles(
     throw new UploadFilesError(error.error || 'Upload failed', error, error.code);
   }
   const result = await response.json();
+  confirmOwner();
   onProgress?.(100);
   return result;
 }
@@ -3969,8 +4095,8 @@ async function operationsRequest<T>(path: string, init?: RequestInit): Promise<T
 
 export type { CollaborationTaskView, TaskOperation, TaskCreateInput, TaskMember } from '../../server/agent/collaborationTaskTypes';
 type TaskView = import('../../server/agent/collaborationTaskTypes').CollaborationTaskView;
-export function listCollaborationTasks(groupId?: string): Promise<{ tasks: TaskView[] }> {
-  return operationsRequest(`/collaboration-tasks${groupId ? `?group=${encodeURIComponent(groupId)}` : ''}`);
+export function listCollaborationTasks(groupId?: string, signal?: AbortSignal): Promise<{ tasks: TaskView[] }> {
+  return operationsRequest(`/collaboration-tasks${groupId ? `?group=${encodeURIComponent(groupId)}` : ''}`, signal ? { signal } : undefined);
 }
 export function getCollaborationTask(taskId: string): Promise<{ task: TaskView }> {
   return operationsRequest(`/collaboration-tasks/${encodeURIComponent(taskId)}`);

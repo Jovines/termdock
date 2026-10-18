@@ -57,6 +57,16 @@ describe('TermdockUpdateSettings', () => {
     expect(actions.onCheck).not.toHaveBeenCalled();
   });
 
+  it('keeps installation errors visible in Settings even when the versions match', () => {
+    const actions = renderSettings({
+      status: 'error', currentVersion: '1.4.322', latestVersion: '1.4.322',
+      source: 'official', checkedAt: Date.now(), error: 'Install verification failed.',
+    });
+    expect(screen.getByText('Install verification failed.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(actions.onCheck).toHaveBeenCalledOnce();
+  });
+
   it('checks the desktop app independently from the CLI runtime', () => {
     const actions = renderSettings(
       {

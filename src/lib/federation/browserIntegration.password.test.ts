@@ -88,3 +88,55 @@ it('distinguishes real OPAQUE rejection, encrypted disconnect, pin mismatch and 
   expect(location.reload).not.toHaveBeenCalled();
   expect(wire.every(bytes => !new TextDecoder().decode(bytes).includes('known-password') && !new TextDecoder().decode(bytes).includes('wrong-password'))).toBe(true);
 }, 20_000);
+
+it.each([
+  ['browser', false, undefined],
+  ['legacy desktop', false, 'https://ignored-preview.test'],
+  ['Preview', true, 'https://service.test'],
+] as const)('keeps real OPAQUE binding for %s before any authenticated transport is opened', async (_name, preview, supplied) => {
+  vi.resetModules(); state.target = null; state.save.mockClear();
+  const { PasswordBootstrapServer } = await import('../../server/federation/passwordBootstrap');
+  const device = await createIdentity(), service = await createIdentity(); state.identity.mockResolvedValue(device);
+  const saltHex = '12'.repeat(16);
+  const verifier = `scrypt$${saltHex}$${scryptSync('known-password', Buffer.from(saltHex, 'hex'), 64, { N: 32768, r: 8, p: 1, maxmem: 67108864 }).toString('hex')}`;
+  const server = new PasswordBootstrapServer({ getPasswordHash: () => verifier, serverIdentity: service.peerId });
+  const pageOrigin = 'http://127.0.0.1:43000';
+  vi.stubGlobal('location', { origin: pageOrigin, href: pageOrigin + '/', host: '127.0.0.1:43000', pathname: '/' });
+  const binding = vi.fn(() => supplied);
+  vi.stubGlobal('window', Object.assign(new EventTarget(), { termdockDesktop: supplied ? { ...(preview ? { previewCapabilities: {} } : {}), passwordBootstrapOrigin: binding } : undefined }));
+  vi.stubGlobal('navigator', { onLine: true });
+  let proved = false;
+  const transport = vi.fn(async (raw, init) => {
+    const url = new URL(raw, pageOrigin);
+    if (url.pathname.endsWith('/parameters')) return Response.json(server.parameters());
+    if (url.pathname.endsWith('/start')) {
+      const body = JSON.parse(init.body);
+      return Response.json(await server.start({ ...body, origin: preview ? supplied! : pageOrigin }));
+    }
+    if (url.pathname.endsWith('/finish')) {
+      const verified = await server.finish(JSON.parse(init.body));
+      expect(verified.clientIdentity).toBe(device.peerId); expect(verified.serverIdentity).toBe(service.peerId);
+      proved = true;
+      // End this scoped binding check before opening a service. The real old
+      // router + subsequent Noise integration lives in preview_password.rs.
+      return Response.json({ error: 'Fixture stopped after proof' }, { status: 503 });
+    }
+    throw new Error('Unexpected ordinary request');
+  });
+  vi.stubGlobal('fetch', transport);
+  const integration = await import('./browserIntegration');
+  await expect(integration.connectServiceAddress('https://service.test', 'known-password')).rejects.toThrow();
+  expect(proved).toBe(true);
+  expect(binding).toHaveBeenCalledTimes(preview ? 1 : 0);
+  expect(state.save).not.toHaveBeenCalled();
+});
+
+it.each(['https://attacker.test', 'file:///tmp', 'https://service.test/', 'https://user:pass@service.test', 'https://service.test/?secret=x'])('rejects a forged Preview bootstrap binding %s before sending a password proof', async origin => {
+  vi.resetModules(); state.target = null;
+  vi.stubGlobal('location', { origin: 'http://127.0.0.1:43000' });
+  vi.stubGlobal('window', Object.assign(new EventTarget(), { termdockDesktop: { previewCapabilities: {}, passwordBootstrapOrigin: () => origin } }));
+  const transport = vi.fn(); vi.stubGlobal('fetch', transport);
+  const integration = await import('./browserIntegration');
+  await expect(integration.connectServiceAddress('https://service.test', 'known-password')).rejects.toThrow();
+  expect(transport).not.toHaveBeenCalled();
+});

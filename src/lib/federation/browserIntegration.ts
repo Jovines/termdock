@@ -32,24 +32,40 @@ export function currentEntryClient(): SecureClient | undefined { return entryCli
 export function invalidateSecureTransport(): void {
   active?.close(); entryClient?.close(); active = undefined; entryClient = undefined;
 }
+class SecureReadTargetChanged extends Error { constructor(){super('Secure read target changed');this.name='SecureReadTargetChanged';} }
+function isRecoverableReadInterruption(error: unknown): boolean {
+  if (isConnectionInterruption(error)) return true;
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { name?: unknown; message?: unknown };
+  return candidate.name === 'UnexpectedEOFError'
+    && typeof candidate.message === 'string'
+    && /^Unexpected EOF - stream closed while reading \d+\/\d+ bytes$/.test(candidate.message);
+}
 /** Retry a complete read (including its body) once on an interrupted encrypted
  * channel. Writes and reads belonging to a changed service are never replayed. */
 export async function readWithSecureReconnect<T>(read: () => Promise<T>, signal?: AbortSignal | null): Promise<T> {
-  const targetPeerId = savedConnection()?.targetPeerId;
+  const target = savedConnection();
+  const targetPeerId = target?.targetPeerId;
+  const targetStamp = JSON.stringify(target);
+  const targetIsCurrent = () => JSON.stringify(savedConnection()) === targetStamp;
   const previous = currentSecureClient();
-  try { return await read(); }
+  const complete = (result:T):T => {
+    if (!targetIsCurrent()) throw new SecureReadTargetChanged();
+    if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
+    return result;
+  };
+  try { return complete(await read()); }
   catch (error) {
-    if (signal?.aborted || error instanceof Error && error.name === 'AbortError'
+    if (error instanceof SecureReadTargetChanged || signal?.aborted || error instanceof Error && error.name === 'AbortError'
       || error && typeof error === 'object' && 'status' in error
-      || !targetPeerId || savedConnection()?.targetPeerId !== targetPeerId
-      || (!previous?.closed && !isConnectionInterruption(error))) throw error;
+      || !targetPeerId || !targetIsCurrent()
+      || (!previous?.closed && !isRecoverableReadInterruption(error))) throw error;
     setConnectionRecovery(navigator.onLine === false ? 'offline' : 'reconnecting');
     if (previous && currentSecureClient() === previous) invalidateSecureTransport();
     window.dispatchEvent(new Event(SECURE_STATE_EVENT));
     await waitForActiveClient(signal);
-    if (savedConnection()?.targetPeerId !== targetPeerId) throw error;
-    const result = await read();
-    if (savedConnection()?.targetPeerId !== targetPeerId) throw error;
+    if (!targetIsCurrent()) throw new SecureReadTargetChanged();
+    const result = complete(await read());
     setConnectionRecovery('ready');
     return result;
   }
@@ -71,6 +87,17 @@ export async function connectOpenService(): Promise<void> {
 }
 async function authenticateServicePasswordDirect(url: string, password: string): Promise<ConnectionIntent> {
   const { startPasswordBootstrap, finishPasswordBootstrap } = await import('../../server/federation/passwordBootstrap');
+  // Preview's transport uses a private loopback document. Its native boundary
+  // binds this proof to the exact approved upstream Origin for old servers;
+  // ordinary browsers and Electron keep their existing document binding.
+  const preview = typeof window !== 'undefined' ? window.termdockDesktop as (typeof window.termdockDesktop & { previewCapabilities?: unknown; passwordBootstrapOrigin?: (url: string) => string }) : undefined;
+  let proofOrigin = location.origin;
+  if (preview?.previewCapabilities && preview.passwordBootstrapOrigin) {
+    const candidate = preview.passwordBootstrapOrigin(url);
+    const parsed = new URL(candidate);
+    if (parsed.origin !== candidate || (url !== location.origin && parsed.origin !== url) || !['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new PasswordLoginFailure('LOGIN_UNAVAILABLE');
+    proofOrigin = candidate;
+  }
   const endpoint = (path: string) => url === location.origin ? path : new URL(path, url).href;
   const request = async (path: string, body?: unknown) => {
     const response = await nativeFetch(endpoint(path), { credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15_000), ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
@@ -86,9 +113,10 @@ async function authenticateServicePasswordDirect(url: string, password: string):
   const state = await startPasswordBootstrap(password, saltHex);
   try {
     const started = await request('/api/auth/password/start', { startLoginRequest: state.startLoginRequest, clientIdentity: identity.peerId });
-    const verified = await finishPasswordBootstrap(state, started, { clientIdentity: identity.peerId, origin: location.origin });
+    const verified = await finishPasswordBootstrap(state, started, { clientIdentity: identity.peerId, origin: proofOrigin });
     await request('/api/auth/password/finish', { attemptId: verified.attemptId, finishLoginRequest: verified.finishLoginRequest });
-    return { url, targetPeerId: verified.serverIdentity, serviceName: new URL(url).host, serviceOrigin: url };
+    const address = proofOrigin === location.origin ? url : proofOrigin;
+    return { url: address, targetPeerId: verified.serverIdentity, serviceName: new URL(address).host, serviceOrigin: address };
   } finally { state.passwordKey = ''; }
 }
 async function authenticateServicePassword(url: string, password: string): Promise<ConnectionIntent> {

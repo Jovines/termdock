@@ -4,6 +4,7 @@ import { CollaborationTab, openCollaborationSession } from './AgentOperationsPan
 import { collaborationPanelClientId, openCollaborationMessagesPanel } from '../../collaboration/panelPreferences';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { isConnectionInterruption, SECURE_READY_EVENT, useConnectionRecovery } from '../../federation/connectionRecovery';
+import { startVisiblePolling } from './startVisiblePolling';
 import { getAgentLaunchers, getSettings, listCollaborationGroups, subscribeCollaborationGroups,
   type AgentLauncherInfo, type CollaborationGroupsResponse } from '../../terminal/api';
 
@@ -45,13 +46,8 @@ export default function CollaborationMainWorkspace({ groupId, activeSessionId, o
       }
     }).catch(() => {});
     const unsubscribe = subscribeCollaborationGroups(next => { if (!cancelled) { setDirectory(next); setLoadError(null); } });
-    void refresh();
-    const visible = () => { if (!document.hidden && navigator.onLine !== false) void refresh(); };
-    const timer = setInterval(visible, 10000);
-    document.addEventListener('visibilitychange', visible);
-    window.addEventListener(SECURE_READY_EVENT, visible);
-    window.addEventListener('pageshow', visible);
-    return () => { cancelled = true; unsubscribe(); clearInterval(timer); document.removeEventListener('visibilitychange', visible); window.removeEventListener(SECURE_READY_EVENT, visible); window.removeEventListener('pageshow', visible); };
+    const stopPolling = startVisiblePolling(() => { if (navigator.onLine !== false) void refresh(); }, 10000, [SECURE_READY_EVENT, 'pageshow']);
+    return () => { cancelled = true; unsubscribe(); stopPolling(); };
   }, [refresh]);
   const group = directory?.groups.find(g => g.id === groupId);
   const activeTerminal = directory?.sessions.find(session => session.sessionId === activeSessionId);
@@ -61,7 +57,7 @@ export default function CollaborationMainWorkspace({ groupId, activeSessionId, o
     useCollaborationNavigation.getState().terminal();
   };
   return <section aria-label="协作主工作区" className="absolute inset-0 flex min-h-0 min-w-0 flex-col bg-[var(--chrome-bg)] text-foreground">
-    <header className="flex min-h-14 shrink-0 items-center gap-1 border-b border-border/15 px-2 sm:min-h-16 sm:gap-3 sm:px-6">
+    <header data-termdock-window-header="true" className="flex min-h-14 shrink-0 items-center gap-1 border-b border-border/15 px-2 sm:min-h-16 sm:gap-3 sm:px-6">
       {!leftSidebarVisible && <button type="button" aria-label="打开会话侧栏" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-2" onClick={onOpenSidebar}><PanelLeft size={17} /></button>}
       <Workflow size={18} className="hidden shrink-0 text-primary sm:block" />
       <div className="min-w-0 flex-1"><h2 ref={title} tabIndex={-1} className="truncate text-base font-semibold outline-none">{group?.name ?? '协作工作区'}</h2><p className="text-[11px] text-muted-foreground">{group ? `${group.sessionIds.length} 位成员` : '正在连接工作组'}</p></div>

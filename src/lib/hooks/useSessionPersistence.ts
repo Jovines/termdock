@@ -14,6 +14,7 @@ import {
 import { subscribeClientState } from '../utils/clientStateSync';
 import { pickSessionAfterClose } from '../utils/sessionSelection';
 import { removeSessionFontSize } from '../terminal/sessionFontSize';
+import { closeNativeSession } from '../terminal/nativeLifetime';
 
 const LEGACY_STORAGE_KEY = 'termdock-sessions';
 const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
@@ -219,9 +220,18 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     return nextActiveSessionId;
   }, []);
 
-  const applySessionList = useCallback((sessionList: PersistedSession[], options?: { reconcileActive?: boolean }) => {
+  const applySessionList = useCallback((sessionList: PersistedSession[], options?: { reconcileActive?: boolean; confirmedRemoval?: boolean }) => {
     const filteredSessionList = sessionList.filter((session) => !removedSessionIdsRef.current.has(session.sessionId));
+    const nextIds = new Set(filteredSessionList.map(session => session.sessionId));
+    const removed = options?.confirmedRemoval
+      ? sessionsRef.current.filter(session => !nextIds.has(session.sessionId))
+      : [];
     sessionsRef.current = filteredSessionList;
+    for (const session of removed) {
+      // Retire only membership deletions accepted from this service. A retry
+      // checks that the ID has not reappeared; nativeLifetime binds the lease.
+      void closeNativeSession(session.sessionId, () => !sessionsRef.current.some(current => current.sessionId === session.sessionId)).catch(() => {});
+    }
     ++sessionSnapshotRevisionRef.current;
     setSessions((prev) => (sessionListKey(prev) === sessionListKey(filteredSessionList) ? prev : filteredSessionList));
     writeSessionsCache(filteredSessionList);
@@ -255,6 +265,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const applyInventory = useCallback((nextInventory: SessionInventory, options?: {
     reconcileActive?: boolean; backendBaseRevision?: number; mergedLocally?: boolean;
   }) => {
+    if (!options?.mergedLocally && inventoryRef.current && nextInventory.updatedAt < inventoryRef.current.updatedAt) return;
     const filteredInventory = removedSessionIdsRef.current.size === 0
       ? nextInventory
       : {
@@ -271,7 +282,9 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     };
     inventoryRef.current = confirmedInventory;
     setInventory(confirmedInventory);
-    applySessionList(normalizeInventorySessionList(confirmedInventory.clientSessions), options);
+    applySessionList(normalizeInventorySessionList(confirmedInventory.clientSessions), {
+      ...options, confirmedRemoval: !options?.mergedLocally,
+    });
   }, [applySessionList, mergeBackendFacts]);
 
   const mutateSessionList = useCallback((update: (previous: PersistedSession[]) => PersistedSession[]) => {
@@ -596,7 +609,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
       const serverSessions = normalizeSessionList(snapshot.clientState.sessions || []).map(session =>
         mergeBackendFacts(session, snapshot.clientState.updatedAt));
-      applySessionList(serverSessions, { reconcileActive: true });
+      if (inventoryRef.current && snapshot.clientState.updatedAt < inventoryRef.current.updatedAt) return;
+      applySessionList(serverSessions, { reconcileActive: true, confirmedRemoval: true });
     });
     return unsubscribe;
   }, [applyInventory, applySessionList, mergeBackendFacts]);

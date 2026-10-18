@@ -619,6 +619,8 @@ export type TranslationDictionary = {
     downloadFile: string;
     downloadFailed: string;
     downloadCanceled: string;
+    downloadSaved: string;
+    downloadStarted: string;
     uploadPending: string;
     uploadInserting: string;
     uploadDone: (params: TranslatorParams) => string;

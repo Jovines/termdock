@@ -10,10 +10,11 @@ interface UtilityAction {
   separated?: boolean;
 }
 
-export function SidebarUtilityActions({ onOpenSettings, serverAttention, actions }: {
+export function SidebarUtilityActions({ onOpenSettings, serverAttention, actions, compact = false }: {
   onOpenSettings: () => void;
   serverAttention: boolean;
   actions: UtilityAction[];
+  compact?: boolean;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -78,7 +79,7 @@ export function SidebarUtilityActions({ onOpenSettings, serverAttention, actions
       role="group"
       data-sidebar-gesture-ignore
       aria-label={t('sidebar.moreActions')}
-      className="relative z-20 mt-2 flex items-center justify-between gap-2"
+      className={compact ? "relative z-20 flex shrink-0 items-center" : "relative z-20 mt-2 flex items-center justify-between gap-2"}
       onKeyDown={(event) => {
         if (open && event.key === 'Escape') {
           event.preventDefault();
@@ -88,7 +89,7 @@ export function SidebarUtilityActions({ onOpenSettings, serverAttention, actions
         }
       }}
     >
-      <button
+      {!compact && <button
         type="button"
         onClick={onOpenSettings}
         title={serverAttention ? t('sidebar.serverAttention') : undefined}
@@ -96,9 +97,12 @@ export function SidebarUtilityActions({ onOpenSettings, serverAttention, actions
       >
         <Settings size={14} className={serverAttention ? 'text-destructive' : undefined} />
         <span>{t('sidebar.settings')}</span>
-      </button>
+      </button>}
       <button
         ref={triggerRef}
+        data-session-sidebar-header-action={compact ? '' : undefined}
+        title={t('sidebar.moreActions')}
+        aria-label={t('sidebar.moreActions')}
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -110,10 +114,11 @@ export function SidebarUtilityActions({ onOpenSettings, serverAttention, actions
             setOpen(true);
           }
         }}
-        className={`inline-flex min-h-9 items-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[11px] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${open ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+        className={`relative inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg text-[11px] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${compact ? 'h-9 w-9 shrink-0' : 'min-h-9 px-2'} ${open ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
       >
         <MoreHorizontal size={15} />
-        <span>{t('sidebar.moreActions')}</span>
+        {!compact && <span>{t('sidebar.moreActions')}</span>}
+        {compact && serverAttention && <span aria-hidden="true" className="absolute right-0 top-0 h-1.5 w-1.5 rounded-full bg-destructive" />}
       </button>
       {open && createPortal(
         <div

@@ -1,3 +1,6 @@
+import { sanitizeTerminalInput } from '../../terminal/inputNormalization';
+import { NativeTerminalViewport } from '../../terminal/nativeViewport';
+import { supportsNativeTerminal } from '../../desktop/nativeBridge';
 import { encodeTerminalKey } from '../../terminal/keyboard';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { isWorkspaceActive } from '../../services/workspaceHost';
@@ -115,19 +118,7 @@ const MOBILE_COPY_POPOVER_HANDLE_CLEARANCE_PX = 52;
  * 2. Unicode 空格变体转换为普通空格
  * 3. 移除零宽字符
  */
-function sanitizeTerminalInput(input: string): string {
-  if (!input) {
-    return '';
-  }
 
-  return input
-    // 换行符统一处理：LF (\n) 和 CR-LF (\r\n) → CR (\r)
-    .replace(/\r\n|\r|\n/g, '\r')
-    // 所有 Unicode 空格变体 → 普通空格
-    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
-    // 移除零宽字符
-    .replace(/[\u200B-\u200D\uFEFF]/g, '');
-}
 
 // Mobile IMEs (notably voice input) may briefly rewrite a whole textarea value:
 // delete the current draft, then insert the normalized final transcript.  If we
@@ -305,6 +296,10 @@ const RESUME_REASONS: ReadonlySet<RefreshReason> = new Set<RefreshReason>([
 ]);
 
 export type TerminalController = {
+  renderer?: () => 'native' | 'native-pending' | 'xterm';
+  prepareNativeSession?: (backendSessionId: string) => Promise<{seq:number;epoch:string} | null>;
+  captureNativeSnapshot?: (cursor: {seq:number;epoch:string}) => Promise<import('../../terminal/nativeSnapshotCache').NativeSnapshot | null>;
+  saveNativeCursor?: (cursor: {seq:number;epoch:string}) => Promise<void>;
   serializeSnapshot: () => string | null;
   focus: () => void;
   blur: () => void;
@@ -368,10 +363,14 @@ export type TerminalViewportInputOptions = {
   ownedPaste?: OwnedTerminalPaste;
 };
 
-interface TerminalViewportProps {
+export interface TerminalViewportProps {
+  backendSessionId?: string | null;
+  nativeCursor?: {seq:number;epoch:string} | null;
   sessionKey: string;
   /** Frontend session id — used to persist per-session font size overrides. */
   sessionId: string;
+  /** Backend-session generation captured by async clipboard uploads. */
+  getPasteOwnerKey?: () => string;
   isLayoutVisible?: boolean;
   chunks: TerminalChunk[];
   onInput: (data: string, options?: TerminalViewportInputOptions) => void | Promise<boolean>;
@@ -393,6 +392,8 @@ interface TerminalViewportProps {
   }) => void;
   onWriteProgress?: (lastWrittenChunkId: number) => void;
   onCursorPositionChange?: (position: { x: number; y: number; rows: number }) => void;
+  onNativeTitleChange?: (title:string) => void;
+  onNativeRendererFailed?: () => void;
   onDirectoryLinkActivate?: (path: string, line?: number) => void;
   terminalSettings: TerminalSettings;
   theme: TerminalTheme;
@@ -400,6 +401,8 @@ interface TerminalViewportProps {
   enableTouchScroll?: boolean;
   mobileLongPressMode?: 'arrows' | 'copy';
   autoFocus?: boolean;
+  /** Current session active and not focus-suspended; distinct from autofocus preference. */
+  inputActive?: boolean;
   cursorVisible?: boolean;
   /** Disable animated viewport settling while an initial buffer is restored off-screen. */
   suppressSmoothScroll?: boolean;
@@ -798,6 +801,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     {
       sessionKey,
       sessionId,
+      getPasteOwnerKey,
       isLayoutVisible = true,
       chunks,
       onInput,
@@ -1632,6 +1636,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
       const cleaned = sanitizeTerminalInput(rawText);
       if (!cleaned) return false;
+      pasteWorkRef.current?.controller.abort();
       setPasteError(null);
       if (routeCollaborationInput(cleaned)) return true;
       sendTerminalSeq(cleaned, textarea, { paste: true, submitAfterPaste: false });
@@ -1652,51 +1657,112 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }), [sendTerminalSeq, sessionKey]);
 
-    const pasteImageIntoTerminal = React.useCallback(async (image: File, textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
+    const pasteIdentityRef = React.useRef({ sessionKey, sessionId, getPasteOwnerKey });
+    pasteIdentityRef.current = { sessionKey, sessionId, getPasteOwnerKey };
+    const pasteWorkRef = React.useRef<{ controller: AbortController; current: () => boolean } | null>(null);
+    const pasteMountedRef = React.useRef(true);
+    const pasteOwner = React.useCallback(() => {
+      pasteWorkRef.current?.controller.abort();
+      const identity = pasteIdentityRef.current;
+      const target = selectedTarget(), inputHandler = inputHandlerRef.current;
+      const backendKey = identity.getPasteOwnerKey?.() ?? null;
+      const controller = new AbortController();
+      const owner = { controller, current: () => pasteMountedRef.current && !controller.signal.aborted
+        && pasteWorkRef.current === owner && selectedTarget() === target
+        && pasteIdentityRef.current.sessionKey === identity.sessionKey
+        && pasteIdentityRef.current.sessionId === identity.sessionId
+        && inputHandlerRef.current === inputHandler
+        && (pasteIdentityRef.current.getPasteOwnerKey?.() ?? null) === backendKey };
+      pasteWorkRef.current = owner;
+      return owner;
+    }, []);
+    const pasteOwnerIsCurrent = React.useCallback((owner: ReturnType<typeof pasteOwner>) => owner.current(), []);
+    React.useEffect(() => {
+      const cancelStale = () => { const work = pasteWorkRef.current; if (work && !work.current()) work.controller.abort(); };
+      cancelStale();
+      window.addEventListener('termdock:secure-state', cancelStale);
+      const cancel = () => pasteWorkRef.current?.controller.abort();
+      window.addEventListener('auth:unauthorized', cancel);
+      return () => { window.removeEventListener('termdock:secure-state', cancelStale); window.removeEventListener('auth:unauthorized', cancel); };
+    });
+    React.useEffect(() => { pasteMountedRef.current = true; return () => { pasteMountedRef.current = false; pasteWorkRef.current?.controller.abort(); }; }, []);
+
+    const pasteImageIntoTerminal = React.useCallback(async (image: File, textarea?: HTMLTextAreaElement | null, existingOwner?: ReturnType<typeof pasteOwner>): Promise<boolean> => {
+      const owner = existingOwner ?? pasteOwner();
+      if (!owner.current()) return false;
       setPasteError(null);
       try {
-        const imagePath = await uploadTerminalClipboardImage(image);
+        const imagePath = await uploadTerminalClipboardImage(image, owner.controller.signal);
+        if (!pasteOwnerIsCurrent(owner)) {
+          return false;
+        }
         if (routeCollaborationInput(`${escapeShellPath(imagePath)} `)) return true;
-        sendTerminalSeq(`${escapeShellPath(imagePath)} `, textarea);
+        const sent = await sendTerminalSeq(`${escapeShellPath(imagePath)} `, textarea);
+        if (sent === false) {
+          if (pasteOwnerIsCurrent(owner)) setPasteError('终端未接受粘贴，请重试');
+          return false;
+        }
+        if (!pasteOwnerIsCurrent(owner)) return false;
         dismissMobileCopyPopover();
         return true;
       } catch (error) {
-        setPasteError(error instanceof Error ? error.message : 'Image upload failed');
+        if (pasteOwnerIsCurrent(owner)) setPasteError(error instanceof Error ? error.message : 'Image upload failed');
         return false;
       }
-    }, [dismissMobileCopyPopover, sendTerminalSeq]);
+    }, [dismissMobileCopyPopover, pasteOwner, pasteOwnerIsCurrent, sendTerminalSeq]);
 
-    const pasteFilesIntoTerminal = React.useCallback(async (files: File[], textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
+    const pasteFilesIntoTerminal = React.useCallback(async (
+      files: File[],
+      textarea?: HTMLTextAreaElement | null,
+      existingPaths: string[] = [],
+      existingOwner?: ReturnType<typeof pasteOwner>,
+    ): Promise<boolean> => {
+      const owner = existingOwner ?? pasteOwner();
+      if (!owner.current()) return false;
       setPasteError(null);
       try {
-        const paths = await uploadTerminalClipboardFiles(files);
+        const uploadedPaths = await uploadTerminalClipboardFiles(files, owner.controller.signal);
+        if (!pasteOwnerIsCurrent(owner)) {
+          return false;
+        }
+        const paths = [...existingPaths, ...uploadedPaths];
         if (!paths.length) return false;
         const text = `${paths.map(escapeShellPath).join(' ')} `;
         if (routeCollaborationInput(text)) return true;
-        sendTerminalSeq(text, textarea);
+        const sent = await sendTerminalSeq(text, textarea);
+        if (sent === false) {
+          if (pasteOwnerIsCurrent(owner)) setPasteError('终端未接受粘贴，请重试');
+          return false;
+        }
+        if (!pasteOwnerIsCurrent(owner)) return false;
         dismissMobileCopyPopover();
         return true;
       } catch (error) {
-        setPasteError(error instanceof Error ? error.message : 'File upload failed');
+        if (pasteOwnerIsCurrent(owner)) setPasteError(error instanceof Error ? error.message : 'File upload failed');
         return false;
       }
-    }, [dismissMobileCopyPopover, sendTerminalSeq]);
+    }, [dismissMobileCopyPopover, pasteOwner, pasteOwnerIsCurrent, sendTerminalSeq]);
 
     const readClipboardIntoTerminal = React.useCallback(async (
       textarea?: HTMLTextAreaElement | null,
       pasteData?: { files: File[]; text: string },
     ): Promise<boolean> => {
+      const owner = pasteOwner();
+      const owned = async <T,>(promise: Promise<T>): Promise<T> => {
+        const value = await promise;
+        if (!owner.current()) throw new Error('Clipboard operation was superseded');
+        return value;
+      };
       setPasteError(null);
       try {
         const targetPeerId = selectedTarget()?.targetPeerId;
         let nativeFileError: unknown;
         if (getTermdockDesktopBridge()?.readClipboardFiles) {
           try {
-            const { files, paths } = await readTerminalClipboardFiles();
-            if (paths.length) return pasteTextIntoTerminal(`${paths.map(escapeShellPath).join(' ')} `, textarea);
-            if (files.length) return pasteFilesIntoTerminal(files, textarea);
+            const { files, paths } = await owned(readTerminalClipboardFiles());
+            if (paths.length || files.length) return pasteFilesIntoTerminal(files, textarea, paths, owner);
           } catch (error) {
-            if (error instanceof TerminalClipboardVideoError) throw error;
+            if (!owner.current() || error instanceof TerminalClipboardVideoError) throw error;
             // File/movie detection must not prevent ordinary text or image
             // paste, including when an older installed native reader fails.
             nativeFileError = error;
@@ -1708,8 +1774,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (pasteData?.files.length) {
           const image = pasteData.files[0];
           return pasteData.files.length === 1 && image.type.startsWith('image/')
-            ? pasteImageIntoTerminal(image, textarea)
-            : pasteFilesIntoTerminal(pasteData.files, textarea);
+            ? pasteImageIntoTerminal(image, textarea, owner)
+            : pasteFilesIntoTerminal(pasteData.files, textarea, [], owner);
         }
         if (pasteData?.text) {
           return pasteTextIntoTerminal(pasteData.text, textarea);
@@ -1718,14 +1784,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (typeof navigator.clipboard?.read === 'function') {
             // Request access once, within the button's user gesture. Reuse the
             // returned items for text too: a later readText() can be denied by iOS.
-            const items = await navigator.clipboard.read();
-            const videos = await readTerminalClipboardVideos({ read: async () => items });
-            if (videos.length) return pasteFilesIntoTerminal(videos, textarea);
-            const image = await readTerminalClipboardImage({ read: async () => items });
-            if (image) return pasteImageIntoTerminal(image, textarea);
+            const items = await owned(navigator.clipboard.read());
+            const videos = await owned(readTerminalClipboardVideos({ read: async () => items }));
+            if (videos.length) return pasteFilesIntoTerminal(videos, textarea, [], owner);
+            const image = await owned(readTerminalClipboardImage({ read: async () => items }));
+            if (image) return pasteImageIntoTerminal(image, textarea, owner);
             for (const item of items) {
               if (!item.types.includes('text/plain')) continue;
-              const text = await (await item.getType('text/plain')).text();
+              const text = await owned((await owned(item.getType('text/plain'))).text());
               return pasteTextIntoTerminal(text, textarea);
             }
             setPasteError('剪贴板未提供可读取的文字、图片或视频；视频可通过文件按钮选择上传。');
@@ -1733,22 +1799,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           // Older browsers exposing only readText must call it before any await.
           if (!navigator.clipboard?.readText) return false;
-          return pasteTextIntoTerminal(await navigator.clipboard.readText(), textarea);
+          return pasteTextIntoTerminal(await owned(navigator.clipboard.readText()), textarea);
         }
-        const image = await readTerminalClipboardImage(navigator.clipboard);
-        if (image) return pasteImageIntoTerminal(image, textarea);
+        const image = await owned(readTerminalClipboardImage(navigator.clipboard));
+        if (image) return pasteImageIntoTerminal(image, textarea, owner);
         if (!navigator.clipboard?.readText) {
           if (nativeFileError) throw nativeFileError;
           return false;
         }
-        const text = await navigator.clipboard.readText();
+        const text = await owned(navigator.clipboard.readText());
         if (!text && nativeFileError) throw nativeFileError;
         return pasteTextIntoTerminal(text, textarea);
       } catch (error) {
-        setPasteError(error instanceof Error ? error.message : 'Clipboard read failed');
+        if (owner.current()) setPasteError(error instanceof Error ? error.message : 'Clipboard read failed');
         return false;
       }
-    }, [pasteFilesIntoTerminal, pasteImageIntoTerminal, pasteTextIntoTerminal]);
+    }, [pasteOwner, pasteFilesIntoTerminal, pasteImageIntoTerminal, pasteTextIntoTerminal]);
 
     /**
      * 根据 xterm 当前光标位置计算 IME 组合文本锚点。桌面 textarea 会缩成
@@ -4534,6 +4600,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [onTmuxScroll, terminalReadyVersion]);
 
     React.useEffect(() => {
+      const element=containerRef.current,terminal=terminalRef.current;
+      const owned=window as unknown as {__TD_PREVIEW_BENCH_RENDERER?:string;__TD_NATIVE_GATE_NONCE?:string;__TD_NATIVE_GATE_EPOCH?:string;__TD_NATIVE_GATE_STATE?:{pageEpoch?:string;finished?:boolean;cancelled?:boolean}};
+      const state=owned.__TD_NATIVE_GATE_STATE;
+      if(!element||!terminal||owned.__TD_PREVIEW_BENCH_RENDERER!=='browser'||!owned.__TD_NATIVE_GATE_NONCE||!state||state.finished||state.cancelled||state.pageEpoch!==owned.__TD_NATIVE_GATE_EPOCH)return;
+      element.dataset.ownedRendererMetrics=JSON.stringify({nonce:owned.__TD_NATIVE_GATE_NONCE,epoch:state.pageEpoch,renderer:webglAddonRef.current?'webgl':'dom',requestedRenderer:rendererMode,fontFamily:terminal.options.fontFamily,fontSize:terminal.options.fontSize,history:terminal.options.scrollback});
+      return ()=>{delete element.dataset.ownedRendererMetrics;};
+    },[terminalReadyVersion,onTmuxScroll,rendererMode,fontFamily,fontSize]);
+
+    React.useEffect(() => {
       const terminal = terminalRef.current;
       if (!terminal) {
         return;
@@ -4772,6 +4847,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       <div
         ref={containerRef}
         data-termdock-terminal-dropzone={sessionKey}
+        data-termdock-terminal-owner={getPasteOwnerKey?.() ?? sessionKey}
         className={`relative h-full w-full terminal-viewport-container ${className || ''}`}
         style={{
           backgroundColor: theme.background,
@@ -5547,4 +5623,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 );
 
 TerminalViewportInner.displayName = 'TerminalViewport';
-export const TerminalViewport = TerminalViewportInner;
+export const TerminalViewport = React.forwardRef<TerminalController,TerminalViewportProps>((props,ref) => {
+  const [nativeFailed,setNativeFailed]=React.useState(false);
+  const fallback=React.useCallback(()=>{setNativeFailed(true);props.onNativeRendererFailed?.();},[props.onNativeRendererFailed]);
+  return supportsNativeTerminal()&&!nativeFailed ? <NativeTerminalViewport {...props} onNativeRendererFailed={fallback} ref={ref}/> : <TerminalViewportInner {...props} ref={ref}/>;
+});

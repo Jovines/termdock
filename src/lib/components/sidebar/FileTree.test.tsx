@@ -6,11 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { FileTree } from './FileTree';
+import * as browserScope from '../../federation/browserIntegration';
 
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
 
 const { deleteFileMock, downloadFileMock, searchFilesStreamMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
-  deleteFileMock: vi.fn(async () => undefined),
+  deleteFileMock: vi.fn(async (_path:string,_current?:()=>boolean):Promise<void> => undefined),
   downloadFileMock: vi.fn(async () => undefined),
   searchFilesStreamMock: vi.fn(),
   getSettingsMock: vi.fn(async () => ({ fileSortModes: {} })),
@@ -63,7 +64,7 @@ describe('FileTree file deletion', () => {
   });
 
   afterEach(() => {
-    cleanup();
+    cleanup();delete window.termdockDesktop;vi.restoreAllMocks();
     if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView);
     else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     deleteFileMock.mockClear();
@@ -165,9 +166,52 @@ describe('FileTree file deletion', () => {
     await user.click(screen.getByTitle('More file actions'));
     await user.click(screen.getByRole('button', { name: 'Delete file' }));
 
-    await waitFor(() => expect(deleteFileMock).toHaveBeenCalledWith('/workspace/notes.txt'));
+    await waitFor(() => expect(deleteFileMock).toHaveBeenCalledWith('/workspace/notes.txt',expect.any(Function)));
     await waitFor(() => expect(screen.queryByText('notes.txt')).toBeNull());
     expect(useSidebarStore.getState().selectedFilePath).toBeNull();
+  });
+
+  it('Preview delete waits for explicit async confirmation, rejects double click and expires on page change',async()=>{
+    const user=userEvent.setup();let answer!:(value:boolean)=>void;const confirm=vi.fn(()=>new Promise<boolean>(resolve=>{answer=resolve;}));
+    window.termdockDesktop={platform:'darwin',confirmationUI:'page-v1',confirm,alert:vi.fn()} as any;
+    const view=await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={vi.fn()}/></I18nProvider>);
+    await user.click(screen.getByTitle('More file actions'));await user.click(screen.getByRole('button',{name:'Delete file'}));expect(confirm).toHaveBeenCalledTimes(1);expect(deleteFileMock).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event('pagehide'));answer(true);await waitFor(()=>expect(screen.getByText('notes.txt')).toBeTruthy());expect(deleteFileMock).not.toHaveBeenCalled();view.unmount();delete window.termdockDesktop;
+  });
+  it('an old delete response cannot remove a replacement file or mutate pins and a current failure uses page feedback',async()=>{
+    const user=userEvent.setup(),pin=vi.fn(),alert=vi.fn();window.termdockDesktop={platform:'darwin',confirmationUI:'page-v1',confirm:async()=>true,alert} as any;
+    let finish!:()=>void;deleteFileMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{finish=resolve;}));
+    await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={vi.fn()} onFilePinToggle={pin} pinnedPaths={new Set(['/workspace/notes.txt'])}/></I18nProvider>);
+    await user.click(screen.getByTitle('More file actions'));await user.click(screen.getByRole('button',{name:'Delete file'}));await waitFor(()=>expect(finish).toBeTypeOf('function'));
+    useSidebarStore.setState({directoryCache:new Map([['/workspace',[{name:'notes.txt',path:'/workspace/notes.txt',type:'file',modified:'replacement'}]]])});finish();await waitFor(()=>expect(screen.getByText('notes.txt')).toBeTruthy());expect(pin).not.toHaveBeenCalled();
+    deleteFileMock.mockRejectedValueOnce(new Error('Controlled delete failure'));await user.click(screen.getByTitle('More file actions'));await user.click(screen.getByRole('button',{name:'Delete file'}));await waitFor(()=>expect(alert).toHaveBeenCalledWith(expect.stringContaining('Controlled delete failure')));delete window.termdockDesktop;
+  });
+
+  it('keeps a confirmed delete valid across an equivalent cache refresh and applies pin cleanup after its own watch event',async()=>{
+    const user=userEvent.setup(),pin=vi.fn();let answer!:(value:boolean)=>void,finish!:()=>void;
+    window.termdockDesktop={platform:'darwin',confirmationUI:'page-v1',confirm:()=>new Promise<boolean>(resolve=>{answer=resolve;}),alert:vi.fn()} as any;
+    deleteFileMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{finish=resolve;}));
+    await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={vi.fn()} onFilePinToggle={pin} pinnedPaths={new Set(['/workspace/notes.txt'])}/></I18nProvider>);
+    await user.click(screen.getByTitle('More file actions'));await user.click(screen.getByRole('button',{name:'Delete file'}));
+    const entry=useSidebarStore.getState().directoryCache.get('/workspace')![0];
+    useSidebarStore.setState({directoryCache:new Map([['/workspace',[{...entry}]]])});answer(true);
+    await waitFor(()=>expect(finish).toBeTypeOf('function'));expect(deleteFileMock).toHaveBeenCalledOnce();
+    // A real watch deletion can arrive before the DELETE response. It should not
+    // cancel the successful response's own pin cleanup on the same target.
+    useSidebarStore.getState().applyFileWatchEvents([{type:'deleted',path:'/workspace/notes.txt'}]);finish();
+    await waitFor(()=>expect(pin).toHaveBeenCalledExactlyOnceWith('/workspace/notes.txt'));
+    expect(screen.queryByText('notes.txt')).toBeNull();
+  });
+
+  it.each(['root','target','client','closed-client'] as const)('no delete is approved after %s changes while the normal async confirmation waits',async kind=>{
+    const user=userEvent.setup();let answer!:(value:boolean)=>void,target:any={url:'https://owned',targetPeerId:'a'},client:any={closed:false};
+    vi.spyOn(browserScope,'savedConnection').mockImplementation(()=>target);vi.spyOn(browserScope,'currentSecureClient').mockImplementation(()=>client);
+    window.termdockDesktop={platform:'darwin',confirmationUI:'page-v1',confirm:()=>new Promise<boolean>(resolve=>{answer=resolve;}),alert:vi.fn()} as any;
+    const view=await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={vi.fn()}/></I18nProvider>);
+    await user.click(screen.getByTitle('More file actions'));await user.click(screen.getByRole('button',{name:'Delete file'}));
+    if(kind==='root')view.rerender(<I18nProvider><FileTree rootPath="/different-owned-root" selectedFilePath={null} onFileSelect={vi.fn()}/></I18nProvider>);
+    if(kind==='target')target={url:'https://other-owned',targetPeerId:'b'};if(kind==='client')client={closed:false};if(kind==='closed-client')client.closed=true;
+    answer(true);await new Promise(resolve=>setTimeout(resolve,0));expect(deleteFileMock).not.toHaveBeenCalled();
   });
 
   it('expands and scrolls to a directory requested by a Markdown link', async () => {

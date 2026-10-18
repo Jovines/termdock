@@ -1,9 +1,11 @@
+import {observeOwnedNativeInput} from '../../terminal/nativeInputObservation';
 import { isKeyboardLayerOpen, useKeyboardLayerOpen } from '../../hooks/useKeyboardLayer';
 import { authorizeOwnedTerminalPaste, consumeOwnedTerminalPaste, isOwnedTerminalPasteCurrent } from '../../terminal/ownedPaste';
 import { isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../../services/workspaceHost';
 import { scheduleInteractionIdle } from '../../utils/interactionIdle';
+import { writeNativeSnapshot } from '../../terminal/nativeSnapshotCache';
 import { readTerminalSnapshot, writeTerminalSnapshot } from '../../utils/terminalSnapshotCache';
-import { getAppliedTerminalCursor, setTerminalSnapshotCursor } from '../../terminal/api';
+import { getAppliedTerminalCursor, getReceivedTerminalCursor, setTerminalSnapshotCursor, discardTerminalSnapshotCursor } from '../../terminal/api';
 import { acknowledgeTerminalOutput } from '../../terminal/api';
 import { useTerminalOutputSubscription } from '../../hooks/useTerminalOutputSubscription';
 import React from 'react';
@@ -437,9 +439,33 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const cursor = getAppliedTerminalCursor(backendId);
       const dimensions = terminalControllerRef.current?.getDimensions();
       if (!cursor || !dimensions) return;
-      const data = terminalControllerRef.current?.serializeSnapshot();
-      if (data) void writeTerminalSnapshot({ id: backendId, version: 1, ...cursor, ...dimensions, data, savedAt: Date.now() });
+      const controller = terminalControllerRef.current;
+      if(controller?.renderer?.()==='native') {
+        void controller.captureNativeSnapshot?.(cursor).then(snapshot=>{if(snapshot)void writeNativeSnapshot(snapshot);}).catch(error=>console.warn('[Terminal] Native snapshot unavailable:',error));
+        return;
+      }
+      const data = controller?.serializeSnapshot();
+      if (data && terminalControllerRef.current?.renderer?.() !== 'native') void writeTerminalSnapshot({ id: backendId, version: 1, ...cursor, ...dimensions, data, savedAt: Date.now() });
     }, 2000);
+  }, [sessionId]);
+
+  const nativeBufferFlushRef = React.useRef<{ backendId: string; version: number } | null>(null);
+  const scheduleNativeBufferFlush = React.useCallback(() => {
+    const backendId = terminalIdRef.current;
+    if (!backendId || terminalControllerRef.current?.renderer?.() !== 'native') return;
+    const version = streamVersionRef.current;
+    if (nativeBufferFlushRef.current?.backendId === backendId && nativeBufferFlushRef.current.version === version) return;
+    const pending = { backendId, version };
+    nativeBufferFlushRef.current = pending;
+    // Native delivery must progress independently of presentation frames. One
+    // microtask coalesces this turn, after the stream updates its received seq.
+    queueMicrotask(() => {
+      if (nativeBufferFlushRef.current !== pending) return;
+      nativeBufferFlushRef.current = null;
+      if (sessionIdRef.current !== sessionId || terminalIdRef.current !== backendId
+        || streamVersionRef.current !== version || terminalControllerRef.current?.renderer?.() !== 'native') return;
+      useTerminalStore.getState().flushPendingBufferWrites(sessionId);
+    });
   }, [sessionId]);
 
   const handleViewportWriteProgress = React.useCallback((writtenChunkId: number) => {
@@ -447,6 +473,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const latest = state.getTerminalSession(sessionId)?.bufferChunks.at(-1)?.id;
     if (terminalIdRef.current && latest !== undefined && latest <= writtenChunkId && !state.hasPendingBufferWrites(sessionId)) {
       acknowledgeTerminalOutput(terminalIdRef.current);
+      const controller = terminalControllerRef.current;
+      if (controller?.renderer?.() === 'native') {
+        const cursor = getAppliedTerminalCursor(terminalIdRef.current);
+        if (cursor) void controller.saveNativeCursor?.(cursor).catch(error => console.warn('[Terminal] Native checkpoint not confirmed:', error));
+      }
       scheduleSnapshot();
     }
     if (!awaitingInitialWritesRef.current) return;
@@ -1175,8 +1206,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       streamVersionRef.current = streamVersion;
       initialConnectionPendingRef.current = true;
 
+      const controller = terminalControllerRef.current;
+      let nativeActive = false;
+      if (controller?.prepareNativeSession) {
+        let baseline;
+        try {baseline = await controller.prepareNativeSession(terminalId);} catch(error) {
+          if(streamVersionRef.current!==streamVersion||sessionIdRef.current!==sessionId)return;
+          throw error;
+        }
+        if (streamVersionRef.current !== streamVersion || sessionIdRef.current !== sessionId) return;
+        nativeActive = controller.renderer?.() === 'native';
+        if (!nativeActive) throw new Error('Native terminal did not reach engine Ready');
+        discardTerminalSnapshotCursor(terminalId);
+        if (baseline) setTerminalSnapshotCursor(terminalId, baseline.seq, baseline.epoch);
+        // The preserved NSView contains the complete consumed VT. A new surface
+        // uses the existing same-PTY authoritative protocol, never xterm text.
+        useTerminalStore.getState().replaceBuffer(sessionId, []);
+      }
       const current = useTerminalStore.getState().getTerminalSession(sessionId);
-      if (current?.mode === 'shell' && !current.bufferChunks.length) {
+      if (!nativeActive && current?.mode === 'shell'  && !current.bufferChunks.length) {
         // Storage may be unavailable or blocked: never hold startup on it.
         const snapshot = await Promise.race([
           readTerminalSnapshot(terminalId),
@@ -1341,6 +1389,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 if (replayChunks && replayChunks.length > 0) {
                   let replayTargetChunkId: number | null = null;
                   if (event.replayOutOfWindow) {
+                    terminalControllerRef.current?.prepareScreenReplacement();
                     debugSession(`[Terminal] Replay out-of-window, atomically replacing buffer (${replayChunks.length} chunks)`);
                     replayTargetChunkId = replaceBuffer(
                       storeSessionId,
@@ -1382,6 +1431,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     flowPausedBufferRef.current.push(event.data);
                   } else {
                     appendToBuffer(storeSessionId, event.data);
+                    scheduleNativeBufferFlush();
                   }
                 }
                 break;
@@ -1516,6 +1566,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     exitCode !== null ? ` with code ${exitCode}` : ''
                   }${signal !== null ? ` (signal ${signal})` : ''}]\r\n`
                 );
+                // clearTerminalSession discards pending store batches. Preserve
+                // the native final message in the retained VT before cleanup.
+                if (terminalControllerRef.current?.renderer?.() === 'native') {
+                  useTerminalStore.getState().flushPendingBufferWrites(storeSessionId);
+                }
                 clearTerminalSession(storeSessionId);
                 setConnecting(storeSessionId, false);
                 setConnectionError('Terminal session ended');
@@ -1540,9 +1595,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             isStreamReadyRef.current = false;
             setIsStreamReady(false);
 
+            const isInputRejected = error.name === 'TerminalInputError'
+              && 'code' in error && error.code === 'TERMINAL_INPUT_REJECTED';
             const isAuthenticationFailure = fatal && error.message === 'Authentication required';
-            const isRecoverableBackendMiss = isTransientBackendSessionMiss(error);
-            const errorMsg = isAuthenticationFailure
+            const isRecoverableBackendMiss = !isInputRejected && isTransientBackendSessionMiss(error);
+            const errorMsg = isInputRejected
+              ? error.message
+              : isAuthenticationFailure
               ? error.message
               : isRecoverableBackendMiss
                 ? 'Reconnecting...'
@@ -1604,7 +1663,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, markInitialContentReadyAfterPaint, onStreamConnected, reportFlowControl, restartEnsureSession, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
+    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, markInitialContentReadyAfterPaint, onStreamConnected, reportFlowControl, restartEnsureSession, scheduleNativeBufferFlush, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
   );
 
   // 后台会话允许长时间退避，覆盖锁屏和系统冻结；可见会话连续重连超过 60 秒时，
@@ -1946,13 +2005,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const ownedPaste = options?.ownedPaste
         ? consumeOwnedTerminalPaste(options.ownedPaste, sessionId, data) : false;
       if (options?.ownedPaste && !ownedPaste) return Promise.resolve(false);
-      if (externalFocusSuspendedRef.current || ((focusSuspendedRef.current || isKeyboardLayerOpen()) && !ownedPaste)) return Promise.resolve(false);
+      if (externalFocusSuspendedRef.current || ((focusSuspendedRef.current || isKeyboardLayerOpen()) && !ownedPaste)) {observeOwnedNativeInput(`terminal::${sessionId}`,undefined,'page-input',{reason:'focusSuspended'});return Promise.resolve(false);}
       const ownedCurrent = () => !!options?.ownedPaste && isOwnedTerminalPasteCurrent(options.ownedPaste, sessionId)
         && isActiveRef.current && !externalFocusSuspendedRef.current && isStreamReadyRef.current
         && !isConnectionTransitionRef.current && !document.hidden && navigator.onLine !== false && isWorkspaceActive();
       if (ownedPaste && !ownedCurrent()) return Promise.resolve(false);
       if (!isActiveRef.current && !options?.targeted) {
-        return;
+        observeOwnedNativeInput(`terminal::${sessionId}`,undefined,'page-input',{reason:'inactive'});return;
       }
 
       if (!data) {
@@ -1971,7 +2030,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       if (Date.now() < suppressInputUntilRef.current) {
-        return;
+        const currentBackend=terminalIdRef.current;
+        const applied=currentBackend?getAppliedTerminalCursor(currentBackend):null;
+        // Native consumption is an actual queue ACK, so the browser replay
+        // timer must not discard input after this exact stream has caught up.
+        const nativeConsumed=terminalControllerRef.current?.renderer?.()==='native'
+          && sessionIdRef.current===sessionId && !!currentBackend
+          && useTerminalStore.getState().getTerminalSession(sessionId)?.terminalSessionId===currentBackend
+          && isStreamReadyRef.current && !isConnectionTransitionRef.current
+          && !awaitingInitialWritesRef.current && !!applied;
+        if(!nativeConsumed){observeOwnedNativeInput(`terminal::${sessionId}`,undefined,'page-input',{reason:'suppressReplay'});return false;}
       }
 
       let payload = data;
@@ -2000,7 +2068,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const terminalId = terminalIdRef.current;
       if (!terminalId) {
-        return;
+        observeOwnedNativeInput(`terminal::${sessionId}`,undefined,'page-input',{reason:'stream'});return;
       }
 
       const operationEpoch = terminalOperationEpochRef.current;
@@ -2034,12 +2102,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           }
 
           if (ownedPaste && (!ownedCurrent() || terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch)) return false;
+          observeOwnedNativeInput(`terminal::${sessionId}`,undefined,'page-input',{reason:'send-start'});
           await terminal.sendInput(terminalId, payload);
+          observeOwnedNativeInput(`terminal::${sessionId}`,undefined,'page-input',{reason:'send-return'});
           if (ownedPaste && (!ownedCurrent() || terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch)) return false;
           // If user is on the session and agent just finished, user input = reviewed
           clearAgentNeedsReview(sessionId);
           return true;
         } catch (error) {
+          observeOwnedNativeInput(`terminal::${sessionId}`,undefined,'page-input',{reason:'send-error'});
           handleTerminalOperationError(error, terminalId, operationEpoch, 'Failed to send input');
           return false;
         }
@@ -2271,9 +2342,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         for (const chunk of buffered) {
           appendToBuffer(storeSessionId, chunk);
         }
+        scheduleNativeBufferFlush();
       }
     }
-  }, [appendToBuffer, reportFlowControl, sessionId]);
+  }, [appendToBuffer, reportFlowControl, scheduleNativeBufferFlush, sessionId]);
 
   const handleEnsureSizeMatches = React.useCallback((reason: string) => {
     if (!isActiveRef.current) return;
@@ -2576,6 +2648,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return `terminal::${sessionId}`;
   }, [sessionId]);
 
+  const getPasteOwnerKey = React.useCallback(
+    () => `${terminalIdRef.current ?? 'pending'}:${terminalOperationEpochRef.current}`,
+    [],
+  );
+
   React.useEffect(() => {
     onStatusChange?.({
       isConnecting,
@@ -2678,7 +2755,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     (navigator.maxTouchPoints > 0 || 'ontouchstart' in window);
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col overflow-hidden" style={wrapperStyle}>
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden" style={wrapperStyle}
+      data-owned-terminal-startup={(window as unknown as { __TD_NATIVE_GATE_STATE?: { finished?: boolean; cancelled?: boolean } }).__TD_NATIVE_GATE_STATE
+        ? JSON.stringify({ active: isActive, viewportReady: isViewportInitialized, streamReady: isStreamReady, contentReady: isInitialContentReady, sizeReady: isInitialSizeReady }) : undefined}
+    >
       <input
         ref={mobileFileInputRef}
         type="file"
@@ -2756,6 +2836,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               ref={handleTerminalControllerRef}
               sessionKey={terminalSessionKey}
               sessionId={sessionId}
+              getPasteOwnerKey={getPasteOwnerKey}
+              backendSessionId={terminalSessionId}
+              nativeCursor={terminalSessionId && !flowPausedRef.current && !flowPausedBufferRef.current.length && !useTerminalStore.getState().hasPendingBufferWrites(sessionId) ? getReceivedTerminalCursor(terminalSessionId) : null}
               isLayoutVisible={isLayoutVisible}
               chunks={bufferChunks}
               onInput={handleViewportInput}
@@ -2774,11 +2857,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onWriteProgress={handleViewportWriteProgress}
               onCursorPositionChange={handleViewportCursorPositionChange}
               onDirectoryLinkActivate={handleDirectoryLinkActivate}
+              onNativeTitleChange={(title)=>scheduleShellTitleUpdate(sessionId,title||null)}
+              onNativeRendererFailed={()=>{
+                disconnectStream();
+                setConnectionError(null);setIsFatalError(false);
+                const backendId=terminalIdRef.current;if(backendId)discardTerminalSnapshotCursor(backendId);
+                flowPausedBufferRef.current=[];flowPausedRef.current=false;
+                pendingSnapshotRef.current?.();pendingSnapshotRef.current=null;
+                useTerminalStore.getState().replaceBuffer(sessionId,[]);
+                restartEnsureSession();
+              }}
               terminalSettings={effectiveTerminalSettings}
               theme={xtermTheme}
               enableTouchScroll={isMobile}
               mobileLongPressMode={mobileLongPressMode}
-              autoFocus={!focusSuspended && !isMobile && !touchCapable}
+              autoFocus={isActive && !focusSuspended && !isMobile && !touchCapable}
+              inputActive={isActive && !focusSuspended}
               cursorVisible={
                 !focusSuspended
                 && isCursorPresentationReady

@@ -28,6 +28,7 @@ vi.mock('../../hooks/useNewSessionAgentPreference', () => ({
 vi.mock('../../terminal/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../terminal/api')>()),
   listAgentResumeHistory: vi.fn().mockResolvedValue([]),
+  listCollaborationTasks: vi.fn().mockResolvedValue({ tasks: [] }),
 }));
 
 afterEach(() => {

@@ -15,6 +15,8 @@ const terminalMocks = vi.hoisted(() => ({
 const clientStateMocks = vi.hoisted(() => ({
   subscribeClientState: vi.fn(),
 }));
+const nativeMocks = vi.hoisted(() => ({closeNativeSession:vi.fn<(id:string,current?:()=>boolean)=>Promise<void>>(async()=>{})}));
+vi.mock('../terminal/nativeLifetime', () => nativeMocks);
 
 vi.mock('../terminal', () => terminalMocks);
 vi.mock('../utils/clientStateSync', () => clientStateMocks);
@@ -505,4 +507,40 @@ describe('useSessionPersistence creation races', () => {
     expect(settled.terminalSession.activeProgramRaw).toBeUndefined();
     expect(settled.terminalSession.activeProgramSource).toBeUndefined();
   });
+});
+
+
+describe('confirmed inventory native retirement', () => {
+ beforeEach(()=>{
+  vi.clearAllMocks();window.localStorage.clear();window.localStorage.setItem('termdock-sessions-cache',JSON.stringify([cachedSession]));
+  terminalMocks.getSessionInventory.mockResolvedValue(staleInventory);nativeMocks.closeNativeSession.mockResolvedValue(undefined);
+  clientStateMocks.subscribeClientState.mockImplementation(()=>()=>{});
+ });
+ afterEach(()=>cleanup());
+ it('successful full inventory deletion retires only the missing frontend ID',async()=>{
+  terminalMocks.getSessionInventory.mockResolvedValue({...staleInventory,clientSessions:[],updatedAt:2});
+  const {result}=renderHook(()=>useSessionPersistence());await waitFor(()=>expect(result.current.isLoading).toBe(false));
+  expect(nativeMocks.closeNativeSession).toHaveBeenCalledOnce();expect(nativeMocks.closeNativeSession.mock.calls[0][0]).toBe('frontend-1');expect(nativeMocks.closeNativeSession.mock.calls[0][1]!()).toBe(true);
+ });
+ it('accepted control deletion retires; reappearance cancels its delayed cleanup guard',async()=>{
+  let listener:any;clientStateMocks.subscribeClientState.mockImplementation(value=>{listener=value;return()=>{};});
+  const {result}=renderHook(()=>useSessionPersistence());await waitFor(()=>expect(result.current.isLoading).toBe(false));
+  act(()=>listener({type:'client-state',seq:2,clientState:{sessions:[],updatedAt:2},inventory:{...staleInventory,clientSessions:[],updatedAt:2}}));
+  expect(nativeMocks.closeNativeSession).toHaveBeenCalledOnce();const guard=nativeMocks.closeNativeSession.mock.calls[0][1]!;expect(guard()).toBe(true);
+  act(()=>listener({type:'client-state',seq:3,clientState:{sessions:[cachedSession],updatedAt:3},inventory:{...staleInventory,updatedAt:3}}));expect(guard()).toBe(false);
+ });
+ it('same ID exit/backend changes and rename preserve the living receiver; stale removals are rejected',async()=>{
+  let listener:any;clientStateMocks.subscribeClientState.mockImplementation(value=>{listener=value;return()=>{};});
+  const {result}=renderHook(()=>useSessionPersistence());await waitFor(()=>expect(result.current.isLoading).toBe(false));
+  act(()=>listener({type:'client-state',seq:5,clientState:{sessions:[],updatedAt:5},inventory:{...staleInventory,updatedAt:5,clientSessions:[{...staleInventory.clientSessions[0],name:'Renamed',backendSessionId:'backend-2',live:false,connected:false}]}}));
+  act(()=>listener({type:'client-state',seq:4,clientState:{sessions:[],updatedAt:4},inventory:{...staleInventory,clientSessions:[],updatedAt:4}}));
+  act(()=>listener({type:'client-state',seq:6,clientState:{sessions:[],updatedAt:3},inventory:{...staleInventory,clientSessions:[],updatedAt:3}}));
+  expect(nativeMocks.closeNativeSession).not.toHaveBeenCalled();expect(result.current.sessions[0].name).toBe('Renamed');
+ });
+ it('failed GET and rejected cleanup do not invent a confirmed detach',async()=>{
+  terminalMocks.getSessionInventory.mockRejectedValueOnce(Error('controlled disconnected GET'));
+  const {result}=renderHook(()=>useSessionPersistence());await waitFor(()=>expect(result.current.isLoading).toBe(false));expect(nativeMocks.closeNativeSession).not.toHaveBeenCalled();
+  terminalMocks.getSessionInventory.mockResolvedValue({...staleInventory,clientSessions:[],updatedAt:2});nativeMocks.closeNativeSession.mockRejectedValueOnce(Error('controlled detach failed'));
+  await act(async()=>{await result.current.restoreSessions();});expect(nativeMocks.closeNativeSession).toHaveBeenCalledOnce();
+ });
 });

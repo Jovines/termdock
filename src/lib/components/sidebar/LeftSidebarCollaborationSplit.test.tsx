@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock('../../terminal/api', async (original) => ({
   ...await original<typeof import('../../terminal/api')>(),
+  listCollaborationTasks: vi.fn(async () => ({ tasks: useCollaborationTaskInbox.getState().allTasks })),
   archiveExecutionSession: mocks.archive,
   listExecutionArchives: vi.fn().mockResolvedValue({ entries: [] }),
   listCollaborationGroups: mocks.list,
@@ -68,7 +69,7 @@ function point(element: Element | null) {
   Object.defineProperty(document, 'elementsFromPoint', { configurable: true, value: () => element ? [element] : [] });
   fireEvent.pointerMove(window, { clientX: 50, clientY: 50 });
 }
-beforeEach(() => {
+beforeEach(async () => {
   localStorage.clear();
   useCollaborationPanelDock.setState({ docks: {}, hosts: {} });
   useCollaborationTaskInbox.setState({ tasks: [], allTasks: [], error: null });
@@ -79,6 +80,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, 'getAnimations', { configurable: true, value: vi.fn(() => []) });
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ locale: 'en', agents: [] }))));
+  await useCollaborationTaskInbox.getState().refresh();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
