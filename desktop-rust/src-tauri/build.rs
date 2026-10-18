@@ -2,6 +2,9 @@
 mod runtime_icon;
 
 fn main() {
+    for key in ["TERMDOCK_PREVIEW_UPDATE_ENDPOINT", "TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY"] {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
     if std::env::var_os("CARGO_FEATURE_DESKTOP").is_some() {
         println!("cargo:rerun-if-changed=../../public/pwa-512x512.png");
         println!("cargo:rerun-if-changed=build/runtime_icon.rs");

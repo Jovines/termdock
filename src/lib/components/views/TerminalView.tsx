@@ -352,6 +352,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const flowPausedBufferRef = React.useRef<string[]>([]);
   const suppressInputUntilRef = React.useRef(0);
   const shouldExitTmuxCopyModeOnInputRef = React.useRef(false);
+  const viewportInputChainRef = React.useRef<Promise<void>>(Promise.resolve());
   const tmuxScrollPendingRef = React.useRef<{ direction: 'up' | 'down'; lines: number } | null>(null);
   const tmuxScrollFlushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTmuxScreenSyncGenerationRef = React.useRef(-1);
@@ -2025,9 +2026,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // 只是打个标记，等真正的键盘输入再退出。
       const isMouseOrFocusSeq = isTmuxMouseOrFocusInput(data);
       const isMouseWheelSeq = /^(\x1b\[<6[45];[0-9]+;[0-9]+M)+$/.test(data);
-      if (isTmuxMode && isMouseWheelSeq) {
-        shouldExitTmuxCopyModeOnInputRef.current = true;
-      }
 
       if (Date.now() < suppressInputUntilRef.current) {
         const currentBackend=terminalIdRef.current;
@@ -2073,7 +2071,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const operationEpoch = terminalOperationEpochRef.current;
       const sendPayload = async () => {
+        if (terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch) return false;
         try {
+          if (isTmuxMode && isMouseWheelSeq) shouldExitTmuxCopyModeOnInputRef.current = true;
           // 只有非鼠标序列的真键盘输入才触发退出 copy-mode；
           // wheel/drag/select 事件自身不退出。
           if (
@@ -2116,7 +2116,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         }
       };
 
-      const delivery = sendPayload();
+      // Ghostty emits an asynchronous IME/dictation commit as separate paste
+      // opener/body/closer callbacks. The first may await copy-mode exit; later
+      // callbacks must never overtake it and leave the receiving TUI in paste.
+      const delivery = viewportInputChainRef.current.then(sendPayload);
+      viewportInputChainRef.current = delivery.then(() => undefined, () => undefined);
 
       if (modifierConsumed) {
         if (!lockedModifier) {

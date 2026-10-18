@@ -1,7 +1,7 @@
 {
   "name": "termdock-preview-shell",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "npm run prepare:workspace && npm run prepare:native && npm run prepare:renderer && tauri dev",
@@ -12,7 +12,8 @@
     "verify": "npm run test && npm run check",
     "prepare:renderer": "node scripts/prepare-renderer.mjs",
     "prepare:workspace": "npm --prefix .. run build:client && node scripts/prepare-workspace.mjs",
-    "prepare:native": "python3 scripts/prepare-native-resources.py"
+    "prepare:native": "python3 scripts/prepare-native-resources.py",
+    "package:preview": "node scripts/preview-release.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.6",

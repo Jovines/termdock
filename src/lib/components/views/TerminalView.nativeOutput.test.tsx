@@ -76,6 +76,28 @@ it('allows native input immediately after real replay consumption and rejects pr
  await waitFor(()=>expect(socket.sent.filter(value=>value.type==='input').map(value=>value.data)).toEqual(['owned-after-ack']));
  delete (window as any).__TD_NATIVE_GATE_STATE;
 });
+it('keeps native dictation paste fragments behind the actual asynchronous tmux copy-mode exit',async()=>{
+ vi.spyOn(Date,'now').mockReturnValue(100000);
+ useTerminalStore.getState().setTerminalSession('controlled-panel',{sessionId:'controlled-backend',mode:'tmux',cols:80,rows:24});
+ render(<I18nProvider><TerminalView sessionId="controlled-panel" mode="tmux" isActive suppressKeyboard/></I18nProvider>);
+ await waitFor(()=>expect(Socket.sockets).toHaveLength(1));const socket=Socket.sockets[0];
+ await act(async()=>{socket.readyState=1;socket.onopen?.();socket.event({type:'connected',mode:'tmux',outputProtocol:2,streamEpoch:'dictation',replayLastSeq:1,replayChunks:['baseline\r\n']});});
+ await waitFor(()=>expect(host.writes).toHaveLength(1));await act(async()=>emit(1));
+ await waitFor(()=>expect(getAppliedTerminalCursor('controlled-backend')?.seq).toBe(1));
+ const input=(text:string)=>host.listeners.forEach(listener=>listener({token:host.token,epoch:'controlled-page',event:{type:'input',base64:btoa(unescape(encodeURIComponent(text)))}}));
+ await act(async()=>input('\x1b[<64;1;1M'));
+ await waitFor(()=>expect(socket.sent.some(value=>value.type==='input'&&value.data==='\x1b[<64;1;1M')).toBe(true));
+ const before=socket.sent.filter(value=>value.type==='input').map(value=>value.data);
+ // Ghostty's text API emits these separately for an asynchronous IME commit.
+ await act(async()=>{input('\x1b[200~');input('语音最终修订');input('\x1b[201~');});
+ const exit=socket.sent.find(value=>value.type==='tmux'&&value.action==='copy-mode'&&value.enabled===false);
+ expect(exit).toBeDefined();
+ const whileWaiting=socket.sent.filter(value=>value.type==='input').map(value=>value.data);
+ await act(async()=>socket.event({type:'tmux-result',reqId:exit.reqId,success:true}));
+ await waitFor(()=>expect(socket.sent.filter(value=>value.type==='input')).toHaveLength(before.length+3));
+ expect(whileWaiting).toEqual(before);
+ expect(socket.sent.filter(value=>value.type==='input').map(value=>value.data)).toEqual([...before,'\x1b[200~','语音最终修订','\x1b[201~']);
+});
 it('keeps startup content unready without presentation frames despite native consumption, then releases after size ACK and two visible frames',async()=>{
  const frames=new Map<number,FrameRequestCallback>();let serial=0;
  vi.stubGlobal('requestAnimationFrame',vi.fn((callback:FrameRequestCallback)=>{frames.set(++serial,callback);return serial;}));
