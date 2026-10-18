@@ -6,6 +6,10 @@ import { createHash } from 'node:crypto';
 
 export const repository = 'Jovines/termdock';
 export const previewEndpoint = `https://github.com/${repository}/releases/download/preview-channel/preview.json`;
+export function outsideSource(root, target) {
+  const relative = path.relative(root, target);
+  return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
 export function releasePlan(version, publicKey) {
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? '')) throw Error('A separate numeric Preview version is required (for example 0.1.1)');
   if (!publicKey || Buffer.from(publicKey, 'base64').toString('base64') !== publicKey) throw Error('Preview updater public key is required');
@@ -52,14 +56,12 @@ export function buildPreview(version, destination, env = process.env) {
   if (env.CARGO_BUILD_TARGET) throw Error('Use a native macOS release environment without CARGO_BUILD_TARGET');
   if (env.CARGO_TARGET_DIR && !path.isAbsolute(env.CARGO_TARGET_DIR)) throw Error('CARGO_TARGET_DIR must be absolute for release packaging');
   const out = path.resolve(destination);
-  const relative = path.relative(root, out);
-  if (!relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) throw Error('Release output must be outside the source tree');
+  if (!outsideSource(root, out)) throw Error('Release output must be outside the source tree');
   if (fs.existsSync(out)) throw Error('Use a new output directory for each Preview release');
   const parent = path.dirname(out);
   if (!fs.existsSync(parent)) throw Error('Create the release output parent directory first');
   const realParent = fs.realpathSync(parent), realRoot = fs.realpathSync(root);
-  const realRelative = path.relative(realRoot, realParent);
-  if (!realRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(realRelative)) throw Error('Release output cannot resolve inside the source tree');
+  if (!outsideSource(realRoot, realParent)) throw Error('Release output cannot resolve inside the source tree');
   const hasGit = fs.existsSync(path.join(root, '.git'));
   const revision = hasGit ? output('git', ['rev-parse', 'HEAD'], { cwd: root }) : env.TERMDOCK_PREVIEW_SOURCE_REVISION;
   if (!/^[a-f0-9]{40}$/.test(revision ?? '')) throw Error('Archive release requires an exact TERMDOCK_PREVIEW_SOURCE_REVISION');

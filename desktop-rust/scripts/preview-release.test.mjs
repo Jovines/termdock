@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { releasePlan, updateManifest, previewEndpoint } from './preview-release.mjs';
+import { releasePlan, updateManifest, previewEndpoint, outsideSource } from './preview-release.mjs';
 // Public-only vector also used by the pinned Rust updater tests.
 const key = Buffer.from('untrusted comment: minisign public key\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3').toString('base64');
 test('Preview release keeps its own identity, version and updater feed', () => {
@@ -27,4 +27,12 @@ test('updater metadata binds assets to the exact independent Preview release', (
   assert.throws(() => updateManifest(plan, []));
   assert.throws(() => updateManifest(plan, [artifact,artifact]));
   assert.throws(() => updateManifest(plan, [{...artifact,signature:''}]));
+});
+
+test('release output accepts a sibling directory while rejecting source descendants', () => {
+  assert.equal(outsideSource('/build/source','/build'), true);
+  assert.equal(outsideSource('/build/source','/build/output'), true);
+  assert.equal(outsideSource('/build/source','/tmp/release'), true);
+  assert.equal(outsideSource('/build/source','/build/source'), false);
+  assert.equal(outsideSource('/build/source','/build/source/output'), false);
 });
