@@ -10,6 +10,9 @@ test('Preview release keeps its own identity, version and updater feed', () => {
   assert.equal(plan.config.identifier, 'com.jovines.termdock.preview');
   assert.equal(plan.config.productName, 'Termdock Preview');
   assert.equal(plan.config.bundle.createUpdaterArtifacts, true);
+  assert.equal(plan.config.plugins.updater.pubkey, key);
+  assert.deepEqual(plan.config.plugins.updater.endpoints, []);
+  assert.equal(plan.config.plugins.updater.requireSignedVersion, true);
   assert.equal(plan.environment.TERMDOCK_PREVIEW_UPDATE_ENDPOINT, previewEndpoint);
   assert.equal(plan.environment.TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY, key);
   assert.ok(!previewEndpoint.includes('/latest/'));

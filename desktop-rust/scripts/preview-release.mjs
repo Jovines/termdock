@@ -22,7 +22,8 @@ export function releasePlan(version, publicKey) {
     endpoint: previewEndpoint,
     environment: { TERMDOCK_PREVIEW_UPDATE_ENDPOINT: previewEndpoint, TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY: publicKey },
     config: { productName: 'Termdock Preview', identifier: 'com.jovines.termdock.preview', version,
-      bundle: { createUpdaterArtifacts: true } },
+      bundle: { createUpdaterArtifacts: true },
+      plugins: { updater: { pubkey: publicKey, endpoints: [], requireSignedVersion: true } } },
   };
 }
 export function updateManifest(plan, artifacts, notes = '', now = new Date()) {
