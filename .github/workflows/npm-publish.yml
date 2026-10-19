@@ -70,8 +70,11 @@ jobs:
           src/server/utils/tmuxRecoveryOperations.test.ts
           src/server/utils/tmuxRecovery.test.ts
           src/lib/components/computer/ComputerControlView.test.tsx
+          src/lib/computer/rdpSession.test.ts
       - name: Verify desktop bridge file-drop transport and lifecycle
         run: node --test desktop-rust/renderer/bridge.test.mjs
+      - name: Verify systemd runtime isolation policy
+        run: node --test tests/systemdKillMode.test.mjs
       - run: npm run build
       - name: Pack the verified build
         run: |

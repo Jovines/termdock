@@ -204,6 +204,11 @@ export const PORT = {
 它决定三件事：服务不主动断开 IPC、装 `disconnect` 处理器记录「与监督者失联」、
 把 `supervised` 报给界面。
 
+systemd 启动 `td --supervise` 时，如需服务重启后保留 TD 管理的 tmux/Agent，必须设置
+`KillMode=process`；默认 `control-group` 会同时终止整个 unit cgroup 内的 tmux 和 Agent。
+参见[systemd部署说明](systemd.md)及仓库附带的 drop-in。systemd stop 会有意保留这些运行时，
+永久卸载前应通过 TD 会话生命周期显式关闭并确认清空。
+
 ## 公网安全模式
 
 Termdock 的登录用户拥有运行服务的系统账户权限，终端可以执行任意命令。

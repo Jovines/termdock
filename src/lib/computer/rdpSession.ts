@@ -30,7 +30,7 @@ export class RdpSession extends EventTarget {
   private nativeCursor = false;
   private touchpadPointer = false;
   private cancelDisplayBatch: () => void;
-  constructor(target: HTMLElement, options: RdpConnection, fail: (reason: string) => void) {
+  constructor(private readonly target: HTMLElement, options: RdpConnection, fail: (reason: string) => void) {
     super();
     this.requestedSize = `${options.width}x${options.height}`;
     const tunnel = this.tunnel = new SecureRdpTunnel(options, fail, () => this.localPointer && !this.readonlyMode);
@@ -91,16 +91,18 @@ export class RdpSession extends EventTarget {
   }
   private scale(): void {
     const width = this.display.getWidth(), height = this.display.getHeight();
-    if (!this.container.clientWidth || !this.container.clientHeight) return;
+    if (!this.target.clientWidth || !this.target.clientHeight) return;
     this.viewportScale = this.fit && width && height
-      ? Math.min(this.container.clientWidth / width, this.keyboardScale ?? this.container.clientHeight / height) : 1;
+      ? Math.min(this.target.clientWidth / width, this.keyboardScale ?? this.target.clientHeight / height) : 1;
     this.display.scale(this.viewportScale * this.zoom);
   }
   private scheduleResize(): void {
     clearTimeout(this.resizeTimer);
     if (!this.connected || !this.connectionNotified || this.disposed || !this.fit || this.resizePaused) return;
     this.resizeTimer = setTimeout(() => {
-      const w = this.container.clientWidth, h = this.container.clientHeight;
+      // Measure the fixed viewport, not the scroller: its scrollbars can
+      // appear during remote repaint/zoom and otherwise feed back into RDP size.
+      const w = this.target.clientWidth, h = this.target.clientHeight;
       if (!w || !h || !this.connectionNotified || this.disposed || !this.fit || this.resizePaused) return;
       // Keep a useful virtual resolution on narrow touch screens, preserving
       // their aspect ratio instead of requesting an unusable 390-pixel desktop.

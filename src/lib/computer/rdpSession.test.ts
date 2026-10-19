@@ -104,6 +104,21 @@ describe('RDP viewport lifecycle', () => {
     expect(mocks.sendSize).toHaveBeenLastCalledWith(640, 985);
     expect(mocks.scale).toHaveBeenLastCalledWith(390 / 1280); s.disconnect();
   });
+  it('keeps resolution stable when remote repaint or zoom changes inner scrollbars', () => {
+    const target = document.createElement('div');
+    Object.defineProperties(target, { clientWidth: { get: () => 390 }, clientHeight: { get: () => 744 } });
+    const s = new RdpSession(target, { host: '127.0.0.1', port: 3389, username: 'test', password: 'secret', domain: '', ignoreCert: false, width: 640, height: 1221 }, vi.fn());
+    // The existing desktop temporarily overflows while XRDP repaints. Only the
+    // inner scroller loses width/height; the actual viewport has not changed.
+    mocks.width = 375; mocks.height = 729;
+    mocks.clients[0].onstatechange(3); mocks.observers[0](); vi.advanceTimersByTime(200);
+    expect(mocks.sendSize).not.toHaveBeenCalled();
+    expect(mocks.scale).toHaveBeenLastCalledWith(390 / 1280);
+    s.viewportZoom = 2; mocks.observers[0](); vi.advanceTimersByTime(200);
+    mocks.width = 390; mocks.height = 744; s.viewportZoom = 1;
+    mocks.displays[0].onresize(); mocks.observers[0](); vi.advanceTimersByTime(200);
+    expect(mocks.sendSize).not.toHaveBeenCalled(); s.disconnect();
+  });
   it('debounces window resizing, preserves original-size mode, and cancels pending updates on disconnect', () => {
     const s = session(); mocks.clients[0].onstatechange(3);
     mocks.width = 1500; mocks.observers[0](); mocks.width = 1600; mocks.observers[0](); vi.advanceTimersByTime(200);

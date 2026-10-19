@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.326",
+  "version": "1.4.327",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -16,6 +16,8 @@
     "dist",
     "runtime-manifest.json",
     "README.md",
+    "docs/systemd.md",
+    "packaging/systemd/termdock.service.d/10-preserve-tmux.conf",
     "LICENSE",
     "scripts",
     "docs/integrations.md"
