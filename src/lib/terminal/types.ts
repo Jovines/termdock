@@ -147,11 +147,14 @@ export interface SessionInventory {
       state: 'queued' | 'resource_wait' | 'running' | 'paused' | 'succeeded' | 'partial_failure';
       total: number;
       queued: number;
+      paused_count: number;
       resource_wait: number;
       running: number;
       succeeded: number;
       failed: number;
       paused: boolean;
+      pauseReason?: 'manual' | 'resources';
+      counts: { total: number; queued: number; running: number; succeeded: number; failed: number; paused: number };
       items: Array<{ sessionId: string; state: string; phase: string; errorCode?: string; error?: string; resourceWaitReason?: string; memAvailableBytes?: number; estimatedRssBytes?: number; actualRssBytes?: number }>;
     } | null;
     sessions: Array<{

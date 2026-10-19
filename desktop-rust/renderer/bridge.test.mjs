@@ -19,7 +19,7 @@ function fixture(overrides = {}) {
     } },
     fetch:overrides.fetch??(async (...args) => { calls.push(args); if (overrides.fetchError) throw new TypeError('disconnected'); return new Response('public'); }), WebSocket:Socket, setTimeout,clearTimeout,addEventListener:(name,fn)=>{const list=handlers.get(name)||[];list.push(fn);handlers.set(name,list);listeners.set(name,event=>[...list].forEach(handler=>handler(event)));}, removeEventListener:(name,fn)=>{const list=handlers.get(name)||[];const index=list.indexOf(fn);if(index>=0)list.splice(index,1);} };
   window.top=overrides.frame ? {} : window;
-  const context = {window, location:{origin:boot.origin, pathname:'/', hash:''}, navigator:{serviceWorker:{getRegistrations:async()=>[],register:async()=>({scope:boot.origin+'/'})}}, sessionStorage:{setItem:(key,value)=>storage.set(key,value),getItem:key=>storage.get(key)??null}, Request, Response, URL, TypeError, Error, Uint8Array, TextEncoder,crypto:webcrypto, atob, btoa, Blob, Number, Promise, Object, Set, String, JSON, queueMicrotask, ...overrides.context};
+  const context = {window, location:{origin:boot.origin, pathname:'/', hash:''}, navigator:{serviceWorker:{getRegistrations:async()=>[],register:async()=>({scope:boot.origin+'/'})}}, sessionStorage:{setItem:(key,value)=>storage.set(key,value),getItem:key=>storage.get(key)??null}, AbortController, Request, Response, URL, TypeError, Error, Uint8Array, TextEncoder,crypto:webcrypto, atob, btoa, Blob, Number, Promise, Object, Set, String, JSON, queueMicrotask, ...overrides.context};
   vm.runInNewContext(source, context);
   return { window,calls,socketCalls,ipc,storage,context,listeners };
 }
@@ -227,7 +227,7 @@ test('native file drops resolve the exact owning terminal view and carry it to t
 test('an older native-drop error timer cannot clear a newer error for the same owner',async()=>{
  const dom=new JSDOM('<div data-termdock-terminal-dropzone="view-a"></div>'),target=dom.window.document.querySelector('[data-termdock-terminal-dropzone]');
  const f=fixture({context:{document:dom.window.document,CustomEvent:dom.window.CustomEvent},invoke:async op=>op==='dropFiles'?{batch:'11111111-1111-4111-8111-111111111111',files:[{name:'local.txt',path:'/tmp/local.txt'}]}:null});
- const timers=[];f.window.setTimeout=(callback,delay)=>{timers.push({callback,delay});return timers.length;};
+ const timers=[];f.window.setTimeout=(callback,delay)=>{if(delay===3000)timers.push({callback,delay});return timers.length;};
  let deliveries=0;f.window.termdockDesktop.onNativeFileDrop(()=>{deliveries++;throw new Error(`failure-${deliveries}`);});
  const drop=()=>f.listeners.get('termdock:preview-files')({detail:{token:'capability-a',sessionKey:'view-a'}});
  drop();await new Promise(resolve=>setTimeout(resolve,0));
@@ -267,7 +267,7 @@ test('a stale native-drop upload success cannot deliver paths or clear a newer d
  uploads[1](new Response(JSON.stringify({files:[{path:'/tmp/new.txt'}]}),{status:200,headers:{'content-type':'application/json'}}));
  await new Promise(resolve=>setTimeout(resolve,0));
  assert.equal(delivered.length,1);assert.equal(delivered[0].sessionKey,'view-a');assert.deepEqual(Array.from(delivered[0].paths),['/tmp/new.txt']);
- assert.equal(target.dataset.nativeFileDropState,undefined);assert.equal(target.dataset.nativeFileDropOperation,undefined);
+ assert.equal(target.dataset.nativeFileDropState,'uploaded');assert(target.dataset.nativeFileDropOperation);
  dom.window.close();
 });
 test('a changed target while a native selector is pending cannot return its files to the new target',async()=>{
@@ -708,4 +708,27 @@ test('Web terminal opens only the final external URL and copies text on the clie
  assert.deepEqual(JSON.parse(JSON.stringify(f.ipc.map(({op,args})=>({op,args})))),[{op:'openExternal',args:{url:'https://example.test/terminal?q=1#L2'}},{op:'clipboardWriteText',args:{text:'远程选区'}}]);
  const before=f.ipc.length;for(const url of ['javascript:alert(1)','file:///tmp/private','https://user:pass@example.test/'])await assert.rejects(api.openExternal(url));await assert.rejects(api.writeClipboardText('x'.repeat(262145)));assert.equal(f.ipc.length,before);
  f.listeners.get('pagehide')({});await assert.rejects(api.writeClipboardText('late'));assert.equal(f.ipc.length,before);
+});
+test('normal coordinate-based OS drops select the hovered Web terminal and reuse verified local paths without uploading',async()=>{
+ const dom=new JSDOM('<div data-termdock-terminal-dropzone="view-a"></div><div data-termdock-terminal-dropzone="view-b"></div>'),doc=dom.window.document,target=doc.querySelector('[data-termdock-terminal-dropzone="view-b"]');
+ doc.elementFromPoint=(x,y)=>{assert.equal(x,240);assert.equal(y,120);return target;};
+ const f=fixture({context:{document:doc,CustomEvent:dom.window.CustomEvent},invoke:async op=>op==='dropFiles'?{batch:null,files:[{name:'local.txt',path:'/Users/test/local.txt'}]}:null});
+ const delivered=[];f.window.termdockDesktop.onNativeFileDrop(value=>delivered.push(value));
+ f.listeners.get('termdock:preview-drag')({detail:{phase:'enter',x:240,y:120,local:true}});assert.equal(target.dataset.nativeFileDropState,'local');
+ f.listeners.get('termdock:preview-files')({detail:{token:'os-drop',x:240,y:120}});
+ await new Promise(resolve=>setTimeout(resolve,20));assert.equal(delivered.length,1);assert.equal(delivered[0].sessionKey,'view-b');assert.deepEqual(Array.from(delivered[0].paths),['/Users/test/local.txt']);assert.equal(f.calls.length,0);assert.equal(target.dataset.nativeFileDropState,'inserted');assert.equal(target.dataset.nativeFileDrag,'true');dom.window.close();
+});
+test('native remote upload displays progress and cancel aborts the page request without delivering paths',async()=>{
+ const dom=new JSDOM('<div data-termdock-terminal-dropzone="view-a"></div>'),target=dom.window.document.querySelector('div');
+ const batch='11111111-1111-4111-8111-111111111111',receipt='22222222-2222-4222-8222-222222222222';
+ const f=fixture({context:{document:dom.window.document,CustomEvent:dom.window.CustomEvent,FormData,Blob},invoke:async op=>op==='dropFiles'?{batch,files:[{index:0,name:'remote.txt',size:1}]}:op==='fileChunk'?{index:0,seq:0,offset:0,length:1,eof:true,receipt,base64:'QQ=='}:null});
+ let signal;f.window.fetch=async(url,options)=>{
+  if(String(url).includes('csrf'))return new Response(JSON.stringify({csrfToken:'csrf'}));
+  signal=options.signal;options.onUploadProgress(Math.floor(options.body.size/2));
+  return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new DOMException('cancelled','AbortError'))));
+ };
+ const delivered=[];f.window.termdockDesktop.onNativeFileDrop(value=>delivered.push(value));
+ f.listeners.get('termdock:preview-files')({detail:{token:'drop',sessionKey:'view-a'}});
+ for(let i=0;i<50&&!signal;i++)await new Promise(resolve=>setTimeout(resolve,2));assert(signal);assert.equal(target.dataset.nativeFileDropState,'uploading');assert.equal(target.dataset.nativeFileDrag,'true');assert(Number(target.dataset.nativeFileDropProgress)>0);
+ f.listeners.get('termdock:file-drop-cancel')({target});await new Promise(resolve=>setTimeout(resolve,0));assert(signal.aborted);assert.deepEqual(delivered,[]);assert.equal(target.dataset.nativeFileDropState,'cancelled');dom.window.close();
 });

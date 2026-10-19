@@ -254,7 +254,9 @@ Termdock 的“恢复全部”请求先持久化恢复操作并立即返回 `202
 - `POST /api/terminal/tmux/recovery/operations/:operationId/pause` 和 `/resume`：暂停后续启动或继续队列；已开始的单个恢复不会被强杀。
 - `GET /api/terminal/tmux/recovery/diagnostics`：最近一次主机资源与队列诊断。
 
-`POST /api/terminal/tmux/recovery/restore-all` 接受 `idempotencyKey` 与可选范围 `{kind:"incident"}`、`{kind:"group",id}`、`{kind:"principal",id}` 或 `{kind:"sessions",sessionIds:[...]}`。所选范围只能缩小到当前恢复事故内的会话。重放同一幂等键和参数会返回同一操作；键参数冲突或会话已在另一个未结束操作中会返回冲突。
+`POST /api/terminal/tmux/recovery/restore-all` 接受 `idempotencyKey` 与可选范围 `{kind:"incident"}`、`{kind:"group",id}`、`{kind:"principal",id}` 或 `{kind:"sessions",sessionIds:[...]}`。所选范围只能缩小到当前恢复事故内的会话。重放同一幂等键和参数会返回同一操作；活动中的同一恢复意图即使由另一页面生成了新键也会合并到原 operation，并持久记录该键；键参数冲突或不同意图重叠会话时返回冲突。
+
+兼容迁移：`restore-all` 路径保留，但从 1.4.325 起响应改为 `202 { accepted: true, operation_id, operation }`，表示恢复操作已持久接收，不表示整批完成。原来等待同步 `200` 最终结果的调用方需改为读取 `operation_id`，轮询 operation API 或订阅终端控制 WebSocket，并处理逐项结果。没有同步等待模式；不要对超时请求换幂等键重放。
 
 可用下列环境变量调整准入，修改后需重启 Termdock：
 
@@ -265,7 +267,11 @@ Termdock 的“恢复全部”请求先持久化恢复操作并立即返回 `202
 | `TD_AGENT_ESTIMATED_RSS_MB` | `512` | 新 Agent 的额外内存预算估值。 |
 | `TD_MAX_RESIDENT_AGENTS` | `48` | 整机驻留 Agent 进程组上限。 |
 | `TD_MAX_AGENTS_PER_GROUP` | `32` | 单个协作组的驻留 Agent 上限。 |
+| `TD_AGENT_MAX_MEMORY_PSI_SOME_AVG10` | `10` | Linux memory PSI `some avg10` 准入上限（百分比，0–100）。 |
+| `TD_AGENT_MAX_MEMORY_PSI_FULL_AVG10` | `1` | Linux memory PSI `full avg10` 准入上限（百分比，0–100）。 |
 
-低于预算或资源采样不可用时，会话停在 `resource_wait`，不会启动进程；队列每隔数秒重新评估。逐会话记录包含准入时 MemAvailable、估算 RSS、可观测时的启动后 RSS 和错误阶段。`/api/terminal/tmux/recovery/diagnostics` 会持久保存 MemAvailable、Linux memory PSI、kswapd、D-state、Agent 进程组与浏览器进程计数、恢复队列和最近完成项；Termdock 进程 CPU/RSS 与 event-loop lag 继续由 `/api/diagnostics/runtime` 提供。进程命令行仅用于当前内存中的分类，不写入诊断文件。
+低于预算或资源采样不可用时，会话进入 `paused`，逐项 `pauseReason="resources"` 并保留准确原因，不启动进程；队列每隔数秒重新评估，资源满足后自动继续。操作快照的 `counts` 对象包含 `total/queued/running/succeeded/failed/paused`，`paused_count` 是兼容计数，顶层 `paused` 布尔值表示人工暂停，`resource_wait` 计数也作为兼容字段保留。手动暂停使用 `pauseReason="manual"`，需显式 resume。逐会话记录包含准入时 MemAvailable、估算 RSS、可观测时的启动后 RSS 和错误阶段。`/api/terminal/tmux/recovery/diagnostics` 会持久保存 MemAvailable、Linux memory PSI、kswapd、D-state、Agent 进程组与浏览器进程计数、恢复队列和最近完成项；Termdock 进程 CPU/RSS 与 event-loop lag 继续由 `/api/diagnostics/runtime` 提供。进程命令行仅用于当前内存中的分类，不写入诊断文件。
 
-该限制只控制 Termdock 执行的批量恢复启动，不会终止浏览器、Agent 或其他应用。IntegrationSession 可通过新增的受管批量 release 进入 `released`（逻辑会话、消息/诊断历史、工作目录和原生历史保留，运行承载回收）；接口为 `POST /sessions/release-batch`，请求 `{session_ids:[...], idempotency_key:"..."}`，返回 `accepted` 和可由 `GET /sessions/release-batches/:id` 查询的持久 operation。它要求 principal 有 `session.release` 权限，并逐会话复用 generation、pending-message、配置指纹和运行时核验；不会强制终止校验失败的会话，也不会把普通 tmux 会话、浏览器或外部 Agent 纳入范围。`capabilities` 返回 `session_release_batch=true` 与最低服务版本字段。
+Integration `/capabilities` 返回 `tmux_recovery_operations=true` / `tmux_recovery_operations_min_version="1.4.325"` 与 `tmux_recovery_resource_admission=true` / 对应最低版本。1.4.326 新增 `tmux_recovery_pause_status`、`tmux_recovery_memory_psi_admission`、`tmux_recovery_td_owned_resident_admission`，各自的最低版本字段均为 `1.4.326`。Linux PSI 超过上限或无法读取时不启动 Agent；resident 配额只计算 TD 自己登记的活跃 Agent 会话和恢复预留。非 Linux 平台使用 MemAvailable 与 TD-owned resident 配额。批量 release 继续回读 `session_release_batch_min_version="1.4.325"`。
+
+该限制只控制 Termdock 执行的批量恢复启动，不会终止浏览器、Agent 或其他应用。诊断中的 `hostObservedAgentProcessGroupCount` / RSS 是主机进程观察值，可能包含第三方 Agent；只有 `tdOwnedResidentAgentCount` 用于 TD 自有配额，浏览器计数仅用于诊断。IntegrationSession 可通过新增的受管批量 release 进入 `released`（逻辑会话、消息/诊断历史、工作目录和原生历史保留，运行承载回收）；接口为 `POST /sessions/release-batch`，请求 `{session_ids:[...], idempotency_key:"..."}`，返回 `accepted` 和可由 `GET /sessions/release-batches/:id` 查询的持久 operation。它要求 principal 有 `session.release` 权限，并逐会话复用 generation、pending-message、配置指纹和运行时核验；不会强制终止校验失败的会话，也不会把普通 tmux 会话、浏览器或外部 Agent 纳入范围。`capabilities` 返回 `session_release_batch=true` 与最低服务版本字段。

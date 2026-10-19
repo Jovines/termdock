@@ -1304,6 +1304,7 @@ export type TranslationDictionary = {
     tmuxRecoveryFailed: string;
     tmuxRecoveryDismissFailed: string;
     tmuxRecoveryProgress: (params: TranslatorParams) => string;
+    tmuxRecoveryPausedForResources: string;
     tmuxRecoveryPause: string;
     tmuxRecoveryResume: string;
     tmuxRecoveryInProgress: string;

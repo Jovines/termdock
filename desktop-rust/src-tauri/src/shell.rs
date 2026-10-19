@@ -1716,6 +1716,8 @@ fn observe_window(app: &AppHandle, window: &WebviewWindow, connection_id: Option
     window.on_window_event(move |event| {
         let shell = state(&app);
         match event {
+            // Tauri's main WindowContent WebView synthesizes WINDOW drag events.
+            tauri::WindowEvent::DragDrop(event) => handle_file_drag(&app, &label, event),
             tauri::WindowEvent::Focused(true) => {
                 if connection_id.is_some() {
                     *shell.last_focused.lock().unwrap() = Some(label.clone());
@@ -1802,10 +1804,29 @@ fn observe_window(app: &AppHandle, window: &WebviewWindow, connection_id: Option
     let app = window.app_handle().clone();
     let label = window.label().to_owned();
     window.on_webview_event(move |event| {
-        if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event
-        {
-            let shell = state(&app);
-            if !shell.windows.lock().unwrap().contains_key(&label) {
+        if let tauri::WebviewEvent::DragDrop(event) = event { handle_file_drag(&app, &label, event); }
+    });
+}
+fn handle_file_drag(app: &AppHandle, label: &str, event: &tauri::DragDropEvent) {
+    let shell = state(app);
+    let connection = shell.windows.lock().unwrap().get(label).map(|w| w.connection.clone());
+    let Some(connection) = connection else { return; };
+    let Some(window) = app.get_webview_window(label) else { return; };
+    let zoom = shell.zooms.lock().unwrap().get(label).copied().unwrap_or(1.);
+    match event {
+        tauri::DragDropEvent::Enter { paths, position } => {
+            let (x,y) = preview_drop_css_point(position.x as f64, position.y as f64, zoom);
+            let local = local_service::home().ok().is_some_and(|home| local_files::verified_local(&home, connection.target_peer_id.as_deref(), connection.target_peer_id.as_deref()));
+            desktop_ui::emit(&window,"termdock:preview-drag",json!({"phase":"enter","x":x,"y":y,"local":local,"count":paths.len()}));
+        }
+        tauri::DragDropEvent::Over { position } => {
+            let (x,y) = preview_drop_css_point(position.x as f64, position.y as f64, zoom);
+            desktop_ui::emit(&window,"termdock:preview-drag",json!({"phase":"over","x":x,"y":y}));
+        }
+        tauri::DragDropEvent::Leave => desktop_ui::emit(&window,"termdock:preview-drag",json!({"phase":"leave"})),
+        tauri::DragDropEvent::Drop { paths, position } => {
+            let shell = state(app);
+            if !shell.windows.lock().unwrap().contains_key(label) {
                 return;
             }
             let token = uuid::Uuid::new_v4().to_string();
@@ -1818,17 +1839,17 @@ fn observe_window(app: &AppHandle, window: &WebviewWindow, connection_id: Option
                 drops.insert(
                     token.clone(),
                     NativeDrop {
-                        owner: label.clone(),
+                        owner: label.into(),
                         paths: paths.clone(),
                         expires: Instant::now() + Duration::from_secs(60),
                         view: None,
-                        target: None,
-                        epoch: None,
+                        target: connection.target_peer_id.clone(),
+                        epoch: shell.file_epochs.lock().unwrap().get(label).cloned(),
                     },
                 );
             }
-            if let Some(w) = app.get_webview_window(&label) {
-                let zoom = shell.zooms.lock().unwrap().get(&label).copied().unwrap_or(1.);
+            if let Some(w) = app.get_webview_window(label) {
+                let zoom = shell.zooms.lock().unwrap().get(label).copied().unwrap_or(1.);
                 let (x, y) = preview_drop_css_point(position.x as f64, position.y as f64, zoom);
                 desktop_ui::emit(
                     &w,
@@ -1837,8 +1858,10 @@ fn observe_window(app: &AppHandle, window: &WebviewWindow, connection_id: Option
                 );
             }
         }
-    });
+        _ => {}
+    }
 }
+
 async fn show_notification(
     app: &AppHandle,
     window: &WebviewWindow,

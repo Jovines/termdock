@@ -45,8 +45,12 @@ it('replays same idempotency input and rejects key reuse or overlapping sessions
   const input = { incidentId: 'incident', sessionIds: ['a'], scope: { kind: 'incident' as const }, idempotencyKey: 'same' };
   const first = await store.create(input);
   expect((await store.create(input)).id).toBe(first.id);
+  const coalesced = await store.create({ ...input, idempotencyKey: 'second-click' });
+  expect(coalesced.id).toBe(first.id);
+  expect(store.get(first.id)?.idempotencyKeyAliases).toContain('second-click');
+  expect((await store.create({ ...input, idempotencyKey: 'second-click' })).id).toBe(first.id);
   await expect(store.create({ ...input, sessionIds: ['b'] })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
-  await expect(store.create({ ...input, idempotencyKey: 'other' })).rejects.toMatchObject({ code: 'RECOVERY_SESSION_IN_PROGRESS', operationId: first.id });
+  await expect(store.create({ ...input, scope: { kind: 'sessions', sessionIds: ['a'] }, idempotencyKey: 'other' })).rejects.toMatchObject({ code: 'RECOVERY_SESSION_IN_PROGRESS', operationId: first.id });
   await vi.waitFor(() => expect(typeof release).toBe('function'));
   release();
   await store.flush();
@@ -64,7 +68,7 @@ it('pause prevents queued work and resume continues the same operation', async (
   await vi.waitFor(() => expect(started).toEqual(['a']));
   await store.pause(operation.id);
   finish();
-  await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'paused', running: 0, queued: 1 }));
+  await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'paused', running: 0, queued: 0, paused_count: 1 }));
   expect(started).toEqual(['a']);
   await store.resume(operation.id);
   await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'succeeded', succeeded: 2 }));
@@ -96,18 +100,53 @@ it('reports item failure code and bounds configured concurrency', async () => {
   expect(new TmuxRecoveryOperationError('TEST', 'x').code).toBe('TEST');
 });
 
-it('parks launches in resource_wait until admission recovers', async () => {
+it('reports resource exhaustion as paused with a reason, then resumes automatically', async () => {
   const { store } = await makeStore(1);
   let admitted = false;
   store.setAdmission(async () => ({ admitted, reason: admitted ? undefined : 'MEMORY_BUDGET_LOW', memAvailableBytes: 128 }));
   store.setRunner(async () => ({ actualRssBytes: 1024 }));
   const operation = await store.create({ incidentId: 'i', sessionIds: ['a'], scope: { kind: 'incident' }, idempotencyKey: 'memory-wait' });
-  await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'resource_wait', resource_wait: 1,
-    items: [{ state: 'resource_wait', resourceWaitReason: 'MEMORY_BUDGET_LOW', memAvailableBytes: 128 }] }));
+  await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'paused', pauseReason: 'resources', paused_count: 1, resource_wait: 1, counts: { total: 1, paused: 1 },
+    items: [{ state: 'paused', pauseReason: 'resources', resourceWaitReason: 'MEMORY_BUDGET_LOW', memAvailableBytes: 128 }] }));
   expect(store.stats().activeLaunches).toBe(0);
   admitted = true;
   store.notifyResourcesChanged();
   await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'succeeded', succeeded: 1, items: [{ actualRssBytes: 1024 }] }));
+});
+
+it('recovers a 100-session operation after restart without exceeding configured fan-out', async () => {
+  const { store, file } = await makeStore(3);
+  const abandonedGates: Array<() => void> = [];
+  store.setRunner(async () => new Promise<void>(resolve => abandonedGates.push(resolve)));
+  const sessionIds = Array.from({ length: 100 }, (_, index) => `session-${index.toString().padStart(3, '0')}`);
+  const operation = await store.create({ incidentId: 'large-incident', sessionIds, scope: { kind: 'incident' }, idempotencyKey: 'restore-100' });
+  await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ total: 100, running: 3, queued: 97 }));
+  await store.flush();
+
+  const restarted = new TmuxRecoveryOperationStore(file, 3);
+  await restarted.load();
+  expect(restarted.get(operation.id)).toMatchObject({ state: 'queued', total: 100, queued: 100 });
+  expect(restarted.get(operation.id)?.items.filter(item => item.phase === 'restart_reconciliation')).toHaveLength(3);
+  let active = 0, maximum = 0;
+  restarted.setRunner(async () => {
+    active += 1; maximum = Math.max(maximum, active);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    active -= 1;
+  });
+  await restarted.resumePending();
+  await vi.waitFor(() => expect(restarted.get(operation.id)).toMatchObject({ state: 'succeeded', total: 100, succeeded: 100, failed: 0, queued: 0, running: 0 }), { timeout: 10000 });
+  expect(maximum).toBeLessThanOrEqual(3);
+});
+
+it('continues the whole batch after an individual session failure', async () => {
+  const { store } = await makeStore(4);
+  store.setRunner(async (_operationId, sessionId) => {
+    if (sessionId === 'session-057') throw Object.assign(new Error('isolated launch failure'), { code: 'SESSION_LAUNCH_FAILED' });
+  });
+  const sessionIds = Array.from({ length: 100 }, (_, index) => `session-${index.toString().padStart(3, '0')}`);
+  const operation = await store.create({ incidentId: 'failure-incident', sessionIds, scope: { kind: 'incident' }, idempotencyKey: 'failure-100' });
+  await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'partial_failure', total: 100, succeeded: 99, failed: 1 }), { timeout: 10000 });
+  expect(store.get(operation.id)?.items.find(item => item.sessionId === 'session-057')).toMatchObject({ errorCode: 'SESSION_LAUNCH_FAILED', phase: 'failed' });
 });
 
 it('finishes instead of leaving a paused operation stuck when its last running item completes', async () => {

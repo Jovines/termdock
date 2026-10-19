@@ -1,3 +1,4 @@
+import { TerminalFileDropStatus } from './TerminalFileDropStatus';
 import {writeTerminalClipboardText as writeClipboardText, copyTmuxTerminalSelection} from '../../terminal/clipboardText';
 import { sanitizeTerminalInput } from '../../terminal/inputNormalization';
 import { encodeTerminalKey } from '../../terminal/keyboard';
@@ -4872,6 +4873,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }, 0);
         }}
       >
+        <TerminalFileDropStatus target={containerRef} />
         {pasteError && (
           <button type="button" role="alert" onClick={() => setPasteError(null)}
             className="absolute bottom-2 left-2 right-2 z-20 rounded-md border border-border bg-surface-2 px-3 py-2 text-left text-sm text-foreground">

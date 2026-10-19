@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export type TmuxRecoveryItemState = 'queued' | 'resource_wait' | 'running' | 'succeeded' | 'failed';
+export type TmuxRecoveryItemState = 'queued' | 'resource_wait' | 'running' | 'paused' | 'succeeded' | 'failed';
 export type TmuxRecoveryOperationState = 'queued' | 'resource_wait' | 'running' | 'paused' | 'succeeded' | 'partial_failure';
 
 export interface TmuxRecoveryItem {
@@ -15,6 +15,7 @@ export interface TmuxRecoveryItem {
   errorCode?: string;
   error?: string;
   resourceWaitReason?: string;
+  pauseReason?: 'manual' | 'resources';
   memAvailableBytes?: number;
   estimatedRssBytes?: number;
   actualRssBytes?: number;
@@ -34,6 +35,9 @@ export interface TmuxRecoveryOperation {
   scope: TmuxRecoveryScope;
   state: TmuxRecoveryOperationState;
   paused: boolean;
+  pauseReason?: 'manual' | 'resources';
+  /** Additional keys coalesced while this exact intent was active. */
+  idempotencyKeyAliases?: string[];
   concurrency: number;
   createdAt: number;
   updatedAt: number;
@@ -52,15 +56,38 @@ export interface TmuxRecoveryCounts {
   running: number;
   succeeded: number;
   failed: number;
+  paused_count: number;
 }
 
-export function summarizeRecoveryOperation(operation: TmuxRecoveryOperation): TmuxRecoveryOperation & TmuxRecoveryCounts {
+export interface TmuxRecoveryStatusCounts {
+  total: number;
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  paused: number;
+}
+
+export function summarizeRecoveryOperation(operation: TmuxRecoveryOperation): TmuxRecoveryOperation & TmuxRecoveryCounts & { counts: TmuxRecoveryStatusCounts } {
   const counts = operation.items.reduce<TmuxRecoveryCounts>((total, item) => {
     total.total += 1;
-    total[item.state] += 1;
+    if (item.state === 'resource_wait') {
+      total.resource_wait += 1;
+      total.paused_count += 1;
+    } else if (item.state === 'paused') {
+      total.paused_count += 1;
+      if (item.pauseReason === 'resources') total.resource_wait += 1;
+    } else if (item.state === 'queued' && operation.paused) {
+      total.paused_count += 1;
+    } else {
+      total[item.state] += 1;
+    }
     return total;
-  }, { total: 0, queued: 0, resource_wait: 0, running: 0, succeeded: 0, failed: 0 });
-  return { ...structuredClone(operation), ...counts };
+  }, { total: 0, queued: 0, resource_wait: 0, running: 0, succeeded: 0, failed: 0, paused_count: 0 });
+  return { ...structuredClone(operation), ...counts, counts: {
+    total: counts.total, queued: counts.queued, running: counts.running,
+    succeeded: counts.succeeded, failed: counts.failed, paused: counts.paused_count,
+  } };
 }
 
 export interface AgentLaunchAdmission {
@@ -138,14 +165,15 @@ export class TmuxRecoveryOperationStore {
         if (item.state === 'running') {
           // A killed worker may have submitted the native resume before it died.
           // The runner always performs an exact-owner reconciliation before it launches.
-          item.state = 'queued';
+          item.state = operation.paused ? 'paused' : 'queued';
+          item.pauseReason = operation.paused ? 'manual' : undefined;
           item.phase = 'restart_reconciliation';
           item.errorCode = 'RECOVERY_WORKER_RESTARTED';
           item.error = 'Service restarted during recovery; exact runtime ownership will be reconciled before retry.';
           recovered = true;
         }
       }
-      if (!terminalState(operation.state) && !operation.paused) operation.state = 'queued';
+      if (!terminalState(operation.state) && !operation.paused) operation.state = operation.items.some(item => item.state === 'paused' && item.pauseReason === 'resources') ? 'paused' : 'queued';
       operation.updatedAt = recovered ? now : operation.updatedAt;
     }
     if (recovered) await this.persist();
@@ -172,15 +200,25 @@ export class TmuxRecoveryOperationStore {
       ? { ...input.scope, sessionIds: [...new Set(input.scope.sessionIds ?? [])].sort() }
       : structuredClone(input.scope);
     const fingerprint = requestHash({ incidentId: input.incidentId, sessionIds, scope, concurrency });
-    const existingKey = this.state.operations.find(operation => operation.idempotencyKey === input.idempotencyKey);
+    const existingKey = this.state.operations.find(operation => operation.idempotencyKey === input.idempotencyKey || operation.idempotencyKeyAliases?.includes(input.idempotencyKey));
     if (existingKey) {
       if (existingKey.requestHash !== fingerprint) throw new TmuxRecoveryOperationError('IDEMPOTENCY_CONFLICT', 'The idempotency key was already used for a different recovery request.');
       return structuredClone(existingKey);
     }
     if (this.state.operations.length >= 2000) throw new TmuxRecoveryOperationError('RECOVERY_OPERATION_LIMIT', 'Recovery operation history is full; archive diagnostics before creating another operation.');
     const inProgress = this.state.operations.find(operation => !terminalState(operation.state)
-      && operation.items.some(item => sessionIds.includes(item.sessionId) && (item.state === 'queued' || item.state === 'resource_wait' || item.state === 'running')));
-    if (inProgress) throw new TmuxRecoveryOperationError('RECOVERY_SESSION_IN_PROGRESS', 'At least one selected session is already in a recovery operation.', inProgress.id);
+      && operation.requestHash === fingerprint
+      && operation.items.some(item => sessionIds.includes(item.sessionId) && (item.state === 'queued' || item.state === 'resource_wait' || item.state === 'paused' || item.state === 'running')));
+    if (inProgress) {
+      inProgress.idempotencyKeyAliases = [...new Set([...(inProgress.idempotencyKeyAliases ?? []), input.idempotencyKey])];
+      inProgress.updatedAt = Date.now();
+      await this.persist();
+      this.emit();
+      return structuredClone(inProgress);
+    }
+    const overlapping = this.state.operations.find(operation => !terminalState(operation.state)
+      && operation.items.some(item => sessionIds.includes(item.sessionId) && (item.state === 'queued' || item.state === 'resource_wait' || item.state === 'paused' || item.state === 'running')));
+    if (overlapping) throw new TmuxRecoveryOperationError('RECOVERY_SESSION_IN_PROGRESS', 'At least one selected session is already in a recovery operation.', overlapping.id);
     const now = Date.now();
     const operation: TmuxRecoveryOperation = {
       id: randomUUID(), incidentId: input.incidentId, idempotencyKey: input.idempotencyKey,
@@ -215,6 +253,13 @@ export class TmuxRecoveryOperationStore {
     if (!operation) return null;
     if (!terminalState(operation.state)) {
       operation.paused = true;
+      operation.pauseReason = 'manual';
+      for (const item of operation.items) {
+        if (item.state === 'queued' || item.state === 'resource_wait' || (item.state === 'paused' && item.pauseReason === 'resources')) {
+          item.state = 'paused';
+          item.pauseReason = 'manual';
+        }
+      }
       operation.state = 'paused';
       operation.updatedAt = Date.now();
       await this.persist(); this.emit();
@@ -227,7 +272,16 @@ export class TmuxRecoveryOperationStore {
     if (!operation) return null;
     if (!terminalState(operation.state)) {
       operation.paused = false;
-      operation.state = 'queued';
+      operation.pauseReason = undefined;
+      for (const item of operation.items) {
+        if (item.state === 'paused' && item.pauseReason === 'manual') {
+          item.state = item.resourceWaitReason ? 'paused' : 'queued';
+          item.pauseReason = item.resourceWaitReason ? 'resources' : undefined;
+        }
+      }
+      const waitingForResources = operation.items.some(item => item.state === 'paused' && item.pauseReason === 'resources');
+      operation.state = waitingForResources ? 'paused' : 'queued';
+      operation.pauseReason = waitingForResources ? 'resources' : undefined;
       operation.updatedAt = Date.now();
       await this.persist(); this.emit();
       void this.pump();
@@ -235,13 +289,14 @@ export class TmuxRecoveryOperationStore {
     return this.get(id);
   }
 
-  stats(): { queued: number; resource_wait: number; running: number; activeLaunches: number; lastCompletedAt: number | null; lastCompletedSessionId: string | null } {
+  stats(): { queued: number; paused: number; resource_wait: number; running: number; activeLaunches: number; lastCompletedAt: number | null; lastCompletedSessionId: string | null } {
     const operations = this.state.operations;
     const items = operations.flatMap(operation => operation.items);
     const lastCompleted = [...items].filter(item => item.completedAt !== null).sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
     return {
       queued: items.filter(item => item.state === 'queued').length,
-      resource_wait: items.filter(item => item.state === 'resource_wait').length,
+      paused: items.filter(item => item.state === 'paused' || item.state === 'resource_wait').length,
+      resource_wait: items.filter(item => item.state === 'resource_wait' || (item.state === 'paused' && item.pauseReason === 'resources')).length,
       running: items.filter(item => item.state === 'running').length,
       activeLaunches: this.active,
       lastCompletedAt: lastCompleted?.completedAt ?? null,
@@ -269,8 +324,8 @@ export class TmuxRecoveryOperationStore {
       while (this.active < this.concurrencyLimit) {
         const candidate = this.state.operations.find(operation => !operation.paused && !terminalState(operation.state)
           && operation.items.filter(item => item.state === 'running').length < operation.concurrency
-          && operation.items.some(item => (item.state === 'queued' || item.state === 'resource_wait') && !deferred.has(`${operation.id}:${item.sessionId}`)));
-        const item = candidate?.items.find(entry => (entry.state === 'queued' || entry.state === 'resource_wait') && !deferred.has(`${candidate.id}:${entry.sessionId}`));
+          && operation.items.some(item => (item.state === 'queued' || item.state === 'resource_wait' || (item.state === 'paused' && item.pauseReason === 'resources')) && !deferred.has(`${operation.id}:${item.sessionId}`)));
+        const item = candidate?.items.find(entry => (entry.state === 'queued' || entry.state === 'resource_wait' || (entry.state === 'paused' && entry.pauseReason === 'resources')) && !deferred.has(`${candidate.id}:${entry.sessionId}`));
         if (!candidate || !item) break;
         if (this.admission) {
           let admission: AgentLaunchAdmission;
@@ -279,14 +334,17 @@ export class TmuxRecoveryOperationStore {
           item.memAvailableBytes = admission.memAvailableBytes;
           item.estimatedRssBytes = admission.estimatedRssBytes ?? item.estimatedRssBytes;
           if (!admission.admitted) {
-            item.state = 'resource_wait'; item.phase = 'resource_wait';
+            item.state = 'paused'; item.pauseReason = 'resources'; item.phase = 'resource_wait';
             item.resourceWaitReason = admission.reason ?? 'Resource budget is not currently available.';
-            candidate.state = 'resource_wait'; candidate.updatedAt = Date.now();
+            candidate.pauseReason = 'resources';
+            candidate.state = candidate.items.some(candidateItem => candidateItem.state === 'running') ? 'running' : 'paused'; candidate.updatedAt = Date.now();
             deferred.add(`${candidate.id}:${item.sessionId}`);
             await this.persist(); this.emit();
             continue;
           }
           item.resourceWaitReason = undefined;
+          item.pauseReason = undefined;
+          candidate.pauseReason = candidate.items.some(candidateItem => candidateItem.state === 'paused' && candidateItem.pauseReason === 'resources' && candidateItem !== item) ? 'resources' : undefined;
         }
         if (candidate.paused) break;
         candidate.state = 'running';
@@ -297,7 +355,7 @@ export class TmuxRecoveryOperationStore {
         void this.execute(candidate, item);
       }
       if (this.state.operations.some(operation => !operation.paused && !terminalState(operation.state)
-        && operation.items.some(item => item.state === 'resource_wait'))) {
+        && operation.items.some(item => item.state === 'resource_wait' || (item.state === 'paused' && item.pauseReason === 'resources')))) {
         const retry = setTimeout(() => void this.pump(), 5_000);
         retry.unref?.();
       }
@@ -328,14 +386,17 @@ export class TmuxRecoveryOperationStore {
       this.onError({ operationId: operation.id, sessionId: item.sessionId, code, message });
     } finally {
       item.completedAt = Date.now(); operation.updatedAt = item.completedAt;
-      const hasPending = operation.items.some(candidate => candidate.state === 'queued' || candidate.state === 'resource_wait' || candidate.state === 'running');
+      const hasPending = operation.items.some(candidate => candidate.state === 'queued' || candidate.state === 'resource_wait' || candidate.state === 'paused' || candidate.state === 'running');
       if (!hasPending) {
         operation.paused = false;
+        operation.pauseReason = undefined;
         operation.state = operation.items.some(candidate => candidate.state === 'failed') ? 'partial_failure' : 'succeeded';
       } else {
         operation.state = operation.paused ? 'paused'
           : operation.items.some(candidate => candidate.state === 'running') ? 'running'
-            : operation.items.some(candidate => candidate.state === 'queued') ? 'queued' : 'resource_wait';
+            : operation.items.some(candidate => candidate.state === 'queued') ? 'queued' : 'paused';
+        if (operation.paused) operation.pauseReason = 'manual';
+        else if (!operation.items.some(candidate => candidate.state === 'running' || candidate.state === 'queued')) operation.pauseReason = 'resources';
       }
       this.active = Math.max(0, this.active - 1);
       try { await this.persist(); } catch (error) { this.onError(error); }

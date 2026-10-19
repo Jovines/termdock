@@ -320,12 +320,15 @@ export default function ComputerControlView() {
     {touchDevice && <span className="hidden pr-2 text-[10px] text-muted-foreground sm:inline">{t('computer.pinchHint')}</span>}
   </div>;
 
+  // Keep pointer controls compact without shrinking touch targets.
+  const toolbarButtonClass = `flex shrink-0 items-center justify-center rounded-md hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${touchDevice ? 'min-h-11 min-w-11' : 'h-8 min-w-8'}`;
+
   const body = (
     <div ref={frameRef} className={`flex min-h-0 flex-col bg-surface text-foreground ${expanded ? 'fixed inset-0 z-modal-panel h-dvh pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]' : 'relative h-full'}`}
       role={expanded ? 'dialog' : undefined} aria-modal={expanded || undefined} aria-label={t('computer.title')}
       onKeyDown={event => { event.stopPropagation(); if (event.key === 'Escape' && !event.nativeEvent.isComposing && panel) { event.preventDefault(); setPanel(null); } }} onKeyUp={event => event.stopPropagation()}>
-      <div className="relative z-30 flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-3">
-        {expanded && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" onClick={() => { setExpanded(false); setPanel(null); }} aria-label={t('computer.exitFullscreen')}><ChevronLeft size={20} /></button>}
+      <div className={`relative z-30 flex shrink-0 items-center gap-2 border-b border-border bg-surface px-2 ${touchDevice ? 'min-h-12' : 'min-h-8'}`}>
+        {expanded && <button type="button" className={toolbarButtonClass} onClick={() => { setExpanded(false); setPanel(null); }} aria-label={t('computer.exitFullscreen')}><ChevronLeft size={20} /></button>}
         <Monitor size={16} className="shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{connected ? desktopName || (localTarget ? service?.hostname || savedConnection()?.serviceName : host) || t('computer.title') : t('computer.title')}</span>
         {connected && <span className="text-[11px] text-primary">{t('computer.connected')}</span>}
@@ -333,10 +336,10 @@ export default function ComputerControlView() {
         {connected && saveState === 'saving' && <span role="status" aria-label={t('computer.settingsSaving')} title={t('computer.settingsSaving')}><Loader2 size={12} className="animate-spin text-muted-foreground" /></span>}
         {connected && saveState === 'error' && <button type="button" className={buttonClass} title={t('computer.settingsSaveFailed')} aria-label={t('computer.settingsSaveFailed')} onClick={retry}>! {t('computer.retry')}</button>}
         {busy && <button type="button" className={buttonClass} onClick={disconnect}><Unplug size={14} />{t('computer.cancel')}</button>}
-        {connected && !touchDevice && panel === 'keyboard' && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" onClick={() => togglePanel('keyboard')} aria-label={t('computer.keyboard')} aria-pressed={keyboardActive}><Keyboard size={18} /></button>}
-        {connected && !touchDevice && <button type="button" className={`flex min-h-11 min-w-11 items-center justify-center rounded-md ${panel === 'clipboard' ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('clipboard')} aria-label={t('computer.clipboardTool')} title={t('computer.clipboardTool')} aria-pressed={panel === 'clipboard'}><Clipboard size={18} /></button>}
-        {connected && !expanded && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center gap-1 text-xs" onClick={() => setExpanded(true)} aria-label={t('computer.fullscreen')}><Maximize2 size={16} />{t('computer.expand')}</button>}
-        {connected && <button type="button" className="flex min-h-11 min-w-11 items-center justify-center" onClick={() => togglePanel('tools')} aria-label={t('computer.tools')} aria-expanded={panel === 'tools'}><Settings2 size={18} /></button>}
+        {connected && !touchDevice && panel === 'keyboard' && <button type="button" className={toolbarButtonClass} onClick={() => togglePanel('keyboard')} aria-label={t('computer.keyboard')} aria-pressed={keyboardActive}><Keyboard size={18} /></button>}
+        {connected && !touchDevice && <button type="button" className={`${toolbarButtonClass} ${panel === 'clipboard' ? 'bg-surface-2 text-primary' : ''}`} disabled={viewOnly} onClick={() => togglePanel('clipboard')} aria-label={t('computer.clipboardTool')} title={t('computer.clipboardTool')} aria-pressed={panel === 'clipboard'}><Clipboard size={18} /></button>}
+        {connected && !expanded && <button type="button" className={`${toolbarButtonClass} gap-1 px-1 text-xs`} onClick={() => setExpanded(true)} aria-label={t('computer.fullscreen')}><Maximize2 size={16} />{t('computer.expand')}</button>}
+        {connected && <button type="button" className={toolbarButtonClass} onClick={() => togglePanel('tools')} aria-label={t('computer.tools')} aria-expanded={panel === 'tools'}><Settings2 size={18} /></button>}
       </div>
       {!connected && <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
         <div className="mx-auto w-full max-w-md">
@@ -402,8 +405,8 @@ export default function ComputerControlView() {
         </details>
         </div>
       </div>}
-      {connected && panel === 'tools' && <button type="button" className={`absolute inset-x-0 ${touchDevice ? 'bottom-14' : 'bottom-0'} top-12 z-20 bg-background/40`} aria-label={t('computer.returnToDesktop')} onClick={() => setPanel(null)} />}
-      {connected && <div hidden={panel !== 'tools'} className={`${panel === 'tools' ? 'flex' : 'hidden'} absolute inset-x-3 top-14 z-30 max-h-[calc(100%-7rem)] flex-wrap items-center gap-3 overflow-y-auto rounded-lg border border-border bg-surface px-4 py-3 text-xs shadow-lg [&_button]:min-h-11 [&_select]:min-h-11 [&_label]:min-h-11`} role="region" aria-label={t('computer.tools')}>
+      {connected && panel === 'tools' && <button type="button" className={`absolute inset-x-0 ${touchDevice ? 'bottom-14 top-12' : 'bottom-0 top-8'} z-20 bg-background/40`} aria-label={t('computer.returnToDesktop')} onClick={() => setPanel(null)} />}
+      {connected && <div hidden={panel !== 'tools'} className={`${panel === 'tools' ? 'flex' : 'hidden'} absolute inset-x-3 ${touchDevice ? 'top-14' : 'top-10'} z-30 max-h-[calc(100%-7rem)] flex-wrap items-center gap-3 overflow-y-auto rounded-lg border border-border bg-surface px-4 py-3 text-xs shadow-lg [&_button]:min-h-11 [&_select]:min-h-11 [&_label]:min-h-11`} role="region" aria-label={t('computer.tools')}>
         <div className="flex w-full items-center justify-between"><span className="font-medium">{t('computer.tools')}</span><button type="button" className="flex min-w-11 items-center justify-center" aria-label={t('computer.closeTools')} onClick={() => setPanel(null)}><X size={18} /></button></div>
         {touchDevice && <div className="flex w-full items-center gap-2">
           <div className="inline-flex rounded-md bg-background p-0.5" role="group" aria-label={t('computer.touchMode')}>

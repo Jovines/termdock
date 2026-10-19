@@ -62,10 +62,16 @@ jobs:
           src/lib/components/terminal/TerminalViewportPasteOwnership.test.tsx
           src/lib/federation/SecureAccessGate.test.tsx
           src/lib/terminal/api.close.test.ts
+          src/lib/desktop/encryptedFileDrops.test.ts
+          src/lib/components/terminal/TerminalFileDropStatus.test.tsx
           src/server/agent/integrationBatchRelease.test.ts
+          src/server/agent/integration.test.ts
           src/server/utils/hostResources.test.ts
           src/server/utils/tmuxRecoveryOperations.test.ts
           src/server/utils/tmuxRecovery.test.ts
+          src/lib/components/computer/ComputerControlView.test.tsx
+      - name: Verify desktop bridge file-drop transport and lifecycle
+        run: node --test desktop-rust/renderer/bridge.test.mjs
       - run: npm run build
       - name: Pack the verified build
         run: |

@@ -139,7 +139,7 @@ import { completedExecution, ExecutionArchiveStore } from '../agent/executionArc
 import { archiveTaskWorkspace, restoreTaskWorkspace, snapshotTaskWorkspace } from '../agent/collaborationTaskWorkspace.js';
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { configuredTmuxRecoveryConcurrency, TmuxRecoveryOperationStore, type TmuxRecoveryOperation, type TmuxRecoveryScope } from '../utils/tmuxRecoveryOperations.js';
-import { assessAgentResourceBudget, collectHostResourceSnapshot, configuredAgentResourceBudget } from '../utils/hostResources.js';
+import { assessAgentResourceBudget, collectHostResourceSnapshot, configuredAgentResourceBudget, getTermdockOwnedAgentSessionIds } from '../utils/hostResources.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { writeBracketedPrompt, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { captureTerminalInputGuard, captureRuntimeInputGuard, waitAndWriteTerminalInput, type TerminalInputGuard, type PromptWriteProgress } from '../agent/terminalInput.js';
@@ -552,7 +552,7 @@ interface SessionInventory {
   tmuxRecovery: {
     id: string;
     detectedAt: number;
-    operation?: (TmuxRecoveryOperation & { total: number; queued: number; resource_wait: number; running: number; succeeded: number; failed: number }) | null;
+    operation?: (TmuxRecoveryOperation & { total: number; queued: number; paused_count: number; resource_wait: number; running: number; succeeded: number; failed: number; counts: { total: number; queued: number; running: number; succeeded: number; failed: number; paused: number } }) | null;
     sessions: Array<{
       sessionId: string;
       name: string;
@@ -6997,18 +6997,17 @@ const tmuxAgentResourceBudget = configuredAgentResourceBudget();
 tmuxRecoveryOperations.setAdmission(async (_operationId, sessionId) => {
   try {
     const snapshot = await collectHostResourceSnapshot();
+    const managedSessions = globalSessionState.sessions.filter(item => item.mode === 'tmux' && item.tmuxSessionName);
+    const liveSessions = await listLiveTmuxInventorySessions();
+    const activeRecoverySessionIds = tmuxRecoveryOperations.all().flatMap(operation => operation.items)
+      .filter(item => item.state === 'running').map(item => item.sessionId);
+    const ownedAgentSessionIds = getTermdockOwnedAgentSessionIds({ managedSessions,
+      liveAgentSessions: liveSessions.filter(item => item.program && agentBySlug(item.program)).map(item => ({ name: item.name, sourceFrontendSessionId: item.sourceFrontendSessionId })),
+      activeRecoverySessionIds });
     const group = collaborationStore.list().find(item => item.sessionIds.includes(sessionId));
-    let residentAgentsInGroup = 0;
-    if (group) {
-      const rows = globalSessionState.sessions.filter(item => group.sessionIds.includes(item.sessionId) && item.agentResume && item.tmuxSessionName);
-      const liveSessions = await listLiveTmuxInventorySessions();
-      const liveAgents = new Set(liveSessions.filter(item => item.program && agentBySlug(item.program) !== null).map(item => item.name));
-      residentAgentsInGroup = rows.filter(item => liveAgents.has(item.tmuxSessionName!)).length;
-      const memberIds = new Set(group.sessionIds);
-      residentAgentsInGroup += tmuxRecoveryOperations.all().flatMap(operation => operation.items)
-        .filter(item => item.state === 'running' && memberIds.has(item.sessionId)).length;
-    }
-    const result = assessAgentResourceBudget({ snapshot: { ...snapshot, residentAgentCount: snapshot.residentAgentCount + tmuxRecoveryOperations.stats().activeLaunches }, budget: tmuxAgentResourceBudget, residentAgentsInGroup });
+    const memberIds = new Set(group?.sessionIds ?? []);
+    const residentAgentsInGroup = [...ownedAgentSessionIds].filter(id => memberIds.has(id)).length;
+    const result = assessAgentResourceBudget({ snapshot: { ...snapshot, residentAgentCount: ownedAgentSessionIds.size }, budget: tmuxAgentResourceBudget, residentAgentsInGroup });
     return { ...result, memAvailableBytes: snapshot.memoryAvailableBytes, estimatedRssBytes: tmuxAgentResourceBudget.estimatedRssBytes };
   } catch {
     return { admitted: false, reason: 'RESOURCE_SNAPSHOT_UNAVAILABLE', estimatedRssBytes: tmuxAgentResourceBudget.estimatedRssBytes };
@@ -7022,7 +7021,13 @@ async function sampleTmuxRecoveryHealth(): Promise<void> {
   if (tmuxRecoveryHealthSampling) return;
   tmuxRecoveryHealthSampling = true;
   try {
-    const snapshot = await collectHostResourceSnapshot();
+    const [snapshot, liveSessions] = await Promise.all([collectHostResourceSnapshot(), listLiveTmuxInventorySessions()]);
+    const managedSessions = globalSessionState.sessions.filter(item => item.mode === 'tmux' && item.tmuxSessionName);
+    const activeRecoverySessionIds = tmuxRecoveryOperations.all().flatMap(operation => operation.items)
+      .filter(item => item.state === 'running').map(item => item.sessionId);
+    const tdOwnedAgentSessionIds = getTermdockOwnedAgentSessionIds({ managedSessions,
+      liveAgentSessions: liveSessions.filter(item => item.program && agentBySlug(item.program)).map(item => ({ name: item.name, sourceFrontendSessionId: item.sourceFrontendSessionId })),
+      activeRecoverySessionIds });
     const diagnostics = {
       sampledAt: snapshot.sampledAt,
       platform: snapshot.platform,
@@ -7035,6 +7040,9 @@ async function sampleTmuxRecoveryHealth(): Promise<void> {
       dStateProcessCount: snapshot.dStateProcessCount,
       residentAgentCount: snapshot.residentAgentCount,
       residentAgentRssBytes: snapshot.residentAgentRssBytes,
+      hostObservedAgentProcessGroupCount: snapshot.residentAgentCount,
+      hostObservedAgentRssBytes: snapshot.residentAgentRssBytes,
+      tdOwnedResidentAgentCount: tdOwnedAgentSessionIds.size,
       browserProcessCount: snapshot.browserProcessCount,
       recovery: tmuxRecoveryOperations.stats(),
       resourceBudget: tmuxAgentResourceBudget,

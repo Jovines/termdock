@@ -229,7 +229,15 @@ it('requires an explicit configure grant, preserves identity credentials, and pu
 });
 it('creates scoped background records, returns current execution in summaries and rejects cross-group migrations or forged acceptance', async () => {
   const f = await runtimeFixture();
-  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true, external_validation: false });
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({
+    background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true, external_validation: false,
+    tmux_recovery_operations: true, tmux_recovery_operations_min_version: '1.4.325',
+    tmux_recovery_resource_admission: true, tmux_recovery_resource_admission_min_version: '1.4.325',
+    tmux_recovery_pause_status: true, tmux_recovery_pause_status_min_version: '1.4.326',
+    tmux_recovery_memory_psi_admission: true, tmux_recovery_memory_psi_admission_min_version: '1.4.326',
+    tmux_recovery_td_owned_resident_admission: true, tmux_recovery_td_owned_resident_admission_min_version: '1.4.326',
+    session_release_batch: true, session_release_batch_min_version: '1.4.325',
+  });
   const input = { title: 'Background', spec: 'Run', purpose: 'automation', idempotencyKey: 'background', assigneeSessionId: 'worker' };
   const created = await f.request('POST', '/tasks', { input });
   expect(created.body.task).toMatchObject({ purpose: 'automation', execution: { status: 'awaiting_report', artifactId: null } });

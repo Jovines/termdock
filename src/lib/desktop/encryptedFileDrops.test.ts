@@ -25,7 +25,7 @@ it('uploads a remote drop in the renderer before the legacy preload can transmit
   Object.defineProperty(event, 'dataTransfer', { value: { files: [file] } });
   zone.dispatchEvent(event);
   await vi.waitFor(() => expect(delivered).toHaveBeenCalledWith({ sessionKey: 'session-C', paths: ['/tmp/uploaded.txt'] }));
-  expect(upload).toHaveBeenCalledWith('/tmp', [file], expect.any(AbortSignal), undefined, expect.any(Function)); expect(legacy).not.toHaveBeenCalled();
+  expect(upload).toHaveBeenCalledWith('/tmp', [file], expect.any(AbortSignal), expect.any(Function), expect.any(Function)); expect(legacy).not.toHaveBeenCalled();
   dispose(); document.removeEventListener('drop', legacy, true);
 });
 
@@ -91,7 +91,7 @@ it('does not let an older successful drop clear a newer drop or deliver its path
   pending[1]({ files: [{ path: '/tmp/new.txt' }] });
   await vi.waitFor(() => expect(delivered).toHaveBeenCalledWith({ sessionKey: 'session-C', paths: ['/tmp/new.txt'] }));
   expect(delivered).toHaveBeenCalledWith({ sessionKey: 'session-C', paths: ['/tmp/new.txt'] });
-  expect(zone.dataset.nativeFileDropState).toBeUndefined();
+  expect(zone.dataset.nativeFileDropState).toBe('uploaded');
   dispose();
 });
 
@@ -111,4 +111,13 @@ it('a real secure target change aborts an already-started encrypted drop upload'
  const zone=document.createElement('div');zone.dataset.termdockTerminalDropzone='old';document.body.append(zone);const dispose=installEncryptedFileDrops(vi.fn());let signal:AbortSignal|undefined;upload.mockImplementation((_dir,_files,value)=>{signal=value;return new Promise((_resolve,reject)=>signal!.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError'))));});
  const event=new Event('drop',{bubbles:true,cancelable:true});Object.defineProperty(event,'dataTransfer',{value:{files:[new File(['private'],'owned.txt')]}});zone.dispatchEvent(event);await vi.waitFor(()=>expect(signal).toBeDefined());
  state.target={url:'https://changed.test',targetPeerId:'new'};window.dispatchEvent(new Event('termdock:secure-state'));expect(signal!.aborted).toBe(true);await Promise.resolve();dispose();
+});
+it('reports encrypted upload progress and cancels without inserting paths',async()=>{
+ const zone=document.createElement('div');zone.dataset.termdockTerminalDropzone='view';document.body.append(zone);
+ let signal:AbortSignal|undefined;upload.mockImplementation((_dir,_files,value,progress)=>{signal=value;progress(37);return new Promise((_resolve,reject)=>value.addEventListener('abort',()=>reject(new DOMException('cancelled','AbortError'))));});
+ const deliver=vi.fn(),dispose=installEncryptedFileDrops(deliver);
+ const event=new Event('drop',{bubbles:true,cancelable:true});Object.defineProperty(event,'dataTransfer',{value:{files:[new File(['test'],'test.txt')]}});zone.dispatchEvent(event);
+ await vi.waitFor(()=>expect(zone.dataset.nativeFileDropProgress).toBe('37'));
+ zone.dispatchEvent(new CustomEvent('termdock:file-drop-cancel',{bubbles:true}));
+ await vi.waitFor(()=>expect(signal?.aborted).toBe(true));expect(deliver).not.toHaveBeenCalled();expect(zone.dataset.nativeFileDropState).toBe('cancelled');dispose();
 });

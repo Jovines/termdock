@@ -256,7 +256,12 @@ export class IntegrationRuntime {
       native_identity_linux_flock_owner: process.platform === 'linux',
       background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true,
       integration_message_send: true, integration_message_reply: true, integration_message_history: true,
-      session_release_batch: true, session_release_batch_min_version: getTermdockVersion(),
+      tmux_recovery_operations: true, tmux_recovery_operations_min_version: '1.4.325',
+      tmux_recovery_resource_admission: true, tmux_recovery_resource_admission_min_version: '1.4.325',
+      tmux_recovery_pause_status: true, tmux_recovery_pause_status_min_version: '1.4.326',
+      tmux_recovery_memory_psi_admission: true, tmux_recovery_memory_psi_admission_min_version: '1.4.326',
+      tmux_recovery_td_owned_resident_admission: true, tmux_recovery_td_owned_resident_admission_min_version: '1.4.326',
+      session_release_batch: true, session_release_batch_min_version: '1.4.325',
       permissions: INTEGRATION_OPERATIONS };
   }
   private async createReleaseBatch(principal: IntegrationPrincipal, rawSessionIds: unknown, rawKey: unknown) {

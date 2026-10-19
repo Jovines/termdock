@@ -2314,7 +2314,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               </p>
               {tmuxRecovery.operation && (
                 <div className="mt-2 rounded-lg bg-surface-2 px-2.5 py-2 text-[10px] text-muted-foreground" aria-live="polite">
-                  <p>{t('tab.tmuxRecoveryProgress', { total: tmuxRecovery.operation.total, queued: tmuxRecovery.operation.queued, resourceWait: tmuxRecovery.operation.resource_wait, running: tmuxRecovery.operation.running, succeeded: tmuxRecovery.operation.succeeded, failed: tmuxRecovery.operation.failed })}</p>
+                  <p>{t('tab.tmuxRecoveryProgress', { total: tmuxRecovery.operation.total, queued: tmuxRecovery.operation.queued, paused: tmuxRecovery.operation.paused_count, resourceWait: tmuxRecovery.operation.resource_wait, running: tmuxRecovery.operation.running, succeeded: tmuxRecovery.operation.succeeded, failed: tmuxRecovery.operation.failed })}</p>
+                  {tmuxRecovery.operation.pauseReason === 'resources' && <p className="mt-1">{t('tab.tmuxRecoveryPausedForResources')}</p>}
                   <div className="mt-1 max-h-24 overflow-y-auto">
                   {tmuxRecovery.operation.items.map(item => (
                     <p key={item.sessionId} className={`mt-1 ${item.errorCode ? 'text-destructive' : ''}`}>

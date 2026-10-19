@@ -370,6 +370,8 @@ html[data-termdock-ipad-pwa='true'] #root {
   background: var(--chrome-glow), var(--surface);
 }
 
+.terminal-viewport-container[data-native-file-feedback='true']::after { display: none; }
+
 .terminal-viewport-container[data-native-file-drag='true']::after {
   position: absolute;
   bottom: 18px;

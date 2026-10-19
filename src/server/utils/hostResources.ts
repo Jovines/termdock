@@ -39,6 +39,27 @@ export interface AgentResourceBudget {
   estimatedRssBytes: number;
   maxResidentAgents: number;
   maxAgentsPerGroup: number;
+  maxMemoryPressureSomeAvg10: number;
+  maxMemoryPressureFullAvg10: number;
+}
+
+export function getTermdockOwnedAgentSessionIds(input: {
+  managedSessions: Array<{ sessionId: string; tmuxSessionName?: string | null }>;
+  liveAgentSessions: Array<{ name: string; sourceFrontendSessionId?: string | null }>;
+  activeRecoverySessionIds?: string[];
+}): Set<string> {
+  const managedByName = new Map(input.managedSessions.flatMap(session => session.tmuxSessionName ? [[session.tmuxSessionName, session.sessionId] as const] : []));
+  const managedIds = new Set(input.managedSessions.map(session => session.sessionId));
+  const owned = new Set<string>();
+  for (const live of input.liveAgentSessions) {
+    const sessionId = managedByName.get(live.name)
+      ?? (live.sourceFrontendSessionId && managedIds.has(live.sourceFrontendSessionId) ? live.sourceFrontendSessionId : undefined);
+    if (sessionId) owned.add(sessionId);
+  }
+  for (const sessionId of input.activeRecoverySessionIds ?? []) {
+    if (managedIds.has(sessionId)) owned.add(sessionId);
+  }
+  return owned;
 }
 
 function parseMemAvailable(contents: string): number | null {
@@ -131,22 +152,38 @@ export function configuredAgentResourceBudget(env: NodeJS.ProcessEnv = process.e
     if (!Number.isInteger(value) || value < 1 || value > max) throw new Error(`${key} must be an integer from 1 to ${max}`);
     return value;
   };
+  const readPressure = (key: string, fallback: number) => {
+    const raw = env[key];
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || value > 100) throw new Error(`${key} must be a number from 0 to 100`);
+    return value;
+  };
   return {
     minAvailableBytes: readMb('TD_AGENT_MIN_AVAILABLE_MB', 2048, 256, 131072),
     estimatedRssBytes: readMb('TD_AGENT_ESTIMATED_RSS_MB', 512, 64, 32768),
     maxResidentAgents: readCount('TD_MAX_RESIDENT_AGENTS', 48, 10000),
     maxAgentsPerGroup: readCount('TD_MAX_AGENTS_PER_GROUP', 32, 1000),
+    maxMemoryPressureSomeAvg10: readPressure('TD_AGENT_MAX_MEMORY_PSI_SOME_AVG10', 10),
+    maxMemoryPressureFullAvg10: readPressure('TD_AGENT_MAX_MEMORY_PSI_FULL_AVG10', 1),
   };
 }
 
 export function assessAgentResourceBudget(input: {
-  snapshot: Pick<HostResourceSnapshot, 'memoryAvailableBytes' | 'residentAgentCount'> & Partial<Pick<HostResourceSnapshot, 'memorySnapshotAvailable' | 'processSnapshotAvailable'>>;
+  snapshot: Pick<HostResourceSnapshot, 'memoryAvailableBytes' | 'residentAgentCount'> & Partial<Pick<HostResourceSnapshot, 'platform' | 'memoryPressure' | 'memorySnapshotAvailable' | 'processSnapshotAvailable'>>;
   budget: AgentResourceBudget;
   residentAgentsInGroup: number;
 }): { admitted: boolean; reason?: string } {
   if (input.snapshot.memorySnapshotAvailable === false || input.snapshot.processSnapshotAvailable === false) return { admitted: false, reason: 'RESOURCE_SNAPSHOT_UNAVAILABLE' };
   const required = input.budget.minAvailableBytes + input.budget.estimatedRssBytes;
   if (input.snapshot.memoryAvailableBytes < required) return { admitted: false, reason: 'MEMORY_BUDGET_LOW' };
+  if (input.snapshot.platform === 'linux') {
+    const pressure = input.snapshot.memoryPressure;
+    if (!pressure || pressure.someAvg10 === null || pressure.fullAvg10 === null) return { admitted: false, reason: 'MEMORY_PSI_UNAVAILABLE' };
+    if (pressure.someAvg10 > input.budget.maxMemoryPressureSomeAvg10 || pressure.fullAvg10 > input.budget.maxMemoryPressureFullAvg10) {
+      return { admitted: false, reason: 'MEMORY_PSI_HIGH' };
+    }
+  }
   if (input.snapshot.residentAgentCount >= input.budget.maxResidentAgents) return { admitted: false, reason: 'MAX_RESIDENT_AGENTS' };
   if (input.residentAgentsInGroup >= input.budget.maxAgentsPerGroup) return { admitted: false, reason: 'MAX_GROUP_AGENTS' };
   return { admitted: true };

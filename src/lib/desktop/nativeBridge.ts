@@ -140,15 +140,14 @@ export function subscribeNativeFileDrops(
   listener: (payload: NativeFileDropPayload) => void,
 ): () => void {
   const bridge = getTermdockDesktopBridge();
-  if (!bridge) return () => undefined;
   nativeFileDropListeners.add(listener);
   if (!nativeFileDropBridgeInstalled) {
     const deliver = (payload: NativeFileDropPayload) => {
       if (routeCollaborationInput(payload.paths.map(escapeShellPath).join(' ') + ' ')) return;
       for (const current of nativeFileDropListeners) current(payload);
     };
-    installEncryptedFileDrops(deliver);
-    bridge.onNativeFileDrop(deliver);
+    installEncryptedFileDrops(deliver, !!bridge);
+    bridge?.onNativeFileDrop(deliver);
     nativeFileDropBridgeInstalled = true;
   }
   return () => {

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { assessAgentResourceBudget, parseHostResourcesForTest } from './hostResources.js';
+import { assessAgentResourceBudget, configuredAgentResourceBudget, getTermdockOwnedAgentSessionIds, parseHostResourcesForTest } from './hostResources.js';
 
 it('parses Linux memory, pressure, D-state, agent and browser observations', () => {
   const parsed = parseHostResourcesForTest({
@@ -16,7 +16,7 @@ it('parses Linux memory, pressure, D-state, agent and browser observations', () 
 });
 
 it('fails closed at memory and resident-agent admission boundaries', () => {
-  const budget = { minAvailableBytes: 2048, estimatedRssBytes: 512, maxResidentAgents: 4, maxAgentsPerGroup: 2 };
+  const budget = { minAvailableBytes: 2048, estimatedRssBytes: 512, maxResidentAgents: 4, maxAgentsPerGroup: 2, maxMemoryPressureSomeAvg10: 10, maxMemoryPressureFullAvg10: 1 };
   expect(assessAgentResourceBudget({ snapshot: { memoryAvailableBytes: 2559, residentAgentCount: 0 }, budget, residentAgentsInGroup: 0 }))
     .toEqual({ admitted: false, reason: 'MEMORY_BUDGET_LOW' });
   expect(assessAgentResourceBudget({ snapshot: { memoryAvailableBytes: 4096, residentAgentCount: 4 }, budget, residentAgentsInGroup: 0 }))
@@ -27,4 +27,44 @@ it('fails closed at memory and resident-agent admission boundaries', () => {
     .toEqual({ admitted: true });
   expect(assessAgentResourceBudget({ snapshot: { memoryAvailableBytes: 4096, residentAgentCount: 0, processSnapshotAvailable: false }, budget, residentAgentsInGroup: 0 }))
     .toEqual({ admitted: false, reason: 'RESOURCE_SNAPSHOT_UNAVAILABLE' });
+});
+
+it('uses Linux memory PSI as an admission gate and fails closed if PSI is unavailable', () => {
+  const budget = { minAvailableBytes: 100, estimatedRssBytes: 50, maxResidentAgents: 10, maxAgentsPerGroup: 5,
+    maxMemoryPressureSomeAvg10: 10, maxMemoryPressureFullAvg10: 1 };
+  const base = { platform: 'linux', memoryAvailableBytes: 1000, residentAgentCount: 0, memorySnapshotAvailable: true, processSnapshotAvailable: true } as const;
+  expect(assessAgentResourceBudget({ snapshot: { ...base, memoryPressure: { someAvg10: 12, fullAvg10: 0 } }, budget, residentAgentsInGroup: 0 }))
+    .toEqual({ admitted: false, reason: 'MEMORY_PSI_HIGH' });
+  expect(assessAgentResourceBudget({ snapshot: { ...base, memoryPressure: { someAvg10: 2, fullAvg10: 1.2 } }, budget, residentAgentsInGroup: 0 }))
+    .toEqual({ admitted: false, reason: 'MEMORY_PSI_HIGH' });
+  expect(assessAgentResourceBudget({ snapshot: base, budget, residentAgentsInGroup: 0 }))
+    .toEqual({ admitted: false, reason: 'MEMORY_PSI_UNAVAILABLE' });
+  expect(assessAgentResourceBudget({ snapshot: { ...base, memoryPressure: { someAvg10: 1, fullAvg10: 0.1 } }, budget, residentAgentsInGroup: 0 }))
+    .toEqual({ admitted: true });
+  expect(assessAgentResourceBudget({ snapshot: { ...base, platform: 'darwin' }, budget, residentAgentsInGroup: 0 }))
+    .toEqual({ admitted: true });
+});
+
+it('exposes bounded PSI thresholds as environment configuration', () => {
+  expect(configuredAgentResourceBudget({} as NodeJS.ProcessEnv)).toMatchObject({ maxMemoryPressureSomeAvg10: 10, maxMemoryPressureFullAvg10: 1 });
+  expect(configuredAgentResourceBudget({ TD_AGENT_MAX_MEMORY_PSI_SOME_AVG10: '25', TD_AGENT_MAX_MEMORY_PSI_FULL_AVG10: '2.5' } as NodeJS.ProcessEnv))
+    .toMatchObject({ maxMemoryPressureSomeAvg10: 25, maxMemoryPressureFullAvg10: 2.5 });
+  expect(() => configuredAgentResourceBudget({ TD_AGENT_MAX_MEMORY_PSI_FULL_AVG10: '101' } as NodeJS.ProcessEnv)).toThrow();
+});
+
+it('counts only live Agent sessions owned by Termdock records plus active recovery reservations', () => {
+  const owned = getTermdockOwnedAgentSessionIds({
+    managedSessions: [
+      { sessionId: 'td-1', tmuxSessionName: 'managed-one' },
+      { sessionId: 'td-2', tmuxSessionName: 'managed-two' },
+      { sessionId: 'missing', tmuxSessionName: 'not-running' },
+    ],
+    liveAgentSessions: [
+      { name: 'managed-one' },
+      { name: 'managed-two' },
+      { name: 'external' },
+    ],
+    activeRecoverySessionIds: ['pending-launch', 'td-1'],
+  });
+  expect([...owned].sort()).toEqual(['td-1', 'td-2']);
 });

@@ -453,66 +453,81 @@
     readLocalFiles: async options => readSelection('chooseFiles', undefined, options?.signal),
     // Native drop capabilities identify files selected by an actual OS drop.
     // Rust verifies target identity before returning reusable local paths.
-    onNativeFileDrop: callback => subscribe('termdock:preview-files', async payload => {
-      const viewId = typeof payload.sessionKey === 'string' ? payload.sessionKey : '';
-      const target = viewId
-        ? [...document.querySelectorAll('[data-termdock-terminal-dropzone]')].find(element => element.dataset.termdockTerminalDropzone === viewId)
-        : document.elementFromPoint(payload.x, payload.y)?.closest('[data-termdock-terminal-dropzone]');
-      if (!target) return;
-      const targetSessionKey = target.dataset.termdockTerminalDropzone || '';
-      const peer = JSON.parse(sessionStorage.getItem('termdock-secure-target-v1') || 'null')?.targetPeerId;
-      const operation = String(++nativeDropOperationSequence), ownerKey = target.dataset.termdockTerminalOwner, stamp = targetStamp();
-      const currentPeer = () => JSON.parse(sessionStorage.getItem('termdock-secure-target-v1') || 'null')?.targetPeerId;
-      const ownsDropState = () => target.isConnected !== false
-        && target.dataset.termdockTerminalDropzone === targetSessionKey
-        && target.dataset.nativeFileDropOperation === operation;
-      const isCurrent = () => !closing && ownsDropState() && target.dataset.termdockTerminalOwner === ownerKey && targetStamp() === stamp && currentPeer() === peer;
-      const discardStaleDrop = () => {
-        if (isCurrent()) return false;
-        if (ownsDropState() && target.dataset.nativeFileDropState === 'uploading') {
-          delete target.dataset.nativeFileDropState; delete target.dataset.nativeFileDropOperation;
-        }
-        return true;
+    onNativeFileDrop: callback => {
+      let hovered, localHover = false;
+      const controllers = new WeakMap();
+      const clear = target => {
+        for (const key of ['nativeFileDrag','nativeFileDropState','nativeFileDropOperation','nativeFileDropProgress','nativeFileDropCancellable']) delete target.dataset[key];
       };
-      target.dataset.nativeFileDropOperation = operation;
-      target.dataset.nativeFileDropState = 'uploading';
-      try {
-        const files = await readSelection('dropFiles', {token: payload.token, targetPeerId: peer, viewId: viewId || undefined}, undefined, isCurrent);
-        if (discardStaleDrop()) return;
-        const paths = files.filter(file => file.path).map(file => file.path);
-        const upload = files.filter(file => file.bytes);
-        if (!isCurrent()) throw new Error('目标服务或终端已切换，请重新拖入文件');
-        if (upload.length) {
-          const form = new FormData(); for (const file of upload) form.append('files', new Blob([file.bytes], {type:file.type}), file.name);
-          const csrf = await window.fetch('/api/csrf-token');
-          if (discardStaleDrop()) return;
-          if (!csrf.ok) throw new Error('文件上传授权失败');
-          const {csrfToken} = await csrf.json();
-          if (discardStaleDrop()) return;
-          if (!csrfToken || !isCurrent()) throw new Error('目标服务或终端已切换，请重新拖入文件');
-          // Dynamic page fetch owns encryption even on the first uncontrolled load.
-          const response = await window.fetch(`/api/terminal/fs/upload?dir=%2Ftmp&fileCount=${upload.length}`, {method:'POST',body:form,headers:{'X-XSRF-TOKEN':csrfToken}});
-          if (discardStaleDrop()) return;
-          if (!response.ok) throw new Error('文件上传失败');
-          const result = await response.json();
-          if (discardStaleDrop()) return;
-          if (result.files?.length !== upload.length || result.files.some(file => !file.path) || !isCurrent()) throw new Error('上传结果、目标服务或终端发生变化');
-          paths.push(...result.files.map(file => file.path));
-        }
-        if (discardStaleDrop()) return;
-        callback({sessionKey:targetSessionKey,paths});
-        if (isCurrent()) { delete target.dataset.nativeFileDropState; delete target.dataset.nativeFileDropOperation; }
-      } catch (error) {
-        if (discardStaleDrop()) return;
-        target.dataset.nativeFileDropState = 'error';
-        target.dispatchEvent(new CustomEvent('termdock:file-drop-error', {bubbles:true,detail:String(error.message || error)}));
-        window.setTimeout(() => {
-          if (ownsDropState() && target.dataset.nativeFileDropState === 'error') {
-            delete target.dataset.nativeFileDropState; delete target.dataset.nativeFileDropOperation;
+      const hit = payload => document.elementFromPoint?.(payload.x,payload.y)?.closest('[data-termdock-terminal-dropzone]');
+      const stopHover = subscribe('termdock:preview-drag', payload => {
+        if (hovered && ['local','remote'].includes(hovered.dataset.nativeFileDropState)) clear(hovered);
+        hovered = payload.phase === 'leave' ? null : hit(payload);
+        if (payload.phase === 'enter') localHover = payload.local === true;
+        if (hovered && !controllers.has(hovered)) { hovered.dataset.nativeFileDrag='true'; hovered.dataset.nativeFileDropState=localHover?'local':'remote'; }
+      });
+      const stopDrop = subscribe('termdock:preview-files', async payload => {
+        const viewId = typeof payload.sessionKey === 'string' ? payload.sessionKey : '';
+        const target = viewId
+          ? [...document.querySelectorAll('[data-termdock-terminal-dropzone]')].find(element => element.dataset.termdockTerminalDropzone === viewId)
+          : hit(payload);
+        if (!target) return;
+        controllers.get(target)?.abort();
+        const controller = new AbortController(); controllers.set(target,controller);
+        const targetSessionKey=target.dataset.termdockTerminalDropzone||'';
+        const currentPeer=()=>JSON.parse(sessionStorage.getItem('termdock-secure-target-v1')||'null')?.targetPeerId;
+        const peer=currentPeer(),operation=String(++nativeDropOperationSequence),ownerKey=target.dataset.termdockTerminalOwner,stamp=targetStamp();
+        const ownsDropState=()=>target.isConnected!==false && target.dataset.termdockTerminalDropzone===targetSessionKey && target.dataset.nativeFileDropOperation===operation;
+        const isCurrent=()=>!closing&&!controller.signal.aborted&&ownsDropState()&&target.dataset.termdockTerminalOwner===ownerKey&&targetStamp()===stamp&&currentPeer()===peer;
+        const discardStaleDrop=()=>{if(isCurrent())return false;if(ownsDropState())clear(target);return true;};
+        const timedStatus=phase=>{
+          target.dataset.nativeFileDropState=phase;delete target.dataset.nativeFileDropCancellable;delete target.dataset.nativeFileDropProgress;
+          window.setTimeout(()=>{if(ownsDropState()&&target.dataset.nativeFileDropState===phase)clear(target);},3000);
+        };
+        const cancel=event=>{if(event.target?.closest?.('[data-termdock-terminal-dropzone]')!==target||!ownsDropState())return;controller.abort();clear(target);target.dataset.nativeFileDropOperation=operation;target.dataset.nativeFileDrag='true';timedStatus('cancelled');};
+        const expire=()=>{if(!isCurrent()){controller.abort();discardStaleDrop();}};
+        const leave=()=>{controller.abort();discardStaleDrop();};
+        target.dataset.nativeFileDropOperation=operation;target.dataset.nativeFileDrag='true';target.dataset.nativeFileDropState='preparing';target.dataset.nativeFileDropCancellable='true';delete target.dataset.nativeFileDropProgress;
+        window.addEventListener('termdock:file-drop-cancel',cancel);
+        window.addEventListener('termdock:secure-state',expire);
+        window.addEventListener('auth:unauthorized',leave);
+        window.addEventListener('pagehide',leave);
+        const timeout=window.setTimeout(()=>{if(isCurrent()){controller.abort();timedStatus('error');target.dispatchEvent(new CustomEvent('termdock:file-drop-error',{bubbles:true,detail:'文件处理超时，请重试'}));}},120000);
+        try {
+          const files=await readSelection('dropFiles',{token:payload.token,targetPeerId:peer,viewId:viewId||undefined},controller.signal,isCurrent);
+          if(discardStaleDrop())return;
+          if(!files.length)throw new Error('未读取到文件，请重新拖入');
+          const paths=files.filter(file=>file.path).map(file=>file.path),upload=files.filter(file=>file.bytes);
+          if(upload.length){
+            target.dataset.nativeFileDropState='uploading';
+            const form=new FormData();for(const file of upload)form.append('files',new Blob([file.bytes],{type:file.type}),file.name);
+            const csrf=await window.fetch('/api/csrf-token',{signal:controller.signal});
+            if(discardStaleDrop())return;if(!csrf.ok)throw new Error('文件上传授权失败');
+            const {csrfToken}=await csrf.json();if(discardStaleDrop())return;if(!csrfToken)throw new Error('文件上传授权失败');
+            // Preserve WebKit's case-sensitive multipart boundary, and report
+            // only encrypted transport acknowledgements (never synthetic progress).
+            const encoded=new Response(form),body=await encoded.blob();
+            if(discardStaleDrop())return;
+            const response=await window.fetch(`/api/terminal/fs/upload?dir=%2Ftmp&fileCount=${upload.length}`,{method:'POST',body,signal:controller.signal,headers:{'X-XSRF-TOKEN':csrfToken,'Content-Type':encoded.headers.get('Content-Type')},onUploadProgress:bytes=>{if(isCurrent())target.dataset.nativeFileDropProgress=String(Math.min(99,Math.floor(bytes/Math.max(1,body.size)*100)));}});
+            if(discardStaleDrop())return;
+            const result=await response.json();if(discardStaleDrop())return;
+            if(!response.ok)throw new Error(result.error||'文件上传失败');
+            if(result.files?.length!==upload.length||result.files.some(file=>!file.path))throw new Error('上传结果不完整，请重新拖入文件');
+            paths.push(...result.files.map(file=>file.path));
           }
-        },3000);
-      }
-    }),
+          if(discardStaleDrop())return;
+          callback({sessionKey:targetSessionKey,paths});
+          if(isCurrent())timedStatus(upload.length?'uploaded':'inserted');
+        }catch(error){
+          if(controller.signal.aborted||discardStaleDrop())return;
+          timedStatus('error');target.dispatchEvent(new CustomEvent('termdock:file-drop-error',{bubbles:true,detail:String(error.message||error)}));
+        }finally{
+          window.clearTimeout(timeout);if(controllers.get(target)===controller)controllers.delete(target);
+          window.removeEventListener('termdock:file-drop-cancel',cancel);window.removeEventListener('termdock:secure-state',expire);window.removeEventListener('auth:unauthorized',leave);window.removeEventListener('pagehide',leave);
+        }
+      });
+      return ()=>{stopHover();stopDrop();};
+    },
     reportServiceActivity: activity => { void invoke('reportActivity', { activity }).catch(() => {}); },
     focusService: origin => invoke('focusService', { origin }),
     onServiceActivity: callback => subscribe('termdock:preview-activity', callback),

@@ -14,12 +14,12 @@ export function canUseLocalDroppedPaths(pageOrigin: string, target: ReturnType<t
 
 /** Capture remote drops before legacy desktop preload's document listener.
  * Local same-service paths can still be resolved by Electron's webUtils. */
-export function installEncryptedFileDrops(deliver: (payload: NativeFileDropPayload) => void): () => void {
+export function installEncryptedFileDrops(deliver: (payload: NativeFileDropPayload) => void, allowLocalPaths = true): () => void {
   const active = new Set<() => void>(), timers = new Set<number>();
   const controllers = new WeakMap<HTMLElement, AbortController>();
   const targetFor = (event: DragEvent) => event.target instanceof Element
     ? event.target.closest<HTMLElement>('[data-termdock-terminal-dropzone]') : null;
-  const remote = () => !canUseLocalDroppedPaths(location.origin, selectedTarget());
+  const remote = () => !allowLocalPaths || !canUseLocalDroppedPaths(location.origin, selectedTarget());
   const dragover = (event: DragEvent) => {
     const target = targetFor(event);
     if (!target || !remote() || !event.dataTransfer?.types.includes('Files')) return;
@@ -42,26 +42,29 @@ export function installEncryptedFileDrops(deliver: (payload: NativeFileDropPaylo
       && target.dataset.nativeFileDropOperation === operation
       && selectedTarget() === selected && selectedTarget()?.targetPeerId === targetPeerId
       && target.dataset.termdockTerminalOwner === ownerKey;
-    const discardStale = () => { if (isCurrent()) return false; if (target.dataset.nativeFileDropOperation === operation) { delete target.dataset.nativeFileDrag; delete target.dataset.nativeFileDropState; delete target.dataset.nativeFileDropOperation; } return true; };
+    const discardStale = () => { if (isCurrent()) return false; if (target.dataset.nativeFileDropOperation === operation) { delete target.dataset.nativeFileDrag; delete target.dataset.nativeFileDropState; delete target.dataset.nativeFileDropOperation; delete target.dataset.nativeFileDropProgress; delete target.dataset.nativeFileDropCancellable; } return true; };
     target.dataset.nativeFileDropOperation = operation;
-    target.dataset.nativeFileDrag = 'true'; target.dataset.nativeFileDropState = 'uploading';
+    target.dataset.nativeFileDrag = 'true'; target.dataset.nativeFileDropState = 'uploading';target.dataset.nativeFileDropCancellable='true';delete target.dataset.nativeFileDropProgress;
     const cancelStale = (event?: Event) => { if (event?.type === 'auth:unauthorized' || event?.type === 'pagehide' || !isCurrent()) { controller.abort(); discardStale(); } };
     const observer = new MutationObserver(() => cancelStale());observer.observe(target,{attributes:true,attributeFilter:['data-termdock-terminal-dropzone','data-termdock-terminal-owner','data-native-file-drop-operation']});
     const cancel = () => { controller.abort(); discardStale(); cleanup(); };
-    const cleanup = () => { observer.disconnect(); for (const name of ['termdock:secure-state','auth:unauthorized','pagehide']) window.removeEventListener(name,cancelStale); active.delete(cancel); };
+    const cancelByUser = (event: Event) => { if (!(event.target instanceof Element) || event.target.closest('[data-termdock-terminal-dropzone]') !== target || !isCurrent()) return; cancel(); target.dataset.nativeFileDrag='true';target.dataset.nativeFileDropOperation=operation;target.dataset.nativeFileDropState='cancelled'; const timer=window.setTimeout(()=>{timers.delete(timer);if(target.dataset.nativeFileDropOperation===operation&&target.dataset.nativeFileDropState==='cancelled'){delete target.dataset.nativeFileDrag;delete target.dataset.nativeFileDropState;delete target.dataset.nativeFileDropOperation;}},3000);timers.add(timer); };
+    window.addEventListener('termdock:file-drop-cancel',cancelByUser);
+    const cleanup = () => { window.removeEventListener('termdock:file-drop-cancel',cancelByUser); observer.disconnect(); for (const name of ['termdock:secure-state','auth:unauthorized','pagehide']) window.removeEventListener(name,cancelStale); active.delete(cancel); };
     active.add(cancel);for (const name of ['termdock:secure-state','auth:unauthorized','pagehide']) window.addEventListener(name,cancelStale);
     void import('../terminal/api').then(({ uploadFiles }) => {
       if (!isCurrent()) throw new DOMException('Drop target changed','AbortError');
-      return uploadFiles('/tmp', files, controller.signal, undefined, isCurrent);
+      return uploadFiles('/tmp', files, controller.signal, percent => { if(isCurrent())target.dataset.nativeFileDropProgress=String(Math.round(percent)); }, isCurrent);
     }).then(result => {
       if (result.files.length !== files.length || result.files.some(file => !file.path)) throw new Error('Upload did not return every file path');
       if (discardStale()) return;
-      delete target.dataset.nativeFileDrag; delete target.dataset.nativeFileDropState;
-      delete target.dataset.nativeFileDropOperation;
+      delete target.dataset.nativeFileDropCancellable;delete target.dataset.nativeFileDropProgress;
       deliver({ sessionKey, paths: result.files.map(file => file.path) });
+      target.dataset.nativeFileDropState='uploaded';
+      const timer=window.setTimeout(()=>{timers.delete(timer);if(isCurrent()&&target.dataset.nativeFileDropState==='uploaded'){delete target.dataset.nativeFileDrag;delete target.dataset.nativeFileDropState;delete target.dataset.nativeFileDropOperation;}},3000);timers.add(timer);
     }).catch(error => {
       if (discardStale()) return;
-      target.dataset.nativeFileDropState = 'error';
+      delete target.dataset.nativeFileDropCancellable;delete target.dataset.nativeFileDropProgress;target.dataset.nativeFileDropState = 'error';
       target.dispatchEvent(new CustomEvent('termdock:file-drop-error', { bubbles: true, detail: error instanceof Error ? error.message : 'File upload failed' }));
       const timer = window.setTimeout(() => {
         timers.delete(timer);
