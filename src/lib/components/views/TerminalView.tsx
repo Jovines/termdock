@@ -1166,6 +1166,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const disconnectStream = React.useCallback(() => {
     streamVersionRef.current += 1;
     terminalOperationEpochRef.current += 1;
+    viewportInputChainRef.current = Promise.resolve();
     flushPendingShellTitle();
     cancelPendingShellTitle();
     const cleanup = streamCleanupRef.current;
@@ -1255,6 +1256,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             switch (event.type) {
               case 'connected': {
                 terminalOperationEpochRef.current += 1;
+                // Old async controls retain their epoch checks, but cannot
+                // keep new-connection input waiting for their timeout/reply.
+                viewportInputChainRef.current = Promise.resolve();
                 initialConnectionPendingRef.current = false;
                 const resumeAttempt = resumeAttemptRef.current;
                 if (resumeAttempt) {

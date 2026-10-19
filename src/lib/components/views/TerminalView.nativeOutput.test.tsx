@@ -98,6 +98,28 @@ it('keeps native dictation paste fragments behind the actual asynchronous tmux c
  expect(whileWaiting).toEqual(before);
  expect(socket.sent.filter(value=>value.type==='input').map(value=>value.data)).toEqual([...before,'\x1b[200~','语音最终修订','\x1b[201~']);
 });
+it('does not let an old copy-mode request block native input after reconnecting the same backend',async()=>{
+ vi.spyOn(Date,'now').mockReturnValue(100000);
+ useTerminalStore.getState().setTerminalSession('controlled-panel',{sessionId:'controlled-backend',mode:'tmux',cols:80,rows:24});
+ render(<I18nProvider><TerminalView sessionId="controlled-panel" mode="tmux" isActive suppressKeyboard/></I18nProvider>);
+ await waitFor(()=>expect(Socket.sockets).toHaveLength(1));const socket=Socket.sockets[0];
+ await act(async()=>{socket.readyState=1;socket.onopen?.();socket.event({type:'connected',mode:'tmux',outputProtocol:2,streamEpoch:'before-reconnect',replayLastSeq:1,replayChunks:['baseline\r\n']});});
+ await waitFor(()=>expect(host.writes).toHaveLength(1));await act(async()=>emit(1));
+ await waitFor(()=>expect(getAppliedTerminalCursor('controlled-backend')?.seq).toBe(1));
+ const input=(text:string)=>host.listeners.forEach(listener=>listener({token:host.token,epoch:'controlled-page',event:{type:'input',base64:btoa(text)}}));
+ await act(async()=>input('\x1b[<64;1;1M'));
+ await act(async()=>input('old-waiting-input'));
+ const exit=socket.sent.find(value=>value.type==='tmux'&&value.action==='copy-mode'&&value.enabled===false);expect(exit).toBeDefined();
+ await act(async()=>socket.event({type:'connected',mode:'tmux',outputProtocol:2,streamEpoch:'after-reconnect',replayLastSeq:2,replayChunks:['fresh baseline\r\n']}));
+ await waitFor(()=>expect(host.writes.length).toBeGreaterThan(1));
+ await act(async()=>emit(host.writes.at(-1).sequence));
+ await waitFor(()=>expect(getAppliedTerminalCursor('controlled-backend')).toEqual({seq:2,epoch:'after-reconnect'}));
+ await act(async()=>input('fresh-input'));
+ const beforeOldReply=socket.sent.filter(value=>value.type==='input').map(value=>value.data);
+ await act(async()=>socket.event({type:'tmux-result',reqId:exit.reqId,success:true}));
+ expect(beforeOldReply).toContain('fresh-input');
+ expect(socket.sent.filter(value=>value.type==='input').map(value=>value.data)).not.toContain('old-waiting-input');
+});
 it('keeps startup content unready without presentation frames despite native consumption, then releases after size ACK and two visible frames',async()=>{
  const frames=new Map<number,FrameRequestCallback>();let serial=0;
  vi.stubGlobal('requestAnimationFrame',vi.fn((callback:FrameRequestCallback)=>{frames.set(++serial,callback);return serial;}));

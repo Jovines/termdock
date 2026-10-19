@@ -80,7 +80,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
   const lastLayout=React.useRef('');
   const layoutVersion=React.useRef(0);
   const pointerFocus=React.useRef<Surface|null>(null);
-  const actualFocusReceipt=React.useRef({token:'',revision:0});
+  const actualFocusReceipt=React.useRef({token:'',revision:0,focused:false});
   const fatal=React.useCallback((reason:unknown)=>{
     if(disposed.current||reason instanceof NativeOwnerChanged||retiring.current)return;
     if(restoring.current)return;
@@ -173,7 +173,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
     if(pointerIntent){const old=document.activeElement;if(old instanceof HTMLElement&&(old.isContentEditable||old.matches('input,textarea,select,[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"]')))old.blur();}
     const active=document.activeElement;
     const textFocus=active instanceof HTMLElement&&(active.isContentEditable||active.matches('input,textarea,select,[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"]'));
-    const signature=JSON.stringify([surface.current.token,visible,holdForOverlay,rect.x,rect.y,rect.width,rect.height,innerWidth,innerHeight,window.devicePixelRatio,latest.current.autoFocus,latest.current.inputActive,textFocus,pointerIntent,overlaps,life?.generation]);
+    const signature=JSON.stringify([surface.current.token,visible,holdForOverlay,rect.x,rect.y,rect.width,rect.height,innerWidth,innerHeight,window.devicePixelRatio,latest.current.autoFocus,latest.current.inputActive,textFocus,pointerIntent,overlaps,life?.generation,life?.focused]);
     if(signature===lastLayout.current)return;lastLayout.current=signature;
     const version=++layoutVersion.current;
     void (async()=>{
@@ -184,7 +184,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
       const receipt=await serializeCommand('rect',{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:innerWidth,viewportHeight:innerHeight,holes:overlaps.map(r=>[r.x,r.y,r.width,r.height]),generation:String(life?.generation??0)},version);
       if(version!==layoutVersion.current)return;
       if((receipt as {staleGeometry?:boolean;layoutPending?:boolean}|undefined)?.staleGeometry||(receipt as {layoutPending?:boolean}|undefined)?.layoutPending){
-        lastLayout.current=null;
+        lastLayout.current='';
         if(!layoutFrame.current)layoutFrame.current=requestAnimationFrame(()=>{layoutFrame.current=0;measure();});
         return;
       }
@@ -392,7 +392,10 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
           if(typeof event.focused!=='boolean'||!Number.isSafeInteger(event.revision)||event.revision!<=0)break;
           const receipt=actualFocusReceipt.current;
           if(receipt.token===current.token&&event.revision!<=receipt.revision)break;
-          actualFocusReceipt.current={token:current.token,revision:event.revision!};
+          actualFocusReceipt.current={token:current.token,revision:event.revision!,focused:event.focused};
+          // Geometry can stay identical while AppKit transfers the responder.
+          // Invalidate once per real loss; repeated negative ACKs must not loop.
+          if(!event.focused&&receipt.token===current.token&&receipt.focused)lastLayout.current='';
           const active=document.activeElement,editable=active instanceof HTMLElement&&(active.isContentEditable||active.matches('input,textarea,select'));
           if(event.focused&&(latest.current.inputActive===false||latest.current.isLayoutVisible===false||document.hidden||editable))break;
           latest.current.onInputFocusChange?.(event.focused);break;
@@ -519,7 +522,13 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
     ensureSizeMatches:()=>pushResize(),
     requestPtyRedraw:()=>pushResize(true),
   }),[startClipboardOperation,clearClipboardError,clearLocal,fatal,measure,paste,prepare,pushResize,send,serializeCommand,publishRendererReady,showClipboardError]);
-  return <div ref={container} data-termdock-terminal-dropzone={props.sessionKey} data-termdock-terminal-owner={props.getPasteOwnerKey?.()??props.backendSessionId??props.sessionKey} aria-disabled={props.inputActive===false} className={`relative h-full w-full terminal-viewport-container ${props.className||''}`} style={{backgroundColor:props.theme.background}}>
+  return <div ref={container} data-termdock-terminal-dropzone={props.sessionKey} data-termdock-terminal-owner={props.getPasteOwnerKey?.()??props.backendSessionId??props.sessionKey} aria-disabled={props.inputActive===false} className={`relative h-full w-full terminal-viewport-container ${props.className||''}`} style={{backgroundColor:props.theme.background}} onPointerDown={event=>{
+    // WK can receive a click while the native sibling is temporarily clipped.
+    // A click on this pane must retry focus even if cached layout is unchanged;
+    // child search fields/buttons and inactive panes retain their own focus.
+    if(event.target!==event.currentTarget||!surface.current||latest.current.inputActive===false||latest.current.isLayoutVisible===false||document.hidden)return;
+    pointerFocus.current=surface.current;lastLayout.current='';measure();
+  }}>
     {feedbackMessage&&<div role="alert" className="absolute bottom-2 left-2 z-20 rounded bg-surface p-2 text-destructive"><span>{feedbackMessage}</span><button onClick={clearFeedback}>×</button></div>}
     {error&&<div role="alert" className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4 text-destructive">{error}</div>}
     {search!==null&&<div role="dialog" className="absolute right-2 top-2 z-30 flex gap-2 rounded bg-surface p-2">

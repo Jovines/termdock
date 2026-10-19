@@ -322,6 +322,39 @@ it('a current native pointer releases the old DOM editable and restores normal e
  await waitFor(()=>expect(document.activeElement).not.toBe(input));
  await waitFor(()=>expect(host.request.mock.calls.slice(start).some(([value])=>value.action==='focus'&&value.focused===true)).toBe(true));expect(failed).not.toHaveBeenCalled();
 });
+it('a direct click in the native placeholder reasserts focus even with an unchanged layout',async()=>{
+ const p=props(),ref=React.createRef<TerminalController>();
+ const view=render(<NativeTerminalViewport {...p} ref={ref} inputActive/>);
+ await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');await tick();});
+ const pane=view.container.querySelector('[data-termdock-terminal-dropzone]')!;
+ host.request.mockClear();
+ await act(async()=>{pane.dispatchEvent(new MouseEvent('pointerdown',{bubbles:true}));await tick();});
+ expect(host.request.mock.calls.some(([a])=>a.action==='focus'&&a.focused===true)).toBe(true);
+ const field=document.createElement('input');pane.append(field);
+ await act(async()=>{field.focus();await tick();});host.request.mockClear();
+ await act(async()=>{field.dispatchEvent(new MouseEvent('pointerdown',{bubbles:true}));await tick();});
+ expect(document.activeElement).toBe(field);
+ expect(host.request.mock.calls.some(([a])=>a.action==='focus'&&a.focused===true)).toBe(false);
+ field.remove();view.rerender(<NativeTerminalViewport {...p} ref={ref} inputActive={false}/>);
+ await act(tick);host.request.mockClear();
+ await act(async()=>{pane.dispatchEvent(new MouseEvent('pointerdown',{bubbles:true}));await tick();});
+ expect(host.request.mock.calls.some(([a])=>a.action==='focus'&&a.focused===true)).toBe(false);
+});
+it('reconciles a lost actual native focus without a session or geometry change',async()=>{
+ const p=props(),ref=React.createRef<TerminalController>();
+ render(<NativeTerminalViewport {...p} ref={ref} inputActive/>);
+ await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');await tick();});
+ act(()=>emit(latestToken,{type:'focusChanged',focused:true,revision:1}));
+ act(()=>emit(latestToken,{type:'focusChanged',focused:false,revision:2}));
+ host.request.mockClear();
+ await act(async()=>{lifeListeners.forEach(fn=>fn(lifeState));await tick();});
+ expect(host.request.mock.calls.some(([a])=>a.action==='focus'&&a.focused===true)).toBe(true);
+ // Repeated negative confirmations cannot create an idle focus/IPC loop.
+ act(()=>emit(latestToken,{type:'focusChanged',focused:false,revision:3}));
+ host.request.mockClear();
+ await act(async()=>{lifeListeners.forEach(fn=>fn(lifeState));await tick();});
+ expect(host.request).not.toHaveBeenCalled();
+});
 it('native pointer waits for current input eligibility and a newer DOM focus cancels the old intent',async()=>{
  vi.stubGlobal('PointerEvent',MouseEvent);
  const p=props(),ref=React.createRef<TerminalController>();

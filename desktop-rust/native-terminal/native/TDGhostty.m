@@ -458,7 +458,7 @@ int td_native_pump(void *handle) {
     if(h->focus_dirty){
         h->focus_dirty=false;
         if(h->desired_focus&&h->desired_visible)[v.window makeFirstResponder:v];
-        bool focused=h->desired_focus&&h->desired_visible&&!v.hidden&&v.window.isKeyWindow;
+        bool focused=h->desired_focus&&h->desired_visible&&!v.hidden&&v.window.isKeyWindow&&v.window.firstResponder==v;
         ghostty_app_set_focus(h->app,focused);ghostty_surface_set_focus(h->surface,focused);work=1;
     }
     if(atomic_exchange(&h->wakeup,false)){ghostty_app_tick(h->app);work=1;}
@@ -510,11 +510,11 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
         for(NSString *name in @[NSWindowDidBecomeKeyNotification,NSWindowDidResignKeyNotification,NSWindowDidChangeOcclusionStateNotification])
             [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(windowChanged:) name:name object:self.window];
     }
-    if(self.host){self.host->visibility_dirty=true;self.host->focus_dirty=true;}
+    if(self.host){self.host->visibility_dirty=true;self.host->focus_dirty=true;emit(self.host,16,NULL,0,0,0);}
 }
 - (void)windowChanged:(NSNotification *)notification {
     if([notification.name isEqualToString:NSWindowDidResignKeyNotification])[self cancelComposition];
-    if(self.host){self.host->visibility_dirty=true;self.host->focus_dirty=true;}
+    if(self.host){self.host->visibility_dirty=true;self.host->focus_dirty=true;emit(self.host,16,NULL,0,0,0);}
 }
 - (void)viewDidChangeBackingProperties {
     [super viewDidChangeBackingProperties];
@@ -530,7 +530,7 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
 - (BOOL)resignFirstResponder {
     // Do not enter Ghostty while the feed worker owns terminal state.
     if(self.host){self.host->desired_focus=false;self.host->focus_dirty=true;self.host->visibility_dirty=true;}
-    [self cancelComposition];return YES;
+    [self cancelComposition];if(self.host)emit(self.host,16,NULL,0,0,0);return YES;
 }
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];if(self.tracking)[self removeTrackingArea:self.tracking];
@@ -607,12 +607,12 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
 }
 - (void)keyUp:(NSEvent *)event{[self queue:event];}
 - (void)flagsChanged:(NSEvent *)event{[self queue:event];}
-- (void)mouseDown:(NSEvent *)event{[self.window makeFirstResponder:self];[self queue:event];}
+- (void)mouseDown:(NSEvent *)event{[self.window makeFirstResponder:self];emit(self.host,15,NULL,0,0,0);[self queue:event];}
 - (void)mouseUp:(NSEvent *)event{[self queue:event];}
 - (void)mouseDragged:(NSEvent *)event{[self queue:event];}
-- (void)rightMouseDown:(NSEvent *)event{[self queue:event];}
+- (void)rightMouseDown:(NSEvent *)event{emit(self.host,15,NULL,0,0,0);[self queue:event];}
 - (void)rightMouseUp:(NSEvent *)event{[self queue:event];}
-- (void)otherMouseDown:(NSEvent *)event{[self queue:event];}
+- (void)otherMouseDown:(NSEvent *)event{emit(self.host,15,NULL,0,0,0);[self queue:event];}
 - (void)otherMouseUp:(NSEvent *)event{[self queue:event];}
 - (void)mouseMoved:(NSEvent *)event{[self queue:event];}
 - (void)scrollWheel:(NSEvent *)event{[self queue:event];}
@@ -763,7 +763,6 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     }
     bool press=event.type==NSEventTypeLeftMouseDown||event.type==NSEventTypeRightMouseDown||event.type==NSEventTypeOtherMouseDown;
     bool release=event.type==NSEventTypeLeftMouseUp||event.type==NSEventTypeRightMouseUp||event.type==NSEventTypeOtherMouseUp;
-    if(press)emit(h,15,NULL,0,0,0);
     if(press||release)ghostty_surface_mouse_button(h->surface,press?GHOSTTY_MOUSE_PRESS:GHOSTTY_MOUSE_RELEASE,(ghostty_input_mouse_button_e)(event.buttonNumber+1),modifiers(event.modifierFlags));
     if(event.type==NSEventTypeLeftMouseUp&&(event.modifierFlags&NSEventModifierFlagCommand)){
         ghostty_surface_size_s size=ghostty_surface_size(h->surface);

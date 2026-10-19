@@ -3,6 +3,7 @@
 #import "../native/TDGhostty.m"
 #include <assert.h>
 static unsigned wakeups;
+static unsigned pointers;
 static unsigned menuCalls;
 @interface TDFontTestMenu : NSMenu
 @end
@@ -10,7 +11,7 @@ static unsigned menuCalls;
 - (BOOL)performKeyEquivalent:(NSEvent *)event {(void)event;menuCalls++;return YES;}
 @end
 static int observe(void *ctx,uint32_t kind,const uint8_t *data,size_t n,uint64_t a,uint64_t b){
-    (void)ctx;(void)data;(void)n;(void)a;(void)b;if(kind==16)wakeups++;return 1;
+    (void)ctx;(void)data;(void)n;(void)a;(void)b;if(kind==16)wakeups++;if(kind==15)pointers++;return 1;
 }
 @interface TDInputTestView : TDGhosttyView
 @property(nonatomic) BOOL insideKeyDown;
@@ -71,6 +72,17 @@ int main(void){@autoreleasepool{
     // posting OS key events or touching the user's windows or input source.
     NSWindow *window=[[NSWindow alloc]initWithContentRect:NSMakeRect(0,0,400,200) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO;window.contentView=view;assert([window makeFirstResponder:view]);
+    // A quiet engine has no timer that can rescue unscheduled focus changes.
+    // AppKit notifications and responder loss must wake it while IO is busy.
+    wakeups=0;host.focus_dirty=false;host.visibility_dirty=false;
+    [view windowChanged:[NSNotification notificationWithName:NSWindowDidBecomeKeyNotification object:window]];
+    assert(wakeups>0&&host.focus_dirty&&host.visibility_dirty);
+    wakeups=0;assert([view resignFirstResponder]);assert(wakeups>0&&!host.desired_focus);
+    [view.pending removeAllObjects];view.pendingBytes=0;pointers=0;
+    NSEvent *click=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSMakePoint(20,20) modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:1 clickCount:1 pressure:1];
+    [view mouseDown:click];
+    assert(pointers==1&&view.pending.count==1&&atomic_load(&host.busy));
+    [view.pending removeAllObjects];view.pendingBytes=0;
     NSMenu *oldMenu=NSApp.mainMenu;NSApp.mainMenu=[[TDFontTestMenu alloc]initWithTitle:@"Owned font menu"];
     for(NSArray *spec in @[@[@"=",@24,@(NSEventModifierFlagCommand)],@[@"+",@24,@(NSEventModifierFlagCommand|NSEventModifierFlagShift)],@[@"-",@27,@(NSEventModifierFlagCommand)],@[@"0",@29,@(NSEventModifierFlagCommand)]]){
         [view.pending removeAllObjects];view.pendingBytes=0;menuCalls=0;
@@ -81,6 +93,6 @@ int main(void){@autoreleasepool{
     NSEvent *normal=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand timestamp:0 windowNumber:window.windowNumber context:nil characters:@"n" charactersIgnoringModifiers:@"n" isARepeat:NO keyCode:45];
     assert([view performKeyEquivalent:normal]&&menuCalls==1);
     NSApp.mainMenu=oldMenu;view.host=NULL;[window close];
-    puts("spaceCandidate=pass numberCandidate=pass cancel=pass dictationPreedit=pass orderedCommit=pass mutableCommit=pass busyEngineUntouched=pass sessionFontMenuRouting=pass; physicalIME=false");
+    puts("spaceCandidate=pass numberCandidate=pass cancel=pass dictationPreedit=pass orderedCommit=pass mutableCommit=pass busyEngineUntouched=pass sessionFontMenuRouting=pass focusWakeups=pass immediatePointer=pass; physicalIME=false");
     return 0;
 }}
