@@ -16,6 +16,7 @@ vi.mock('./nativeSnapshotCache',()=>({readNativeSnapshot:async()=>host.cached,de
 vi.mock('./clipboardImage',()=>({readTerminalClipboardFiles:vi.fn(),readTerminalClipboardImage:vi.fn(),uploadTerminalClipboardFiles:vi.fn(),uploadTerminalClipboardImage:vi.fn(),TerminalClipboardVideoError:class extends Error{}}));
 vi.mock('./sessionFontSize',()=>({setSessionFontSize:vi.fn()}));
 import * as clipboard from './clipboardImage';
+import {setSessionFontSize} from './sessionFontSize';
 import {NativeTerminalViewport} from './nativeViewport';
 import {closeNativeSession,registerNativeLease,retireNativeLease,hideNativeLease} from './nativeLifetime';
 let serial=0,latestToken='',creates:Array<Record<string,any>>,writes:Array<Record<string,any>>,restoreMode='none',retain=false,lastRect='',lifeState:any,lifeListeners:Set<(value:any)=>void>;
@@ -563,4 +564,15 @@ it('retries a presented pending grid on the next frame without hiding or focusin
  expect(host.request.mock.calls.some(([a]:any)=>a.action==='visible'||a.action==='focus')).toBe(false);
  await act(async()=>{pending=false;await new Promise(resolve=>setTimeout(resolve,55));});
  expect(host.request.mock.calls.some(([a]:any)=>a.action==='focus')).toBe(true);
+});
+
+it('native font chords adjust only the owning session and reset its override instead of zooming the app',async()=>{
+ const p=props(),ref=React.createRef<TerminalController>();const view=render(<NativeTerminalViewport {...p} ref={ref}/>);await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');});
+ for(const [key,modifiers,size] of [['=',8,14],['=',9,14],['+',9,14],['-',8,12],['0',8,null]] as const){
+  vi.mocked(setSessionFontSize).mockClear();host.request.mockClear();
+  act(()=>emit(latestToken,{type:'shortcut',key,keyCode:key==='-'?27:key==='0'?29:24,modifiers}));
+  expect(setSessionFontSize).toHaveBeenCalledExactlyOnceWith('frontend-id',size);
+  expect(host.request.mock.calls.some(([request])=>request.action==='menu')).toBe(false);
+ }
+ expect(p.onInput).not.toHaveBeenCalled();view.unmount();
 });

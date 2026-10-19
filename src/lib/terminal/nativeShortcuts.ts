@@ -1,3 +1,13 @@
+/** Font shortcuts belong to the focused terminal, not the WebView zoom menu. */
+export function nativeSessionFontShortcut(key:string,modifiers:number):'increase'|'decrease'|'reset'|null {
+  const mods=modifiers&15;
+  if(mods!==8&&mods!==9)return null;
+  if(key==='+'||key==='=')return 'increase';
+  if(mods===8&&key==='-')return 'decrease';
+  if(mods===8&&key==='0')return 'reset';
+  return null;
+}
+
 /** Match the existing Preview menu contract using physical bracket codes and
  * logical characters. Ghostty encodes non-Command terminal keys itself. */
 export function nativeMenuShortcut(key:string,keyCode:number,modifiers:number):string|null {

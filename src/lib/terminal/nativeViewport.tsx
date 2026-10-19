@@ -12,7 +12,7 @@ import { readTerminalClipboardFiles, readTerminalClipboardImage, uploadTerminalC
 import { escapeShellPath } from '../desktop/shellPath';
 import { createResizeSyncState, acknowledgeResize, requestResize, forceResize, observeServerSize } from './resizeSync';
 import { sanitizeTerminalInput } from './inputNormalization';
-import { nativeMenuShortcut, nativeTerminalShortcut } from './nativeShortcuts';
+import { nativeMenuShortcut, nativeTerminalShortcut, nativeSessionFontShortcut } from './nativeShortcuts';
 import { activateNativePathHit } from './nativePaths';
 import { readNativeSnapshot, deleteNativeSnapshot, nativeSnapshotRevision, tagNativeSnapshot, writeNativeSnapshot, type NativeSnapshot } from './nativeSnapshotCache';
 import {observeOwnedNativeInput} from './nativeInputObservation';
@@ -425,6 +425,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
           const key=event.key||'';const modifiers=event.modifiers||0;
           if(key.toLowerCase()==='c'&&(modifiers&15)===8&&latest.current.onTmuxScroll){void copyTmuxSelection();break;}
           const terminal=nativeTerminalShortcut(key,event.keyCode??0,modifiers);if(terminal){if(terminal.kind==='clear')clearLocal();else void send(terminalSequencePayload(terminal.data),{skipModifierTransform:true});break;}
+          const font=nativeSessionFontShortcut(key,modifiers);if(font){setSessionFontSize(latest.current.sessionId,font==='reset'?null:latest.current.terminalSettings.fontSize+(font==='increase'?1:-1));break;}
           const menu=nativeMenuShortcut(key,event.keyCode??0,modifiers);if(menu){void serializeCommand('menu',{id:menu}).catch(fatal);break;}
           const code=event.keyCode===33?'BracketLeft':event.keyCode===30?'BracketRight':key.length===1?`Key${key.toUpperCase()}`:undefined;
           document.dispatchEvent(new KeyboardEvent('keydown',{key,code,metaKey:(modifiers&8)!==0,ctrlKey:(modifiers&2)!==0,altKey:(modifiers&4)!==0,shiftKey:(modifiers&1)!==0,bubbles:true,cancelable:true}));break;

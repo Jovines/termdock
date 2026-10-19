@@ -623,6 +623,14 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
 }
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
     if(self.window.firstResponder!=self)return NO;
+    // Keep font +/-/0 in the focused session. AppKit's zoom menu otherwise
+    // consumes '-' and '0', while shifted '+' can reach a different path.
+    unsigned mods=modifiers(event.modifierFlags)&15;
+    NSString *plain=[event charactersByApplyingModifiers:0]?:event.charactersIgnoringModifiers?:@"";
+    bool font=(mods==GHOSTTY_MODS_SUPER||mods==(GHOSTTY_MODS_SUPER|GHOSTTY_MODS_SHIFT))
+        &&([plain isEqualToString:@"+"]||[plain isEqualToString:@"="]
+            ||(mods==GHOSTTY_MODS_SUPER&&([plain isEqualToString:@"-"]||[plain isEqualToString:@"0"])));
+    if(font){[self keyDown:event];return YES;}
     if(event.modifierFlags&NSEventModifierFlagCommand){if([NSApp.mainMenu performKeyEquivalent:event]){if(self.host)td_shortcut_down(self.host->shortcut_keys,event.keyCode,true,event.isARepeat);return YES;}[self queue:event];return YES;}return NO;
 }
 - (void)sendKey:(NSEvent *)event action:(ghostty_input_action_e)action text:(NSString *)text composing:(bool)composing {
