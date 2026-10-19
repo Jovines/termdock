@@ -166,7 +166,10 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
       if(!layoutFrame.current)layoutFrame.current=requestAnimationFrame(()=>{layoutFrame.current=0;measure();});
     }
     const overlaps=life?.overlays.filter(r=>r.x<rect.right&&r.x+r.width>rect.left&&r.y<rect.bottom&&r.y+r.height>rect.top)??[];
-    const visible=latest.current.isLayoutVisible!==false&&!document.hidden&&rect.width>0&&rect.height>0&&rect.left>=0&&rect.top>=0&&rect.right<=innerWidth+0.5&&rect.bottom<=innerHeight+0.5;
+    // Native siblings do not inherit a DOM ancestor's visibility or inert
+    // state. A retained workspace can keep its bounds while no longer visible.
+    const domVisible=!element.closest('[inert],[aria-hidden="true"]')&&getComputedStyle(element).visibility!=='hidden';
+    const visible=domVisible&&latest.current.isLayoutVisible!==false&&!document.hidden&&rect.width>0&&rect.height>0&&rect.left>=0&&rect.top>=0&&rect.right<=innerWidth+0.5&&rect.bottom<=innerHeight+0.5;
     // During the first safe overlay ACK, keep an already-visible surface in
     // place; prepareOverlay atomically adds the cutout before the CSS gate lifts.
     const holdForOverlay=visible&&(overlaps.length>0||life?.blockInput===true)&&life?.overlayReady===false;

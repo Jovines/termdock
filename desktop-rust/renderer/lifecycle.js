@@ -203,7 +203,7 @@
       gateGeometry(); // MutationObserver runs before the next overlay paint.
       notify();
     });
-    observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','aria-modal','role']});
+    observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','aria-modal','role','inert']});
     for(const name of ['focus','blur','resize','termdock:preview-layout'])window.addEventListener(name,notify);
     document.addEventListener('visibilitychange',notify);window.visualViewport?.addEventListener('resize',notify);
   };

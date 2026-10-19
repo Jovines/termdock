@@ -18,6 +18,7 @@ vi.mock('./sessionFontSize',()=>({setSessionFontSize:vi.fn()}));
 import * as clipboard from './clipboardImage';
 import {setSessionFontSize} from './sessionFontSize';
 import {NativeTerminalViewport} from './nativeViewport';
+import {CollaborationWorkspaceFrame} from '../components/CollaborationWorkspaceFrame';
 import {closeNativeSession,registerNativeLease,retireNativeLease,hideNativeLease} from './nativeLifetime';
 let serial=0,latestToken='',creates:Array<Record<string,any>>,writes:Array<Record<string,any>>,restoreMode='none',retain=false,lastRect='',lifeState:any,lifeListeners:Set<(value:any)=>void>;
 const emit=(token:string,event:Record<string,unknown>)=>host.listeners.forEach(fn=>fn({token,epoch:'page-a',event}));
@@ -669,4 +670,17 @@ it('transparent outside-click capture preserves terminal pixels and releases inp
  lifeState={...lifeState,generation:9,blockInput:false,overlays:[]};
  await act(async()=>{for(const fn of lifeListeners)fn(lifeState);await tick();});
  expect(host.request.mock.calls.map(([a])=>a)).toEqual(expect.arrayContaining([expect.objectContaining({action:'rect',blockInput:false,holes:[]}),expect.objectContaining({action:'focus',focused:true})]));
+});
+
+it('switching to collaboration hides the retained native terminal and returning restores the same surface',async()=>{
+ const ref=React.createRef<TerminalController>();const terminal=<NativeTerminalViewport {...props()} ref={ref}/>;
+ const view=render(<CollaborationWorkspaceFrame workspace={null}>{terminal}</CollaborationWorkspaceFrame>);
+ await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');await tick();});const token=latestToken;host.request.mockClear();
+ view.rerender(<CollaborationWorkspaceFrame workspace={<div>Collaboration content</div>}>{terminal}</CollaborationWorkspaceFrame>);
+ await act(async()=>{for(const fn of lifeListeners)fn(lifeState);await tick();});
+ expect(host.request.mock.calls.map(([a])=>a)).toContainEqual(expect.objectContaining({action:'visible',token,visible:false}));
+ expect(creates).toHaveLength(1);host.request.mockClear();
+ view.rerender(<CollaborationWorkspaceFrame workspace={null}>{terminal}</CollaborationWorkspaceFrame>);
+ await act(async()=>{for(const fn of lifeListeners)fn(lifeState);await tick();});
+ expect(host.request.mock.calls.map(([a])=>a)).toContainEqual(expect.objectContaining({action:'rect',token}));expect(creates).toHaveLength(1);
 });
