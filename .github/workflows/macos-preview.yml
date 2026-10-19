@@ -1,0 +1,107 @@
+name: macOS Rust client
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'desktop-rust/**'
+      - 'src/**'
+      - 'public/**'
+      - 'package*.json'
+      - 'vite.config.ts'
+      - '.github/workflows/macos-preview.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'desktop-rust/**'
+      - 'src/**'
+      - 'public/**'
+      - 'package*.json'
+      - 'vite.config.ts'
+      - '.github/workflows/macos-preview.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      CARGO_BUILD_JOBS: '3'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop-rust/package-lock.json
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-rust/src-tauri
+      - name: Check runner architecture
+        run: test "$(uname -m)" = arm64
+      - name: Install build dependencies without starting local services
+        run: |
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix desktop-rust
+      - name: Check Web terminal and desktop interaction regressions
+        run: >-
+          npx vitest run
+          src/lib/components/sidebar/sidebarResize.test.ts
+          src/lib/components/sidebar/CollaborationMemberMenu.test.tsx
+          src/lib/terminal/clipboardText.test.ts
+          src/lib/terminal/nativeWebLinks.test.ts
+          src/lib/federation/transportBoundary.test.ts
+          src/lib/zIndexTokens.test.ts
+      - name: Prepare embedded workspace and renderer
+        run: |
+          npm --prefix desktop-rust run prepare:workspace
+          npm --prefix desktop-rust run prepare:renderer
+          node desktop-rust/scripts/prepare-workspace.mjs --require-clean
+      - name: Test Rust and renderer bridge
+        run: |
+          cargo test --manifest-path desktop-rust/src-tauri/Cargo.toml --locked --lib
+          node --test desktop-rust/renderer/*.test.mjs desktop-rust/scripts/*.test.mjs
+      - name: Build ad-hoc signed test App (not a public release)
+        working-directory: desktop-rust
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npx tauri build --bundles app --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+      - name: Verify and archive test App
+        run: |
+          APP='desktop-rust/src-tauri/target/release/bundle/macos/Termdock Preview.app'
+          codesign --verify --deep --strict "$APP"
+          test "$(lipo -archs "$APP/Contents/MacOS/termdock-preview")" = arm64
+          test ! -e "$APP/Contents/Resources/native-terminal"
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import crypto from 'node:crypto';
+          const root='desktop-rust/src-tauri/target/release/bundle/macos/Termdock Preview.app/Contents/Resources/workspace';
+          const manifest=JSON.parse(fs.readFileSync(`${root}/workspace-manifest.json`));
+          if(manifest.sourceRevision!==process.env.GITHUB_SHA||manifest.dirty)throw Error('Wrong or dirty workspace revision');
+          for(const [name,entry] of Object.entries(manifest.files)){
+            const bytes=fs.readFileSync(`${root}/${name}`);
+            if(bytes.length!==entry.size||crypto.createHash('sha256').update(bytes).digest('hex')!==entry.sha256)throw Error(`Invalid workspace resource ${name}`);
+          }
+          fs.mkdirSync(`${process.env.RUNNER_TEMP}/macos-check`);
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/macos-check/build-info.json`,JSON.stringify({revision:process.env.GITHUB_SHA,architecture:'arm64',signing:'ad-hoc',notarized:false,publicRelease:false},null,2));
+          JS
+          tar -czf "$RUNNER_TEMP/macos-check/Termdock-Preview-arm64-test.app.tar.gz" -C "$(dirname "$APP")" 'Termdock Preview.app'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-test-${{ github.sha }}
+          path: ${{ runner.temp }}/macos-check/
+          if-no-files-found: error
+          retention-days: 7

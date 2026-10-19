@@ -30,3 +30,9 @@ npm --prefix desktop-rust run build
 ## 窗口诊断
 
 `--window-chrome-check NEW_ABSOLUTE_DIRECTORY LOOPBACK_ORIGIN FIXTURE_DESCRIPTOR` 保留独立窗口框架诊断，使用全新的私有配置目录和非生产 loopback 服务。描述文件必须明确启用 `controlledWindowChrome` 并提供对应服务身份；不会读取用户书签或连接生产端口。
+
+## GitHub Actions
+
+[macOS Rust client](../.github/workflows/macos-preview.yml) 在相关 master 推送、PR 和手动触发时，使用 GitHub 的 macOS Apple Silicon runner 编译。工作流运行终端/桥接回归、Rust 测试，构建内嵌工作区并上传 `macos-arm64-test-SHA` artifact；其中 App 为临时签名测试包，未公证，不进入 Preview 自动更新源。
+
+正式 Preview 的 Developer ID 签名、公证和更新密钥仍按 [发布契约](RELEASE.md) 在受控发布环境执行。后续将该步骤迁入 GitHub 前，须在 Actions Secrets 配置现有 Developer ID `.p12` 与密码、Apple 公证 API key，以及**同一套** Preview updater 私钥/公钥，不能生成新密钥替换已有更新信任链。
