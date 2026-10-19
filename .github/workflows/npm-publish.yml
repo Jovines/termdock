@@ -1,0 +1,123 @@
+name: Publish npm package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact package.json version to release (for example 1.4.324)'
+        required: true
+        type: string
+      publish:
+        description: 'Publish to npm after validation (requires the npm trusted publisher binding)'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      EXPECTED_VERSION: ${{ inputs.version }}
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify release identity
+        run: |
+          test "$GITHUB_REF" = refs/heads/master
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          if (!/^\d+\.\d+\.\d+$/.test(process.env.EXPECTED_VERSION)
+            || pkg.name !== 'termdock' || pkg.version !== process.env.EXPECTED_VERSION
+            || lock.version !== pkg.version || lock.packages[''].version !== pkg.version) {
+            throw new Error('Requested release must match the committed termdock package and lockfile');
+          }
+          JS
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install tmux for integration checks
+        run: |
+          if ! command -v tmux >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends tmux
+          fi
+      - run: npm ci
+      - name: Verify terminal copy and encrypted transport
+        run: >-
+          npx vitest run
+          src/lib/federation/transportBoundary.test.ts
+          src/server/utils/tmuxCopySelection.test.ts
+          src/lib/terminal/nativeViewport.test.tsx
+          src/lib/terminal/api.close.test.ts
+      - run: npm run build
+      - name: Pack the verified build
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-package"
+          npm pack --json --pack-destination "$RUNNER_TEMP/npm-package" > "$RUNNER_TEMP/npm-package/pack.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-package/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      EXPECTED_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package-${{ inputs.version }}
+          path: npm-package
+      - name: Verify the package transferred from the build job
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import crypto from 'node:crypto';
+          const [pack] = JSON.parse(fs.readFileSync('npm-package/pack.json', 'utf8'));
+          if (pack.name !== 'termdock' || pack.version !== process.env.EXPECTED_VERSION
+            || pack.filename !== `termdock-${pack.version}.tgz`) throw new Error('Unexpected release package');
+          const bytes = fs.readFileSync(`npm-package/${pack.filename}`);
+          const integrity = `sha512-${crypto.createHash('sha512').update(bytes).digest('base64')}`;
+          if (integrity !== pack.integrity || bytes.length !== pack.size) throw new Error('Release package integrity mismatch');
+          JS
+      - name: Publish the verified package using OIDC
+        run: npm publish "npm-package/termdock-${EXPECTED_VERSION}.tgz" --access public
+      - name: Verify the registry package and latest tag
+        run: |
+          npm view "termdock@${EXPECTED_VERSION}" dist.integrity --json > registry-integrity.json
+          npm view termdock dist-tags.latest --json > registry-latest.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const [pack] = JSON.parse(fs.readFileSync('npm-package/pack.json', 'utf8'));
+          const integrity = JSON.parse(fs.readFileSync('registry-integrity.json', 'utf8'));
+          const latest = JSON.parse(fs.readFileSync('registry-latest.json', 'utf8'));
+          if (integrity !== pack.integrity || latest !== process.env.EXPECTED_VERSION) {
+            throw new Error('Registry integrity or latest version differs from the published package');
+          }
+          JS
