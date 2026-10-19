@@ -1,7 +1,7 @@
 {
   "name": "termdock-preview-shell",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "npm run prepare:workspace && npm run prepare:native && npm run prepare:renderer && tauri dev",

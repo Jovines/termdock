@@ -1,5 +1,6 @@
 pub mod clipboard_collector;
 pub mod config;
+pub mod collaboration_focus;
 #[cfg(feature = "desktop")]
 mod desktop_ui;
 pub mod local_files;

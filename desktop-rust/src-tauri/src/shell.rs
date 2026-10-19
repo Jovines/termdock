@@ -996,8 +996,22 @@ async fn preview_dispatch(
             .await
         }
         "collaborationFocus" => {
-            desktop_ui::emit(&window, "termdock:focus-session", json!(text(&args, "id")?));
-            desktop_ui::focus(&window)?;
+            let Some((origin, session)) = crate::collaboration_focus::address(text(&args, "id")?) else {
+                return Ok(json!(false));
+            };
+            let open = shell.windows.lock().unwrap().iter()
+                .map(|(label, service)| (label.clone(), service.connection.clone())).collect::<Vec<_>>();
+            let label = crate::collaboration_focus::window(&origin, &open, &shell.config.lock().unwrap().connections);
+            let Some(target) = label.and_then(|label| app.get_webview_window(&label)) else {
+                return Ok(json!(false));
+            };
+            {
+                let mut windows = shell.windows.lock().unwrap();
+                let Some(service) = windows.get_mut(target.label()) else { return Ok(json!(false)); };
+                service.pending_focus = Some((uuid::Uuid::new_v4().to_string(), session));
+            }
+            deliver_pending_focus(&app, &target);
+            desktop_ui::focus(&target)?;
             Ok(json!(true))
         }
         "connections" => Ok(json!(shell.config.lock().unwrap().connections)),
