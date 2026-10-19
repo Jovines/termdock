@@ -13,6 +13,7 @@ import { beginLaunchDiagnostics, launchFailure, launchProgress, type LaunchPhase
 
 export interface IntegrationSession extends SessionLifecycleDescriptor {
   terminal_binding?: CollaborationPaneBinding | null;
+  binding_reconciliation?: { at: number; recovery_operation_id: string; previous_binding: CollaborationPaneBinding | null };
   resume_configuration_fingerprint?: string;
   group_role?: string;
   name?: string;
@@ -57,6 +58,8 @@ export interface IntegrationSessionAdapter {
   retryCold?(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress: (phase: LaunchPhase) => void): Promise<void>;
   messageHistory?(id: string): boolean | null;
   inspect(record: IntegrationSession): Promise<{ exists: boolean; running: boolean; shell: boolean; agentSlug: string | null; nativeId: string | null }>;
+  reconcileRecoveryBinding?(record: IntegrationSession): Promise<{ binding: CollaborationPaneBinding; recoveryOperationId: string } | null>;
+  recoveryBindingReconciled?(sessionId: string): void;
   /** Current runtime presence includes orphaned tmux/backend, not inventory alone. */
   runtimePresent?(record: IntegrationSession): Promise<boolean>;
   release?(record: IntegrationSession, reconcile: boolean): Promise<void>;
@@ -97,6 +100,7 @@ export class IntegrationSessions {
   private lifecycle = new SessionLifecycleCoordinator();
   private mutations = new Map<string, { hash: string; promise: Promise<IntegrationSession> }>();
   private coldRetries = new Set<string>();
+  private reconcilingBindings = new Set<string>();
   private closingOperations = new Set<string>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopObservation: () => void;
@@ -256,7 +260,13 @@ export class IntegrationSessions {
     return record;
   }
   async restore(principal: IntegrationPrincipal, id: string, key: string): Promise<IntegrationSession> {
-    return this.mutate(principal, key, ['restore', id], () => this.lifecycle.run(id, () => this.restoreOnce(principal, id, key)));
+    return this.mutate(principal, key, ['restore', id], async () => {
+      // A get can reconcile a proven tmux-recovery binding before restore takes
+      // the per-session lifecycle lock. restoreOnce then sees the exact live
+      // native owner and remains a no-op instead of launching a second Agent.
+      await this.get(principal, id);
+      return this.lifecycle.run(id, () => this.restoreOnce(principal, id, key));
+    });
   }
   async retryCold(principal: IntegrationPrincipal, id: string, generation: number, key: string): Promise<IntegrationSession> {
     return this.mutate(principal, key, ['retry-cold', id, generation], () => this.lifecycle.run(id, async () => {
@@ -484,7 +494,7 @@ export class IntegrationSessions {
       record.updated_at = Date.now(); this.saveRecord(record); return record;
     }));
   }
-  private async refresh(id: string): Promise<void> {
+  private async refresh(id: string, allowBindingReconciliation = true): Promise<void> {
     const record = structuredClone(this.doc.sessions.find(s => s.session_id === id)); if (!record) return;
     if (record.rename_pending) {
       if (this.lifecycle.active(id)) return;
@@ -543,8 +553,17 @@ export class IntegrationSessions {
     catch (error) {
       const current = this.doc.sessions.find(s => s.session_id === id);
       if (JSON.stringify(current) !== JSON.stringify(record)) return;
+      if (this.lifecycle.active(id) || this.pending.has(id)) return;
       const code = (error as { code?: unknown }).code;
       const errorCode = typeof code === 'string' ? code : 'SESSION_OBSERVATION_FAILED';
+      if (allowBindingReconciliation && errorCode === 'SESSION_IDENTITY_MISMATCH' && this.adapter.reconcileRecoveryBinding
+        && ['ready', 'failed'].includes(record.state) && (record.runtime_present === true || record.state === 'failed')
+        && (!record.error_code || record.error_code === 'SESSION_IDENTITY_MISMATCH')
+        && record.agent_native_session_id && record.terminal_binding && !record.operation_uncertain
+        && !record.close_intent && !record.rename_pending && !record.cold_retry_pending
+        && !this.pending.has(id) && !this.lifecycle.active(id)) {
+        if (await this.reconcileRecoveredBinding(record)) return;
+      }
       if (record.state !== 'failed' || record.error_code !== errorCode) this.saveRecord({ ...record, state: 'failed', error_code: errorCode,
         launch_diagnostics: record.launch_diagnostics ? launchFailure(record.launch_diagnostics, error, errorCode) : undefined, updated_at: Date.now() });
       return;
@@ -590,16 +609,57 @@ export class IntegrationSessions {
     if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
     if (JSON.stringify(next) !== JSON.stringify(record)) { next.updated_at = Date.now(); this.saveRecord(next); }
   }
+  private async reconcileRecoveredBinding(expected: IntegrationSession): Promise<boolean> {
+    const id = expected.session_id;
+    const reconcile = this.adapter.reconcileRecoveryBinding;
+    if (!reconcile || this.lifecycle.active(id) || this.pending.has(id)) return false;
+    let committed = false;
+    try {
+      await this.lifecycle.run(id, async () => {
+        const current = this.doc.sessions.find(record => record.session_id === id);
+        if (!current || JSON.stringify(current) !== JSON.stringify(expected) || this.pending.has(id)
+          || !['ready', 'failed'].includes(current.state) || !(current.runtime_present === true || current.state === 'failed')
+          || (current.error_code && current.error_code !== 'SESSION_IDENTITY_MISMATCH')
+          || current.operation_uncertain || current.close_intent || current.rename_pending || current.cold_retry_pending
+          || !current.agent_native_session_id || !current.terminal_binding) return;
+        this.reconcilingBindings.add(id);
+        let reconciled: Awaited<ReturnType<NonNullable<IntegrationSessionAdapter['reconcileRecoveryBinding']>>>;
+        try { reconciled = await reconcile.call(this.adapter, current); }
+        catch { return; }
+        if (!reconciled || JSON.stringify(reconciled.binding) === JSON.stringify(current.terminal_binding)) return;
+        const latest = this.doc.sessions.find(record => record.session_id === id);
+        if (!latest || JSON.stringify(latest) !== JSON.stringify(current)) return;
+        const now = Date.now();
+        const next: IntegrationSession = { ...current, terminal_binding: structuredClone(reconciled.binding), state: 'ready',
+          runtime_present: true, error_code: null, operation_uncertain: false, generation: (current.generation ?? 1) + 1,
+          operation_id: randomUUID(), updated_at: now,
+          binding_reconciliation: { at: now, recovery_operation_id: reconciled.recoveryOperationId,
+            previous_binding: structuredClone(current.terminal_binding) },
+          startup_input: startupInput(current, now) };
+        this.saveRecord(next);
+        committed = true;
+      });
+    } catch { return false; }
+    finally { this.reconcilingBindings.delete(id); }
+    if (committed) {
+      try { this.adapter.recoveryBindingReconciled?.(id); } catch { /* The worker also retries on its normal tick. */ }
+    }
+    return committed;
+  }
   /** Only gates configured launches. Native UUID and Agent turn state are not input prerequisites. */
   async deliveryReadiness(id: string): Promise<IntegrationDeliveryReadiness | null> {
     const existing = this.doc.sessions.find(record => record.session_id === id);
     if (!existing) return null;
+    if (this.reconcilingBindings.has(id)) return { allowed: false, reason: 'SESSION_BINDING_RECONCILIATION_PENDING' };
     if (this.closingOperations.has(id)) return { allowed: false, reason: 'SESSION_OPERATION_IN_PROGRESS' };
     if (existing.state === 'closed') return { allowed: false, reason: 'SESSION_CLOSED' };
     if (existing.close_intent || existing.state === 'closing') return { allowed: false, reason: 'SESSION_OPERATION_IN_PROGRESS' };
     if (existing.state === 'released' || existing.state === 'releasing' || existing.operation_uncertain) return { allowed: false, reason: existing.state === 'released' ? 'SESSION_RELEASED' : 'SESSION_OPERATION_IN_PROGRESS' };
     if (!existing.startup_input) return null;
-    await this.refresh(id);
+    // This callback can run inside the delivery worker's own queue. Binding
+    // reconciliation must enter that queue from get/observation, never wait on
+    // the worker from within itself.
+    await this.refresh(id, false);
     const record = this.doc.sessions.find(record => record.session_id === id)!;
     if (record.error_code && record.error_code !== 'SESSION_BINDING_TIMEOUT') return { allowed: false, reason: record.error_code };
     return record.startup_input!.state === 'observed' ? { allowed: true, reason: null }

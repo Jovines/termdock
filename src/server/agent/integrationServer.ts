@@ -261,6 +261,7 @@ export class IntegrationRuntime {
       tmux_recovery_pause_status: true, tmux_recovery_pause_status_min_version: '1.4.326',
       tmux_recovery_memory_psi_admission: true, tmux_recovery_memory_psi_admission_min_version: '1.4.326',
       tmux_recovery_td_owned_resident_admission: true, tmux_recovery_td_owned_resident_admission_min_version: '1.4.326',
+      session_recovery_binding_reconcile: process.platform === 'linux', session_recovery_binding_reconcile_min_version: '1.4.328',
       session_release_batch: true, session_release_batch_min_version: '1.4.325',
       permissions: INTEGRATION_OPERATIONS };
   }

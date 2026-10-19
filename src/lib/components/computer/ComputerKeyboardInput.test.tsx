@@ -62,3 +62,28 @@ it('does not turn the trailing phone IME line break into a remote Return', () =>
   fireEvent(input, new InputEvent('beforeinput', { inputType: 'insertLineBreak', cancelable: true }));
   expect(sendKey).toHaveBeenCalledExactlyOnceWith('enter');
 });
+
+it('does not lose an already committed IME candidate when the keyboard panel unmounts before RAF', () => {
+  vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1)); vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  const sendText = vi.fn(), sendKey = vi.fn(); const view = render(<ComputerKeyboardInput sendText={sendText} sendKey={sendKey} />);
+  const input = screen.getByRole('textbox');
+  fireEvent.compositionStart(input); fireEvent.change(input, { target: { value: '已确认🙂' } }); fireEvent.compositionEnd(input);
+  view.unmount(); expect(sendText).toHaveBeenCalledExactlyOnceWith('已确认🙂');
+});
+
+it('forwards hardware shortcuts and modified navigation while leaving native paste and IME alone', () => {
+  const sendChord = vi.fn(), sendText = vi.fn(), sendKey = vi.fn();
+  render(<ComputerKeyboardInput sendText={sendText} sendKey={sendKey} sendChord={sendChord} commandKey={[0xffe3, 'ControlLeft']} />);
+  const input = screen.getByRole('textbox');
+  fireEvent.keyDown(input, { key: 'a', code: 'KeyA', metaKey: true });
+  fireEvent.keyDown(input, { key: 'Backspace', code: 'Backspace', ctrlKey: true });
+  fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', shiftKey: true });
+  expect(sendChord.mock.calls).toEqual([
+    [[[0xffe3, 'ControlLeft'], [0x61, 'KeyA']]],
+    [[[0xffe3, 'ControlLeft'], [0xff08, 'Backspace']]],
+    [[[0xffe1, 'ShiftLeft'], [0xff0d, 'Enter']]],
+  ]);
+  fireEvent.keyDown(input, { key: 'v', code: 'KeyV', ctrlKey: true });
+  fireEvent.compositionStart(input); fireEvent.keyDown(input, { key: 'a', code: 'KeyA', ctrlKey: true, isComposing: true });
+  expect(sendChord).toHaveBeenCalledTimes(3); expect(sendKey).not.toHaveBeenCalled();
+});

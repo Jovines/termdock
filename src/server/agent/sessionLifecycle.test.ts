@@ -56,6 +56,65 @@ it('releases all runtime facts, keeps exact identity, and restores with a new pa
   expect(f.api.release).toHaveBeenCalledTimes(1);
   expect(await f.sessions.get(f.p, released.session_id)).toMatchObject({ state: 'ready', generation: 3 });
 });
+it('reconciles a proven tmux recovery binding on get without launching or redelivering', async () => {
+  const f = await fixture();
+  const old = f.created.terminal_binding!;
+  const current = { serverPid: 200, sessionId: '$2', paneId: '%2', panePid: 201, agentSlug: 'fixture', nativeSessionId: 'native-uuid' };
+  f.api.inspect = vi.fn(async (record: IntegrationSession) => {
+    if (record.terminal_binding?.paneId === old.paneId) throw Object.assign(new Error(), { code: 'SESSION_IDENTITY_MISMATCH' });
+    return { ...f.facts };
+  });
+  f.api.reconcileRecoveryBinding = vi.fn(async () => ({ binding: current, recoveryOperationId: 'tmux-recovery-op' }));
+  f.api.recoveryBindingReconciled = vi.fn();
+
+  const reconciled = await f.sessions.get(f.p, f.created.session_id);
+  expect(reconciled).toMatchObject({ state: 'ready', runtime_present: true, generation: 2,
+    agent_native_session_id: 'native-uuid', terminal_binding: current,
+    binding_reconciliation: { recovery_operation_id: 'tmux-recovery-op', previous_binding: old } });
+  expect(reconciled.operation_id).not.toBe(f.created.operation_id);
+  expect(f.api.reconcileRecoveryBinding).toHaveBeenCalledTimes(1);
+  expect(f.api.recoveryBindingReconciled).toHaveBeenCalledWith(f.created.session_id);
+  expect(f.api.restore).not.toHaveBeenCalled();
+  expect(f.api.create).toHaveBeenCalledTimes(1);
+  expect(await f.sessions.get(f.p, f.created.session_id)).toMatchObject({ state: 'ready', generation: 2, terminal_binding: current });
+  expect(f.api.reconcileRecoveryBinding).toHaveBeenCalledTimes(1);
+});
+it('performs get reconciliation before restore and does not start a second native Agent', async () => {
+  const f = await fixture();
+  const current = { serverPid: 200, sessionId: '$2', paneId: '%2', panePid: 201, agentSlug: 'fixture', nativeSessionId: 'native-uuid' };
+  f.api.inspect = vi.fn(async (record: IntegrationSession) => {
+    if (record.terminal_binding?.paneId !== current.paneId) throw Object.assign(new Error(), { code: 'SESSION_IDENTITY_MISMATCH' });
+    return { ...f.facts };
+  });
+  f.api.reconcileRecoveryBinding = vi.fn(async () => ({ binding: current, recoveryOperationId: 'tmux-recovery-op' }));
+  const result = await f.sessions.restore(f.p, f.created.session_id, 'restore-after-recovery');
+  expect(result).toMatchObject({ state: 'ready', generation: 2, terminal_binding: current, agent_native_session_id: 'native-uuid' });
+  expect(f.api.reconcileRecoveryBinding).toHaveBeenCalledTimes(1);
+  expect(f.api.restore).not.toHaveBeenCalled();
+  expect(f.api.create).toHaveBeenCalledTimes(1);
+});
+it('keeps the old binding and fails closed when recovery evidence is absent or ambiguous', async () => {
+  const f = await fixture();
+  const original = f.created.terminal_binding;
+  f.api.inspect = vi.fn(async () => { throw Object.assign(new Error(), { code: 'SESSION_IDENTITY_MISMATCH' }); });
+  f.api.reconcileRecoveryBinding = vi.fn(async () => null);
+  const result = await f.sessions.get(f.p, f.created.session_id);
+  expect(result).toMatchObject({ state: 'failed', error_code: 'SESSION_IDENTITY_MISMATCH', generation: 1, terminal_binding: original });
+  expect(f.api.restore).not.toHaveBeenCalled();
+  expect(f.api.create).toHaveBeenCalledTimes(1);
+});
+it('does not enter the worker reconciliation barrier from its own delivery readiness callback', async () => {
+  const f = await fixture();
+  f.p.launchProfiles[0]!.startupInput = { allOf: ['ready'] };
+  const created = await f.sessions.create(f.p, { profile: 'agent', cwd: dir, idempotencyKey: 'guarded-create' });
+  const binding = { serverPid: 200, sessionId: '$2', paneId: '%2', panePid: 201, agentSlug: 'fixture', nativeSessionId: 'native-uuid' };
+  f.api.inspect = vi.fn(async () => { throw Object.assign(new Error(), { code: 'SESSION_IDENTITY_MISMATCH' }); });
+  f.api.reconcileRecoveryBinding = vi.fn(async () => ({ binding, recoveryOperationId: 'recovery' }));
+  expect(await f.sessions.deliveryReadiness(created.session_id)).toEqual({ allowed: false, reason: 'SESSION_IDENTITY_MISMATCH' });
+  expect(f.api.reconcileRecoveryBinding).not.toHaveBeenCalled();
+  expect(await f.sessions.get(f.p, created.session_id)).toMatchObject({ state: 'ready', generation: 2, terminal_binding: binding });
+  expect(f.api.reconcileRecoveryBinding).toHaveBeenCalledTimes(1);
+});
 it('refuses running Agents, pending messages, wrong owners and incompatible current authorization before side effects', async () => {
   const f = await fixture(), id = f.created.session_id;
   await expect(f.sessions.release(f.p, id, 1, 'running')).rejects.toMatchObject({ code: 'SESSION_STILL_RUNNING' });

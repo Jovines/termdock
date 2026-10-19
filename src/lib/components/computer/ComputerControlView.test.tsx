@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   peer: 'ubuntu-service',
   platform: 'linux',
   rdpAvailable: true as boolean | undefined,
-  clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn>; keyboardActive?: boolean; focusOnClick?: boolean }>,
+  clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn>; clipboardPasteFrom: ReturnType<typeof vi.fn>; keyboardActive?: boolean; focusOnClick?: boolean }>,
   hosts: [] as string[],
   pointerSend: vi.fn(),
   rdpOptions: [] as RdpConnection[],
@@ -39,6 +39,7 @@ vi.mock('../../computer/secureVncChannel', () => ({ SecureVncChannel: class {
 } }));
 vi.mock('@novnc/novnc', () => ({ default: class extends EventTarget {
   sendKey = vi.fn();
+  clipboardPasteFrom = vi.fn();
   disconnect() {}
   constructor() { super(); mocks.clients.push(this); }
 } }));
@@ -48,6 +49,7 @@ vi.mock('../../computer/rdpSession', () => ({ RdpSession: class extends EventTar
   surface = document.createElement('div');
   pointerTarget = { size: () => ({ width: 1280, height: 800 }), surface: () => this.surface, send: mocks.pointerSend };
   sendKey = vi.fn();
+  clipboardPasteFrom = vi.fn();
   disconnect() {}
   constructor(_target: HTMLElement, options: RdpConnection, fail: (reason: string) => void) {
     super(); _target.append(this.surface); mocks.clients.push(this); mocks.rdpOptions.push(options); mocks.failures.push(fail);
@@ -78,7 +80,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 async function ready() {
   render(<ComputerControlView />);
-  await waitFor(() => expect((screen.getByRole('button', { name: '当前电脑' }) as HTMLButtonElement).disabled).toBe(false));
+  await waitFor(() => expect(screen.queryByRole('button', { name: '取消' }) || !(screen.getByRole('button', { name: '当前电脑' }) as HTMLButtonElement).disabled).toBeTruthy());
 }
 
 describe('computer targets', () => {
@@ -114,6 +116,36 @@ describe('computer targets', () => {
     expect(screen.queryByRole('button', { name: '键盘' })).toBeNull();
     expect(screen.queryByRole('button', { name: '切换触摸方式' })).toBeNull();
     expect(mocks.clients).toHaveLength(1);
+  });
+  it('measures the final mobile desktop before opening RDP, including its controls and safe areas', async () => {
+    const beforeWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 402 });
+    const measure = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute('aria-label') === zh.computer.remoteTitle) {
+        expect(this.classList.contains('hidden')).toBe(false);
+        const dialog = this.closest('[role="dialog"]');
+        expect(dialog).toBeTruthy();
+        expect(dialog?.querySelector('button[aria-label="缩小桌面"]')).toBeTruthy();
+        return { width: 402, height: 677 } as DOMRect;
+      }
+      return { width: 402, height: 874 } as DOMRect;
+    });
+    try {
+      await ready();
+      fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+      fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+      fireEvent.click(screen.getByRole('button', { name: '连接' }));
+      await waitFor(() => expect(mocks.rdpOptions).toHaveLength(1));
+      expect(mocks.rdpOptions[0]).toMatchObject({ width: 640, height: 1078 });
+      expect((screen.getByRole('button', { name: '键盘' }) as HTMLButtonElement).disabled).toBe(true);
+      act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+      expect(screen.getByRole('dialog')).toBeTruthy();
+      expect((screen.getByRole('button', { name: '键盘' }) as HTMLButtonElement).disabled).toBe(false);
+      expect(mocks.clients).toHaveLength(1);
+    } finally {
+      measure.mockRestore();
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: beforeWidth });
+    }
   });
   it('retains touch controls on a large touchscreen', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false })));
@@ -204,16 +236,17 @@ describe('computer targets', () => {
     mocks.preferences.local.protocol = protocol; mocks.preferences.local.username = 'test-user';
     mocks.credentials[computerLoginKey(mocks.preferences.local)] = 'fixture-secret';
     render(<ComputerControlView />);
-    await screen.findByPlaceholderText('已保存，留空直接连接');
-    await screen.findByText(/运行当前 Termdock 服务的电脑/);
     await act(async () => {});
     if (protocol === 'rdp' && rdpAvailable === false) {
+      await screen.findByPlaceholderText('已保存，留空直接连接');
+      await screen.findByText(/运行当前 Termdock 服务的电脑/);
       expect(mocks.clients).toHaveLength(0);
       expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/credentials/use'))).toBe(false);
       expect((screen.getByRole('button', { name: '连接' }) as HTMLButtonElement).disabled).toBe(true);
     } else {
       await waitFor(() => expect(mocks.clients).toHaveLength(1));
-      expect((screen.getByRole('button', { name: '正在连接…' }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByRole('button', { name: '取消' })).toBeTruthy();
+      expect(screen.getByRole('status').textContent).toContain('正在连接');
     }
   });
   it.each(['local', 'remote'] as const)('retains the %s RDP settings and credentials when runtime submission is blocked', async target => {
@@ -256,7 +289,7 @@ describe('computer targets', () => {
     try {
       await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
       fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
-      await waitFor(() => expect(mocks.clients).toHaveLength(1)); expect(mocks.rdpOptions[0]).toMatchObject({ width: 640, height: 1221 });
+      await waitFor(() => expect(mocks.clients).toHaveLength(1));
       act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
       expect(screen.getByRole('dialog')).toBeTruthy(); expect(screen.queryByRole('textbox', { name: '发送剪贴板' })).toBeNull();
       expect(screen.queryByRole('region', { name: '控制设置' })).toBeNull();
@@ -330,7 +363,7 @@ describe('computer targets', () => {
     cleanup(); await ready();
     await waitFor(() => expect(mocks.rdpOptions).toHaveLength(2));
     expect(mocks.rdpOptions[1].password).toBe('remembered-secret');
-    expect((screen.getByLabelText('密码') as HTMLInputElement).value).toBe('');
+    expect(screen.queryByLabelText('密码')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     await act(async () => {}); expect(mocks.rdpOptions).toHaveLength(2);
     expect(screen.getByPlaceholderText('已保存，留空直接连接')).toBeTruthy();
@@ -533,4 +566,24 @@ describe('computer targets', () => {
     expect((screen.getByRole('button', { name: '当前电脑' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('连接设置读取失败，请重试。')).toBeTruthy();
   });
+});
+
+
+it('receives remote clipboard text without overwriting a local draft and copies it on demand', async () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  await ready();
+  fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+  fireEvent.click(screen.getByRole('button', { name: '连接' }));
+  await waitFor(() => expect(mocks.clients).toHaveLength(1));
+  act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+  fireEvent.click(screen.getByRole('button', { name: '剪贴板' }));
+  fireEvent.change(screen.getByRole('textbox', { name: '发送剪贴板' }), { target: { value: 'local draft' } });
+  act(() => mocks.clients[0].dispatchEvent(new CustomEvent('clipboard', { detail: { text: 'remote 中文🙂' } })));
+  expect((screen.getByRole('textbox', { name: '发送剪贴板' }) as HTMLTextAreaElement).value).toBe('local draft');
+  expect((screen.getByRole('textbox', { name: '电脑复制的文字' }) as HTMLTextAreaElement).value).toBe('remote 中文🙂');
+  fireEvent.click(screen.getByRole('button', { name: '复制到本机' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: '已复制到本机' })).toBeTruthy());
+  expect(writeText).toHaveBeenCalledExactlyOnceWith('remote 中文🙂');
 });

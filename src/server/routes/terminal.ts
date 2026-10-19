@@ -160,6 +160,7 @@ import { NativeSessionSearch } from '../agent/nativeSessionSearch.js';
 import { CollaborationError } from '../agent/collaborationProtocol.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, assessCollaborationRouteIdentity, type CollaborationBinding, type CollaborationPaneBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
+import { selectRecoveredIntegrationBinding } from '../agent/integrationRecoveryBinding.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
 import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane,
   type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
@@ -2585,6 +2586,25 @@ function integrationTerminalRecord(record: IntegrationSession) {
   if (terminal && (terminal.mode !== 'tmux' || terminal.tmuxSessionName !== `wt-integration-${record.session_id}`)) integrationError('SESSION_IDENTITY_MISMATCH', 'Owned TD terminal binding changed', 409);
   return terminal;
 }
+async function integrationRecoveryOwnership(record: IntegrationSession) {
+  const root = `${TERMDOCK_DIR}/integration-state`;
+  const directories = await fs.promises.readdir(root, { withFileTypes: true }).catch(() => []);
+  const descriptorOwners: Array<{ sessionId: string; groupId: string; principalId: string }> = [];
+  const principalOwners: Array<{ groupId: string; principalId: string; revoked: boolean }> = [];
+  for (const directory of directories) {
+    if (!directory.isDirectory()) continue;
+    const directoryPath = path.join(root, directory.name);
+    const sessions = await readJsonFileIfExists<{ sessions?: Array<{ session_id?: string; group_id?: string; principal_id?: string }> }>(path.join(directoryPath, 'integration-sessions.json'));
+    for (const session of sessions?.sessions ?? []) if (session.session_id === record.session_id) {
+      descriptorOwners.push({ sessionId: String(session.session_id), groupId: String(session.group_id ?? ''), principalId: String(session.principal_id ?? '') });
+    }
+    const integrations = await readJsonFileIfExists<{ principals?: Array<{ id?: string; groupId?: string; revoked?: boolean }> }>(path.join(directoryPath, 'integrations.json'));
+    for (const principal of integrations?.principals ?? []) if (principal.id === record.principal_id) {
+      principalOwners.push({ principalId: String(principal.id), groupId: String(principal.groupId ?? ''), revoked: principal.revoked === true });
+    }
+  }
+  return { descriptorOwners, principalOwners };
+}
 async function integrationTmuxPresent(record: IntegrationSession): Promise<boolean> {
   try { await runTmux(['has-session', '-t', `=wt-integration-${record.session_id}`]); return true; }
   catch (error) { if (/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) return false; throw error; }
@@ -2757,6 +2777,71 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
       && route.pane.nativeSessionId !== nativeId) collaborationRouting.bind({ ...route, nativeSessionId: nativeId, pane: { ...route.pane, nativeSessionId: nativeId } });
     return { exists: true, running: Boolean(pane.agentSlug), shell: await integrationPaneIsIdleShell(pane), agentSlug: pane.agentSlug || null, nativeId };
   },
+  async reconcileRecoveryBinding(record) {
+    if (process.platform !== 'linux' || !record.agent_native_session_id || !record.terminal_binding) return null;
+    const expectedNativeSessionId = record.agent_native_session_id;
+    let reconciled: { binding: CollaborationPaneBinding; recoveryOperationId: string } | null = null;
+    const collect = async () => {
+      const sessionName = `wt-integration-${record.session_id}`;
+      const recoveryAfter = Math.max(record.created_at, record.binding_reconciliation?.at ?? 0);
+      const matchingRecovery = tmuxRecoveryOperations.all().reverse().find(operation =>
+        operation.items.some(item => item.sessionId === record.session_id && item.state === 'succeeded'
+          && Number.isSafeInteger(item.completedAt) && item.completedAt! > recoveryAfter));
+      const owners = await integrationRecoveryOwnership(record);
+      const groupOwners = collaborationStore.list().filter(group => !group.deleted && group.sessionIds.includes(record.session_id)).map(group => group.id);
+      const globalOwners = globalSessionState.sessions.filter(session => session.sessionId === record.session_id || session.tmuxSessionName === sessionName);
+      const terminal = globalSessionState.sessions.find(session => session.sessionId === record.session_id);
+      const backendMatches = [...terminalSessions].filter(([, backend]) => backend.mode === 'tmux' && backend.tmuxSessionName === sessionName);
+      const backendOwnershipVerified = !!terminal && terminal.mode === 'tmux' && terminal.tmuxSessionName === sessionName
+        && terminal.agentResume?.slug === record.agent_slug && terminal.agentResume.sessionId === expectedNativeSessionId
+        && backendMatches.length === 1 && !globalSessionState.sessions.some(other => other.sessionId !== record.session_id
+          && (other.tmuxSessionName === sessionName || other.backendSessionId === backendMatches[0]?.[0]))
+        && [null, record.session_id].includes(collaborationRouting.ownerOfBackend(backendMatches[0]?.[0] ?? ''));
+      let panes: Array<{ tmuxSessionName: string; agentSlug: string; nativeSessionId: string | null; nativeIdentitySource: string | null; nativeIdentityVerified: boolean; binding: CollaborationPaneBinding }> = [];
+      if (backendOwnershipVerified && backendMatches.length === 1) {
+        await runTmux(['has-session', '-t', `=${sessionName}`]);
+        const layout = await getTmuxLayout(sessionName);
+        if (layout.sessionName === sessionName && layout.windows.flatMap(window => window.panes).length === 1) {
+          const [backendSessionId] = backendMatches[0]!;
+          const unpinned: CollaborationBinding = { sessionId: record.session_id, backendSessionId, mode: 'tmux',
+            tmuxSessionName: sessionName, agentSlug: record.agent_slug, nativeSessionId: expectedNativeSessionId, pane: null };
+          const inspected = await inspectCollaborationTmux(unpinned, null, false, true, true, true);
+          panes = (inspected.candidates ?? []).map(pane => ({ tmuxSessionName: sessionName,
+            agentSlug: pane.agentSlug, nativeSessionId: pane.nativeSessionId,
+            nativeIdentitySource: pane.nativeIdentitySource ?? null, nativeIdentityVerified: pane.nativeIdentityVerified === true,
+            binding: { serverPid: pane.serverPid, sessionId: pane.sessionId, paneId: pane.paneId, panePid: pane.panePid,
+              agentSlug: pane.agentSlug, nativeSessionId: pane.nativeSessionId } }));
+        }
+      }
+      const selected = selectRecoveredIntegrationBinding({ sessionId: record.session_id, groupId: record.group_id, principalId: record.principal_id,
+        agentSlug: record.agent_slug, nativeSessionId: expectedNativeSessionId, tmuxSessionName: sessionName,
+        descriptorOwners: owners.descriptorOwners, principalOwners: owners.principalOwners, groupOwners,
+        terminalOwners: globalOwners.map(session => session.sessionId), backendOwnershipVerified,
+        recoveryOperationId: matchingRecovery?.id ?? null, panes });
+      return selected && backendMatches.length === 1 ? { ...selected, backendSessionId: backendMatches[0]![0] } : null;
+    };
+    await collaborationDeliveryWorker.reconfigure(record.session_id, async () => {
+      if (routeHasUnconfirmedWrite(record.session_id)) throw Object.assign(new Error('A previous terminal write has an uncertain outcome'), { code: 'ROUTE_DELIVERY_OUTCOME_UNCONFIRMED' });
+      const first = await collect();
+      if (!first) throw Object.assign(new Error('Recovery binding evidence is incomplete, ambiguous, or does not match the exact native identity'), { code: 'SESSION_RECOVERY_BINDING_UNCONFIRMED' });
+      const second = await collect();
+      if (!second || first.recoveryOperationId !== second.recoveryOperationId || first.backendSessionId !== second.backendSessionId
+        || JSON.stringify(first.binding) !== JSON.stringify(second.binding)) {
+        throw Object.assign(new Error('Integration runtime changed while recovery binding was being verified'), { code: 'SESSION_RECOVERY_BINDING_CHANGED' });
+      }
+      if (routeHasUnconfirmedWrite(record.session_id) || collaborationRouting.hasOtherPaneOwner(record.session_id, second.binding)) {
+        throw Object.assign(new Error('A previous write or another route owner prevents automatic binding reconciliation'), { code: 'ROUTE_DELIVERY_OUTCOME_UNCONFIRMED' });
+      }
+      const previous = collaborationRouting.get(record.session_id);
+      collaborationRouting.bind({ sessionId: record.session_id, backendSessionId: second.backendSessionId,
+        mode: 'tmux', tmuxSessionName: `wt-integration-${record.session_id}`, agentSlug: record.agent_slug,
+        nativeSessionId: record.agent_native_session_id, pane: second.binding, routeRevision: crypto.randomUUID(),
+        lastRecovery: { kind: 'native-identity', at: Date.now(), previousPane: previous?.pane ?? record.terminal_binding ?? null } });
+      reconciled = { binding: second.binding, recoveryOperationId: second.recoveryOperationId };
+    });
+    return reconciled;
+  },
+  recoveryBindingReconciled(sessionId) { collaborationDeliveryWorker.wake(sessionId); },
   async create(record, prepared, progress) {
     await listDetectedAgentLaunchers();
     if (!agentBySlug(record.agent_slug)) integrationError('COLLAB_AGENT_UNAVAILABLE', 'Configured agent plugin is not installed');

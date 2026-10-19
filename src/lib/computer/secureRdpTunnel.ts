@@ -1,4 +1,5 @@
 import Guacamole from 'guacamole-common-js';
+import type { ComputerMotionTrace } from './motionTrace';
 import { secureSocket } from '../federation/browserIntegration';
 
 export interface RdpConnection {
@@ -13,7 +14,7 @@ export class SecureRdpTunnel extends Guacamole.Tunnel {
   sendPointer: (x: number, y: number, buttons: number) => void;
   oninstructionbatch?: (deliver: () => void, syncs: number) => void;
   onauthentication?: (state: 'pending' | 'authenticated' | 'unavailable') => void;
-  constructor(options: RdpConnection, fail: (reason: string) => void, localPointer: () => boolean = () => false) {
+  constructor(options: RdpConnection, fail: (reason: string) => void, localPointer: () => boolean = () => false, trace?: ComputerMotionTrace) {
     super();
     let movement: string[] | null = null, animation: number | null = null, buttons = '0';
     const cancelMovement = () => {
@@ -25,8 +26,8 @@ export class SecureRdpTunnel extends Guacamole.Tunnel {
       if (this.socket?.readyState !== 1 || this.state !== Guacamole.Tunnel.State.OPEN) return;
       this.socket.send(JSON.stringify({ type: 'instruction', opcode: values[0], args: values.slice(1) }));
     };
-    // Touchpad movement is already limited to one update per animation frame.
-    // Send it now instead of adding the native-mouse scheduler's extra frame.
+    // Touchpad coordinates are final. Forward them directly; the native-mouse
+    // scheduler must not add another wait to touch input.
     this.sendPointer = (x, y, mask) => {
       cancelMovement();
       buttons = String(mask);
@@ -73,7 +74,11 @@ export class SecureRdpTunnel extends Guacamole.Tunnel {
             if (opcode === 'ready') {
               this.uuid = args[0]; this.onuuid?.(args[0]); state(Guacamole.Tunnel.State.OPEN);
               this.sendMessage('nop');
-            } else if (opcode !== 'mouse' || !localPointer()) this.oninstruction?.(opcode, args);
+            } else {
+              const ignored = opcode === 'mouse' && localPointer();
+              if (opcode === 'mouse') trace?.record('rdp-server-mouse', { x: Number(args[0]), y: Number(args[1]), ignored });
+              if (!ignored) this.oninstruction?.(opcode, args);
+            }
           } };
           const syncs = message.instructions.filter((instruction: string[]) => instruction[0] === 'sync').length;
           if (this.oninstructionbatch && syncs > 1) this.oninstructionbatch(deliver, syncs);

@@ -1327,3 +1327,30 @@ TD/native session、运行承载、消息/reply、consumer 游标或历史；不
 `GROUP_ARCHIVE_STATE_UNCONFIRMED`，不会猜测或重建。只允许本机非 federated、未删除
 组；删除组、跨服务组和不确定的目标分别返回 `GROUP_NOT_FOUND`、`GROUP_NOT_LOCAL`、
 `GROUP_ARCHIVE_TARGET_UNAVAILABLE`。归档不延长消息历史保留期。
+
+## 1.4.328：IntegrationSession 对账 tmux recovery 的新承载
+
+最低 CLI / 实际服务 **1.4.328**，能力回读字段为
+`session_recovery_binding_reconcile=true` 与
+`session_recovery_binding_reconcile_min_version=1.4.328`。该自动对账目前只在 Linux
+提供；其它平台返回 capability=false，因为没有同等的当前 writer-lock 身份证明。
+
+所属 principal 调用现有 `session get` 时，如果 IntegrationSession 因
+`SESSION_IDENTITY_MISMATCH` 指向旧 pane，而 TD 持久恢复 operation 已成功恢复该逻辑
+session，服务会尝试受限对账。它要求当前唯一受管终端名严格为
+`wt-integration-<session_id>`，IntegrationSession 与有效 principal/group 的持久归属唯一，
+当前组和全局终端记录唯一，只有一个 tmux pane/backend，且该前台 Agent 的当前 Linux
+flock-owner 身份独立核验出原 agent slug 与原生 UUID。目标元组会连续采样确认未变，
+并在现有投递 worker 屏障内更新绑定。
+
+成功后保留逻辑 `session_id`、group、principal、原生 UUID、消息与历史，只更新
+`terminal_binding`、状态和 `generation`，并在 `binding_reconciliation` 记录旧绑定及
+对应 `recovery_operation_id`。不会启动或恢复第二个 Agent，也不创建 task、发送正文或
+重放已写入的消息。此前写入结果不明时不会自动改绑；已写入的消息保持原 receipt，
+尚未写入的 pending 消息由原 worker 继续处理。
+
+任一 owner 缺失/重复、tmux 名或 pane 不唯一、native UUID 不同、writer-lock 不可核验、
+没有该 session 成功的恢复 operation，或绑定在双重采样间再次变化时，服务保持
+fail-closed，旧绑定与原消息保留，`session get` 仍报告身份错误；不会按 tmux 名称、PID
+缓存、cwd、argv 中的 resume 参数或显示名猜测认领。此 capability 不新增权限；仅通过
+`session.read` 认证的所属 principal 可触发其自身记录的对账。

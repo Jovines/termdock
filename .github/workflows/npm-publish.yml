@@ -66,6 +66,8 @@ jobs:
           src/lib/components/terminal/TerminalFileDropStatus.test.tsx
           src/server/agent/integrationBatchRelease.test.ts
           src/server/agent/integration.test.ts
+          src/server/agent/integrationRecoveryBinding.test.ts
+          src/server/agent/sessionLifecycle.test.ts
           src/server/utils/hostResources.test.ts
           src/server/utils/tmuxRecoveryOperations.test.ts
           src/server/utils/tmuxRecovery.test.ts

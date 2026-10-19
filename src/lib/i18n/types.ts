@@ -215,6 +215,10 @@ export type TranslationDictionary = {
     clipboard: string;
     clipboardPlaceholder: string;
     clipboardHint: string;
+    remoteClipboard: string;
+    copyToDevice: string;
+    clipboardCopied: string;
+    clipboardAccessFailed: string;
     clipboardSent: string;
     shortcuts: string;
     switchApps: string;

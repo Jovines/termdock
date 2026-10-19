@@ -9,7 +9,7 @@ declare module '@novnc/novnc' {
     qualityLevel: number;
     compressionLevel: number;
     disconnect(): void;
-    focus(): void;
+    focus(options?: FocusOptions): void;
     blur(): void;
     sendKey(keysym: number, code?: string | null, down?: boolean): void;
     sendCredentials(credentials: { username?: string; password?: string }): void;

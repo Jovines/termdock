@@ -169,6 +169,10 @@ function shouldWriteClientLog(level: unknown, message: unknown): boolean {
     return false;
   }
 
+  // Motion trace records share a label but contain different ordered samples.
+  // Preserve every chunk while retaining the global rate limit above.
+  if (message === 'COMPUTER_MOTION_TRACE') return true;
+
   const key = `${String(level ?? 'info')}\u0000${String(message ?? '')}`;
   const last = clientLogRecent.get(key);
   if (last && now - last < CLIENT_LOG_DEDUP_WINDOW_MS) {
