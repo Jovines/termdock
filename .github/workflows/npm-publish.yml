@@ -107,7 +107,7 @@ jobs:
           if (integrity !== pack.integrity || bytes.length !== pack.size) throw new Error('Release package integrity mismatch');
           JS
       - name: Publish the verified package using OIDC
-        run: npm publish "npm-package/termdock-${EXPECTED_VERSION}.tgz" --access public
+        run: npm publish "./npm-package/termdock-${EXPECTED_VERSION}.tgz" --access public
       - name: Verify the registry package and latest tag
         run: |
           npm view "termdock@${EXPECTED_VERSION}" dist.integrity --json > registry-integrity.json
