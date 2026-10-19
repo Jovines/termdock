@@ -81,12 +81,15 @@
       return false;
     }catch{return true;}
   };
+  // Transparent desktop menu backdrops catch outside clicks but paint nothing.
+  // Keep their native input exclusion separate from the visible cutout mask.
+  const inputOnly=node=>node.classList?.contains('z-menu-backdrop')&&node.classList.contains('bg-transparent');
   const nodes=()=>[...document.querySelectorAll(selector)].filter(presentsOverlay);
   // AppKit's mask accepts rectangles. Tessellate uniform CSS rounded corners
   // into subpixel-height bands so their outside corners retain native content,
   // instead of exposing a rectangular patch of WK's backing background.
   const overlayRects=()=>{
-    const current=nodes(),budget=Math.max(1,Math.floor((64-current.length)/Math.max(1,current.length)/2));
+    const current=nodes().filter(node=>!inputOnly(node)),budget=Math.max(1,Math.floor((64-current.length)/Math.max(1,current.length)/2));
     return current.flatMap(node=>{
       const r=node.getBoundingClientRect(),style=getComputedStyle(node);
       const corners=[style.borderTopLeftRadius,style.borderTopRightRadius,style.borderBottomLeftRadius,style.borderBottomRightRadius];
@@ -103,7 +106,7 @@
       return result;
     });
   };
-  const snapshot=()=>({focused:document.hasFocus(),hidden:document.hidden,generation,overlayReady:!count||(!nodes().length&&!resuming&&!gateFailed)||acknowledged===generation,moving:nodes().some(node=>node.getAnimations?.().some(animation=>animation.playState==='running')),gate:{status:gateStatus,pending:pendingGate,resuming:!!resuming,queued:!!gateTask,frameScheduled:!!frame,acknowledged,nativePanels:count,failed:gateFailed},viewport:{width:innerWidth,height:innerHeight,scale:window.visualViewport?.scale||1},overlays:overlayRects()});
+  const snapshot=()=>({focused:document.hasFocus(),hidden:document.hidden,generation,overlayReady:!count||(!nodes().length&&!resuming&&!gateFailed)||acknowledged===generation,moving:nodes().some(node=>node.getAnimations?.().some(animation=>animation.playState==='running')),gate:{status:gateStatus,pending:pendingGate,resuming:!!resuming,queued:!!gateTask,frameScheduled:!!frame,acknowledged,nativePanels:count,failed:gateFailed},viewport:{width:innerWidth,height:innerHeight,scale:window.visualViewport?.scale||1},blockInput:nodes().some(inputOnly),overlays:overlayRects()});
   const gateGeometry=()=>{
     const current=nodes().map(node=>{let id=identities.get(node);if(!id){id=nextIdentity++;identities.set(node,id);}return id;});
     const next=JSON.stringify(current);
@@ -124,7 +127,7 @@
         gateStatus='clip-requested';
         const viewport={width:innerWidth,height:innerHeight};
         const holes=overlayRects().map(r=>[r.x,r.y,r.width,r.height]);
-        receipt=await native.request({action:'prepareOverlay',generation:String(current),viewportWidth:viewport.width,viewportHeight:viewport.height,holes});
+        receipt=await native.request({action:'prepareOverlay',generation:String(current),viewportWidth:viewport.width,viewportHeight:viewport.height,holes,blockInput:nodes().some(inputOnly)});
         if(receipt?.ready!==true||receipt.generation!==String(current)||!Array.isArray(receipt.views))throw new Error('Native overlay clip was not confirmed');
       } else {
         gateStatus='hide-requested';
@@ -154,12 +157,12 @@
   const updateGate=()=>{
     gateGeometry();
     const value=snapshot();
-    if(count&&value.overlays.length&&!acknowledged&&!pendingGate&&!gateFailed){
+    if(count&&nodes().length&&!acknowledged&&!pendingGate&&!gateFailed){
       pendingGate=true;
       let superseded=false;
       lastGate=prepareOverlay().then(confirmed=>{superseded=confirmed===false;if(!superseded)for(const listener of listeners)listener(snapshot());}).catch(error=>showFailure(error,()=>prepareOverlay(true))).finally(()=>{pendingGate=false;if(superseded)notify();});
     } else {
-      if(!value.overlays.length&&acknowledged){
+      if(!nodes().length&&acknowledged){
         acknowledged=0;const current=++generation;resuming=current;gateStatus='resume-requested';
         document.documentElement.removeAttribute('data-native-overlays-ready');
         lastGate=window.termdockDesktop.nativeTerminal.request({action:'resumeAll',generation:String(current)}).then(receipt=>{

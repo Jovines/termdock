@@ -13,7 +13,7 @@ import { escapeShellPath } from '../desktop/shellPath';
 import { createResizeSyncState, acknowledgeResize, requestResize, forceResize, observeServerSize } from './resizeSync';
 import { sanitizeTerminalInput } from './inputNormalization';
 import { nativeMenuShortcut, nativeTerminalShortcut, nativeSessionFontShortcut } from './nativeShortcuts';
-import { activateNativePathHit } from './nativePaths';
+import { activateNativePathHit, nativePathHoverRects } from './nativePaths';
 import { readNativeSnapshot, deleteNativeSnapshot, nativeSnapshotRevision, tagNativeSnapshot, writeNativeSnapshot, type NativeSnapshot } from './nativeSnapshotCache';
 import {observeOwnedNativeInput} from './nativeInputObservation';
 import { registerNativeLease, invalidateNativeHiddenReceipt, markNativeRendererReady, hideNativeLease, retireNativeLease } from './nativeLifetime';
@@ -24,7 +24,7 @@ import { MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, type TerminalSettings }
 type Cursor = {seq:number;epoch:string};
 type Surface = { token:string;epoch:string;sequence:number;baseline:Cursor|null;reused:boolean;dimensions?:{cols:number;rows:number};snapshot?:Omit<NativeSnapshot,'savedAt'>|null };
 class NativeOwnerChanged extends Error {}
-type Lifecycle = {hidden:boolean;focused:boolean;moving?:boolean;overlayReady?:boolean;viewport:{width:number;height:number;scale:number};overlays:Array<{x:number;y:number;width:number;height:number}>;generation?:number};
+type Lifecycle = {blockInput?:boolean;hidden:boolean;focused:boolean;moving?:boolean;overlayReady?:boolean;viewport:{width:number;height:number;scale:number};overlays:Array<{x:number;y:number;width:number;height:number}>;generation?:number};
 declare global { interface Window { termdockPreviewLifecycle?: {snapshot():Lifecycle;subscribe(callback:(snapshot:Lifecycle)=>void):()=>void; nativePanels(active:boolean):void; prepareOverlay?():Promise<unknown> } } }
 function rgb(color:string):number[] {
   const match=/^#([\da-f]{6})$/i.exec(color); if(!match) throw new Error('Native palette requires the existing opaque terminal tokens');
@@ -79,7 +79,9 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
   const wheelState=React.useRef({delta:0,remainder:0,x:0,y:0,width:1,height:1,cellHeight:16,frame:0});
   const lastLayout=React.useRef('');
   const layoutVersion=React.useRef(0);
+  const hoverSlice=React.useRef<{token:string;data:Record<string,unknown>}|null>(null);
   const pointerFocus=React.useRef<Surface|null>(null);
+  const explicitBlur=React.useRef(false);
   const actualFocusReceipt=React.useRef({token:'',revision:0,focused:false});
   const fatal=React.useCallback((reason:unknown)=>{
     if(disposed.current||reason instanceof NativeOwnerChanged||retiring.current)return;
@@ -167,13 +169,13 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
     const visible=latest.current.isLayoutVisible!==false&&!document.hidden&&rect.width>0&&rect.height>0&&rect.left>=0&&rect.top>=0&&rect.right<=innerWidth+0.5&&rect.bottom<=innerHeight+0.5;
     // During the first safe overlay ACK, keep an already-visible surface in
     // place; prepareOverlay atomically adds the cutout before the CSS gate lifts.
-    const holdForOverlay=visible&&overlaps.length>0&&life?.overlayReady===false;
+    const holdForOverlay=visible&&(overlaps.length>0||life?.blockInput===true)&&life?.overlayReady===false;
     if(pointerFocus.current&&pointerFocus.current!==surface.current)pointerFocus.current=null;
     const pointerIntent=pointerFocus.current===surface.current&&visible&&latest.current.inputActive!==false;
     if(pointerIntent){const old=document.activeElement;if(old instanceof HTMLElement&&(old.isContentEditable||old.matches('input,textarea,select,[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"]')))old.blur();}
     const active=document.activeElement;
     const textFocus=active instanceof HTMLElement&&(active.isContentEditable||active.matches('input,textarea,select,[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"]'));
-    const signature=JSON.stringify([surface.current.token,visible,holdForOverlay,rect.x,rect.y,rect.width,rect.height,innerWidth,innerHeight,window.devicePixelRatio,latest.current.autoFocus,latest.current.inputActive,textFocus,pointerIntent,overlaps,life?.generation,life?.focused]);
+    const signature=JSON.stringify([surface.current.token,visible,holdForOverlay,rect.x,rect.y,rect.width,rect.height,innerWidth,innerHeight,window.devicePixelRatio,latest.current.autoFocus,latest.current.inputActive,textFocus,pointerIntent,overlaps,life?.generation,life?.focused,life?.blockInput]);
     if(signature===lastLayout.current)return;lastLayout.current=signature;
     const version=++layoutVersion.current;
     void (async()=>{
@@ -181,14 +183,14 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
       if(!visible){await serializeCommand('visible',{visible:false});return;}
       // The host applies frame, overlay clip and visibility in one AppKit
       // transaction. A moving overlay must not cause a hide/show per frame.
-      const receipt=await serializeCommand('rect',{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:innerWidth,viewportHeight:innerHeight,holes:overlaps.map(r=>[r.x,r.y,r.width,r.height]),generation:String(life?.generation??0)},version);
+      const receipt=await serializeCommand('rect',{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:innerWidth,viewportHeight:innerHeight,holes:overlaps.map(r=>[r.x,r.y,r.width,r.height]),blockInput:life?.blockInput===true,generation:String(life?.generation??0)},version);
       if(version!==layoutVersion.current)return;
       if((receipt as {staleGeometry?:boolean;layoutPending?:boolean}|undefined)?.staleGeometry||(receipt as {layoutPending?:boolean}|undefined)?.layoutPending){
         lastLayout.current='';
         if(!layoutFrame.current)layoutFrame.current=requestAnimationFrame(()=>{layoutFrame.current=0;measure();});
         return;
       }
-      if(version===layoutVersion.current){const focused=await serializeCommand('focus',{focused:(pointerIntent||latest.current.autoFocus!==false)&&!textFocus});if(pointerIntent&&focused!==undefined&&pointerFocus.current===surface.current)pointerFocus.current=null;}
+      if(version===layoutVersion.current){const focused=await serializeCommand('focus',{focused:(pointerIntent||(!explicitBlur.current&&latest.current.autoFocus!==false))&&!textFocus&&!life?.blockInput});if(pointerIntent&&focused!==undefined&&pointerFocus.current===surface.current)pointerFocus.current=null;}
     })().catch(fatal);
   },[fatal,serializeCommand]);
   const send=React.useCallback(async(data:string,options?:Parameters<TerminalViewportProps['onInput']>[1])=>{
@@ -400,10 +402,14 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
           // Invalidate once per real loss; repeated negative ACKs must not loop.
           if(!event.focused&&receipt.token===current.token&&receipt.focused)lastLayout.current='';
           const active=document.activeElement,editable=active instanceof HTMLElement&&(active.isContentEditable||active.matches('input,textarea,select'));
+          if(!event.focused&&receipt.token===current.token&&receipt.focused&&!explicitBlur.current&&!editable&&latest.current.inputActive!==false&&latest.current.isLayoutVisible!==false&&!document.hidden){
+            const life=window.termdockPreviewLifecycle?.snapshot();
+            if(life?.focused!==false&&!life?.overlays.length)queueMicrotask(()=>{if(surface.current===current&&!explicitBlur.current)measure();});
+          }
           if(event.focused&&(latest.current.inputActive===false||latest.current.isLayoutVisible===false||document.hidden||editable))break;
           latest.current.onInputFocusChange?.(event.focused);break;
         }
-        case 'pointer':pointerFocus.current=current;container.current?.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:1,pointerType:'mouse'}));measure();break;
+        case 'pointer':explicitBlur.current=false;pointerFocus.current=current;container.current?.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:1,pointerType:'mouse'}));measure();break;
         case 'wheel': {
           const wheel=event.wheel;if(!wheel)break;
           container.current?.dispatchEvent(new WheelEvent('wheel',{bubbles:true,deltaY:wheel.deltaY}));
@@ -438,6 +444,11 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
         }
         case 'title':if(event.text!==undefined)latest.current.onNativeTitleChange?.(event.text);break;
         case 'link':if(event.text){try{const url=new URL(event.text);if(url.protocol==='file:')latest.current.onDirectoryLinkActivate?.(decodeURIComponent(url.pathname));else if(['https:','http:','mailto:'].includes(url.protocol))window.open(url.href,'_blank','noopener');}catch{/* An invalid remote link is inert. */}}break;
+        case 'pathHover':if(event.text&&event.revision){try{
+          const incoming=JSON.parse(event.text) as Record<string,unknown>;
+          const data=event.partial?(hoverSlice.current?.token===current.token?{...hoverSlice.current.data,...incoming}:null):incoming;
+          if(data){if(!event.partial)hoverSlice.current={token:current.token,data};const rects=nativePathHoverRects(data);void serializeCommand('linkHover',{revision:event.revision,rects}).catch(()=>{});}
+        }catch{/* Invalid or expired hover data cannot activate anything. */}}break;
         case 'path':if(event.text){try{activateNativePathHit(JSON.parse(event.text),latest.current.onDirectoryLinkActivate,event.plainClick===true?url=>{window.open(url,'_blank','noopener');}:undefined);}catch{/* A bounded or stale path read is inert. */}}break;
         case 'bell':container.current?.dispatchEvent(new CustomEvent('termdock:terminal-bell',{bubbles:true}));break;
         case 'fatal':fatal(event.message||'Native terminal failed');break;
@@ -483,8 +494,8 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
     prepareNativeSession:session=>prepare(session).catch(error=>{fatal(error);throw error;}),
     captureNativeSnapshot:async(cursor)=>{if(!queue.current?.idle)return null;const session=backend.current;if(!session)return null;const generation=nativeSnapshotRevision(session);const value=await serializeCommand('capture',{sequence:queue.current.consumedSequence,cursor}) as Omit<NativeSnapshot,'savedAt'>|{status:string}|null;return value&&!('status' in value)?tagNativeSnapshot({...value,savedAt:Date.now()},generation):null;},
     saveNativeCursor:async(cursor)=>{if(queue.current?.idle)await serializeCommand('checkpoint',{sequence:queue.current.consumedSequence,cursor});},
-    focus:()=>{if(surface.current)void serializeCommand('focus',{focused:true}).catch(fatal);},
-    blur:()=>{if(surface.current)void serializeCommand('focus',{focused:false}).catch(fatal);latest.current.onInputFocusChange?.(false);},
+    focus:()=>{explicitBlur.current=false;if(surface.current)void serializeCommand('focus',{focused:true}).catch(fatal);},
+    blur:()=>{explicitBlur.current=true;if(surface.current)void serializeCommand('focus',{focused:false}).catch(fatal);latest.current.onInputFocusChange?.(false);},
     clear:clearLocal,
     prepareScreenReplacement:()=>{
       // An authoritative stream replacement needs a neutral parser too. A RIS
@@ -530,7 +541,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
     // A click on this pane must retry focus even if cached layout is unchanged;
     // child search fields/buttons and inactive panes retain their own focus.
     if(event.target!==event.currentTarget||!surface.current||latest.current.inputActive===false||latest.current.isLayoutVisible===false||document.hidden)return;
-    pointerFocus.current=surface.current;lastLayout.current='';measure();
+    explicitBlur.current=false;pointerFocus.current=surface.current;lastLayout.current='';measure();
   }}>
     {feedbackMessage&&<div role="alert" className="absolute bottom-2 left-2 z-20 rounded bg-surface p-2 text-destructive"><span>{feedbackMessage}</span><button onClick={clearFeedback}>×</button></div>}
     {error&&<div role="alert" className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4 text-destructive">{error}</div>}

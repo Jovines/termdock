@@ -5,7 +5,7 @@ type Cell={chars:string;width:number;fgMode:number;fgColor:number};
 type Slice={version:1;row:number;column:number;rows:Array<{wrapped:boolean;cells:Cell[]}>};
 /** Temporary read-only engine cells, only for an explicit link click. Reuse the
  * original soft/hard-wrap path matcher; no VT parser, renderer or lasting grid. */
-export function activateNativePathHit(value:unknown,activate:((path:string,line?:number)=>void)|undefined,openUrl?: (url:string)=>void):boolean {
+export function activateNativePathHit(value:unknown,activate:((path:string,line?:number)=>void)|undefined,openUrl?: (url:string)=>void,onHit?:(rects:number[][])=>void):boolean {
  const data=value as Slice;
  if(!data||data.version!==1||!Array.isArray(data.rows)||data.rows.length>64||!Number.isSafeInteger(data.row)||!Number.isSafeInteger(data.column)||data.row<0||data.row>=data.rows.length||data.column<0)return false;
  let count=0;
@@ -23,11 +23,16 @@ export function activateNativePathHit(value:unknown,activate:((path:string,line?
  const hit:Parameters<ILinkProvider['provideLinks']>[1]=links=>{
   const point={x:data.column+1,y:data.row+1};
   const link=links?.find(link=>(point.y>link.range.start.y||point.y===link.range.start.y&&point.x>=link.range.start.x)&&(point.y<link.range.end.y||point.y===link.range.end.y&&point.x<=link.range.end.x));
-  if(link){found=true;link.activate(new MouseEvent('click'),link.text);}
+  if(link){found=true;const rects:number[][]=[];for(let y=link.range.start.y;y<=link.range.end.y;y++){const x=y===link.range.start.y?link.range.start.x-1:0;const end=y===link.range.end.y?link.range.end.x:data.rows[y-1].cells.length;rects.push([x,y-1-data.row,end-x,1]);}onHit?.(rects);link.activate(new MouseEvent('click'),link.text);}
  };
  // Reuse xterm's bounded URL matching and wide/soft-wrapped cell mapping.
  // Command-click URLs remain Ghostty-owned; only plain clicks use this branch.
  if(openUrl){const addon=new WebLinksAddon((_event,url)=>{try{const parsed=new URL(url);if(['http:','https:'].includes(parsed.protocol))openUrl(parsed.href);}catch{/* Inert malformed text. */}});try{addon.activate(terminal);webProvider?.provideLinks(data.row+1,hit);}finally{addon.dispose();}}
  if(!found&&activate)createTerminalPathLinkProvider(terminal,activate).provideLinks(data.row+1,hit);
  return found;
+}
+
+/** Same recognizer as activation, with inert callbacks: hover never opens anything. */
+export function nativePathHoverRects(value:unknown):number[][] {
+ let rects:number[][]=[];activateNativePathHit(value,()=>{},()=>{},value=>{rects=value;});return rects;
 }

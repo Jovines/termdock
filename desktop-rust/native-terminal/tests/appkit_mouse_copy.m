@@ -5,9 +5,10 @@
 #include <assert.h>
 static NSPasteboard *ownedBoard;
 static NSPasteboard *ownedGeneral(id obj,SEL sel){(void)obj;(void)sel;return ownedBoard;}
+static unsigned hoverCount,partialCount,linkCount;static uint64_t hoverRevision;static NSString *lastLink;
 static unsigned pathCount;static bool plainPath;
 static unsigned shortcutCount,selectionCount,failureCount,inputCount,wheelCount;
-static int observe(void *ctx,uint32_t kind,const uint8_t *data,size_t len,uint64_t a,uint64_t b){(void)ctx;(void)data;if(kind==19){pathCount++;plainPath=a==1;}(void)a;(void)b;if(kind==0)inputCount+=(unsigned)len;if(kind==2)selectionCount++;if(kind==11)shortcutCount++;if(kind==21)failureCount++;if(kind==14)wheelCount++;return 1;}
+static int observe(void *ctx,uint32_t kind,const uint8_t *data,size_t len,uint64_t a,uint64_t b){(void)ctx;if(kind==18){linkCount++;lastLink=[[NSString alloc]initWithBytes:data length:len encoding:NSUTF8StringEncoding];}if(kind==23){hoverCount++;hoverRevision=a;}if(kind==24){partialCount++;hoverRevision=a;}if(kind==19){pathCount++;plainPath=a==1;}(void)a;(void)b;if(kind==0)inputCount+=(unsigned)len;if(kind==2)selectionCount++;if(kind==11)shortcutCount++;if(kind==21)failureCount++;if(kind==14)wheelCount++;return 1;}
 static void settle(TDHandle *h,const char *text){
  __block atomic_bool done;atomic_init(&done,false);__block bool ok=false;td_native_worker_busy(h,true);
  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{if(text)ok=td_native_feed(h,(const uint8_t *)text,strlen(text));else ok=true;if(ok)ok=td_native_drain_app(h)&&td_native_barrier(h);atomic_store(&done,true);});
@@ -49,7 +50,7 @@ int main(void){@autoreleasepool{
  // Actual gesture dispatch must activate only clicks, including under app mouse capture.
  settle(h,"\033c\033[H/tmp/termdock-owned.ts:7 https://example.test/owned\033[?1002h\033[?1006h");
  for(int mode=0;mode<5;mode++){
-  unsigned before=pathCount;
+  unsigned before=pathCount,beforeLinks=linkCount;
   for(int i=0;i<(mode==2?3:2);i++){
    bool up=i==(mode==2?2:1);NSEventType type=i==0?NSEventTypeLeftMouseDown:up?NSEventTypeLeftMouseUp:NSEventTypeLeftMouseDragged;
    double column=mode==1?35.5:5.5;if(mode==2&&i)column=12.5;
@@ -57,8 +58,25 @@ int main(void){@autoreleasepool{
    NSEvent *event=[NSEvent mouseEventWithType:type location:point modifierFlags:mode==3?NSEventModifierFlagShift:mode==4?NSEventModifierFlagCommand:0 timestamp:10+mode+.1*i windowNumber:w.windowNumber context:nil eventNumber:100+mode*3+i clickCount:1 pressure:up?0:1];
    if(i==0)[v mouseDown:event];else if(up)[v mouseUp:event];else[v mouseDragged:event];drain(h,v);
   }
-  if(mode==2||mode==3)assert(pathCount==before);else{assert(pathCount==before+1);assert(plainPath==(mode!=4));}
+  printf("clickMode=%d pathDelta=%u linkDelta=%u\n",mode,pathCount-before,linkCount-beforeLinks);
+  if(mode==2||mode==3)assert(pathCount==before&&linkCount==beforeLinks);else if(mode==1){assert(pathCount+linkCount==before+beforeLinks+1);}else{assert(pathCount==before+1&&linkCount==beforeLinks);assert(plainPath==(mode!=4));}
  }
  printf("plainPathClick=pass plainURLClick=pass dragDoesNotActivate=pass shiftDoesNotActivate=pass commandPathClick=pass\n");
+ // Idle mouse motion is local even with all-motion tracking after F2/Escape.
+ settle(h,"\033c\033[H/tmp/owned-dir/ https://example.test/owned\033[?1003h\033[?1006h");
+ unsigned beforeMotion=inputCount;uint64_t previousHover=0;
+ for(int i=0;i<2;i++){
+  NSPoint point=[v convertPoint:NSMakePoint((5.5+i)*cw,.5*ch) toView:nil];NSEvent *motion=[NSEvent mouseEventWithType:NSEventTypeMouseMoved location:point modifierFlags:0 timestamp:20+.1*i windowNumber:w.windowNumber context:nil eventNumber:200+i clickCount:0 pressure:0];[v mouseMoved:motion];drain(h,v);
+  assert(inputCount==beforeMotion&&hoverRevision>previousHover);double line[]={0,0,15,1};assert(td_native_link_hover(h,hoverRevision,line,1));assert(v.linkDecoration.lines.count==1);if(previousHover)assert(!td_native_link_hover(h,previousHover,line,1));previousHover=hoverRevision;
+ }
+ assert(hoverCount>0&&partialCount>0);[v mouseExited:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:22 windowNumber:w.windowNumber context:nil subtype:0 data1:0 data2:0]];assert(!td_native_link_hover(h,hoverRevision,NULL,0));
+ // OSC 8 file labels need their target URI, not a guessed visible filename.
+ settle(h,"\033c\033[H\033]8;;file:///tmp/owned-dir/\033\\Owned folder\033]8;;\033\\");
+ unsigned beforeLink=linkCount;
+ for(int up=0;up<2;up++){
+  NSPoint point=[v convertPoint:NSMakePoint(3.5*cw,.5*ch) toView:nil];NSEvent *event=[NSEvent mouseEventWithType:up?NSEventTypeLeftMouseUp:NSEventTypeLeftMouseDown location:point modifierFlags:0 timestamp:30+.1*up windowNumber:w.windowNumber context:nil eventNumber:300+up clickCount:1 pressure:up?0:1];if(up)[v mouseUp:event];else[v mouseDown:event];drain(h,v);
+ }
+ assert(linkCount==beforeLink+1&&[lastLink isEqualToString:@"file:///tmp/owned-dir/"]);
+ printf("nativeHover=pass staleHoverRejected=pass idleMotionBytes=0 osc8FileClick=pass\n");
  method_setImplementation(method,original);[ownedBoard releaseGlobally];ownedBoard=nil;td_native_destroy(h);td_native_demo_close(window);assert(expected.length>0&&[actual isEqualToString:expected]);return 0;
 }}

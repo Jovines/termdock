@@ -637,3 +637,36 @@ it('opens plain-click URLs and paths in the owning viewport without duplicating 
  await act(async()=>{click('https://example.test/owned',true);click('/home/me/owned.ts:7',true);click('https://example.test/owned',false);});
  expect(open).toHaveBeenCalledExactlyOnceWith('https://example.test/owned','_blank','noopener');expect(onPath).toHaveBeenCalledExactlyOnceWith('/home/me/owned.ts',7);
 });
+
+it('reclaims an unexpected native focus loss without waiting for a switch or lifecycle event',async()=>{
+ const ref=React.createRef<TerminalController>();render(<NativeTerminalViewport {...props()} ref={ref} inputActive/>);
+ await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');await tick();});
+ act(()=>emit(latestToken,{type:'focusChanged',focused:true,revision:1}));host.request.mockClear();
+ await act(async()=>{emit(latestToken,{type:'focusChanged',focused:false,revision:2});await tick();});
+ expect(host.request.mock.calls.some(([a])=>a.action==='focus'&&a.focused)).toBe(true);
+ host.request.mockClear();await act(async()=>{emit(latestToken,{type:'focusChanged',focused:false,revision:3});await tick();});expect(host.request).not.toHaveBeenCalled();
+ act(()=>emit(latestToken,{type:'focusChanged',focused:true,revision:4}));await act(async()=>{ref.current!.blur();await tick();});host.request.mockClear();
+ await act(async()=>{emit(latestToken,{type:'focusChanged',focused:false,revision:5});await tick();});expect(host.request).not.toHaveBeenCalled();
+});
+it('hover replies are scoped to the current surface and do not open links or files',async()=>{
+ const ref=React.createRef<TerminalController>(),open=vi.spyOn(window,'open').mockReturnValue(null),path=vi.fn();render(<NativeTerminalViewport {...props()} ref={ref} onDirectoryLinkActivate={path}/>);
+ await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');await tick();});host.request.mockClear();
+ const data={version:1,row:0,column:4,rows:[{wrapped:false,cells:[...'/owned/dir/ other'].map(chars=>({chars,width:1,fgMode:0,fgColor:0}))}]};
+ await act(async()=>{emit(latestToken,{type:'pathHover',text:JSON.stringify(data),revision:1});await tick();});
+ expect(host.request.mock.calls.some(([a])=>a.action==='linkHover'&&a.revision===1&&a.rects.length===1)).toBe(true);
+ await act(async()=>{emit(latestToken,{type:'pathHover',text:JSON.stringify({column:14}),partial:true,revision:2});await tick();});
+ expect(host.request.mock.calls.some(([a])=>a.action==='linkHover'&&a.revision===2&&a.rects.length===0)).toBe(true);
+ expect(open).not.toHaveBeenCalled();expect(path).not.toHaveBeenCalled();
+});
+
+it('transparent outside-click capture preserves terminal pixels and releases input after menu close',async()=>{
+ const ref=React.createRef<TerminalController>();render(<NativeTerminalViewport {...props()} ref={ref}/>);
+ await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');await tick();});host.request.mockClear();
+ lifeState={...lifeState,generation:8,blockInput:true,overlays:[{x:20,y:30,width:100,height:80}]};
+ await act(async()=>{for(const fn of lifeListeners)fn(lifeState);await tick();});
+ expect(host.request.mock.calls.map(([a])=>a)).toEqual(expect.arrayContaining([expect.objectContaining({action:'rect',blockInput:true,holes:[[20,30,100,80]]}),expect.objectContaining({action:'focus',focused:false})]));
+ expect(host.request.mock.calls.some(([a])=>a.action==='visible'&&a.visible===false)).toBe(false);host.request.mockClear();
+ lifeState={...lifeState,generation:9,blockInput:false,overlays:[]};
+ await act(async()=>{for(const fn of lifeListeners)fn(lifeState);await tick();});
+ expect(host.request.mock.calls.map(([a])=>a)).toEqual(expect.arrayContaining([expect.objectContaining({action:'rect',blockInput:false,holes:[]}),expect.objectContaining({action:'focus',focused:true})]));
+});

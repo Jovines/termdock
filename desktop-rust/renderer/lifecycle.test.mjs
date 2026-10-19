@@ -187,3 +187,24 @@ test('the center recovery button is clickable and re-enables after a rejected na
  vm.runInNewContext(script,{document,window:{termdockDesktop:{retryNativeIsolation:(...args)=>{calls.push(args);return Promise.reject(Error('controlled'));}}}});
  const button=children[1];assert(!button.disabled);button.onclick();assert.equal(button.disabled,true);await turn();assert.equal(button.disabled,false);assert.deepEqual(calls,[['workspace-a','page:1']]);
 });
+
+// Actual host prepare must remain presentation-only even for inactive retained
+// sessions or a surface with an outstanding engine resize/barrier.
+test('popup first-paint clipping cannot wait on terminal grid layout or change visibility',()=>{
+ const source=fs.readFileSync(new URL('../src-tauri/src/native_terminal.rs',import.meta.url),'utf8');
+ const prepare=source.slice(source.indexOf('if let Request::PrepareOverlay'),source.indexOf('if let Request::HideAll'));
+ assert.match(prepare,/entry\.panel\.clip\(&union\)/);
+ assert.doesNotMatch(prepare,/set_layout|set_visible|entry\.visible\s*=/);
+});
+
+test('transparent menu outside-click capture blocks native input without hiding the terminal',async()=>{
+ const f=fixture(),api=f.window.termdockPreviewLifecycle;api.nativePanels(true);
+ const backdrop=f.add();backdrop.rect={x:0,y:0,width:800,height:600};backdrop.classList={contains:name=>['z-menu-backdrop','bg-transparent'].includes(name)};
+ const panel=f.add();panel.rect={x:20,y:100,width:120,height:200};await turn();
+ const prepare=f.calls[0];assert.equal(prepare.request.blockInput,true);assert.equal(JSON.stringify(prepare.request.holes),'[[20,100,120,200]]');
+ prepare.resolve({ready:true,generation:prepare.request.generation,views:['terminal'],epoch:'page'});await turn();
+ assert.equal(api.snapshot().blockInput,true);assert.equal(f.calls.length,1);
+ f.nodes.length=0;f.observed()([{target:{},type:'childList'}]);await turn();
+ const resume=f.calls[1];assert.equal(resume.request.action,'resumeAll');resume.resolve({generation:resume.request.generation,epoch:'page'});await turn();
+ assert.equal(api.snapshot().blockInput,false);assert.equal(api.snapshot().overlays.length,0);
+});

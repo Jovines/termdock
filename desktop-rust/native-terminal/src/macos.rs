@@ -130,6 +130,7 @@ unsafe extern "C" fn receive(
         22 if a<=1 && b>0 => HostEvent::FocusChanged { focused:a==1, revision:b },
         17 => HostEvent::ClipboardText(String::from_utf8_lossy(&bytes).into_owned()),
         18 => HostEvent::OpenLink(String::from_utf8_lossy(&bytes).into_owned()),
+        23 | 24 => HostEvent::PathHover { text: String::from_utf8_lossy(&bytes).into_owned(), revision: a, partial: kind == 24 },
         19 => HostEvent::PathHit { text: String::from_utf8_lossy(&bytes).into_owned(), plain_click: a == 1 },
         20 => {
             let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { return 0 };
@@ -209,6 +210,7 @@ extern "C" {
         rows: *mut u16,
     );
     fn td_native_focus(handle: *mut c_void);
+    fn td_native_link_hover(handle: *mut c_void, revision: u64, rects: *const f64, count: usize) -> bool;
     fn td_native_policy(handle: *mut c_void, tmux: bool);
     fn td_native_history(handle: *mut c_void, history: u32);
     fn td_native_bind_webview(handle:*mut c_void,wk_view:*mut c_void)->bool;
@@ -218,6 +220,7 @@ extern "C" {
     fn td_native_read_text(handle: *mut c_void, selection: bool) -> c_int;
     fn td_native_attachment(handle:*mut c_void,wk_view:*mut c_void)->u32;
     fn td_native_cursor(handle: *mut c_void, x: *mut u32, y: *mut u32);
+    fn td_native_input_blocked(handle:*mut c_void,blocked:bool);
     fn td_native_clip(handle: *mut c_void, rects: *const f64, count: usize) -> bool;
     fn td_native_present_layout(handle:*mut c_void,x:f64,y:f64,w:f64,height:f64,rects:*const f64,count:usize,visible:bool)->c_int;
     fn td_native_layout(handle:*mut c_void,x:f64,y:f64,w:f64,height:f64,scale:f64,rects:*const f64,count:usize,resize:bool,visible:bool,cols:*mut u16,rows:*mut u16)->c_int;
@@ -676,6 +679,11 @@ impl NativePanel {
         }
         Ok(())
     }
+    pub fn set_link_hover(&mut self, revision:u64, rects:&[[f64;4]]) -> Result<bool,NativeError> {
+        main_thread()?;if self.closed{return Err(Error::Closed.into());}
+        if rects.len()>64{return Err(Error::Dimensions.into());}
+        Ok(unsafe {td_native_link_hover(self.handle.as_ptr(),revision,rects.as_ptr().cast(),rects.len())})
+    }
     pub fn set_history(&mut self, history: usize) -> Result<(), NativeError> {
         self.ensure_idle()?;
         self.envelope.history(history)?;
@@ -907,6 +915,10 @@ impl NativePanel {
     /// Engine occlusion/focus are deferred until the feed is idle.
     /// AppKit-only exclusion mask and hit-test holes; no engine lock, no
     /// second parser and no pause in hidden/occluded output consumption.
+    pub fn set_input_blocked(&mut self, blocked:bool)->Result<(),NativeError>{
+        main_thread()?;if self.closed{return Err(Error::Closed.into());}
+        unsafe{td_native_input_blocked(self.handle.as_ptr(),blocked)};Ok(())
+    }
     pub fn clip(&mut self, holes: &[[f64; 4]]) -> Result<(), NativeError> {
         main_thread()?;
         if self.closed {

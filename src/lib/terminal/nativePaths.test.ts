@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import {expect,it,vi} from 'vitest';
-import {activateNativePathHit} from './nativePaths';
+import {activateNativePathHit,nativePathHoverRects} from './nativePaths';
 const row=(text:string,wrapped=false,fgMode=0,fgColor=0)=>({wrapped,cells:[...text].map(chars=>({chars,width:1,fgMode,fgColor}))});
 it('uses existing path semantics for normal, soft-wrap, colored hard-wrap, escaped spaces and line suffix',()=>{
  for(const data of [
@@ -31,4 +31,9 @@ it('plain-click matching leaves prose, gaps and executable URL schemes inert',()
  const open=vi.fn(),path=vi.fn();
  for(const text of ['ordinary prose','javascript:alert(1)','data:text/html,hello','     https://example.test'])expect(activateNativePathHit({version:1,rows:[row(text)],row:0,column:2},path,open)).toBe(false);
  expect(open).not.toHaveBeenCalled();expect(path).not.toHaveBeenCalled();
+});
+
+it('hover uses the activation matcher without side effects and returns multi-row cell underlines',()=>{
+ expect(nativePathHoverRects({version:1,rows:[row('/home/me/'),row('file.ts',true)],row:1,column:3})).toEqual([[0,-1,9,1],[0,0,7,1]]);
+ expect(nativePathHoverRects({version:1,rows:[row('plain words')],row:0,column:2})).toEqual([]);
 });

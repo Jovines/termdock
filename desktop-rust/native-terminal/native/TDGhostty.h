@@ -31,6 +31,7 @@ bool td_native_palette(void *handle, const char *config);
 void td_native_focus(void *handle);
 bool td_native_bind_webview(void *handle,void *wk_view);
 bool td_native_blur(void *handle);
+bool td_native_link_hover(void *handle,uint64_t revision,const double *rects,size_t count);
 void td_native_policy(void *handle, bool tmux);
 void td_native_history(void *handle, uint32_t history);
 bool td_native_action(void *handle, const char *action, size_t len);
@@ -64,4 +65,5 @@ int td_native_demo_step(void *window);
 void td_native_demo_close(void *window);
 void *td_native_demo_parent(void *window);
 void td_native_demo_bounds(void *window, double *w, double *h, double *scale);
+void td_native_input_blocked(void *handle,bool blocked);
 #endif

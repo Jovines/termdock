@@ -137,6 +137,7 @@ fn token(request: &Request) -> Option<&str> {
         | Request::Menu { token, .. }
         | Request::Capture { token, .. }
         | Request::Restore { token, .. }
+        | Request::LinkHover { token, .. }
         | Request::Policy { token, .. }
         | Request::History { token, .. }
         | Request::Write { token, .. }
@@ -209,6 +210,7 @@ fn pump(app: &AppHandle) {
                     },
                     HostEvent::ClipboardText(text)=>json!({"type":"pasteText","text":text}),
                     HostEvent::OpenLink(text)=>json!({"type":"link","text":text}),
+                    HostEvent::PathHover{text,revision,partial}=>json!({"type":"pathHover","text":text,"revision":revision,"partial":partial}),
                     HostEvent::PathHit{text,plain_click}=>json!({"type":"path","text":text,"plainClick":plain_click}),
                     HostEvent::FileDrop(_)=>continue,
                     HostEvent::PasteRequested=>json!({"type":"paste"}),
@@ -350,7 +352,7 @@ pub async fn dispatch(app: AppHandle, window: WebviewWindow, args: Value,trace_i
                     OVERLAYS.with(|gates|gates.borrow_mut().remove(&context.window));
                     return Ok(json!({"generation":generation,"epoch":context.epoch,"views":views,"hidden":true,"retired":true}));
                 }
-                if let Request::PrepareOverlay{generation,viewport_width,viewport_height,holes}=&request {
+                if let Request::PrepareOverlay{generation,viewport_width,viewport_height,holes,block_input}=&request {
                     native_contract::validate_id(generation)?;
                     if holes.len()>64||![*viewport_width,*viewport_height].iter().all(|v|v.is_finite()&&*v>0.0&&*v<=32768.0)
                         ||holes.iter().flatten().any(|v|!v.is_finite())
@@ -368,8 +370,12 @@ pub async fn dispatch(app: AppHandle, window: WebviewWindow, args: Value,trace_i
                         if let Some(rect)=entry.rect {
                             let clipped=native_contract::overlay_holes_in_panel(holes,(*viewport_width,*viewport_height),(host.x,host.y,host.width,host.height),(rect.x,rect.y,rect.width,rect.height))?;
                             let union=native_contract::union_rectangles(&clipped)?;
-                            let layout=entry.panel.set_layout(rect,&union,entry.visible).map_err(fail);
-                            native_contract::confirm_layout_visibility(&mut entry.visible,layout)?;
+                            // This is a presentation-only cutout. Output/replay or a
+                            // pending grid resize must not reject a small popup and
+                            // force hideAll across every retained session. entry.rect
+                            // tracks the presented frame, including LayoutPending.
+                            entry.panel.clip(&union).map_err(fail)?;
+                            entry.panel.set_input_blocked(*block_input).map_err(fail)?;
                         }
                         entry.clip_generation=Some(generation.clone());
                     }
@@ -566,7 +572,7 @@ pub async fn dispatch(app: AppHandle, window: WebviewWindow, args: Value,trace_i
                         let (cols,rows)=entry.panel.dimensions();
                         Ok(json!({"complete":true,"token":entry.token,"epoch":context.epoch,"sequence":entry.panel.last_sequence(),"dimensions":{"cols":cols,"rows":rows}}))
                     },
-                    Request::Rect{x,y,width,height,viewport_width,viewport_height,holes,generation,..}=>{
+                    Request::Rect{x,y,width,height,viewport_width,viewport_height,holes,generation,block_input,..}=>{
                         let zoom=shell::state(&current).zooms.lock().unwrap().get(&context.window).copied().unwrap_or(1.);
                         // During live resize WK and AppKit can report different
                         // generations. Retry without mutating the surface/font.
@@ -592,6 +598,7 @@ pub async fn dispatch(app: AppHandle, window: WebviewWindow, args: Value,trace_i
                                 clipped.push([host.x+hx-rect.x,host.y+hy-rect.y,hw,hh]);
                             }
                             let union=native_contract::union_rectangles(&clipped)?;
+                            entry.panel.set_input_blocked(block_input).map_err(fail)?;
                             let layout=entry.panel.set_layout(rect,&union,true);
                             if matches!(&layout,Err(termdock_native_terminal::macos::NativeError::LayoutPending)) {
                                 entry.rect=Some(rect);entry.clip_generation=allowed;entry.visible=true;
@@ -604,6 +611,7 @@ pub async fn dispatch(app: AppHandle, window: WebviewWindow, args: Value,trace_i
                         Ok(json!({"rectApplied":true}))
                     },
                     Request::Visible{visible,..}=>{if visible&&OVERLAYS.with(|gates|gates.borrow().get(&context.window).is_some_and(|generation|Some(generation)!=entry.clip_generation.as_ref())){return Err("Native overlay is still active".into());}entry.panel.set_visible(visible).map_err(fail)?;entry.visible=visible;Ok(json!({"visible":visible,"epoch":context.epoch}))},
+                    Request::LinkHover{revision,rects,..}=>Ok(json!(entry.panel.set_link_hover(revision,&rects).map_err(fail)?)),
                     Request::Focus{focused,..}=>{if focused {entry.panel.focus().map_err(fail)?;}else{entry.panel.blur().map_err(fail)?;}Ok(Value::Null)},
                     Request::Palette{palette,..}=>{entry.panel.set_palette(palette).map_err(fail)?;Ok(Value::Null)},
                     Request::Cursor{visible,blink,..}=>{entry.panel.set_cursor(visible,blink).map_err(fail)?;Ok(Value::Null)},

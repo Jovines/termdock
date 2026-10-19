@@ -22,7 +22,15 @@ int main(void){@autoreleasepool{
  NSRect previous=view.frame;
  assert(!td_native_present_layout(&host,NAN,40,400,300,NULL,0,true));assert(NSEqualRects(previous,view.frame));
  atomic_store(&host.replaying,true);assert(!td_native_present_layout(&host,200,40,400,300,NULL,0,true));assert(NSEqualRects(previous,view.frame));
- atomic_store(&host.replaying,false);
+ // Popup clipping is independent of parser/replay and pending grid geometry.
+ // A retained hidden session must also stay hidden; clipping never shows it.
+ assert(td_native_clip(&host,hole,1));assert(!view.hidden&&view.layer.mask&&view.clipHoles.count==1);
+ assert(NSEqualRects(previous,view.frame));assert(view.layer.animationKeys.count==0);
+ assert(td_native_clip(&host,NULL,0));assert(!view.hidden&&!view.layer.mask);
+ td_native_input_blocked(&host,true);assert(!view.hidden&&[view hitTest:[view convertPoint:NSMakePoint(150,150) toView:parent]]==nil);
+ td_native_input_blocked(&host,false);assert([view hitTest:[view convertPoint:NSMakePoint(150,150) toView:parent]]==view);
+ view.hidden=YES;assert(td_native_clip(&host,hole,1));assert(view.hidden);
+ view.hidden=NO;atomic_store(&host.replaying,false);
  assert(td_native_present_layout(&host,200,40,600,500,NULL,0,true));assert(!view.layer.mask&&view.clipHoles.count==0);
  // Returning to the last committed grid still restores the visual frame.
  uint16_t cols=0,rows=0;

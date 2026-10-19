@@ -2,6 +2,9 @@
 import React from 'react';
 import {act,cleanup,render,waitFor} from '@testing-library/react';
 import {beforeEach,afterEach,it,expect,vi} from 'vitest';
+// Use the real vanilla stores with this fixture's React instance; shared
+// dependency symlinks can otherwise load a second React through the CJS shim.
+vi.mock('zustand',async()=>{const {createStore}=await import('zustand/vanilla');const create=(initial?:any):any=>{if(!initial)return create;const api=createStore(initial);return Object.assign((selector:any=(value:any)=>value)=>selector(React.useSyncExternalStore(api.subscribe,api.getState,api.getInitialState)),api);};return{create};});
 const host=vi.hoisted(()=>({listeners:new Set<(value:any)=>void>(),request:vi.fn(),token:'',serial:0,writes:[] as any[]}));
 vi.mock('../terminal/TerminalViewport',async()=>({TerminalViewport:(await import('../../terminal/nativeViewport')).NativeTerminalViewport}));
 vi.mock('../../desktop/nativeBridge',()=>{const nativeTerminal={available:true,request:host.request,subscribe:(listener:any)=>{host.listeners.add(listener);return()=>host.listeners.delete(listener);}};return{getTermdockDesktopBridge:()=>({nativeTerminal}),subscribeNativeFileDrops:()=>()=>{}};});
@@ -14,6 +17,9 @@ import {TerminalView} from './TerminalView';
 import {I18nProvider} from '../../i18n';
 import {useTerminalStore} from '../../stores/useTerminalStore';
 import {getAppliedTerminalCursor} from '../../terminal/api';
+import * as terminalApi from '../../terminal/api';
+import {useSidebarStore} from '../../stores/useSidebarStore';
+import {TERMINAL_DIRECTORY_OPEN_EVENT} from '../../terminal/pathLinks';
 class Socket {
  static OPEN=1;static CONNECTING=0;static CLOSED=3;static sockets:Socket[]=[];
  readyState=0;onopen:(()=>void)|null=null;onmessage:((event:MessageEvent)=>void)|null=null;onclose:((event:CloseEvent)=>void)|null=null;onerror:(()=>void)|null=null;sent:any[]=[];
@@ -158,4 +164,22 @@ it('shows a typed input refusal without replacing the backend session or hiding 
  await waitFor(()=>expect(view.container.textContent).toContain('Input could not be delivered. Retry after reconnecting.'));
  expect(socket.sent.filter(value=>value.type==='input')).toHaveLength(0);
  expect(useTerminalStore.getState().sessions.get('controlled-panel')?.terminalSessionId).toBe('controlled-backend');
+});
+
+it('native file and directory clicks reach the real TerminalView sidebar handoff',async()=>{
+ const listing=vi.spyOn(terminalApi,'listDirectory').mockImplementation(async path=>{if(path.endsWith('.ts'))throw new Error('Path is not a directory');return{path,entries:[]};});
+ const opened=vi.fn();window.addEventListener(TERMINAL_DIRECTORY_OPEN_EVENT,opened);
+ try{
+  render(React.createElement(I18nProvider,null,React.createElement(TerminalView,{sessionId:'controlled-panel',mode:'shell',isActive:true,suppressKeyboard:true})));
+  await waitFor(()=>expect(Socket.sockets).toHaveLength(1));const socket=Socket.sockets[0];
+  await act(async()=>{socket.readyState=1;socket.onopen?.();socket.event({type:'connected',mode:'shell',cwd:'/owned/project',outputProtocol:2,streamEpoch:'stream-a',replayLastSeq:1,replayChunks:['baseline\r\n']});});
+  await waitFor(()=>expect(host.token).not.toBe(''));
+  const click=async(text:string)=>{const event={type:'path',plainClick:true,text:JSON.stringify({version:1,row:0,column:8,rows:[{wrapped:false,cells:[...text].map(chars=>({chars,width:1,fgMode:0,fgColor:0}))}]})};await act(async()=>host.listeners.forEach(listener=>listener({token:host.token,epoch:'controlled-page',event})));};
+  await click('/owned/project/src/');await waitFor(()=>expect(opened).toHaveBeenCalled());
+  expect((opened.mock.calls[0][0] as CustomEvent).detail).toMatchObject({path:'/owned/project/src',kind:'directory'});
+  expect(useSidebarStore.getState()).toMatchObject({rightOpen:true,rightTab:'files'});
+  opened.mockClear();await click('/owned/project/file.ts:7');await waitFor(()=>expect(opened).toHaveBeenCalled());
+  expect((opened.mock.calls[0][0] as CustomEvent).detail).toMatchObject({path:'/owned/project/file.ts',kind:'file',line:7});
+  expect(listing).toHaveBeenCalledWith('/owned/project/src');
+ }finally{window.removeEventListener(TERMINAL_DIRECTORY_OPEN_EVENT,opened);}
 });

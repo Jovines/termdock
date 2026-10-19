@@ -163,7 +163,7 @@ export function subscribeNativeFileDrops(
 
 export interface NativeTerminalEvent {
   token: string; epoch: string;
-  event: { type: string; plainClick?:boolean; copyId?:string; focused?:boolean; revision?:number; status?: 'TooLarge' | 'Unreadable' | 'WriteFailed'; sequence?: number; base64?: string; cols?: number; rows?: number; text?: string; message?: string; key?: string; keyCode?: number; modifiers?: number; wheel?: {deltaY:number;x:number;y:number;width:number;height:number;cellHeight:number;modifiers:number;precise:boolean}; position?: {x:number;y:number;rows:number} };
+  event: { type: string; partial?:boolean; plainClick?:boolean; copyId?:string; focused?:boolean; revision?:number; status?: 'TooLarge' | 'Unreadable' | 'WriteFailed'; sequence?: number; base64?: string; cols?: number; rows?: number; text?: string; message?: string; key?: string; keyCode?: number; modifiers?: number; wheel?: {deltaY:number;x:number;y:number;width:number;height:number;cellHeight:number;modifiers:number;precise:boolean}; position?: {x:number;y:number;rows:number} };
 }
 export interface NativeTerminalBridge {
   readonly available: boolean;

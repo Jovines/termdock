@@ -32,6 +32,17 @@ extern bool td_ghostty_path_hit(ghostty_surface_t,uint16_t,uint16_t,uint8_t *,si
 extern bool td_ghostty_snapshot_finish(ghostty_surface_t,const uint8_t *,size_t);
 extern bool td_ghostty_size_valid(ghostty_surface_t,uint32_t,uint32_t,double);
 
+// A transparent, non-interactive AppKit overlay. Colors come from the terminal config.
+@interface TDLinkDecoration : NSView
+@property(nonatomic,strong) NSArray<NSValue *> *lines;
+@property(nonatomic,strong) NSColor *color;
+@end
+@implementation TDLinkDecoration
+- (BOOL)isFlipped{return YES;}
+- (BOOL)isOpaque{return NO;}
+- (NSView *)hitTest:(NSPoint)point{(void)point;return nil;}
+- (void)drawRect:(NSRect)dirty{(void)dirty;[self.color setFill];for(NSValue *line in self.lines)NSRectFill(line.rectValue);}
+@end
 @class TDGhosttyView;
 typedef struct {
     void *retained_view;
@@ -57,6 +68,7 @@ typedef struct {
     bool desired_visible, visibility_dirty, desired_focus, focus_dirty, has_rect;
     bool reported_focus;
     uint64_t focus_revision;
+    atomic_bool hover_invalidated;
     double scale, initial_font_points;
     double created_geometry[16], first_rect_geometry[16];
     bool created_geometry_valid, first_rect_geometry_valid;
@@ -96,6 +108,19 @@ static char TDTextClickKey;
 @property(nonatomic) BOOL leftWasDragged;
 @property(nonatomic) BOOL leftOptionOverride;
 @property(nonatomic,strong) NSArray<NSValue *> *clipHoles;
+@property(nonatomic) BOOL overlayInputBlocked;
+@property(nonatomic,strong) TDLinkDecoration *linkDecoration;
+@property(nonatomic) uint64_t hoverRevision;
+@property(nonatomic) NSPoint hoverCell;
+@property(nonatomic) NSSize hoverCellSize;
+@property(nonatomic) BOOL hoverInside;
+@property(nonatomic) BOOL hoverValid;
+@property(nonatomic,strong) NSColor *hoverColor;
+@property(nonatomic,copy) NSString *engineHoverLink;
+@property(nonatomic,strong) NSData *clickSlice;
+@property(nonatomic,copy) NSString *clickLink;
+- (void)clearLinkHover;
+
 - (void)dispatchEvent:(NSEvent *)event;
 - (void)dispatchKey:(TDInterpretedKey *)key;
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender;
@@ -142,6 +167,11 @@ static bool actionCallback(ghostty_app_t app,ghostty_target_s target,ghostty_act
             if(action.action.renderer_health==GHOSTTY_RENDERER_HEALTH_UNHEALTHY)textEvent(h,10,"Ghostty Metal renderer unhealthy");return true;
         case GHOSTTY_ACTION_START_SEARCH:textEvent(h,6,action.action.start_search.needle);return true;
         case GHOSTTY_ACTION_END_SEARCH:return true;
+        case GHOSTTY_ACTION_MOUSE_OVER_LINK: {
+            TDGhosttyView *view=(__bridge TDGhosttyView *)h->retained_view;
+            if(NSThread.isMainThread&&action.action.mouse_over_link.len<=16384)view.engineHoverLink=action.action.mouse_over_link.len?[[NSString alloc]initWithBytes:action.action.mouse_over_link.url length:action.action.mouse_over_link.len encoding:NSUTF8StringEncoding]:nil;
+            return true;
+        }
         case GHOSTTY_ACTION_OPEN_URL:
             if(action.action.open_url.len>16384){emit(h,5,NULL,0,0,0);return false;}
             emit(h,18,action.action.open_url.url,action.action.open_url.len,0,0);return true;
@@ -205,7 +235,7 @@ void *td_native_create(void *parent,void *context,td_event_fn cb,const char *tex
     if(!initialized)return NULL;
     TDHandle *h=calloc(1,sizeof(*h));if(!h)return NULL;
     pthread_mutex_init(&h->mutex,NULL);pthread_cond_init(&h->cond,NULL);
-    atomic_init(&h->busy,false);atomic_init(&h->wakeup,false);atomic_init(&h->replaying,false);atomic_init(&h->needs_barrier,false);atomic_init(&h->gui_requested,false);atomic_init(&h->closing,false);atomic_init(&h->failed,false);
+    atomic_init(&h->hover_invalidated,false);atomic_init(&h->busy,false);atomic_init(&h->wakeup,false);atomic_init(&h->replaying,false);atomic_init(&h->needs_barrier,false);atomic_init(&h->gui_requested,false);atomic_init(&h->closing,false);atomic_init(&h->failed,false);
     double scale=[(__bridge NSView *)parent window].backingScaleFactor;
     if(!isfinite(scale)||scale<1||scale>4){td_native_destroy(h);return NULL;}
     h->context=context;h->callback=cb;h->desired_visible=false;h->scale=scale;h->initial_font_points=font;
@@ -253,7 +283,7 @@ void td_native_destroy(void *handle) {
 }
 void *td_native_view(void *handle) {TDHandle *h=handle;return h ? h->retained_view : NULL;}
 bool td_native_feed(void *handle,const uint8_t *data,size_t len) {
-    TDHandle *h=handle;return h&&h->surface&&!atomic_load(&h->closing)&&td_ghostty_feed(h->surface,data,len)&&!atomic_load(&h->failed);
+    TDHandle *h=handle;if(h)atomic_store(&h->hover_invalidated,true);return h&&h->surface&&!atomic_load(&h->closing)&&td_ghostty_feed(h->surface,data,len)&&!atomic_load(&h->failed);
 }
 bool td_native_drain_app(void *handle){
     TDHandle *h=handle;if(atomic_load(&h->closing))return false;
@@ -341,6 +371,22 @@ bool td_native_palette(void *handle,const char *text) {
     ghostty_config_free(h->config);h->config=config;return true;
 }
 void td_native_focus(void *handle) {TDHandle *h=handle;h->desired_focus=true;h->focus_dirty=true;}
+bool td_native_link_hover(void *handle,uint64_t revision,const double *rects,size_t count) {
+    if(!handle||!NSThread.isMainThread||count>64)return false;
+    TDGhosttyView *v=(__bridge TDGhosttyView *)((TDHandle *)handle)->retained_view;
+    if(v.hoverRevision!=revision||!v.hoverInside||v.hidden||!v.window)return false;
+    NSMutableArray<NSValue *> *lines=[NSMutableArray array];
+    for(size_t i=0;i<count;i++){
+        const double *r=rects+i*4;for(size_t j=0;j<4;j++)if(!isfinite(r[j]))return false;
+        if(r[0]<0||r[1]<-64||r[1]>64||r[2]<=0||r[2]>4096||r[3]!=1)return false;
+        NSRect line=NSMakeRect(r[0]*v.hoverCellSize.width,(v.hoverCell.y+r[1]+1)*v.hoverCellSize.height-1,r[2]*v.hoverCellSize.width,1);
+        line=NSIntersectionRect(line,v.bounds);if(!NSIsEmptyRect(line))[lines addObject:[NSValue valueWithRect:line]];
+    }
+    if(!v.linkDecoration){v.linkDecoration=[[TDLinkDecoration alloc]initWithFrame:v.bounds];v.linkDecoration.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;v.linkDecoration.wantsLayer=YES;[v addSubview:v.linkDecoration];}
+    v.linkDecoration.lines=lines;v.linkDecoration.color=v.hoverColor;v.linkDecoration.needsDisplay=YES;
+    if(v.window.isKeyWindow){if(lines.count||v.engineHoverLink.length)[NSCursor.pointingHandCursor set];else[NSCursor.IBeamCursor set];}
+    return true;
+}
 void td_native_policy(void *handle,bool tmux) {((TDHandle *)handle)->tmux_scroll=tmux;}
 void td_native_history(void *handle,uint32_t history) {td_ghostty_history(((TDHandle *)handle)->surface,history);}
 bool td_native_bind_webview(void *handle,void *wk_view) {
@@ -397,6 +443,7 @@ uint32_t td_native_attachment(void *handle,void *wk_view) {
 void td_native_cursor(void *handle,uint32_t *x,uint32_t *y) {
     td_ghostty_cursor(((TDHandle *)handle)->surface,x,y);
 }
+void td_native_input_blocked(void *handle,bool blocked){TDHandle *h=handle;TDGhosttyView *view=(__bridge TDGhosttyView *)h->retained_view;view.overlayInputBlocked=blocked;}
 bool td_native_clip(void *handle,const double *rects,size_t count) {
     if(count>8192)return false;
     TDHandle *h=handle;TDGhosttyView *view=(__bridge TDGhosttyView *)h->retained_view;
@@ -408,8 +455,9 @@ bool td_native_clip(void *handle,const double *rects,size_t count) {
         NSRect rect=NSIntersectionRect(view.bounds,NSMakeRect(r[0],r[1],r[2],r[3]));
         if(!NSIsEmptyRect(rect)){[holes addObject:[NSValue valueWithRect:rect]];CGPathAddRect(path,NULL,NSRectToCGRect(rect));}
     }
+    [CATransaction begin];[CATransaction setDisableActions:YES];
     if(count){CAShapeLayer *mask=[CAShapeLayer layer];mask.frame=view.bounds;mask.path=path;mask.fillRule=kCAFillRuleEvenOdd;view.layer.mask=mask;}else view.layer.mask=nil;
-    view.clipHoles=holes;CGPathRelease(path);return true;
+    view.clipHoles=holes;[CATransaction commit];CGPathRelease(path);return true;
 }
 // Presentation is independent of the IO/parser barrier. Keep the last Metal
 // contents attached while the engine catches up; never call Ghostty here.
@@ -455,6 +503,7 @@ int td_native_pump(void *handle) {
     if(atomic_load(&h->busy))return atomic_exchange(&h->needs_barrier,false)?1:0;
     TDGhosttyView *v=(__bridge TDGhosttyView *)h->retained_view;
     int work=0;
+    if(atomic_exchange(&h->hover_invalidated,false))[v clearLinkHover];
     if(h->pending_copy){h->pending_copy=false;[v copy:nil];work=1;}
     // A cancelled composition must clear before any queued input can run.
     if(h->preedit_state){[v flushPreedit];work=1;}
@@ -638,14 +687,16 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     if(self.leftDown){[self queue:[self leftEvent:self.leftDown]];self.leftDown=nil;}
 }
 - (void)mouseDown:(NSEvent *)event {
-    [self.window makeFirstResponder:self];emit(self.host,15,NULL,0,0,0);
+    [self clearLinkHover];[self.window makeFirstResponder:self];emit(self.host,15,NULL,0,0,0);
     self.leftDown=event;self.leftStart=event.locationInWindow;self.leftWasDragged=NO;self.leftOptionOverride=NO;
     NSEventModifierFlags flags=event.modifierFlags;
     if(flags&NSEventModifierFlagShift){
         [self beginLeftSelection];
     }else if(flags&(NSEventModifierFlagOption|NSEventModifierFlagCommand|NSEventModifierFlagControl)){
         self.leftGesture=TDLeftProgram;self.leftOptionOverride=(flags&(NSEventModifierFlagOption|NSEventModifierFlagCommand|NSEventModifierFlagControl))==NSEventModifierFlagOption;
-        [self queue:[self leftEvent:event]];self.leftDown=nil;
+        NSEvent *down=[self leftEvent:event];
+        if(flags&NSEventModifierFlagCommand)objc_setAssociatedObject(down,&TDTextClickKey,@2,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self queue:down];self.leftDown=nil;
     }else self.leftGesture=TDLeftPending;
 }
 - (void)mouseDragged:(NSEvent *)event {
@@ -657,7 +708,7 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     BOOL textClick=NO;
     if(self.leftGesture==TDLeftPending){
         if([self leftMoved:event])[self beginLeftSelection];
-        else {textClick=YES;self.leftGesture=TDLeftProgram;[self queue:self.leftDown];self.leftDown=nil;}
+        else {textClick=YES;self.leftGesture=TDLeftProgram;objc_setAssociatedObject(self.leftDown,&TDTextClickKey,@1,OBJC_ASSOCIATION_RETAIN_NONATOMIC);[self queue:self.leftDown];self.leftDown=nil;}
     }
     if(self.leftGesture==TDLeftSelection||self.leftGesture==TDLeftProgram){
         NSEvent *up=[self leftEvent:event];
@@ -671,9 +722,17 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
 - (void)rightMouseUp:(NSEvent *)event{[self queue:event];}
 - (void)otherMouseDown:(NSEvent *)event{emit(self.host,15,NULL,0,0,0);[self queue:event];}
 - (void)otherMouseUp:(NSEvent *)event{[self queue:event];}
-- (void)mouseMoved:(NSEvent *)event{[self queue:event];}
+- (void)clearLinkHover {self.hoverRevision++;self.hoverValid=NO;self.linkDecoration.lines=@[];self.linkDecoration.needsDisplay=YES;if(self.hoverInside&&self.window.isKeyWindow)[NSCursor.IBeamCursor set];}
+- (void)mouseExited:(NSEvent *)event{(void)event;self.hoverInside=NO;[self clearLinkHover];}
+- (void)mouseMoved:(NSEvent *)event{
+    self.hoverInside=YES;
+    id tail=self.pending.lastObject;
+    if([tail isKindOfClass:NSEvent.class]&&((NSEvent *)tail).type==NSEventTypeMouseMoved)[self.pending removeLastObject];
+    [self queue:event];
+}
 - (void)scrollWheel:(NSEvent *)event{[self queue:event];}
 - (NSView *)hitTest:(NSPoint)point {
+    if(self.overlayInputBlocked)return nil;
     NSPoint local=[self convertPoint:point fromView:self.superview];
     for(NSValue *hole in self.clipHoles)if(NSPointInRect(local,hole.rectValue))return nil;
     return [super hitTest:point];
@@ -800,7 +859,48 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
         [self sendKey:event action:action?GHOSTTY_ACTION_PRESS:GHOSTTY_ACTION_RELEASE text:nil composing:false];return;
     }
     NSPoint p=[self convertPoint:event.locationInWindow fromView:nil];
-    ghostty_surface_mouse_pos(h->surface,p.x,p.y,modifiers(event.modifierFlags));
+    if(event.type==NSEventTypeMouseMoved&&!(event.modifierFlags&NSEventModifierFlagOption)){
+        // Local link feedback owns unpressed motion. Never leak forced tmux
+        // all-motion reports into an application's Escape/input parser.
+        if(!self.hoverInside)return;
+        ghostty_surface_size_s size=ghostty_surface_size(h->surface);
+        if(!size.cell_width_px||!size.cell_height_px||p.x<0||p.y<0||!NSPointInRect(p,self.bounds))return;
+        NSPoint cell=NSMakePoint(floor(p.x*h->scale/size.cell_width_px),floor(p.y*h->scale/size.cell_height_px));
+        if(self.hoverValid&&NSEqualPoints(cell,self.hoverCell))return;
+        // Ghostty reports idle motion even with Shift when no button is held.
+        // Read-only cell recognition handles captured applications without ever
+        // calling the motion API. Uncaptured OSC 8 labels can use engine hover.
+        self.engineHoverLink=nil;
+        if(!ghostty_surface_mouse_captured(h->surface)){
+            ghostty_surface_mouse_pos(h->surface,-1,-1,GHOSTTY_MODS_SUPER);
+            ghostty_surface_mouse_pos(h->surface,p.x,p.y,GHOSTTY_MODS_SUPER);
+        }
+        BOOL partial=self.hoverValid&&cell.y==self.hoverCell.y;
+        self.hoverCell=cell;self.hoverCellSize=NSMakeSize(size.cell_width_px/h->scale,size.cell_height_px/h->scale);self.hoverValid=YES;
+        self.hoverRevision++;ghostty_config_color_s color;
+        if(ghostty_config_get(h->config,&color,"foreground",10))self.hoverColor=[NSColor colorWithSRGBRed:color.r/255. green:color.g/255. blue:color.b/255. alpha:1];
+        uint8_t data[262144];size_t len=0;
+        if(partial){len=(size_t)snprintf((char *)data,sizeof(data),"{\"column\":%u}",(unsigned)cell.x);emit(h,24,data,len,self.hoverRevision,0);}
+        else if(td_ghostty_path_hit(h->surface,(uint16_t)cell.x,(uint16_t)cell.y,data,sizeof(data),&len))emit(h,23,data,len,self.hoverRevision,0);
+        return;
+    }
+    NSUInteger clickActivation=[objc_getAssociatedObject(event,&TDTextClickKey) unsignedIntegerValue];
+    if(event.type==NSEventTypeLeftMouseDown&&clickActivation){
+        // Snapshot before reporting the click: the TUI may repaint between
+        // press and release. Its original path must remain the activation target.
+        unsigned queryMods=GHOSTTY_MODS_SUPER|(ghostty_surface_mouse_captured(h->surface)?GHOSTTY_MODS_SHIFT:0);
+        self.engineHoverLink=nil;ghostty_surface_mouse_pos(h->surface,-1,-1,queryMods);
+        ghostty_surface_mouse_pos(h->surface,p.x,p.y,queryMods);
+        self.clickLink=self.engineHoverLink;self.clickSlice=nil;
+        ghostty_surface_size_s size=ghostty_surface_size(h->surface);
+        if(size.cell_width_px&&size.cell_height_px&&p.x>=0&&p.y>=0){uint8_t data[262144];size_t len=0;
+            if(td_ghostty_path_hit(h->surface,(uint16_t)floor(p.x*h->scale/size.cell_width_px),(uint16_t)floor(p.y*h->scale/size.cell_height_px),data,sizeof(data),&len))self.clickSlice=[NSData dataWithBytes:data length:len];}
+    }
+    // Update coordinates locally; explicit button reports retain their real modifiers.
+    unsigned positionMods=modifiers(event.modifierFlags);
+    if(!(event.modifierFlags&NSEventModifierFlagOption))positionMods|=GHOSTTY_MODS_SHIFT;
+    if(clickActivation)positionMods&=~GHOSTTY_MODS_SUPER;
+    ghostty_surface_mouse_pos(h->surface,p.x,p.y,positionMods);
     if(event.type==NSEventTypeScrollWheel){
         // Page owns tmux's forced SGR policy and session font shortcuts. Shell
         // wheel/alternate/mouse tracking remains solely Ghostty's VT policy.
@@ -824,17 +924,12 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     }
     bool press=event.type==NSEventTypeLeftMouseDown||event.type==NSEventTypeRightMouseDown||event.type==NSEventTypeOtherMouseDown;
     bool release=event.type==NSEventTypeLeftMouseUp||event.type==NSEventTypeRightMouseUp||event.type==NSEventTypeOtherMouseUp;
-    if(press||release)ghostty_surface_mouse_button(h->surface,press?GHOSTTY_MOUSE_PRESS:GHOSTTY_MOUSE_RELEASE,(ghostty_input_mouse_button_e)(event.buttonNumber+1),modifiers(event.modifierFlags));
+    if(press||release)ghostty_surface_mouse_button(h->surface,press?GHOSTTY_MOUSE_PRESS:GHOSTTY_MOUSE_RELEASE,(ghostty_input_mouse_button_e)(event.buttonNumber+1),clickActivation?(modifiers(event.modifierFlags)&~GHOSTTY_MODS_SUPER):modifiers(event.modifierFlags));
     NSUInteger activation=[objc_getAssociatedObject(event,&TDTextClickKey) unsignedIntegerValue];
-    BOOL plainClick=activation==1;
-    if(event.type==NSEventTypeLeftMouseUp&&activation){
-        ghostty_surface_size_s size=ghostty_surface_size(h->surface);
-        if(size.cell_width_px&&size.cell_height_px&&p.x>=0&&p.y>=0){
-            uint16_t col=MIN(size.columns-1,(uint32_t)floor(p.x*h->scale/size.cell_width_px));
-            uint16_t row=MIN(size.rows-1,(uint32_t)floor(p.y*h->scale/size.cell_height_px));
-            uint8_t data[262144];size_t len=0;
-            if(td_ghostty_path_hit(h->surface,col,row,data,sizeof(data),&len)&&len<=sizeof(data))emit(h,19,data,len,plainClick?1:0,0);
-        }
+    if(event.type==NSEventTypeLeftMouseUp){
+        if(activation&&([self.clickLink hasPrefix:@"file:"]||[self.clickLink hasPrefix:@"https:"]||[self.clickLink hasPrefix:@"http:"]||[self.clickLink hasPrefix:@"mailto:"])){NSData *url=[self.clickLink dataUsingEncoding:NSUTF8StringEncoding];emit(h,18,url.bytes,url.length,0,0);}
+        else if(activation&&self.clickSlice)emit(h,19,self.clickSlice.bytes,self.clickSlice.length,activation==1?1:0,0);
+        self.clickSlice=nil;self.clickLink=nil;
     }
     if(release){ghostty_text_s text={0};if(ghostty_surface_read_selection(h->surface,&text)){if(text.text_len<=262144)emit(h,2,text.text,text.text_len,0,0);else emit(h,21,NULL,0,1,0);ghostty_surface_free_text(h->surface,&text);}else if(ghostty_surface_has_selection(h->surface))emit(h,21,NULL,0,2,0);}
 }

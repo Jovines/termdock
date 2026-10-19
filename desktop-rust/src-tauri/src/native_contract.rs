@@ -64,6 +64,8 @@ pub enum Request {
     Inspect { token: String },
     Rect {
         token: String,
+        #[serde(default, rename = "blockInput")]
+        block_input: bool,
         x: f64,
         y: f64,
         width: f64,
@@ -98,6 +100,7 @@ pub enum Request {
         token: String,
         font: Font,
     },
+    LinkHover { token: String, revision: u64, rects: Vec<[f64;4]> },
     Policy {
         token: String,
         tmux: bool,
@@ -142,6 +145,8 @@ pub enum Request {
     /// its local exclusion mask for this generation without disappearing.
     PrepareOverlay {
         generation: String,
+        #[serde(default, rename = "blockInput")]
+        block_input: bool,
         #[serde(rename = "viewportWidth")]
         viewport_width: f64,
         #[serde(rename = "viewportHeight")]
@@ -342,7 +347,7 @@ mod tests {
         let mut layout=base;layout["holes"]=serde_json::json!([[10,20,30,40]]);layout["generation"]=serde_json::json!("overlay-7");
         assert!(matches!(serde_json::from_value::<Request>(layout).unwrap(),Request::Rect{holes:Some(holes),generation:Some(generation),..} if holes==vec![[10.,20.,30.,40.]]&&generation=="overlay-7"));
         let prepare=serde_json::json!({"action":"prepareOverlay","generation":"overlay-8","viewportWidth":800,"viewportHeight":600,"holes":[[10,20,30,40]]});
-        assert!(matches!(serde_json::from_value::<Request>(prepare).unwrap(),Request::PrepareOverlay{generation,viewport_width,viewport_height,holes} if generation=="overlay-8"&&viewport_width==800.&&viewport_height==600.&&holes==vec![[10.,20.,30.,40.]]));
+        assert!(matches!(serde_json::from_value::<Request>(prepare).unwrap(),Request::PrepareOverlay{generation,viewport_width,viewport_height,holes,..} if generation=="overlay-8"&&viewport_width==800.&&viewport_height==600.&&holes==vec![[10.,20.,30.,40.]]));
     }
     #[test]
     fn first_overlay_cutouts_are_clipped_per_native_panel_without_changing_visibility(){
