@@ -121,7 +121,7 @@ interface LeftSidebarProps {
   updateActionPending?: boolean;
   onConfirmUpdateRestart?: () => void;
   onRetryUpdate?: () => void;
-  // 服务最近出过事（崩溃/卡死/重启失败）。`attention` 为真时 More 按钮点红点，
+  // 服务最近出过事（崩溃/卡死/重启失败）。`attention` 为真时顶部设置入口提示，
   // 具体的经过在设置的「服务健康」里看——这里只是个提示，不展开。
   serverHealthState?: ServerHealthState | null;
   tmuxAvailable?: boolean;
@@ -369,12 +369,10 @@ export function LeftSidebar(
   const pendingUpdate = Boolean(
     hasNewerUpdate && updateState && ['checking', 'installing', 'ready', 'restarting', 'error'].includes(updateState.status),
   );
-  // 两个点各有各的指向：红的=服务出过事（点开设置看详情），琥珀的=有更新。
-  // 同时亮时并排显示，不让其中一个把另一个盖掉。
+  // 服务健康提醒跟随顶部设置入口；底部启动菜单仅提示可在其中操作的更新。
   const serverAttention = Boolean(serverHealthState?.attention);
   const moreButtonLabel = [
     t('sidebar.moreActions'),
-    serverAttention ? t('sidebar.serverAttention') : null,
     pendingUpdate && updateState?.latestVersion
       ? t('sidebar.updateAvailable', { version: updateState.latestVersion })
       : null,
@@ -2205,11 +2203,8 @@ export function LeftSidebar(
               aria-controls="sidebar-launch-options"
             >
               <RiMoreHorizontal size={15} />
-              {serverAttention && (
-                <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-destructive ring-2 ring-[var(--chrome-bg)]" aria-hidden="true" />
-              )}
               {pendingUpdate && (
-                <span className={`absolute top-0.5 h-2 w-2 rounded-full bg-[var(--warning)] ring-2 ring-[var(--chrome-bg)] ${serverAttention ? 'right-3.5' : 'right-0.5'}`} aria-hidden="true" />
+                <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-[var(--warning)] ring-2 ring-[var(--chrome-bg)]" aria-hidden="true" />
               )}
             </button>
           </div>

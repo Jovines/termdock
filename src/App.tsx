@@ -94,6 +94,7 @@ import { clientLog } from './lib/utils/clientLog';
 import { shouldClearSessionFilePreview } from './lib/utils/rightSidebarSessionState';
 import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
+import { beginSidebarResize } from './lib/components/sidebar/sidebarResize';
 import { DeferredRightSidebar as RightSidebar } from './lib/components/sidebar/DeferredRightSidebar';
 import { AndroidMirrorDock } from './lib/components/android/AndroidMirrorView';
 import { QuotaView } from './lib/components/sidebar/QuotaView';
@@ -1318,40 +1319,20 @@ function App() {
     store.closeRight();
   }, []);
 
-  // Resize handle for pinned sidebar
-  const resizeStartXRef = useRef<number>(0);
-  const resizeStartWidthRef = useRef<number>(0);
-  const resizeRafRef = useRef<number | null>(null);
-
+  // Live drag only adjusts the layout box. Persist/reconcile the application once on release.
+  const pinnedLeftPanelRef = useRef<HTMLDivElement>(null);
+  const stopLeftResizeRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopLeftResizeRef.current?.(), []);
   const handleResizeMouseDown = useCallback((event: React.MouseEvent) => {
+    if (event.button !== 0 || !pinnedLeftPanelRef.current) return;
     event.preventDefault();
-    resizeStartXRef.current = event.clientX;
-    resizeStartWidthRef.current = useSidebarStore.getState().leftSidebarWidth;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      if (resizeRafRef.current !== null) return;
-      resizeRafRef.current = requestAnimationFrame(() => {
-        resizeRafRef.current = null;
-        const delta = moveEvent.clientX - resizeStartXRef.current;
-        useSidebarStore.getState().setLeftSidebarWidth(resizeStartWidthRef.current + delta);
-      });
-    };
-
-    const handleMouseUp = () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-      if (resizeRafRef.current !== null) {
-        cancelAnimationFrame(resizeRafRef.current);
-        resizeRafRef.current = null;
-      }
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    stopLeftResizeRef.current?.();
+    const store = useSidebarStore.getState();
+    stopLeftResizeRef.current = beginSidebarResize(
+      pinnedLeftPanelRef.current, event.clientX, store.leftSidebarWidth,
+      width => Math.min(Math.max(width, 200), 500),
+      width => useSidebarStore.getState().setLeftSidebarWidth(width),
+    );
   }, []);
 
   const rightResizeStartXRef = useRef<number>(0);
@@ -5497,7 +5478,7 @@ function App() {
     return (
       <div className="w-screen h-full flex flex-row">
         {showPinnedLeft && <>
-        <div style={{ width: sidebarLeftWidth, flexShrink: 0, height: '100%' }}>
+        <div ref={pinnedLeftPanelRef} style={{ width: sidebarLeftWidth, flexShrink: 0, height: '100%' }}>
           <LeftSidebar
             isOpen={sidebarLeftOpen}
             drawerWidthPx={sidebarLeftWidth}

@@ -1,3 +1,4 @@
+import { CollaborationMemberMenu } from './CollaborationMemberMenu';
 import { CollaborationGroupLauncher } from './CollaborationGroupLauncher';
 import { CollaborationLaunchSettings, CollaborationLaunchChoice } from './CollaborationLaunchSettings';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
@@ -1082,6 +1083,7 @@ export function CollaborationTab({ fullWorkspace = false, initialView = 'tasks',
       await saveCollaborationGroup({ id: selectedGroup.id, name: groupName,
         sessionIds: selectedGroup.sessionIds.filter((id) => id !== sessionId), expectedUpdatedAt: selectedGroup.updatedAt });
       setConfirmRemoveMemberId(null);
+      setTargetSessionIds(current => current?.filter(id => id !== sessionId) ?? null);
       setMemberSelection((current) => new Set([...current].filter((id) => id !== sessionId)));
       setRoleDrafts((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== sessionId)));
       await refresh();
@@ -1199,10 +1201,10 @@ export function CollaborationTab({ fullWorkspace = false, initialView = 'tasks',
             {[{ id: '*', label: '全组成员' }, ...selectedGroup.sessionIds.map(id => ({ id, label: (() => { const member = workspaceMembers.find(session => session.sessionId === id); return member ? collaborationMemberLabel(member, workspaceMembers) : undefined; })() ?? `${id.slice(0, 8)}（离线）` }))].map(({ id, label }) => {
               const selected = id === '*' ? targetSessionIds === null : targetSessionIds?.includes(id) ?? false;
               const session = sessions.find(session => session.sessionId === id);
-              return <span key={id} className="inline-flex max-w-full items-center gap-0.5">
+              return <CollaborationMemberMenu key={`${selectedGroup.id}:${id}`} label={label} disabled={id === '*' || busy !== null} onRemove={() => void removeMember(id)}>
                 <button type="button" aria-pressed={selected} onClick={() => setTargetSessionIds(current => id === '*' ? null : current?.includes(id) ? current.filter(target => target !== id) : [...(current ?? []), id])} className={`${choiceClass} min-h-9 min-w-0 gap-1 sm:min-h-7 ${selected ? 'border-primary/40 bg-primary/15 text-primary' : 'border-border/20 bg-surface-2 text-muted-foreground hover:text-foreground'}`}>{selected && <Check size={12} aria-hidden="true" className="shrink-0" />}<span className="break-words text-left">{label}</span></button>
                 {session && <button type="button" aria-label={`打开 ${label} 的终端`} title={`打开 ${label} 的终端`} className="inline-flex h-9 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-surface-2 hover:text-primary sm:h-7 sm:w-6" onClick={() => void onOpenSession(session).catch(error => setError(error instanceof Error ? error.message : '无法打开会话'))}><ExternalLink size={12} /></button>}
-              </span>;
+              </CollaborationMemberMenu>;
             })}
           </div></fieldset>
         </div>
