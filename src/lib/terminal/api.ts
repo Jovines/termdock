@@ -1,4 +1,3 @@
-import { closeNativeSession, closeAllNativeSessions } from './nativeLifetime';
 import { pollConnectionQuality, receiveQualityPong } from './connectionQuality';
 import { collaborationServiceLabel } from '../collaboration/display';
 import { listServiceConnections, observeServiceConnections } from '../services/serviceDirectory';
@@ -617,19 +616,9 @@ function getWebSocketUrl(sessionId: string, sinceSeq: number, epoch?: string, vi
 // 自动带上正确的 since。如果尚未建立连接，则记录在外层 map 等待 connect() 时使用。
 const pendingInitialSeq = new Map<string, number>();
 const pendingSnapshotEpoch = new Map<string, string>();
-/** A fresh native surface has no xterm snapshot/parser baseline. */
-export function discardTerminalSnapshotCursor(sessionId: string): void {
-  pendingInitialSeq.delete(sessionId); pendingSnapshotEpoch.delete(sessionId);
-}
 export function setTerminalSnapshotCursor(sessionId: string, seq: number, epoch: string): void {
   pendingInitialSeq.set(sessionId, seq);
   pendingSnapshotEpoch.set(sessionId, epoch);
-}
-/** Received sequence may seed a native batch boundary only when every store
- * byte through it is included; it is never a consumption or server ACK. */
-export function getReceivedTerminalCursor(sessionId:string):{seq:number;epoch:string}|null {
-  const conn=wsConnections.get(sessionId);
-  return conn?.streamEpoch&&conn.lastSeq>0?{seq:conn.lastSeq,epoch:conn.streamEpoch}:null;
 }
 export function getAppliedTerminalCursor(sessionId: string): { seq: number; epoch: string } | null {
   const conn = wsConnections.get(sessionId);
@@ -1690,8 +1679,6 @@ export async function reorderSessionInventoryEntries(sessionIds: string[]): Prom
 }
 
 export async function removeSessionInventoryEntry(frontendSessionId: string): Promise<void> {
-  // The local panel was explicitly closed even if the remote DELETE fails.
-  void closeNativeSession(frontendSessionId).catch(() => {});
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/session-inventory/sessions/${encodeURIComponent(frontendSessionId)}`, {
     method: 'DELETE',
@@ -1704,7 +1691,6 @@ export async function removeSessionInventoryEntry(frontendSessionId: string): Pr
 }
 
 export async function clearSessionInventoryEntries(): Promise<void> {
-  void closeAllNativeSessions().catch(() => {});
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/session-inventory/sessions', {
     method: 'DELETE',

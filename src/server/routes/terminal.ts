@@ -6683,7 +6683,7 @@ async function resolveShellIntegrationDir(): Promise<string | null> {
 /**
  * Inject termdock shell integration via environment variables.
  *
- * This replaces the old injectShellTitleHooks with a full Ghostty-style
+ * This replaces the old injectShellTitleHooks with full shell
  * integration that emits OSC 133 (prompt marks), OSC 2 (title), and OSC 7 (cwd).
  *
  * Works for both shell mode (env passed to PTY spawn) and tmux mode
@@ -6705,7 +6705,7 @@ async function injectShellIntegration(shellPath: string, baseEnv: Record<string,
 
   if (shellType === 'zsh') {
     // Create a temporary ZDOTDIR that sources user's zshenv/zshrc then
-    // sources our integration script. Same approach as Ghostty.
+    // sources our integration script. This preserves the user shell configuration.
     const zdotdir = '/tmp/termdock-zsh-' + String(process.pid);
     try {
       await fs.promises.mkdir(zdotdir, { recursive: true });

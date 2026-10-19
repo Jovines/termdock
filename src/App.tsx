@@ -1,5 +1,3 @@
-import { TerminalEngineSettings } from './lib/components/settings/TerminalEngineSettings';
-import { isNativeRendererReady, subscribeNativeRenderer } from './lib/terminal/nativeLifetime';
 import { confirmPageAction, runConfirmedPageAction, showPageFeedback } from './lib/desktop/pageFeedback';
 import { readBrowserServices } from './lib/services/serviceDirectory';
 import { parseArchitectureLink, consumeArchitectureLink, queueArchitectureLink } from './lib/architecture/link';
@@ -534,15 +532,6 @@ function reorderSessionsByIds<T extends { id: string }>(items: T[], orderedIds: 
 }
 
 const CollaborationMainWorkspace = React.lazy(() => import('./lib/components/sidebar/CollaborationMainWorkspace'));
-
-export function RendererPreferenceControls({sessionId,children}:{sessionId:string|null;children:React.ReactNode}) {
-  const snapshot=React.useCallback(()=>isNativeRendererReady(sessionId?`terminal::${sessionId}`:null),[sessionId]);
-  const actualNative=React.useSyncExternalStore(subscribeNativeRenderer,snapshot,()=>false);
-  return actualNative?null:<>{children}</>;
-}
-export function RendererPreferenceNotice({locale}:{locale:string}) {
-  return <p data-terminal-renderer-scope="browser-fallback" className="text-[11px] text-muted-foreground">{locale === 'zh' ? '这些设置适用于浏览器和后备终端；原生终端使用 Ghostty。' : 'These preferences apply to browser and fallback terminals; native terminals use Ghostty.'}</p>;
-}
 
 /** One confirmation belongs to one live service/page, including the CSRF await. */
 export async function runServiceUpdateConfirmation(lock: { busy: boolean }, action: {
@@ -3700,8 +3689,6 @@ function App() {
                 <WorkspaceRetentionSettings />
 
                 {/* Preferences stay saved, but only the selected browser/fallback exposes them. */}
-                <TerminalEngineSettings locale={locale}>
-                <RendererPreferenceControls sessionId={activeSessionId}>
                 <div data-terminal-renderer-controls="browser-fallback" className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">
                   <div className="flex items-center gap-2">
                     <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.render')}</span>
@@ -3723,10 +3710,7 @@ function App() {
                       })}
                     </div>
                   </div>
-                  <RendererPreferenceNotice locale={locale}/>
                 </div>
-                </RendererPreferenceControls>
-                </TerminalEngineSettings>
 
                 {/* Theme */}
                 <div className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">

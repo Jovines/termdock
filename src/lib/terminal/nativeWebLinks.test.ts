@@ -27,3 +27,8 @@ describe('native terminal web links', () => {
     expect(open).not.toHaveBeenCalled();
   });
 });
+
+it('uses the desktop external-open bridge without an about:blank staging popup',async()=>{
+ const openExternal=vi.fn(async()=>{}),popup=vi.fn();const handler=createNativeWebLinkHandler({capabilities:{webWorkspace:true},openExternal},popup)!;
+ handler({} as MouseEvent,'https://example.test/path?q=1#section');expect(openExternal).toHaveBeenCalledExactlyOnceWith('https://example.test/path?q=1#section');expect(popup).not.toHaveBeenCalled();
+});

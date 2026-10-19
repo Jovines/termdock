@@ -325,20 +325,6 @@
       }
     }).catch(()=>{});
   }
-  const unsupportedNative = () => Promise.reject(new Error('Native terminal module has not been integrated into this Preview shell'));
-  let engineEpoch=null;
-  let nativeEnabled=boot.nativeTerminal===true&&boot.platform==='darwin'&&!boot.local;
-  const engineSelection=boot.terminalEngineSwitch===true&&!boot.local;
-  if(engineSelection)nativeEnabled=false;
-  const engineState=value=>{
-    if(!value||!['web','native'].includes(value.selected)||!['web','native'].includes(value.active)||typeof value.nativeSupported!=='boolean'||typeof value.epoch!=='string'||!value.epoch||value.active==='native'&&!value.nativeSupported)throw new Error('Invalid terminal engine negotiation');
-    return Object.freeze({selected:value.selected,active:value.active,nativeSupported:value.nativeSupported,targetVerified:value.targetVerified===true,epoch:value.epoch});
-  };
-  const engineReady=engineSelection?invoke('terminalEngine').then(engineState).then(value=>{engineEpoch=value.epoch;documentEpoch=value.epoch;nativeEnabled=value.active==='native';return value;}):null;
-  const requestNative=request=>nativeEnabled&&(!engineSelection||engineEpoch)?invoke('nativeTerminal',engineSelection?{engineEpoch,request}:request):unsupportedNative();
-  // A rejected negotiation must keep the old renderer detached and block mount.
-  engineReady?.then(()=>invoke('startupObservation',{category:'engine-ready'}),()=>invoke('startupObservation',{category:'engine-failed'})).catch(()=>{});
-
   const invitationMarker='termdock-secure-preview-invitation-v1';
   const invitationFingerprint=()=>crypto.subtle.digest('SHA-256',new TextEncoder().encode(boot.invitation)).then(bytes=>Array.from(new Uint8Array(bytes),byte=>byte.toString(16).padStart(2,'0')).join(''));
   const serviceConnection=async()=>{
@@ -389,26 +375,23 @@
   for(const name of ['pagehide','termdock:secure-state','auth:unauthorized'])window.addEventListener(name,()=>{feedback?.remove();feedback=undefined;});
   window.termdockDesktop = Object.freeze({
     platform: boot.platform,
+    capabilities:Object.freeze({webWorkspace:true}),
+    openExternal: value => {
+      try{const url=new URL(value);if(!['http:','https:','mailto:'].includes(url.protocol)||url.username||url.password)throw Error('Invalid external URL');return invoke('openExternal',{url:url.href});}
+      catch(error){return Promise.reject(error);}
+    },
+    writeClipboardText: text => {
+      if(closing||typeof text!=='string'||!text||new TextEncoder().encode(text).length>262144)return Promise.reject(new TypeError('Invalid clipboard text'));
+      return invoke('clipboardWriteText',{text});
+    },
     confirmationUI:'page-v1',confirm:confirmInPage,alert:alertInPage,
-    previewCapabilities: Object.freeze({ get nativeTerminal(){return nativeEnabled;}, notifications: boot.platform === 'darwin', updates: true, tray: true, floatingWidget: true, backgroundWorker: true }),
+    previewCapabilities: Object.freeze({ notifications: boot.platform === 'darwin', updates: true, tray: true, floatingWidget: true, backgroundWorker: true }),
     passwordBootstrapOrigin: url => {
       if (boot.local) throw new TypeError('Authorization belongs to a service window');
       const parsed = new URL(url);
       if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== url || parsed.username || parsed.password || (url !== location.origin && !boot.origins.includes(url))) throw new TypeError('Unapproved password proof route');
       return url === location.origin ? boot.origins[boot.defaultRoute] : parsed.origin;
     },
-    ...(engineSelection?{terminalEngine:Object.freeze({
-      ready:engineReady,
-      getState:()=>invoke('terminalEngine').then(engineState),
-      set:async engine=>{
-        if(!['web','native'].includes(engine))throw new Error('Invalid terminal engine');
-        const current=await engineReady;
-        if(engine==='native'&&!current.nativeSupported)throw new Error('Native terminal is not supported on this platform');
-        const result=engineState(await invoke('setTerminalEngine',{engine,epoch:current.epoch}));
-        if(result.epoch!==current.epoch)throw new Error('Terminal engine workspace changed');
-        return result;
-      },
-    })}:{}),
     reloadWorkspace: ({force=false}={}) => reloadWorkspace(force),
     snapshot: () => invoke('snapshot'),
     ...(boot.local ? {
@@ -441,7 +424,7 @@
     focusNextService: (scope = 'attention') => invoke('focusNext', {scope}),
     setFloatingMetricCount: count => invoke('floatingSize', {count}),
     disableFloatingWidget: () => invoke('preferences', {preferences: {floatingWidgetEnabled: false}}).then(() => invoke('snapshot')),
-    collaborationFocus: id => invoke('collaborationFocus', {id}),
+    collaborationFocus: (id,targetPeerId) => invoke('collaborationFocus', {id,...(targetPeerId?{targetPeerId}:{} )}),
     getServiceConnection:serviceConnection,acknowledgeServiceInvitation:acknowledgeInvitation,
     serviceConnections: () => invoke('connections'),
     saveServiceConnection: connection => invoke('saveConnection', { connection }),
@@ -452,9 +435,7 @@
       try { return await invoke('openConnection', { connection, invitation }); }
       catch (reason) { const normalized = normalizeOpenRejection(reason); const error = new Error(normalized.message); error.code = normalized.code; throw error; }
     },
-    showConnectionCenter: (nativeError,recoveryId) => closing?Promise.resolve():invoke('showCenter', typeof nativeError==='string'?{nativeError,recoveryId,documentEpoch}:{}),
-    confirmNativeRecovery: recoveryId => closing?Promise.resolve():invoke('showCenter',{nativeRecovered:recoveryId,documentEpoch}),
-    retryNativeIsolation: (windowLabel,recoveryId) => invoke('nativeRecoveryRetry',{windowLabel,recoveryId,documentEpoch}),
+    showConnectionCenter: () => closing?Promise.resolve():invoke('showCenter'),
     revealDataDirectory: () => invoke('revealConfig'),
     deviceInfo: () => invoke('deviceInfo'),
     notificationDeliveryConfirmation: true,
@@ -535,12 +516,6 @@
     reportServiceActivity: activity => { void invoke('reportActivity', { activity }).catch(() => {}); },
     focusService: origin => invoke('focusService', { origin }),
     onServiceActivity: callback => subscribe('termdock:preview-activity', callback),
-    nativeTerminal: Object.freeze({
-      get available(){return nativeEnabled;},
-      request: requestNative,
-      subscribe: callback => subscribe('termdock:preview-terminal', callback),
-      create: request => requestNative({action:'create', ...request}),
-    }),
   });
   if (!boot.local) {
     let request, timer, channel;

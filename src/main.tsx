@@ -2,8 +2,6 @@ import './lib/federation/scopeBootstrap';
 import { installCollaborationEnrollment } from './lib/collaboration/connectionEnrollment';
 import React, { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
-import { getTermdockDesktopBridge } from './lib/desktop/nativeBridge';
-import { DesktopTerminalEngineGate } from './lib/desktop/DesktopTerminalEngineGate';
 import { installEncryptedFetch } from './lib/federation/browserIntegration';
 import { SecureAccessGate } from './lib/federation/SecureAccessGate';
 // test comment
@@ -47,7 +45,6 @@ try {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <DesktopTerminalEngineGate ready={getTermdockDesktopBridge()?.terminalEngine?.ready}>
     <PwaStatusBarSurface />
     <StartupHandoff />
     <I18nProvider>
@@ -64,6 +61,5 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       </Suspense>
       </ErrorBoundary>
     </I18nProvider>
-    </DesktopTerminalEngineGate>
   </React.StrictMode>
 );

@@ -42,14 +42,10 @@ export interface DesktopAppUpdateState {
   error: string | null;
 }
 
-export type TerminalEngine = 'web' | 'native';
-export interface TerminalEngineState { selected:TerminalEngine; active:TerminalEngine; nativeSupported:boolean; targetVerified?:boolean; epoch:string }
 export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
-  terminalEngine?: {
-    ready:Promise<TerminalEngineState>;
-    getState():Promise<TerminalEngineState>;
-    set(engine:TerminalEngine):Promise<TerminalEngineState>;
-  };
+  capabilities?:{webWorkspace?:boolean};
+  openExternal?(url:string):Promise<void>;
+  writeClipboardText?(text:string):Promise<void>;
   platform: string;
   /** Explicit Preview page-dialog capability; legacy Electron/browser omit it. */
   confirmationUI?: 'page-v1';
@@ -58,7 +54,6 @@ export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   alert?(message:string):void;
   /** Metadata receipt after real page authorization; never grants permission. */
   acknowledgeServiceInvitation?(options: { targetPeerId: string; fingerprint: string }, isCurrent: () => boolean): Promise<boolean>;
-  nativeTerminal?: NativeTerminalBridge;
   deviceInfo?(): Promise<import('../../server/federation/deviceProfile').DeviceProfile>;
   /** Versioned discovery/mutation contract; legacy clients omit this object. */
   collaboration?: { protocolVersion: number; peers: boolean; save: boolean };
@@ -66,7 +61,7 @@ export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
   collaborationList?(): Promise<{ groups: import('../terminal/api').CollaborationGroup[]; sessions: import('../terminal/api').OrchestrationSession[] }>;
   collaborationSave?(input: import('../terminal/api').CollaborationGroupInput & { expectedOrigin?: string }): Promise<{ group: import('../terminal/api').CollaborationGroup }>;
   collaborationRemove?(id: string): Promise<void>;
-  collaborationFocus?(id: string): Promise<boolean>;
+  collaborationFocus?(id: string, targetPeerId?:string): Promise<boolean>;
   /** Present when the desktop shell only acknowledges confirmed native delivery. */
   notificationDeliveryConfirmation?: boolean;
   snapshot(): Promise<DesktopNativeSnapshot>;
@@ -159,18 +154,4 @@ export function subscribeNativeFileDrops(
   return () => {
     nativeFileDropListeners.delete(listener);
   };
-}
-
-export interface NativeTerminalEvent {
-  token: string; epoch: string;
-  event: { type: string; partial?:boolean; plainClick?:boolean; copyId?:string; focused?:boolean; revision?:number; status?: 'TooLarge' | 'Unreadable' | 'WriteFailed'; sequence?: number; base64?: string; cols?: number; rows?: number; text?: string; message?: string; key?: string; keyCode?: number; modifiers?: number; wheel?: {deltaY:number;x:number;y:number;width:number;height:number;cellHeight:number;modifiers:number;precise:boolean}; position?: {x:number;y:number;rows:number} };
-}
-export interface NativeTerminalBridge {
-  readonly available: boolean;
-  request(request: Record<string, unknown>): Promise<unknown>;
-  subscribe(listener: (event: NativeTerminalEvent) => void): () => void;
-}
-export function supportsNativeTerminal(): boolean {
-  const native = getTermdockDesktopBridge()?.nativeTerminal;
-  return native?.available === true && typeof native.request === 'function' && typeof native.subscribe === 'function';
 }

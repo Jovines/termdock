@@ -1,10 +1,10 @@
+import {writeTerminalClipboardText as writeClipboardText, copyTmuxTerminalSelection} from '../../terminal/clipboardText';
 import { sanitizeTerminalInput } from '../../terminal/inputNormalization';
-import { NativeTerminalViewport } from '../../terminal/nativeViewport';
-import { supportsNativeTerminal } from '../../desktop/nativeBridge';
 import { encodeTerminalKey } from '../../terminal/keyboard';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { isWorkspaceActive } from '../../services/workspaceHost';
 import { selectedTarget } from '../../federation/clientScope';
+import { currentSecureClient } from '../../federation/browserIntegration';
 import React from 'react';
 import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
@@ -296,10 +296,6 @@ const RESUME_REASONS: ReadonlySet<RefreshReason> = new Set<RefreshReason>([
 ]);
 
 export type TerminalController = {
-  renderer?: () => 'native' | 'native-pending' | 'xterm';
-  prepareNativeSession?: (backendSessionId: string) => Promise<{seq:number;epoch:string} | null>;
-  captureNativeSnapshot?: (cursor: {seq:number;epoch:string}) => Promise<import('../../terminal/nativeSnapshotCache').NativeSnapshot | null>;
-  saveNativeCursor?: (cursor: {seq:number;epoch:string}) => Promise<void>;
   serializeSnapshot: () => string | null;
   focus: () => void;
   blur: () => void;
@@ -365,7 +361,6 @@ export type TerminalViewportInputOptions = {
 
 export interface TerminalViewportProps {
   backendSessionId?: string | null;
-  nativeCursor?: {seq:number;epoch:string} | null;
   sessionKey: string;
   /** Frontend session id — used to persist per-session font size overrides. */
   sessionId: string;
@@ -392,8 +387,6 @@ export interface TerminalViewportProps {
   }) => void;
   onWriteProgress?: (lastWrittenChunkId: number) => void;
   onCursorPositionChange?: (position: { x: number; y: number; rows: number }) => void;
-  onNativeTitleChange?: (title:string) => void;
-  onNativeRendererFailed?: () => void;
   onDirectoryLinkActivate?: (path: string, line?: number) => void;
   terminalSettings: TerminalSettings;
   theme: TerminalTheme;
@@ -611,32 +604,7 @@ function estimateInitialDimensions(
   return { cols, rows };
 }
 
-async function writeClipboardText(text: string): Promise<boolean> {
-  if (!text) return false;
-  try {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error('Clipboard API unavailable');
-    }
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    try {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.setAttribute('readonly', '');
-      textarea.style.position = 'fixed';
-      textarea.style.left = '-9999px';
-      textarea.style.top = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      const ok = document.execCommand('copy');
-      textarea.remove();
-      return ok;
-    } catch {
-      return false;
-    }
-  }
-}
+
 
 function getVisibleTerminalText(terminal: Terminal): string {
   const buffer = terminal.buffer.active;
@@ -801,6 +769,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     {
       sessionKey,
       sessionId,
+      backendSessionId,
       getPasteOwnerKey,
       isLayoutVisible = true,
       chunks,
@@ -1657,6 +1626,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }), [sendTerminalSeq, sessionKey]);
 
+    const copyBackendRef=React.useRef(backendSessionId);copyBackendRef.current=backendSessionId;
     const pasteIdentityRef = React.useRef({ sessionKey, sessionId, getPasteOwnerKey });
     pasteIdentityRef.current = { sessionKey, sessionId, getPasteOwnerKey };
     const pasteWorkRef = React.useRef<{ controller: AbortController; current: () => boolean } | null>(null);
@@ -1664,11 +1634,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pasteOwner = React.useCallback(() => {
       pasteWorkRef.current?.controller.abort();
       const identity = pasteIdentityRef.current;
-      const target = selectedTarget(), inputHandler = inputHandlerRef.current;
+      const target = selectedTarget(), client=currentSecureClient(), inputHandler = inputHandlerRef.current;
       const backendKey = identity.getPasteOwnerKey?.() ?? null;
       const controller = new AbortController();
       const owner = { controller, current: () => pasteMountedRef.current && !controller.signal.aborted
-        && pasteWorkRef.current === owner && selectedTarget() === target
+        && pasteWorkRef.current === owner && selectedTarget() === target && currentSecureClient()===client && !client?.closed
         && pasteIdentityRef.current.sessionKey === identity.sessionKey
         && pasteIdentityRef.current.sessionId === identity.sessionId
         && inputHandlerRef.current === inputHandler
@@ -1676,6 +1646,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       pasteWorkRef.current = owner;
       return owner;
     }, []);
+    const copySelection=React.useCallback(async(data?:DataTransfer)=>{
+      const owner=pasteOwner(),backend=copyBackendRef.current;
+      const current=()=>owner.current()&&copyBackendRef.current===backend;
+      const term=terminalRef.current,text=term?.hasSelection()?term.getSelection():'';
+      try{
+        if(text&&data){data.setData('text/plain',text);return true;}
+        if(text){const copied=await writeClipboardText(text,current);if(!copied&&current())setPasteError('复制失败，请重试');return copied;}
+        return backend&&onTmuxScrollRef.current?await copyTmuxTerminalSelection(backend,current):false;
+      }catch(error){if(current())setPasteError(error instanceof Error?error.message:'复制失败，请重试');return false;}
+    },[pasteOwner]);
     const pasteOwnerIsCurrent = React.useCallback((owner: ReturnType<typeof pasteOwner>) => owner.current(), []);
     React.useEffect(() => {
       const cancelStale = () => { const work = pasteWorkRef.current; if (work && !work.current()) work.controller.abort(); };
@@ -4600,15 +4580,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [onTmuxScroll, terminalReadyVersion]);
 
     React.useEffect(() => {
-      const element=containerRef.current,terminal=terminalRef.current;
-      const owned=window as unknown as {__TD_PREVIEW_BENCH_RENDERER?:string;__TD_NATIVE_GATE_NONCE?:string;__TD_NATIVE_GATE_EPOCH?:string;__TD_NATIVE_GATE_STATE?:{pageEpoch?:string;finished?:boolean;cancelled?:boolean}};
-      const state=owned.__TD_NATIVE_GATE_STATE;
-      if(!element||!terminal||owned.__TD_PREVIEW_BENCH_RENDERER!=='browser'||!owned.__TD_NATIVE_GATE_NONCE||!state||state.finished||state.cancelled||state.pageEpoch!==owned.__TD_NATIVE_GATE_EPOCH)return;
-      element.dataset.ownedRendererMetrics=JSON.stringify({nonce:owned.__TD_NATIVE_GATE_NONCE,epoch:state.pageEpoch,renderer:webglAddonRef.current?'webgl':'dom',requestedRenderer:rendererMode,fontFamily:terminal.options.fontFamily,fontSize:terminal.options.fontSize,history:terminal.options.scrollback});
-      return ()=>{delete element.dataset.ownedRendererMetrics;};
-    },[terminalReadyVersion,onTmuxScroll,rendererMode,fontFamily,fontSize]);
-
-    React.useEffect(() => {
       const terminal = terminalRef.current;
       if (!terminal) {
         return;
@@ -5010,6 +4981,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           <>
             <textarea
               ref={hiddenInputRef}
+              onCopy={event=>{event.preventDefault();void copySelection(event.clipboardData);}}
               aria-label={t('terminal.input')}
               data-terminal-input-anchor="true"
               inputMode="text"
@@ -5327,10 +5299,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   // ---- Cmd + C（Mac 风格）：有选区复制，无选区什么都不做 ----
                   if (cmd && !ctrl && !alt && !shift && (key === 'c' || key === 'C')) {
                     event.preventDefault();
-                    const sel = term?.hasSelection() ? term.getSelection() : '';
-                    if (sel) {
-                      navigator.clipboard?.writeText(sel).catch(() => { /* ignored */ });
-                    }
+                    void copySelection();
                     return;
                     // ⚠️ Mac Cmd+C 永远不发 SIGINT；Ctrl+C 走下面的 ctrl-letter 分支
                   }
@@ -5623,8 +5592,4 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 );
 
 TerminalViewportInner.displayName = 'TerminalViewport';
-export const TerminalViewport = React.forwardRef<TerminalController,TerminalViewportProps>((props,ref) => {
-  const [nativeFailed,setNativeFailed]=React.useState(false);
-  const fallback=React.useCallback(()=>{setNativeFailed(true);props.onNativeRendererFailed?.();},[props.onNativeRendererFailed]);
-  return supportsNativeTerminal()&&!nativeFailed ? <NativeTerminalViewport {...props} onNativeRendererFailed={fallback} ref={ref}/> : <TerminalViewportInner {...props} ref={ref}/>;
-});
+export const TerminalViewport = TerminalViewportInner;

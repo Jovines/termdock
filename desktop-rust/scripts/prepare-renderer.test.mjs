@@ -20,10 +20,6 @@ test('actual Preview renderer generation marks only the real rail/header hosts a
   const styles=fs.readFileSync(new URL('../.renderer-dist/styles.css',import.meta.url),'utf8');
   const shared=fs.readFileSync(new URL('../../desktop/renderer/styles.css',import.meta.url),'utf8');
   assert.ok(styles.startsWith(shared),'shared center geometry must remain unchanged');
-  const previewStyles=styles.slice(shared.length);
-  assert.match(previewStyles,/\.notice:has\(\.native-recovery-retry\)/);
-  assert.match(previewStyles,/color:var\(--foreground\)/);
-  assert.match(previewStyles,/border-radius:8px/);
-  assert.doesNotMatch(previewStyles,/(?:html|body|\.app-shell)\s*\{/);
+  assert.equal(styles,shared,'center styling is shared without engine recovery overrides');
   assert.equal(fs.readFileSync(new URL('../.renderer-dist/floating.css',import.meta.url),'utf8'),fs.readFileSync(new URL('../../desktop/renderer/floating.css',import.meta.url),'utf8'));
 });

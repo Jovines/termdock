@@ -1,5 +1,5 @@
 use crate::{
-    config::{origin, Config, Connection, TerminalEngine},
+    config::{origin, Config, Connection},
     desktop_ui, download_save, local_files, local_service, native_desktop,
     proxy::{self, ProxyHandle},
     tls,
@@ -30,7 +30,6 @@ pub(crate) struct ServiceWindow {
     proxy: ProxyHandle,
     pub(crate) activity: Value,
     pending_focus: Option<(String, String)>,
-    terminal_engine: Option<(String, TerminalEngine)>,
 }
 struct NativeDrop {
     owner: String,
@@ -104,7 +103,6 @@ pub(crate) struct Shell {
     pub(crate) config: Mutex<Config>,
     pub(crate) windows: Mutex<BTreeMap<String, ServiceWindow>>,
     openings: tokio::sync::Mutex<()>,
-    engine_changes: tokio::sync::Mutex<()>,
     permissions: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) last_focused: Mutex<Option<String>>,
     pub(crate) tray: Mutex<Option<tauri::tray::TrayIcon>>,
@@ -184,8 +182,6 @@ pub(crate) fn show_center(app: &AppHandle) -> Result<(), String> {
                         .lock()
                         .unwrap()
                         .insert(w.label().into(), uuid::Uuid::new_v4().to_string());
-                    #[cfg(target_os = "macos")]
-                    crate::native_terminal::invalidate(w.app_handle(), w.label(), false);
                     if let Ok(mut files) = state(w.app_handle()).files.try_lock() {
                         files.close_window(w.label());
                     }
@@ -199,7 +195,7 @@ pub(crate) fn show_center(app: &AppHandle) -> Result<(), String> {
                 }
             })
             .on_navigation(move |_| {
-                if crate::native_gate::chrome_enabled() {
+                if crate::window_diagnostics::chrome_enabled() {
                     if let Some(w)=navigation_app.get_webview_window("center") {
                         crate::window_chrome::invalidate_instance(&w,true,chrome_instance);
                     }
@@ -213,12 +209,6 @@ pub(crate) fn show_center(app: &AppHandle) -> Result<(), String> {
             // Native alignment owns button frames. Wry's inset implementation
             // also resizes an AppKit ancestor during draw/zoom; do not mix them.
             .hidden_title(true);
-        if crate::native_gate::keyboard_before_native(){
-            // The owned center must not read/migrate the user's default WK store.
-            let profile=crate::native_gate::profile("keyboard-center").expect("owned keyboard profile");
-            let digest=Sha256::digest(profile.as_bytes());let mut id=[0u8;16];id.copy_from_slice(&digest[..16]);
-            builder=builder.data_store_identifier(id);
-        }
     }
     let window = builder.build().map_err(|e| e.to_string())?;
     observe_window(app, &window, None,chrome_instance);
@@ -271,59 +261,6 @@ fn preview_drop_css_point(x: f64, y: f64, page_zoom: f64) -> (f64, f64) {
     // coordinates a second time. Only page zoom changes CSS hit-test units.
     (x / zoom, y / zoom)
 }
-#[cfg(target_os = "macos")]
-pub(crate) fn publish_native_drop(
-    app: &AppHandle,
-    window: &WebviewWindow,
-    view: &str,
-    raw_paths: Vec<String>,
-) -> Result<(), String> {
-    if raw_paths.is_empty() || raw_paths.len() > 50 {
-        return Err("Invalid native file drop".into());
-    }
-    let context = native_context(app, window)?;
-    let paths = raw_paths
-        .into_iter()
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
-    if paths.iter().any(|path| !path.is_absolute()) {
-        return Err("Native file drop contains a non-local path".into());
-    }
-    let shell = state(app);
-    let token = uuid::Uuid::new_v4().to_string();
-    {
-        let mut drops = shell.drops.lock().unwrap();
-        drops.retain(|_, drop| drop.expires > Instant::now());
-        if drops.len() >= 32 {
-            return Err("Too many pending file drops".into());
-        }
-        drops.insert(
-            token.clone(),
-            NativeDrop {
-                owner: window.label().into(),
-                paths,
-                expires: Instant::now() + Duration::from_secs(60),
-                view: Some(view.into()),
-                target: Some(context.target),
-                epoch: Some(context.epoch),
-            },
-        );
-    }
-    let payload = json!({"token":token,"sessionKey":view});
-    window
-        .eval(&format!(
-            "window.dispatchEvent(new CustomEvent('termdock:preview-files',{{detail:{payload}}}));"
-        ))
-        .map_err(|error| error.to_string())
-}
-#[cfg(target_os = "macos")]
-pub(crate) fn report_native_drop_error(window: &WebviewWindow, view: &str) {
-    let script = format!(
-        "for(const target of document.querySelectorAll('[data-termdock-terminal-dropzone]'))if(target.dataset.termdockTerminalDropzone==={})target.dispatchEvent(new CustomEvent('termdock:file-drop-error',{{detail:'文件暂时无法读取，请重新拖入。',bubbles:true}}));",
-        json!(view)
-    );
-    let _ = window.eval(&script);
-}
 // Read-only opt-in driver context, including the normal caller validation.
 pub(crate) fn owned_gate_service_pin(connection:&Connection,expected_service:&str,expected_peer:&str)->Result<bool,String>{
     if connection.url!=expected_service{return Err("Owned service workspace mismatch".into());}
@@ -365,7 +302,7 @@ pub(crate) async fn open_connection(
         connection = crate::config::resolve_saved_connection(&shell.config.lock().unwrap().connections, connection);
     }
     let mut pins = shell.config.lock().unwrap().certificate_pins.clone();
-    if !crate::native_gate::active(){
+    if !crate::window_diagnostics::active(){
         if let Some(pin) = local_service::local_pin(&connection.url) {pins.entry(connection.url.clone()).or_insert(pin);}
     }
     if connection.target_peer_id.is_none() {
@@ -456,7 +393,7 @@ pub(crate) async fn open_connection(
         config
             .profile_keys
             .entry(connection.key())
-            .or_insert_with(|| crate::native_gate::profile(&connection.key()).unwrap_or_else(||connection.key()));
+            .or_insert_with(|| crate::window_diagnostics::profile(&connection.key()).unwrap_or_else(||connection.key()));
         config.persist(&shell.file)?;
     }
     let assets = app
@@ -471,14 +408,10 @@ pub(crate) async fn open_connection(
         .unwrap_or(&connection.url);
     let default_route = origins.iter().position(|o| o == default_origin).unwrap();
     let boot = json!({"origin":proxy.origin,"origins":origins,"defaultRoute":default_route,"connection":connection,"invitation":invitation,
-        "chromeCss":include_str!("../../renderer/chrome.css"),"version":app.package_info().version.to_string(),"nativeTerminal":crate::native_gate::native_renderer_enabled(),"terminalEngineSwitch":!crate::native_gate::active(),"bundledWorkspace":true,"ownedWindowChrome":crate::native_gate::chrome_enabled(),"platform":if cfg!(target_os="macos") { "darwin" } else { std::env::consts::OS }});
+        "chromeCss":include_str!("../../renderer/chrome.css"),"version":app.package_info().version.to_string(),"bundledWorkspace":true,"ownedWindowChrome":crate::window_diagnostics::chrome_enabled(),"platform":if cfg!(target_os="macos") { "darwin" } else { std::env::consts::OS }});
     let script = format!(
         "window.__TD_PREVIEW_BOOT__={boot};\n{}",
-        concat!(
-            include_str!("../../renderer/bridge.js"),
-            "\n",
-            include_str!("../../renderer/lifecycle.js")
-        )
+        include_str!("../../renderer/bridge.js")
     );
     // Exact origin + exact webview label; no wildcard remote IPC capability and
     // no filesystem/shell/plugin permissions are granted to service pages.
@@ -508,12 +441,10 @@ pub(crate) async fn open_connection(
             proxy,
             activity: json!({"runningCount":0,"reviewCount":0}),
             pending_focus: None,
-            terminal_engine: None,
         },
     );
     let chrome_instance=crate::window_chrome::new_instance();
     let navigation_app = app.clone();
-    let navigation_label = label.clone();
     let new_window_app = app.clone();
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(format!("{} · Termdock Preview", connection.label))
@@ -532,8 +463,6 @@ pub(crate) async fn open_connection(
                     .lock()
                     .unwrap()
                     .insert(w.label().into(), uuid::Uuid::new_v4().to_string());
-                #[cfg(target_os = "macos")]
-                crate::native_terminal::invalidate(w.app_handle(), w.label(), false);
                 if let Ok(mut files) = state(w.app_handle()).files.try_lock() {
                     files.close_window(w.label());
                 }
@@ -541,18 +470,14 @@ pub(crate) async fn open_connection(
                     downloads.close_window(w.label());
                 }
                 crate::window_chrome::page_started(&w,chrome_instance);
-                crate::native_gate::page_started(&w,payload.url());
             }
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
                 deliver_pending_focus(w.app_handle(), &w);
                 publish_document_epoch(&w);
                 crate::window_chrome::page_finished(&w,chrome_instance);
-                crate::native_gate::page_finished(&w);
             }
         })
-        .on_document_title_changed(|window,title|crate::native_gate::title(&window,&title))
         .on_navigation(move |url| {
-            if crate::native_gate::active(){if let Some(window)=navigation_app.get_webview_window(&navigation_label){crate::window_chrome::invalidate_instance(&window,true,chrome_instance);crate::native_gate::navigation(&window,url);}}
             if url.origin().ascii_serialization() == allowed_origin
                 || url.scheme() == "blob"
                 || url.as_str() == "about:blank"
@@ -665,62 +590,6 @@ fn update_unpaired_window(windows:&Mutex<BTreeMap<String,ServiceWindow>>,config:
     }
     None
 }
-fn connection_terminal_engine(selected:TerminalEngine,supported:bool,connection:&Connection)->TerminalEngine{
- initial_terminal_engine(selected,supported,connection.target_peer_id.is_some())
-}
-fn initial_terminal_engine(selected:TerminalEngine,supported:bool,pinned:bool)->TerminalEngine{
- if supported&&pinned{selected}else{TerminalEngine::Web}
-}
-fn engine_epoch_allowed(active:Option<&(String,TerminalEngine)>,current:&str,requested:&str)->bool{
- requested==current&&active==Some(&(current.to_owned(),TerminalEngine::Native))
-}
-fn owned_native_engine_request(args:&Value,active:Option<&(String,TerminalEngine)>,current:&str)->Result<(Value,String),String>{
- let epoch=args["engineEpoch"].as_str().ok_or("Native engine page epoch is missing")?;
- if !engine_epoch_allowed(active,current,epoch){return Err("Native engine is disabled or belongs to an old page".into());}
- let request=args.get("request").filter(|value|value.is_object()).cloned().ok_or("Native request envelope is missing")?;
- Ok((request,epoch.to_owned()))
-}
-fn normal_native_engine_request(app:&AppHandle,window:&WebviewWindow,args:&Value)->Result<(Value,String),String>{
- if !cfg!(target_os="macos"){return Err("Native terminal requires macOS".into());}
- let epoch=page_epoch(window).ok_or("Native service page is missing")?;
- let shell=state(app);let active=shell.windows.lock().unwrap().get(window.label()).and_then(|service|service.terminal_engine.clone());
- owned_native_engine_request(args,active.as_ref(),&epoch)
-}
-fn confirm_engine_detachment(receipt:&Value,epoch:&str)->Result<(),String>{
- if receipt["detached"]!=true||receipt["epoch"].as_str()!=Some(epoch)||receipt["remaining"].as_u64()!=Some(0){return Err("Previous terminal renderer did not detach".into());}Ok(())
-}
-async fn terminal_engine(app:&AppHandle,window:&WebviewWindow,change:Option<&Value>)->Result<Value,String>{
- let shell=state(app);let _serial=shell.engine_changes.lock().await;
- check_caller(app,window)?;
- let epoch=page_epoch(window).ok_or("Missing service page epoch")?;
- if let Some(change)=change{
-  if change["epoch"].as_str()!=Some(&epoch){return Err("Engine choice belongs to an old workspace page".into());}
-  let engine:TerminalEngine=serde_json::from_value(change["engine"].clone()).map_err(|_|"Invalid terminal engine")?;
-  if engine==TerminalEngine::Native&&!cfg!(target_os="macos"){return Err("Native terminal is available only on macOS".into());}
-  let mut config=shell.config.lock().unwrap();let mut next=config.clone();next.desktop_preferences.terminal_engine=engine;
-  // Hold the epoch map through the synchronous atomic preference commit.
-  let epochs=shell.file_epochs.lock().unwrap();
-  if epochs.get(window.label()).map(String::as_str)!=Some(&epoch){return Err("Workspace changed before saving its engine".into());}
-  next.persist(&shell.file)?;*config=next;drop(epochs);
- }
- let current=shell.windows.lock().unwrap().get(window.label()).and_then(|service|service.terminal_engine.clone());
- let active=if let Some((old_epoch,engine))=current.filter(|(old_epoch,_)|old_epoch==&epoch){let _=old_epoch;engine}else{
-  // New documents must detach the previous page's exact window/service/target
-  // surfaces before React may mount either renderer. No backend session closes.
-  #[cfg(target_os="macos")]
-  {
-   let receipt=crate::native_terminal::detach_previous_engine(app.clone(),window.clone(),epoch.clone()).await?;
-   confirm_engine_detachment(&receipt,&epoch)?;
-  }
-  if page_epoch(window).as_deref()!=Some(&epoch){return Err("Workspace changed while choosing its terminal engine".into());}
-  check_caller(app,window)?;
-  let selected=shell.config.lock().unwrap().desktop_preferences.terminal_engine;
-  let engine=shell.windows.lock().unwrap().get(window.label()).map(|service|connection_terminal_engine(selected,cfg!(target_os="macos"),&service.connection)).ok_or("Service window closed")?;
-  shell.windows.lock().unwrap().get_mut(window.label()).ok_or("Service window closed")?.terminal_engine=Some((epoch.clone(),engine));engine
- };
- let selected=shell.config.lock().unwrap().desktop_preferences.terminal_engine;
- Ok(json!({"selected":selected,"active":active,"nativeSupported":cfg!(target_os="macos"),"targetVerified":shell.windows.lock().unwrap().get(window.label()).is_some_and(|service|service.connection.target_peer_id.is_some()),"epoch":epoch}))
-}
 #[tauri::command]
 async fn preview_dispatch(
     app: AppHandle,
@@ -728,11 +597,8 @@ async fn preview_dispatch(
     op: String,
     args: Value,
 ) -> Result<Value, String> {
-    let native_request_id=if op=="nativeTerminal"{crate::native_gate::request_id()}else{None};
-    if op=="nativeTerminal"{crate::native_gate::native_event(&window,"dispatch-received",args["action"].as_str().unwrap_or("invalid"),native_request_id,None,"");}
     let center = match check_caller(&app, &window){Ok(center)=>center,Err(error)=>{
         if op=="dragWindow"{crate::window_chrome::caller_rejected(&window);}
-        if op=="nativeTerminal"{crate::native_gate::native_event(&window,"dispatch-caller-rejected",args["action"].as_str().unwrap_or("invalid"),native_request_id,None,&error);}
         return Err(error);
     }};
     if op == "startupObservation" {
@@ -764,39 +630,17 @@ async fn preview_dispatch(
             let restore=match args.get("restore") {Some(Value::Bool(value))=>*value,Some(_)=>return Err("Invalid titlebar restore flag".into()),None=>false};
             let restore_epoch=if restore {
                 let epoch=page_epoch(&window).ok_or("Titlebar restore has no owned service page epoch")?;
-                if !crate::native_gate::consume_titlebar_restore(&window,&epoch){return Err("No current owned titlebar minimize is available to restore".into());}
+                if !crate::window_diagnostics::consume_titlebar_restore(&window,&epoch){return Err("No current owned titlebar minimize is available to restore".into());}
                 Some(epoch)
             }else{None};
             let receipt=titlebar_double_click(&window,args,restore_epoch).await?;
             if !restore&&receipt["action"]=="Minimize"&&receipt["after"]["isMiniaturized"]==true {
-                if let Some(epoch)=page_epoch(&window){crate::native_gate::arm_titlebar_restore(&window,&epoch);}
+                if let Some(epoch)=page_epoch(&window){crate::window_diagnostics::arm_titlebar_restore(&window,&epoch);}
             }
             return Ok(receipt);
         }
         return Ok(Value::Null);
     }
-    if op=="terminalEngine"||op=="setTerminalEngine" {
-        if center||crate::native_gate::active(){return Err("Engine selection belongs to a normal service workspace".into());}
-        return terminal_engine(&app,&window,if op=="setTerminalEngine"{Some(&args)}else{None}).await;
-    }
-    if op == "nativeTerminal" {
-        let (args,request_epoch)=if crate::native_gate::active(){
-            if !crate::native_gate::native_renderer_enabled(){return Err("Native terminal is disabled for this owned gate".into());}(args,None)
-        }else{
-            let (request,epoch)=normal_native_engine_request(&app,&window,&args)?;
-            (request,Some(epoch))
-        };
-        #[cfg(target_os = "macos")]
-        {
-            let trace_window=window.clone();let action=args["action"].as_str().unwrap_or("invalid").to_owned();
-            let result=crate::native_terminal::dispatch(app, window, args,native_request_id,request_epoch).await;
-            crate::native_gate::native_event(&trace_window,"dispatch-return",&action,native_request_id,None,if result.is_ok(){"ok"}else{result.as_ref().unwrap_err()});
-            return result;
-        }
-        #[cfg(not(target_os = "macos"))]
-        return Err("Native Ghostty requires the compiled macOS host".into());
-    }
-    if let Some(result)=crate::native_gate::interaction_update(&window,&op){return result;}
     let shell = state(&app);
     if [
         "trustCertificate",
@@ -1003,7 +847,11 @@ async fn preview_dispatch(
             };
             let open = shell.windows.lock().unwrap().iter()
                 .map(|(label, service)| (label.clone(), service.connection.clone())).collect::<Vec<_>>();
-            let label = crate::collaboration_focus::window(&origin, &open, &shell.config.lock().unwrap().connections);
+            let peer=args["targetPeerId"].as_str();
+            if peer.is_some_and(|value|value.is_empty()||value.len()>256){return Err("Invalid focus target identity".into());}
+            let label = if let Some(peer)=peer {
+                crate::collaboration_focus::peer_window(peer,&open)
+            }else{crate::collaboration_focus::window(&origin, &open, &shell.config.lock().unwrap().connections)};
             let Some(target) = label.and_then(|label| app.get_webview_window(&label)) else {
                 return Ok(json!(false));
             };
@@ -1026,12 +874,8 @@ async fn preview_dispatch(
                 }
                 config.save_connection(connection.clone(), op == "saveConnection");
             }
-            let pairing=update_unpaired_window(&shell.windows,&shell.config,window.label(),&connection);
+            let _pairing=update_unpaired_window(&shell.windows,&shell.config,window.label(),&connection);
             store(&app)?;
-            if let Some((previous,current))=pairing {
-                crate::native_gate::paired_connection(&window,&previous,&current);
-                desktop_ui::emit(&window,"termdock:terminal-engine-availability",Value::Null);
-            }
             Ok(json!(crate::config::service_connections(&shell.config.lock().unwrap().connections)))
         }
         "removeConnection" => {
@@ -1142,62 +986,14 @@ async fn preview_dispatch(
             }
             Ok(Value::Null)
         }
-        "showCenter" => {
-            // Late cleanup from a replaced document must not focus the center
-            // or overwrite a healthy replacement page with its old failure.
-            if !center && (args["nativeError"].is_string() || args["nativeRecovered"].is_string()) && args["documentEpoch"].as_str()!=page_epoch(&window).as_deref(){return Ok(Value::Null);}
-            // Recovery may only clear this workspace's exact native notice.
-            // This acknowledgement does not show/focus the center window.
-            if let Some(id)=args["nativeRecovered"].as_str().filter(|id|!id.is_empty()&&id.len()<=128) {
-                if center{return Err("Native recovery requires a workspace".into());}
-                if let Some(local)=app.get_webview_window("center") {
-                    let id=json!(id);let label=json!(window.label());
-                    local.eval(&format!("(()=>{{const state=window.__tdNativeRecoveryNotice;if(state?.owner==={label}&&state.id==={id})state.recovered=true;const notice=document.querySelector('#notice');if(notice?.dataset.nativeRecoveryOwner==={label}&&notice.dataset.nativeRecoveryId==={id}&&notice.querySelector('[data-native-recovery-message]')){{notice.hidden=true;notice.replaceChildren();delete notice.dataset.nativeRecoveryOwner;delete notice.dataset.nativeRecoveryId;}}}})();")).map_err(|e|e.to_string())?;
-                }
-                return Ok(Value::Null);
-            }
-            show_center(&app)?;
-            if !center {
-                if let Some(message)=args["nativeError"].as_str().filter(|text|text.len()<=4096) {
-                    if let Some(local)=app.get_webview_window("center") {
-                        eprintln!("Termdock native recovery: {}",message.chars().take(768).collect::<String>());
-                        let _technical_message=message;let message=json!("原生终端暂时无法恢复，已保留服务端会话。请重试恢复终端。");let label=json!(window.label());let recovery_id=json!(args["recoveryId"].as_str().filter(|id|id.len()<=128).unwrap_or(""));
-                        local.eval(&format!("(()=>{{const state={{owner:{label},id:{recovery_id},recovered:false}};window.__tdNativeRecoveryNotice=state;const show=()=>{{if(window.__tdNativeRecoveryNotice!==state||state.recovered)return;const notice=document.querySelector('#notice');if(!notice)return;notice.hidden=false;notice.dataset.nativeRecoveryOwner={label};notice.dataset.nativeRecoveryId={recovery_id};notice.classList.add('error');notice.replaceChildren();const text=document.createElement('span');text.dataset.nativeRecoveryMessage='true';text.textContent={message};notice.append(text);const button=document.createElement('button');button.textContent='重试恢复终端';button.className='native-recovery-retry';button.onclick=()=>{{button.disabled=true;void window.termdockDesktop.retryNativeIsolation({label},{recovery_id}).catch(()=>{{button.disabled=false;text.textContent='终端恢复未完成，请重试。服务端会话仍保留。';}});}};notice.append(button);}};if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',show,{{once:true}});else show();}})();")).map_err(|e|e.to_string())?;
-                    }
-                }
-            }
+        "clipboardWriteText" => {
+            if !window.is_focused().unwrap_or(false){return Err("Copy requires the focused workspace".into());}
+            let value=text(&args,"text")?.to_owned();
+            if value.is_empty()||value.len()>262144{return Err("Invalid clipboard text".into());}
+            tauri::async_runtime::spawn_blocking(move ||arboard::Clipboard::new().map_err(|e|e.to_string())?.set_text(value).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())??;
             Ok(Value::Null)
         }
-        "nativeRecoveryRetry" => {
-            let workspace=if center {
-                let label=text(&args,"windowLabel")?;
-                if !shell.windows.lock().unwrap().contains_key(label){return Err("Recovery workspace is no longer open".into());}
-                app.get_webview_window(label).ok_or("Recovery workspace is closed")?
-            } else {
-                if args["windowLabel"].as_str().is_some(){return Err("Recovery cannot select another workspace".into());}
-                window.clone()
-            };
-            check_caller(&app,&workspace)?;
-            let epoch=page_epoch(&workspace).ok_or("Recovery workspace page is missing")?;
-            if !center && args["documentEpoch"].as_str()!=Some(&epoch){return Err("Recovery belongs to an old workspace page".into());}
-            #[cfg(target_os="macos")]
-            {
-                // A failed JS retirement can point forever at a superseded
-                // token. Recover through the host's captured real surfaces,
-                // without closing any backend session or trusting a JS ACK.
-                let receipt=crate::native_terminal::dispatch(app.clone(),workspace.clone(),json!({"action":"closeAllViews"}),None,Some(epoch.clone())).await?;
-                if receipt["detached"]!=true || receipt["remaining"]!=0 || receipt["epoch"].as_str()!=Some(&epoch){return Err("Recovery did not detach the current native surfaces".into());}
-            }
-            if page_epoch(&workspace).as_deref()!=Some(&epoch){return Err("Workspace changed during native recovery".into());}
-            workspace.reload().map_err(|e|e.to_string())?;
-            workspace.show().map_err(|e|e.to_string())?;
-            workspace.set_focus().map_err(|e|e.to_string())?;
-            if let Some(local)=app.get_webview_window("center") {
-                let label=json!(workspace.label());let id=json!(args["recoveryId"].as_str().unwrap_or(""));
-                local.eval(&format!("(()=>{{const state=window.__tdNativeRecoveryNotice;if(state?.owner!=={label}||({id}&&state.id!=={id}))return;state.recovered=true;const notice=document.querySelector('#notice');if(notice?.dataset.nativeRecoveryOwner==={label}&&notice.dataset.nativeRecoveryId===state.id){{notice.hidden=true;notice.replaceChildren();}}}})();")).map_err(|e|e.to_string())?;
-            }
-            Ok(Value::Null)
-        }
+        "showCenter" => { show_center(&app)?; Ok(Value::Null) }
         "revealConfig" => {
             open::that(local_service::home()?.join(".termdock")).map_err(|e| e.to_string())?;
             Ok(Value::Null)
@@ -1629,16 +1425,6 @@ async fn clipboard_files(
     }
 }
 #[cfg(target_os = "macos")]
-pub struct NativeHost {
-    pub wk_view: *mut std::ffi::c_void,
-    pub parent: *mut std::ffi::c_void,
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-    pub scale: f64,
-}
-#[cfg(target_os = "macos")]
 async fn titlebar_double_click(window: &WebviewWindow, args: Value, restore_epoch: Option<String>) -> Result<Value, String> {
     let restore = args.get("restore").and_then(Value::as_bool).unwrap_or(false);
     let setting=std::process::Command::new("/usr/bin/defaults").args(["read","-g","AppleActionOnDoubleClick"]).output().ok()
@@ -1649,7 +1435,7 @@ async fn titlebar_double_click(window: &WebviewWindow, args: Value, restore_epoc
     let caller=window.clone();
     window.with_webview(move |webview| unsafe {
         if let Some(epoch)=restore_epoch.as_deref(){
-            if crate::shell::page_epoch(&caller).as_deref()!=Some(epoch)||!crate::native_gate::titlebar_restore_owner_matches(&caller,epoch){
+            if crate::shell::page_epoch(&caller).as_deref()!=Some(epoch)||!crate::window_diagnostics::titlebar_restore_owner_matches(&caller,epoch){
                 let _=send.send(Err("Titlebar restore owner or page epoch changed".to_owned()));return;
             }
         }
@@ -1682,86 +1468,10 @@ async fn titlebar_double_click(window: &WebviewWindow, args: Value, restore_epoc
     receive.await.map_err(|_|"Titlebar action receipt channel closed".to_owned())?
 }
 
-/// Callback is executed by with_webview on the actual AppKit thread. Even a
-/// missing parent completes with an error; scheduling never represents an ACK.
-#[cfg(target_os = "macos")]
-pub fn with_native_host(
-    window: &WebviewWindow,
-    attach: impl FnOnce(Result<NativeHost, String>) + Send + 'static,
-) -> tauri::Result<()> {
-    window.with_webview(move |webview| unsafe {
-        let view = &*webview.inner().cast::<objc2::runtime::AnyObject>();
-        let parent: *mut objc2::runtime::AnyObject = objc2::msg_send![view, superview];
-        if parent.is_null() {
-            attach(Err("WKWebView common parent is absent".into()));
-            return;
-        }
-        let bounds: objc2_foundation::NSRect = objc2::msg_send![view, bounds];
-        let frame: objc2_foundation::NSRect =
-            objc2::msg_send![view, convertRect: bounds, toView: parent];
-        let parent_bounds: objc2_foundation::NSRect = objc2::msg_send![parent, bounds];
-        let flipped: bool = objc2::msg_send![parent, isFlipped];
-        let native_window: *mut objc2::runtime::AnyObject = objc2::msg_send![view, window];
-        if native_window.is_null() {
-            attach(Err("WKWebView window is absent".into()));
-            return;
-        }
-        let scale: f64 = objc2::msg_send![native_window, backingScaleFactor];
-        let y = if flipped {
-            frame.origin.y
-        } else {
-            parent_bounds.size.height - frame.origin.y - frame.size.height
-        };
-        attach(Ok(NativeHost {
-            wk_view: webview.inner().cast(),
-            parent: parent.cast(),
-            x: frame.origin.x,
-            y,
-            width: bounds.size.width,
-            height: bounds.size.height,
-            scale,
-        }));
-    })
-}
-#[cfg(target_os = "macos")]
-pub(crate) fn native_context(
-    app: &AppHandle,
-    window: &WebviewWindow,
-) -> Result<crate::native_contract::Context, String> {
-    if check_caller(app, window)? {
-        return Err("Native terminal requires a service workspace".into());
-    }
-    let shell = state(app);
-    let windows = shell.windows.lock().unwrap();
-    let service = windows.get(window.label()).ok_or("Unknown native window")?;
-    let epoch = shell
-        .file_epochs
-        .lock()
-        .unwrap()
-        .get(window.label())
-        .cloned()
-        .ok_or("Native page is not ready")?;
-    Ok(crate::native_contract::Context {
-        window: window.label().into(),
-        origin: service.proxy.origin.clone(),
-        service: service
-            .connection
-            .service_origin
-            .as_ref()
-            .unwrap_or(&service.connection.url)
-            .clone(),
-        target: service
-            .connection
-            .target_peer_id
-            .clone()
-            .ok_or("Native terminal requires the verified target pin")?,
-        epoch,
-    })
-}
 // App bootstrap embeds Info.plist; lib tests already embed it through updater fixtures.
 #[cfg(not(test))]
 pub fn run() {
-    crate::native_gate::initialize().expect("Invalid isolated native gate arguments");
+    crate::window_diagnostics::initialize().expect("Invalid window diagnostic arguments");
     let mut context = tauri::generate_context!();
     if let Some(diagnostic) = crate::updater::prepare_startup(context.config_mut()) {
         eprintln!("Preview updater configuration: {diagnostic}");
@@ -1770,7 +1480,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![preview_dispatch])
         .setup(|app| {
-            let (file,config)=if let Some(isolated)=crate::native_gate::configuration(){isolated}else{
+            let (file,config)=if let Some(isolated)=crate::window_diagnostics::configuration(){isolated}else{
                 let file=app.path().app_config_dir()?.join("connections.json");
                 let stable=PathBuf::from(std::env::var_os("HOME").ok_or("Missing home directory")?).join(".termdock/desktop.json");
                 let config=Config::load(&file,&stable)?;(file,config)
@@ -1822,7 +1532,6 @@ pub fn run() {
                 config: Mutex::new(config),
                 windows: Mutex::new(BTreeMap::new()),
                 openings: tokio::sync::Mutex::new(()),
-                engine_changes: tokio::sync::Mutex::new(()),
                 permissions: Mutex::new(Default::default()),
                 last_focused: Mutex::new(None),
                 tray: Mutex::new(None),
@@ -1856,8 +1565,7 @@ pub fn run() {
             native_desktop::init(app.handle());
             desktop_ui::install_menu(app.handle())?;
             app.on_menu_event(|app, event| desktop_ui::menu_event(app, event.id().as_ref()));
-            if (!crate::native_gate::active()&&!restore_pending)||crate::native_gate::chrome_enabled()||crate::native_gate::keyboard_before_native(){show_center(app.handle())?;}
-            crate::native_gate::deadline(app.handle().clone());
+            if !restore_pending||crate::window_diagnostics::chrome_enabled(){show_center(app.handle())?;}
             let preferences = state(app.handle())
                 .config
                 .lock()
@@ -1870,19 +1578,19 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let mut restored=0;
                 for connection in restore_connections {
-                    match open_connection(&app, connection, crate::native_gate::invitation()).await {
+                    match open_connection(&app, connection, crate::window_diagnostics::invitation()).await {
                         Ok(_)=>restored+=1,
                         Err(error)=>announce(&app, "termdock:preview-error", json!(error)),
                     }
                 }
                 state(&app).restoring.store(false,Ordering::SeqCst);
-                if !crate::native_gate::active()&&restored==0 {
+                if !crate::window_diagnostics::active()&&restored==0 {
                     let _=show_center(&app);
                 }
                 // Owned window inventory only; no addresses, bookmark identities
                 // or page contents. Also verifies the actual startup policy.
                 eprintln!("Termdock startup presentation: restored={} center={}",restored,app.get_webview_window("center").is_some());
-                if crate::native_gate::active(){return;}
+                if crate::window_diagnostics::active(){return;}
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 loop {
                     app.state::<crate::updater::Updater>().check(&app).await;
@@ -1918,7 +1626,7 @@ pub fn run() {
 
 pub(crate) fn local_bridge() -> &'static str {
     static SCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SCRIPT.get_or_init(||format!("window.__TD_PREVIEW_BOOT__={{local:true,origin:location.origin,connection:{{}},version:{},platform:{},ownedWindowChrome:{}}};\n{}",json!(env!("CARGO_PKG_VERSION")),json!(if cfg!(target_os="macos"){"darwin"}else{std::env::consts::OS}),json!(crate::native_gate::chrome_enabled()),include_str!("../../renderer/bridge.js")))
+    SCRIPT.get_or_init(||format!("window.__TD_PREVIEW_BOOT__={{local:true,origin:location.origin,connection:{{}},version:{},platform:{},ownedWindowChrome:{}}};\n{}",json!(env!("CARGO_PKG_VERSION")),json!(if cfg!(target_os="macos"){"darwin"}else{std::env::consts::OS}),json!(crate::window_diagnostics::chrome_enabled()),include_str!("../../renderer/bridge.js")))
 }
 async fn snapshot(app: &AppHandle) -> Result<Value, String> {
     let shell = state(app);
@@ -2071,8 +1779,6 @@ fn observe_window(app: &AppHandle, window: &WebviewWindow, connection_id: Option
             }
             tauri::WindowEvent::Destroyed => {
                 crate::window_chrome::destroyed(&label,chrome_instance);
-                #[cfg(target_os = "macos")]
-                crate::native_terminal::invalidate(&app, &label, true);
                 shell.windows.lock().unwrap().remove(&label);
                 shell.drops.lock().unwrap().retain(|_, d| d.owner != label);
                 shell.file_epochs.lock().unwrap().remove(&label);
@@ -2314,7 +2020,7 @@ mod pairing_tests {
   let server=tokio::spawn(async move{axum::serve(upstream,axum::Router::new().route("/",axum::routing::get(||async{axum::response::Html("<html>Owned registry test</html>")}))).await.unwrap();});
   let old=Connection{id:"owned".into(),url:format!("http://{address}"),label:"Owned".into(),target_peer_id:None,service_origin:None,entry_service_id:None,routes:vec![]};
   let listener=proxy::bind(None).await.unwrap();let (proxy,_)=proxy::start(listener,&old,&BTreeMap::new()).await.unwrap();
-  let windows=Mutex::new(BTreeMap::from([("owner".into(),ServiceWindow{connection:old.clone(),proxy,activity:Value::Null,pending_focus:None,terminal_engine:None})]));
+  let windows=Mutex::new(BTreeMap::from([("owner".into(),ServiceWindow{connection:old.clone(),proxy,activity:Value::Null,pending_focus:None})]));
   let mut initial=Config::default();initial.ports.insert(old.key(),12345);initial.profile_keys.insert(old.key(),"controlled-profile".into());
   let config=Mutex::new(initial);let mut next=old.clone();next.target_peer_id=Some("controlled-peer".into());
   let (previous,current)=update_unpaired_window(&windows,&config,"owner",&next).unwrap();
@@ -2329,41 +2035,5 @@ mod pairing_tests {
   assert!(update_unpaired_window(&windows,&config,"owner",&next).is_none());
   let mut other=next.clone();other.url="http://127.0.0.1:12346".into();assert!(update_unpaired_window(&windows,&config,"owner",&other).is_none());
   server.abort();
- }
-}
-
-#[cfg(test)]
-mod terminal_engine_tests {
- use super::*;
- #[test]fn first_unpaired_web_can_reach_authorization_even_with_saved_native_choice(){
-  assert_eq!(initial_terminal_engine(TerminalEngine::Web,true,false),TerminalEngine::Web);
-  assert_eq!(initial_terminal_engine(TerminalEngine::Native,true,false),TerminalEngine::Web);
-  assert_eq!(initial_terminal_engine(TerminalEngine::Native,true,true),TerminalEngine::Native);
-  assert_eq!(initial_terminal_engine(TerminalEngine::Native,false,true),TerminalEngine::Web);
- }
- #[test]fn remote_direct_and_entry_relay_use_the_verified_target_not_locality(){
-  for relay in [false,true]{
-   let mut connection=Connection{id:"remote".into(),url:"https://entry.example".into(),label:"Remote".into(),target_peer_id:None,service_origin:relay.then(||"https://target.example".into()),entry_service_id:relay.then(||"entry-peer".into()),routes:vec![]};
-   assert_eq!(connection_terminal_engine(TerminalEngine::Native,true,&connection),TerminalEngine::Web);
-   connection.target_peer_id=Some("verified-target-peer".into());
-   assert_eq!(connection_terminal_engine(TerminalEngine::Native,true,&connection),TerminalEngine::Native);
-   assert_eq!(connection_terminal_engine(TerminalEngine::Web,true,&connection),TerminalEngine::Web);
-   assert_eq!(connection_terminal_engine(TerminalEngine::Native,false,&connection),TerminalEngine::Web);
-  }
- }
- #[test]fn native_global_and_create_requests_cannot_borrow_a_new_page_epoch(){
-  let current=("new".to_owned(),TerminalEngine::Native);let old=("old".to_owned(),TerminalEngine::Native);
-  for action in ["create","hideAll","resumeAll"]{
-   let stale=json!({"engineEpoch":"old","request":{"action":action}});
-   let fresh=json!({"engineEpoch":"new","request":{"action":action}});
-   assert!(owned_native_engine_request(&stale,Some(&current),"new").is_err());
-   assert!(owned_native_engine_request(&fresh,Some(&old),"new").is_err());
-   assert!(owned_native_engine_request(&fresh,None,"new").is_err());
-   assert_eq!(owned_native_engine_request(&fresh,Some(&current),"new").unwrap().0["action"],action);
-  }
- }
- #[test]fn engine_mount_requires_real_exact_empty_detachment(){
-  assert!(confirm_engine_detachment(&json!({"detached":true,"epoch":"new","remaining":0}),"new").is_ok());
-  for receipt in [json!({"detached":true,"epoch":"old","remaining":0}),json!({"detached":false,"epoch":"new","remaining":0}),json!({"detached":true,"epoch":"new","remaining":1}),json!({"detached":true,"epoch":"new"})]{assert!(confirm_engine_detachment(&receipt,"new").is_err());}
  }
 }

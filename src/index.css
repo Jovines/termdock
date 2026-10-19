@@ -946,7 +946,7 @@ html[data-termdock-touch-viewport='true'] .terminal-viewport-container {
      避免 ⏺ (U+23FA) 等被浏览器回退成彩色 Apple Color Emoji。
      仅 Chrome 131+ / Safari 17.4+ 支持；老浏览器靠 fontFamily 末尾的字体链兜底。 */
   font-variant-emoji: text;
-  /* 归一化回退字体的视觉大小，对齐 Ghostty 的 ic_width 回退缩放策略。
+  /* 归一化回退字体的视觉大小，按字符单元宽度匹配回退缩放。
      Termdock Mono 的 ex-height = 0.55em (OS/2 sxHeight = 550 / upem 1000)。
      不加此属性时，浏览器按 font-size 原始值渲染回退字体，而 CJK 字体的
      lineHeight = 1.448em (比 JetBrains Mono 的 1.32em 高 9.7%)，导致中文字符

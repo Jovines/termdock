@@ -89,7 +89,7 @@ test('native readers preserve safe bytes; delivery and update state come from th
   assert.equal(files[0].path,undefined); assert.deepEqual([...new Uint8Array(files[0].bytes)],[0,255]);
   assert.deepEqual([...new Uint8Array(await bridge.readClipboardImage())],[1,2,255]);
   assert.equal(await bridge.showNotification({title:'test'}),false); assert.equal((await bridge.desktopUpdateState()).status,'error');
-  await assert.rejects(bridge.nativeTerminal.create({viewId:'a'}));
+  assert.equal(bridge.nativeTerminal, undefined);
   assert.equal((await f.context.navigator.serviceWorker.register('/sw.js')).scope,f.context.location.origin+'/');
   assert.equal(bridge.previewCapabilities.backgroundWorker,true);
   assert.equal(f.ipc.some(call=>call.op.includes('upload')),false);
@@ -612,53 +612,12 @@ test('a same-view backend rebound invalidates a pending native drop capability',
  await new Promise(resolve=>setTimeout(resolve,0));assert.deepEqual(delivered,[]);dom.window.close();
 });
 
-test('normal Preview disables native surface requests while preserving local clipboard collection',async()=>{
- const f=fixture({nativeTerminal:false});
- assert.equal(f.window.termdockDesktop.previewCapabilities.nativeTerminal,false);
- assert.equal(f.window.termdockDesktop.nativeTerminal.available,false);
- const before=f.ipc.length;
- await assert.rejects(f.window.termdockDesktop.nativeTerminal.request({action:'create'}));
- await assert.rejects(f.window.termdockDesktop.nativeTerminal.request({action:'focus',focused:true}));
- await assert.rejects(f.window.termdockDesktop.nativeTerminal.create({view:'owned'}));
- assert.equal(f.ipc.length,before);
- const files=await f.window.termdockDesktop.readClipboardFiles();
- assert.equal(files.length,1);assert.deepEqual(Array.from(new Uint8Array(files[0].bytes)),[0,255]);
+test('Web-only Preview omits engine APIs while preserving desktop clipboard collection',async()=>{
+ const f=fixture();const api=f.window.termdockDesktop;
+ assert.equal(api.nativeTerminal,undefined);assert.equal(api.terminalEngine,undefined);
+ const files=await api.readClipboardFiles();assert.equal(files.length,1);
+ assert.deepEqual(Array.from(new Uint8Array(files[0].bytes)),[0,255]);
  assert(f.ipc.some(call=>call.op==='clipboardFiles'));
- assert(!f.ipc.some(call=>call.op==='nativeTerminal'));
-});
-test('normal engine negotiation keeps native disabled until ready and envelopes current-page global requests',async()=>{
- let ready;const result=new Promise(resolve=>{ready=resolve;});
- const f=fixture({terminalEngineSwitch:true,invoke:async(op,args)=>{if(op==='terminalEngine')return result;if(op==='setTerminalEngine')return{selected:args.engine,active:'native',nativeSupported:true,epoch:'page-one'};return null;}});
- const api=f.window.termdockDesktop;
- assert.equal(api.nativeTerminal.available,false);await assert.rejects(api.nativeTerminal.request({action:'create'}));
- ready({selected:'native',active:'native',nativeSupported:true,epoch:'page-one'});await api.terminalEngine.ready;
- assert.equal(api.nativeTerminal.available,true);
- for(const action of ['create','hideAll','resumeAll'])await api.nativeTerminal.request({action});
- const native=f.ipc.filter(call=>call.op==='nativeTerminal');assert.equal(native.length,3);
- for(const call of native){assert.equal(call.args.engineEpoch,'page-one');assert(['create','hideAll','resumeAll'].includes(call.args.request.action));}
- const changed=await api.terminalEngine.set('web');assert.equal(changed.selected,'web');assert.equal(api.nativeTerminal.available,true,'Saving a choice must not revoke the active page before reload');
- assert.equal(f.ipc.find(call=>call.op==='setTerminalEngine').args.epoch,'page-one');
-});
-test('Web negotiation and failed detach never enable native, and stale preference receipts reject',async()=>{
- const web=fixture({terminalEngineSwitch:true,invoke:async()=>({selected:'web',active:'web',nativeSupported:true,epoch:'web-page'})});
- await web.window.termdockDesktop.terminalEngine.ready;assert.equal(web.window.termdockDesktop.nativeTerminal.available,false);
- const failed=fixture({terminalEngineSwitch:true,invoke:async()=>{throw Error('old receiver not detached');}});
- await assert.rejects(failed.window.termdockDesktop.terminalEngine.ready);assert.equal(failed.window.termdockDesktop.nativeTerminal.available,false);
- const stale=fixture({terminalEngineSwitch:true,invoke:async op=>({selected:'native',active:'native',nativeSupported:true,epoch:op==='terminalEngine'?'page-one':'page-two'})});
- await stale.window.termdockDesktop.terminalEngine.ready;await assert.rejects(stale.window.termdockDesktop.terminalEngine.set('web'),/workspace changed/);
-});
-
-test('pairing makes Native eligible only after a new document negotiates; current Web cannot create',async()=>{
- let pinned=false;
- const f=fixture({terminalEngineSwitch:true,invoke:async op=>({selected:'native',active:'web',nativeSupported:true,targetVerified:pinned,epoch:'unpaired-page'})});
- const api=f.window.termdockDesktop;
- assert.equal((await api.terminalEngine.ready).targetVerified,false);
- pinned=true;assert.equal((await api.terminalEngine.getState()).targetVerified,true);
- assert.equal(api.nativeTerminal.available,false);
- await assert.rejects(api.nativeTerminal.request({action:'create'}));
- const next=fixture({terminalEngineSwitch:true,invoke:async()=>({selected:'native',active:'native',nativeSupported:true,targetVerified:true,epoch:'paired-page'})});
- await next.window.termdockDesktop.terminalEngine.ready;
- assert.equal(next.window.termdockDesktop.nativeTerminal.available,true);
 });
 
 test('certificate management is center-only and changed certificates retain a typed safe error',async()=>{
@@ -697,15 +656,6 @@ test('a desktop app upgrade activates only its own waiting bundled worker and re
 test('ordinary service pages retain explicit PWA update consent',async()=>{
  let touched=false;fixture({context:{navigator:{serviceWorker:{controller:{},getRegistrations:async()=>{touched=true;return[];},addEventListener:()=>{touched=true;}}}}});
  await Promise.resolve();assert.equal(touched,false);
-});
-
-test('a page which is closing cannot post its stale native failure over a replacement workspace',async()=>{
- const f=fixture();f.listeners.get('termdock:window-document-epoch')({detail:{epoch:'12345678-1234-4234-8234-123456789abc'}});
- await f.window.termdockDesktop.showConnectionCenter('owned failure','failure-1');
- const notice=f.ipc.at(-1);assert.equal(notice.op,'showCenter');assert.equal(notice.args.documentEpoch,'12345678-1234-4234-8234-123456789abc');
- const count=f.ipc.length;f.listeners.get('pagehide')({});
- await f.window.termdockDesktop.showConnectionCenter('late failure','failure-1');await f.window.termdockDesktop.confirmNativeRecovery('failure-1');
- assert.equal(f.ipc.length,count);
 });
 
 test('force reload coalesces repeated accelerators and worker activation into one navigation',async()=>{
@@ -750,4 +700,12 @@ test('a repeated shortcut in a replacement loading document does not restart sta
  let reloads=0;const storage=new Map([['termdock-preview-reload-at',String(Date.now())]]);
  const f=fixture({storage,context:{Date,document:{getElementById:()=>({hidden:false})},location:{origin:'http://127.0.0.1:43000',pathname:'/',hash:'',reload:()=>reloads++}}});
  await f.window.termdockDesktop.reloadWorkspace({force:true});assert.equal(reloads,0);
+});
+
+test('Web terminal opens only the final external URL and copies text on the client through bounded desktop IPC',async()=>{
+ const f=fixture(),api=f.window.termdockDesktop;assert.equal(api.capabilities.webWorkspace,true);
+ await api.openExternal('https://example.test/terminal?q=1#L2');await api.writeClipboardText('远程选区');
+ assert.deepEqual(JSON.parse(JSON.stringify(f.ipc.map(({op,args})=>({op,args})))),[{op:'openExternal',args:{url:'https://example.test/terminal?q=1#L2'}},{op:'clipboardWriteText',args:{text:'远程选区'}}]);
+ const before=f.ipc.length;for(const url of ['javascript:alert(1)','file:///tmp/private','https://user:pass@example.test/'])await assert.rejects(api.openExternal(url));await assert.rejects(api.writeClipboardText('x'.repeat(262145)));assert.equal(f.ipc.length,before);
+ f.listeners.get('pagehide')({});await assert.rejects(api.writeClipboardText('late'));assert.equal(f.ipc.length,before);
 });

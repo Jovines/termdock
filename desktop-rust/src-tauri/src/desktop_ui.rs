@@ -174,7 +174,7 @@ pub fn install_menu(app: &AppHandle) -> Result<(), String> {
             let services = Submenu::new(app, "打开服务", true).map_err(|e| e.to_string())?;
             let connections = state(app).config.lock().unwrap().connections.clone();
             // The opt-in fixture never reads the user's standalone daemon data.
-            let local=if crate::native_gate::active(){None}else{crate::local_service::metadata()};
+            let local=if crate::window_diagnostics::active(){None}else{crate::local_service::metadata()};
             for row in crate::config::service_menu_rows(&connections,local.as_ref().and_then(|value|value["localUrl"].as_str())) {
                 services
                     .append(

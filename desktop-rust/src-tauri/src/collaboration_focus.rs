@@ -40,6 +40,12 @@ pub fn window(address: &str, open: &[(String, Connection)], saved: &[Connection]
         || c.target_peer_id.as_deref().is_some_and(|peer| peers.contains(peer)))
         .map(|(label, _)| label.clone())
 }
+/// An authenticated peer-directory lookup can identify a saved window even
+/// when that node's registered origin is not a route of the caller's window.
+/// This only focuses an existing pinned window; it grants no network route.
+pub fn peer_window(peer:&str,open:&[(String,Connection)])->Option<String>{
+ open.iter().find(|(_,c)|c.target_peer_id.as_deref()==Some(peer)).map(|(label,_)|label.clone())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +68,12 @@ mod tests {
         let open = vec![("target".into(), connection("https://other-address.test", Some("b")))];
         assert_eq!(window("https://target.test", &open, &[connection("https://target.test", Some("b"))]).as_deref(), Some("target"));
         assert_eq!(window("https://target.test", &open, &[connection("https://target.test", Some("b")), connection("https://target.test", Some("c"))]), None);
+    }
+    #[test]
+    fn registered_origin_alias_focuses_only_the_saved_pinned_peer(){
+        let open=vec![("caller".into(),connection("https://caller.test",Some("caller"))),("already-open".into(),connection("https://127.0.0.1:9834",Some("target")))];
+        assert_eq!(peer_window("target",&open).as_deref(),Some("already-open"));
+        assert_eq!(peer_window("unknown",&open),None);
     }
     #[test]
     fn relay_entry_does_not_impersonate_target() {

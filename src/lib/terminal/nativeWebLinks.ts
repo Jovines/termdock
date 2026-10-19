@@ -1,5 +1,6 @@
 type WebWorkspaceBridge = {
   capabilities?: { webWorkspace?: boolean };
+  openExternal?: (url:string)=>Promise<void>;
 };
 
 /** WK cannot provide xterm's default about:blank staging window. Open the
@@ -13,7 +14,8 @@ export function createNativeWebLinkHandler(
     try {
       const url = new URL(uri);
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-      open(url.href);
+      if(bridge.openExternal)void bridge.openExternal(url.href).catch(()=>{});
+      else open(url.href);
     } catch { /* Ignore malformed terminal text. */ }
   };
 }

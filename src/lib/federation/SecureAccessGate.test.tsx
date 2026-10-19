@@ -88,6 +88,23 @@ describe('remote session workspace navigation', () => {
     expect(screen.queryByText('Service management')).toBeNull();
   });
 
+  it('focuses the already-open desktop window by peer identity without connecting through the callers routes',async()=>{
+    const focus=vi.fn(async(_id:string,peer?:string)=>peer==='remote'),openWindow=vi.fn();
+    window.termdockDesktop={collaborationFocus:focus,openServiceConnection:openWindow,serviceConnections:vi.fn(async()=>[remote]),saveServiceConnection:vi.fn()} as unknown as NonNullable<Window['termdockDesktop']>;
+    mocks.fetch.mockResolvedValue(Response.json({services:[{origin:'https://registered.internal',serviceId:'remote'}]}));
+    render(<SecureAccessGate><div>Active terminal</div></SecureAccessGate>);await screen.findByText('Active terminal');
+    await open('https://registered.internal','target-session');
+    await waitFor(()=>expect(focus).toHaveBeenCalledWith('remote:https%3A%2F%2Fregistered.internal:target-session','remote'));
+    expect(openWindow).not.toHaveBeenCalled();expect(mocks.connect).not.toHaveBeenCalled();expect(screen.queryByText('Service management')).toBeNull();
+  });
+  it('opens a missing desktop workspace then directs the session into that window without reusing the caller transport',async()=>{
+    let opened=false;const focus=vi.fn(async(_id:string,peer?:string)=>opened&&peer==='remote');
+    const openWindow=vi.fn(async()=>{opened=true;return {ok:true};});
+    window.termdockDesktop={collaborationFocus:focus,openServiceConnection:openWindow,serviceConnections:vi.fn(async()=>[remote]),saveServiceConnection:vi.fn()} as unknown as NonNullable<Window['termdockDesktop']>;
+    render(<SecureAccessGate><div>Active terminal</div></SecureAccessGate>);await screen.findByText('Active terminal');await open(remote.url,'target-session');
+    await waitFor(()=>expect(openWindow).toHaveBeenCalledOnce());await waitFor(()=>expect(focus).toHaveBeenLastCalledWith('remote:https%3A%2F%2Fremote.internal:target-session','remote'));
+    expect(mocks.connect).not.toHaveBeenCalled();expect(screen.queryByText('Service management')).toBeNull();
+  });
   it.each(['unknown identity', 'disconnected'])('keeps the current workspace on %s without direct HTTP fallback', async failure => {
     writeBrowserServices([entry, remote]);
     const host = installWorkspaceHost(entry)!;

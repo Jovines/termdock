@@ -506,7 +506,7 @@ fn flush_report(finalized: bool) -> bool {
         if bytes.len() > 64 * 1024 {
             return None;
         }
-        let path = crate::native_gate::chrome_path()?;
+        let path = crate::window_diagnostics::chrome_path()?;
         let mut writer = PERSIST.get_or_init(Default::default).lock().ok()?;
         writer
             .write(&path, report["stateRevision"].as_u64()?, finalized, &bytes)
@@ -531,7 +531,7 @@ fn binding(window: &WebviewWindow) -> Option<(u64, u64)> {
     Some((o.instance, o.document))
 }
 pub(crate) fn enabled() -> bool {
-    crate::native_gate::chrome_enabled()
+    crate::window_diagnostics::chrome_enabled()
 }
 fn allocate_instance() -> Option<u64> {
     NEXT_INSTANCE
@@ -546,7 +546,7 @@ pub(crate) fn new_instance() -> Option<u64> {
 }
 fn ensure(window: &WebviewWindow, expected: Option<u64>) -> Option<u64> {
     let instance = expected?;
-    let role = crate::native_gate::chrome_role(window, false)?;
+    let role = crate::window_diagnostics::chrome_role(window, false)?;
     let mut s = state().lock().ok()?;
     if let Some(i) = s.owners.iter().position(|o| o.label == window.label()) {
         if s.owners[i].instance == instance {
@@ -667,7 +667,7 @@ pub(crate) fn observe(
     if !enabled() {
         return Err("Owned window observations unavailable".into());
     }
-    if crate::native_gate::chrome_role(window, true).is_none() {
+    if crate::window_diagnostics::chrome_role(window, true).is_none() {
         return Err("Owned window observation context rejected".into());
     }
     let value: Observation =
@@ -712,7 +712,7 @@ pub(crate) fn drag_start(
     window: &WebviewWindow,
     args: &serde_json::Value,
 ) -> Option<(u64, u64, u32)> {
-    if !enabled() || crate::native_gate::chrome_role(window, true).is_none() {
+    if !enabled() || crate::window_diagnostics::chrome_role(window, true).is_none() {
         return None;
     }
     let stamp: DragStamp = serde_json::from_value(args.get("ownedWindowChrome")?.clone()).ok()?;

@@ -95,6 +95,19 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
         }
         if (stopped || request !== revision) return;
         if (!service) { setOpen(true); return; }
+        // A desktop service window cannot borrow another window's public or
+        // encrypted routes. Select the existing window by its saved peer pin.
+        const desktop=window.termdockDesktop;
+        if(desktop?.collaborationFocus){
+          const id=`remote:${encodeURIComponent(origin)}:${encodeURIComponent(sessionId)}`;
+          if(await desktop.collaborationFocus(id,service.targetPeerId))return;
+          if(desktop.openServiceConnection){
+            const opened=await desktop.openServiceConnection(service);
+            if(stopped||request!==revision)return;
+            if(opened?.ok&&await desktop.collaborationFocus(id,service.targetPeerId))return;
+            throw new Error('目标服务窗口尚未就绪，请重试切换会话。');
+          }
+        }
         if (getWorkspaceHost()?.focusSession(service.targetPeerId, sessionId)) return;
         const connection = { ...service, serviceName: service.label };
         sessionStorage.setItem(OPEN_SESSION_KEY, JSON.stringify({ serviceId: connection.targetPeerId, sessionId }));

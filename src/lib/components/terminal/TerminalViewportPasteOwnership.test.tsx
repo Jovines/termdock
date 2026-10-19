@@ -2,13 +2,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const terminalModel=vi.hoisted(()=>({instance:null as any,selection:''}));
 const clipboard = vi.hoisted(() => ({
   uploadTerminalClipboardFiles: vi.fn(),
   uploadTerminalClipboardImage: vi.fn(),
   readTerminalClipboardFiles: vi.fn(),
 }));
 const federation = vi.hoisted(() => ({ selectedTarget: vi.fn(() => ({ targetPeerId: 'peer-a' })) }));
-const desktop = vi.hoisted(() => ({ bridge: undefined as { readClipboardFiles?: () => void } | undefined }));
+const desktop = vi.hoisted(() => ({ bridge: undefined as { readClipboardFiles?: () => void;writeClipboardText?: (text:string)=>Promise<void> } | undefined }));
 vi.mock('../../terminal/clipboardImage', () => ({
   TerminalClipboardVideoError: class TerminalClipboardVideoError extends Error {},
   readTerminalClipboardFiles: clipboard.readTerminalClipboardFiles, uploadTerminalClipboardFiles: clipboard.uploadTerminalClipboardFiles,
@@ -17,16 +18,19 @@ vi.mock('../../terminal/clipboardImage', () => ({
 }));
 vi.mock('../../federation/clientScope', () => federation);
 vi.mock('../../collaboration/inputTarget', () => ({ routeCollaborationInput: vi.fn(() => false) }));
-vi.mock('../../desktop/nativeBridge', () => ({ supportsNativeTerminal: () => false, getTermdockDesktopBridge: () => desktop.bridge, subscribeNativeFileDrops: vi.fn(() => () => {}) }));
+vi.mock('../../desktop/nativeBridge', () => ({ getTermdockDesktopBridge: () => desktop.bridge, subscribeNativeFileDrops: vi.fn(() => () => {}) }));
 vi.mock('../../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../hooks/useTouchScroll', () => ({ useTouchScroll: () => ({ setupTouchScroll: vi.fn(), stopAllScroll: vi.fn() }) }));
 vi.mock('../../hooks/useGesture', () => ({ useGesture: vi.fn() }));
 vi.mock('../../terminal/resizePresentation', () => ({ createResizePresentation: () => ({ begin() {}, cancel() {}, dispose() {}, written() {} }) }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
+  constructor(options:Record<string,unknown>){this.options=options;terminalModel.instance=this;}
+  _core={coreService:{isCursorInitialized:false}};
+  hasSelection(){return !!terminalModel.selection;}getSelection(){return terminalModel.selection;}
   cols = 80; rows = 24; options: Record<string, unknown> = {}; unicode = { activeVersion: '11' };
   buffer = { active: { cursorX: 0, cursorY: 0, viewportY: 0, baseY: 0, length: 0, getLine: () => undefined } };
   textarea: HTMLTextAreaElement | null = null;
-  loadAddon() {} registerLinkProvider() {} refresh() {} focus() {} blur() {} clearSelection() {}
+  loadAddon() {} registerLinkProvider() {} refresh() {} focus=vi.fn(); blur=vi.fn(); clearSelection() {}
   attachCustomWheelEventHandler() {}
   onCursorMove() { return { dispose() {} }; } onData() { return { dispose() {} }; }
   onRender() { return { dispose() {} }; } onResize() { return { dispose() {} }; }
@@ -66,7 +70,7 @@ function pasteImage(file: File) {
 
 describe('TerminalViewport async paste ownership', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.clearAllMocks();terminalModel.selection='';terminalModel.instance=null;
     clipboard.uploadTerminalClipboardFiles.mockReset().mockResolvedValue([]);
     federation.selectedTarget.mockReturnValue({ targetPeerId: 'peer-a' });
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -90,6 +94,22 @@ describe('TerminalViewport async paste ownership', () => {
     return { ...view, props };
   }
 
+  it('Web CmdC copies a remote terminal selection to the client without sending CtrlC',async()=>{
+    const writeClipboardText=vi.fn(async()=>{}),onInput=vi.fn();desktop.bridge={writeClipboardText};
+    mount(onInput);await waitFor(()=>expect(screen.getByRole('textbox')).toBeTruthy());terminalModel.selection='remote 中文';
+    fireEvent.keyDown(screen.getByRole('textbox'),{key:'c',metaKey:true});
+    await waitFor(()=>expect(writeClipboardText).toHaveBeenCalledExactlyOnceWith('remote 中文'));expect(onInput).not.toHaveBeenCalled();
+  });
+  it('macOS Edit Copy events use the xterm selection rather than the hidden input value',async()=>{
+    mount(vi.fn());await waitFor(()=>expect(screen.getByRole('textbox')).toBeTruthy());terminalModel.selection='selected terminal output';const setData=vi.fn();
+    fireEvent.copy(screen.getByRole('textbox'),{clipboardData:{setData}});expect(setData).toHaveBeenCalledExactlyOnceWith('text/plain','selected terminal output');
+  });
+  it('Web cursor initializes before first paint, hides during suspension and restores its inactive style',async()=>{
+    const view=mount(vi.fn());await waitFor(()=>expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    const term=terminalModel.instance;expect(term.options.cursorStyle).toBe('block');expect(term.options.cursorBlink).toBe(true);expect(term.options.cursorInactiveStyle).toBe('bar');
+    view.rerender(<TerminalViewport {...view.props} cursorVisible={false}/>);await waitFor(()=>expect(term.options.cursorInactiveStyle).toBe('none'));expect(term.blur).toHaveBeenCalled();
+    view.rerender(<TerminalViewport {...view.props} cursorVisible/>);await waitFor(()=>expect(term.options.cursorInactiveStyle).toBe('bar'));expect(terminalModel.instance).toBe(term);
+  });
   it('does not send an upload result after the selected target changes', async () => {
     const upload = deferred<string[]>();
     clipboard.uploadTerminalClipboardFiles.mockReturnValue(upload.promise);

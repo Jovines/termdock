@@ -74,7 +74,7 @@ export function buildPreview(version, destination, env = process.env) {
   fs.mkdirSync(out, { recursive: true });
   const config = path.join(out, 'preview-build.json');
   fs.writeFileSync(config, JSON.stringify(plan.config, null, 2));
-  for (const step of ['prepare:workspace', 'prepare:native', 'prepare:renderer']) run('npm', ['run', step], { cwd, env: buildEnv });
+  for (const step of ['prepare:workspace', 'prepare:renderer']) run('npm', ['run', step], { cwd, env: buildEnv });
   run(process.execPath, ['scripts/prepare-workspace.mjs', '--require-clean'], { cwd, env: buildEnv });
   run(path.join(cwd, 'node_modules/.bin/tauri'), ['build', '--bundles', 'app,dmg', '--config', config], { cwd, env: buildEnv });
   const target = env.CARGO_TARGET_DIR ? path.resolve(cwd, env.CARGO_TARGET_DIR) : path.join(cwd, 'src-tauri/target');

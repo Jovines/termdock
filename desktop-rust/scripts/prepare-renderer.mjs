@@ -24,12 +24,6 @@ for (const name of ['index.html', 'app.js', 'styles.css', 'floating.html', 'floa
   if (name === 'index.html') text = text.replace('class="brand"','class="brand" data-tauri-drag-region').replace('class="topbar"','class="topbar" data-tauri-drag-region').replace('class="rail"','class="rail" data-termdock-window-rail="true"');
   if (name.endsWith('.html')) text = text.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '').replace('Termdock 连接中心', 'Termdock Preview 连接中心');
   if (name === 'app.js') text = text.replace('Termdock Desktop ${snapshot.appVersion}', 'Termdock Preview ${snapshot.appVersion}');
-  if (name === 'styles.css') text += `
-/* Native recovery feedback uses the same token surfaces as the center. */
-.notice:has(.native-recovery-retry) { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
-.native-recovery-retry { flex-shrink:0; border:1px solid var(--border); border-radius:8px; padding:8px 12px; background:var(--surface); color:var(--foreground); font-weight:600; }
-.native-recovery-retry:hover { background:var(--surface-2); }
-`;
   fs.writeFileSync(new URL(name, destination), text);
 }
 await build({ entryPoints: [new URL('../../desktop/renderer/services.tsx', import.meta.url).pathname], bundle: true, platform: 'browser', format: 'iife', minify: true, outfile: new URL('services.js', destination).pathname });

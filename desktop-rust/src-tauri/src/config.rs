@@ -233,13 +233,9 @@ impl Connection {
         Ok(())
     }
 }
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all="lowercase")]
-pub enum TerminalEngine { #[default] Web, Native }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Preferences {
-    pub terminal_engine: TerminalEngine,
     pub menu_bar_status_enabled: bool,
     pub floating_widget_enabled: bool,
     pub floating_widget_position: Option<Point>,
@@ -247,7 +243,6 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            terminal_engine: TerminalEngine::Web,
             menu_bar_status_enabled: true,
             floating_widget_enabled: false,
             floating_widget_position: None,
@@ -585,15 +580,11 @@ mod tests {
 }
 
 #[cfg(test)]
-mod terminal_engine_preference_tests {
+mod legacy_preferences_tests {
  use super::*;
- #[test]fn engine_preference_is_optional_web_by_default_and_persists_native(){
-  let old:Config=serde_json::from_str("{}").unwrap();assert_eq!(old.desktop_preferences.terminal_engine,TerminalEngine::Web);
-  let mut config=old;config.desktop_preferences.terminal_engine=TerminalEngine::Native;
-  let encoded=serde_json::to_string(&config).unwrap();let restored:Config=serde_json::from_str(&encoded).unwrap();assert_eq!(restored.desktop_preferences.terminal_engine,TerminalEngine::Native);
-  let directory=tempfile::tempdir().unwrap();let file=directory.path().join("preview.json");
-  config.persist(&file).unwrap();let loaded=Config::load(&file,&directory.path().join("missing-stable.json")).unwrap();
-  assert_eq!(loaded.desktop_preferences.terminal_engine,TerminalEngine::Native);
-  assert!(serde_json::from_str::<TerminalEngine>("\"unknown\"").is_err());
+ #[test]fn old_engine_preference_is_ignored_without_losing_desktop_settings(){
+  let config:Config=serde_json::from_str(r#"{"desktopPreferences":{"terminalEngine":"native","menuBarStatusEnabled":false,"floatingWidgetEnabled":true}}"#).unwrap();
+  assert!(!config.desktop_preferences.menu_bar_status_enabled);assert!(config.desktop_preferences.floating_widget_enabled);
+  let encoded=serde_json::to_value(&config).unwrap();assert!(encoded["desktopPreferences"].get("terminalEngine").is_none());
  }
 }

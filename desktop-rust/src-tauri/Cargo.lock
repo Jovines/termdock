@@ -4724,16 +4724,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "termdock-native-terminal"
-version = "0.1.0"
-dependencies = [
- "cc",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "termdock-preview"
 version = "0.1.0"
 dependencies = [
@@ -4766,7 +4756,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-updater",
  "tempfile",
- "termdock-native-terminal",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.28.0",
