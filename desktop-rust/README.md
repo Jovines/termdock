@@ -36,3 +36,5 @@ npm --prefix desktop-rust run build
 [macOS Rust client](../.github/workflows/macos-preview.yml) 在相关 master 推送、PR 和手动触发时，使用 GitHub 的 macOS Apple Silicon runner 编译。工作流运行终端/桥接回归、Rust 测试，构建内嵌工作区并上传 `macos-arm64-test-SHA` artifact；其中 App 为临时签名测试包，未公证，不进入 Preview 自动更新源。
 
 正式 Preview 的 Developer ID 签名、公证和更新密钥仍按 [发布契约](RELEASE.md) 在受控发布环境执行。后续将该步骤迁入 GitHub 前，须在 Actions Secrets 配置现有 Developer ID `.p12` 与密码、Apple 公证 API key，以及**同一套** Preview updater 私钥/公钥，不能生成新密钥替换已有更新信任链。
+
+[Publish verified Preview draft](../.github/workflows/promote-preview.yml) 接收已有公证草稿的版本与精确源码 SHA，核对实际 Git 标签、安装包摘要和公证记录后公开版本并更新 Preview 渠道。它不负责导入签名私钥或执行公证，也不修改既有版本标签。GitHub 的 `target_commitish` 在标签已存在时只是创建提示；发布校验以实际标签解析出的 commit 为准。
