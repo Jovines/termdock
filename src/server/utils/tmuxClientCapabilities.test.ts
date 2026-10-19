@@ -14,7 +14,7 @@ describe('tmux client capability compatibility', () => {
     expect(supported).toBe(true);
     expect(execFile).toHaveBeenCalledWith('/opt/bin/tmux', ['-T', 'RGB,sync', '-V'], { timeout: 5000 }, expect.any(Function));
     expect(buildTmuxAttachArgs('work session', supported)).toEqual([
-      '-u', '-T', 'RGB,sync', 'attach-session', '-t', 'work session',
+      '-u', '-T', 'RGB,sync', 'attach-session', '-f', 'ignore-size', '-t', 'work session',
     ]);
   });
 

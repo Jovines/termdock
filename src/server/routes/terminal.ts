@@ -20,6 +20,7 @@ import { TerminalPasteBuffer } from '../utils/terminalPasteBuffer.js';
 import { SharedSessionSampler, SharedSnapshotCache, type SampleEvent } from '../utils/sharedSampling.js';
 import { batchTmuxOptions, TmuxMetadataWriter } from '../utils/tmuxMetadataWriter.js';
 import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
+import { claimTmuxSize } from '../utils/tmuxSizeOwnership.js';
 import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
 import { TerminalOutputDelivery, resolveTerminalReplayCursor, type OutputFrame } from '../utils/terminalOutputDelivery.js';
 import express from 'express';
@@ -304,6 +305,7 @@ const TERMDOCK_FRONTEND_SESSION_ID_OPTION = '@termdock-frontend-session-id';
 const wsClients = new Map<string, Map<string, WebSocket>>();
 const outputDeliveries = new WeakMap<WebSocket, TerminalOutputDelivery>();
 const independentTmuxClients = new WeakSet<WebSocket>();
+const tmuxAttachments = new WeakMap<WebSocket, TerminalClientAttachment>();
 const independentTmuxReplays = new WeakMap<WebSocket, () => Promise<void>>();
 const TERMINAL_STREAM_EPOCH = crypto.randomUUID();
 
@@ -6070,13 +6072,13 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   }
 }
 
-function broadcastToWs(sessionId: string, data: string, excludeClientId?: string, output?: OutputFrame, eventType?: string): void {
+function broadcastToWs(sessionId: string, data: string, excludeClientId?: string, output?: OutputFrame): void {
   const clients = wsClients.get(sessionId);
   const session = terminalSessions.get(sessionId);
   if (!clients) return;
   for (const [clientId, ws] of clients.entries()) {
     if (excludeClientId && clientId === excludeClientId) continue;
-    if (independentTmuxClients.has(ws) && (output || eventType === 'pty-size')) continue;
+    if (independentTmuxClients.has(ws) && output) continue;
     try {
       if (ws.readyState !== ws.OPEN) continue;
       if (ws.bufferedAmount > 1024 * 1024) {
@@ -6095,7 +6097,7 @@ function broadcastToWs(sessionId: string, data: string, excludeClientId?: string
 
 function broadcastJsonWs(sessionId: string, payload: unknown, excludeClientId?: string): void {
   const output = (payload as { type?: string })?.type === 'data' ? payload as OutputFrame : undefined;
-  broadcastToWs(sessionId, JSON.stringify(payload), excludeClientId, output, (payload as { type?: string })?.type);
+  broadcastToWs(sessionId, JSON.stringify(payload), excludeClientId, output);
 }
 
 // 统一的 pty resize 入口：调用 ptyProcess.resize 改变 pty size 之后，把
@@ -9775,6 +9777,7 @@ export function handleTerminalWebSocket(
   let clientCols = session.cols;
   let clientRows = session.rows;
   let initialAttachmentResize = true;
+  let tmuxSizeOwnershipSupported = false;
   let initialScreen: TmuxInitialScreen | null = null;
   if (initialDimensions && options.independentTmux) {
     clientCols = initialDimensions.cols;
@@ -9788,6 +9791,7 @@ export function handleTerminalWebSocket(
       const provider = await getPtyProvider();
       const tmuxBinary = getTmuxBinary();
       const supportsFeatures = await supportsTmuxClientFeatures(tmuxBinary);
+      tmuxSizeOwnershipSupported = supportsFeatures;
       // The metadata observer must not choose the pane size while a browser
       // owns an attached client. Resolve by exact PID, never another client.
       const raw = await runTmux(['list-clients', '-t', session.tmuxSessionName!, '-F', '#{client_pid} #{client_tty}']);
@@ -9813,6 +9817,7 @@ export function handleTerminalWebSocket(
     },
     () => { if (ws.readyState === ws.OPEN) ws.close(1012, 'Tmux display client detached'); },
   ) : null;
+  if (attachment) tmuxAttachments.set(ws, attachment);
 
 
   // Register client
@@ -10033,25 +10038,38 @@ export function handleTerminalWebSocket(
           const rows = Number(msg.rows);
           if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
             if (attachment) {
-              const cleanCols = Math.floor(cols), cleanRows = Math.floor(rows);
-              const sameSize = clientCols === cleanCols && clientRows === cleanRows;
-              const ok = sameSize ? attachment.attached : attachment.resize(cleanCols, cleanRows);
-              if (ok) {
-                // The first resize confirms the grid supplied at attachment.
-                // Its PTY is already drawing that grid; forcing refresh-client
-                // here repeats the initial clear/full redraw. Later same-size
-                // requests remain explicit display recovery requests.
-                const needsRedraw = sameSize && !initialAttachmentResize;
-                initialAttachmentResize = false;
-                clientCols = cleanCols;
-                clientRows = cleanRows;
-                session.lastActivity = Date.now();
-                if (needsRedraw) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
-              }
-              if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({
-                type: 'resize-ack', seq: typeof msg.seq === 'number' ? msg.seq : undefined,
-                ok, cols: clientCols, rows: clientRows, screenSyncPending: false,
-              }));
+              await enqueueTmuxIo(session, async () => {
+                const cleanCols = Math.floor(cols), cleanRows = Math.floor(rows);
+                const displayPids = new Set<number>();
+                for (const client of wsClients.get(sessionId)?.values() ?? []) {
+                  const pid = tmuxAttachments.get(client)?.pid;
+                  if (pid !== undefined) displayPids.add(pid);
+                }
+                if (tmuxSizeOwnershipSupported) {
+                  await claimTmuxSize(runTmux, session.tmuxSessionName!, attachment.pid, displayPids);
+                }
+                const sameSize = clientCols === cleanCols && clientRows === cleanRows;
+                const ok = sameSize ? attachment.attached : attachment.resize(cleanCols, cleanRows);
+                if (ok) {
+                  // The first resize confirms the grid supplied at attachment.
+                  // Its PTY is already drawing that grid; forcing refresh-client
+                  // here repeats the initial clear/full redraw. Later same-size
+                  // requests remain explicit display recovery requests.
+                  const needsRedraw = sameSize && !initialAttachmentResize;
+                  initialAttachmentResize = false;
+                  clientCols = cleanCols;
+                  clientRows = cleanRows;
+                  session.lastActivity = Date.now();
+                  broadcastJsonWs(sessionId, {
+                    type: 'pty-size', cols: clientCols, rows: clientRows, source: `ws-resize:${clientId}`,
+                  }, clientId);
+                  if (needsRedraw) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
+                }
+                if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({
+                  type: 'resize-ack', seq: typeof msg.seq === 'number' ? msg.seq : undefined,
+                  ok, cols: clientCols, rows: clientRows, screenSyncPending: false,
+                }));
+              });
               break;
             }
             const sameSize = session.cols === Math.floor(cols) && session.rows === Math.floor(rows);

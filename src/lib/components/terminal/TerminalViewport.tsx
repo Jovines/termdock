@@ -3521,12 +3521,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // notifyServerSize 同步 lastServerSizeRef。这样 ensureSizeMatches 在用户
     // 交互时一比较，就会发现"我 xterm 是 200×50，但 server 是 80×24，要推"。
     //
-    // 防拉扯：lastServerBroadcastAtRef 记录服务端最近一次广播的时间。如果在
-    // 冷却窗口内（最近 1.5s 内刚收到广播），就不主动推回去 —— 视为"对端刚改
-    // 过"，让对方先生效，避免双端互相覆盖。
-    const SERVER_BROADCAST_COOLDOWN_MS = 1500;
+    // 被动广播只更新事实并取消旧请求；真实交互可以立即接管尺寸。
     const ENSURE_SIZE_THROTTLE_MS = 400;
-    const lastServerBroadcastAtRef = React.useRef(0);
     const lastEnsureSizeAtRef = React.useRef(0);
 
     const notifyServerSize = React.useCallback(
@@ -3540,14 +3536,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           resizeSyncStateRef.current,
           { cols: cleanCols, rows: cleanRows },
         );
-        lastServerBroadcastAtRef.current = Date.now();
+        // Another display took ownership. Cancel our queued/retrying request
+        // so it cannot take the size back without another local interaction.
+        if (source !== 'tmux-screen-sync') {
+          clearResizeAckTimer();
+          clearResizePushTimer();
+          resizeSyncStateRef.current = clearPendingResize(resizeSyncStateRef.current);
+          resizePresentationRef.current?.cancel();
+        }
         debugTerminal('pty-size broadcast received', {
           cols: cleanCols,
           rows: cleanRows,
           source: source ?? 'unknown',
         });
       },
-      [debugTerminal]
+      [debugTerminal, clearResizeAckTimer, clearResizePushTimer]
     );
 
     const ensureSizeMatches = React.useCallback(
@@ -3561,11 +3564,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return;
         }
         const now = Date.now();
-        // 服务端刚广播过尺寸（说明刚有别的客户端改过）：冷却期内不主动推回，
-        // 让对方先生效。
-        if (now - lastServerBroadcastAtRef.current < SERVER_BROADCAST_COOLDOWN_MS) {
-          return;
-        }
         // 本端短时间内已经检查过一次：交互高频时降频，避免无意义的尺寸比较。
         if (now - lastEnsureSizeAtRef.current < ENSURE_SIZE_THROTTLE_MS) {
           return;

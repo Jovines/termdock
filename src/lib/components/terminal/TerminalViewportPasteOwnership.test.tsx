@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createRef } from 'react';
+import type { TerminalController } from './TerminalViewport';
 
 const terminalModel=vi.hoisted(()=>({instance:null as any,selection:''}));
 const clipboard = vi.hoisted(() => ({
@@ -79,9 +81,35 @@ describe('TerminalViewport async paste ownership', () => {
   });
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     if ('termdockDesktop' in window) delete (window as Window & { termdockDesktop?: unknown }).termdockDesktop;
     desktop.bridge = undefined;
     vi.unstubAllGlobals();
+  });
+
+  it('waits for interaction after a remote resize and cancels superseded retries', async () => {
+    const ref = createRef<TerminalController>();
+    const onResize = vi.fn();
+    render(<TerminalViewport ref={ref} sessionKey="resize-ownership" sessionId="resize-ownership" chunks={[]} onInput={vi.fn()}
+      onResize={onResize} terminalSettings={{ rendererMode: 'dom' } as never} theme={{} as never} autoFocus={false} />);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    vi.useFakeTimers();
+    act(() => {
+      ref.current!.setSessionReady(true);
+      ref.current!.notifyServerSize(50, 20, 'other-client');
+      ref.current!.requestRefresh('tmux-layout', { skipResizePush: true });
+      vi.advanceTimersByTime(3000);
+    });
+    expect(onResize).not.toHaveBeenCalled();
+    act(() => ref.current!.ensureSizeMatches('pointerdown'));
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(80, 24, expect.any(Number));
+    act(() => {
+      ref.current!.notifyServerSize(50, 20, 'other-client');
+      vi.advanceTimersByTime(3000);
+    });
+    expect(onResize).toHaveBeenCalledTimes(1);
+    act(() => ref.current!.ensureSizeMatches('keydown'));
+    expect(onResize).toHaveBeenCalledTimes(2);
   });
 
   function mount(onInput: (data: string) => void | Promise<boolean>, getOwnerKey = () => 'backend-a') {

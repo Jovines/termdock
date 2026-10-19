@@ -216,10 +216,10 @@ export default function ComputerControlView() {
       if (protocol === 'rdp') {
         const { RdpSession } = await import('../../computer/rdpSession');
         if (attempt !== generation.current) return;
-        // Commit the final controls, safe areas and mobile portal before the
+        // Commit the final controls and safe areas before the
         // handshake. Guessing innerHeight - 100 made XRDP resize again on login.
         (document.activeElement as HTMLElement | null)?.blur?.();
-        flushSync(() => { setState('connecting'); if (window.innerWidth <= 640) setExpanded(true); });
+        flushSync(() => { setState('connecting'); });
         const bounds = mountRef.current?.getBoundingClientRect();
         const initialSize = computerDesktopSize(bounds?.width || 1280, bounds?.height || 800);
         rfb = new RdpSession(screen, { host: host.trim(), port: Number(port), username: username.trim(), password: secret || '',
@@ -242,7 +242,7 @@ export default function ComputerControlView() {
         clearTimeout(timer.current);
         setState('connected'); setPassword('');
         if (window.innerWidth <= 640) {
-          (document.activeElement as HTMLElement | null)?.blur?.(); setExpanded(true);
+          (document.activeElement as HTMLElement | null)?.blur?.();
         }
         const successfulPassword = loginPassword.current; loginPassword.current = '';
         if (profile.rememberLogin && successfulPassword) void credentialRequest('save', profile, successfulPassword).catch(() => {});

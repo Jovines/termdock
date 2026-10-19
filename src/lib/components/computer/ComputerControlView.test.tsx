@@ -117,15 +117,14 @@ describe('computer targets', () => {
     expect(screen.queryByRole('button', { name: '切换触摸方式' })).toBeNull();
     expect(mocks.clients).toHaveLength(1);
   });
-  it('measures the final mobile desktop before opening RDP, including its controls and safe areas', async () => {
+  it('measures the embedded mobile desktop before opening RDP without entering full-screen', async () => {
     const beforeWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 402 });
     const measure = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       if (this.getAttribute('aria-label') === zh.computer.remoteTitle) {
         expect(this.classList.contains('hidden')).toBe(false);
         const dialog = this.closest('[role="dialog"]');
-        expect(dialog).toBeTruthy();
-        expect(dialog?.querySelector('button[aria-label="缩小桌面"]')).toBeTruthy();
+        expect(dialog).toBeNull();
         return { width: 402, height: 677 } as DOMRect;
       }
       return { width: 402, height: 874 } as DOMRect;
@@ -139,7 +138,7 @@ describe('computer targets', () => {
       expect(mocks.rdpOptions[0]).toMatchObject({ width: 640, height: 1078 });
       expect((screen.getByRole('button', { name: '键盘' }) as HTMLButtonElement).disabled).toBe(true);
       act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
-      expect(screen.getByRole('dialog')).toBeTruthy();
+      expect(screen.queryByRole('dialog')).toBeNull();
       expect((screen.getByRole('button', { name: '键盘' }) as HTMLButtonElement).disabled).toBe(false);
       expect(mocks.clients).toHaveLength(1);
     } finally {
@@ -269,6 +268,7 @@ describe('computer targets', () => {
     expect(JSON.stringify(mocks.writes)).not.toContain('fixture-secret');
   });
   it('allows remembered VNC auto-connect after leaving the unavailable RDP protocol', async () => {
+    vi.stubGlobal('innerWidth', 390);
     mocks.rdpAvailable = false;
     mocks.preferences = defaultComputerPreferences('linux'); mocks.preferences.autoConnect = true;
     mocks.preferences.local.username = 'test-user';
@@ -279,11 +279,13 @@ describe('computer targets', () => {
     fireEvent.change(screen.getByLabelText('连接协议'), { target: { value: 'vnc' } });
     await waitFor(() => expect(mocks.clients).toHaveLength(1));
     expect(mocks.hosts).toEqual(['127.0.0.1']); expect(mocks.rdpOptions).toEqual([]);
+    act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByText(zh.computer.rdpBackendUnavailable)).toBeNull();
     expect(screen.queryByText(zh.computer.rdpBackendRecovery)).toBeNull();
     expect(mocks.credentialWrites).toEqual([]);
   });
-  it('opens a portrait desktop full-screen on phones with tools and clipboard closed, and accepts direct keyboard input', async () => {
+  it('keeps phones embedded until explicitly expanded, and accepts direct keyboard input', async () => {
     const beforeWidth = window.innerWidth, beforeHeight = window.innerHeight;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 }); Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
     try {
@@ -291,7 +293,13 @@ describe('computer targets', () => {
       fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
       await waitFor(() => expect(mocks.clients).toHaveLength(1));
       act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
-      expect(screen.getByRole('dialog')).toBeTruthy(); expect(screen.queryByRole('textbox', { name: '发送剪贴板' })).toBeNull();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: zh.computer.fullscreen }));
+      expect(screen.getByRole('dialog')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: zh.computer.exitFullscreen }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(mocks.clients).toHaveLength(1);
+      expect(screen.queryByRole('textbox', { name: '发送剪贴板' })).toBeNull();
       expect(screen.queryByRole('region', { name: '控制设置' })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: '键盘' }));
       const proxy = screen.getByLabelText('直接输入到电脑'); expect(document.activeElement).toBe(proxy);
@@ -350,6 +358,7 @@ describe('computer targets', () => {
     touch('pointerdown'); touch('pointerup'); expect(mocks.pointerSend).not.toHaveBeenCalled();
   });
   it('saves login only after success, automatically connects after reopening and does not loop after cancellation', async () => {
+    vi.stubGlobal('innerWidth', 390);
     await ready();
     fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
     fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'remembered-secret' } });
@@ -363,6 +372,7 @@ describe('computer targets', () => {
     cleanup(); await ready();
     await waitFor(() => expect(mocks.rdpOptions).toHaveLength(2));
     expect(mocks.rdpOptions[1].password).toBe('remembered-secret');
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByLabelText('密码')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     await act(async () => {}); expect(mocks.rdpOptions).toHaveLength(2);

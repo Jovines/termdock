@@ -1488,8 +1488,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               case 'pty-size': {
                 // 服务端在任意 client resize 之后广播过来的真实 pty 尺寸。
                 // 同步给 viewport 的 lastServerSize：多端切换后 ensureSizeMatches
-                // 比对时才有正确的"服务端事实"。同时让本端进入 ~1.5s 冷却窗口
-                // 不主动反推，避免双端互相覆盖（防拉扯）。
+                // 比对时才有正确的"服务端事实"。取消本端旧的待发/重试请求，
+                // 等下一次真实交互再接管尺寸。
                 if (typeof event.cols === 'number' && typeof event.rows === 'number') {
                   terminalControllerRef.current?.notifyServerSize(
                     event.cols,
@@ -2188,6 +2188,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (!activePane) return;
 
     terminalControllerRef.current?.requestRefresh('tmux-layout', {
+      skipResizePush: true,
       skipScrollToBottom: true,
       dedupeKey: `${terminalSessionId}:${_tmuxLayout.sessionId}:${activePane.id}:${activePane.width}x${activePane.height}`,
     });
@@ -2297,7 +2298,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   // 多端同步：用户在本端做交互（点击 / 按键 / 触摸 / 滚轮）时，让 viewport
   // 比对本端 xterm 尺寸与服务端最近广播的 pty-size。不一致就立即重推 resize。
-  // 防拉扯逻辑（visibility gate + 服务端广播冷却 + 400ms 节流）在 viewport
+  // 防拉扯逻辑（visibility gate + 取消旧请求 + 400ms 节流）在 viewport
   // 内部完成。
   //
   // 监听挂在 viewport 容器上而非 window：

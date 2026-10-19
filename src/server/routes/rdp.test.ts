@@ -44,7 +44,7 @@ async function fixture(mode: 'direct' | 'relay', full = true) {
   const connections = new Set<Socket>();
   const guacd = createServer(socket => {
     connections.add(socket); socket.once('close', () => connections.delete(socket)); socket.setEncoding('utf8');
-    const names = ['VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'domain', 'security', 'ignore-cert', 'enable-drive', 'resize-method', 'client-name'];
+    const names = ['VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'domain', 'security', 'ignore-cert', 'enable-drive', 'resize-method', 'client-name', 'disable-copy', 'disable-paste'];
     const parser = new GuacamoleParser(values => {
       const [op, ...args] = values;
       if (op === 'select') { expect(args).toEqual(['rdp']); socket.write(guacamoleInstruction('args', ...names)); }
@@ -310,4 +310,26 @@ describe('Guacamole framing', () => {
   it.each(['x.bad;', '3.foo!', '9999999.x'])('rejects malformed or oversized framing: %s', wire => {
     expect(() => new GuacamoleParser(() => {}).receive(wire)).toThrow();
   });
+});
+
+
+it.each(['direct', 'relay'] as const)('allows bidirectional Unicode text clipboard over encrypted %s RDP transport', async mode => {
+  const f = await fixture(mode); await f.open(); f.send(f.start);
+  const initial = JSON.parse(String((await f.take('rdp', 'ws-data')).data));
+  f.send({ type: 'ack', seq: initial.seq });
+  expect(f.configurations[0]).toMatchObject({ 'disable-copy': 'false', 'disable-paste': 'false' });
+  const remote = '远程复制：中文🙂\nunique-clipboard-3472', encodedRemote = Buffer.from(remote).toString('base64');
+  for (const connection of f.connections) connection.write(
+    guacamoleInstruction('clipboard', '17', 'text/plain;charset=utf-8')
+    + guacamoleInstruction('blob', '17', encodedRemote) + guacamoleInstruction('end', '17'));
+  const frame = JSON.parse(String((await f.take('rdp', 'ws-data')).data));
+  expect(frame.instructions).toEqual([
+    ['clipboard', '17', 'text/plain;charset=utf-8'], ['blob', '17', encodedRemote], ['end', '17'],
+  ]);
+  f.send({ type: 'ack', seq: frame.seq });
+  const local = '本机粘贴：中文🙂\nunique-paste-9431', encodedLocal = Buffer.from(local).toString('base64');
+  const records = [['clipboard', '23', 'text/plain'], ['blob', '23', encodedLocal], ['end', '23'], ['key', '65507', '1'], ['key', '118', '1'], ['key', '118', '0'], ['key', '65507', '0']];
+  for (const [opcode, ...args] of records) f.send({ type: 'instruction', opcode, args });
+  await vi.waitFor(() => expect(f.inputs.filter(([opcode]) => ['clipboard', 'blob', 'end', 'key'].includes(opcode))).toEqual(records));
+  expect(f.wire.every(chunk => ![remote, encodedRemote, local, encodedLocal].some(value => chunk.includes(value)))).toBe(true);
 });

@@ -94,7 +94,7 @@ export function handleRdpWebSocket(socket: WebSocket, host: string, port: number
           width: String(Math.max(640, Math.min(2560, Number(message.width) || 1280))),
           height: String(Math.max(480, Math.min(1600, Number(message.height) || 800))),
           'color-depth': '32', 'disable-audio': 'true', 'enable-drive': 'false',
-          'disable-copy': 'true', 'server-layout': 'en-us-qwerty', 'resize-method': 'display-update',
+          'disable-copy': 'false', 'disable-paste': 'false', 'server-layout': 'en-us-qwerty', 'resize-method': 'display-update',
         };
         void resolveComputerHost(host).then(async address => {
           if (closed) return;

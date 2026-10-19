@@ -22,6 +22,6 @@ export function buildTmuxAttachArgs(sessionName: string, supportsFeatures: boole
     // non-ASCII cells before the encrypted output ever reaches the renderer.
     '-u',
     ...(supportsFeatures ? ['-T', 'RGB,sync'] : []),
-    'attach-session', '-t', sessionName,
+    'attach-session', ...(supportsFeatures ? ['-f', 'ignore-size'] : []), '-t', sessionName,
   ];
 }

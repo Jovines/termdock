@@ -57,6 +57,8 @@ jobs:
           npx vitest run
           src/lib/federation/transportBoundary.test.ts
           src/server/utils/tmuxCopySelection.test.ts
+          src/server/utils/tmuxSizeOwnership.test.ts
+          src/server/utils/tmuxClientCapabilities.test.ts
           src/lib/terminal/clipboardText.test.ts
           src/lib/terminal/nativeWebLinks.test.ts
           src/lib/components/terminal/TerminalViewportPasteOwnership.test.tsx
