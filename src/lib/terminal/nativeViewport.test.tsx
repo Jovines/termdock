@@ -628,3 +628,12 @@ it('native clipboard failure is visible and never falls back to a denied web wri
  act(()=>emit(latestToken,{type:'shortcut',key:'c',keyCode:8,modifiers:8,copyId:'expired'}));
  await waitFor(()=>expect(view.getByRole('alert').textContent).toContain('gesture expired'));expect(webWrite).not.toHaveBeenCalled();expect(p.onInput).not.toHaveBeenCalled();
 });
+
+it('opens plain-click URLs and paths in the owning viewport without duplicating Command URLs',async()=>{
+ const open=vi.spyOn(window,'open').mockReturnValue(null),onPath=vi.fn(),ref=React.createRef<TerminalController>();
+ render(<NativeTerminalViewport {...props()} onDirectoryLinkActivate={onPath} ref={ref}/>);
+ await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');await tick();});
+ const click=(text:string,plainClick:boolean)=>emit(latestToken,{type:'path',plainClick,text:JSON.stringify({version:1,row:0,column:5,rows:[{wrapped:false,cells:[...text].map(chars=>({chars,width:1,fgMode:0,fgColor:0}))}]})});
+ await act(async()=>{click('https://example.test/owned',true);click('/home/me/owned.ts:7',true);click('https://example.test/owned',false);});
+ expect(open).toHaveBeenCalledExactlyOnceWith('https://example.test/owned','_blank','noopener');expect(onPath).toHaveBeenCalledExactlyOnceWith('/home/me/owned.ts',7);
+});

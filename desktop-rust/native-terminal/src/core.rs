@@ -189,7 +189,7 @@ pub enum HostEvent {
     PasteRequested,
     ClipboardText(String),
     OpenLink(String),
-    PathHit(String),
+    PathHit { text: String, plain_click: bool },
     /// A file drop accepted by this native view. Paths remain local and are
     /// resolved through the window and view-bound shell capability.
     FileDrop(Vec<String>),
@@ -211,8 +211,8 @@ impl HostEvent {
             Self::Shortcut { key, .. } => key.len(),
             Self::Wheel(data)
             | Self::ClipboardText(data)
-            | Self::OpenLink(data)
-            | Self::PathHit(data) => data.len(),
+            | Self::OpenLink(data) => data.len(),
+            Self::PathHit { text, .. } => text.len(),
             Self::FileDrop(paths) => paths
                 .iter()
                 .fold(0usize, |total, path| total.saturating_add(path.len())),

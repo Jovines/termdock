@@ -209,7 +209,7 @@ fn pump(app: &AppHandle) {
                     },
                     HostEvent::ClipboardText(text)=>json!({"type":"pasteText","text":text}),
                     HostEvent::OpenLink(text)=>json!({"type":"link","text":text}),
-                    HostEvent::PathHit(text)=>json!({"type":"path","text":text}),
+                    HostEvent::PathHit{text,plain_click}=>json!({"type":"path","text":text,"plainClick":plain_click}),
                     HostEvent::FileDrop(_)=>continue,
                     HostEvent::PasteRequested=>json!({"type":"paste"}),
                     HostEvent::LayoutRequested=>json!({"type":"layout"}),

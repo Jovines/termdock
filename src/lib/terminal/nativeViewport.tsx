@@ -438,7 +438,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
         }
         case 'title':if(event.text!==undefined)latest.current.onNativeTitleChange?.(event.text);break;
         case 'link':if(event.text){try{const url=new URL(event.text);if(url.protocol==='file:')latest.current.onDirectoryLinkActivate?.(decodeURIComponent(url.pathname));else if(['https:','http:','mailto:'].includes(url.protocol))window.open(url.href,'_blank','noopener');}catch{/* An invalid remote link is inert. */}}break;
-        case 'path':if(event.text&&latest.current.onDirectoryLinkActivate){try{activateNativePathHit(JSON.parse(event.text),latest.current.onDirectoryLinkActivate);}catch{/* A bounded or stale path read is inert. */}}break;
+        case 'path':if(event.text){try{activateNativePathHit(JSON.parse(event.text),latest.current.onDirectoryLinkActivate,event.plainClick===true?url=>{window.open(url,'_blank','noopener');}:undefined);}catch{/* A bounded or stale path read is inert. */}}break;
         case 'bell':container.current?.dispatchEvent(new CustomEvent('termdock:terminal-bell',{bubbles:true}));break;
         case 'fatal':fatal(event.message||'Native terminal failed');break;
         case 'rejected':showPersistentError(event.message||'Native input was rejected',JSON.stringify([latest.current.sessionKey,latest.current.backendSessionId??null,selectedTarget()?.targetPeerId??null]));break;

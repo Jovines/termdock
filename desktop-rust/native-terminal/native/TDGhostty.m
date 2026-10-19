@@ -74,6 +74,7 @@ typedef struct {
 @implementation TDInterpretedKey
 @end
 enum { TDLeftIdle, TDLeftPending, TDLeftSelection, TDLeftProgram };
+static char TDTextClickKey;
 @interface TDGhosttyView : NSView<NSTextInputClient,NSDraggingDestination>
 - (void)copy:(id)sender;
 @property(nonatomic,assign) TDHandle *host;
@@ -91,6 +92,8 @@ enum { TDLeftIdle, TDLeftPending, TDLeftSelection, TDLeftProgram };
 @property(nonatomic) NSRect imeRect;
 @property(nonatomic,strong) NSEvent *leftDown;
 @property(nonatomic) NSUInteger leftGesture;
+@property(nonatomic) NSPoint leftStart;
+@property(nonatomic) BOOL leftWasDragged;
 @property(nonatomic) BOOL leftOptionOverride;
 @property(nonatomic,strong) NSArray<NSValue *> *clipHoles;
 - (void)dispatchEvent:(NSEvent *)event;
@@ -627,7 +630,7 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     return [NSEvent mouseEventWithType:event.type location:event.locationInWindow modifierFlags:flags timestamp:event.timestamp windowNumber:event.windowNumber context:nil eventNumber:event.eventNumber clickCount:event.clickCount pressure:event.pressure];
 }
 - (BOOL)leftMoved:(NSEvent *)event {
-    NSPoint start=self.leftDown.locationInWindow,end=event.locationInWindow;
+    NSPoint start=self.leftStart,end=event.locationInWindow;
     return hypot(end.x-start.x,end.y-start.y)>=4.;
 }
 - (void)beginLeftSelection {
@@ -636,7 +639,7 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
 }
 - (void)mouseDown:(NSEvent *)event {
     [self.window makeFirstResponder:self];emit(self.host,15,NULL,0,0,0);
-    self.leftDown=event;self.leftOptionOverride=NO;
+    self.leftDown=event;self.leftStart=event.locationInWindow;self.leftWasDragged=NO;self.leftOptionOverride=NO;
     NSEventModifierFlags flags=event.modifierFlags;
     if(flags&NSEventModifierFlagShift){
         [self beginLeftSelection];
@@ -646,15 +649,22 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     }else self.leftGesture=TDLeftPending;
 }
 - (void)mouseDragged:(NSEvent *)event {
+    if([self leftMoved:event])self.leftWasDragged=YES;
     if(self.leftGesture==TDLeftPending){if(![self leftMoved:event])return;[self beginLeftSelection];}
     if(self.leftGesture==TDLeftSelection||self.leftGesture==TDLeftProgram)[self queue:[self leftEvent:event]];
 }
 - (void)mouseUp:(NSEvent *)event {
+    BOOL textClick=NO;
     if(self.leftGesture==TDLeftPending){
         if([self leftMoved:event])[self beginLeftSelection];
-        else {self.leftGesture=TDLeftProgram;[self queue:self.leftDown];self.leftDown=nil;}
+        else {textClick=YES;self.leftGesture=TDLeftProgram;[self queue:self.leftDown];self.leftDown=nil;}
     }
-    if(self.leftGesture==TDLeftSelection||self.leftGesture==TDLeftProgram)[self queue:[self leftEvent:event]];
+    if(self.leftGesture==TDLeftSelection||self.leftGesture==TDLeftProgram){
+        NSEvent *up=[self leftEvent:event];
+        NSUInteger activation=textClick?1:(!self.leftWasDragged&&![self leftMoved:event]&&self.leftGesture==TDLeftProgram&&(event.modifierFlags&NSEventModifierFlagCommand)?2:0);
+        if(activation)objc_setAssociatedObject(up,&TDTextClickKey,@(activation),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self queue:up];
+    }
     self.leftDown=nil;self.leftGesture=TDLeftIdle;self.leftOptionOverride=NO;
 }
 - (void)rightMouseDown:(NSEvent *)event{emit(self.host,15,NULL,0,0,0);[self queue:event];}
@@ -815,13 +825,15 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     bool press=event.type==NSEventTypeLeftMouseDown||event.type==NSEventTypeRightMouseDown||event.type==NSEventTypeOtherMouseDown;
     bool release=event.type==NSEventTypeLeftMouseUp||event.type==NSEventTypeRightMouseUp||event.type==NSEventTypeOtherMouseUp;
     if(press||release)ghostty_surface_mouse_button(h->surface,press?GHOSTTY_MOUSE_PRESS:GHOSTTY_MOUSE_RELEASE,(ghostty_input_mouse_button_e)(event.buttonNumber+1),modifiers(event.modifierFlags));
-    if(event.type==NSEventTypeLeftMouseUp&&(event.modifierFlags&NSEventModifierFlagCommand)){
+    NSUInteger activation=[objc_getAssociatedObject(event,&TDTextClickKey) unsignedIntegerValue];
+    BOOL plainClick=activation==1;
+    if(event.type==NSEventTypeLeftMouseUp&&activation){
         ghostty_surface_size_s size=ghostty_surface_size(h->surface);
         if(size.cell_width_px&&size.cell_height_px&&p.x>=0&&p.y>=0){
             uint16_t col=MIN(size.columns-1,(uint32_t)floor(p.x*h->scale/size.cell_width_px));
             uint16_t row=MIN(size.rows-1,(uint32_t)floor(p.y*h->scale/size.cell_height_px));
             uint8_t data[262144];size_t len=0;
-            if(td_ghostty_path_hit(h->surface,col,row,data,sizeof(data),&len)&&len<=sizeof(data))emit(h,19,data,len,0,0);
+            if(td_ghostty_path_hit(h->surface,col,row,data,sizeof(data),&len)&&len<=sizeof(data))emit(h,19,data,len,plainClick?1:0,0);
         }
     }
     if(release){ghostty_text_s text={0};if(ghostty_surface_read_selection(h->surface,&text)){if(text.text_len<=262144)emit(h,2,text.text,text.text_len,0,0);else emit(h,21,NULL,0,1,0);ghostty_surface_free_text(h->surface,&text);}else if(ghostty_surface_has_selection(h->surface))emit(h,21,NULL,0,2,0);}

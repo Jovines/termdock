@@ -5,8 +5,9 @@
 #include <assert.h>
 static NSPasteboard *ownedBoard;
 static NSPasteboard *ownedGeneral(id obj,SEL sel){(void)obj;(void)sel;return ownedBoard;}
+static unsigned pathCount;static bool plainPath;
 static unsigned shortcutCount,selectionCount,failureCount,inputCount,wheelCount;
-static int observe(void *ctx,uint32_t kind,const uint8_t *data,size_t len,uint64_t a,uint64_t b){(void)ctx;(void)data;(void)a;(void)b;if(kind==0)inputCount+=(unsigned)len;if(kind==2)selectionCount++;if(kind==11)shortcutCount++;if(kind==21)failureCount++;if(kind==14)wheelCount++;return 1;}
+static int observe(void *ctx,uint32_t kind,const uint8_t *data,size_t len,uint64_t a,uint64_t b){(void)ctx;(void)data;if(kind==19){pathCount++;plainPath=a==1;}(void)a;(void)b;if(kind==0)inputCount+=(unsigned)len;if(kind==2)selectionCount++;if(kind==11)shortcutCount++;if(kind==21)failureCount++;if(kind==14)wheelCount++;return 1;}
 static void settle(TDHandle *h,const char *text){
  __block atomic_bool done;atomic_init(&done,false);__block bool ok=false;td_native_worker_busy(h,true);
  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{if(text)ok=td_native_feed(h,(const uint8_t *)text,strlen(text));else ok=true;if(ok)ok=td_native_drain_app(h)&&td_native_barrier(h);atomic_store(&done,true);});
@@ -45,5 +46,19 @@ int main(void){@autoreleasepool{
  oldInput=inputCount;for(int count=1;count<=2;count++){for(int up=0;up<=1;up++){NSPoint p=[v convertPoint:NSMakePoint(2.5*cw,.5*ch) toView:nil];NSEvent *event=[NSEvent mouseEventWithType:up?NSEventTypeLeftMouseUp:NSEventTypeLeftMouseDown location:p modifierFlags:0 timestamp:6+.05*(count*2+up) windowNumber:w.windowNumber context:nil eventNumber:40+count*2+up clickCount:count pressure:up?0:1];if(up)[v mouseUp:event];else[v mouseDown:event];drain(h,v);}}
  printf("applicationClickBytes=%u\n",inputCount-oldInput);assert(inputCount>oldInput&&!ghostty_surface_has_selection(h->surface));
  CGEventRef scroll=CGEventCreateScrollWheelEvent(NULL,kCGScrollEventUnitLine,1,1);NSEvent *wheel=[NSEvent eventWithCGEvent:scroll];CFRelease(scroll);unsigned oldWheel=wheelCount;[v scrollWheel:wheel];drain(h,v);printf("pageWheel=%u\n",wheelCount-oldWheel);assert(wheelCount==oldWheel+1);
+ // Actual gesture dispatch must activate only clicks, including under app mouse capture.
+ settle(h,"\033c\033[H/tmp/termdock-owned.ts:7 https://example.test/owned\033[?1002h\033[?1006h");
+ for(int mode=0;mode<5;mode++){
+  unsigned before=pathCount;
+  for(int i=0;i<(mode==2?3:2);i++){
+   bool up=i==(mode==2?2:1);NSEventType type=i==0?NSEventTypeLeftMouseDown:up?NSEventTypeLeftMouseUp:NSEventTypeLeftMouseDragged;
+   double column=mode==1?35.5:5.5;if(mode==2&&i)column=12.5;
+   NSPoint point=[v convertPoint:NSMakePoint(column*cw,.5*ch) toView:nil];
+   NSEvent *event=[NSEvent mouseEventWithType:type location:point modifierFlags:mode==3?NSEventModifierFlagShift:mode==4?NSEventModifierFlagCommand:0 timestamp:10+mode+.1*i windowNumber:w.windowNumber context:nil eventNumber:100+mode*3+i clickCount:1 pressure:up?0:1];
+   if(i==0)[v mouseDown:event];else if(up)[v mouseUp:event];else[v mouseDragged:event];drain(h,v);
+  }
+  if(mode==2||mode==3)assert(pathCount==before);else{assert(pathCount==before+1);assert(plainPath==(mode!=4));}
+ }
+ printf("plainPathClick=pass plainURLClick=pass dragDoesNotActivate=pass shiftDoesNotActivate=pass commandPathClick=pass\n");
  method_setImplementation(method,original);[ownedBoard releaseGlobally];ownedBoard=nil;td_native_destroy(h);td_native_demo_close(window);assert(expected.length>0&&[actual isEqualToString:expected]);return 0;
 }}

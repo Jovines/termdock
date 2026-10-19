@@ -130,7 +130,7 @@ unsafe extern "C" fn receive(
         22 if a<=1 && b>0 => HostEvent::FocusChanged { focused:a==1, revision:b },
         17 => HostEvent::ClipboardText(String::from_utf8_lossy(&bytes).into_owned()),
         18 => HostEvent::OpenLink(String::from_utf8_lossy(&bytes).into_owned()),
-        19 => HostEvent::PathHit(String::from_utf8_lossy(&bytes).into_owned()),
+        19 => HostEvent::PathHit { text: String::from_utf8_lossy(&bytes).into_owned(), plain_click: a == 1 },
         20 => {
             let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { return 0 };
             let Some(values) = value.as_array().filter(|items| !items.is_empty() && items.len() <= 50) else { return 0 };
