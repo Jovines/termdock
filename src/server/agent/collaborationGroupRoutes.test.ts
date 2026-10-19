@@ -51,6 +51,23 @@ describe('authoritative collaboration membership HTTP API', () => {
     const newer = (await save({ id: original.id, name: 'Web title', sessionIds: original.sessionIds, expectedUpdatedAt: renamed.group.updatedAt })).body.group;
     expect(store.renameLocalGroup(original.id, 'Short title', original.updatedAt, 'admin-rename')).toEqual({ group: { id: newer.id, name: newer.name, updatedAt: newer.updatedAt }, applied: renamed.applied, replayed: true });
   });
+  it('web archive controls hide a group from default UI without removing membership or history', async () => {
+    const group = store.save({ name: 'Case', sessionIds: ['custom', 'shell'] });
+    const [message] = store.send({ groupId: group.id, fromSessionId: 'custom', toSessionIds: ['shell'], kind: 'message', content: 'keep me' });
+    const update = async (verb: 'archive' | 'unarchive', revision: number, key: string) => fetch(`${url}/${group.id}/${verb}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedUpdatedAt: revision, idempotencyKey: key }),
+    });
+    const archived = await update('archive', group.updatedAt, 'ui-archive');
+    expect(archived.status).toBe(200);
+    expect((await archived.json()).group).toMatchObject({ id: group.id, archivedAt: expect.any(Number) });
+    expect((await (await fetch(url)).json()).groups).toContainEqual(expect.objectContaining({ id: group.id, archivedAt: expect.any(Number) }));
+    expect(store.groupsForSession('custom')).toHaveLength(1);
+    expect(store.getGroup(group.id)?.sessionIds).toEqual(['custom', 'shell']);
+    expect(store.getMessage(message!.id)?.content).toBe('keep me');
+    const restore = await update('unarchive', store.getGroup(group.id)!.updatedAt, 'ui-restore');
+    expect(restore.status).toBe(200);
+    expect((await restore.json()).group).not.toHaveProperty('archivedAt');
+  });
   it('rejects the entire request if any new member disappeared, even when two valid ones remain', async () => {
     const result = await save({ name: 'Race', sessionIds: ['custom', 'shell', 'disappeared'] });
     expect(result).toMatchObject({ status: 409, body: { code: 'MEMBERS_CHANGED' } });

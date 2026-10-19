@@ -1118,6 +1118,29 @@ it('administrator-only metadata rename serializes competing revisions and expose
   expect(f.options.sessions.create).not.toHaveBeenCalled(); expect(f.options.sessions.restore).not.toHaveBeenCalled();
   expect((await f.request('GET', '/admin/capabilities', undefined, headers)).body).toMatchObject({ admin_local_group_rename: true, admin_local_group_rename_min_version: '1.4.319' });
 });
+it('administrator group archive is reversible, hides only default discovery, and keeps routing/history intact', async () => {
+  const f = await runtimeFixture(), group = f.group;
+  const headers = { 'Content-Type': 'application/json', 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  const route = `/admin/groups/${group.id}`;
+  const [message] = f.messages.send({ groupId: group.id, fromSessionId: null, toSessionIds: [group.sessionIds[0]!], kind: 'message', content: 'preserved' });
+  const archiveBody = { expected_updated_at: group.updatedAt, idempotency_key: 'archive-one' };
+  expect(await f.request('POST', `${route}/archive`, archiveBody)).toMatchObject({ status: 401, body: { code: 'INTEGRATION_ADMIN_REQUIRED' } });
+  const archived = await f.request('POST', `${route}/archive`, archiveBody, headers);
+  expect(archived).toMatchObject({ status: 200, body: { group: { id: group.id, archivedAt: expect.any(Number) }, applied: { archivedAt: expect.any(Number) }, replayed: false } });
+  expect((await f.request('GET', route, undefined, headers)).body.group).toMatchObject({ archivedAt: expect.any(Number) });
+  expect((await f.request('GET', '/admin/groups', undefined, headers)).body.groups).not.toContainEqual(expect.objectContaining({ id: group.id }));
+  expect((await f.request('GET', '/admin/groups?include_archived=true', undefined, headers)).body.groups).toContainEqual(expect.objectContaining({ id: group.id, archivedAt: expect.any(Number) }));
+  expect((await f.request('POST', `${route}/archive`, archiveBody, headers)).body.replayed).toBe(true);
+  expect(await f.request('POST', `${route}/unarchive`, { ...archiveBody, idempotency_key: 'restore-one' }, headers)).toMatchObject({ status: 409, body: { code: 'GROUP_CHANGED' } });
+  const current = (await f.request('GET', route, undefined, headers)).body.group;
+  const restored = await f.request('POST', `${route}/unarchive`, { expected_updated_at: current.updatedAt, idempotency_key: 'restore-one' }, headers);
+  expect(restored).toMatchObject({ status: 200, body: { group: { id: group.id }, replayed: false } });
+  expect(restored.body.group).not.toHaveProperty('archivedAt');
+  expect((await f.request('GET', '/admin/groups', undefined, headers)).body.groups).toContainEqual(expect.objectContaining({ id: group.id }));
+  expect(f.messages.getGroup(group.id)?.sessionIds).toEqual(group.sessionIds);
+  expect(f.messages.getMessage(message!.id)?.content).toBe('preserved');
+  expect((await f.request('GET', '/admin/capabilities', undefined, headers)).body).toMatchObject({ admin_local_group_archive: true, admin_local_group_archive_min_version: '1.4.323' });
+});
 it('metadata CLI gates unsupported services, validates exact arguments and preserves historical/current JSON without printing credentials', async () => {
   const output: string[] = [], write = (line: string) => { output.push(line); };
   const args = ['group', 'rename', 'group-id', '--name', 'Short', '--expected-updated-at', '12', '--idempotency-key', 'key'];
@@ -1151,5 +1174,28 @@ it('metadata CLI gates unsupported services, validates exact arguments and prese
   conflict = true;
   expect(await runIntegrationAdmin(args, port, 'private-admin', write)).toBe(1);
   expect(JSON.parse(output.at(-1)!)).toEqual({ ok: false, code: 'GROUP_CHANGED', currentUpdatedAt: 14, error: 'Group changed' });
+  expect(output.join('')).not.toContain('private-admin');
+});
+it('administrator archive CLI checks capability, validates revision/key and exposes archived listing explicitly', async () => {
+  const output: string[] = [], calls: Array<{ url: string; method: string; body?: unknown }> = [];
+  const server = http.createServer((req, res) => {
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
+      const body = raw ? JSON.parse(raw) : undefined; calls.push({ url: req.url!, method: req.method!, ...(body ? { body } : {}) });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (req.url === '/admin/capabilities') { res.end(JSON.stringify({ admin_local_group_archive: true })); return; }
+      res.end(JSON.stringify({ group: { id: 'group-id', name: 'Case', updatedAt: 12, archivedAt: 10 }, applied: { id: 'group-id', name: 'Case', updatedAt: 12, archivedAt: 10 }, replayed: false }));
+    });
+  });
+  const port = 60000 + Math.floor(Math.random() * 5000), socket = (await import('./integrationServer.js')).integrationSocketPath(port);
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const write = (line: string) => { output.push(line); };
+  expect(await runIntegrationAdmin(['group', 'archive', 'group-id', '--expected-updated-at', '11', '--idempotency-key', 'archive'], port, 'private-admin', write)).toBe(0);
+  expect(calls.slice(0, 2).map(call => call.url)).toEqual(['/admin/capabilities', '/admin/groups/group-id/archive']);
+  expect(calls[1]?.body).toEqual({ expected_updated_at: 11, idempotency_key: 'archive' });
+  expect(await runIntegrationAdmin(['groups', '--include-archived'], port, 'private-admin', write)).toBe(0);
+  expect(calls.slice(2).map(call => call.url)).toEqual(['/admin/capabilities', '/admin/groups?include_archived=true']);
+  for (const bad of [['group', 'archive', 'group-id', '--expected-updated-at', '11'], ['group', 'unarchive', 'group-id', '--expected-updated-at', '-1', '--idempotency-key', 'x'], ['groups', '--other']]) {
+    expect(await runIntegrationAdmin(bad, port, 'private-admin', write)).toBe(1);
+  }
   expect(output.join('')).not.toContain('private-admin');
 });

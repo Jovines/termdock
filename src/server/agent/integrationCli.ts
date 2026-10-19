@@ -27,6 +27,14 @@ export const INTEGRATION_HELP = `td integration — local scoped integration adm
     GROUP_CHANGED, GROUP_NOT_FOUND, GROUP_NOT_LOCAL, GROUP_STATE_UNCONFIRMED,
     GROUP_RENAME_TARGET_UNAVAILABLE, GROUP_RENAME_STATE_UNCONFIRMED,
     GROUP_RENAME_LIMIT, ADMIN_LOCAL_GROUP_RENAME_UNSUPPORTED.
+  group archive|unarchive <exact-group-id> --expected-updated-at <N> --idempotency-key <key>
+    Administrator only; minimum CLI/running service 1.4.323; admin_local_group_archive=true.
+    Reversible discovery metadata only. Default groups list hides archived groups;
+    groups --include-archived lists them. group get always includes archivedAt when set.
+    Membership, principals, sessions, runtime, messages and history are unchanged.
+    Retry uncertain results with the same operation, revision and key; GROUP_CHANGED
+    requires rereading current metadata and choosing a new key. Archive receipts are
+    retained separately from the immutable group-create snapshot.
   group create --name <name> --idempotency-key <key>
     Administrator only; create an empty local group without a terminal source.
     Minimum CLI/running service 1.4.318; admin_local_group_create=true.
@@ -118,23 +126,27 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
     const action = argv[0] ?? 'help', options: Record<string, string> = {};
     if (action === 'help' || argv.includes('--help')) { write(INTEGRATION_HELP); return 0; }
     const socketPath = integrationSocketPath(port);
-    if (action === 'group' && ['get', 'rename'].includes(argv[1])) {
+    if (action === 'group' && ['get', 'rename', 'archive', 'unarchive'].includes(argv[1])) {
       const operation = argv[1], id = argv[2], args: Record<string, string> = {};
-      const usage = 'Usage: td integration group get <exact-id> | group rename <exact-id> --name <name> --expected-updated-at <N> --idempotency-key <key>';
+      const usage = 'Usage: td integration group get <exact-id> | group rename <exact-id> --name <name> --expected-updated-at <N> --idempotency-key <key> | group archive|unarchive <exact-id> --expected-updated-at <N> --idempotency-key <key>';
       if (!id || !/^[a-zA-Z0-9._-]{1,80}$/.test(id)) throw new CollaborationError('INVALID_GROUP_ID', usage, 400);
       if (operation === 'get' && argv.length !== 3) throw new CollaborationError('INVALID_GROUP_RENAME_REQUEST', usage, 400);
-      if (operation === 'rename') {
+      if (operation !== 'get') {
         for (let i = 3; i < argv.length; i += 2) {
-          if (!['--name', '--expected-updated-at', '--idempotency-key'].includes(argv[i]) || !argv[i + 1] || Object.hasOwn(args, argv[i])) throw new CollaborationError('INVALID_GROUP_RENAME_REQUEST', usage, 400);
+          const allowed = operation === 'rename' ? ['--name', '--expected-updated-at', '--idempotency-key'] : ['--expected-updated-at', '--idempotency-key'];
+          if (!allowed.includes(argv[i]) || !argv[i + 1] || Object.hasOwn(args, argv[i])) throw new CollaborationError(operation === 'rename' ? 'INVALID_GROUP_RENAME_REQUEST' : 'INVALID_GROUP_ARCHIVE_REQUEST', usage, 400);
           args[argv[i]] = argv[i + 1];
         }
-        if (Object.keys(args).length !== 3 || !args['--name']?.trim() || !args['--idempotency-key']?.trim()) throw new CollaborationError('INVALID_GROUP_RENAME_REQUEST', usage, 400);
+        if (operation === 'rename' ? Object.keys(args).length !== 3 || !args['--name']?.trim() || !args['--idempotency-key']?.trim()
+          : Object.keys(args).length !== 2 || !args['--idempotency-key']?.trim()) throw new CollaborationError(operation === 'rename' ? 'INVALID_GROUP_RENAME_REQUEST' : 'INVALID_GROUP_ARCHIVE_REQUEST', usage, 400);
         if (!/^(0|[1-9][0-9]*)$/.test(args['--expected-updated-at']) || !Number.isSafeInteger(Number(args['--expected-updated-at']))) throw new CollaborationError('INVALID_GROUP_VERSION', usage, 400);
       }
       const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
-      if (capabilities.admin_local_group_rename !== true) throw new CollaborationError('ADMIN_LOCAL_GROUP_RENAME_UNSUPPORTED', 'CLI and running service must support administrator group metadata operations (minimum 1.4.319)', 409);
-      const body = operation === 'rename' ? { name: args['--name'], expected_updated_at: Number(args['--expected-updated-at']), idempotency_key: args['--idempotency-key'] } : undefined;
-      write(JSON.stringify(parsed(await request(socketPath, body ? 'POST' : 'GET', `/admin/groups/${encodeURIComponent(id)}${body ? '/rename' : ''}`, body, headers(undefined, adminToken)))));
+      const isArchive = operation === 'archive' || operation === 'unarchive';
+      if (capabilities[isArchive ? 'admin_local_group_archive' : 'admin_local_group_rename'] !== true) throw new CollaborationError(isArchive ? 'ADMIN_LOCAL_GROUP_ARCHIVE_UNSUPPORTED' : 'ADMIN_LOCAL_GROUP_RENAME_UNSUPPORTED', `CLI and running service must support this operation (minimum 1.4.${isArchive ? '323' : '319'})`, 409);
+      const body = operation === 'get' ? undefined : { ...(operation === 'rename' ? { name: args['--name'] } : {}), expected_updated_at: Number(args['--expected-updated-at']), idempotency_key: args['--idempotency-key'] };
+      const suffix = operation === 'get' ? '' : `/${operation}`;
+      write(JSON.stringify(parsed(await request(socketPath, body ? 'POST' : 'GET', `/admin/groups/${encodeURIComponent(id)}${suffix}`, body, headers(undefined, adminToken)))));
       return 0;
     }
     if (action === 'group') {
@@ -183,12 +195,16 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
       if (capabilities.session_restore_diagnostics !== true) throw new CollaborationError('SESSION_RESTORE_DIAGNOSTICS_UNSUPPORTED', 'Running service does not support stored restore diagnostics', 409);
       write(JSON.stringify(parsed(await request(socketPath, 'GET', `/admin/sessions/${encodeURIComponent(argv[1])}/restore-diagnostics`, undefined, headers(undefined, adminToken))))); return 0;
     }
-    for (let index = 1; index < argv.length; index += 2) {
+    if (action !== 'groups' && action !== 'list') for (let index = 1; index < argv.length; index += 2) {
       const flag = argv[index]; if (!['--file', '--credential-file'].includes(flag) || !argv[index + 1] || options[flag]) throw new Error('Invalid integration arguments'); options[flag] = argv[index + 1];
     }
     if (action === 'groups' || action === 'list') {
-      if (argv.length !== 1) throw new Error('Unexpected arguments');
-      write(JSON.stringify(parsed(await request(socketPath, 'GET', action === 'groups' ? '/admin/groups' : '/admin/principals', undefined, headers(undefined, adminToken))))); return 0;
+      if (action === 'list' && argv.length !== 1 || action === 'groups' && argv.length > 2 || action === 'groups' && argv.length === 2 && argv[1] !== '--include-archived') throw new Error('Usage: td integration groups [--include-archived] | list');
+      if (action === 'groups' && argv[1] === '--include-archived') {
+        const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+        if (capabilities.admin_local_group_archive !== true) throw new CollaborationError('ADMIN_LOCAL_GROUP_ARCHIVE_UNSUPPORTED', 'CLI and running service must support archived group discovery (minimum 1.4.323)', 409);
+      }
+      write(JSON.stringify(parsed(await request(socketPath, 'GET', action === 'groups' ? `/admin/groups${argv[1] ? '?include_archived=true' : ''}` : '/admin/principals', undefined, headers(undefined, adminToken))))); return 0;
     }
     if (action === 'update') {
       if (!options['--file'] || Object.keys(options).length !== 1) throw new Error('update requires only --file');

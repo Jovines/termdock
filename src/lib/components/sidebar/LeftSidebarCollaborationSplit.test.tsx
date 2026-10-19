@@ -10,7 +10,7 @@ import { I18nProvider } from '../../i18n';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { LeftSidebar, buildCollaborationSections } from './LeftSidebar';
+import { LeftSidebar, buildCollaborationSections, normalizeSidebarCollaborationGroups } from './LeftSidebar';
 
 const mocks = vi.hoisted(() => ({
   start: null as null | ((start: DragStart) => void),
@@ -85,6 +85,13 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Agent workgroup split navigation', () => {
+  it('omits archived groups from default sidebar data while retaining active groups', () => {
+    const groups = normalizeSidebarCollaborationGroups([
+      { id: 'active', name: 'Active', sessionIds: ['one'], createdAt: 1, updatedAt: 1 },
+      { id: 'archived', name: 'Archived', sessionIds: ['two'], createdAt: 1, updatedAt: 2, archivedAt: 2 },
+    ], new Set(['one', 'two']));
+    expect(groups.map(group => group.id)).toEqual(['active']);
+  });
   it('collapses completed execution sessions and keeps their terminal controls accessible', async () => {
     useCollaborationTaskInbox.setState({ allTasks: [{ id: 'done', groupId: 'team', status: 'accepted', activeAttemptId: 'attempt', attempts: [{ id: 'attempt', assignee: { serviceId: 'local', sessionId: 'c' } }], memberSessions: { 'local:c': 'c' }, workspace: { cwd: '/task' }, workflow: { kind: 'step', isolated: true, reviewers: [] } } as unknown as CollaborationTaskView] });
     const handlers = await setup();

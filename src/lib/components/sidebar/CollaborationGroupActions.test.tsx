@@ -3,8 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CollaborationGroupActions } from './CollaborationGroupActions';
 
-const api = vi.hoisted(() => ({ remove: vi.fn(), save: vi.fn() }));
-vi.mock('../../terminal/api', () => ({ removeCollaborationGroup: api.remove, saveCollaborationGroup: api.save }));
+const api = vi.hoisted(() => ({ remove: vi.fn(), save: vi.fn(), archive: vi.fn() }));
+vi.mock('../../terminal/api', () => ({ removeCollaborationGroup: api.remove, saveCollaborationGroup: api.save, setCollaborationGroupArchived: api.archive }));
 const group = { id: 'team', name: '出卡策略检验', sessionIds: ['visible', 'remote-unavailable'], createdAt: 1, updatedAt: 7 };
 function setup(options: Partial<React.ComponentProps<typeof CollaborationGroupActions>> = {}) {
   const callbacks = { onOpen: vi.fn(), onMessages: vi.fn(), onToggleCollapsed: vi.fn(), onChanged: vi.fn() };
@@ -12,7 +12,7 @@ function setup(options: Partial<React.ComponentProps<typeof CollaborationGroupAc
   return { ...result, ...callbacks };
 }
 function open() { fireEvent.contextMenu(screen.getByRole('button', { name: '组标题' }), { clientX: 900, clientY: 600 }); }
-beforeEach(() => { vi.clearAllMocks(); api.remove.mockResolvedValue(undefined); api.save.mockResolvedValue({ group: { ...group, name: '新名称', updatedAt: 8 } }); });
+beforeEach(() => { vi.clearAllMocks(); api.remove.mockResolvedValue(undefined); api.save.mockResolvedValue({ group: { ...group, name: '新名称', updatedAt: 8 } }); api.archive.mockResolvedValue({ ...group, archivedAt: 8, updatedAt: 8 }); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it('opens from right-click without opening the board and supports keyboard navigation and Escape', async () => {
@@ -97,4 +97,17 @@ it('renames with all original member IDs, rejects blank input and retains the dr
   fireEvent.click(screen.getByRole('button', { name: '保存名称' }));
   await waitFor(() => expect(onChanged).toHaveBeenCalledWith(expect.objectContaining({ name: '新名称' })));
   expect(api.save.mock.calls[0][0]).toEqual({ id: 'team', name: '新名称', sessionIds: group.sessionIds, expectedUpdatedAt: 7 });
+});
+it('confirms reversible archive and restore operations and updates the group without deleting it', async () => {
+  const { onChanged } = setup();
+  open(); fireEvent.click(screen.getByRole('menuitem', { name: '归档协作组' }));
+  expect(screen.getByRole('dialog').textContent).toContain('消息和历史都会保留');
+  expect(api.archive).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '归档并隐藏' }));
+  await waitFor(() => expect(onChanged).toHaveBeenCalledWith(expect.objectContaining({ archivedAt: 8 })));
+  expect(api.archive).toHaveBeenCalledWith(group, true);
+
+  cleanup(); setup({ group: { ...group, archivedAt: 8 } }); open(); fireEvent.click(screen.getByRole('menuitem', { name: '恢复显示' }));
+  fireEvent.click(screen.getByRole('button', { name: '恢复显示' }));
+  await waitFor(() => expect(api.archive).toHaveBeenLastCalledWith(expect.objectContaining({ archivedAt: 8 }), false));
 });

@@ -1291,3 +1291,39 @@ runtime_resolved / queue_acquired / before_paste / before_submit`。时间是 TD
 确定性交错回归覆盖延迟改名/元数据回写、清除检查、持久化等待、输入队列等待、
 真实第二次启动、backend 替换及重新绑定；发生真实换代时，旧输入及旧的延迟回车
 仍被拒绝。测试证明 TD 一致性与终端写入边界，不代替私有 Agent 的实机消费验收。
+
+## 1.4.323：归档与恢复本机协作组显示
+
+最低 **CLI / 实际服务均为 1.4.323**，回读
+`admin_local_group_archive=true`、`admin_local_group_archive_min_version=1.4.323`。
+本机管理员可归档/恢复精确本机组；CLI 与服务均检查能力，旧服务返回
+`ADMIN_LOCAL_GROUP_ARCHIVE_UNSUPPORTED`。
+
+```sh
+td integration group get <精确group-id>
+td integration group archive <精确group-id> \
+  --expected-updated-at <当前updatedAt> --idempotency-key case-archive:v1
+td integration groups                         # 默认不列出归档组
+td integration groups --include-archived       # 显式查看
+td integration group unarchive <精确group-id> \
+  --expected-updated-at <当前updatedAt> --idempotency-key case-restore:v1
+```
+
+`group get` 对归档组仍可用，并在归档时返回 `archivedAt`。归档/恢复仅修改
+`archivedAt` 与组的 `updatedAt`，不改 `id`、名称、成员/角色、principal 固定组、
+TD/native session、运行承载、消息/reply、consumer 游标或历史；不关闭、释放、恢复
+会话，不停止业务调度，也不重放消息。Web 侧栏默认隐藏归档组，在“已归档协作组”
+中可查看并恢复显示；恢复组显示不会重启已关闭的 session。
+
+管理路由为 `POST /admin/groups/:id/archive` 与 `POST /admin/groups/:id/unarchive`，
+请求仅接受 `{expected_updated_at,idempotency_key}`。`GET /admin/groups` 默认隐藏归档
+组，传 `?include_archived=true` 显示归档组。归档/恢复 key 在同一操作范围内唯一，
+参数改变返回 `IDEMPOTENCY_CONFLICT`。成功回执分开返回当前 `group`、本次提交的
+`applied` 和 `replayed`；旧回执重放不会覆盖后来版本。并发版本过期返回
+`GROUP_CHANGED` 与 `currentUpdatedAt`，应先重新 get，再由调用者决定是否用新 key
+重试。同状态操作保留原 `archivedAt` 并记录幂等回执，不推进组版本。
+
+归档 journal 与组状态原子持久化，保留上限为 2000 条。状态/journal 不完整时返回
+`GROUP_ARCHIVE_STATE_UNCONFIRMED`，不会猜测或重建。只允许本机非 federated、未删除
+组；删除组、跨服务组和不确定的目标分别返回 `GROUP_NOT_FOUND`、`GROUP_NOT_LOCAL`、
+`GROUP_ARCHIVE_TARGET_UNAVAILABLE`。归档不延长消息历史保留期。

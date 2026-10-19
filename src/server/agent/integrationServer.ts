@@ -58,7 +58,7 @@ export class IntegrationRuntime {
       const given = Buffer.from(String(req.headers['x-termdock-local-token'] ?? '')), expected = Buffer.from(options.adminToken ?? '');
       if (!expected.length || given.length !== expected.length || !timingSafeEqual(given, expected)) integrationError('INTEGRATION_ADMIN_REQUIRED', 'Local administration credential is required', 401);
     };
-    app.get('/admin/groups', run(req => { admin(req); return { groups: options.messages.list().filter(g => !g.federated).map(g => ({ id: g.id, name: g.name, updatedAt: g.updatedAt })) }; }));
+    app.get('/admin/groups', run(req => { admin(req); return { groups: options.messages.listLocalGroupMetadata(req.query.include_archived === 'true') }; }));
     app.get('/admin/groups/:id', run(req => { admin(req); return { group: options.messages.getLocalGroupMetadata(req.params.id) }; }));
     app.post('/admin/groups/:id/rename', run(req => {
       admin(req);
@@ -67,6 +67,22 @@ export class IntegrationRuntime {
         integrationError('INVALID_GROUP_RENAME_REQUEST', 'Specify only name, expected_updated_at and idempotency_key');
       }
       return options.messages.renameLocalGroup(req.params.id, body.name, body.expected_updated_at, body.idempotency_key);
+    }));
+    app.post('/admin/groups/:id/archive', run(req => {
+      admin(req);
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['expected_updated_at', 'idempotency_key'].includes(key))) {
+        integrationError('INVALID_GROUP_ARCHIVE_REQUEST', 'Specify only expected_updated_at and idempotency_key');
+      }
+      return options.messages.setLocalGroupArchived(req.params.id, true, body.expected_updated_at, body.idempotency_key);
+    }));
+    app.post('/admin/groups/:id/unarchive', run(req => {
+      admin(req);
+      const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['expected_updated_at', 'idempotency_key'].includes(key))) {
+        integrationError('INVALID_GROUP_ARCHIVE_REQUEST', 'Specify only expected_updated_at and idempotency_key');
+      }
+      return options.messages.setLocalGroupArchived(req.params.id, false, body.expected_updated_at, body.idempotency_key);
     }));
     app.post('/admin/groups', run(req => {
       admin(req);
@@ -208,6 +224,7 @@ export class IntegrationRuntime {
       session_close: true, session_close_min_version: '1.4.315',
       admin_local_group_create: true, admin_local_group_create_min_version: '1.4.318',
       admin_local_group_rename: true, admin_local_group_rename_min_version: '1.4.319',
+      admin_local_group_archive: true, admin_local_group_archive_min_version: '1.4.323',
       integration_policy_update: true,
       session_restore_diagnostics: true,
       native_identity_linux_flock_owner: process.platform === 'linux',

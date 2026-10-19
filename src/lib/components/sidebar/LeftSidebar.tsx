@@ -147,7 +147,7 @@ export function normalizeSidebarCollaborationGroups(
   groups: readonly CollaborationGroup[],
   availableSessionIds: ReadonlySet<string>,
 ): SidebarCollaborationGroup[] {
-  return normalizeSessionOrderGroups(groups, availableSessionIds);
+  return normalizeSessionOrderGroups(groups.filter(group => group.archivedAt === undefined), availableSessionIds);
 }
 
 // Keep one drag list per workgroup; visual split sections do not introduce
@@ -327,6 +327,7 @@ export function LeftSidebar(
   const [completedSessionsExpanded, setCompletedSessionsExpanded] = useState<Record<string, boolean>>({});
   const taskInboxError = useCollaborationTaskInbox(state => state.error);
   const [inboxExpanded, setInboxExpanded] = useState(false);
+  const [archivedGroupsExpanded, setArchivedGroupsExpanded] = useState(false);
   useEffect(() => {
     return startVisiblePolling(() => { void useCollaborationTaskInbox.getState().refresh(); }, 5000, [SECURE_READY_EVENT]);
   }, []);
@@ -413,6 +414,10 @@ export function LeftSidebar(
   );
   const collaborationGroups = useMemo(
     () => normalizeSidebarCollaborationGroups(rawCollaborationGroups, new Set(sessionsById.keys())),
+    [rawCollaborationGroups, sessionsById],
+  );
+  const archivedCollaborationGroups = useMemo(
+    () => normalizeSessionOrderGroups(rawCollaborationGroups.filter(group => group.archivedAt !== undefined), new Set(sessionsById.keys())),
     [rawCollaborationGroups, sessionsById],
   );
   const refreshCollaborationGroups = useCallback(async () => {
@@ -1894,6 +1899,12 @@ export function LeftSidebar(
           onRestore={handleRestoreTmuxSession}
           onClose={onCloseRecoverableTmuxSession}
         />
+        {archivedCollaborationGroups.length > 0 && <section className="mb-1" aria-label="已归档协作组">
+          <button type="button" className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-left text-[11px] text-muted-foreground hover:bg-surface-2" aria-expanded={archivedGroupsExpanded} onClick={() => setArchivedGroupsExpanded(value => !value)}>
+            <Archive size={13} /><span className="flex-1">已归档协作组</span><span>{archivedCollaborationGroups.length}</span><RiChevronRightLine size={12} className={archivedGroupsExpanded ? 'rotate-90' : ''} />
+          </button>
+          {archivedGroupsExpanded && <div className="space-y-1">{archivedCollaborationGroups.map(group => <DragDropContext key={group.id} onDragEnd={() => {}}>{renderCollaborationGroupItem(group, group.sessionIds.flatMap(id => sessionsById.get(id) ?? []))}</DragDropContext>)}</div>}
+        </section>}
         {collaborationGroups.filter(group => !group.sessionIds.length).map(group => <DragDropContext key={group.id} onDragEnd={() => {}}>{renderCollaborationGroupItem(group, [])}</DragDropContext>)}
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">

@@ -4009,6 +4009,7 @@ export interface CollaborationGroup {
   instructions?: { text: string; version: string; updatedAt: number; updatedBy: string };
   createdAt: number;
   updatedAt: number;
+  archivedAt?: number;
 }
 
 export type CollaborationMessageKind = 'message' | 'ask' | 'reply' | 'task' | 'handoff' | 'done';
@@ -4216,6 +4217,14 @@ export function setCollaborationGroupRules(groupId: string, input: { sessionId: 
 
 export function listCollaborationGroups(): Promise<CollaborationGroupsResponse> {
   return currentCollaborationDirectory().load();
+}
+
+export async function setCollaborationGroupArchived(group: CollaborationGroup, archived: boolean): Promise<CollaborationGroup> {
+  const response = await operationsRequest<{ group: CollaborationGroup }>(`/collaboration-groups/${encodeURIComponent(group.id)}/${archived ? 'archive' : 'unarchive'}`, {
+    method: 'POST', body: JSON.stringify({ expectedUpdatedAt: group.updatedAt, idempotencyKey: crypto.randomUUID() }),
+  });
+  currentCollaborationDirectory().invalidate();
+  return response.group;
 }
 
 export async function saveCollaborationGroup(input: CollaborationGroupInput): Promise<{ group: CollaborationGroup }> {

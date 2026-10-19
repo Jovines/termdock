@@ -28,6 +28,8 @@ export interface CollaborationGroup extends CollaborationContext, CollaborationL
   roles?: Record<string, string>;
   createdAt: number;
   updatedAt: number;
+  /** Hidden from default discovery while retaining the group and its history. */
+  archivedAt?: number;
   federated?: boolean;
   deleted?: boolean;
   remoteSessions?: CollaborationRemoteSession[];
@@ -128,6 +130,8 @@ interface CollaborationDocument {
   localGroupRequestsComplete?: boolean;
   localGroupRenames?: Record<string, { hash: string; applied: LocalGroupMetadata }>;
   localGroupRenamesComplete?: boolean;
+  localGroupArchives?: Record<string, { hash: string; applied: LocalGroupMetadata }>;
+  localGroupArchivesComplete?: boolean;
   groups: CollaborationGroup[];
   messages: CollaborationMessage[];
   sequence?: number;
@@ -143,7 +147,7 @@ interface CollaborationDocument {
 const MAX_MESSAGES = 2_000;
 const MESSAGE_KINDS = new Set<CollaborationMessageKind>(['message', 'ask', 'reply', 'task', 'handoff', 'done']);
 
-export interface LocalGroupMetadata { id: string; name: string; updatedAt: number }
+export interface LocalGroupMetadata { id: string; name: string; updatedAt: number; archivedAt?: number }
 function localGroupName(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 256 || COLLAB_NAME_FORBIDDEN.test(value)) {
     throw new CollaborationError('INVALID_GROUP', 'name must be non-empty text up to 256 characters without forbidden group-name characters', 400);
@@ -180,6 +184,7 @@ export class CollaborationStore {
   private historyAvailable = true;
   private groupCreationAvailable = true;
   private groupRenamesAvailable = true;
+  private groupArchivesAvailable = true;
 
   /** `drawId` is the random source behind newCollaborationId. It is a
    *  constructor seam so tests can force a collision and prove the guard
@@ -225,6 +230,16 @@ export class CollaborationStore {
             && typeof value.applied.name === 'string' && !!value.applied.name.trim() && value.applied.name.length <= 256
             && !COLLAB_NAME_FORBIDDEN.test(value.applied.name) && Number.isSafeInteger(value.applied.updatedAt) && value.applied.updatedAt >= 0));
       this.document.localGroupRenames = this.groupRenamesAvailable ? renames ?? {} : {};
+      const archives = parsed.localGroupArchives;
+      this.groupArchivesAvailable = [1, 2].includes(parsed.version ?? 0) && Array.isArray(parsed.groups)
+        && (parsed.localGroupArchivesComplete === undefined || parsed.localGroupArchivesComplete === true)
+        && (archives === undefined || archives !== null && typeof archives === 'object' && !Array.isArray(archives)
+          && Object.entries(archives).every(([key, value]) => /^[a-f0-9]{64}$/.test(key) && value && typeof value.hash === 'string' && /^[a-f0-9]{64}$/.test(value.hash)
+            && value.applied && typeof value.applied.id === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(value.applied.id)
+            && typeof value.applied.name === 'string' && !!value.applied.name.trim() && value.applied.name.length <= 256
+            && !COLLAB_NAME_FORBIDDEN.test(value.applied.name) && Number.isSafeInteger(value.applied.updatedAt) && value.applied.updatedAt >= 0
+            && (value.applied.archivedAt === undefined || Number.isSafeInteger(value.applied.archivedAt) && value.applied.archivedAt >= 0)));
+      this.document.localGroupArchives = this.groupArchivesAvailable ? archives ?? {} : {};
       this.document.sequence = Math.max(parsed.sequence ?? 0, this.document.sequence ?? 0);
 
       this.document.idempotency = parsed.idempotency ?? {};
@@ -233,10 +248,11 @@ export class CollaborationStore {
       this.document.fragments = parsed.fragments ?? {};
       this.document.prunedThrough = parsed.prunedThrough ?? {};
       this.document.prunedSenders = parsed.prunedSenders ?? {};
-    } catch (error) { this.historyAvailable = (error as NodeJS.ErrnoException).code === 'ENOENT'; this.groupCreationAvailable = this.historyAvailable; this.groupRenamesAvailable = this.historyAvailable; }
+    } catch (error) { this.historyAvailable = (error as NodeJS.ErrnoException).code === 'ENOENT'; this.groupCreationAvailable = this.historyAvailable; this.groupRenamesAvailable = this.historyAvailable; this.groupArchivesAvailable = this.historyAvailable; }
     this.document.terminalHistoryComplete = this.historyAvailable;
     this.document.localGroupRequestsComplete = this.groupCreationAvailable;
     this.document.localGroupRenamesComplete = this.groupRenamesAvailable;
+    this.document.localGroupArchivesComplete = this.groupArchivesAvailable;
     this.persistedDocument = JSON.stringify(this.document);
   }
 
@@ -334,7 +350,47 @@ export class CollaborationStore {
     if (!group || group.deleted) throw new CollaborationError('GROUP_NOT_FOUND', 'Local group does not exist', 404);
     if (group.federated) throw new CollaborationError('GROUP_NOT_LOCAL', 'Administrator metadata operations require a local group', 409);
     if (!Number.isSafeInteger(group.updatedAt) || group.updatedAt < 0) throw new CollaborationError('GROUP_STATE_UNCONFIRMED', 'Group revision is unavailable', 409);
-    return { id: group.id, name: group.name, updatedAt: group.updatedAt };
+    return { id: group.id, name: group.name, updatedAt: group.updatedAt, ...(group.archivedAt !== undefined ? { archivedAt: group.archivedAt } : {}) };
+  }
+
+  listLocalGroupMetadata(includeArchived = false): LocalGroupMetadata[] {
+    return this.list().filter(group => !group.federated && (includeArchived || group.archivedAt === undefined))
+      .map(group => ({ id: group.id, name: group.name, updatedAt: group.updatedAt,
+        ...(group.archivedAt !== undefined ? { archivedAt: group.archivedAt } : {}) }));
+  }
+
+  /** Archive is a reversible discovery flag; it never changes membership or message routing. */
+  setLocalGroupArchived(id: unknown, archived: boolean, expectedUpdatedAt: unknown, key: unknown): { group: LocalGroupMetadata; applied: LocalGroupMetadata; replayed: boolean } {
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(id)) throw new CollaborationError('INVALID_GROUP_ID', 'An exact group ID is required', 400);
+    if (typeof archived !== 'boolean') throw new CollaborationError('INVALID_GROUP_ARCHIVE_REQUEST', 'Archive state must be explicit', 400);
+    if (!Number.isSafeInteger(expectedUpdatedAt) || (expectedUpdatedAt as number) < 0) throw new CollaborationError('INVALID_GROUP_VERSION', 'expected_updated_at must be a non-negative safe integer', 400);
+    const requestKey = localGroupRequestKey(key);
+    if (!this.groupArchivesAvailable) throw new CollaborationError('GROUP_ARCHIVE_STATE_UNCONFIRMED', 'Archive journal is unavailable; reconcile persisted state before changing group visibility', 409);
+    const hash = crypto.createHash('sha256').update(JSON.stringify(['archive-local-group', id, archived, expectedUpdatedAt])).digest('hex');
+    const previous = this.document.localGroupArchives?.[requestKey];
+    if (previous) {
+      if (previous.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', 'This administrator archive key was used with different parameters', 409);
+      const target = this.getGroup(id);
+      if (!target || target.deleted || target.federated) throw new CollaborationError('GROUP_ARCHIVE_TARGET_UNAVAILABLE', 'Original local archive target is unavailable; no replacement is created', 409);
+      const group = this.getLocalGroupMetadata(id);
+      this.persist(true);
+      return { group, applied: { ...previous.applied }, replayed: true };
+    }
+    const current = this.getLocalGroupMetadata(id);
+    if (current.updatedAt !== expectedUpdatedAt) throw new CollaborationError('GROUP_CHANGED', 'Group changed; read its current revision before deciding again', 409, { currentUpdatedAt: current.updatedAt });
+    if (Object.keys(this.document.localGroupArchives ?? {}).length >= 2000) throw new CollaborationError('GROUP_ARCHIVE_LIMIT', 'Administrator archive journal has reached its 2000-record limit', 409);
+    const target = this.getGroup(id)!;
+    const currentlyArchived = target.archivedAt !== undefined;
+    const changed = currentlyArchived !== archived;
+    const updatedAt = changed ? Math.max(Date.now(), current.updatedAt + 1) : current.updatedAt;
+    if (!Number.isSafeInteger(updatedAt)) throw new CollaborationError('GROUP_STATE_UNCONFIRMED', 'Group revision cannot advance safely', 409);
+    const archivedAt = archived ? currentlyArchived ? target.archivedAt! : Date.now() : undefined;
+    const applied: LocalGroupMetadata = { id, name: target.name, updatedAt, ...(archivedAt !== undefined ? { archivedAt } : {}) };
+    this.document = { ...this.document, groups: this.document.groups.map(group => group.id === id
+      ? { ...group, updatedAt, ...(archivedAt !== undefined ? { archivedAt } : { archivedAt: undefined }) } : group),
+    localGroupArchives: { ...this.document.localGroupArchives, [requestKey]: { hash, applied } } };
+    this.persist(true);
+    return { group: { ...applied }, applied: { ...applied }, replayed: false };
   }
 
   /** Display metadata and its original receipt share a durable commit. */
@@ -361,7 +417,8 @@ export class CollaborationStore {
     if (Object.keys(this.document.localGroupRenames ?? {}).length >= 2000) throw new CollaborationError('GROUP_RENAME_LIMIT', 'Administrator rename journal has reached its 2000-record limit', 409);
     const updatedAt = name === current.name ? current.updatedAt : Math.max(Date.now(), current.updatedAt + 1);
     if (!Number.isSafeInteger(updatedAt)) throw new CollaborationError('GROUP_STATE_UNCONFIRMED', 'Group revision cannot advance safely', 409);
-    const applied = { id, name, updatedAt };
+    const target = this.getGroup(id)!;
+    const applied: LocalGroupMetadata = { id, name, updatedAt, ...(target.archivedAt !== undefined ? { archivedAt: target.archivedAt } : {}) };
     this.document = { ...this.document, groups: this.document.groups.map(group => group.id === id ? { ...group, name, updatedAt } : group),
       localGroupRenames: { ...this.document.localGroupRenames, [requestKey]: { hash, applied } } };
     this.persist(true);

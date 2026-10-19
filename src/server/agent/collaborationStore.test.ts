@@ -84,6 +84,31 @@ describe('CollaborationStore', () => {
     expect(store.listMessages(group.id)).toHaveLength(1);
   });
 
+  it('archives and restores a local group with revision fencing and durable idempotent receipts', () => {
+    let store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Case', sessionIds: ['worker'] });
+    const [message] = store.send({ groupId: group.id, fromSessionId: null, toSessionIds: ['worker'], kind: 'message', content: 'kept' });
+    const archived = store.setLocalGroupArchived(group.id, true, group.updatedAt, 'case:archive');
+    expect(archived.group).toMatchObject({ id: group.id, name: 'Case', archivedAt: expect.any(Number) });
+    expect(archived.applied).toEqual(archived.group);
+    expect(store.listLocalGroupMetadata()).toEqual([]);
+    expect(store.listLocalGroupMetadata(true)).toEqual([archived.group]);
+    expect(store.getGroup(group.id)?.sessionIds).toEqual(['worker']);
+    expect(store.getMessage(message!.id)?.content).toBe('kept');
+    expect(store.setLocalGroupArchived(group.id, true, group.updatedAt, 'case:archive')).toMatchObject({ replayed: true, group: archived.group, applied: archived.group });
+    expect(() => store.setLocalGroupArchived(group.id, false, group.updatedAt, 'case:archive')).toThrow(expect.objectContaining({ code: 'IDEMPOTENCY_CONFLICT' }));
+    expect(() => store.setLocalGroupArchived(group.id, false, group.updatedAt, 'stale')).toThrow(expect.objectContaining({ code: 'GROUP_CHANGED' }));
+
+    store = new CollaborationStore(filePath);
+    expect(store.getLocalGroupMetadata(group.id)).toEqual(archived.group);
+    const restored = store.setLocalGroupArchived(group.id, false, archived.group.updatedAt, 'case:restore');
+    expect(restored.group).toMatchObject({ id: group.id, name: 'Case', updatedAt: expect.any(Number) });
+    expect(restored.group).not.toHaveProperty('archivedAt');
+    expect(store.listLocalGroupMetadata()).toEqual([restored.group]);
+    expect(store.getMessage(message!.id)?.content).toBe('kept');
+    expect(new CollaborationStore(filePath).setLocalGroupArchived(group.id, false, archived.group.updatedAt, 'case:restore')).toMatchObject({ replayed: true, applied: restored.group });
+  });
+
   it('removes a terminal while retaining project identity and message history', () => {
     const store = new CollaborationStore(filePath);
     const pair = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });

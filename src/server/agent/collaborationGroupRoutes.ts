@@ -15,6 +15,19 @@ export function collaborationGroupRoutes(options: {
     res.json({ federationVersion: 1, capabilities: { groupRevision: 1, groupPromotion: 1, groupMove: 1, serverCollaboration: options.save ? 1 : undefined },
       groups: options.store.list(), sessions: options.sessions() });
   });
+  for (const [verb, archived] of [['archive', true], ['unarchive', false]] as const) {
+    router.post(`/collaboration-groups/:groupId/${verb}`, (req, res) => {
+      try {
+        const body = req.body ?? {};
+        if (Object.keys(body).some(key => !['expectedUpdatedAt', 'idempotencyKey'].includes(key))) throw new CollaborationError('INVALID_GROUP_ARCHIVE_REQUEST', 'Only expectedUpdatedAt and idempotencyKey are accepted', 400);
+        const result = options.store.setLocalGroupArchived(req.params.groupId, archived, body.expectedUpdatedAt, body.idempotencyKey);
+        res.json(result);
+      } catch (error) {
+        res.status(error instanceof CollaborationError ? error.httpStatus : 500).json({ code: error instanceof CollaborationError ? error.code : 'GROUP_ARCHIVE_FAILED',
+          ...(error instanceof CollaborationError && error.details ? error.details : {}), error: error instanceof Error ? error.message : 'Group archive operation failed' });
+      }
+    });
+  }
   router.post('/collaboration-groups', async (req, res) => {
     try {
       const body = req.body ?? {};
