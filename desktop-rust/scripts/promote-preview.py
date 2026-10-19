@@ -83,8 +83,9 @@ def main():
         current = json.loads((channel/'preview.json').read_text())['version']
         require(re.fullmatch(r'\d+\.\d+\.\d+', current), 'Invalid current channel version')
         require(tuple(map(int, version.split('.'))) > tuple(map(int, current.split('.'))), 'Refuse channel rollback or version overwrite')
-        published = api(f'repos/{repo}/releases/{release["id"]}', '--method', 'PATCH', '-f', f'target_commitish={revision}', '-F', 'draft=false', '-F', 'prerelease=true', '-f', 'make_latest=false')
-        require(published['target_commitish'] == revision and not published['draft'] and published['prerelease'], 'Published identity mismatch')
+        published = api(f'repos/{repo}/releases/{release["id"]}', '--method', 'PATCH', '-F', 'draft=false', '-F', 'prerelease=true', '-f', 'make_latest=false')
+        require(published['tag_name'] == tag and not published['draft'] and published['prerelease'], 'Published identity mismatch')
+        require(api(f'repos/{repo}/git/ref/tags/{tag}')["object"] == reference, 'Tag changed during publication')
         gh('release', 'upload', 'preview-channel', str(base/'preview.json'), '--repo', repo, '--clobber')
         print(published['html_url'])
 
