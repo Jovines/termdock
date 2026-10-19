@@ -467,6 +467,7 @@
         if (hovered && !controllers.has(hovered)) { hovered.dataset.nativeFileDrag='true'; hovered.dataset.nativeFileDropState=localHover?'local':'remote'; }
       });
       const stopDrop = subscribe('termdock:preview-files', async payload => {
+        if(hovered&&['local','remote'].includes(hovered.dataset.nativeFileDropState))clear(hovered);hovered=null;
         const viewId = typeof payload.sessionKey === 'string' ? payload.sessionKey : '';
         const target = viewId
           ? [...document.querySelectorAll('[data-termdock-terminal-dropzone]')].find(element => element.dataset.termdockTerminalDropzone === viewId)
@@ -479,7 +480,7 @@
         const peer=currentPeer(),operation=String(++nativeDropOperationSequence),ownerKey=target.dataset.termdockTerminalOwner,stamp=targetStamp();
         const ownsDropState=()=>target.isConnected!==false && target.dataset.termdockTerminalDropzone===targetSessionKey && target.dataset.nativeFileDropOperation===operation;
         const isCurrent=()=>!closing&&!controller.signal.aborted&&ownsDropState()&&target.dataset.termdockTerminalOwner===ownerKey&&targetStamp()===stamp&&currentPeer()===peer;
-        const discardStaleDrop=()=>{if(isCurrent())return false;if(ownsDropState())clear(target);return true;};
+        const discardStaleDrop=()=>{if(isCurrent())return false;if(ownsDropState()&&!(controller.signal.aborted&&['cancelled','error'].includes(target.dataset.nativeFileDropState)&&target.dataset.termdockTerminalOwner===ownerKey&&targetStamp()===stamp))clear(target);return true;};
         const timedStatus=phase=>{
           target.dataset.nativeFileDropState=phase;delete target.dataset.nativeFileDropCancellable;delete target.dataset.nativeFileDropProgress;
           window.setTimeout(()=>{if(ownsDropState()&&target.dataset.nativeFileDropState===phase)clear(target);},3000);
