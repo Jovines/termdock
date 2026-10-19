@@ -62,6 +62,8 @@ jobs:
           src/lib/components/sidebar/sidebarResize.test.ts
           src/lib/components/sidebar/CollaborationMemberMenu.test.tsx
           src/lib/terminal/clipboardText.test.ts
+          src/lib/components/terminal/TerminalFileDropStatus.test.tsx
+          src/lib/desktop/encryptedFileDrops.test.ts
           src/lib/terminal/nativeWebLinks.test.ts
           src/lib/federation/transportBoundary.test.ts
           src/lib/zIndexTokens.test.ts
