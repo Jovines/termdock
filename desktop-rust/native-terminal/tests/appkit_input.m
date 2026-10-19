@@ -72,6 +72,14 @@ int main(void){@autoreleasepool{
     // posting OS key events or touching the user's windows or input source.
     NSWindow *window=[[NSWindow alloc]initWithContentRect:NSMakeRect(0,0,400,200) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO;window.contentView=view;assert([window makeFirstResponder:view]);
+    wakeups=0;[view copy:nil];assert(host.pending_copy&&wakeups>0&&atomic_load(&host.busy));host.pending_copy=false;
+    NSPasteboard *ownedBoard=[NSPasteboard pasteboardWithUniqueName];
+    const char *selection="local clipboard 中文";
+    assert(td_write_clipboard_selection(ownedBoard,(const uint8_t *)selection,strlen(selection))==0);
+    assert([[ownedBoard stringForType:NSPasteboardTypeString] isEqualToString:@"local clipboard 中文"]);
+    assert(td_write_clipboard_selection(ownedBoard,NULL,0)==4);
+    assert([[ownedBoard stringForType:NSPasteboardTypeString] isEqualToString:@"local clipboard 中文"]);
+    [ownedBoard releaseGlobally];
     // A quiet engine has no timer that can rescue unscheduled focus changes.
     // AppKit notifications and responder loss must wake it while IO is busy.
     wakeups=0;host.focus_dirty=false;host.visibility_dirty=false;
@@ -93,6 +101,6 @@ int main(void){@autoreleasepool{
     NSEvent *normal=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand timestamp:0 windowNumber:window.windowNumber context:nil characters:@"n" charactersIgnoringModifiers:@"n" isARepeat:NO keyCode:45];
     assert([view performKeyEquivalent:normal]&&menuCalls==1);
     NSApp.mainMenu=oldMenu;view.host=NULL;[window close];
-    puts("spaceCandidate=pass numberCandidate=pass cancel=pass dictationPreedit=pass orderedCommit=pass mutableCommit=pass busyEngineUntouched=pass sessionFontMenuRouting=pass focusWakeups=pass immediatePointer=pass; physicalIME=false");
+    puts("spaceCandidate=pass numberCandidate=pass cancel=pass dictationPreedit=pass orderedCommit=pass mutableCommit=pass busyEngineUntouched=pass sessionFontMenuRouting=pass focusWakeups=pass immediatePointer=pass deferredBusyCopy=pass ownedPasteboardUTF8=pass; physicalIME=false");
     return 0;
 }}

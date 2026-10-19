@@ -609,3 +609,22 @@ it('native font chords adjust only the owning session and reset its override ins
  }
  expect(p.onInput).not.toHaveBeenCalled();view.unmount();
 });
+
+it('native CmdC copies a remote tmux selection to the client clipboard even when WebKit denies clipboard access',async()=>{
+ const p={...props(),onTmuxScroll:vi.fn()},ref=React.createRef<TerminalController>();
+ const webWrite=vi.fn(async()=>{throw new DOMException('Gesture required','NotAllowedError');});Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:webWrite}});
+ copyModel.request.mockResolvedValue({success:true,selection:{status:'copied',paneId:'%17',text:'远端选区',bytes:12}});
+ const original=host.request.getMockImplementation()!;host.request.mockImplementation(async(args:any)=>args.action==='copyText'?{copied:true}:original(args));
+ render(<NativeTerminalViewport {...p} ref={ref}/>);await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');});
+ act(()=>emit(latestToken,{type:'shortcut',key:'c',keyCode:8,modifiers:8,copyId:'owned-copy'}));
+ await waitFor(()=>expect(host.request).toHaveBeenCalledWith(expect.objectContaining({action:'copyText',token:latestToken,copyId:'owned-copy',text:'远端选区'})));
+ expect(webWrite).not.toHaveBeenCalled();expect(p.onInput).not.toHaveBeenCalled();
+});
+it('native clipboard failure is visible and never falls back to a denied web write',async()=>{
+ const p={...props(),onTmuxScroll:vi.fn()},ref=React.createRef<TerminalController>(),webWrite=vi.fn();Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:webWrite}});
+ copyModel.request.mockResolvedValue({success:true,selection:{status:'copied',paneId:'%1',text:'text',bytes:4}});
+ const original=host.request.getMockImplementation()!;host.request.mockImplementation(async(args:any)=>{if(args.action==='copyText')throw new Error('Clipboard copy gesture expired');return original(args);});
+ const view=render(<NativeTerminalViewport {...p} ref={ref}/>);await act(async()=>{await ref.current!.prepareNativeSession!('backend-a');});
+ act(()=>emit(latestToken,{type:'shortcut',key:'c',keyCode:8,modifiers:8,copyId:'expired'}));
+ await waitFor(()=>expect(view.getByRole('alert').textContent).toContain('gesture expired'));expect(webWrite).not.toHaveBeenCalled();expect(p.onInput).not.toHaveBeenCalled();
+});

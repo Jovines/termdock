@@ -1,5 +1,5 @@
-//! Public metadata only. This contract never accepts paths, native pointers,
-//! service/target/window identity or credentials from a renderer.
+//! Native terminal requests accept bounded data and panel capabilities, never
+//! native pointers, service/target/window identity or credentials from a renderer.
 use serde::{Deserialize, Serialize};
 use termdock_native_terminal::{Font, Options, Palette};
 #[derive(Clone, Debug, Deserialize)]
@@ -13,6 +13,12 @@ pub enum Request {
         viewport_width: f64,
         #[serde(rename = "viewportHeight")]
         viewport_height: f64,
+    },
+    CopyText {
+        token: String,
+        #[serde(rename = "copyId")]
+        copy_id: String,
+        text: String,
     },
     ClipboardText {
         token: String,
@@ -470,5 +476,35 @@ mod resize_generation_tests {
         assert!(!viewport_matches_host((666.,533.),(900.,800.),1.5));
         assert!(!viewport_matches_host((1000.,800.),(1000.,800.),1.5));
         assert!(!viewport_matches_host((f64::NAN,800.),(1000.,800.),1.));
+    }
+}
+
+/// Claim a single OS copy gesture before touching the local clipboard.
+pub fn claim_copy(grant: &mut Option<(String, std::time::Instant)>, id: &str, text: &str, now: std::time::Instant) -> Result<(), String> {
+    if !grant.as_ref().is_some_and(|(issued, until)| issued == id && *until > now) {
+        return Err("Clipboard copy gesture expired or belongs to another terminal".into());
+    }
+    *grant = None;
+    if text.is_empty() || text.len() > 256 * 1024 {return Err("Clipboard copy text must be 1..256KiB".into());}
+    Ok(())
+}
+#[cfg(test)]
+mod clipboard_copy_tests {
+    use super::claim_copy;
+    use std::time::{Instant, Duration};
+    #[test]
+    fn only_a_live_matching_gesture_can_write_and_only_once() {
+        let now=Instant::now();let mut grant=Some(("owned".into(),now+Duration::from_secs(10)));
+        assert!(claim_copy(&mut grant,"other","text",now).is_err());
+        assert!(claim_copy(&mut grant,"owned","中文",now).is_ok());
+        assert!(claim_copy(&mut grant,"owned","text",now).is_err());
+        let mut expired=Some(("owned".into(),now));assert!(claim_copy(&mut expired,"owned","text",now).is_err());
+    }
+    #[test]
+    fn invalid_text_is_rejected_before_any_write_and_consumes_the_gesture() {
+        for text in [String::new(),"中".repeat(90_000)] {
+            let now=Instant::now();let mut grant=Some(("owned".into(),now+Duration::from_secs(10)));
+            assert!(claim_copy(&mut grant,"owned",&text,now).is_err());assert!(grant.is_none());
+        }
     }
 }

@@ -76,6 +76,7 @@ struct Entry {
     durable: Option<termdock_native_terminal::core::DurableSnapshot>,
     logical_font_size: f64,
     zoom: f64,
+    copy_request: Option<(String, std::time::Instant)>,
 }
 thread_local! { static PANELS: RefCell<BTreeMap<(String,String),Entry>> = const { RefCell::new(BTreeMap::new()) }; }
 thread_local! { static OVERLAYS: RefCell<BTreeMap<String,String>> = const { RefCell::new(BTreeMap::new()) }; }
@@ -132,6 +133,7 @@ fn token(request: &Request) -> Option<&str> {
         | Request::RetireView { .. } => None,
         Request::Clip { token, .. }
         | Request::ClipboardText { token, .. }
+        | Request::CopyText { token, .. }
         | Request::Menu { token, .. }
         | Request::Capture { token, .. }
         | Request::Restore { token, .. }
@@ -198,7 +200,13 @@ fn pump(app: &AppHandle) {
                     HostEvent::Bell=>json!({"type":"bell"}),
                     HostEvent::SearchRequested(text)=>json!({"type":"search","text":text}),
                     HostEvent::CloseRequested=>json!({"type":"close"}),
-                    HostEvent::Shortcut{key_code,modifiers,key}=>json!({"type":"shortcut","keyCode":key_code,"modifiers":modifiers,"key":key}),
+                    HostEvent::Shortcut{key_code,modifiers,key}=>{
+                        let copy_id=if modifiers&15==8&&key.eq_ignore_ascii_case("c") {
+                            let id=uuid::Uuid::new_v4().to_string();
+                            entry.copy_request=Some((id.clone(),std::time::Instant::now()+std::time::Duration::from_secs(10)));Some(id)
+                        } else {None};
+                        json!({"type":"shortcut","keyCode":key_code,"modifiers":modifiers,"key":key,"copyId":copy_id})
+                    },
                     HostEvent::ClipboardText(text)=>json!({"type":"pasteText","text":text}),
                     HostEvent::OpenLink(text)=>json!({"type":"link","text":text}),
                     HostEvent::PathHit(text)=>json!({"type":"path","text":text}),
@@ -454,7 +462,7 @@ pub async fn dispatch(app: AppHandle, window: WebviewWindow, args: Value,trace_i
                     crate::native_gate::native_event(&caller,"create-engine-return",&trace_action,trace_id,Some(&context.epoch),"ok");
                     let wake_app=current.clone();panel.set_waker(Arc::new(move ||signal(wake_app.clone())));
                     let token=uuid::Uuid::new_v4().to_string();
-                    panels.insert(key,Entry{panel,context:context.clone(),token:token.clone(),checkpoint:None,pending_cursor:None,rect:None,clip_generation:None,visible:false,durable:previous_snapshot.clone(),logical_font_size:*font_size,zoom});
+                    panels.insert(key,Entry{panel,context:context.clone(),token:token.clone(),checkpoint:None,pending_cursor:None,rect:None,clip_generation:None,visible:false,durable:previous_snapshot.clone(),logical_font_size:*font_size,zoom,copy_request:None});
                     COUNT.store(panels.len(),Ordering::Release);
                     return Ok(json!({"token":token,"epoch":context.epoch,"sequence":0,"baseline":null,"reused":false,"snapshot":previous_snapshot,"dimensions":{"cols":options.columns,"rows":options.rows}}));
                 }
@@ -476,6 +484,13 @@ pub async fn dispatch(app: AppHandle, window: WebviewWindow, args: Value,trace_i
                         }
                         let union=native_contract::union_rectangles(&clipped)?;entry.panel.clip(&union).map_err(fail)?;entry.clip_generation=allowed;
                         Ok(json!({"clipped":true,"generation":generation,"epoch":context.epoch}))
+                    },
+                    Request::CopyText{copy_id,text,..}=>{
+                        // A single OS Command-C grants one bounded local write.
+                        // The panel token/context above binds it to this page and target.
+                        native_contract::claim_copy(&mut entry.copy_request,&copy_id,&text,std::time::Instant::now())?;
+                        arboard::Clipboard::new().map_err(fail)?.set_text(text).map_err(fail)?;
+                        Ok(json!({"copied":true}))
                     },
                     Request::ClipboardText{..}=>{
                         let text=match arboard::Clipboard::new().map_err(fail)?.get_text(){Ok(text)=>text,Err(arboard::Error::ContentNotAvailable)=>String::new(),Err(error)=>return Err(fail(error))};

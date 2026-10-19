@@ -53,7 +53,7 @@ typedef struct {
     bool gui_done;
     uint8_t preedit_state;
     uint64_t shortcut_keys[4];
-    bool tmux_scroll;
+    bool tmux_scroll, pending_copy;
     bool desired_visible, visibility_dirty, desired_focus, focus_dirty, has_rect;
     bool reported_focus;
     uint64_t focus_revision;
@@ -74,6 +74,7 @@ typedef struct {
 @implementation TDInterpretedKey
 @end
 @interface TDGhosttyView : NSView<NSTextInputClient,NSDraggingDestination>
+- (void)copy:(id)sender;
 @property(nonatomic,assign) TDHandle *host;
 @property(nonatomic,weak) NSView *inputWebview;
 @property(nonatomic,strong) NSMutableAttributedString *marked;
@@ -447,6 +448,7 @@ int td_native_pump(void *handle) {
     if(atomic_load(&h->busy))return atomic_exchange(&h->needs_barrier,false)?1:0;
     TDGhosttyView *v=(__bridge TDGhosttyView *)h->retained_view;
     int work=0;
+    if(h->pending_copy){h->pending_copy=false;[v copy:nil];work=1;}
     // A cancelled composition must clear before any queued input can run.
     if(h->preedit_state){[v flushPreedit];work=1;}
     if(h->visibility_dirty){
@@ -550,7 +552,9 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     emit(self.host,16,NULL,0,0,0);
 }
 - (void)copy:(id)sender {
-    (void)sender;TDHandle *h=self.host;if(!h||!h->surface||atomic_load(&h->busy))return;
+    (void)sender;TDHandle *h=self.host;if(!h)return;
+    if(atomic_load(&h->busy)){h->pending_copy=true;emit(h,16,NULL,0,0,0);return;}
+    if(!h->surface)return;
     if(!ghostty_surface_has_selection(h->surface)){if(h->tmux_scroll)emit(h,11,(const uint8_t *)"c",1,8,8);return;}
     ghostty_text_s text={0};
     if(!ghostty_surface_read_selection(h->surface,&text)){emit(h,21,NULL,0,2,0);return;}

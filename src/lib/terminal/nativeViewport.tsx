@@ -237,7 +237,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
       operation.succeed();return true;
     }catch(error){if(current())operation.fail(error instanceof Error?error.message:String(error));return false;}
   },[startClipboardOperation,send,serializeCommand]);
-  const copyTmuxSelection=React.useCallback(async()=>{
+  const copyTmuxSelection=React.useCallback(async(copyId?:string)=>{
     const operation=startClipboardOperation();
     const stamp=surface.current,session=backend.current,target=selectedTarget(),client=currentSecureClient();
     const current=()=>operation.isCurrent()&&!disposed.current&&surface.current===stamp&&backend.current===session&&selectedTarget()===target&&currentSecureClient()===client&&!client?.closed&&latest.current.inputActive!==false;
@@ -249,11 +249,14 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
       if(!result.success||!selection||!['copied','empty'].includes(selection.status)||typeof selection.text!=='string'||typeof selection.paneId!=='string'||!/^%[0-9]+$/.test(selection.paneId)||new TextEncoder().encode(selection.text).length!==selection.bytes||selection.bytes>262144)throw new Error('This service did not confirm a valid tmux selection; update the service and retry.');
       if(selection.status==='empty'){operation.succeed();return false;}
       if(!selection.bytes)throw new Error('Tmux copy returned an empty selection.');
-      await navigator.clipboard.writeText(selection.text);
+      if(copyId){
+        const result=await serializeCommand('copyText',{copyId,text:selection.text}) as {copied?:boolean}|null;
+        if(!result?.copied)throw new Error('Native clipboard copy was not confirmed.');
+      }else await navigator.clipboard.writeText(selection.text);
       if(!current())return false;
       operation.succeed();return true;
     }catch(error){if(current())operation.fail(error instanceof Error?error.message:String(error));return false;}
-  },[beginClipboardOperation]);
+  },[beginClipboardOperation,serializeCommand]);
   const clearLocal=React.useCallback(()=>{
     const output=queue.current;if(!output||localClearWork.current)return;
     const feedbackOwnerAtStart=JSON.stringify([latest.current.sessionKey,latest.current.backendSessionId??null,selectedTarget()?.targetPeerId??null]);
@@ -426,7 +429,7 @@ export const NativeTerminalViewport=React.forwardRef<TerminalController,Terminal
         case 'shortcut':{
           const focused=document.activeElement;if(focused instanceof HTMLElement&&(focused.isContentEditable||focused.matches('input,textarea,select')))break;
           const key=event.key||'';const modifiers=event.modifiers||0;
-          if(key.toLowerCase()==='c'&&(modifiers&15)===8&&latest.current.onTmuxScroll){void copyTmuxSelection();break;}
+          if(key.toLowerCase()==='c'&&(modifiers&15)===8&&latest.current.onTmuxScroll){void copyTmuxSelection(event.copyId);break;}
           const terminal=nativeTerminalShortcut(key,event.keyCode??0,modifiers);if(terminal){if(terminal.kind==='clear')clearLocal();else void send(terminalSequencePayload(terminal.data),{skipModifierTransform:true});break;}
           const font=nativeSessionFontShortcut(key,modifiers);if(font){setSessionFontSize(latest.current.sessionId,font==='reset'?null:latest.current.terminalSettings.fontSize+(font==='increase'?1:-1));break;}
           const menu=nativeMenuShortcut(key,event.keyCode??0,modifiers);if(menu){void serializeCommand('menu',{id:menu}).catch(fatal);break;}
