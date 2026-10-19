@@ -85,7 +85,13 @@ def main():
         require(tuple(map(int, version.split('.'))) > tuple(map(int, current.split('.'))), 'Refuse channel rollback or version overwrite')
         published = api(f'repos/{repo}/releases/{release["id"]}', '--method', 'PATCH', '-F', 'draft=false', '-F', 'prerelease=true', '-f', 'make_latest=false')
         require(published['tag_name'] == tag and not published['draft'] and published['prerelease'], 'Published identity mismatch')
-        require(api(f'repos/{repo}/git/ref/tags/{tag}')["object"] == reference, 'Tag changed during publication')
+        published_reference = api(f'repos/{repo}/git/ref/tags/{tag}')['object']
+        for _ in range(5):
+            if published_reference['type'] == 'commit':
+                break
+            require(published_reference['type'] == 'tag', 'Unexpected published tag type')
+            published_reference = api(f'repos/{repo}/git/tags/{published_reference["sha"]}')['object']
+        require(published_reference == reference, 'Tag changed during publication')
         gh('release', 'upload', 'preview-channel', str(base/'preview.json'), '--repo', repo, '--clobber')
         print(published['html_url'])
 
