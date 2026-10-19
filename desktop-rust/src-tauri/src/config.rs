@@ -50,19 +50,44 @@ pub fn connection_at<'a>(connections: &'a [Connection], address: &str) -> Option
     let pins=matching.iter().filter_map(|c|c.target_peer_id.as_deref()).collect::<std::collections::BTreeSet<_>>();
     if pins.len()==1 {matching.iter().find(|c|c.target_peer_id.is_some()).copied()} else {matching.first().copied()}
 }
+/// Fold only recorded identities and exact-address bootstrap aliases. This is
+/// a view: profile keys, saved routes and window restoration IDs remain intact.
+fn directory_groups(connections: &[Connection]) -> Vec<&Connection> {
+    let mut groups: Vec<&Connection> = Vec::new();
+    for c in connections {
+        if c.target_peer_id.is_none() {
+            let pins=connections.iter().filter(|other|other.url==c.url)
+                .filter_map(|other|other.target_peer_id.as_deref()).collect::<std::collections::BTreeSet<_>>();
+            if pins.len()==1 {continue;}
+        }
+        if groups.iter().any(|old| match (&old.target_peer_id,&c.target_peer_id) {
+            (Some(a),Some(b)) => a==b,
+            (None,None) => old.url==c.url && old.service_origin==c.service_origin,
+            _ => false,
+        }) {continue;}
+        groups.push(c);
+    }
+    groups
+}
+pub fn service_connections(connections: &[Connection]) -> Vec<Connection> {
+    directory_groups(connections).into_iter().cloned().collect()
+}
+/// URL-only legacy entries must reuse an unambiguous saved pin before opening.
+/// Never infer that localhost/IPv4/IPv6, schemes or different ports are identical.
+pub fn resolve_saved_connection(connections: &[Connection], connection: Connection) -> Connection {
+    if connection.target_peer_id.is_some() {return connection;}
+    let peers=connections.iter().filter(|c|c.url==connection.url)
+        .filter_map(|c|c.target_peer_id.as_deref()).collect::<std::collections::BTreeSet<_>>();
+    if peers.len()==1 {
+        if let Some(saved)=connections.iter().find(|c|c.url==connection.url&&c.target_peer_id.is_some()) {return saved.clone();}
+    }
+    connection
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct ServiceMenuRow { pub id: String, pub label: String }
 /// Presentation only. Never deletes bookmarks, routes, profiles or open windows.
 pub fn service_menu_rows(connections: &[Connection], local_address: Option<&str>) -> Vec<ServiceMenuRow> {
-    let mut groups:Vec<&Connection>=Vec::new();
-    for c in connections {
-        if c.target_peer_id.is_none() {
-            let pins=connections.iter().filter(|other|other.url==c.url).filter_map(|other|other.target_peer_id.as_deref()).collect::<std::collections::BTreeSet<_>>();
-            if pins.len()==1 {continue;}
-        }
-        if c.target_peer_id.is_some()&&groups.iter().any(|old|old.target_peer_id==c.target_peer_id){continue;}
-        groups.push(c);
-    }
+    let groups=directory_groups(connections);
     let local_is_saved=local_address.and_then(|address|connection_at(connections,address)).is_some_and(|c|c.target_peer_id.is_some());
     let mut rows=Vec::new();
     if !local_is_saved {rows.push(ServiceMenuRow{id:"local-service".into(),label:"本机服务（快捷入口）".into()});}
@@ -464,6 +489,27 @@ mod tests {
         let connections=vec![menu_connection("a","https://host.test",Some("peer-a"),"Home"),menu_connection("b","https://host.test",Some("peer-b"),"Home"),menu_connection("unknown","https://host.test",None,"Home")];
         let rows=service_menu_rows(&connections,Some("http://127.0.0.1:9834"));assert_eq!(rows.len(),4);assert_eq!(rows[0].id,"local-service");
         assert_ne!(rows[1].label,rows[2].label);assert_eq!(connection_at(&connections,"https://host.test").unwrap().id,"a");
+    }
+    #[test]
+    fn service_directory_folds_bootstrap_and_aliases_without_touching_profiles() {
+        let mut config=Config::default();
+        config.connections=vec![menu_connection("local","https://127.0.0.1:9834",None,"本机"),menu_connection("paired","https://127.0.0.1:9834",Some("peer-a"),"127.0.0.1:9834"),menu_connection("alias","https://mac.test",Some("peer-a"),"Mac"),menu_connection("other-port","https://127.0.0.1:9881",Some("peer-b"),"Other"),menu_connection("localhost","https://localhost:9834",None,"Unknown"),menu_connection("http","http://127.0.0.1:9834",None,"Unknown HTTP")];
+        config.profile_keys.insert("local".into(),"existing-profile".into());config.open_connections.push("local".into());
+        let before=serde_json::to_value(&config).unwrap();
+        let rows=service_connections(&config.connections);
+        assert_eq!(rows.iter().map(|c|c.id.as_str()).collect::<Vec<_>>(),vec!["paired","other-port","localhost","http"]);
+        let selected=resolve_saved_connection(&config.connections,config.connections[0].clone());
+        assert_eq!(selected.id,"paired");assert_eq!(selected.window_label(),rows[0].window_label());
+        assert_eq!(serde_json::to_value(&config).unwrap(),before);
+    }
+    #[test]
+    fn directory_and_resolution_preserve_conflicting_pins_and_unproven_addresses() {
+        let connections=vec![menu_connection("a","https://host.test",Some("peer-a"),"Home"),menu_connection("b","https://host.test",Some("peer-b"),"Home"),menu_connection("unknown","https://host.test",None,"Home")];
+        assert_eq!(service_connections(&connections),connections);
+        assert_eq!(resolve_saved_connection(&connections,connections[2].clone()).id,"unknown");
+        assert_eq!(resolve_saved_connection(&connections,connections[1].clone()).target_peer_id.as_deref(),Some("peer-b"));
+        let unpaired=vec![menu_connection("local","https://127.0.0.1:9834",None,"本机"),menu_connection("address","https://127.0.0.1:9834",None,"127.0.0.1:9834")];
+        assert_eq!(service_connections(&unpaired).len(),1);
     }
     #[test]
     fn address_labels_keep_ports_and_ipv6_without_guessing_service_identity() {

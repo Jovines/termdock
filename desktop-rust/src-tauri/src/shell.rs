@@ -361,6 +361,8 @@ pub(crate) async fn open_connection(
     let _opening = shell.openings.lock().await;
     if let Some(invitation) = &invitation {
         connection.validate_invitation(invitation)?;
+    } else {
+        connection = crate::config::resolve_saved_connection(&shell.config.lock().unwrap().connections, connection);
     }
     let mut pins = shell.config.lock().unwrap().certificate_pins.clone();
     if !crate::native_gate::active(){
@@ -1014,7 +1016,7 @@ async fn preview_dispatch(
             desktop_ui::focus(&target)?;
             Ok(json!(true))
         }
-        "connections" => Ok(json!(shell.config.lock().unwrap().connections)),
+        "connections" => Ok(json!(crate::config::service_connections(&shell.config.lock().unwrap().connections))),
         "saveConnection" | "importConnection" => {
             let connection = parse_connection(&args)?;
             {
@@ -1030,7 +1032,7 @@ async fn preview_dispatch(
                 crate::native_gate::paired_connection(&window,&previous,&current);
                 desktop_ui::emit(&window,"termdock:terminal-engine-availability",Value::Null);
             }
-            Ok(json!(shell.config.lock().unwrap().connections))
+            Ok(json!(crate::config::service_connections(&shell.config.lock().unwrap().connections)))
         }
         "removeConnection" => {
             let id = text(&args, "id")?;
@@ -1049,7 +1051,7 @@ async fn preview_dispatch(
                 }
             }
             store(&app)?;
-            Ok(json!(shell.config.lock().unwrap().connections))
+            Ok(json!(crate::config::service_connections(&shell.config.lock().unwrap().connections)))
         }
         "openConnection" => {
             let connection = parse_connection(&args)?;
@@ -1922,7 +1924,7 @@ async fn snapshot(app: &AppHandle) -> Result<Value, String> {
     let shell = state(app);
     let config = shell.config.lock().unwrap().clone();
     let local = local_service::status(&config.certificate_pins).await;
-    let mut connections = json!(config.connections);
+    let mut connections = json!(crate::config::service_connections(&config.connections));
     if let Some(items) = connections.as_array_mut() {
         for c in items {
             let id = c["id"].as_str().unwrap_or("");
