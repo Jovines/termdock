@@ -634,7 +634,11 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
     bool font=(mods==GHOSTTY_MODS_SUPER||mods==(GHOSTTY_MODS_SUPER|GHOSTTY_MODS_SHIFT))
         &&([plain isEqualToString:@"+"]||[plain isEqualToString:@"="]
             ||(mods==GHOSTTY_MODS_SUPER&&([plain isEqualToString:@"-"]||[plain isEqualToString:@"0"])));
-    if(font){[self keyDown:event];return YES;}
+    // Route Copy through the owning terminal as well. A menu can report the
+    // equivalent handled without delivering copy: to this view (for example
+    // while AppKit is changing the key window). That must not swallow Cmd-C.
+    bool copy=mods==GHOSTTY_MODS_SUPER&&[plain.lowercaseString isEqualToString:@"c"];
+    if(font||copy){[self keyDown:event];return YES;}
     if(event.modifierFlags&NSEventModifierFlagCommand){if([NSApp.mainMenu performKeyEquivalent:event]){if(self.host)td_shortcut_down(self.host->shortcut_keys,event.keyCode,true,event.isARepeat);return YES;}[self queue:event];return YES;}return NO;
 }
 - (void)sendKey:(NSEvent *)event action:(ghostty_input_action_e)action text:(NSString *)text composing:(bool)composing {

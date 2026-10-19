@@ -92,7 +92,7 @@ int main(void){@autoreleasepool{
     assert(pointers==1&&view.pending.count==1&&atomic_load(&host.busy));
     [view.pending removeAllObjects];view.pendingBytes=0;
     NSMenu *oldMenu=NSApp.mainMenu;NSApp.mainMenu=[[TDFontTestMenu alloc]initWithTitle:@"Owned font menu"];
-    for(NSArray *spec in @[@[@"=",@24,@(NSEventModifierFlagCommand)],@[@"+",@24,@(NSEventModifierFlagCommand|NSEventModifierFlagShift)],@[@"-",@27,@(NSEventModifierFlagCommand)],@[@"0",@29,@(NSEventModifierFlagCommand)]]){
+    for(NSArray *spec in @[@[@"=",@24,@(NSEventModifierFlagCommand)],@[@"+",@24,@(NSEventModifierFlagCommand|NSEventModifierFlagShift)],@[@"-",@27,@(NSEventModifierFlagCommand)],@[@"0",@29,@(NSEventModifierFlagCommand)],@[@"c",@8,@(NSEventModifierFlagCommand)]]){
         [view.pending removeAllObjects];view.pendingBytes=0;menuCalls=0;
         NSEvent *event=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:[spec[2] unsignedLongLongValue] timestamp:0 windowNumber:window.windowNumber context:nil characters:spec[0] charactersIgnoringModifiers:spec[0] isARepeat:NO keyCode:[spec[1] unsignedShortValue]];
         assert([view performKeyEquivalent:event]);assert(menuCalls==0&&view.pending.count==1&&view.pending.firstObject==event);
@@ -101,6 +101,6 @@ int main(void){@autoreleasepool{
     NSEvent *normal=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand timestamp:0 windowNumber:window.windowNumber context:nil characters:@"n" charactersIgnoringModifiers:@"n" isARepeat:NO keyCode:45];
     assert([view performKeyEquivalent:normal]&&menuCalls==1);
     NSApp.mainMenu=oldMenu;view.host=NULL;[window close];
-    puts("spaceCandidate=pass numberCandidate=pass cancel=pass dictationPreedit=pass orderedCommit=pass mutableCommit=pass busyEngineUntouched=pass sessionFontMenuRouting=pass focusWakeups=pass immediatePointer=pass deferredBusyCopy=pass ownedPasteboardUTF8=pass; physicalIME=false");
+    puts("spaceCandidate=pass numberCandidate=pass cancel=pass dictationPreedit=pass orderedCommit=pass mutableCommit=pass busyEngineUntouched=pass sessionFontMenuRouting=pass copyMenuRouting=pass focusWakeups=pass immediatePointer=pass deferredBusyCopy=pass ownedPasteboardUTF8=pass; physicalIME=false");
     return 0;
 }}
