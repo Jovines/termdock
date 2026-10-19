@@ -1,0 +1,36 @@
+name: Publish verified Preview draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version of the existing notarized Preview draft'
+        required: true
+        type: string
+      revision:
+        description: 'Exact 40-character source SHA of the notarized artifacts'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-channel-publish
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PREVIEW_VERSION: ${{ inputs.version }}
+      PREVIEW_REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate notarized draft, publish, then move Preview channel
+        run: python3 desktop-rust/scripts/promote-preview.py
