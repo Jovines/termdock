@@ -28,3 +28,7 @@ npm --prefix desktop-rust run build
 - 源码测试、浏览器测试、原生受控窗口测试与用户实际交互验收分别报告；本地已签名开发构建不等于公证发布或完整 UX 通过。
 
 原生终端及历史验收记录见 [NATIVE-INTEGRATION.md](NATIVE-INTEGRATION.md) 和 [native-terminal/README.md](native-terminal/README.md)。
+
+### 原生终端鼠标选择
+
+普通左键拖动优先在 Mac 本地选择终端文字，选中后使用 `⌘C` 复制；远端程序启用鼠标捕获时也适用。单击和滚轮仍传给程序。需要 Vim 等程序处理拖动时，按住 `⌥ Option` 再拖动。`Shift` 拖选保持可用。

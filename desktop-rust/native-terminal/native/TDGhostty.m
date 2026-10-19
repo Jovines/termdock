@@ -73,6 +73,7 @@ typedef struct {
 @end
 @implementation TDInterpretedKey
 @end
+enum { TDLeftIdle, TDLeftPending, TDLeftSelection, TDLeftProgram };
 @interface TDGhosttyView : NSView<NSTextInputClient,NSDraggingDestination>
 - (void)copy:(id)sender;
 @property(nonatomic,assign) TDHandle *host;
@@ -88,6 +89,9 @@ typedef struct {
 @property(nonatomic) uint64_t compositionGeneration;
 @property(nonatomic) size_t pendingBytes;
 @property(nonatomic) NSRect imeRect;
+@property(nonatomic,strong) NSEvent *leftDown;
+@property(nonatomic) NSUInteger leftGesture;
+@property(nonatomic) BOOL leftOptionOverride;
 @property(nonatomic,strong) NSArray<NSValue *> *clipHoles;
 - (void)dispatchEvent:(NSEvent *)event;
 - (void)dispatchKey:(TDInterpretedKey *)key;
@@ -532,6 +536,7 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
 - (BOOL)resignFirstResponder {
     // Do not enter Ghostty while the feed worker owns terminal state.
     if(self.host){self.host->desired_focus=false;self.host->focus_dirty=true;self.host->visibility_dirty=true;}
+    if(self.leftGesture==TDLeftPending){self.leftDown=nil;self.leftGesture=TDLeftIdle;}
     [self cancelComposition];if(self.host)emit(self.host,16,NULL,0,0,0);return YES;
 }
 - (void)updateTrackingAreas {
@@ -611,9 +616,47 @@ int td_native_search(void *handle,const char *needle,size_t len,int direction,in
 }
 - (void)keyUp:(NSEvent *)event{[self queue:event];}
 - (void)flagsChanged:(NSEvent *)event{[self queue:event];}
-- (void)mouseDown:(NSEvent *)event{[self.window makeFirstResponder:self];emit(self.host,15,NULL,0,0,0);[self queue:event];}
-- (void)mouseUp:(NSEvent *)event{[self queue:event];}
-- (void)mouseDragged:(NSEvent *)event{[self queue:event];}
+// Decide the left-button gesture before sending a press to the application.
+// A click still sends one down/up pair; a drag owns a local Ghostty selection.
+// The Shift bit here belongs only to immutable queued mouse events: no key or
+// terminal mode is changed. Option explicitly opts into application dragging.
+- (NSEvent *)leftEvent:(NSEvent *)event {
+    NSEventModifierFlags flags=event.modifierFlags;
+    if(self.leftGesture==TDLeftSelection)flags|=NSEventModifierFlagShift;
+    else if(self.leftOptionOverride)flags&=~NSEventModifierFlagOption;
+    return [NSEvent mouseEventWithType:event.type location:event.locationInWindow modifierFlags:flags timestamp:event.timestamp windowNumber:event.windowNumber context:nil eventNumber:event.eventNumber clickCount:event.clickCount pressure:event.pressure];
+}
+- (BOOL)leftMoved:(NSEvent *)event {
+    NSPoint start=self.leftDown.locationInWindow,end=event.locationInWindow;
+    return hypot(end.x-start.x,end.y-start.y)>=4.;
+}
+- (void)beginLeftSelection {
+    self.leftGesture=TDLeftSelection;
+    if(self.leftDown){[self queue:[self leftEvent:self.leftDown]];self.leftDown=nil;}
+}
+- (void)mouseDown:(NSEvent *)event {
+    [self.window makeFirstResponder:self];emit(self.host,15,NULL,0,0,0);
+    self.leftDown=event;self.leftOptionOverride=NO;
+    NSEventModifierFlags flags=event.modifierFlags;
+    if(flags&NSEventModifierFlagShift){
+        [self beginLeftSelection];
+    }else if(flags&(NSEventModifierFlagOption|NSEventModifierFlagCommand|NSEventModifierFlagControl)){
+        self.leftGesture=TDLeftProgram;self.leftOptionOverride=(flags&(NSEventModifierFlagOption|NSEventModifierFlagCommand|NSEventModifierFlagControl))==NSEventModifierFlagOption;
+        [self queue:[self leftEvent:event]];self.leftDown=nil;
+    }else self.leftGesture=TDLeftPending;
+}
+- (void)mouseDragged:(NSEvent *)event {
+    if(self.leftGesture==TDLeftPending){if(![self leftMoved:event])return;[self beginLeftSelection];}
+    if(self.leftGesture==TDLeftSelection||self.leftGesture==TDLeftProgram)[self queue:[self leftEvent:event]];
+}
+- (void)mouseUp:(NSEvent *)event {
+    if(self.leftGesture==TDLeftPending){
+        if([self leftMoved:event])[self beginLeftSelection];
+        else {self.leftGesture=TDLeftProgram;[self queue:self.leftDown];self.leftDown=nil;}
+    }
+    if(self.leftGesture==TDLeftSelection||self.leftGesture==TDLeftProgram)[self queue:[self leftEvent:event]];
+    self.leftDown=nil;self.leftGesture=TDLeftIdle;self.leftOptionOverride=NO;
+}
 - (void)rightMouseDown:(NSEvent *)event{emit(self.host,15,NULL,0,0,0);[self queue:event];}
 - (void)rightMouseUp:(NSEvent *)event{[self queue:event];}
 - (void)otherMouseDown:(NSEvent *)event{emit(self.host,15,NULL,0,0,0);[self queue:event];}

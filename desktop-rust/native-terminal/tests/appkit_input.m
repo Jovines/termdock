@@ -89,7 +89,16 @@ int main(void){@autoreleasepool{
     [view.pending removeAllObjects];view.pendingBytes=0;pointers=0;
     NSEvent *click=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSMakePoint(20,20) modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:1 clickCount:1 pressure:1];
     [view mouseDown:click];
-    assert(pointers==1&&view.pending.count==1&&atomic_load(&host.busy));
+    assert(pointers==1&&view.pending.count==0&&view.leftDown==click&&atomic_load(&host.busy));
+    NSEvent *up=[NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:NSMakePoint(21,20) modifierFlags:0 timestamp:.1 windowNumber:window.windowNumber context:nil eventNumber:2 clickCount:1 pressure:0];
+    [view mouseUp:up];assert(view.pending.count==2&&view.pending.firstObject==click&&view.leftDown==nil);
+    [view.pending removeAllObjects];view.pendingBytes=0;
+    [view mouseDown:click];
+    NSEvent *drag=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged location:NSMakePoint(40,20) modifierFlags:0 timestamp:.2 windowNumber:window.windowNumber context:nil eventNumber:3 clickCount:1 pressure:1];
+    [view mouseDragged:drag];[view mouseUp:up];
+    assert(view.pending.count==3);for(NSEvent *event in view.pending)assert(event.modifierFlags&NSEventModifierFlagShift);
+    [view.pending removeAllObjects];view.pendingBytes=0;
+    [view mouseDown:click];assert([view resignFirstResponder]);assert(!view.leftDown&&view.leftGesture==TDLeftIdle&&view.pending.count==0);
     [view.pending removeAllObjects];view.pendingBytes=0;
     NSMenu *oldMenu=NSApp.mainMenu;NSApp.mainMenu=[[TDFontTestMenu alloc]initWithTitle:@"Owned font menu"];
     for(NSArray *spec in @[@[@"=",@24,@(NSEventModifierFlagCommand)],@[@"+",@24,@(NSEventModifierFlagCommand|NSEventModifierFlagShift)],@[@"-",@27,@(NSEventModifierFlagCommand)],@[@"0",@29,@(NSEventModifierFlagCommand)],@[@"c",@8,@(NSEventModifierFlagCommand)]]){
