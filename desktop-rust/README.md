@@ -35,6 +35,8 @@ npm --prefix desktop-rust run build
 
 [macOS Rust client](../.github/workflows/macos-preview.yml) 在相关 master 推送、PR 和手动触发时，使用 GitHub 的 macOS Apple Silicon runner 编译。工作流运行终端/桥接回归、Rust 测试，构建内嵌工作区并上传 `macos-arm64-test-SHA` artifact；其中 App 为临时签名测试包，未公证，不进入 Preview 自动更新源。
 
-正式 Preview 的 Developer ID 签名、公证和更新密钥仍按 [发布契约](RELEASE.md) 在受控发布环境执行。后续将该步骤迁入 GitHub 前，须在 Actions Secrets 配置现有 Developer ID `.p12` 与密码、Apple 公证 API key，以及**同一套** Preview updater 私钥/公钥，不能生成新密钥替换已有更新信任链。
+[Build signed and notarized Preview](../.github/workflows/signed-preview.yml) 支持在 master 手动触发完整云端流程：测试、Developer ID 签名、App 与 DMG 公证和 staple、Gatekeeper 验证、内嵌源码与资源摘要校验。默认只上传验证后的 artifact；勾选 `publish` 才会创建精确源码标签和草稿、校验上传摘要、公开预览版并更新独立 Preview 渠道。发布前先递增桌面 Preview 版本，已有版本拒绝覆盖；不会替换稳定版 latest。
+
+Actions Secrets 必须沿用现有签名身份及更新信任链：`APPLE_CERTIFICATE`（base64 `.p12`）、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_API_KEY`、`APPLE_API_ISSUER`、`APPLE_API_PRIVATE_KEY`（`.p8` 内容）、`TAURI_SIGNING_PRIVATE_KEY`、`TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY`，以及可选的 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。Tauri 在临时钥匙串导入发布证书；公证密钥写入 runner 临时文件并在结束时清理。普通 PR/推送检查不读取发布凭证。详见 [发布契约](RELEASE.md)。
 
 [Publish verified Preview draft](../.github/workflows/promote-preview.yml) 接收已有公证草稿的版本与精确源码 SHA，核对实际 Git 标签、安装包摘要和公证记录后公开版本并更新 Preview 渠道。它不负责导入签名私钥或执行公证，也不修改既有版本标签。GitHub 的 `target_commitish` 在标签已存在时只是创建提示；发布校验以实际标签解析出的 commit 为准。
