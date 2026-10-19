@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { zh } from '../../i18n/zh';
 import type { RdpConnection } from '../../computer/secureRdpTunnel';
 import { computerLoginKey, defaultComputerPreferences, type ComputerPreferences } from '../../computer/preferences';
-import ComputerControlView from './ComputerControlView';
+import ComputerControlView, { COMPUTER_BACKGROUND_RETENTION_MS } from './ComputerControlView';
 
 const mocks = vi.hoisted(() => ({
   peer: 'ubuntu-service',
@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   clients: [] as Array<EventTarget & { sendKey: ReturnType<typeof vi.fn>; clipboardPasteFrom: ReturnType<typeof vi.fn>; keyboardActive?: boolean; focusOnClick?: boolean }>,
   hosts: [] as string[],
   pointerSend: vi.fn(),
+  disconnect: vi.fn(),
+  workspaceActive: true,
   rdpOptions: [] as RdpConnection[],
   preferences: null as ComputerPreferences | null,
   writes: [] as ComputerPreferences[],
@@ -31,7 +33,7 @@ vi.mock('../../federation/browserIntegration', () => ({
   SECURE_STATE_EVENT: 'test-secure-state',
 }));
 vi.mock('../../services/workspaceHost', () => ({
-  isWorkspaceActive: () => true, WORKSPACE_VISIBILITY_EVENT: 'test-workspace-visibility',
+  isWorkspaceActive: () => mocks.workspaceActive, WORKSPACE_VISIBILITY_EVENT: 'test-workspace-visibility',
 }));
 vi.mock('../../computer/secureVncChannel', () => ({ SecureVncChannel: class {
   constructor(host: string) { mocks.hosts.push(host); }
@@ -40,7 +42,7 @@ vi.mock('../../computer/secureVncChannel', () => ({ SecureVncChannel: class {
 vi.mock('@novnc/novnc', () => ({ default: class extends EventTarget {
   sendKey = vi.fn();
   clipboardPasteFrom = vi.fn();
-  disconnect() {}
+  disconnect() { mocks.disconnect(); }
   constructor() { super(); mocks.clients.push(this); }
 } }));
 
@@ -50,7 +52,7 @@ vi.mock('../../computer/rdpSession', () => ({ RdpSession: class extends EventTar
   pointerTarget = { size: () => ({ width: 1280, height: 800 }), surface: () => this.surface, send: mocks.pointerSend };
   sendKey = vi.fn();
   clipboardPasteFrom = vi.fn();
-  disconnect() {}
+  disconnect() { mocks.disconnect(); }
   constructor(_target: HTMLElement, options: RdpConnection, fail: (reason: string) => void) {
     super(); _target.append(this.surface); mocks.clients.push(this); mocks.rdpOptions.push(options); mocks.failures.push(fail);
   }
@@ -60,6 +62,7 @@ beforeEach(() => {
   localStorage.clear();
   mocks.peer = 'ubuntu-service'; mocks.platform = 'linux'; mocks.rdpAvailable = true;
   mocks.clients.length = 0; mocks.hosts.length = 0; mocks.rdpOptions.length = 0; mocks.failures.length = 0;
+  mocks.disconnect.mockClear(); mocks.workspaceActive = true;
   mocks.preferences = null; mocks.writes = []; mocks.pointerSend.mockClear();
   mocks.credentials = {}; mocks.credentialWrites = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
@@ -76,11 +79,12 @@ beforeEach(() => {
     return { ok: true, json: async () => ({ platform: mocks.platform, hostname: 'ubuntu', rdpAvailable: mocks.rdpAvailable }) };
   }));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 async function ready() {
-  render(<ComputerControlView />);
+  const view = render(<ComputerControlView />);
   await waitFor(() => expect(screen.queryByRole('button', { name: '取消' }) || !(screen.getByRole('button', { name: '当前电脑' }) as HTMLButtonElement).disabled).toBeTruthy());
+  return view;
 }
 
 describe('computer targets', () => {
@@ -174,7 +178,8 @@ describe('computer targets', () => {
       await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
       fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } }); fireEvent.click(screen.getByRole('button', { name: '连接' }));
       await waitFor(() => expect(mocks.clients).toHaveLength(1)); act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
-      const button = screen.getByRole('button', { name: '键盘' }); fireEvent.click(button);
+      let button = screen.getByRole('button', { name: '键盘' }); fireEvent.click(button);
+      button = screen.getByRole('button', { name: '键盘' });
       const input = screen.getByLabelText('直接输入到电脑');
       expect(document.activeElement).toBe(input); expect(button.getAttribute('aria-pressed')).toBe('false');
       act(() => { viewport.height = 500; viewport.dispatchEvent(new Event('resize')); });
@@ -184,8 +189,8 @@ describe('computer targets', () => {
       expect(button.getAttribute('aria-pressed')).toBe('false'); expect(document.activeElement).toBe(input);
       fireEvent.click(button); expect(screen.getByLabelText('直接输入到电脑')).toBe(input); expect(document.activeElement).toBe(input);
       act(() => { viewport.height = 500; viewport.dispatchEvent(new Event('resize')); });
-      expect(button.getAttribute('aria-pressed')).toBe('true'); fireEvent.click(button);
-      expect(screen.queryByLabelText('直接输入到电脑')).toBeNull(); expect(button.getAttribute('aria-pressed')).toBe('false');
+      expect(button.getAttribute('aria-pressed')).toBe('true'); expect(fireEvent.pointerDown(button)).toBe(false); fireEvent.click(button);
+      expect(screen.queryByLabelText('直接输入到电脑')).toBeNull(); expect(screen.getByRole('button', { name: '键盘' }).getAttribute('aria-pressed')).toBe('false');
     } finally { Object.defineProperty(window, 'innerWidth', { configurable: true, value: beforeWidth }); }
   });
   it('keeps VNC keyboard focus during mouse use and restores canvas focus after closing the keyboard', async () => {
@@ -596,4 +601,68 @@ it('receives remote clipboard text without overwriting a local draft and copies 
   fireEvent.click(screen.getByRole('button', { name: '复制到本机' }));
   await waitFor(() => expect(screen.getByRole('button', { name: '已复制到本机' })).toBeTruthy());
   expect(writeText).toHaveBeenCalledExactlyOnceWith('remote 中文🙂');
+});
+
+it('retains a hidden desktop, cancels expiry on reopen, and releases it only after thirty minutes in the background', async () => {
+  vi.stubGlobal('innerWidth', 390);
+  const view = await ready();
+  fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+  fireEvent.click(screen.getByRole('button', { name: '连接' }));
+  await waitFor(() => expect(mocks.clients).toHaveLength(1));
+  act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+  fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+  vi.useFakeTimers(); mocks.disconnect.mockClear();
+  view.rerender(<ComputerControlView active={false} />);
+  expect(screen.queryByLabelText('直接输入到电脑')).toBeNull();
+  act(() => vi.advanceTimersByTime(COMPUTER_BACKGROUND_RETENTION_MS - 1));
+  expect(mocks.disconnect).not.toHaveBeenCalled();
+  view.rerender(<ComputerControlView active />);
+  act(() => vi.advanceTimersByTime(COMPUTER_BACKGROUND_RETENTION_MS + 1));
+  expect(mocks.disconnect).not.toHaveBeenCalled(); expect(mocks.clients).toHaveLength(1);
+  view.rerender(<ComputerControlView active={false} />);
+  act(() => vi.advanceTimersByTime(COMPUTER_BACKGROUND_RETENTION_MS));
+  expect(mocks.disconnect).toHaveBeenCalledTimes(1);
+});
+it('retains a desktop when its workspace is hidden, with all input disabled until it returns', async () => {
+  await ready();
+  fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+  fireEvent.click(screen.getByRole('button', { name: '连接' }));
+  await waitFor(() => expect(mocks.clients).toHaveLength(1));
+  act(() => mocks.clients[0].dispatchEvent(new Event('connect'))); mocks.disconnect.mockClear();
+  act(() => { mocks.workspaceActive = false; window.dispatchEvent(new Event('test-workspace-visibility')); });
+  expect(mocks.disconnect).not.toHaveBeenCalled();
+  expect((mocks.clients[0] as unknown as { viewOnly: boolean }).viewOnly).toBe(true);
+  act(() => { mocks.workspaceActive = true; window.dispatchEvent(new Event('test-workspace-visibility')); });
+  expect((mocks.clients[0] as unknown as { viewOnly: boolean }).viewOnly).toBe(false);
+  expect(mocks.clients).toHaveLength(1);
+});
+it('applies phone modifier buttons to one command and releases them before ordinary typing resumes', async () => {
+  vi.stubGlobal('innerWidth', 390);
+  await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+  fireEvent.click(screen.getByRole('button', { name: '连接' }));
+  await waitFor(() => expect(mocks.clients).toHaveLength(1)); act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+  fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+  const ctrl = screen.getByRole('button', { name: 'Ctrl' }); fireEvent.click(ctrl);
+  expect(ctrl.getAttribute('aria-pressed')).toBe('true'); expect(mocks.clients[0].sendKey).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText('直接输入到电脑'), { target: { value: '\u200bc' } });
+  expect(mocks.clients[0].sendKey.mock.calls).toEqual([[0xffe3, 'ControlLeft', true], [99, '', true], [99, '', false], [0xffe3, 'ControlLeft', false]]);
+  expect(ctrl.getAttribute('aria-pressed')).toBe('false');
+  fireEvent.change(screen.getByLabelText('直接输入到电脑'), { target: { value: '\u200ba' } });
+  expect(mocks.clients[0].sendKey.mock.calls.slice(-2)).toEqual([[97, null, true], [97, null, false]]);
+});
+it('pastes multiline phone text through the remote clipboard before issuing the paste shortcut', async () => {
+  vi.stubGlobal('innerWidth', 390);
+  await ready(); fireEvent.change(screen.getByLabelText('RDP 用户名'), { target: { value: 'qiao' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'secret' } });
+  fireEvent.click(screen.getByRole('button', { name: '连接' }));
+  await waitFor(() => expect(mocks.clients).toHaveLength(1)); act(() => mocks.clients[0].dispatchEvent(new Event('connect')));
+  fireEvent.click(screen.getByRole('button', { name: '键盘' }));
+  fireEvent.paste(screen.getByLabelText('直接输入到电脑'), { clipboardData: { types: ['text/plain'], getData: () => '你好🙂\nnext line' } });
+  const client = mocks.clients[0];
+  expect(client.clipboardPasteFrom).toHaveBeenCalledExactlyOnceWith('你好🙂\nnext line');
+  expect(client.sendKey.mock.calls).toEqual([[0xffe3, 'ControlLeft', true], [0x76, 'KeyV', true], [0x76, 'KeyV', false], [0xffe3, 'ControlLeft', false]]);
+  expect(client.clipboardPasteFrom.mock.invocationCallOrder[0]).toBeLessThan(client.sendKey.mock.invocationCallOrder[0]);
 });

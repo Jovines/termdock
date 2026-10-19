@@ -1,5 +1,6 @@
 /** Text clipboard limits are shared by both renderers and the manual panel. */
 export const COMPUTER_CLIPBOARD_LIMIT = 1_048_576;
+export const COMPUTER_COPY_REQUEST_EVENT = 'termdock:computer-copy';
 
 export interface ComputerClipboardOptions {
   paste(text: string, shift: boolean): void;
@@ -46,6 +47,7 @@ export function attachComputerClipboard(viewport: HTMLElement, session: EventTar
     }
   };
   const capture = { capture: true, signal: abort.signal };
+  viewport.addEventListener(COMPUTER_COPY_REQUEST_EVENT, () => { copyRequestedAt = performance.now(); }, capture);
   viewport.addEventListener('keydown', keydown, capture);
   viewport.addEventListener('keyup', event => {
     if (pasteKeys.delete(event.code || event.key)) event.stopImmediatePropagation();

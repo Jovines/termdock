@@ -1,10 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { clientLog } from '../utils/clientLog';
-import { createComputerMotionTrace } from './motionTrace';
+import { createComputerMotionTrace, createComputerMotionTraceIfEnabled } from './motionTrace';
 vi.mock('../utils/clientLog', () => ({ clientLog: vi.fn() }));
-beforeEach(() => { vi.useFakeTimers(); vi.mocked(clientLog).mockClear(); });
+beforeEach(() => { vi.useFakeTimers(); sessionStorage.clear(); vi.mocked(clientLog).mockClear(); });
 afterEach(() => { vi.useRealTimers(); });
+it('does no recording by default and enables diagnostics only for an opted-in browser session', () => {
+  expect(createComputerMotionTraceIfEnabled()).toBeUndefined();
+  expect(vi.getTimerCount()).toBe(0);
+  expect(clientLog).not.toHaveBeenCalled();
+  sessionStorage.setItem('termdock:computer-motion-trace', '1');
+  const trace = createComputerMotionTraceIfEnabled()!;
+  trace.record('down'); trace.dispose();
+  expect(clientLog).toHaveBeenCalledTimes(1);
+});
 it('keeps input samples local until gesture completion or idle, preserving their order and clock', () => {
   const trace = createComputerMotionTrace();
   trace.record('down', { client: [10, 20] }); vi.advanceTimersByTime(10);

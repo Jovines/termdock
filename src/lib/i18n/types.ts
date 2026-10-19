@@ -131,6 +131,7 @@ export type TranslationDictionary = {
     keyboard: string;
     keyboardInput: string;
     keyboardPlaceholder: string;
+    hideKeyboard: string;
     keyboardNavigation: string;
     desktopZoom: string;
     zoomIn: string;

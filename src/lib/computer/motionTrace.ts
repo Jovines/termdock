@@ -6,6 +6,16 @@ export interface ComputerMotionTrace {
   dispose(): void;
 }
 
+/** Opt in for one browser session, then reopen the computer tab to collect.
+ * sessionStorage['termdock:computer-motion-trace'] = '1'
+ * Disabled sessions create no observers, per-frame records, or uploads. */
+export function createComputerMotionTraceIfEnabled(): ComputerMotionTrace | undefined {
+  try {
+    if (sessionStorage.getItem('termdock:computer-motion-trace') === '1') return createComputerMotionTrace();
+  } catch { /* Diagnostics remain off when storage is unavailable. */ }
+  return undefined;
+}
+
 /** Temporary device diagnostics: coordinates only, no desktop images or text.
  * Keep the input path in memory; upload after a gesture/idle, with bounded size. */
 export function createComputerMotionTrace(): ComputerMotionTrace {

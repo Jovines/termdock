@@ -9,7 +9,14 @@ import { RightSidebar } from './RightSidebar';
 
 vi.mock('./Sidebar', () => ({ Sidebar: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock('./ArchitecturePanel', () => ({ ArchitecturePanel: () => <div>Architecture content</div> }));
-vi.mock('../computer/ComputerControlView', () => ({ default: () => <div>Computer content</div> }));
+const computerLife = vi.hoisted(() => ({ mounts: 0, unmounts: 0 }));
+vi.mock('../computer/ComputerControlView', async () => {
+  const { useEffect } = await import('react');
+  return { default: ({ active }: { active: boolean }) => {
+    useEffect(() => { computerLife.mounts++; return () => { computerLife.unmounts++; }; }, []);
+    return <div data-computer-active={String(active)}>Computer content</div>;
+  } };
+});
 vi.mock('../android/AndroidMirrorView', () => ({
   AndroidMirrorView: () => <div>Device content</div>,
   ANDROID_DOCK_GROUP: 'android-mirror',
@@ -21,9 +28,10 @@ vi.mock('../../terminal/api', async original => ({
 }));
 
 const initialState = useSidebarStore.getState();
-const sidebar = (width = 800) => <I18nProvider><RightSidebar isOpen drawerWidthPx={width} onClose={() => {}} /></I18nProvider>;
+const sidebar = (width = 800, open = true) => <I18nProvider><RightSidebar isOpen={open} drawerWidthPx={width} onClose={() => {}} /></I18nProvider>;
 
 beforeEach(() => {
+  computerLife.mounts = 0; computerLife.unmounts = 0;
   localStorage.setItem('termdock:locale', 'zh');
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   useSidebarStore.setState({ ...initialState, rootPath: null, rightTab: 'files' });
@@ -146,4 +154,23 @@ describe('optional right sidebar tabs', () => {
     render(sidebar());
     await waitFor(() => expect(screen.queryByRole('button', { name: '电脑' })).toBeNull());
   });
+});
+
+it('retains the computer pane across closing and tab switches, and tells it when interaction is hidden', async () => {
+  vi.mocked(getSettings).mockResolvedValue({ locale: 'zh', rightSidebarTabs: { computer: true } } as Awaited<ReturnType<typeof getSettings>>);
+  const view = render(sidebar(360));
+  await waitFor(() => expect(screen.getByRole('button', { name: '电脑' })).toBeTruthy());
+  fireEvent.click(screen.getByRole('button', { name: '电脑' }));
+  const pane = await screen.findByText('Computer content');
+  expect(pane.getAttribute('data-computer-active')).toBe('true');
+  view.rerender(sidebar(360, false));
+  expect(pane.isConnected).toBe(true); expect(pane.getAttribute('data-computer-active')).toBe('false');
+  act(() => useSidebarStore.setState({ rightTab: 'files' }));
+  view.rerender(sidebar(360));
+  expect(pane.isConnected).toBe(true); expect(pane.getAttribute('data-computer-active')).toBe('false');
+  fireEvent.click(screen.getByRole('button', { name: '电脑' }));
+  expect(screen.getByText('Computer content')).toBe(pane);
+  expect(pane.getAttribute('data-computer-active')).toBe('true');
+  expect(computerLife).toEqual({ mounts: 1, unmounts: 0 });
+  view.unmount(); expect(computerLife.unmounts).toBe(1);
 });

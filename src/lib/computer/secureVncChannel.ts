@@ -1,3 +1,4 @@
+import { macVncCursorEncodings } from './vncMacCursor';
 import { secureSocket } from '../federation/browserIntegration';
 
 /** noVNC accepts a WebSocket-shaped binary channel. Keep the JSON/base64
@@ -14,6 +15,11 @@ export class SecureVncChannel {
   onerror: ((event: Event) => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
   private socket: WebSocket;
+  private sendingMacEncodings = false;
+  withMacCursorEncodings(send: () => void): void {
+    const previous = this.sendingMacEncodings; this.sendingMacEncodings = true;
+    try { send(); } finally { this.sendingMacEncodings = previous; }
+  }
   get readyState(): number { return this.socket.readyState; }
   constructor(host: string, onFailure: (reason: string) => void) {
     this.socket = secureSocket(`/api/computer/ws?host=${encodeURIComponent(host)}`);
@@ -38,8 +44,9 @@ export class SecureVncChannel {
     };
   }
   send(data: ArrayBuffer | ArrayBufferView): void {
-    const bytes = ArrayBuffer.isView(data)
+    let bytes = ArrayBuffer.isView(data)
       ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
+    if (this.sendingMacEncodings) bytes = macVncCursorEncodings(bytes);
     for (let offset = 0; offset < bytes.length; offset += 32 * 1024) {
       const chunk = bytes.subarray(offset, offset + 32 * 1024);
       let binary = '';

@@ -7,19 +7,19 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.body.replaceChildren(); });
-function setup(mode: ComputerTouchMode = 'trackpad', viewOnly = false, rendersCursor = false, remotePosition?: { x: number; y: number }) {
-  const viewport = document.createElement('div'), surface = document.createElement('canvas'), cursor = document.createElement('div');
-  viewport.append(surface, cursor); document.body.append(viewport);
+function setup(mode: ComputerTouchMode = 'trackpad', viewOnly = false, remotePosition?: { x: number; y: number }) {
+  const viewport = document.createElement('div'), surface = document.createElement('canvas');
+  viewport.append(surface); document.body.append(viewport);
   viewport.getBoundingClientRect = () => ({ left: 0, top: 0, width: 390, height: 700 }) as DOMRect;
   surface.getBoundingClientRect = () => ({ left: 0, top: 0, width: 390, height: 234 }) as DOMRect;
   const send = vi.fn(), set = vi.fn(), pan = vi.fn();
-  const cleanup = attachComputerTouchpad(viewport, { rendersCursor, position: remotePosition ? () => remotePosition : undefined, surface: () => surface, size: () => ({ width: 1000, height: 600 }), send }, cursor, { current: null },
+  const cleanup = attachComputerTouchpad(viewport, { position: remotePosition ? () => remotePosition : undefined, surface: () => surface, size: () => ({ width: 1000, height: 600 }), send }, { current: null },
     { mode, viewOnly, zoom: { get: () => 1, set, pan, dispose() {} } });
   const touch = (type: string, id: number, x: number, y: number) => {
     const event = new Event(type, { bubbles: true, cancelable: true });
     Object.assign(event, { pointerType: 'touch', pointerId: id, clientX: x, clientY: y }); viewport.dispatchEvent(event);
   };
-  return { send, set, pan, cleanup, touch, cursor };
+  return { send, set, pan, cleanup, touch };
 }
 it.each(['trackpad', 'direct'] as const)('pinches the local desktop in %s mode without remote clicks or wheel events', mode => {
   vi.useFakeTimers();
@@ -49,20 +49,9 @@ it('keeps two-finger scrolling available in trackpad mode and sends a direct tap
   expect(direct.send.mock.calls).toEqual([[500, 300, 1], [500, 300, 0]]); direct.cleanup();
 });
 
-it('uses the session cursor without drawing a second generic arrow', () => {
-  const native = setup('trackpad', false, true);
-  native.touch('pointerdown', 1, 80, 100); native.touch('pointermove', 1, 100, 100);
-  native.touch('pointerup', 1, 100, 100);
-  expect(native.send).toHaveBeenCalled(); expect(native.cursor.hidden).toBe(true); native.cleanup();
-  const fallback = setup();
-  fallback.touch('pointerdown', 1, 80, 100); fallback.touch('pointermove', 1, 100, 100);
-  fallback.touch('pointerup', 1, 100, 100);
-  expect(fallback.cursor.hidden).toBe(true); fallback.cleanup();
-});
-
 it('starts each relative gesture at the displayed remote cursor instead of jumping to the desktop centre', () => {
   const remote = { x: 100, y: 90 };
-  const s = setup('trackpad', false, true, remote);
+  const s = setup('trackpad', false, remote);
   s.touch('pointerdown', 1, 80, 100); s.touch('pointermove', 1, 119, 80.5); s.touch('pointerup', 1, 119, 80.5);
   expect(s.send).toHaveBeenLastCalledWith(200, 40, 0);
   // A physical mouse or server-side action may move the cursor between gestures.
@@ -75,14 +64,14 @@ it('forwards captured continuous touch input directly without waiting for frames
   const frames = new Map<number, FrameRequestCallback>(); let next = 0;
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++next, callback); return next; });
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
-  const viewport = document.createElement('div'), surface = document.createElement('div'), cursor = document.createElement('div'); viewport.append(surface, cursor);
+  const viewport = document.createElement('div'), surface = document.createElement('div'); viewport.append(surface);
   const scaleX = 0.6280029296875, scaleY = 0.6280148423005566;
   viewport.getBoundingClientRect = () => ({ left: 0, top: 0, width: 402, height: 677 }) as DOMRect;
   surface.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640 * scaleX, height: 1078 * scaleY }) as DOMRect;
   let local = { x: 200, y: 500 };
   const send = vi.fn((x: number, y: number) => { local = { x, y }; });
   const stop = attachComputerTouchpad(viewport, { size: () => ({ width: 640, height: 1078 }), surface: () => surface,
-    rendersCursor: true, position: () => local, send }, cursor, { current: null }, { mode: 'trackpad' });
+    position: () => local, send }, { current: null }, { mode: 'trackpad' });
   const input = (type: string, x: number, y: number) => {
     const event = new Event(type, { bubbles: true, cancelable: true });
     Object.assign(event, { pointerType: 'touch', pointerId: 1, clientX: x, clientY: y }); viewport.dispatchEvent(event);
@@ -96,10 +85,10 @@ it('forwards captured continuous touch input directly without waiting for frames
     else {
       const sent = send.mock.calls.length;
       input('pointermove', x!, y!);
-      expect(cursor.hidden).toBe(true);
       expect(send).toHaveBeenCalledTimes(sent + 1); checked++;
     }
   }
+  expect(frames.size).toBe(0);
   expect(checked).toBeGreaterThan(10); expect(send.mock.calls.length).toBe(checked);
   expect(send).toHaveBeenLastCalledWith(Math.round(200 + 106.333333 / scaleX), Math.round(500 - 165.333333 / scaleY), 0);
   const last = timeline.filter(row => row[1] === 'input').at(-1)!;
@@ -181,7 +170,7 @@ it('drops queued wheel events when the page loses focus before the frame', () =>
 
 it('sends each single-finger delta immediately even when the browser never runs RAF', () => {
   vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1)); vi.stubGlobal('cancelAnimationFrame', vi.fn());
-  const s = setup('trackpad', false, true, { x: 100, y: 90 });
+  const s = setup('trackpad', false, { x: 100, y: 90 });
   s.touch('pointerdown', 1, 80, 100); expect(s.send).not.toHaveBeenCalled();
   s.touch('pointermove', 1, 119, 80.5); expect(s.send).toHaveBeenLastCalledWith(200, 40, 0);
   s.touch('pointermove', 1, 158, 80.5); expect(s.send).toHaveBeenLastCalledWith(300, 40, 0);

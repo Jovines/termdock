@@ -114,6 +114,7 @@ export const en: TranslationDictionary = {
     keyboard: "Keyboard",
     keyboardInput: "Type directly on the computer",
     keyboardPlaceholder: "Tap to type directly on the computer",
+    hideKeyboard: "Hide keyboard",
     keyboardNavigation: "Keyboard navigation",
     desktopZoom: "Desktop zoom",
     zoomIn: "Zoom in desktop",

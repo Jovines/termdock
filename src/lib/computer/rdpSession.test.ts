@@ -25,7 +25,7 @@ describe('RDP viewport lifecycle', () => {
   it('draws the remote system cursor immediately for touchpad movement and preserves cursor shape updates', () => {
     const s = session(); mocks.clients[0].onstatechange(3);
     const display = mocks.displays[0], pointer = s.pointerTarget;
-    expect(pointer.rendersCursor).toBe(true);
+    expect(display.getCursorLayer().getElement().style.transition).toBe('none');
     pointer.send(240, 180, 0);
     expect(display.moveCursor).toHaveBeenLastCalledWith(240, 180);
     expect(display.showCursor).toHaveBeenLastCalledWith(true);

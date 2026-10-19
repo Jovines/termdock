@@ -47,10 +47,10 @@ export class RdpSession extends EventTarget {
     };
     this.client = new Guacamole.Client(tunnel);
     this.display = this.client.getDisplay();
-    // Keep touchpad cursor motion on its own compositor layer. The bitmap is
-    // still supplied by the remote OS; moving it must not repaint the desktop
-    // or become an interactive hit target below the user's finger.
+    // The global UI transition includes transform (200ms). Protocol cursor
+    // positions must paint immediately, without CSS interpolating behind input.
     const cursorLayer = this.display.getCursorLayer().getElement();
+    cursorLayer.style.transition = 'none';
     cursorLayer.style.pointerEvents = 'none';
     const batch = batchRdpDisplay(this.display);
     this.cancelDisplayBatch = () => batch.cancel();
@@ -197,7 +197,6 @@ export class RdpSession extends EventTarget {
   }
   get pointerTarget(): ComputerPointer {
     return {
-      rendersCursor: true,
       position: () => ({ x: this.display.cursorX, y: this.display.cursorY }),
       observeCursor: () => {
         const element = this.display.getCursorLayer().getElement();

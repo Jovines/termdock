@@ -114,6 +114,7 @@ export const zh: TranslationDictionary = {
     keyboard: "键盘",
     keyboardInput: "直接输入到电脑",
     keyboardPlaceholder: "点这里打字，文字直接发送到电脑",
+    hideKeyboard: "收起键盘",
     keyboardNavigation: "键盘导航",
     desktopZoom: "桌面缩放",
     zoomIn: "放大桌面",

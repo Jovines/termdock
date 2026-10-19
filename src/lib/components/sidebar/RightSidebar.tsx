@@ -7705,6 +7705,8 @@ export function RightSidebar(
   const androidPaneActive = effectiveRightTab === 'android';
   const computerPaneActive = effectiveRightTab === 'computer';
   const architecturePaneActive = effectiveRightTab === 'architecture';
+  const [hasMountedComputerPane, setHasMountedComputerPane] = useState(false);
+  useEffect(() => { if (isOpen && computerPaneActive) setHasMountedComputerPane(true); }, [isOpen, computerPaneActive]);
   const [hasMountedArchitecturePane, setHasMountedArchitecturePane] = useState(false);
   useEffect(() => {
     if (isOpen && architecturePaneActive) setHasMountedArchitecturePane(true);
@@ -12597,9 +12599,9 @@ export function RightSidebar(
             />
           </Suspense>
         </Pane>
-        <Pane active={computerPaneActive} mounted={isOpen && computerPaneActive}>
+        <Pane active={isOpen && computerPaneActive} mounted={optionalTabs.computer && (hasMountedComputerPane || (isOpen && computerPaneActive))}>
           <Suspense fallback={<div className="p-3 text-xs text-muted-foreground">{t('computer.loading')}</div>}>
-            <ComputerControlView />
+            <ComputerControlView active={isOpen && computerPaneActive} />
           </Suspense>
         </Pane>
         <Pane active={androidPaneActive} mounted={hasMountedAndroidPane && androidTabEnabled}>

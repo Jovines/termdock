@@ -31,7 +31,6 @@ const clamp = (value: number, max: number) => Math.max(0, Math.min(value, Math.m
 export function attachComputerTouchpad(
   viewport: HTMLElement,
   pointer: ComputerPointer,
-  cursor: HTMLElement,
   position: { current: TouchpadPosition | null },
   options: { mode?: ComputerTouchMode; zoom?: ComputerZoom; viewOnly?: boolean; trace?: ComputerMotionTrace } = {},
 ): () => void {
@@ -108,13 +107,12 @@ export function attachComputerTouchpad(
     });
   };
   options.trace?.record('touchpad-attached', { mode: options.mode, viewOnly: options.viewOnly });
-  cursor.hidden = true;
   const followPointer = () => {
     const g = measure(), p = point();
     if (!g.width || !g.height || pinching || options.viewOnly) return;
     let x = g.left + p.x * g.scaleX, y = g.top + p.y * g.scaleY;
     // Follow the pointer only when it crosses an original-size viewport edge.
-    // Read all geometry before writing scroll offsets and the cursor transform.
+    // Read all geometry before writing scroll offsets.
     for (const area of g.scrollers) {
       if (area.maxX) {
         const previous = area.element.scrollLeft;
@@ -133,7 +131,7 @@ export function attachComputerTouchpad(
   const transmit = (mask = buttons) => {
     if (options.viewOnly) return;
     const p = point();
-    const before = pointer.position?.();
+    const before = options.trace ? pointer.position?.() : undefined;
     pointer.send(Math.round(p.x), Math.round(p.y), mask);
     options.trace?.record('send', { target: [Math.round(p.x), Math.round(p.y)], buttons: mask, before, after: pointer.position?.() });
   };
@@ -148,7 +146,10 @@ export function attachComputerTouchpad(
       scrollY -= Math.sign(scrollY) * SCROLL_STEP;
     }
   };
-  const schedule = () => { if (!stopped) frame ??= requestAnimationFrame(renderFrame); };
+  const schedule = (layoutChanged = false) => {
+    if (stopped || (!layoutChanged && Math.abs(scrollY) < SCROLL_STEP && !geometry?.scrollers.length)) return;
+    frame ??= requestAnimationFrame(renderFrame);
+  };
   const flush = () => {
     if (frame === undefined) return;
     cancelAnimationFrame(frame); renderFrame();
@@ -304,7 +305,7 @@ export function attachComputerTouchpad(
   viewport.addEventListener('pointercancel', up, listenerOptions);
   viewport.addEventListener('lostpointercapture', up, listenerOptions);
   for (const name of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'contextmenu']) viewport.addEventListener(name, suppress, listenerOptions);
-  const layoutChanged = () => { geometryDirty = true; schedule(); };
+  const layoutChanged = () => { geometryDirty = true; schedule(true); };
   viewport.addEventListener('scroll', layoutChanged, { capture: true, signal: listeners.signal });
   window.addEventListener('blur', reset, { signal: listeners.signal });
   const visibility = () => { if (document.hidden) reset(); };
@@ -317,7 +318,7 @@ export function attachComputerTouchpad(
     stopped = true;
     // Remove cancellation listeners before explicitly releasing capture.
     trace('touchpad-detached');
-    listeners.abort(); reset(); resize.disconnect(); cursor.hidden = true;
+    listeners.abort(); reset(); resize.disconnect();
     stopObservation?.();
     options.trace?.flush('touchpad-detached');
   };

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
-import { attachComputerClipboard, COMPUTER_CLIPBOARD_LIMIT } from './clipboard';
+import { attachComputerClipboard, COMPUTER_CLIPBOARD_LIMIT, COMPUTER_COPY_REQUEST_EVENT } from './clipboard';
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren(); });
 function setup() {
   const viewport = document.createElement('div'); document.body.append(viewport);
@@ -42,6 +42,15 @@ it('retains remote text and exposes the manual panel if a requested system copy 
   const s = setup(); s.viewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }));
   s.session.dispatchEvent(new CustomEvent('clipboard', { detail: { text: 'retained' } }));
   await Promise.resolve(); expect(s.receive).toHaveBeenCalledWith('retained'); expect(s.failed).toHaveBeenCalledTimes(1); s.stop();
+});
+it('treats an explicit phone-toolbar copy as a user request without synthesizing keyboard input', () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  const s = setup(), keyboard = vi.fn(); s.viewport.addEventListener('keydown', keyboard);
+  s.viewport.dispatchEvent(new Event(COMPUTER_COPY_REQUEST_EVENT));
+  s.session.dispatchEvent(new CustomEvent('clipboard', { detail: { text: 'phone copy🙂' } }));
+  expect(writeText).toHaveBeenCalledExactlyOnceWith('phone copy🙂');
+  expect(keyboard).not.toHaveBeenCalled(); s.stop();
 });
 it('rejects images and oversize clipboard content without typing or logging it', () => {
   const s = setup(); s.input('image', ['Files']); s.input('a'.repeat(COMPUTER_CLIPBOARD_LIMIT + 1));
