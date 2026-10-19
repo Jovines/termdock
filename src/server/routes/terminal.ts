@@ -138,6 +138,8 @@ import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent
 import { completedExecution, ExecutionArchiveStore } from '../agent/executionArchives.js';
 import { archiveTaskWorkspace, restoreTaskWorkspace, snapshotTaskWorkspace } from '../agent/collaborationTaskWorkspace.js';
 import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
+import { configuredTmuxRecoveryConcurrency, TmuxRecoveryOperationStore, type TmuxRecoveryOperation, type TmuxRecoveryScope } from '../utils/tmuxRecoveryOperations.js';
+import { assessAgentResourceBudget, collectHostResourceSnapshot, configuredAgentResourceBudget } from '../utils/hostResources.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { writeBracketedPrompt, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { captureTerminalInputGuard, captureRuntimeInputGuard, waitAndWriteTerminalInput, type TerminalInputGuard, type PromptWriteProgress } from '../agent/terminalInput.js';
@@ -550,6 +552,7 @@ interface SessionInventory {
   tmuxRecovery: {
     id: string;
     detectedAt: number;
+    operation?: (TmuxRecoveryOperation & { total: number; queued: number; resource_wait: number; running: number; succeeded: number; failed: number }) | null;
     sessions: Array<{
       sessionId: string;
       name: string;
@@ -607,7 +610,15 @@ const agentResumeHistory = new AgentResumeHistoryStore(`${TERMDOCK_DIR}/agent-re
 const executionArchives = new ExecutionArchiveStore(`${TERMDOCK_DIR}/execution-archives.json`);
 let executionArchiveMutation = Promise.resolve();
 const TMUX_RECOVERY_STATE_FILE = `${TERMDOCK_DIR}/tmux-recovery-state.json`;
+const TMUX_RECOVERY_OPERATIONS_FILE = `${TERMDOCK_DIR}/tmux-recovery-operations.json`;
 const tmuxLifecycle = new TmuxLifecycleCoordinator();
+const tmuxRecoveryConcurrencyLimit = configuredTmuxRecoveryConcurrency();
+const tmuxRecoveryOperations = new TmuxRecoveryOperationStore(
+  TMUX_RECOVERY_OPERATIONS_FILE,
+  tmuxRecoveryConcurrencyLimit,
+  (error) => console.error('[tmux-recovery] operation worker error:', getErrorMessage(error)),
+);
+let tmuxRecoveryHealthTimer: ReturnType<typeof setInterval> | null = null;
 const intentionallyDeletingTmuxSessions = new Set<string>();
 let tmuxRecoveryState: {
   lastServerPid: number | null;
@@ -623,6 +634,10 @@ let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
 // receives deltas on every mutation (PUT/DELETE client-state, dead-session
 // reconciliation, etc.). Replaces the 5-second poll on the front-end. ──
 const controlClients = new Map<string, WebSocket>();
+tmuxRecoveryOperations.subscribe(() => {
+  latestSessionInventoryAt = 0;
+  broadcastClientState();
+});
 
 let latestSessionInventory: SessionInventory | null = null;
 // Only authoritative observations may remove persisted tmux sessions.
@@ -969,7 +984,7 @@ async function loadTmuxRecoveryStateFromDisk(): Promise<void> {
       incident?: unknown;
       dismissedSessionIds?: unknown;
     }>(TMUX_RECOVERY_STATE_FILE);
-    if (!data) return;
+    if (!data) { await tmuxRecoveryOperations.load(); return; }
     tmuxRecoveryState = {
       lastServerPid: typeof data.lastServerPid === 'number' && Number.isInteger(data.lastServerPid)
         ? data.lastServerPid
@@ -979,6 +994,7 @@ async function loadTmuxRecoveryStateFromDisk(): Promise<void> {
         ? data.dismissedSessionIds.filter((id): id is string => typeof id === 'string')
         : [],
     };
+    await tmuxRecoveryOperations.load();
   } catch (error) {
     console.warn('[tmux-recovery] Failed to load recovery state:', getErrorMessage(error));
   }
@@ -1086,6 +1102,7 @@ let shuttingDown = false;
 const shutdownWithRecordings = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (tmuxRecoveryHealthTimer) clearInterval(tmuxRecoveryHealthTimer);
   flushPersistAndExit();
   void persistToolbarPresetsNow();
   caffeinateManager.shutdown();
@@ -1099,6 +1116,9 @@ process.on('SIGINT', () => { void shutdownWithRecordings(); });
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 void (async () => {
   await Promise.all([loadGlobalSessionStateFromDisk(), loadTmuxRecoveryStateFromDisk()]);
+  await sampleTmuxRecoveryHealth();
+  tmuxRecoveryHealthTimer = setInterval(() => void sampleTmuxRecoveryHealth(), 15_000);
+  tmuxRecoveryHealthTimer.unref?.();
   // Delivery needs the loaded inventory, not optional PTY adoption/metadata backfill.
   // Those steps must not leave durable messages without a background scheduler.
   collaborationDeliveryWorker.start();
@@ -1111,6 +1131,7 @@ void (async () => {
   });
   pruneOrphanSessions();
   await backfillPersistedTmuxMetadata();
+  await tmuxRecoveryOperations.resumePending();
 })();
 caffeinateManager.startNetworkMonitor();
 
@@ -3488,7 +3509,19 @@ async function getTmuxServerPid(): Promise<number | null> {
 
 function getTmuxRecoveryView(): SessionInventory['tmuxRecovery'] {
   const incident = tmuxRecoveryState.incident;
-  if (!incident) return null;
+  const latestOperation = tmuxRecoveryOperations.latest();
+  if (!incident) {
+    if (!latestOperation || ['succeeded', 'partial_failure'].includes(latestOperation.state)) return null;
+    const sessions = latestOperation.items.flatMap(item => {
+      const record = globalSessionState.sessions.find(candidate => candidate.sessionId === item.sessionId);
+      const agent = record?.agentResume ? agentBySlug(record.agentResume.slug) : null;
+      if (!record?.tmuxSessionName || !record.cwd || !agent || !record.agentResume?.sessionId) return [];
+      return [{ sessionId: record.sessionId, name: record.name, tmuxSessionName: record.tmuxSessionName,
+        cwd: record.cwd, agentSlug: agent.slug, agentDisplayName: agent.displayName }];
+    });
+    return { id: latestOperation.incidentId, detectedAt: latestOperation.createdAt, operation: latestOperation, sessions };
+  }
+  const operation = latestOperation?.incidentId === incident.id ? latestOperation : null;
   const affected = new Set(incident.affectedSessionIds);
   const sessions = globalSessionState.sessions.flatMap((record) => {
     if (!affected.has(record.sessionId) || record.mode !== 'tmux' || !record.tmuxSessionName
@@ -3505,7 +3538,7 @@ function getTmuxRecoveryView(): SessionInventory['tmuxRecovery'] {
     }];
   });
   return sessions.length > 0
-    ? { id: incident.id, detectedAt: incident.detectedAt, sessions }
+    ? { id: incident.id, detectedAt: incident.detectedAt, operation, sessions }
     : null;
 }
 
@@ -6881,76 +6914,186 @@ router.get('/tmux/status', async (_req, res) => {
   res.json(status);
 });
 
-router.post('/tmux/recovery/restore-all', async (_req, res) => {
+async function restoreTmuxRecoverySession(operationId: string, frontendSessionId: string, reportPhase: (phase: string) => void): Promise<{ actualRssBytes?: number }> {
+  const record = globalSessionState.sessions.find((session) => session.sessionId === frontendSessionId);
+  if (!record || record.mode !== 'tmux' || !record.tmuxSessionName || !record.cwd || !record.agentResume?.sessionId) {
+    throw Object.assign(new Error('Recovery metadata is incomplete'), { code: 'RECOVERY_METADATA_INCOMPLETE' });
+  }
+  const agent = agentBySlug(record.agentResume.slug);
+  const command = agent ? buildResumeCommand(agent, record.agentResume.sessionId, record.agentResume.launchArgv) : null;
+  if (!agent || !command) throw Object.assign(new Error('Agent does not support exact resume'), { code: 'EXACT_RESUME_UNSUPPORTED' });
+  const target: AgentResumeTarget = { slug: agent.slug, nativeSessionId: record.agentResume.sessionId, command };
+  const activeBackend = findActiveAgentResumeOwner('', target);
+  const activeWriterPid = activeBackend ? null : await findExternalCodexWriter(target);
+  if (activeBackend || activeWriterPid) return {};
+
+  await collaborationDeliveryWorker.reconfigure(frontendSessionId, () => tmuxLifecycle.run(`restore:${record.tmuxSessionName}`, async () => {
+    // Reconcile ownership again inside the per-terminal serialization fence.
+    if (findActiveAgentResumeOwner('', target) || await findExternalCodexWriter(target)) return;
+    reportPhase('runtime_resolving');
+    await prepareManagedTmuxSessionUnlocked(record.tmuxSessionName!, record.cwd!);
+    const metadata = await resolveLiveTmuxMetadata(record.tmuxSessionName!);
+    const foreground = metadata?.program?.toLowerCase() ?? null;
+    if (foreground && !shellNamesBackend.has(foreground)) {
+      throw Object.assign(new Error(`pane is busy with ${foreground}`), { code: 'RECOVERY_TARGET_BUSY' });
+    }
+    const previous = collaborationRouting.get(frontendSessionId);
+    if (previous) collaborationRouting.bind({ ...previous, pane: null });
+    reportPhase('guard_captured');
+    const launchGuard = await beginAgentLaunchCheck(frontendSessionId, agent.slug, target.nativeSessionId);
+    try {
+      reportPhase('paste_submit');
+      await writeAutomaticTerminalPrompt(frontendSessionId, command, stage => reportPhase(stage), launchGuard);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      const reportedCode = (error as { code?: unknown })?.code;
+      const code = reportedCode === 'TERMINAL_INPUT_TARGET_CHANGED' || message.includes('TERMINAL_INPUT_TARGET_CHANGED')
+        ? 'TERMINAL_INPUT_TARGET_CHANGED' : 'RECOVERY_LAUNCH_FAILED';
+      throw Object.assign(new Error(message), { code, operationId, sessionId: frontendSessionId });
+    }
+  }));
+  const incident = tmuxRecoveryState.incident;
+  if (incident?.affectedSessionIds.includes(frontendSessionId)) {
+    const remaining = incident.affectedSessionIds.filter(id => id !== frontendSessionId);
+    tmuxRecoveryState.incident = remaining.length ? { ...incident, affectedSessionIds: remaining } : null;
+    await persistTmuxRecoveryState();
+  }
+  const paneTty = await runTmux(['display-message', '-p', '-t', record.tmuxSessionName, '#{pane_tty}']).catch(() => '');
+  const normalizedTty = paneTty.trim().replace(/^\/dev\//, '');
+  if (normalizedTty) {
+    const resources = await collectHostResourceSnapshot();
+    const rows = resources.processRows.filter(row => row.tty === normalizedTty);
+    if (rows.some(row => row.agent)) return { actualRssBytes: rows.reduce((sum, row) => sum + row.rssBytes, 0) };
+  }
+  return {};
+}
+
+async function resolveTmuxRecoveryScope(scope: TmuxRecoveryScope, incident: TmuxRecoveryIncident): Promise<string[]> {
+  const candidates = incident.affectedSessionIds;
+  if (scope.kind === 'incident') return candidates;
+  if (scope.kind === 'sessions') {
+    if (!Array.isArray(scope.sessionIds) || scope.sessionIds.length === 0) throw Object.assign(new Error('sessionIds must be a non-empty array'), { code: 'INVALID_RECOVERY_SCOPE' });
+    if (scope.sessionIds.some(id => !candidates.includes(id))) throw Object.assign(new Error('Explicit scope may only include sessions in the current recovery incident'), { code: 'RECOVERY_SCOPE_OUTSIDE_INCIDENT' });
+    return [...new Set(scope.sessionIds)];
+  }
+  if (!scope.id) throw Object.assign(new Error('scope id is required'), { code: 'INVALID_RECOVERY_SCOPE' });
+  if (scope.kind === 'group') {
+    const group = collaborationStore.getGroup(scope.id);
+    if (!group || group.deleted) throw Object.assign(new Error('Collaboration group was not found'), { code: 'RECOVERY_GROUP_NOT_FOUND' });
+    return candidates.filter(id => group.sessionIds.includes(id));
+  }
+  const integrationRoot = `${TERMDOCK_DIR}/integration-state`;
+  const portDirectories = await fs.promises.readdir(integrationRoot, { withFileTypes: true }).catch(() => []);
+  const memberIds = new Set<string>();
+  for (const directory of portDirectories.filter(item => item.isDirectory())) {
+    const state = await readJsonFileIfExists<{ sessions?: Array<{ session_id?: string; principal_id?: string }> }>(path.join(integrationRoot, directory.name, 'integration-sessions.json'));
+    for (const item of state?.sessions ?? []) if (item.principal_id === scope.id && typeof item.session_id === 'string') memberIds.add(item.session_id);
+  }
+  return candidates.filter(id => memberIds.has(id));
+}
+
+tmuxRecoveryOperations.setRunner(restoreTmuxRecoverySession);
+const tmuxAgentResourceBudget = configuredAgentResourceBudget();
+tmuxRecoveryOperations.setAdmission(async (_operationId, sessionId) => {
+  try {
+    const snapshot = await collectHostResourceSnapshot();
+    const group = collaborationStore.list().find(item => item.sessionIds.includes(sessionId));
+    let residentAgentsInGroup = 0;
+    if (group) {
+      const rows = globalSessionState.sessions.filter(item => group.sessionIds.includes(item.sessionId) && item.agentResume && item.tmuxSessionName);
+      const liveSessions = await listLiveTmuxInventorySessions();
+      const liveAgents = new Set(liveSessions.filter(item => item.program && agentBySlug(item.program) !== null).map(item => item.name));
+      residentAgentsInGroup = rows.filter(item => liveAgents.has(item.tmuxSessionName!)).length;
+      const memberIds = new Set(group.sessionIds);
+      residentAgentsInGroup += tmuxRecoveryOperations.all().flatMap(operation => operation.items)
+        .filter(item => item.state === 'running' && memberIds.has(item.sessionId)).length;
+    }
+    const result = assessAgentResourceBudget({ snapshot: { ...snapshot, residentAgentCount: snapshot.residentAgentCount + tmuxRecoveryOperations.stats().activeLaunches }, budget: tmuxAgentResourceBudget, residentAgentsInGroup });
+    return { ...result, memAvailableBytes: snapshot.memoryAvailableBytes, estimatedRssBytes: tmuxAgentResourceBudget.estimatedRssBytes };
+  } catch {
+    return { admitted: false, reason: 'RESOURCE_SNAPSHOT_UNAVAILABLE', estimatedRssBytes: tmuxAgentResourceBudget.estimatedRssBytes };
+  }
+});
+
+const TMUX_RECOVERY_HEALTH_FILE = `${TERMDOCK_DIR}/tmux-recovery-health.json`;
+let latestTmuxRecoveryHealth: Record<string, unknown> | null = null;
+let tmuxRecoveryHealthSampling = false;
+async function sampleTmuxRecoveryHealth(): Promise<void> {
+  if (tmuxRecoveryHealthSampling) return;
+  tmuxRecoveryHealthSampling = true;
+  try {
+    const snapshot = await collectHostResourceSnapshot();
+    const diagnostics = {
+      sampledAt: snapshot.sampledAt,
+      platform: snapshot.platform,
+      memoryAvailableBytes: snapshot.memoryAvailableBytes,
+      memoryTotalBytes: snapshot.memoryTotalBytes,
+      memorySnapshotAvailable: snapshot.memorySnapshotAvailable,
+      processSnapshotAvailable: snapshot.processSnapshotAvailable,
+      memoryPressure: snapshot.memoryPressure,
+      kswapd: snapshot.kswapd,
+      dStateProcessCount: snapshot.dStateProcessCount,
+      residentAgentCount: snapshot.residentAgentCount,
+      residentAgentRssBytes: snapshot.residentAgentRssBytes,
+      browserProcessCount: snapshot.browserProcessCount,
+      recovery: tmuxRecoveryOperations.stats(),
+      resourceBudget: tmuxAgentResourceBudget,
+    };
+    latestTmuxRecoveryHealth = diagnostics;
+    const temporaryPath = `${TMUX_RECOVERY_HEALTH_FILE}.${process.pid}.tmp`;
+    await fs.promises.writeFile(temporaryPath, JSON.stringify(diagnostics, null, 2), { mode: 0o600 });
+    await fs.promises.rename(temporaryPath, TMUX_RECOVERY_HEALTH_FILE);
+  } catch (error) {
+    console.warn('[tmux-recovery] resource health sample failed:', getErrorMessage(error));
+  } finally { tmuxRecoveryHealthSampling = false; }
+}
+router.get('/tmux/recovery/diagnostics', async (_req, res) => {
+  await sampleTmuxRecoveryHealth();
+  return res.json({ health: latestTmuxRecoveryHealth, operation: tmuxRecoveryOperations.latest(), concurrencyLimit: tmuxRecoveryConcurrencyLimit });
+});
+
+router.post('/tmux/recovery/restore-all', async (req, res) => {
   const incident = tmuxRecoveryState.incident;
   if (!incident) return res.status(404).json({ error: 'no tmux recovery is pending' });
-
-  const outcomes: Array<{ sessionId: string; restored: boolean; error?: string }> = [];
-  for (const frontendSessionId of incident.affectedSessionIds) {
-    const record = globalSessionState.sessions.find((session) => session.sessionId === frontendSessionId);
-    if (!record || record.mode !== 'tmux' || !record.tmuxSessionName || !record.cwd
-      || !record.agentResume?.sessionId) {
-      outcomes.push({ sessionId: frontendSessionId, restored: false, error: 'recovery metadata is incomplete' });
-      continue;
-    }
-    const agent = agentBySlug(record.agentResume.slug);
-    const command = agent
-      ? buildResumeCommand(agent, record.agentResume.sessionId, record.agentResume.launchArgv)
-      : null;
-    if (!agent || !command) {
-      outcomes.push({ sessionId: frontendSessionId, restored: false, error: 'Agent does not support resume' });
-      continue;
-    }
-
-    const target: AgentResumeTarget = {
-      slug: agent.slug,
-      nativeSessionId: record.agentResume.sessionId,
-      command,
-    };
-    const activeBackend = findActiveAgentResumeOwner('', target);
-    const activeWriterPid = activeBackend ? null : await findExternalCodexWriter(target);
-    if (activeBackend || activeWriterPid) {
-      outcomes.push({ sessionId: frontendSessionId, restored: true });
-      continue;
-    }
-
-    try {
-      await collaborationDeliveryWorker.reconfigure(frontendSessionId, () => tmuxLifecycle.run(`restore:${record.tmuxSessionName}`, async () => {
-        await prepareManagedTmuxSessionUnlocked(record.tmuxSessionName!, record.cwd!);
-        const metadata = await resolveLiveTmuxMetadata(record.tmuxSessionName!);
-        const foreground = metadata?.program?.toLowerCase() ?? null;
-        if (foreground && !shellNamesBackend.has(foreground)) {
-          throw new Error(`pane is busy with ${foreground}`);
-        }
-        // Explicit recovery may replace the vanished tmux pane. A pending
-        // message alone must never replace that binding.
-        const previous = collaborationRouting.get(frontendSessionId);
-        if (previous) collaborationRouting.bind({ ...previous, pane: null });
-        const launchGuard = await beginAgentLaunchCheck(frontendSessionId, agent.slug, target.nativeSessionId);
-        await writeAutomaticTerminalPrompt(frontendSessionId, command, undefined, launchGuard);
-      }));
-      outcomes.push({ sessionId: frontendSessionId, restored: true });
-    } catch (error) {
-      outcomes.push({ sessionId: frontendSessionId, restored: false, error: getErrorMessage(error) });
-    }
+  const rawScope = req.body?.scope;
+  let scope: TmuxRecoveryScope = { kind: 'incident' };
+  if (rawScope !== undefined) {
+    if (!rawScope || !['incident', 'group', 'principal', 'sessions'].includes(rawScope.kind)) return res.status(400).json({ error: 'invalid recovery scope' });
+    scope = rawScope as TmuxRecoveryScope;
   }
-
-  const restoredIds = new Set(outcomes.filter((outcome) => outcome.restored).map((outcome) => outcome.sessionId));
-  const remaining = incident.affectedSessionIds.filter((sessionId) => !restoredIds.has(sessionId));
-  tmuxRecoveryState.incident = remaining.length > 0
-    ? { ...incident, affectedSessionIds: remaining }
-    : null;
-  await persistTmuxRecoveryState();
-  latestSessionInventoryAt = 0;
-  broadcastClientState();
-  res.status(remaining.length > 0 ? 207 : 200).json({
-    restored: restoredIds.size,
-    failed: remaining.length,
-    outcomes,
+  const sessionIds = await resolveTmuxRecoveryScope(scope, incident).catch(error => {
+    res.status(400).json({ error: getErrorMessage(error), code: (error as { code?: string }).code ?? 'INVALID_RECOVERY_SCOPE' });
+    return null;
   });
+  if (!sessionIds) return;
+  try {
+    const operation = await tmuxRecoveryOperations.create({ incidentId: incident.id, sessionIds, scope,
+      idempotencyKey: String(req.body?.idempotencyKey ?? req.headers['idempotency-key'] ?? ''),
+      ...(req.body?.concurrency !== undefined ? { concurrency: Number(req.body.concurrency) } : {}) });
+    res.status(202).json({ accepted: true, operation_id: operation.id, operation: tmuxRecoveryOperations.get(operation.id) });
+  } catch (error) {
+    res.status(409).json({ error: getErrorMessage(error), code: (error as { code?: string }).code ?? 'RECOVERY_OPERATION_FAILED', operation_id: (error as { operationId?: string }).operationId });
+  }
+});
+
+router.get('/tmux/recovery/operations', (_req, res) => res.json({ operations: tmuxRecoveryOperations.all().slice(-50) }));
+router.get('/tmux/recovery/operations/:id', (req, res) => {
+  const operation = tmuxRecoveryOperations.get(req.params.id);
+  return operation ? res.json({ operation }) : res.status(404).json({ error: 'recovery operation not found' });
+});
+router.post('/tmux/recovery/operations/:id/pause', async (req, res) => {
+  const operation = await tmuxRecoveryOperations.pause(req.params.id);
+  return operation ? res.json({ operation }) : res.status(404).json({ error: 'recovery operation not found' });
+});
+router.post('/tmux/recovery/operations/:id/resume', async (req, res) => {
+  const operation = await tmuxRecoveryOperations.resume(req.params.id);
+  return operation ? res.json({ operation }) : res.status(404).json({ error: 'recovery operation not found' });
 });
 
 router.delete('/tmux/recovery', async (_req, res) => {
+  if (tmuxRecoveryOperations.all().some(operation => !['succeeded', 'partial_failure'].includes(operation.state))) {
+    return res.status(409).json({ error: 'a recovery operation is active; pause or finish it before dismissing the incident', code: 'RECOVERY_OPERATION_ACTIVE' });
+  }
   tmuxRecoveryState.dismissedSessionIds = Array.from(new Set([
     ...tmuxRecoveryState.dismissedSessionIds,
     ...(tmuxRecoveryState.incident?.affectedSessionIds ?? []),

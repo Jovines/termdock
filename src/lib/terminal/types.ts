@@ -142,6 +142,18 @@ export interface SessionInventory {
   tmuxRecovery?: {
     id: string;
     detectedAt: number;
+    operation?: {
+      id: string;
+      state: 'queued' | 'resource_wait' | 'running' | 'paused' | 'succeeded' | 'partial_failure';
+      total: number;
+      queued: number;
+      resource_wait: number;
+      running: number;
+      succeeded: number;
+      failed: number;
+      paused: boolean;
+      items: Array<{ sessionId: string; state: string; phase: string; errorCode?: string; error?: string; resourceWaitReason?: string; memAvailableBytes?: number; estimatedRssBytes?: number; actualRssBytes?: number }>;
+    } | null;
     sessions: Array<{
       sessionId: string;
       name: string;

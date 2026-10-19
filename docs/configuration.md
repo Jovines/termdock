@@ -244,3 +244,28 @@ WebSocket 在此模式下不能省略 Origin。HTTP CLI 可不带 Origin，但�
 
 这些措施不提供抗大流量 DDoS 或多租户隔离。需要更强身份保证时，应在入口增加 MFA / VPN，
 并以独立、最小权限的系统账户运行服务。程序本身的回归测试不替代公网链路的实际验收。
+
+## tmux Agent 批量恢复资源限制
+
+Termdock 的“恢复全部”请求先持久化恢复操作并立即返回 `202 accepted`，后台按有界并发执行。浏览器通过终端控制 WebSocket继续接收操作状态；也可使用以下接口查询或控制：
+
+- `GET /api/terminal/tmux/recovery/operations`：最近 50 个操作。
+- `GET /api/terminal/tmux/recovery/operations/:operationId`：单个操作与逐会话结果。
+- `POST /api/terminal/tmux/recovery/operations/:operationId/pause` 和 `/resume`：暂停后续启动或继续队列；已开始的单个恢复不会被强杀。
+- `GET /api/terminal/tmux/recovery/diagnostics`：最近一次主机资源与队列诊断。
+
+`POST /api/terminal/tmux/recovery/restore-all` 接受 `idempotencyKey` 与可选范围 `{kind:"incident"}`、`{kind:"group",id}`、`{kind:"principal",id}` 或 `{kind:"sessions",sessionIds:[...]}`。所选范围只能缩小到当前恢复事故内的会话。重放同一幂等键和参数会返回同一操作；键参数冲突或会话已在另一个未结束操作中会返回冲突。
+
+可用下列环境变量调整准入，修改后需重启 Termdock：
+
+| 环境变量 | 默认值 | 作用 |
+|---|---:|---|
+| `TD_TMUX_RECOVERY_CONCURRENCY` | `3` | 整机同时执行的恢复数，允许 1–16。 |
+| `TD_AGENT_MIN_AVAILABLE_MB` | `2048` | 启动前至少保留的可用内存底线。 |
+| `TD_AGENT_ESTIMATED_RSS_MB` | `512` | 新 Agent 的额外内存预算估值。 |
+| `TD_MAX_RESIDENT_AGENTS` | `48` | 整机驻留 Agent 进程组上限。 |
+| `TD_MAX_AGENTS_PER_GROUP` | `32` | 单个协作组的驻留 Agent 上限。 |
+
+低于预算或资源采样不可用时，会话停在 `resource_wait`，不会启动进程；队列每隔数秒重新评估。逐会话记录包含准入时 MemAvailable、估算 RSS、可观测时的启动后 RSS 和错误阶段。`/api/terminal/tmux/recovery/diagnostics` 会持久保存 MemAvailable、Linux memory PSI、kswapd、D-state、Agent 进程组与浏览器进程计数、恢复队列和最近完成项；Termdock 进程 CPU/RSS 与 event-loop lag 继续由 `/api/diagnostics/runtime` 提供。进程命令行仅用于当前内存中的分类，不写入诊断文件。
+
+该限制只控制 Termdock 执行的批量恢复启动，不会终止浏览器、Agent 或其他应用。IntegrationSession 可通过新增的受管批量 release 进入 `released`（逻辑会话、消息/诊断历史、工作目录和原生历史保留，运行承载回收）；接口为 `POST /sessions/release-batch`，请求 `{session_ids:[...], idempotency_key:"..."}`，返回 `accepted` 和可由 `GET /sessions/release-batches/:id` 查询的持久 operation。它要求 principal 有 `session.release` 权限，并逐会话复用 generation、pending-message、配置指纹和运行时核验；不会强制终止校验失败的会话，也不会把普通 tmux 会话、浏览器或外部 Agent 纳入范围。`capabilities` 返回 `session_release_batch=true` 与最低服务版本字段。

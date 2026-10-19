@@ -1542,21 +1542,27 @@ export async function killTmuxSession(name: string): Promise<{ cleanedSessions: 
   };
 }
 
-export async function restoreAllTmuxAgentSessions(): Promise<{
-  restored: number;
-  failed: number;
-  outcomes: Array<{ sessionId: string; restored: boolean; error?: string }>;
-}> {
+export async function restoreAllTmuxAgentSessions(incidentId?: string): Promise<{ accepted: true; operation_id: string; operation: unknown }> {
   const csrfTokenHeader = await getCsrfToken();
+  const idempotencyKey = `ui-restore:${incidentId ?? 'current'}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   const response = await fetch('/api/terminal/tmux/recovery/restore-all', {
     method: 'POST',
-    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idempotencyKey }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new TerminalApiError(data.error || 'Failed to restore tmux Agent sessions', response.status);
   }
   return data;
+}
+
+export async function setTmuxRecoveryOperationPaused(operationId: string, paused: boolean): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/tmux/recovery/operations/${encodeURIComponent(operationId)}/${paused ? 'pause' : 'resume'}`, {
+    method: 'POST', headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new TerminalApiError('Failed to update recovery operation', response.status);
 }
 
 export async function dismissTmuxRecovery(): Promise<void> {

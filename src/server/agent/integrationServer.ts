@@ -3,14 +3,14 @@ import { createServer, type ServerResponse, type Server } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CollaborationError, resolveIdPrefix } from './collaborationProtocol.js';
 import { terminalMessage, type CollaborationStore } from './collaborationStore.js';
 import type { CollaborationTaskStore } from './collaborationTaskStore.js';
 import type { CollaborationTaskService } from './collaborationTaskService.js';
 import type { CollaborationService } from './collaborationService.js';
 import type { TaskOrigin, TaskOperation, TaskCreateInput } from './collaborationTaskTypes.js';
-import { IntegrationStore, INTEGRATION_PROTOCOL, INTEGRATION_OPERATIONS, integrationError, type IntegrationPermission, type IntegrationPrincipal, type IntegrationEvent } from './integrationStore.js';
+import { IntegrationStore, INTEGRATION_PROTOCOL, INTEGRATION_OPERATIONS, atomicJson, integrationError, type IntegrationPermission, type IntegrationPrincipal, type IntegrationEvent } from './integrationStore.js';
 import { IntegrationSessions, publicIntegrationSession, type IntegrationSessionAdapter } from './integrationSessions.js';
 import { getTermdockVersion } from '../utils/version.js';
 
@@ -21,6 +21,8 @@ export interface IntegrationRuntimeOptions {
   tasks: CollaborationTaskService; peers: CollaborationService; sessions: IntegrationSessionAdapter;
 }
 type Update = { sourceKey: string; sourceVersion: string; eventId?: string; event: Omit<IntegrationEvent, 'event_id' | 'sequence' | 'cursor'> };
+type ReleaseBatchItem = { session_id: string; generation: number; state: 'queued' | 'running' | 'released' | 'failed'; error_code?: string; error?: string };
+type ReleaseBatchOperation = { id: string; principal_id: string; group_id: string; idempotency_key: string; request_hash: string; state: 'queued' | 'running' | 'succeeded' | 'partial_failure'; created_at: number; updated_at: number; items: ReleaseBatchItem[] };
 function scopedId(input: string, ids: string[], type: string): string {
   if (typeof input !== 'string') integrationError(`INVALID_${type}_ID`, 'A message or member id is required');
   const result = resolveIdPrefix([...new Set(ids)], input);
@@ -38,9 +40,23 @@ export class IntegrationRuntime {
   private sent = new Map<string, number>();
   private syncing = false;
   private retry?: ReturnType<typeof setTimeout>;
+  private releaseBatchFile: string;
+  private releaseBatchOperations: ReleaseBatchOperation[] = [];
+  private releaseBatchRunning = false;
   constructor(private options: IntegrationRuntimeOptions) {
     this.store = new IntegrationStore(path.join(options.directory, 'integrations.json'));
     this.sessions = new IntegrationSessions(path.join(options.directory, 'integration-sessions.json'), options.sessions);
+    this.releaseBatchFile = path.join(options.directory, 'session-release-batches.json');
+    try {
+      const saved = JSON.parse(fs.readFileSync(this.releaseBatchFile, 'utf8')) as ReleaseBatchOperation[];
+      if (!Array.isArray(saved)) throw new Error('Invalid batch release journal');
+      this.releaseBatchOperations = saved;
+      for (const operation of this.releaseBatchOperations) {
+        if (operation.state === 'running') operation.state = 'queued';
+        for (const item of operation.items) if (item.state === 'running') item.state = 'queued';
+      }
+      atomicJson(this.releaseBatchFile, this.releaseBatchOperations);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     this.stops.push(options.messages.registerRuntimeGuard(id => this.sessions.assertRuntimeMessage(id)));
     const changed = () => { try { this.sync(); } catch (error) { this.failStreams(error); this.scheduleRetry(); } };
     this.stops.push(options.messages.subscribe(changed), options.taskStore.subscribe(changed), this.sessions.subscribe(changed));
@@ -190,6 +206,16 @@ export class IntegrationRuntime {
     app.post('/sessions/:id/restore', run(async req => { const p = principal(req); this.authorize(p, 'session.restore'); const session = await this.sessions.restore(p, req.params.id, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.post('/sessions/:id/retry-cold', run(async req => { const p = principal(req); this.authorize(p, 'session.create'); const session = await this.sessions.retryCold(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.post('/sessions/:id/release', run(async req => { const p = principal(req); this.authorize(p, 'session.release'); const session = await this.sessions.release(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
+    app.post('/sessions/release-batch', run(async req => {
+      const p = principal(req); this.authorize(p, 'session.release');
+      return this.createReleaseBatch(p, req.body?.session_ids, req.body?.idempotency_key);
+    }));
+    app.get('/sessions/release-batches/:id', run(req => {
+      const p = principal(req); this.authorize(p, 'session.release');
+      const operation = this.releaseBatchOperations.find(item => item.id === req.params.id && item.principal_id === p.id && item.group_id === p.groupId);
+      if (!operation) integrationError('RELEASE_BATCH_NOT_FOUND', 'Batch release operation was not found', 404);
+      return { operation: structuredClone(operation) };
+    }));
     app.post('/sessions/:id/rename', run(async req => { const p = principal(req); this.authorize(p, 'session.rename'); const session = await this.sessions.rename(p, req.params.id, req.body?.generation, req.body?.name, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.post('/sessions/:id/close', run(async req => { const p = principal(req); this.authorize(p, 'session.close'); const session = await this.sessions.closeSession(p, req.params.id, req.body?.generation, req.body?.idempotency_key); this.sync(); return { session: publicIntegrationSession(session) }; }));
     app.get('/events', run((req, res) => {
@@ -230,7 +256,75 @@ export class IntegrationRuntime {
       native_identity_linux_flock_owner: process.platform === 'linux',
       background_task_records: true, task_purpose_configuration: true, explicit_execution_state: true,
       integration_message_send: true, integration_message_reply: true, integration_message_history: true,
+      session_release_batch: true, session_release_batch_min_version: getTermdockVersion(),
       permissions: INTEGRATION_OPERATIONS };
+  }
+  private async createReleaseBatch(principal: IntegrationPrincipal, rawSessionIds: unknown, rawKey: unknown) {
+    if (!Array.isArray(rawSessionIds) || rawSessionIds.length < 1 || rawSessionIds.length > 100
+      || rawSessionIds.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(id))) {
+      integrationError('INVALID_RELEASE_BATCH', 'session_ids must contain 1–100 exact session IDs');
+    }
+    if (typeof rawKey !== 'string' || !rawKey.trim() || rawKey.length > 160) integrationError('INVALID_IDEMPOTENCY_KEY', 'A 1–160 character idempotency_key is required');
+    const sessionIds = [...new Set(rawSessionIds as string[])].sort();
+    const keyHash = createHash('sha256').update(`${principal.id}:${rawKey}`).digest('hex');
+    const requestHash = createHash('sha256').update(JSON.stringify([principal.groupId, sessionIds])).digest('hex');
+    const existing = this.releaseBatchOperations.find(operation => operation.idempotency_key === keyHash);
+    if (existing) {
+      if (existing.request_hash !== requestHash) integrationError('IDEMPOTENCY_CONFLICT', 'This batch release key was used with different sessions', 409);
+      return { accepted: true, operation: structuredClone(existing), replayed: true };
+    }
+    if (this.releaseBatchOperations.length >= 1000) integrationError('RELEASE_BATCH_HISTORY_FULL', 'Batch release history is full; reconcile retained operations before creating another', 503);
+    const items: ReleaseBatchItem[] = [];
+    for (const sessionId of sessionIds) {
+      const session = await this.sessions.get(principal, sessionId);
+      items.push({ session_id: sessionId, generation: session.generation ?? 1, state: 'queued' });
+    }
+    const now = Date.now();
+    const operation: ReleaseBatchOperation = { id: randomUUID(), principal_id: principal.id, group_id: principal.groupId,
+      idempotency_key: keyHash, request_hash: requestHash, state: 'queued', created_at: now, updated_at: now, items };
+    this.releaseBatchOperations.push(operation);
+    try { atomicJson(this.releaseBatchFile, this.releaseBatchOperations); }
+    catch (error) { this.releaseBatchOperations = this.releaseBatchOperations.filter(item => item.id !== operation.id); throw error; }
+    void this.pumpReleaseBatches();
+    return { accepted: true, operation: structuredClone(operation), replayed: false };
+  }
+  private async pumpReleaseBatches(): Promise<void> {
+    if (this.releaseBatchRunning) return;
+    this.releaseBatchRunning = true;
+    try {
+      for (;;) {
+        const operation = this.releaseBatchOperations.find(item => item.state === 'queued' || item.state === 'running');
+        if (!operation) break;
+        operation.state = 'running'; operation.updated_at = Date.now();
+        atomicJson(this.releaseBatchFile, this.releaseBatchOperations);
+        for (const item of operation.items) {
+          if (item.state !== 'queued') continue;
+          item.state = 'running'; operation.updated_at = Date.now();
+          atomicJson(this.releaseBatchFile, this.releaseBatchOperations);
+          try {
+            const policy = this.store.policies().find(candidate => candidate.id === operation.principal_id && candidate.groupId === operation.group_id && !candidate.revoked);
+            if (!policy) throw Object.assign(new Error('Integration principal was revoked before release'), { code: 'INTEGRATION_REVOKED' });
+            const activePrincipal = policy as IntegrationPrincipal;
+            this.store.authorize(activePrincipal, 'session.release');
+            const session = await this.sessions.release(activePrincipal, item.session_id, item.generation, `${operation.idempotency_key}:${item.session_id}`);
+            if (session.state !== 'released') throw Object.assign(new Error(session.error_code ?? 'Session release did not reach released state'), { code: session.error_code ?? 'SESSION_RELEASE_FAILED' });
+            item.state = 'released';
+          } catch (error) {
+            const value = error as { code?: unknown };
+            item.state = 'failed'; item.error_code = typeof value?.code === 'string' ? value.code : 'SESSION_RELEASE_FAILED';
+            item.error = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+          }
+          operation.updated_at = Date.now();
+          atomicJson(this.releaseBatchFile, this.releaseBatchOperations);
+        }
+        operation.state = operation.items.some(item => item.state === 'failed') ? 'partial_failure' : 'succeeded';
+        operation.updated_at = Date.now();
+        atomicJson(this.releaseBatchFile, this.releaseBatchOperations);
+        this.sync();
+      }
+    } catch (error) {
+      console.error('[integration-release-batch] worker stopped; persisted operation will reconcile on restart:', error);
+    } finally { this.releaseBatchRunning = false; }
   }
   private error(error: unknown) {
     return { type: 'error', ok: false, code: error instanceof CollaborationError ? error.code : 'INTEGRATION_INTERNAL_ERROR',
@@ -363,7 +457,7 @@ export class IntegrationRuntime {
       fs.unlinkSync(this.options.socketPath);
     }
     await new Promise<void>((resolve, reject) => { this.server.once('error', reject); this.server.listen(this.options.socketPath, () => { this.server.removeListener('error', reject); fs.chmodSync(this.options.socketPath, 0o600); resolve(); }); });
-    this.sync(); await this.sessions.refreshAll();
+    this.sync(); await this.sessions.refreshAll(); void this.pumpReleaseBatches();
   }
   async close(): Promise<void> {
     for (const stop of this.stops) stop(); if (this.retry) clearTimeout(this.retry); this.sessions.close();

@@ -62,6 +62,10 @@ jobs:
           src/lib/components/terminal/TerminalViewportPasteOwnership.test.tsx
           src/lib/federation/SecureAccessGate.test.tsx
           src/lib/terminal/api.close.test.ts
+          src/server/agent/integrationBatchRelease.test.ts
+          src/server/utils/hostResources.test.ts
+          src/server/utils/tmuxRecoveryOperations.test.ts
+          src/server/utils/tmuxRecovery.test.ts
       - run: npm run build
       - name: Pack the verified build
         run: |

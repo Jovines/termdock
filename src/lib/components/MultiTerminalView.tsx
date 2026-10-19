@@ -20,6 +20,7 @@ import {
   dismissTmuxRecovery,
   killTmuxSession,
   restoreAllTmuxAgentSessions,
+  setTmuxRecoveryOperationPaused,
   sendTerminalInput,
   suspendTerminalConnectionReconnects,
 } from '../terminal/api';
@@ -555,17 +556,24 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     setTmuxRecoveryPending('restore');
     setTmuxRecoveryError(null);
     try {
-      const result = await restoreAllTmuxAgentSessions();
+      const result = await restoreAllTmuxAgentSessions(tmuxRecovery?.id);
       await restoreSessions();
-      if (result.failed > 0) {
-        setTmuxRecoveryError(t('tab.tmuxRecoveryPartial', { restored: result.restored, failed: result.failed }));
-      }
+      if (!result.accepted) setTmuxRecoveryError(t('tab.tmuxRecoveryFailed'));
     } catch {
       setTmuxRecoveryError(t('tab.tmuxRecoveryFailed'));
     } finally {
       setTmuxRecoveryPending(null);
     }
-  }, [restoreSessions, t]);
+  }, [restoreSessions, t, tmuxRecovery?.id]);
+
+  const handlePauseTmuxRecovery = useCallback(async () => {
+    const operation = tmuxRecovery?.operation;
+    if (!operation) return;
+    try {
+      await setTmuxRecoveryOperationPaused(operation.id, !operation.paused);
+      await restoreSessions();
+    } catch { setTmuxRecoveryError(t('tab.tmuxRecoveryFailed')); }
+  }, [restoreSessions, t, tmuxRecovery?.operation]);
 
   const handleDismissTmuxRecovery = useCallback(async () => {
     setTmuxRecoveryPending('dismiss');
@@ -2304,24 +2312,44 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               <p className="mt-1.5 truncate text-[10px] text-foreground/70">
                 {tmuxRecovery.sessions.map((session) => session.name).join(' · ')}
               </p>
+              {tmuxRecovery.operation && (
+                <div className="mt-2 rounded-lg bg-surface-2 px-2.5 py-2 text-[10px] text-muted-foreground" aria-live="polite">
+                  <p>{t('tab.tmuxRecoveryProgress', { total: tmuxRecovery.operation.total, queued: tmuxRecovery.operation.queued, resourceWait: tmuxRecovery.operation.resource_wait, running: tmuxRecovery.operation.running, succeeded: tmuxRecovery.operation.succeeded, failed: tmuxRecovery.operation.failed })}</p>
+                  <div className="mt-1 max-h-24 overflow-y-auto">
+                  {tmuxRecovery.operation.items.map(item => (
+                    <p key={item.sessionId} className={`mt-1 ${item.errorCode ? 'text-destructive' : ''}`}>
+                      {item.sessionId}: {item.errorCode ?? item.resourceWaitReason ?? item.phase}
+                      {item.memAvailableBytes !== undefined ? ` · 可用内存 ${(item.memAvailableBytes / 1024 ** 3).toFixed(1)} GiB` : ''}
+                      {item.actualRssBytes !== undefined ? ` · 实际 RSS ${(item.actualRssBytes / 1024 ** 2).toFixed(0)} MiB` : ''}
+                      {item.estimatedRssBytes !== undefined && item.actualRssBytes === undefined ? ` · 预估 RSS ${(item.estimatedRssBytes / 1024 ** 2).toFixed(0)} MiB` : ''}
+                    </p>
+                  ))}
+                  </div>
+                </div>
+              )}
               {tmuxRecoveryError && (
                 <p className="mt-2 text-[10px] text-destructive">{tmuxRecoveryError}</p>
               )}
               <div className="mt-3 flex items-center gap-2">
                 <button
                   type="button"
-                  disabled={tmuxRecoveryPending !== null}
+                  disabled={tmuxRecoveryPending !== null || Boolean(tmuxRecovery.operation && !['succeeded', 'partial_failure'].includes(tmuxRecovery.operation.state))}
                   onClick={() => void handleRestoreAllTmuxAgents()}
                   className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-primary px-3 text-[11px] font-medium text-primary-foreground transition active:opacity-80 disabled:opacity-50"
                 >
                   <RotateCcw size={13} className={tmuxRecoveryPending === 'restore' ? 'animate-spin' : ''} />
                   {tmuxRecoveryPending === 'restore'
                     ? t('tab.tmuxRecoveryRestoring')
-                    : t('tab.tmuxRecoveryRestoreAll')}
+                    : tmuxRecovery.operation && !['succeeded', 'partial_failure'].includes(tmuxRecovery.operation.state) ? t('tab.tmuxRecoveryInProgress') : t('tab.tmuxRecoveryRestoreAll')}
                 </button>
+                {tmuxRecovery.operation && ['queued', 'resource_wait', 'running', 'paused'].includes(tmuxRecovery.operation.state) && (
+                  <button type="button" disabled={tmuxRecoveryPending !== null} onClick={() => void handlePauseTmuxRecovery()} className="inline-flex min-h-9 items-center rounded-lg px-3 text-[11px] text-muted-foreground transition hover:bg-surface-2 disabled:opacity-50">
+                    {tmuxRecovery.operation.paused ? t('tab.tmuxRecoveryResume') : t('tab.tmuxRecoveryPause')}
+                  </button>
+                )}
                 <button
                   type="button"
-                  disabled={tmuxRecoveryPending !== null}
+                  disabled={tmuxRecoveryPending !== null || Boolean(tmuxRecovery.operation && !['succeeded', 'partial_failure'].includes(tmuxRecovery.operation.state))}
                   onClick={() => void handleDismissTmuxRecovery()}
                   className="inline-flex min-h-9 items-center rounded-lg px-3 text-[11px] text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
                 >

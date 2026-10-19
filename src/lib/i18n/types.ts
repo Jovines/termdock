@@ -1303,6 +1303,10 @@ export type TranslationDictionary = {
     tmuxRecoveryPartial: (params: TranslatorParams) => string;
     tmuxRecoveryFailed: string;
     tmuxRecoveryDismissFailed: string;
+    tmuxRecoveryProgress: (params: TranslatorParams) => string;
+    tmuxRecoveryPause: string;
+    tmuxRecoveryResume: string;
+    tmuxRecoveryInProgress: string;
     copied: string;
     close: string;
     closeHint: string;
