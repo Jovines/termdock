@@ -2,6 +2,7 @@ import { execFile, type ExecFileOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
+import { isIP } from 'node:net';
 
 const execFileAsync = promisify(execFile) as unknown as (
   file: string,
@@ -82,7 +83,7 @@ function parseDeviceLine(line: string): AndroidDeviceInfo | null {
     serial,
     state: state === 'device' || state === 'offline' || state === 'unauthorized' ? state
       : state.startsWith('connect') ? 'connecting' : 'unknown',
-    isNetwork: /^\d+\.\d+\.\d+\.\d+:\d+$/.test(serial) || serial.includes(':') === false && serial.includes('.'),
+    isNetwork: /^\d+\.\d+\.\d+\.\d+:\d+$/.test(serial) || /^\[[0-9a-fA-F:.]+\]:\d+$/.test(serial) || serial.includes(':') === false && serial.includes('.'),
   };
   for (const token of parts.slice(2)) {
     const [key, value] = token.split(':');
@@ -95,18 +96,21 @@ function parseDeviceLine(line: string): AndroidDeviceInfo | null {
   return info;
 }
 
-const PROPS = 'ro.product.model|ro.build.version.release|ro.build.version.sdk';
-
 export async function getDeviceProperties(serial: string): Promise<Pick<AndroidDeviceInfo, 'androidVersion' | 'sdk' | 'model'>> {
   try {
-    const output = await runAdb(['shell', 'getprop', ...PROPS.split('|').map(prop => prop)], { serial, timeout: 8000 });
-    const values = output.split(/\r?\n/).map(line => line.trim());
-    const sdk = Number.parseInt(values[2] || '', 10);
-    return {
-      model: values[0] || undefined,
-      androidVersion: values[1] || undefined,
-      sdk: Number.isFinite(sdk) ? sdk : undefined,
-    };
+    // 无参数 getprop 一次读取全部属性；多个属性名会被解释成 name/default 并报错。
+    const output = await runAdb(['shell', 'getprop'], { serial, timeout: 8000 });
+    const values = new Map<string, string>();
+    for (const line of output.split(/\r?\n/)) {
+      const match = /^\[([^\]]+)\]: \[(.*)\]$/.exec(line.trim());
+      if (match) values.set(match[1], match[2]);
+    }
+    const sdk = Number.parseInt(values.get('ro.build.version.sdk') || '', 10);
+    const result: Pick<AndroidDeviceInfo, 'androidVersion' | 'sdk' | 'model'> = {};
+    if (values.get('ro.product.model')) result.model = values.get('ro.product.model');
+    if (values.get('ro.build.version.release')) result.androidVersion = values.get('ro.build.version.release');
+    if (Number.isFinite(sdk)) result.sdk = sdk;
+    return result;
   } catch {
     return {};
   }
@@ -147,6 +151,13 @@ export function normalizeAddress(raw: string): string | null {
   const urlMatch = /^[a-z]+:\/\/([^/]+)/i.exec(value);
   if (urlMatch) value = urlMatch[1];
   value = value.replace(/^\/+|\/+$/g, '');
+  const ipv6 = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(value);
+  if (ipv6) {
+    if (isIP(ipv6[1]) !== 6) return null;
+    const port = ipv6[2] ?? '5555';
+    if (Number(port) < 1 || Number(port) > 65535) return null;
+    return `[${ipv6[1]}]:${port}`;
+  }
   if (!/^[0-9a-zA-Z_.\-]+(?::\d+)?$/.test(value)) return null;
   if (!value.includes(':') && /^\d+\.\d+\.\d+\.\d+$/.test(value)) value = `${value}:5555`;
   const [host, port] = value.split(':');

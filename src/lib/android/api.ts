@@ -70,9 +70,9 @@ export function normalizeAndroidQuality(value: unknown): AndroidQuality {
   return { id: 'custom', maxSize, bitRate, maxFps };
 }
 
-/** serial 允许 `:`（网络设备），编码会破坏路径匹配，因此只做白名单校验后原样拼入。 */
+/** serial 支持 IPv4/方括号 IPv6 网络设备；加密隧道按原始路径匹配，不编码 serial。 */
 export function androidStreamPath(serial: string, quality?: AndroidQuality): string {
-  if (!/^[0-9a-zA-Z_.:\-]{1,128}$/.test(serial)) throw new Error('INVALID_SERIAL');
+  if (serial.length > 128 || !/^(?:[0-9a-zA-Z_.:\-]+|\[[0-9a-fA-F:.]+\]:\d{1,5})$/.test(serial)) throw new Error('INVALID_SERIAL');
   const params = new URLSearchParams();
   if (quality) {
     params.set('max_size', String(quality.maxSize));

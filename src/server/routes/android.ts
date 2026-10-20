@@ -8,12 +8,12 @@ import { pathValidator } from '../utils/pathValidator.js';
 
 const router = Router();
 
-const SERIAL_PATTERN = /^[0-9a-zA-Z_.:\-]{1,128}$/;
+const SERIAL_PATTERN = /^(?:[0-9a-zA-Z_.:\-]+|\[[0-9a-fA-F:.]+\]:\d{1,5})$/;
 /** 逐帧/逐控件的诊断日志默认关闭，需要时 TERMDOCK_ANDROID_DEBUG=1 打开。 */
 const DEBUG_ANDROID = process.env.TERMDOCK_ANDROID_DEBUG === '1';
 
 export function isValidAndroidSerial(serial: string): boolean {
-  return SERIAL_PATTERN.test(serial);
+  return serial.length <= 128 && SERIAL_PATTERN.test(serial);
 }
 
 router.get('/devices', async (_req, res) => {

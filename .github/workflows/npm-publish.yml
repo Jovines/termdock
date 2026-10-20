@@ -56,6 +56,8 @@ jobs:
         run: >-
           npx vitest run
           src/lib/federation/transportBoundary.test.ts
+          src/server/android/adb.test.ts
+          src/server/android/liveBitrateTransport.test.ts
           src/server/utils/tmuxCopySelection.test.ts
           src/server/utils/tmuxSizeOwnership.test.ts
           src/server/utils/tmuxClientCapabilities.test.ts

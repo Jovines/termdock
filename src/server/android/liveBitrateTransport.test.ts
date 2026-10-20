@@ -11,6 +11,9 @@ import { RelaySocket } from '../../lib/federation/relaySocket';
 import { connect } from '../../lib/federation/secureClient';
 import router, { handleAndroidWebSocket } from '../routes/android';
 import * as scrcpy from './scrcpy';
+import { androidStreamPath } from '../../lib/android/api';
+
+const serial = '[fdbd:ff1:ce00:580:10:76:222:117]:33265';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.reverse().forEach(fn => fn()); cleanup.length = 0; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -61,12 +64,12 @@ describe('live bitrate encrypted stream', () => {
       },
       setBitrate, stop, pauseVideo() {}, resumeVideo() {}, sendControl() { return true; },
     } as unknown as scrcpy.ScrcpySession); });
-    const denied = client.openSocket('/api/android/test-device/ws');
+    const denied = client.openSocket(androidStreamPath(serial));
     await vi.waitFor(() => expect(denied.readyState).toBe(3));
     expect(create).not.toHaveBeenCalled();
     const { pairingCode } = JSON.parse(readFileSync(join(directory, 'pairing.json'), 'utf8'));
     await client.request({ type: 'pair', code: pairingCode });
-    const stream = client.openSocket('/api/android/test-device/ws');
+    const stream = client.openSocket(androidStreamPath(serial));
     const messages: Record<string, unknown>[] = [];
     stream.onmessage = event => messages.push(JSON.parse(String(event.data)));
     await vi.waitFor(() => expect(messages.some(m => m.type === 'bitrate-support')).toBe(true));
@@ -75,9 +78,10 @@ describe('live bitrate encrypted stream', () => {
       await vi.waitFor(() => expect(messages).toContainEqual({ type: 'bitrate-result', requestId, bitRate, applied: true }));
     }
     expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(serial, expect.any(Object), expect.any(Object));
     expect(start).toHaveBeenCalledOnce();
     expect(stop).not.toHaveBeenCalled();
-    expect(wire.every(data => !data.includes('private-device') && !data.includes('test-device') && !data.includes('bitrate'))).toBe(true);
+    expect(wire.every(data => !data.includes('private-device') && !data.includes(serial) && !data.includes('bitrate'))).toBe(true);
     stream.send(JSON.stringify({ type: 'bitrate', requestId: 3, bitRate: -1 }));
     // An ordered ping acts as a barrier after invalid input.
     stream.send(JSON.stringify({ type: 'ping' }));
