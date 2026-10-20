@@ -643,12 +643,12 @@ test('native window backing color follows the CSS chrome token on first load and
  }finally{dom.window.close();}
 });
 
-test('a desktop app upgrade activates only its own waiting bundled worker and reloads once',async()=>{
+for(const source of ['bundledWorkspace','serviceWorkspace'])test(`${source} activates only its own waiting worker and reloads once`,async()=>{
  const handlers=new Map(),messages=[],reloads=[];let updates=0;
  const own={scope:'http://127.0.0.1:43000/',waiting:{postMessage:message=>messages.push(message)},addEventListener(){},update:async()=>{updates++;}};
  const other={scope:'https://other.test/',waiting:{postMessage:()=>assert.fail('foreign worker touched')},addEventListener:()=>assert.fail('foreign worker watched')};
  const sw={controller:{},getRegistrations:async()=>[own,other],addEventListener:(name,fn)=>handlers.set(name,fn)};
- fixture({bundledWorkspace:true,context:{navigator:{serviceWorker:sw},location:{origin:'http://127.0.0.1:43000',pathname:'/',hash:'',reload:()=>reloads.push(true)}}});
+ fixture({[source]:true,context:{navigator:{serviceWorker:sw},location:{origin:'http://127.0.0.1:43000',pathname:'/',hash:'',reload:()=>reloads.push(true)}}});
  await new Promise(resolve=>setTimeout(resolve,0));assert.equal(updates,1);assert(messages.length>0);assert(messages.every(m=>m.type==='SKIP_WAITING'));
  handlers.get('controllerchange')();handlers.get('controllerchange')();assert.equal(reloads.length,1);
 });

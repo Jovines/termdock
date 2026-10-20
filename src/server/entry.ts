@@ -710,7 +710,8 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     const localHostname = ['0.0.0.0', '::'].includes(host) ? 'localhost' : host;
     const localAuthority = localHostname.includes(':') && !localHostname.startsWith('[') ? `[${localHostname}]` : localHostname;
     const selfRelay = new DesktopSelfRelay({
-      desktopFile: path.join(homedir(), '.termdock', 'desktop.json'), identity: runtime.identity, serviceId: runtime.serviceId,
+      desktopFile: path.join(homedir(), '.termdock', 'desktop.json'),
+      targets: () => routeAccess.configuredDirectTargets(), baseDir: path.join(homedir(), '.termdock', 'federation'), identity: runtime.identity, serviceId: runtime.serviceId,
       localOrigin: `${scheme}://${localAuthority}:${port}`, ...(localCa ? { localCa } : {}),
     });
     selfRelay.start();

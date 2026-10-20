@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Terminal, PanelLeft, PanelRight, RefreshCw, Workflow } from 'lucide-react';
+import { PanelLeft, PanelRight, RefreshCw, Workflow } from 'lucide-react';
 import { CollaborationTab, openCollaborationSession } from './AgentOperationsPanel';
 import { collaborationPanelClientId, openCollaborationMessagesPanel } from '../../collaboration/panelPreferences';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
@@ -50,8 +50,6 @@ export default function CollaborationMainWorkspace({ groupId, activeSessionId, o
     return () => { cancelled = true; unsubscribe(); stopPolling(); };
   }, [refresh]);
   const group = directory?.groups.find(g => g.id === groupId);
-  const activeTerminal = directory?.sessions.find(session => session.sessionId === activeSessionId);
-  const terminalLabel = activeSessionId ? activeTerminal?.name ? `终端 · ${activeTerminal.name}` : '继续终端会话' : '选择终端';
   const openTerminal = async (session: NonNullable<CollaborationGroupsResponse>['sessions'][number]) => {
     await openCollaborationSession(session);
     useCollaborationNavigation.getState().terminal();
@@ -62,7 +60,6 @@ export default function CollaborationMainWorkspace({ groupId, activeSessionId, o
       <Workflow size={18} className="hidden shrink-0 text-primary sm:block" />
       <div className="min-w-0 flex-1"><h2 ref={title} tabIndex={-1} className="truncate text-base font-semibold outline-none">{group?.name ?? '协作工作区'}</h2><p className="text-[11px] text-muted-foreground">{group ? `${group.sessionIds.length} 位成员` : '正在连接工作组'}</p></div>
       {onToggleRightSidebar && <button type="button" aria-label="文件侧栏" title="文件侧栏" aria-pressed={rightSidebarOpen} className={`inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg ${rightSidebarOpen ? 'bg-surface-2 text-primary' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={onToggleRightSidebar}><PanelRight size={17} /></button>}
-      <button type="button" aria-label={activeSessionId ? `打开终端：${activeTerminal?.name ?? '当前会话'}` : '选择终端'} title={activeSessionId ? `切换到${activeTerminal?.name ?? '当前终端会话'}，保留看板位置与消息草稿` : '从会话列表选择要打开的终端'} className="inline-flex min-h-11 min-w-11 max-w-[40%] items-center justify-center gap-2 rounded-lg px-2 text-xs text-muted-foreground hover:bg-surface-2" onClick={() => { if (activeSessionId) useCollaborationNavigation.getState().terminal(); else onOpenSidebar(); }}><Terminal size={17} className="shrink-0" /><span className="hidden min-w-0 truncate sm:inline">{terminalLabel}</span><span className="sm:hidden">{activeSessionId ? '终端' : '选择终端'}</span></button>
     </header>
     <div className="flex min-h-0 flex-1 flex-col px-4 py-2 sm:px-6">
       {(showRecovery || isConnectionInterruption(loadError)) && <div role="status" className="mb-2 flex shrink-0 items-center gap-2 text-xs text-muted-foreground"><RefreshCw size={13} className={connection === 'offline' ? '' : 'animate-spin'} /><span>{connection === 'offline' ? '网络已断开，联网后自动恢复' : '正在恢复连接，当前结果和草稿已保留'}</span></div>}

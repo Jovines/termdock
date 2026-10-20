@@ -89,9 +89,9 @@ export class CollaborationRpc {
     this.pending.clear();
   }
 }
-export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string, receive?: (packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>): Promise<CollaborationRpc> {
+export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string, receive?: (packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>, configuredCa?: Buffer): Promise<CollaborationRpc> {
   validateCollaborationNode(peer);
-  const ca = peer.caFingerprint256 ? await readPinnedCertificateAuthority(peer.origin, peer.caFingerprint256) : undefined;
+  const ca = peer.caFingerprint256 ? await readPinnedCertificateAuthority(peer.origin, peer.caFingerprint256) : configuredCa;
   const url = endpoint ?? `${peer.origin.replace(/^https:/, 'wss:')}/api/federation/secure`;
   const socket = new WebSocket(url, { ca, rejectUnauthorized: true, followRedirects: false, handshakeTimeout: 3000, maxPayload: 1024 * 1024 });
   const relay = endpoint ? relayDuplex(socket, peer.serviceId) : undefined;

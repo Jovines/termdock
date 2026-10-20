@@ -205,6 +205,43 @@ export function connectionRoutes(intent: ConnectionIntent): ServiceRoute[] {
     } catch { return []; }
   }).slice(0, 4);
 }
+const relayRouteKey = (route: ServiceRoute) => `relay:${route.targetPeerId}:${route.url}`;
+/** Recovery may inspect other saved, pinned services for a known target.
+ * Directory membership never implies permission: B must expose and authorize A.
+ * A new target only considers entries with an existing forward relationship. */
+async function reverseConnectionRoutes(intent: ConnectionIntent): Promise<ServiceRoute[]> {
+  const explicit = connectionRoutes(intent);
+  const seen = new Set(explicit.map(relayRouteKey));
+  const candidates: ServiceRoute[] = [];
+  const services = await listServiceConnections();
+  const knownTarget = services.some(service => service.targetPeerId === intent.targetPeerId);
+  for (const service of services) {
+    if (!service.targetPeerId || service.targetPeerId === intent.targetPeerId
+      || (!knownTarget && !connectionRoutes({ ...service, targetPeerId: service.targetPeerId }).some(route => route.targetPeerId === intent.targetPeerId))) continue;
+    for (const url of connectionAddresses({ ...service, targetPeerId: service.targetPeerId })) {
+      const route = { url, targetPeerId: service.targetPeerId };
+      if (!seen.has(relayRouteKey(route))) { seen.add(relayRouteKey(route)); candidates.push(route); }
+    }
+  }
+  return candidates.slice(0, Math.max(0, 4 - Math.max(intent.routes?.length ?? 0, explicit.length)));
+}
+async function authorizeReverseRoute(entry: SecureClient, targetServiceId: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  const directory = await entry.request({ type: 'route-targets' }, { timeoutMs: 5000 });
+  const target = (Array.isArray(directory.items) ? directory.items as RelayTarget[] : []).find(item => item.serviceId === targetServiceId);
+  if (!target?.available) throw new Error('反向中转通道尚未建立。');
+  signal.throwIfAborted();
+  if (target.authorized === true) return;
+  if (directory.canManage !== true) throw new Error('反向中转尚未授权。');
+  const access = await entry.request({ type: 'route-access' }, { timeoutMs: 5000 });
+  const subjectId = (await getIdentity()).peerId;
+  signal.throwIfAborted();
+  if (!Array.isArray(access.grants)) throw new Error('入口未返回有效的路由授权记录。');
+  const grants = access.grants as EntryRouteGrant[];
+  // Automatic recovery must never recreate a route the user explicitly revoked.
+  if (grants.some(grant => grant.subjectId === subjectId && grant.targetServiceId === targetServiceId && grant.revokedAt !== undefined)) throw new Error('反向中转授权已撤销。');
+  await entry.request({ type: 'route-grant', serviceId: targetServiceId, subjectId });
+}
 /** Every direct address must authenticate as the same pinned service. Keep
  * alternate addresses in the existing route format so desktop bridges preserve
  * them too, without requiring a native-shell update.
@@ -234,12 +271,14 @@ async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal
     run: signal => connect({ url: secureUrl(origin), targetPeerId: intent.targetPeerId, identity,
       signal: AbortSignal.any([signal, AbortSignal.timeout(8000), ...(outerSignal ? [outerSignal] : [])]) }),
   }));
-  for (const route of connectionRoutes(intent)) attempts.push({ key: `relay:${route.targetPeerId}:${route.url}`, run: async signal => {
+  const reverseRoutes = await reverseConnectionRoutes(intent);
+  for (const route of [...connectionRoutes(intent), ...reverseRoutes]) attempts.push({ key: relayRouteKey(route), run: async signal => {
     if (outerSignal) signal = AbortSignal.any([signal, outerSignal]);
     const reused = [active, entryClient].find(client => client && !client.closed && client.targetPeerId === route.targetPeerId);
     const entry = reused || await connectEntry(route, signal);
     try {
       if (signal.aborted) throw signal.reason;
+      if (reverseRoutes.includes(route)) await authorizeReverseRoute(entry, intent.targetPeerId, signal);
       const ticket = await entry.request({ type: 'route-ticket', serviceId: intent.targetPeerId }, { timeoutMs: 5000 });
       if (signal.aborted) throw signal.reason;
       if (typeof ticket.routeToken !== 'string') throw new Error('入口未允许此设备连接该服务。');
@@ -284,7 +323,8 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
   const serviceOrigin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
   const known = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId);
   const savedIntent = { ...intent, routes: intent.routes ?? known?.routes };
-  const routes = connectionRoutes(savedIntent);
+  const reverseRoutes = await reverseConnectionRoutes(savedIntent);
+  const routes = [...connectionRoutes(savedIntent), ...reverseRoutes];
   const addresses = connectionAddresses(savedIntent);
   let next: SecureClient | undefined, nextEntry: SecureClient | undefined;
   let pairingCode = intent.pairingCode;
@@ -332,6 +372,7 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
       try {
         candidateEntry = await entryFor(route, signal);
         if (signal.aborted) throw signal.reason;
+        if (reverseRoutes.includes(route)) await authorizeReverseRoute(candidateEntry, intent.targetPeerId, signal);
         const ticket = await candidateEntry.request({ type: 'route-ticket', serviceId: intent.targetPeerId }, { timeoutMs: 5000 });
         if (signal.aborted) throw signal.reason;
         if (typeof ticket.routeToken !== 'string' || !ticket.routeToken) throw new Error('入口未允许此设备连接该服务。');
@@ -384,7 +425,9 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
     if (path === 'direct' && new URL(serviceOrigin).host === location.host) migrateLegacyServiceState(intent.targetPeerId);
     const existing = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId || (!item.targetPeerId && (item.serviceOrigin || item.url) === serviceOrigin));
     const serviceName = existing?.label || intent.serviceName || new URL(serviceOrigin).host;
-    const saved = { url: serviceOrigin, targetPeerId: intent.targetPeerId, serviceName, serviceOrigin, routes: savedIntent.routes ?? routes };
+    const reverse = reverseRoutes.find(route => relayRouteKey(route) === result.key);
+    const savedRoutes = savedIntent.routes ?? connectionRoutes(savedIntent);
+    const saved = { url: serviceOrigin, targetPeerId: intent.targetPeerId, serviceName, serviceOrigin, routes: reverse ? [...savedRoutes, reverse] : savedRoutes };
     await (options.rememberOnly ? rememberServiceConnection : saveServiceConnection)({ id: existing?.id || intent.targetPeerId, ...saved, label: serviceName });
     // A new verified service opens its own document; keep this document's
     // existing transport and stores bound to their original target.

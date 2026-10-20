@@ -15,7 +15,7 @@ npm --prefix desktop-rust run verify
 npm --prefix desktop-rust run build
 ```
 
-`--ignore-scripts` 避免根项目 postinstall 初始化用户服务。构建入口准备 React 客户端与连接中心；签名 App 包含完整工作区，不依赖目标服务的旧前端资源。
+`--ignore-scripts` 避免根项目 postinstall 初始化用户服务。构建入口准备 React 客户端与连接中心；工作区优先加载所连接服务自己的前端，同一窗口的页面及静态资源保持同一来源；服务部署后重新加载即可更新界面。目标前端不可达（包括只能中转访问业务的目标）时，使用签名 App 内置的完整工作区备用，不加载入口或其他服务的页面。缺失资源及业务请求失败不会触发来源切换。
 
 公开 Preview 的版本、签名更新包和渠道指针按 [发布契约](RELEASE.md) 生成与发布；普通本地构建没有发布密钥也能运行，但不能冒称已配置自动更新。用户确认稳定后，按同一契约将 Rust 转为正式版，并验证旧 Electron 到 Rust 的直接升级链路。
 

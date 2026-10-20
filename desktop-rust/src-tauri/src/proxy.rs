@@ -44,6 +44,7 @@ struct Boundary {
 pub struct ProxyHandle {
     pub origin: String,
     pub launch_url: String,
+    pub bundled_workspace: bool,
     stop: Option<oneshot::Sender<()>>,
 }
 impl Drop for ProxyHandle {
@@ -106,7 +107,6 @@ pub async fn start_with_assets(
     pins: &BTreeMap<String, String>,
     assets: Option<std::path::PathBuf>,
 ) -> Result<(ProxyHandle, Vec<String>), String> {
-    let assets = assets.map(AssetBundle::load).transpose()?.map(Arc::new);
     let origins = connection.origins();
     let sources: Vec<_> = origins
         .iter()
@@ -117,38 +117,32 @@ pub async fn start_with_assets(
         .as_ref()
         .unwrap_or(&connection.url);
     let default_source = origins.iter().position(|o| o == target).unwrap();
-    // Pin a single frontend build per window. An unreachable target may use its
-    // explicit relay's existing frontend; missing assets never trigger API fallback.
-    let mut candidates = vec![default_source];
-    if connection.entry_service_id.is_some() {
+    // Only addresses explicitly belonging to this target can supply its page.
+    // A relay's frontend belongs to the relay, even when it carries target traffic.
+    let mut candidates = Vec::new();
+    let entry_is_target = match &connection.entry_service_id {
+        Some(entry) => Some(entry) == connection.target_peer_id.as_ref(),
+        None => connection.service_origin.as_ref().is_none_or(|origin| origin == &connection.url),
+    };
+    if connection.service_origin.is_some() || entry_is_target {
+        candidates.push(default_source);
+    }
+    if entry_is_target {
         candidates.push(origins.iter().position(|o| o == &connection.url).unwrap());
     }
-    candidates.extend(
-        connection
-            .routes
-            .iter()
-            .filter_map(|r| origins.iter().position(|o| o == &r.url)),
-    );
+    candidates.extend(connection.routes.iter()
+        .filter(|route| Some(&route.target_peer_id) == connection.target_peer_id.as_ref())
+        .filter_map(|route| origins.iter().position(|o| o == &route.url)));
+    let mut seen = std::collections::BTreeSet::new();
+    candidates.retain(|index| seen.insert(*index));
     let mut static_source = None;
-    if assets.is_some() {
-        static_source = Some(default_source);
-    }
     for index in candidates {
-        if static_source.is_some() {
-            break;
-        }
         let source = &sources[index];
-        if let Ok(response) = source
-            .http
-            .get(format!("{}/", source.origin))
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
+        if let Ok(response) = source.http.get(format!("{}/", source.origin))
+            .timeout(Duration::from_secs(5)).send().await
         {
             if response.status().is_success()
-                && response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
+                && response.headers().get(header::CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
                     .is_some_and(|v| v.starts_with("text/html"))
             {
@@ -157,7 +151,14 @@ pub async fn start_with_assets(
             }
         }
     }
-    let static_source = static_source.ok_or("Could not load a service page. Check the selected address and its Preview certificate pin.")?;
+    // Load the verified package only when this target's own page is unavailable.
+    // Never switch sources for a missing asset or failed business request.
+    let assets = if static_source.is_none() {
+        Some(Arc::new(AssetBundle::load(assets.ok_or(
+            "Could not load this service's page. Check its address and Preview certificate pin.")?)?))
+    } else { None };
+    let bundled_workspace = assets.is_some();
+    let static_source = static_source.unwrap_or(default_source);
     let host = format!(
         "127.0.0.1:{}",
         listener.local_addr().map_err(|e| e.to_string())?.port()
@@ -185,6 +186,7 @@ pub async fn start_with_assets(
         ProxyHandle {
             origin: origin.clone(),
             launch_url: format!("{origin}/api/auth/status?__td_launch={token}"),
+            bundled_workspace,
             stop: Some(tx),
         },
         origins,
@@ -930,6 +932,107 @@ impl AssetBundle {
 #[cfg(test)]
 mod bundle_tests {
     use super::*;
+    async fn page_server(page: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = bind(None).await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = Router::new().route("/", axum::routing::get(move || async move {
+            axum::response::Html(page)
+        })).route("/assets/own.js", axum::routing::get(move || async move { page }));
+        let task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap(); });
+        (origin, task)
+    }
+    async fn capability(proxy: &ProxyHandle) -> (reqwest::Client, String) {
+        let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let response = http.get(&proxy.launch_url).send().await.unwrap();
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap()
+            .split(';').next().unwrap().to_owned();
+        (http, cookie)
+    }
+    #[tokio::test]
+    async fn target_page_wins_over_package_and_relay_and_never_mixes_missing_resources() {
+        let (target, target_task) = page_server("<html>target</html>").await;
+        let (entry, entry_task) = page_server("<html>relay</html>").await;
+        let connection = Connection {
+            id: "target".into(), url: entry, label: "Target through entry".into(),
+            target_peer_id: Some("target".into()), service_origin: Some(target),
+            entry_service_id: Some("entry".into()), routes: vec![],
+        };
+        // An invalid/missing package must not prevent loading the service page.
+        let (proxy, _) = start_with_assets(bind(None).await.unwrap(), &connection,
+            &BTreeMap::new(), Some(std::path::PathBuf::from("/missing-workspace"))).await.unwrap();
+        assert!(!proxy.bundled_workspace);
+        let (http, cookie) = capability(&proxy).await;
+        for path in ["/", "/assets/own.js"] {
+            let response = http.get(format!("{}{path}", proxy.origin))
+                .header(header::COOKIE, &cookie).send().await.unwrap();
+            assert_eq!(response.text().await.unwrap(), "<html>target</html>");
+        }
+        assert_eq!(http.get(format!("{}/assets/missing.js", proxy.origin))
+            .header(header::COOKIE, &cookie).send().await.unwrap().status(), 404);
+        // Another saved direct address may supply the same target's frontend;
+        // relay addresses in the same route list cannot.
+        let mut alternate = connection.clone();
+        alternate.service_origin = Some("http://127.0.0.1:1".into());
+        alternate.routes = vec![crate::config::Route {
+            url: connection.service_origin.clone().unwrap(), target_peer_id: "target".into()
+        }];
+        let (alternate_proxy, _) = start(bind(None).await.unwrap(), &alternate,
+            &BTreeMap::new()).await.unwrap();
+        let (alternate_http, alternate_cookie) = capability(&alternate_proxy).await;
+        assert_eq!(alternate_http.get(&alternate_proxy.origin)
+            .header(header::COOKIE, &alternate_cookie).send().await.unwrap().text().await.unwrap(),
+            "<html>target</html>");
+        // Reload gets the target's current page, not a startup copy.
+        target_task.abort();
+        let _ = target_task.await;
+        let address = connection.service_origin.as_ref().unwrap().trim_start_matches("http://");
+        let listener = TcpListener::bind(address).await.unwrap();
+        let replacement = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/", axum::routing::get(|| async {
+                axum::response::Html("<html>updated target</html>")
+            }))).await.unwrap();
+        });
+        assert_eq!(http.get(&proxy.origin).header(header::COOKIE, &cookie)
+            .send().await.unwrap().text().await.unwrap(), "<html>updated target</html>");
+        replacement.abort();
+        let _ = replacement.await;
+        assert_eq!(http.get(&proxy.origin).header(header::COOKIE, &cookie)
+            .send().await.unwrap().status(), 502);
+        assert_eq!(http.post(format!("{}/api/terminal/fs/upload", proxy.origin))
+            .header(header::COOKIE, &cookie).send().await.unwrap().status(), 403);
+        entry_task.abort();
+    }
+    #[tokio::test]
+    async fn entry_only_and_offline_target_use_package_without_loading_entry_frontend() {
+        let (entry, task) = page_server("<html>wrong service</html>").await;
+        let dir = tempfile::tempdir().unwrap();
+        let index = b"<html>packaged fallback</html>";
+        std::fs::write(dir.path().join("index.html"), index).unwrap();
+        std::fs::write(dir.path().join("workspace-manifest.json"), serde_json::json!({
+            "version":1,"sourceRevision":"a".repeat(40),"files":{
+                "index.html":{"size":index.len(),"sha256":hex::encode(Sha256::digest(index))}
+            }
+        }).to_string()).unwrap();
+        for service_origin in [None, Some("http://127.0.0.1:1".to_owned())] {
+            let connection = Connection {
+                id: "target".into(), url: entry.clone(), label: "Relay only".into(),
+                target_peer_id: Some("target".into()), service_origin,
+                entry_service_id: Some("entry".into()), routes: vec![crate::config::Route {
+                    url: entry.clone(), target_peer_id: "entry".into()
+                }],
+            };
+            assert!(start(bind(None).await.unwrap(), &connection, &BTreeMap::new()).await.is_err());
+            let (proxy, _) = start_with_assets(bind(None).await.unwrap(), &connection,
+                &BTreeMap::new(), Some(dir.path().to_owned())).await.unwrap();
+            assert!(proxy.bundled_workspace);
+            let (http, cookie) = capability(&proxy).await;
+            assert_eq!(http.get(&proxy.origin).header(header::COOKIE, &cookie)
+                .send().await.unwrap().text().await.unwrap(), String::from_utf8_lossy(index));
+            assert_eq!(http.get(format!("{}/assets/own.js", proxy.origin))
+                .header(header::COOKIE, &cookie).send().await.unwrap().status(), 404);
+        }
+        task.abort();
+    }
     #[tokio::test]
     async fn manifest_resources_cannot_escape_or_fallback_to_remote_static_assets() {
         let dir = tempfile::tempdir().unwrap();

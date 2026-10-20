@@ -1,7 +1,5 @@
 import type { ILink, ILinkProvider, Terminal } from '@xterm/xterm';
 
-export const TERMINAL_DIRECTORY_OPEN_EVENT = 'termdock-open-terminal-directory';
-
 export interface TerminalPathMatch {
   text: string;
   startIndex: number;

@@ -307,9 +307,10 @@
     }).catch(()=>{}).finally(reloadOnce);
     return reloadTask;
   };
-  // Installing the desktop app also installs its immutable bundled frontend.
+  // A desktop window owns one frontend source, including migration from the
+  // packaged fallback to its service page. Activate only that window's worker.
   // Ordinary web/PWA update consent is unchanged.
-  if(boot.bundledWorkspace===true&&navigator.serviceWorker?.controller){
+  if((boot.bundledWorkspace===true||boot.serviceWorkspace===true)&&navigator.serviceWorker?.controller){
     const sw=navigator.serviceWorker;
     sw.addEventListener('controllerchange',()=>{
       if(closing||reloadTask)return;

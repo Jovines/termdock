@@ -114,15 +114,6 @@ describe('primary collaboration workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: '看板' }));
     expect(routeCollaborationInput('不能写入隐藏的消息')).toBe(false);
   });
-  it('returns to the terminal without changing the selected session', async () => {
-    useCollaborationNavigation.getState().open('team');
-    const switchSession = vi.fn(); window.addEventListener('switch-terminal-session', switchSession);
-    main(); await screen.findByRole('region', { name: '目标编辑' });
-    fireEvent.click(screen.getByRole('button', { name: '打开终端：协调者' }));
-    expect(useCollaborationNavigation.getState().groupId).toBeNull();
-    expect(switchSession).not.toHaveBeenCalled();
-    window.removeEventListener('switch-terminal-session', switchSession);
-  });
   it('shows the sidebar opener only while the session sidebar is closed', async () => {
     const open = vi.fn();
     const props = { groupId: 'team', activeSessionId: 'lead', defaultSessionMode: 'shell' as const, onOpenSidebar: open };

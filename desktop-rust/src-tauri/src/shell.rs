@@ -408,7 +408,7 @@ pub(crate) async fn open_connection(
         .unwrap_or(&connection.url);
     let default_route = origins.iter().position(|o| o == default_origin).unwrap();
     let boot = json!({"origin":proxy.origin,"origins":origins,"defaultRoute":default_route,"connection":connection,"invitation":invitation,
-        "chromeCss":include_str!("../../renderer/chrome.css"),"version":app.package_info().version.to_string(),"bundledWorkspace":true,"ownedWindowChrome":crate::window_diagnostics::chrome_enabled(),"platform":if cfg!(target_os="macos") { "darwin" } else { std::env::consts::OS }});
+        "chromeCss":include_str!("../../renderer/chrome.css"),"version":app.package_info().version.to_string(),"bundledWorkspace":proxy.bundled_workspace,"serviceWorkspace":!proxy.bundled_workspace,"ownedWindowChrome":crate::window_diagnostics::chrome_enabled(),"platform":if cfg!(target_os="macos") { "darwin" } else { std::env::consts::OS }});
     let script = format!(
         "window.__TD_PREVIEW_BOOT__={boot};\n{}",
         include_str!("../../renderer/bridge.js")

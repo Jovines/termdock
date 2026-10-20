@@ -121,7 +121,6 @@ import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFram
 import { clearFilePreviewSearchHighlights, collectFilePreviewSearchRanges, paintFilePreviewSearchHighlights, ownsFilePreviewSearchHighlights, ownsFilePreviewSearchShortcut, resolveFilePreviewSearchShortcut, scrollFilePreviewSearchRangeIntoView } from './filePreviewSearch';
 import { describeSearchScope, parseExcludePatterns, resolveSearchScopePath } from './fileSearchOptions';
 import './sidebarSelection.css';
-import { TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
 
 export function mountRightSidebarRepoPickerOverlay(
   overlay: ReactNode,
@@ -6540,7 +6539,9 @@ export function RightSidebar(
 ) {
   const { t, locale } = useI18n();
   const [fileQuery, setFileQuery] = useState('');
+  const pendingTerminalPath = useSidebarStore((s) => s.pendingTerminalPath);
   const [directoryReveal, setDirectoryReveal] = useState<{ path: string; nonce: number } | null>(null);
+  const directoryRevealNonce = useRef(0);
   const searchOpen = useSidebarStore((s) => s.rightSearchOpen);
   const setRightSearchOpen = useSidebarStore((s) => s.setRightSearchOpen);
   const rightSidebarLayoutPreference = useSidebarStore((s) => s.rightSidebarLayoutPreference);
@@ -11084,10 +11085,14 @@ export function RightSidebar(
   }, [isMobile, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, selectFile, setExplorerRoot]);
 
   useEffect(() => {
-    const handleTerminalDirectoryOpen = (event: Event) => {
-      const detail = (event as CustomEvent<{ path?: unknown; kind?: unknown; line?: unknown }>).detail;
-      const path = detail?.path;
-      if (typeof path !== 'string' || !path.startsWith('/')) return;
+    if (!pendingTerminalPath) return;
+    // Read the current request so a superseded render cannot consume an older link.
+    if (useSidebarStore.getState().pendingTerminalPath !== pendingTerminalPath) return;
+    useSidebarStore.setState({ pendingTerminalPath: null });
+    const handleTerminalDirectoryOpen = () => {
+      const detail = pendingTerminalPath;
+      const path = detail.path;
+      if (!path.startsWith('/')) return;
 
       setFileQuery('');
       setLineRange(null);
@@ -11107,14 +11112,14 @@ export function RightSidebar(
         } else {
           setExplorerRoot(parentPath);
         }
-        setDirectoryReveal((current) => ({ path, nonce: (current?.nonce ?? 0) + 1 }));
+        setDirectoryReveal({ path, nonce: ++directoryRevealNonce.current });
         return;
       }
 
       selectFile(null);
       if (insideProject) {
         setExplorerRoot(null);
-        setDirectoryReveal((current) => ({ path, nonce: (current?.nonce ?? 0) + 1 }));
+        setDirectoryReveal({ path, nonce: ++directoryRevealNonce.current });
       } else {
         setDirectoryReveal(null);
         setExplorerRoot(path);
@@ -11127,9 +11132,8 @@ export function RightSidebar(
         setMobileFilePreviewOpen(false);
       }
     };
-    window.addEventListener(TERMINAL_DIRECTORY_OPEN_EVENT, handleTerminalDirectoryOpen);
-    return () => window.removeEventListener(TERMINAL_DIRECTORY_OPEN_EVENT, handleTerminalDirectoryOpen);
-  }, [handleFileSelect, isMobile, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, rootPath, selectFile, setExplorerRoot]);
+    handleTerminalDirectoryOpen();
+  }, [pendingTerminalPath, handleFileSelect, isMobile, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, rootPath, selectFile, setExplorerRoot]);
 
   useEffect(() => {
     if (!isOpen) {

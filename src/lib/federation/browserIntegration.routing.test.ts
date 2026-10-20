@@ -584,6 +584,42 @@ describe('browser federation entry routing', () => {
     expect(old.close).toHaveBeenCalledOnce();
     expect(mocks.save).toHaveBeenCalledOnce();
   });
+  it.each(['authorized', 'admin', 'directory-discovery', 'unprivileged', 'revoked-route', 'offline-tunnel', 'revoked-target'] as const)('recovers A through directly reachable B after the network changes (%s)', async mode => {
+    mocks.boot = 'A';
+    const a = { id: 'A', url: 'https://a.internal', targetPeerId: 'A', label: 'A', routes: [] };
+    const b = { id: 'B', url: 'https://b.internal', targetPeerId: 'B', label: 'B', routes: mode === 'directory-discovery' ? [] : [{ url: 'https://a.internal', targetPeerId: 'A' }] };
+    local.setItem('termdock.federation.connections.v1', JSON.stringify([a, b]));
+    mocks.saved.mockReturnValue(a);
+    const base = mocks.connect.getMockImplementation()!;
+    const entryRequests: ReturnType<typeof vi.fn>[] = [];
+    mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'A' && !args.socketFactory) throw new TypeError('new network cannot dial A');
+      const client = await base(args);
+      if (args.targetPeerId === 'B') {
+        client.request.mockImplementation(async (packet: { type: string }) => {
+          if (packet.type === 'route-targets') return { items: [{ serviceId: 'A', available: mode !== 'offline-tunnel', authorized: mode === 'authorized' || mode === 'directory-discovery' || mode === 'revoked-target' }], canManage: mode !== 'unprivileged' };
+          if (packet.type === 'route-access') return { grants: mode === 'revoked-route' ? [{ subjectId: 'phone', targetServiceId: 'A', revokedAt: 1 }] : [] };
+          return { routeToken: 'B-ticket' };
+        });
+        entryRequests.push(client.request);
+      }
+      if (args.targetPeerId === 'A' && mode === 'revoked-target') client.request.mockResolvedValue({ type: 'result', fullService: false, grants: [] });
+      return client;
+    });
+    const integration = await import('./browserIntegration');
+    if (mode === 'authorized' || mode === 'admin' || mode === 'directory-discovery') {
+      await integration.connectDevice(a);
+      expect(integration.currentSecureClient()?.targetPeerId).toBe('A');
+      expect(integration.currentConnectionPath()).toBe('relay');
+      expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ targetPeerId: 'A', routes: [{ url: 'https://b.internal', targetPeerId: 'B' }] }));
+      if (mode === 'admin') expect(entryRequests[0]).toHaveBeenCalledWith({ type: 'route-grant', serviceId: 'A', subjectId: 'phone' });
+    } else {
+      await expect(integration.connectDevice(a)).rejects.toThrow();
+      expect(mocks.save).not.toHaveBeenCalled();
+      expect(entryRequests.flatMap(fn => fn.mock.calls).some(([packet]) => packet.type === 'route-grant')).toBe(false);
+    }
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
   it('prefers direct C and never treats the currently connected B as an authorized backup', async () => {
     const integration = await import('./browserIntegration');
     await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B' });

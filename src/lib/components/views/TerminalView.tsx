@@ -54,7 +54,7 @@ import { buildReferenceInputText } from '../sidebar/referencePaths';
 import { uploadTemporaryFileAndInsertReference, UploadedReferenceRejectedError } from '../sidebar/temporaryImageUpload';
 import { requestReferenceInsertion } from '../sidebar/requestReferenceInsertion';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { resolveTerminalPath, TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
+import { resolveTerminalPath } from '../../terminal/pathLinks';
 import { getSessionFontSize, type SessionFontSizeChangeDetail } from '../../terminal/sessionFontSize';
 import type { VideoCompressionOptions, VideoCompressionPreparationState } from '../../terminal/videoCompression';
 import type { ImageCompressionOptions } from '../../terminal/imageCompression';
@@ -310,12 +310,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
 
     try {
-      const sidebar = useSidebarStore.getState();
-      sidebar.setRightTab('files');
-      sidebar.openRight();
-      window.dispatchEvent(new CustomEvent(TERMINAL_DIRECTORY_OPEN_EVENT, {
-        detail: { path: targetPath, kind, line },
-      }));
+      useSidebarStore.getState().openTerminalPath({ path: targetPath, kind, line });
     } catch {
       // Terminal output can outlive a deleted/moved path. Keep that stale text
       // harmless and leave the user's current sidebar context untouched.

@@ -3,6 +3,12 @@ import { create } from 'zustand';
 import { getSettings, updateSettings, type FileEntry, type FileSortMode, type FileWatchEvent, type GitChangedFile } from '../terminal/api';
 import { clearCache, readCache, writeCache } from '../utils/localStorageCache';
 
+export interface TerminalPathOpenRequest {
+  path: string;
+  kind: 'directory' | 'file';
+  line?: number;
+}
+
 export type RightSidebarTab = 'git' | 'files' | 'diff' | 'android' | 'computer' | 'architecture';
 export type RightSidebarLayoutPreference = 'auto' | 'narrow' | 'wide';
 
@@ -541,6 +547,9 @@ interface SidebarState {
   // so global keyboard shortcuts can open + focus it.
   rightSearchOpen: boolean;
 
+  // Retained until the lazily mounted sidebar consumes the terminal link.
+  pendingTerminalPath: TerminalPathOpenRequest | null;
+
   // File tree state
   rootPath: string | null;
   contextKey: string | null;
@@ -608,6 +617,7 @@ interface SidebarState {
   setRightPinned: (pinned: boolean) => void;
   setRightSidebarWidth: (width: number) => void;
   setRightSidebarLayoutPreference: (preference: RightSidebarLayoutPreference) => void;
+  openTerminalPath: (request: TerminalPathOpenRequest) => void;
   openRight: () => void;
   closeRight: () => void;
   toggleRight: () => void;
@@ -676,6 +686,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   initialRightSidebarStateBySession: new Map(),
   rightTab: 'files',
   rightSearchOpen: false,
+  pendingTerminalPath: null,
   rootPath: null,
   contextKey: null,
   rightSidebarWidthContextKey: null,
@@ -755,6 +766,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       writeRightSidebarLayoutPreference(preference);
       return { rightSidebarLayoutPreference: preference };
     }),
+  openTerminalPath: (request) => set((s) => {
+    writeRightSidebarTab(s.contextKey, 'files');
+    return { pendingTerminalPath: { ...request }, rightTab: 'files', rightOpen: true };
+  }),
   openRight: () => set({ rightOpen: true }),
   closeRight: () => set({ rightOpen: false, rightSearchOpen: false }),
   toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen, rightSearchOpen: s.rightOpen ? false : s.rightSearchOpen, leftOpen: s.rightOpen ? s.leftOpen : false })),
@@ -911,6 +926,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     const persistedSelectedFilePath = contextKey ? readSelectedFilePathCache()[contextKey] : undefined;
     return {
       rootPath: path,
+      pendingTerminalPath: null,
       contextKey,
       rightSidebarWidthContextKey,
       initialRightSidebarStateBySession,

@@ -1,4 +1,7 @@
 import WebSocket from 'ws';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import type { DirectTargetConfig } from './directRoutes.js';
 import { desktopDirectTargets } from './desktopTargets.js';
 import { RelayClient } from './relay.js';
 import { readPinnedCertificateAuthority } from './trustedCa.js';
@@ -9,6 +12,7 @@ interface SelfRelayTarget {
   serviceId: string;
   url: string;
   caFingerprint256?: string;
+  caPath?: string;
 }
 
 interface SelfRelayState {
@@ -21,6 +25,9 @@ interface SelfRelayState {
 
 export interface DesktopSelfRelayOptions {
   desktopFile: string;
+  /** Only administrator-configured, pinned destinations; never browser URLs. */
+  targets?: () => DirectTargetConfig[];
+  baseDir?: string;
   identity: Identity;
   serviceId: string;
   localOrigin: string;
@@ -74,8 +81,8 @@ function waitForReady(socket: WebSocket): Promise<void> {
 
 /**
  * A local Termdock service may publish only its own stable identity to other
- * services pinned by the same Desktop installation. Desktop supplies addresses
- * and CA pins only; the service proves itself with its own Noise identity and
+ * administrator-configured peers or services pinned by the same Desktop
+ * installation. Configuration supplies addresses and TLS trust only; the service proves itself with its own Noise identity and
  * no browser/device authorization is copied into this process.
  */
 export class DesktopSelfRelay {
@@ -101,17 +108,18 @@ export class DesktopSelfRelay {
 
   private refresh(): void {
     if (this.stopped) return;
-    const desired = new Map(desktopDirectTargets(this.options.desktopFile, this.options.serviceId)
-      .map(target => [target.serviceId, target as SelfRelayTarget]));
+    const desired = new Map([...desktopDirectTargets(this.options.desktopFile, this.options.serviceId), ...(this.options.targets?.() || [])]
+      .filter(target => target.serviceId !== this.options.serviceId)
+      .map(target => [target.serviceId, { ...target, url: new URL(target.url.replace(/^wss:/, 'https:')).origin } as SelfRelayTarget]));
     for (const [serviceId, state] of this.states) {
       const target = desired.get(serviceId);
-      const signature = target && JSON.stringify([target.url, target.caFingerprint256]);
+      const signature = target && JSON.stringify([target.url, target.caFingerprint256, target.caPath]);
       if (!target || signature !== state.signature) {
         this.stopState(state); this.states.delete(serviceId);
       }
     }
     for (const [serviceId, target] of desired) if (!this.states.has(serviceId)) {
-      const state: SelfRelayState = { signature: JSON.stringify([target.url, target.caFingerprint256]), stopped: false };
+      const state: SelfRelayState = { signature: JSON.stringify([target.url, target.caFingerprint256, target.caPath]), stopped: false };
       this.states.set(serviceId, state);
       void this.run(state, target);
     }
@@ -142,7 +150,8 @@ export class DesktopSelfRelay {
 
   private async connect(state: SelfRelayState, target: SelfRelayTarget): Promise<void> {
     const peer = { serviceId: target.serviceId, origin: target.url, ...(target.caFingerprint256 ? { caFingerprint256: target.caFingerprint256 } : {}) };
-    const rpc = await connectCollaborationRpc(this.options.identity, peer);
+    const configuredCa = target.caPath ? readFileSync(resolve(this.options.baseDir || process.cwd(), target.caPath)) : undefined;
+    const rpc = await connectCollaborationRpc(this.options.identity, peer, undefined, undefined, configuredCa);
     let selfRelayToken: string;
     try {
       const result = await rpc.request({ type: 'self-relay-ticket' });
@@ -152,7 +161,7 @@ export class DesktopSelfRelay {
     } finally { rpc.close(); }
     if (this.stopped || state.stopped) return;
 
-    const ca = target.caFingerprint256 ? await readPinnedCertificateAuthority(target.url, target.caFingerprint256) : undefined;
+    const ca = target.caFingerprint256 ? await readPinnedCertificateAuthority(target.url, target.caFingerprint256) : configuredCa;
     const upstream = await openSocket(relayEndpoint(target.url, selfRelayToken), ca);
     state.upstream = upstream;
     try {
