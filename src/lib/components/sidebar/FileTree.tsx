@@ -42,7 +42,7 @@ interface FileTreeProps {
   onFileSelect: (path: string) => void;
   /** Reuses the explorer tree as a directory picker without exposing file actions. */
   directoriesOnly?: boolean;
-  onPathReference?: (path: string, key?: string) => void;
+  onPathReference?: (path: string, key?: string, source?: HTMLElement) => void;
   referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
@@ -276,7 +276,7 @@ interface FileTreeItemProps {
   depth: number;
   onFileSelect: (path: string) => void;
   directoriesOnly?: boolean;
-  onPathReference?: (path: string, key?: string) => void;
+  onPathReference?: (path: string, key?: string, source?: HTMLElement) => void;
   referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
@@ -416,7 +416,7 @@ const FileTreeItem = memo(function FileTreeItem({
 
   const handleReferenceClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    onPathReference?.(node.path, referenceKey);
+    onPathReference?.(node.path, referenceKey, event.currentTarget as HTMLElement);
   }, [onPathReference, node.path, referenceKey]);
 
   const handleDirectoryRootClick = useCallback((event: React.MouseEvent) => {
@@ -801,7 +801,7 @@ interface FileSearchResultItemProps {
   node: FileTreeNode;
   rootPath: string;
   onFileSelect: (path: string) => void;
-  onPathReference?: (path: string, key?: string) => void;
+  onPathReference?: (path: string, key?: string, source?: HTMLElement) => void;
   referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
@@ -863,7 +863,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
 
   const handleReferenceClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    onPathReference?.(node.path, referenceKey);
+    onPathReference?.(node.path, referenceKey, event.currentTarget as HTMLElement);
   }, [onPathReference, node.path, referenceKey]);
 
   const handleDirectoryPinClick = useCallback((event: React.MouseEvent) => {
@@ -1133,7 +1133,7 @@ interface ContentSearchResultItemProps {
   selectedFilePath: string | null;
   query: string;
   onContentMatchSelect?: (path: string, line: number) => void;
-  onPathReference?: (path: string, key?: string) => void;
+  onPathReference?: (path: string, key?: string, source?: HTMLElement) => void;
   referenceSelection?: FileTreeReferenceSelection;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
@@ -1220,7 +1220,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              onPathReference(entry.path, referenceKey);
+              onPathReference(entry.path, referenceKey, event.currentTarget);
             }}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-[11px] font-semibold transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${referenceSelection ? 'ml-1 min-h-11 min-w-11' : textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}

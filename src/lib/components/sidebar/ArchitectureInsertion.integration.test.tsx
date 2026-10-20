@@ -69,8 +69,8 @@ beforeEach(() => {
   useTerminalStore.getState().setTerminalSession('beta', { sessionId: 'backend-beta', mode: 'shell', cols: 80, rows: 24 });
 });
 afterEach(() => { cleanup(); useSidebarStore.setState(sidebarInitial); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-function mount(extra: { suspended?: boolean; beta?: boolean; width?: number } = {}) {
-  return render(<I18nProvider><TerminalView sessionId="alpha" mode="shell" isActive focusSuspended={extra.suspended} suppressKeyboard />
+function mount(extra: { suspended?: boolean; allowOwnedPaste?: boolean; beta?: boolean; width?: number } = {}) {
+  return render(<I18nProvider><TerminalView sessionId="alpha" mode="shell" isActive focusSuspended={extra.suspended} allowOwnedPasteWhileFocusSuspended={extra.allowOwnedPaste} suppressKeyboard />
     {extra.beta && <TerminalView sessionId="beta" mode="shell" isActive={false} suppressKeyboard />}
     <RightSidebar isOpen sessionId="alpha" drawerWidthPx={extra.width ?? 900} onClose={vi.fn()} />
   </I18nProvider>);
@@ -165,4 +165,15 @@ it.each(['target changes', 'layer closes', 'connection epoch changes'])('does no
   expect(screen.queryByText('Review the current input or context draft, then send it to your Agent.')).toBeNull();
   expect(env.send).toHaveBeenCalledOnce();
   if (stale !== 'layer closes') await screen.findByText('Could not add the prompt. Check the current session, or copy it below.');
+});
+
+it.each([900, 390])('delivers the explorer root reference through the real sidebar router and terminal input at width %s', async width => {
+  useSidebarStore.setState({ rightTab: 'files', fileSortModesHydrated: true, hideGitIgnoredRootsHydrated: true });
+  mount({ width, suspended: true, allowOwnedPaste: true });
+  await waitFor(() => expect(env.streams.has('backend-alpha')).toBe(true));
+  await act(async () => { env.inputs.get('alpha')!('x'); env.inputs.get('alpha')!('x', { targeted: true }); });
+  expect(env.send).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole('button', { name: 'Insert current folder reference' }));
+  await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+  expect(env.send.mock.calls[0]).toEqual(['backend-alpha', '\x1b[200~/project \x1b[201~']);
 });

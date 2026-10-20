@@ -2,6 +2,11 @@
 
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useRef } from 'react';
+import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
+import { requestReferenceInsertion } from './requestReferenceInsertion';
+import { authorizeOwnedTerminalPaste, consumeOwnedTerminalPaste } from '../../terminal/ownedPaste';
+import { terminalSequencePayload } from '../../terminal/sequencePayload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
@@ -94,7 +99,7 @@ describe('FileTree file deletion', () => {
     more = screen.getByRole('button', { name: 'More file actions' }); more.focus(); await user.tab();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Insert file reference into active terminal' }));
     await user.keyboard(' ');
-    expect(onPathReference).toHaveBeenCalledExactlyOnceWith('/workspace/notes.txt', 'path:/workspace/notes.txt');
+    expect(onPathReference).toHaveBeenCalledExactlyOnceWith('/workspace/notes.txt', 'path:/workspace/notes.txt', screen.getByRole('button', { name: 'Insert file reference into active terminal' }));
     expect(onFileSelect).not.toHaveBeenCalled();
   });
 
@@ -109,7 +114,7 @@ describe('FileTree file deletion', () => {
     expect(more.getAttribute('aria-expanded')).toBe('true');
     expect(useSidebarStore.getState().expandedPaths.has('/workspace/src')).toBe(false);
     await user.keyboard('{Escape}'); more.focus(); await user.tab(); await user.keyboard('{Enter}');
-    expect(onPathReference).toHaveBeenCalledWith('/workspace/src', 'path:/workspace/src');
+    expect(onPathReference).toHaveBeenCalledWith('/workspace/src', 'path:/workspace/src', screen.getByRole('button', { name: 'Insert file reference into active terminal' }));
     expect(useSidebarStore.getState().expandedPaths.has('/workspace/src')).toBe(false);
   });
 
@@ -137,8 +142,41 @@ describe('FileTree file deletion', () => {
     }
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Insert file reference into active terminal' }));
     await user.keyboard('{Enter}');
-    expect(onPathReference).toHaveBeenCalledExactlyOnceWith('/workspace/notes.txt', 'path:/workspace/notes.txt');
+    expect(onPathReference).toHaveBeenCalledExactlyOnceWith('/workspace/notes.txt', 'path:/workspace/notes.txt', screen.getByRole('button', { name: 'Insert file reference into active terminal' }));
     expect(onFileSelect).not.toHaveBeenCalled();
+  });
+
+  it.each(['tree', 'search'] as const)('inserts a %s directory reference from a keyboard layer as an owned paste', async mode => {
+    const user = userEvent.setup();
+    const node: FileTreeNode = { name: 'src', path: '/workspace/src', type: 'directory', expanded: false, loaded: true, children: [] };
+    useSidebarStore.setState({ directoryCache: new Map([['/workspace', [node]]]) });
+    searchFilesStreamMock.mockImplementation(async (_root, _query, onProgress) => {
+      onProgress({ entries: [node], done: true });
+    });
+    const payloads: string[] = [];
+    const accepted = vi.fn();
+    const receive = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      const token = authorizeOwnedTerminalPaste(detail, 'shell');
+      const payload = terminalSequencePayload(detail.text, { ...detail, ownedPaste: token ?? undefined });
+      const ok = !!token && consumeOwnedTerminalPaste(token, 'shell', payload);
+      if (ok) payloads.push(payload);
+      window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', { detail: { nonce: detail.nonce, ok } }));
+    };
+    function ExplorerLayer() {
+      const ref = useRef<HTMLDivElement>(null);
+      useKeyboardLayer(ref, true, () => {});
+      return <div ref={ref}><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={vi.fn()} query={mode === 'search' ? 'src' : undefined}
+        onPathReference={(path, _key, source) => { void requestReferenceInsertion(path + ' ', 'shell', () => true, source).then(accepted); }} /></div>;
+    }
+    window.addEventListener('termdock-insert-reference', receive);
+    try {
+      await renderFixture(<I18nProvider><ExplorerLayer /></I18nProvider>);
+      await user.click(await screen.findByRole('button', { name: 'Insert file reference into active terminal' }));
+      await waitFor(() => expect(accepted).toHaveBeenCalledWith(true));
+      expect(payloads).toEqual(['\x1b[200~/workspace/src \x1b[201~']);
+      expect(useSidebarStore.getState().expandedPaths.has('/workspace/src')).toBe(false);
+    } finally { window.removeEventListener('termdock-insert-reference', receive); }
   });
 
   it('only deletes after the user confirms the irreversible action', async () => {

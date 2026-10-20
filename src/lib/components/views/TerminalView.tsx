@@ -118,6 +118,8 @@ interface TerminalViewProps {
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
   focusSuspended?: boolean;
+  /** A visible sidebar may explicitly paste while ordinary terminal input stays paused. */
+  allowOwnedPasteWhileFocusSuspended?: boolean;
   deferCursorUntilPositioned?: boolean;
   isLayoutVisible?: boolean;
   focusRequestToken?: number;
@@ -150,6 +152,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
   focusSuspended: externalFocusSuspended = false,
+  allowOwnedPasteWhileFocusSuspended = false,
   deferCursorUntilPositioned = false,
   isLayoutVisible = true,
   focusRequestToken = 0,
@@ -377,6 +380,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   focusSuspendedRef.current = focusSuspended;
   const externalFocusSuspendedRef = React.useRef(externalFocusSuspended);
   externalFocusSuspendedRef.current = externalFocusSuspended;
+  const allowOwnedPasteWhileFocusSuspendedRef = React.useRef(allowOwnedPasteWhileFocusSuspended);
+  allowOwnedPasteWhileFocusSuspendedRef.current = allowOwnedPasteWhileFocusSuspended;
   const isMobileRef = React.useRef(isMobile);
   const desktopResumeFocusTimerRef = React.useRef<number | null>(null);
   const desktopInteractionFocusTimerRef = React.useRef<number | null>(null);
@@ -1952,9 +1957,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const ownedPaste = options?.ownedPaste
         ? consumeOwnedTerminalPaste(options.ownedPaste, sessionId, data) : false;
       if (options?.ownedPaste && !ownedPaste) return Promise.resolve(false);
-      if (externalFocusSuspendedRef.current || ((focusSuspendedRef.current || isKeyboardLayerOpen()) && !ownedPaste)) {return Promise.resolve(false);}
+      if ((externalFocusSuspendedRef.current && !(ownedPaste && allowOwnedPasteWhileFocusSuspendedRef.current)) || ((focusSuspendedRef.current || isKeyboardLayerOpen()) && !ownedPaste)) {return Promise.resolve(false);}
       const ownedCurrent = () => !!options?.ownedPaste && isOwnedTerminalPasteCurrent(options.ownedPaste, sessionId)
-        && isActiveRef.current && !externalFocusSuspendedRef.current && isStreamReadyRef.current
+        && isActiveRef.current && (!externalFocusSuspendedRef.current || allowOwnedPasteWhileFocusSuspendedRef.current) && isStreamReadyRef.current
         && !isConnectionTransitionRef.current && !document.hidden && navigator.onLine !== false && isWorkspaceActive();
       if (ownedPaste && !ownedCurrent()) return Promise.resolve(false);
       if (!isActiveRef.current && !options?.targeted) {

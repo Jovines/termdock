@@ -9105,7 +9105,7 @@ export function RightSidebar(
         type="button"
         onClick={(event) => {
           event.stopPropagation();
-          insertPathReference(absolutePath, referenceKey);
+          insertPathReference(absolutePath, referenceKey, event.currentTarget);
         }}
         {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
         className={`inline-flex h-6 shrink-0 items-center justify-center overflow-hidden rounded-md text-[11px] font-semibold opacity-100 transition-[max-width,padding,opacity,transform,background-color,color] active:scale-95 ${
@@ -11205,7 +11205,7 @@ export function RightSidebar(
         </div>
         <button
           type="button"
-          onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot, fileTreeRootReferenceKey ?? undefined)}
+          onClick={(event) => fileTreeRoot && insertPathReference(fileTreeRoot, fileTreeRootReferenceKey ?? undefined, event.currentTarget)}
           disabled={!fileTreeRoot}
           {...(fileTreeRoot && fileTreeRootReferenceKey ? getReferenceLongPressHandlers(getPathReferenceText(fileTreeRoot), fileTreeRootReferenceKey) : {})}
           className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${

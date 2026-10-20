@@ -369,6 +369,7 @@ interface MultiTerminalViewProps {
   toolbarPresets?: ToolbarPresetDefinition[];
   showDebug?: boolean;
   terminalFocusAvailable?: boolean;
+  terminalReferenceAvailable?: boolean;
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
   connectionPrioritySessionId?: string | null;
@@ -421,6 +422,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   toolbarPresets = [],
   showDebug,
   terminalFocusAvailable = true,
+  terminalReferenceAvailable = terminalFocusAvailable,
   defaultSessionMode = 'shell',
   defaultTmuxSessionName = '',
   connectionPrioritySessionId = null,
@@ -2249,6 +2251,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             toolbarPresets={toolbarPresets}
             isActive={isActive}
             focusSuspended={!terminalFocusAvailable || pendingSwitchSessionId !== null}
+            allowOwnedPasteWhileFocusSuspended={terminalReferenceAvailable && pendingSwitchSessionId === null}
             deferCursorUntilPositioned={
               pendingSwitchSessionId === session.id
               || (session.mode === 'tmux' && !contentReadySessionIds.has(session.id))

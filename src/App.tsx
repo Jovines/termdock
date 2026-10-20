@@ -1892,7 +1892,8 @@ function App() {
   const [programRules, setProgramRules] = React.useState<ProgramLabelRule[]>(cachedProgramRules ?? []);
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
-  const terminalFocusAvailable = !mainCollaborationGroup && !activeHistoryOverlay
+  const terminalReferenceAvailable = !mainCollaborationGroup
+    && (!activeHistoryOverlay || activeHistoryOverlay === 'right-sidebar' || activeHistoryOverlay === 'right-sidebar-file-preview')
     && !isLocalAccessOpen
     && !isNotificationsOpen
     && !isToolbarPresetsOpen
@@ -1901,6 +1902,7 @@ function App() {
     && !tabMenuSessionId
     && !sidebarCloseChoiceSessionId
     && !newSessionShortcutConfirmMode;
+  const terminalFocusAvailable = terminalReferenceAvailable && !activeHistoryOverlay;
 
   const applyToolbarPresetsDoc = React.useCallback((doc: { version?: unknown; presets?: unknown; updatedAt?: unknown }) => {
     const storedVersion = typeof doc.version === 'number' ? doc.version : 0;
@@ -3567,6 +3569,7 @@ function App() {
                 toolbarPresets={toolbarPresets}
                 showDebug={showDebug && isDesktopViewport}
                 terminalFocusAvailable={terminalFocusAvailable}
+                terminalReferenceAvailable={terminalReferenceAvailable}
                 defaultSessionMode={newSessionMode}
                 defaultTmuxSessionName={newSessionTmuxName}
                 connectionPrioritySessionId={connectionPrioritySessionId}
