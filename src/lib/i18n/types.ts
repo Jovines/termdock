@@ -266,6 +266,8 @@ export type TranslationDictionary = {
     scrcpyUnavailable: string;
     connecting: string;
     reconnecting: string;
+    retrySchedule: string;
+    lastError: string;
     retry: string;
     idleHint: string;
     noDevicesHint: string;

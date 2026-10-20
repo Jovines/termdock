@@ -108,6 +108,32 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     } finally { cleanup(); vi.useRealTimers(); }
   });
 
+  it('自动重试期间显示原始错误、次数及延迟，连接中仍保留原因', async () => {
+    await streamingView(async () => {});
+    const connection = (globalThis as Record<string, unknown>).__mirrorConnection as {
+      callbacks: { onState: (state: string, error?: string) => void };
+    };
+    const reason = 'SCRCPY_CONNECT_TIMEOUT: adb device offline; serial=test-phone';
+    (globalThis as Record<string, unknown>).__pauseMirrorConnect = true;
+    vi.useFakeTimers();
+    try {
+      act(() => connection.callbacks.onState('error', reason));
+      expect(screen.getByText(reason)).toBeTruthy();
+      expect(screen.getByText('Retry 1 starts in 0.7 seconds')).toBeTruthy();
+      await act(() => vi.advanceTimersByTimeAsync(700));
+      expect(screen.getByText(reason)).toBeTruthy();
+      const next = (globalThis as Record<string, unknown>).__mirrorConnection as typeof connection;
+      act(() => next.callbacks.onState('error', 'VIDEO_DECODER_ERROR: resource reclaimed'));
+      expect(screen.getByText('VIDEO_DECODER_ERROR: resource reclaimed')).toBeTruthy();
+      expect(screen.getByText('Retry 2 starts in 1.4 seconds')).toBeTruthy();
+      act(() => next.callbacks.onState('streaming'));
+      expect(screen.queryByText('Last error (retained while reconnecting)')).toBeNull();
+    } finally {
+      delete (globalThis as Record<string, unknown>).__pauseMirrorConnect;
+      cleanup(); vi.useRealTimers();
+    }
+  });
+
   it('原视频流恢复出帧后取消重连，卸载也取消重连', async () => {
     const view = await streamingView(async () => {});
     const connection = (globalThis as Record<string, unknown>).__mirrorConnection as {

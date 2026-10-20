@@ -118,6 +118,7 @@ export class AndroidMirrorController {
   private configData: Uint8Array | null = null;
   private header: MirrorHeader | null = null;
   private closedByUser = false;
+  private failureReason: string | null = null;
   private lastMessageAt = 0;
   private lastFrameAt = 0;
   private lastResetAt = 0;
@@ -160,25 +161,33 @@ export class AndroidMirrorController {
     this.serial = serial;
     this.autoQuality = quality?.id === 'auto';
     this.closedByUser = false;
+    this.failureReason = null;
     this.callbacks.onState('connecting');
     let socket: WebSocket;
     try { socket = secureSocket(androidStreamPath(serial, quality)); }
     catch (error) {
-      this.callbacks.onState('error', error instanceof Error ? error.message : 'ANDROID_STREAM_FAILED');
+      this.reportError(error instanceof Error ? error.message : 'ANDROID_STREAM_FAILED');
       return;
     }
     this.socket = socket;
     socket.onopen = () => { this.lastMessageAt = Date.now(); };
     socket.onmessage = event => { if (!this.closedByUser) this.handleMessage(event.data); };
-    socket.onerror = () => { if (!this.closedByUser) this.callbacks.onState('error', 'SCRCPY_CONNECTION_LOST'); };
-    socket.onclose = () => {
+    socket.onerror = () => { if (!this.closedByUser && !this.failureReason) this.reportError('SCRCPY_CONNECTION_LOST'); };
+    socket.onclose = event => {
       this.finishBitrate(false, 'BITRATE_CONNECTION_CLOSED: preview connection closed');
       this.liveBitrate = false;
       this.teardownTimers();
-      if (!this.closedByUser) this.callbacks.onState('error', 'SCRCPY_CONNECTION_CLOSED');
-      else this.callbacks.onState('idle');
+      if (!this.closedByUser) {
+        const closeDetail = `WebSocket close code=${event.code}${event.reason ? `: ${event.reason}` : ''}`;
+        this.reportError(`${this.failureReason || 'SCRCPY_CONNECTION_CLOSED'}\n${closeDetail}`);
+      } else this.callbacks.onState('idle');
     };
     this.startTimers();
+  }
+
+  private reportError(message: string): void {
+    this.failureReason = message;
+    this.callbacks.onState('error', message);
   }
 
   disconnect(): void {
@@ -307,16 +316,17 @@ export class AndroidMirrorController {
         };
         this.lastFrameAt = Date.now();
         this.callbacks.onHeader(this.header);
+        this.failureReason = null;
         this.callbacks.onState('streaming');
         break;
       case 'frame':
         this.handleFrame(message);
         break;
       case 'error':
-        this.callbacks.onState('error', message.message || 'SCRCPY_ERROR');
+        this.reportError(message.message || 'SCRCPY_ERROR');
         break;
       case 'closed':
-        this.callbacks.onState('error', 'SCRCPY_SESSION_CLOSED');
+        this.reportError(this.failureReason || 'SCRCPY_SESSION_CLOSED');
         break;
       case 'pong':
         if (this.pingAt !== null) {
@@ -381,7 +391,7 @@ export class AndroidMirrorController {
           this.warnedUnsupported = true;
           this.callbacks.onWarning('当前浏览器不支持 WebCodecs（VideoDecoder），无法解码投屏画面。');
         }
-        this.callbacks.onState('error', 'VIDEO_DECODER_UNSUPPORTED');
+        this.reportError('VIDEO_DECODER_UNSUPPORTED');
         return;
       }
       try {
@@ -393,14 +403,14 @@ export class AndroidMirrorController {
             this.configured = false;
             this.decoderRecovering = true;
             console.warn('[android] video decoder error', error);
-            this.callbacks.onState('error', `VIDEO_DECODER_ERROR: ${error.message}`);
+            this.reportError(`VIDEO_DECODER_ERROR: ${error.message}`);
             this.sendControl(serializeSimple(CONTROL_TYPE_RESET_VIDEO));
           },
         });
       } catch (error) {
         console.warn('[android] VideoDecoder unavailable', error);
         this.callbacks.onWarning(`创建 VideoDecoder 失败：${error instanceof Error ? error.message : String(error)}`);
-        this.callbacks.onState('error', 'VIDEO_DECODER_UNSUPPORTED');
+        this.reportError('VIDEO_DECODER_UNSUPPORTED');
         return;
       }
     }
@@ -433,7 +443,7 @@ export class AndroidMirrorController {
       }
     }
     this.callbacks.onWarning(`解码器配置失败（${failures.join('；')}）`);
-    this.callbacks.onState('error', 'VIDEO_DECODER_UNSUPPORTED');
+    this.reportError('VIDEO_DECODER_UNSUPPORTED');
   }
 
   private decode(bytes: Uint8Array, key: boolean, pts?: string): void {
@@ -483,6 +493,7 @@ export class AndroidMirrorController {
     // A new decoder may recover on the existing stream before the view retries.
     if (this.decoderRecovering) {
       this.decoderRecovering = false;
+      this.failureReason = null;
       this.callbacks.onState('streaming');
     }
   }

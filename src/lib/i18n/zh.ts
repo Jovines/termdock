@@ -249,6 +249,8 @@ export const zh: TranslationDictionary = {
     scrcpyUnavailable: '本机未找到 scrcpy / scrcpy-server，无法投屏。macOS: brew install scrcpy；Ubuntu: sudo apt install scrcpy；或在 ~/.termdock/.env 设置 TERMDOCK_SCRCPY_BIN。',
     connecting: '正在连接设备…',
     reconnecting: '连接断开，正在自动重连…',
+    retrySchedule: '第 {attempt} 次重试将在 {seconds} 秒后开始',
+    lastError: '最近一次错误（重连期间保留）',
     retry: '重试',
     idleHint: '选择设备开始投屏',
     noDevicesHint: '用 USB 连接手机并开启 USB 调试，或在此添加网络设备',

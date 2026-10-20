@@ -168,11 +168,12 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   });
   const [mirrorState, setMirrorState] = useState<MirrorState>('idle');
   const [mirrorError, setMirrorError] = useState<string | null>(null);
+  const [lastMirrorError, setLastMirrorError] = useState<string | null>(null);
   const [header, setHeader] = useState<MirrorHeader | null>(null);
   const [stats, setStats] = useState<MirrorStats>({ fps: 0, kbps: 0, width: 0, height: 0, received: 0, decoded: 0, controls: 0, last: '' });
   const [bitrateWarning, setBitrateWarning] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
-  const [retryScheduled, setRetryScheduled] = useState(false);
+  const [retrySchedule, setRetrySchedule] = useState<{ attempt: number; delayMs: number } | null>(null);
   const [ripples, setRipples] = useState<{ id: number; left: number; top: number }[]>([]);
   const [press, setPress] = useState<{ left: number; top: number } | null>(null);
   const [trail, setTrail] = useState<{ x: number; y: number }[]>([]);
@@ -282,6 +283,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     controllerRef.current = null;
     setMirrorState('idle');
     setMirrorError(null);
+    setLastMirrorError(null);
     setHeader(null);
   }, [cancelPointerGesture]);
 
@@ -291,6 +293,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     cancelPointerGesture();
     controllerRef.current?.disconnect();
     setMirrorError(null);
+    if (connectedSerial.current !== serial) { setLastMirrorError(null); retryAttempt.current = 0; }
     if (!preserveFrame && connectedSerial.current !== serial) setHeader(null);
     connectedSerial.current = serial;
     setWarning(null);
@@ -300,7 +303,13 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         if (controllerRef.current !== controller || qualityRef.current.id !== 'auto') return;
         setBitrateWarning(supported ? null : detail ?? 'BITRATE_REASON_UNAVAILABLE');
       },
-      onState: (state, error) => { if (controllerRef.current !== controller) return; setMirrorState(state); setMirrorError(error ?? null); },
+      onState: (state, error) => {
+        if (controllerRef.current !== controller) return;
+        setMirrorState(state);
+        setMirrorError(error ?? null);
+        if (state === 'error') setLastMirrorError(error || 'SCRCPY_ERROR');
+        else if (state === 'streaming') setLastMirrorError(null);
+      },
       onHeader: next => { if (controllerRef.current === controller) setHeader(next); },
       onStats: next => { if (controllerRef.current === controller) setStats(next); },
       onWarning: message => { if (controllerRef.current === controller) setWarning(message); },
@@ -501,12 +510,19 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
 
   // 断链自动重连（指数退避）；缺依赖/无权限/解码器不可用等致命错误不重试。
   useEffect(() => {
-    if (mirrorState === 'streaming') { retryAttempt.current = 0; setRetryScheduled(false); return; }
-    if (mirrorState !== 'error' || !selectedSerial || !isRetryableMirrorError(mirrorError ?? '')) return;
+    if (mirrorState === 'streaming') retryAttempt.current = 0;
+    if (mirrorState !== 'error' || !selectedSerial || !isRetryableMirrorError(mirrorError ?? '')) {
+      setRetrySchedule(null);
+      return;
+    }
     const delay = Math.min(8000, 700 * 2 ** retryAttempt.current);
-    retryAttempt.current += 1;
-    setRetryScheduled(true);
-    const timer = window.setTimeout(() => { setRetryScheduled(false); connect(selectedSerial); }, delay);
+    const attempt = retryAttempt.current + 1;
+    setRetrySchedule({ attempt, delayMs: delay });
+    const timer = window.setTimeout(() => {
+      retryAttempt.current = attempt;
+      setRetrySchedule(null);
+      connect(selectedSerial);
+    }, delay);
     return () => window.clearTimeout(timer);
   }, [mirrorState, mirrorError, selectedSerial, connect]);
 
@@ -1448,7 +1464,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
               <>
                 <Circle size={14} className="text-destructive" />
                 <span className="max-w-[80%] text-destructive">
-                  {retryScheduled ? t('android.reconnecting') : androidErrorText(mirrorError || '')}
+                  {retrySchedule
+                    ? t('android.retrySchedule', { attempt: retrySchedule.attempt, seconds: retrySchedule.delayMs / 1000 })
+                    : androidErrorText(mirrorError || '')}
                 </span>
                 {selectedSerial && (
                   <button
@@ -1460,6 +1478,15 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
                   </button>
                 )}
               </>
+            )}
+            {lastMirrorError && (mirrorState === 'error' || mirrorState === 'connecting') && (
+              <div className="max-h-[40%] w-[90%] shrink-0 select-text overflow-auto rounded bg-surface-2 px-3 py-2 text-left" role="status">
+                <span className="text-muted-foreground">{t('android.lastError')}</span>
+                {androidErrorText(lastMirrorError) !== lastMirrorError && (
+                  <p className="mt-1 whitespace-pre-wrap break-words">{androidErrorText(lastMirrorError)}</p>
+                )}
+                <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[10px] text-foreground">{lastMirrorError}</pre>
+              </div>
             )}
             {mirrorState === 'idle' && !adbMissing && !scrcpyMissing && (
               <>

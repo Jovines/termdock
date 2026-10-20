@@ -249,6 +249,8 @@ export const en: TranslationDictionary = {
     scrcpyUnavailable: 'scrcpy / scrcpy-server not found; mirroring is unavailable. macOS: brew install scrcpy; Ubuntu: sudo apt install scrcpy; or set TERMDOCK_SCRCPY_BIN in ~/.termdock/.env.',
     connecting: 'Connecting to device…',
     reconnecting: 'Connection lost, reconnecting…',
+    retrySchedule: 'Retry {attempt} starts in {seconds} seconds',
+    lastError: 'Last error (retained while reconnecting)',
     retry: 'Retry',
     idleHint: 'Pick a device to start mirroring',
     noDevicesHint: 'Connect a phone over USB with debugging enabled, or add a network device',

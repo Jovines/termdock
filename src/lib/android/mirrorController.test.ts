@@ -129,3 +129,29 @@ describe('transient video decoder recovery', () => {
     } finally { controller.disconnect(); vi.unstubAllGlobals(); }
   });
 });
+
+describe('mirror failure diagnostics', () => {
+  it.each([true, false])('preserves the server cause and includes socket close details (server error: %s)', serverError => {
+    const socket = {
+      readyState: 1, send: vi.fn(), close: vi.fn(),
+      onmessage: null as null | ((event: { data: string }) => void),
+      onerror: null as null | (() => void),
+      onclose: null as null | ((event: { code: number; reason: string }) => void),
+    };
+    vi.mocked(secureSocket).mockReturnValue(socket as unknown as WebSocket);
+    const onState = vi.fn();
+    const controller = new AndroidMirrorController(document.createElement('canvas'), {
+      onState, onHeader: vi.fn(), onWarning: vi.fn(), onStats: vi.fn(),
+    });
+    try {
+      controller.connect('test');
+      if (serverError) {
+        socket.onmessage?.({ data: JSON.stringify({ type: 'error', message: 'SCRCPY_CONNECT_TIMEOUT: device offline' }) });
+        socket.onmessage?.({ data: '{"type":"closed"}' });
+      }
+      socket.onerror?.();
+      socket.onclose?.({ code: 1011, reason: 'upstream closed' });
+      expect(onState).toHaveBeenLastCalledWith('error', `${serverError ? 'SCRCPY_CONNECT_TIMEOUT: device offline' : 'SCRCPY_CONNECTION_LOST'}\nWebSocket close code=1011: upstream closed`);
+    } finally { controller.disconnect(); }
+  });
+});
