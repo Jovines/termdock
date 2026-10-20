@@ -8,6 +8,7 @@ export interface AndroidDevice {
   isNetwork?: boolean;
   androidVersion?: string;
   sdk?: number;
+  physicalId?: string;
 }
 
 export interface AndroidDeviceList {

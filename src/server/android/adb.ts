@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 import { isIP } from 'node:net';
+import { createHash } from 'node:crypto';
 
 const execFileAsync = promisify(execFile) as unknown as (
   file: string,
@@ -73,6 +74,7 @@ export interface AndroidDeviceInfo {
   isNetwork?: boolean;
   androidVersion?: string;
   sdk?: number;
+  physicalId?: string;
 }
 
 function parseDeviceLine(line: string): AndroidDeviceInfo | null {
@@ -96,7 +98,7 @@ function parseDeviceLine(line: string): AndroidDeviceInfo | null {
   return info;
 }
 
-export async function getDeviceProperties(serial: string): Promise<Pick<AndroidDeviceInfo, 'androidVersion' | 'sdk' | 'model'>> {
+export async function getDeviceProperties(serial: string): Promise<Pick<AndroidDeviceInfo, 'androidVersion' | 'sdk' | 'model' | 'physicalId'>> {
   try {
     // 无参数 getprop 一次读取全部属性；多个属性名会被解释成 name/default 并报错。
     const output = await runAdb(['shell', 'getprop'], { serial, timeout: 8000 });
@@ -106,9 +108,13 @@ export async function getDeviceProperties(serial: string): Promise<Pick<AndroidD
       if (match) values.set(match[1], match[2]);
     }
     const sdk = Number.parseInt(values.get('ro.build.version.sdk') || '', 10);
-    const result: Pick<AndroidDeviceInfo, 'androidVersion' | 'sdk' | 'model'> = {};
+    const result: Pick<AndroidDeviceInfo, 'androidVersion' | 'sdk' | 'model' | 'physicalId'> = {};
     if (values.get('ro.product.model')) result.model = values.get('ro.product.model');
     if (values.get('ro.build.version.release')) result.androidVersion = values.get('ro.build.version.release');
+    // Expose a digest rather than the hardware serial; model names are not identities.
+    const identity = ['ro.serialno', 'ro.boot.serialno'].map(key => values.get(key)?.trim())
+      .find(value => value && !/^(?:unknown|null|none|default|0+|0123456789abcdef)$/i.test(value));
+    if (identity) result.physicalId = createHash('sha256').update(`adb-device:${identity}`).digest('hex');
     if (Number.isFinite(sdk)) result.sdk = sdk;
     return result;
   } catch {

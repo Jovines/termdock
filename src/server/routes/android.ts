@@ -135,11 +135,15 @@ export function handleAndroidWebSocket(
   };
   const shutdown = (reason?: string) => {
     if (closed) return;
+    // send() rejects closed sessions: deliver the cause before marking it closed.
+    if (reason) {
+      console.warn(`[android] session failed serial=${serial}: ${reason}`);
+      send({ type: 'error', message: reason });
+    }
     closed = true;
     clearInterval(flowTimer);
     if (statsTimer) clearInterval(statsTimer);
     if (DEBUG_ANDROID) console.log(`[android] session end serial=${serial} sent=${sent} acked=${acked} reason=${reason ?? 'ok'}`);
-    if (reason) send({ type: 'error', message: reason });
     try { session?.stop(); } catch { /* ignore */ }
     session = null;
     try { socket.close(1000, reason ? 'error' : 'closed'); } catch { /* ignore */ }

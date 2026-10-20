@@ -13,6 +13,7 @@ import { useI18n, type TranslationKey } from '../../i18n';
 import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { AutoQuality } from '../../android/autoQuality';
+import { androidDeviceOptions } from '../../android/deviceOptions';
 import { AndroidMirrorController, type MirrorHeader, type MirrorState, type MirrorStats } from '../../android/mirrorController';
 import {
   captureMirrorScreenshot, formatRecordingElapsed,
@@ -230,7 +231,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
 
   useEffect(() => { void refreshDevices(); }, [refreshDevices]);
 
-  const devices = listing?.devices ?? [];
+  const devices = useMemo(() => androidDeviceOptions(listing?.devices ?? [], selectedSerial), [listing?.devices, selectedSerial]);
   const connectedDevice = devices.find(device => device.serial === selectedSerial) ?? null;
   // 依赖缺失是可操作的引导，用专门的 i18n 文案而不是把原始错误码丢给用户。
   const adbMissing = Boolean(listError && /ADB_NOT_FOUND|ADB_UNAVAILABLE/i.test(listError));

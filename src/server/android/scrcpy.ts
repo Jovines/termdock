@@ -4,6 +4,7 @@ import net from 'node:net';
 import { delimiter, dirname, join } from 'node:path';
 import { randomInt } from 'node:crypto';
 import { adbSearchPath, resolveAdbBinary } from './adb.js';
+import { connectScrcpyForward } from './scrcpyForward.js';
 
 import { LiveBitrateChannel, inspectLiveBitrate, resolveBundledPreviewServer, bitrateOverlayPath, bitrateOverlayRemote } from './liveBitrate.js';
 
@@ -132,8 +133,12 @@ function scidHex(scid: number): string {
   return scid.toString(16).padStart(8, '0');
 }
 
-/** 单设备的一条 scrcpy 会话：推送 server → adb reverse → 启动 server → 解析 H.264/H.265 流。 */
+/** 单设备的一条 scrcpy 会话：推送 server → ADB 隧道 → 启动 server → 解析视频流。 */
 export class ScrcpySession {
+  // Network ADB can acknowledge reverse rules without carrying their data.
+  private readonly tunnelForward: boolean;
+  private forwardPort = 0;
+  private readonly connectionAbort = new AbortController();
   private readonly scid = randomInt(1, 0x7fffffff);
   private bitrateChannel: LiveBitrateChannel | null = null;
   private child: ChildProcess | null = null;
@@ -151,13 +156,14 @@ export class ScrcpySession {
   private started = false;
   private deviceName = '';
   private resolveHeader: (() => void) | null = null;
+  private rejectHeader: ((error: Error) => void) | null = null;
   private readonly logLines: string[] = [];
 
   constructor(
     private readonly serial: string,
     private readonly events: ScrcpySessionEvents,
     private readonly options: ScrcpyStartOptions = {},
-  ) {}
+  ) { this.tunnelForward = /[:.]/.test(serial); }
 
   get running(): boolean { return this.started && !this.stopped; }
 
@@ -170,6 +176,7 @@ export class ScrcpySession {
 
   private fail(error: Error): void {
     if (this.stopped) return;
+    this.rejectHeader?.(error);
     this.events.onError(error);
     void this.stop();
   }
@@ -183,15 +190,21 @@ export class ScrcpySession {
       const remoteJar = remoteJarPath(version);
       await runAdbCapture(['-s', this.serial, 'push', serverJar, remoteJar], 60_000);
 
-      const server = net.createServer();
-      this.server = server;
-      server.on('connection', socket => this.acceptSocket(socket));
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => { this.port = (server.address() as net.AddressInfo).port; resolve(); });
-      });
-
-      await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:scrcpy_${scidHex(this.scid)}`, `tcp:${this.port}`], 15_000);
+      if (this.tunnelForward) {
+        const assigned = await runAdbCapture(['-s', this.serial, 'forward', 'tcp:0', `localabstract:scrcpy_${scidHex(this.scid)}`], 15_000);
+        const port = Number(assigned);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('SCRCPY_FORWARD_INVALID_PORT');
+        this.forwardPort = port;
+      } else {
+        const server = net.createServer();
+        this.server = server;
+        server.on('connection', socket => this.acceptSocket(socket));
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(0, '127.0.0.1', () => { this.port = (server.address() as net.AddressInfo).port; resolve(); });
+        });
+        await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:scrcpy_${scidHex(this.scid)}`, `tcp:${this.port}`], 15_000);
+      }
 
       let liveBitrate = false;
       let bitrateFailure = await inspectLiveBitrate(serverJar, version);
@@ -221,6 +234,7 @@ export class ScrcpySession {
       if (this.stopped) {
         this.bitrateChannel?.close();
         this.server?.close();
+        await this.removeForward();
         await Promise.allSettled(['scrcpy_', 'termdock_bitrate_'].map(prefix =>
           runAdbCapture(['-s', this.serial, 'reverse', '--remove', `localabstract:${prefix}${scidHex(this.scid)}`], 8000)));
         return;
@@ -235,7 +249,7 @@ export class ScrcpySession {
         'log_level=info',
         'audio=false',
         'control=true',
-        'tunnel_forward=false',
+        `tunnel_forward=${this.tunnelForward}`,
         'power_on=true',
         'stay_awake=true',
         'clipboard_autosync=false',
@@ -244,14 +258,21 @@ export class ScrcpySession {
       ];
       if (this.options.maxFps && this.options.maxFps > 0) args.push(`max_fps=${this.options.maxFps}`);
 
+      const headerReady = this.waitForHeader();
+      // Handle early process exit even while forward is establishing its sockets.
+      void headerReady.catch(() => {});
       const child = spawn(adbBinary(), args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PATH: adbSearchPath() } });
       this.child = child;
       child.stdout?.on('data', chunk => this.log(String(chunk).replace(/^\[server\]\s*/, '')));
       child.stderr?.on('data', chunk => this.log(String(chunk)));
       child.on('error', error => this.fail(error instanceof Error ? error : new Error('SCRCPY_SPAWN_FAILED')));
-      child.on('close', () => { if (!this.stopped) this.fail(new Error(this.logLines.at(-1) || 'SCRCPY_SERVER_EXITED')); });
+      child.on('close', (code, signal) => {
+        if (!this.stopped) this.fail(new Error(`SCRCPY_SERVER_EXITED: code=${code ?? 'null'} signal=${signal ?? 'none'}; tunnel=${this.tunnelForward ? 'forward' : 'reverse'}; video=${this.videoSocket ? 'connected' : 'not_connected'}\n${this.logLines.slice(-8).join('\n')}`));
+      });
 
-      await this.waitForHeader();
+      await Promise.all([headerReady, this.tunnelForward
+        ? connectScrcpyForward(this.forwardPort, this.connectionAbort.signal, socket => this.acceptSocket(socket))
+        : Promise.resolve()]);
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error('SCRCPY_START_FAILED');
       if (!this.stopped) this.fail(normalized);
@@ -261,8 +282,10 @@ export class ScrcpySession {
 
   private waitForHeader(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { this.resolveHeader = null; reject(new Error('SCRCPY_CONNECT_TIMEOUT')); }, CONNECT_TIMEOUT_MS);
-      this.resolveHeader = () => { clearTimeout(timer); this.resolveHeader = null; resolve(); };
+      const clear = () => { clearTimeout(timer); this.resolveHeader = null; this.rejectHeader = null; };
+      const timer = setTimeout(() => { clear(); reject(new Error('SCRCPY_CONNECT_TIMEOUT')); }, CONNECT_TIMEOUT_MS);
+      this.resolveHeader = () => { clear(); resolve(); };
+      this.rejectHeader = error => { clear(); reject(error); };
     });
   }
 
@@ -272,7 +295,7 @@ export class ScrcpySession {
       this.videoSocket = socket;
       socket.on('data', chunk => this.readVideo(chunk));
       socket.on('error', error => this.fail(error instanceof Error ? error : new Error('VIDEO_SOCKET_ERROR')));
-      socket.on('close', () => { if (!this.stopped) this.fail(new Error(this.logLines.at(-1) || 'VIDEO_SOCKET_CLOSED')); });
+      socket.on('close', () => { if (!this.stopped) this.fail(new Error(`VIDEO_SOCKET_CLOSED: tunnel=${this.tunnelForward ? 'forward' : 'reverse'}\n${this.logLines.slice(-8).join('\n')}`)); });
       return;
     }
     if (!this.controlSocket) {
@@ -395,9 +418,20 @@ export class ScrcpySession {
     return this.bitrateChannel?.setBitrate(value) ?? Promise.resolve(false);
   }
 
+  private async removeForward(): Promise<void> {
+    const port = this.forwardPort;
+    this.forwardPort = 0;
+    if (port) {
+      try { await runAdbCapture(['-s', this.serial, 'forward', '--remove', `tcp:${port}`], 8000); }
+      catch { /* The device or ADB may already have removed this exact rule. */ }
+    }
+  }
+
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.connectionAbort.abort();
+    this.rejectHeader?.(new Error('SCRCPY_SESSION_STOPPED'));
     activeSessions.delete(this);
     this.bitrateChannel?.close();
     const child = this.child;
@@ -409,6 +443,7 @@ export class ScrcpySession {
     try { this.server?.close(); } catch { /* ignore */ }
     this.server = null;
     if (child) { try { child.kill('SIGKILL'); } catch { /* ignore */ } }
+    await this.removeForward();
     try { await runAdbCapture(['-s', this.serial, 'reverse', '--remove', `localabstract:scrcpy_${scidHex(this.scid)}`], 8000); }
     catch { /* reverse 可能已随进程退出被清理 */ }
     try { await runAdbCapture(['-s', this.serial, 'reverse', '--remove', `localabstract:termdock_bitrate_${scidHex(this.scid)}`], 8000); }

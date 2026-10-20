@@ -26,6 +26,14 @@ checksum before writing). Its source is https://github.com/Genymobile/scrcpy/tre
 An explicit TERMDOCK_SCRCPY_SERVER override is honored. Missing/invalid bundled
 assets fall back to the host server; unverified host builds then retain current
 quality with a diagnostic. Rejections and channel failures also preserve video.
+
+Network ADB preview sessions use `adb forward` for video and control; USB
+sessions retain `adb reverse`. The forward connector waits for the scrcpy dummy
+byte before opening control and removes only its own allocated TCP rule on stop.
+The optional bitrate channel still uses a separate reverse rule. If reverse rules
+register but carry no data, its handshake times out with a diagnostic; preview
+continues at the configured bitrate.
+
 Extend the allowlist only after verifying the CaptureReset ABI and real-device
 behavior. No global scrcpy installation is modified.
 
@@ -40,8 +48,15 @@ desktop runtime packager. Apache-2.0 license is included.
 
 Validation: Mi MIX 2S / Android 13 accepted 1.8 → 6 → 0.9 → 4 Mbps within
 one session, continuously producing frames, with one video header and one codec
-configuration packet. Other vendor encoders and macOS/iOS clients require real
-device verification.
+configuration packet.
+
+Mac server and iPhone preview rendering were also verified with network
+PTP-AN00 / Android 16 and Pixel 9 / Android 15 using forward video. On those cloud
+routes, reverse registration succeeded without carrying data: bitrate handshakes
+timed out while preview stayed alive. Physical identity properties matched across
+the PTP IPv4/IPv6 routes; option grouping and selected-route preservation are
+covered by tests. These observations do not establish live bitrate support on
+those devices or full native input/recording acceptance.
 
 Diagnostics distinguish version/build, missing/corrupt extension, ADB push/reverse,
 15s handshake timeout, 2.5s device ACK timeout, 4s client confirmation timeout,

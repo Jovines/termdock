@@ -18,6 +18,9 @@ if (args[0] === 'devices') {
   if (process.env.TD_TEST_PROP_MODE === 'failure') process.exit(1);
   if (process.env.TD_TEST_PROP_MODE === 'diagnostic') console.log('getprop: Max 2 arguments');
   else console.log('[ro.build.version.sdk]: [35]\\n[unrelated]: [ignore]\\n[ro.product.model]: [PTP-AN00]\\n[ro.build.version.release]: [15]');
+  if (process.env.TD_TEST_PROP_MODE === 'identity') console.log('[ro.serialno]: [test-hardware-serial]');
+  if (process.env.TD_TEST_PROP_MODE === 'fallback') console.log('[ro.serialno]: [unknown]\\n[ro.boot.serialno]: [test-hardware-serial]');
+  if (process.env.TD_TEST_PROP_MODE === 'placeholder') console.log('[ro.serialno]: [unknown]\\n[ro.boot.serialno]: [00000000]');
 } else if (['connect', 'disconnect'].includes(args[0]) && args[1] === '${serial}') {
   console.log(args.join(' '));
 } else { console.error('unexpected adb arguments: ' + JSON.stringify(args)); process.exit(1); }
@@ -44,6 +47,18 @@ describe('Android IPv6 devices', () => {
     vi.stubEnv('TD_TEST_PROP_MODE', mode);
     const { listDevices } = await import('./adb');
     expect(await listDevices()).toEqual([expect.objectContaining({ model: 'PTP AN00' })]);
+  });
+  it.each(['identity', 'fallback'])('provides a private physical grouping key from %s', async mode => {
+    vi.stubEnv('TD_TEST_PROP_MODE', mode);
+    const { listDevices } = await import('./adb');
+    const devices = await listDevices();
+    expect(devices[0].physicalId).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(devices)).not.toContain('test-hardware-serial');
+  });
+  it('does not assign a shared identity for placeholder hardware properties', async () => {
+    vi.stubEnv('TD_TEST_PROP_MODE', 'placeholder');
+    const { listDevices } = await import('./adb');
+    expect((await listDevices())[0].physicalId).toBeUndefined();
   });
   it('preserves bracketed IPv6 for connect and disconnect', async () => {
     const { normalizeAddress, connectDevice, disconnectDevice } = await import('./adb');

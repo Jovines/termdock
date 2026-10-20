@@ -23,7 +23,16 @@ async function endpoint() {
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
   return { server, url: `ws://127.0.0.1:${address.port}` };
 }
-async function dial(url: string) { const ws = new WebSocket(url); cleanup.push(() => ws.terminate()); await once(ws, 'open'); return ws; }
+async function dial(url: string, waitForReady = false) {
+  const ws = new WebSocket(url); cleanup.push(() => ws.terminate());
+  // The test entry's ready envelope belongs to its handshake, not RelayClient.
+  const opened = once(ws, 'open');
+  if (waitForReady) {
+    const [, [raw]] = await Promise.all([opened, once(ws, 'message')]);
+    expect(JSON.parse(String(raw))).toEqual({ type: 'ready' });
+  } else await opened;
+  return ws;
+}
 
 describe('live bitrate encrypted stream', () => {
   it.each([false, true])('works without a service worker, including relay-only target=%s and offline failure', async relayed => {
@@ -43,7 +52,7 @@ describe('live bitrate encrypted stream', () => {
       const relay = new RelayRouter({ authenticate: context => context as string, allowRegister: p => p === 'target', allowRoute: p => p === 'browser' });
       cleanup.push(() => relay.close());
       entry.server.on('connection', (ws, req) => { void relay.attach(ws, req.url === '/target' ? 'target' : 'browser').then(ok => { if (ok) ws.send(JSON.stringify({ type: 'ready' })); }); });
-      const registration = await dial(entry.url + '/target');
+      const registration = await dial(entry.url + '/target', true);
       const client = new RelayClient(registration, { targets: new Map([[runtime.serviceId, () => dial(target.url)]]) });
       cleanup.push(() => client.close());
       const registered = once(registration, 'pong'); registration.ping(); await registered;
@@ -92,6 +101,13 @@ describe('live bitrate encrypted stream', () => {
     await vi.waitFor(() => expect(messages).toContainEqual({ type: 'bitrate-support', supported: false, detail }));
     expect(wire.every(data => !data.includes('BITRATE_ACK_TIMEOUT'))).toBe(true);
     expect(stop).not.toHaveBeenCalled();
+    // A device/server failure must arrive before the encrypted logical socket closes.
+    const failure = 'SCRCPY_START_FAILED: private-device encoder unavailable';
+    eventsRef!.onError(new Error(failure));
+    await vi.waitFor(() => expect(stream.readyState).toBe(3));
+    expect(messages).toContainEqual({ type: 'error', message: failure });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(wire.every(data => !data.includes(failure))).toBe(true);
     stream.close(); client.close();
     expect(() => stream.send('{}')).toThrow();
 

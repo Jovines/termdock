@@ -21,7 +21,16 @@ async function endpoint() {
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
   return { server, url: `ws://127.0.0.1:${address.port}` };
 }
-async function dial(url: string) { const ws = new WebSocket(url); cleanup.push(() => ws.terminate()); await once(ws, 'open'); return ws; }
+async function dial(url: string, waitForReady = false) {
+  const ws = new WebSocket(url); cleanup.push(() => ws.terminate());
+  // The test entry's ready envelope belongs to its handshake, not RelayClient.
+  const opened = once(ws, 'open');
+  if (waitForReady) {
+    const [, [raw]] = await Promise.all([opened, once(ws, 'message')]);
+    expect(JSON.parse(String(raw))).toEqual({ type: 'ready' });
+  } else await opened;
+  return ws;
+}
 
 describe('server recording encrypted API', () => {
   it.each([false, true])('works without a service worker, including relay-only target=%s and offline failure', async relayed => {
@@ -41,7 +50,7 @@ describe('server recording encrypted API', () => {
       const relay = new RelayRouter({ authenticate: context => context as string, allowRegister: p => p === 'target', allowRoute: p => p === 'browser' });
       cleanup.push(() => relay.close());
       entry.server.on('connection', (ws, req) => { void relay.attach(ws, req.url === '/target' ? 'target' : 'browser').then(ok => { if (ok) ws.send(JSON.stringify({ type: 'ready' })); }); });
-      const registration = await dial(entry.url + '/target');
+      const registration = await dial(entry.url + '/target', true);
       const client = new RelayClient(registration, { targets: new Map([[runtime.serviceId, () => dial(target.url)]]) });
       cleanup.push(() => client.close());
       const registered = once(registration, 'pong'); registration.ping(); await registered;
