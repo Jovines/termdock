@@ -1,3 +1,4 @@
+import { RELAY_CLIENT_CONNECT_TIMEOUT_MS } from '../../server/federation/streamLimits';
 import { connect, type SecureClient } from './secureClient';
 import { getIdentity } from './deviceIdentity';
 import { createRelaySocketFactory } from './relaySocket';
@@ -23,7 +24,7 @@ export async function connectBackgroundTarget(target: BackgroundTarget): Promise
       const ticket = await entry.request({ type: 'route-ticket', serviceId: target.targetPeerId }, { timeoutMs: 3000 });
       if (typeof ticket.routeToken !== 'string') continue;
       const url = endpoint(route.url, true); url.searchParams.set('routeToken', ticket.routeToken);
-      return await connect({ url: url.href, identity, targetPeerId: target.targetPeerId, socketFactory: createRelaySocketFactory(target.targetPeerId), signal: AbortSignal.timeout(5000) });
+      return await connect({ url: url.href, identity, targetPeerId: target.targetPeerId, socketFactory: createRelaySocketFactory(target.targetPeerId), signal: AbortSignal.timeout(RELAY_CLIENT_CONNECT_TIMEOUT_MS) });
     } catch { /* No plaintext fallback. */ }
     finally { entry?.close(); }
   }

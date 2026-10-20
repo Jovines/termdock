@@ -1,3 +1,4 @@
+import { RELAY_CLIENT_CONNECT_TIMEOUT_MS } from '../../server/federation/streamLimits.js';
 import { fromBase64, toBase64 } from '../../server/federation/packets.js';
 
 const MAX_FRAME_BYTES = 256 * 1024;
@@ -27,7 +28,7 @@ export class RelaySocket extends EventTarget {
     this.upstream.addEventListener('open', () => {
       this.connectionTimings.entryOpenMs = performance.now() - started;
     });
-    this.deadline = setTimeout(() => this.fail('Relay connection timed out'), 20_000);
+    this.deadline = setTimeout(() => this.fail('Relay connection timed out'), RELAY_CLIENT_CONNECT_TIMEOUT_MS);
     this.upstream.addEventListener('message', event => {
       if (this.readyState === 3) return;
       try {

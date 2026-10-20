@@ -1,3 +1,4 @@
+import { RELAY_CLIENT_CONNECT_TIMEOUT_MS } from '../../server/federation/streamLimits';
 import { listServiceConnections, normalizeServiceAddress, saveServiceConnection, rememberServiceConnection, type ServiceRoute } from '../services/serviceDirectory';
 import { connect, SecureSocket, type SecureClient } from './secureClient';
 import { createRelaySocketFactory } from './relaySocket';
@@ -192,9 +193,16 @@ export function connectionRoutes(intent: ConnectionIntent): ServiceRoute[] {
     const legacy = JSON.parse(localStorage.getItem(ENTRY_KEY) || 'null') as ConnectionIntent | null;
     if (legacy && legacy.targetPeerId !== intent.targetPeerId && new URL(legacy.url).host === new URL(intent.url).host) candidates.push(legacy);
   } catch { /* Optional legacy metadata does not authorize a route. */ }
-  return candidates.flatMap((route, index) => {
-    try { return route.targetPeerId && route.targetPeerId !== intent.targetPeerId && candidates.findIndex(item => item.targetPeerId === route.targetPeerId) === index ? [{ url: normalizeServiceAddress(route.url), targetPeerId: route.targetPeerId }] : []; }
-    catch { return []; }
+  const seen = new Set<string>();
+  return candidates.flatMap(route => {
+    try {
+      if (!route.targetPeerId || route.targetPeerId === intent.targetPeerId) return [];
+      const url = normalizeServiceAddress(route.url);
+      const key = JSON.stringify([route.targetPeerId, url]);
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ url, targetPeerId: route.targetPeerId }];
+    } catch { return []; }
   }).slice(0, 4);
 }
 /** Every direct address must authenticate as the same pinned service. Keep
@@ -237,7 +245,7 @@ async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal
       if (typeof ticket.routeToken !== 'string') throw new Error('入口未允许此设备连接该服务。');
       const url = new URL(secureUrl(route.url)); url.pathname = '/api/federation/relay'; url.searchParams.set('routeToken', ticket.routeToken);
       return await connect({ url: url.href, targetPeerId: intent.targetPeerId, identity, socketFactory: createRelaySocketFactory(intent.targetPeerId),
-        signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+        signal: AbortSignal.any([signal, AbortSignal.timeout(RELAY_CLIENT_CONNECT_TIMEOUT_MS)]) });
     } finally { if (!reused) entry.close(); }
   } });
   const preferred = preferredConnectionPath(intent.targetPeerId);
@@ -286,8 +294,9 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
   const entryFor = async (route: ServiceRoute, signal?: AbortSignal) => {
     if (previous && !previous.closed && previous.targetPeerId === route.targetPeerId) return previous;
     if (previousEntry && !previousEntry.closed && previousEntry.targetPeerId === route.targetPeerId) return previousEntry;
-    const cached = entryCache.get(route.targetPeerId); if (cached && !cached.closed) return cached;
-    const entry = await connectEntry(route, signal); openedEntries.add(entry); entryCache.set(route.targetPeerId, entry); return entry;
+    const key = JSON.stringify([route.targetPeerId, route.url]);
+    const cached = entryCache.get(key); if (cached && !cached.closed) return cached;
+    const entry = await connectEntry(route, signal); openedEntries.add(entry); entryCache.set(key, entry); return entry;
   };
   try {
     if (intent.routeCode && intent.entryServiceId) {
@@ -328,7 +337,7 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
         if (typeof ticket.routeToken !== 'string' || !ticket.routeToken) throw new Error('入口未允许此设备连接该服务。');
         const url = new URL(secureUrl(route.url)); url.pathname = '/api/federation/relay'; url.searchParams.set('routeToken', ticket.routeToken);
         client = await connect({ url: url.href, targetPeerId: intent.targetPeerId, pairingCode, identity,
-          socketFactory: createRelaySocketFactory(intent.targetPeerId), signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+          socketFactory: createRelaySocketFactory(intent.targetPeerId), signal: AbortSignal.any([signal, AbortSignal.timeout(RELAY_CLIENT_CONNECT_TIMEOUT_MS)]) });
         pairingCode = undefined;
         await validate(client, signal);
         return { client, entry: candidateEntry, path: 'relay' };
@@ -562,7 +571,7 @@ export async function prepareRelayConnection(route: ServiceRoute, targetServiceI
     if (!target) throw new Error('该服务已不可见，请刷新列表或请入口管理员授权。');
     if (!target.available) throw new Error('入口暂时无法中转到这台服务，请稍后重试。');
     const known = (await listServiceConnections()).find(item => item.targetPeerId === target.serviceId);
-    const routes = [route, ...(known?.routes || []).filter(item => item.targetPeerId !== route.targetPeerId)];
+    const routes = [route, ...(known?.routes || []).filter(item => item.targetPeerId !== route.targetPeerId || normalizeServiceAddress(item.url) !== normalizeServiceAddress(route.url))];
     if (routes.length > 4) throw new Error('这台服务已保存 4 个备用连接，请先移除一个后重试。');
     if (!target.authorized) {
       if (!result.canManage) throw new Error('请先让入口管理员授权此设备。');

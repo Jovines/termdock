@@ -1,3 +1,4 @@
+import { RELAY_PROVIDER_CONNECT_TIMEOUT_MS, RELAY_ROUTE_OPEN_TIMEOUT_MS } from './streamLimits.js';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { WebSocket, RawData } from 'ws';
@@ -11,10 +12,10 @@ export type RelayFrame =
   | { type: 'close'; streamId: string; reason?: string };
 export interface RelayLimits {
   maxFrameBytes?: number; maxBufferedBytes?: number; maxStreams?: number;
-  heartbeatMs?: number; maxRouteTtlMs?: number; connectTimeoutMs?: number;
+  heartbeatMs?: number; maxRouteTtlMs?: number; connectTimeoutMs?: number; routeTimeoutMs?: number;
 }
 const defaults = { maxFrameBytes: 256 * 1024, maxBufferedBytes: 1024 * 1024,
-  maxStreams: 128, heartbeatMs: 30_000, maxRouteTtlMs: 90_000, connectTimeoutMs: 10_000 };
+  maxStreams: 128, heartbeatMs: 30_000, maxRouteTtlMs: 90_000, connectTimeoutMs: RELAY_PROVIDER_CONNECT_TIMEOUT_MS, routeTimeoutMs: RELAY_ROUTE_OPEN_TIMEOUT_MS };
 type Limits = typeof defaults;
 const identifier = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_.:-]{1,160}$/.test(v);
 function parse(raw: RawData, limits: Limits): RelayFrame {
@@ -73,7 +74,10 @@ function memoryPair(): [WebSocket, WebSocket] {
   return [left as unknown as WebSocket, right as unknown as WebSocket];
 }
 interface Peer<P> { ws: WebSocket; principal: P; streams: Map<string, Stream<P>> }
-interface Stream<P> { owner: Peer<P>; ownerId: string; provider: Peer<P>; providerId: string; serviceId: string }
+interface Stream<P> {
+  owner: Peer<P>; ownerId: string; provider: Peer<P>; providerId: string; serviceId: string;
+  opened: boolean; expires: number; attempted: Set<Peer<P>>; deadline?: ReturnType<typeof setTimeout>;
+}
 export interface RelayRouterOptions<P> extends RelayLimits {
   /** Authenticate every incoming connection, before accepting registrations or opens. */
   authenticate: (context: unknown) => Promise<P | null> | P | null;
@@ -84,14 +88,16 @@ export interface RelayRouterOptions<P> extends RelayLimits {
 export class RelayRouter<P = string> {
   private limits: Limits;
   private peers = new Set<Peer<P>>();
-  private routes = new Map<string, { peer: Peer<P>; expires: number }>();
+  private routes = new Map<string, Map<Peer<P>, { expires: number; retryAfter: number }>>();
   private sweep: ReturnType<typeof setInterval>;
   private directPeers = new WeakMap<Peer<P>, string>();
   private stopped = false;
   constructor(private options: RelayRouterOptions<P>) {
     this.limits = { ...defaults, ...options };
     this.sweep = setInterval(() => {
-      for (const [id, route] of this.routes) if (route.expires <= Date.now() || !this.canRegister(route.peer, id)) this.withdraw(id, route.peer);
+      for (const [id, routes] of this.routes) for (const [peer, route] of routes) {
+        if (route.expires <= Date.now() || peer.ws.readyState !== 1 || !this.canRegister(peer, id)) this.withdraw(id, peer);
+      }
       for (const peer of this.peers) for (const stream of [...peer.streams.values()]) {
         if (stream.owner === peer && !this.canRoute(peer, stream.serviceId)) this.closeStream(stream, 'Authorization revoked');
       }
@@ -104,16 +110,22 @@ export class RelayRouter<P = string> {
   private canRoute(peer: Peer<P>, serviceId: string): boolean {
     return !this.directPeers.has(peer) && this.options.allowRoute(peer.principal, serviceId);
   }
+  private providers(serviceId: string): Peer<P>[] {
+    return [...(this.routes.get(serviceId) || [])]
+      .filter(([peer, route]) => route.expires > Date.now() && peer.ws.readyState === 1 && this.canRegister(peer, serviceId))
+      // Recent target failures lower priority but never make the only route disappear.
+      .sort((a, b) => Math.max(0, a[1].retryAfter - Date.now()) - Math.max(0, b[1].retryAfter - Date.now()))
+      .map(([peer]) => peer);
+  }
   hasRoute(serviceId: string): boolean {
-    const route = this.routes.get(serviceId);
-    return !this.stopped && !!route && route.expires > Date.now() && route.peer.ws.readyState === 1 && this.canRegister(route.peer, serviceId);
+    return !this.stopped && this.providers(serviceId).length > 0;
   }
   activeRouteIds(): string[] {
     return [...this.routes.keys()].filter(serviceId => this.hasRoute(serviceId));
   }
   /** Trusted local configuration only. Clients never supply a target URL or factory. */
   registerDirect(serviceId: string, connect: () => Promise<WebSocket>): () => void {
-    if (this.stopped || !identifier(serviceId) || typeof connect !== 'function' || this.hasRoute(serviceId)) throw new Error('Invalid or already registered direct target');
+    if (this.stopped || !identifier(serviceId) || typeof connect !== 'function' || [...this.peers].some(peer => this.directPeers.get(peer) === serviceId)) throw new Error('Invalid or already registered direct target');
     const [routerWire, clientWire] = memoryPair();
     // The private WeakMap marks this peer; its placeholder principal is never
     // passed to externally supplied authentication/authorization callbacks.
@@ -129,6 +141,7 @@ export class RelayRouter<P = string> {
   }
   /** Caller awaits attach before completing its application-level ready handshake. */
   async attach(ws: WebSocket, context: unknown): Promise<boolean> {
+    if (this.stopped) { ws.close(1001, 'Router stopped'); return false; }
     // Reject early application frames rather than buffering untrusted traffic while authenticating.
     let early = false;
     const rejectEarly = () => { early = true; ws.close(1008, 'Authentication pending'); };
@@ -136,7 +149,7 @@ export class RelayRouter<P = string> {
     let principal: P | null;
     try { principal = await this.options.authenticate(context); } catch { principal = null; }
     ws.off('message', rejectEarly);
-    if (principal === null || early || ws.readyState !== 1) { ws.close(1008, 'Relay authentication required'); return false; }
+    if (this.stopped || principal === null || early || ws.readyState !== 1) { ws.close(1008, 'Relay authentication required'); return false; }
     const peer: Peer<P> = { ws, principal, streams: new Map() };
     this.peers.add(peer);
     watch(ws, this.limits, () => this.remove(peer));
@@ -146,47 +159,92 @@ export class RelayRouter<P = string> {
     return true;
   }
   private withdraw(serviceId: string, peer: Peer<P>) {
-    if (this.routes.get(serviceId)?.peer === peer) this.routes.delete(serviceId);
-    for (const stream of [...peer.streams.values()]) if (stream.serviceId === serviceId && stream.provider === peer) this.closeStream(stream, 'Route unavailable');
+    const routes = this.routes.get(serviceId);
+    routes?.delete(peer);
+    if (!routes?.size) this.routes.delete(serviceId);
+    for (const stream of [...peer.streams.values()]) if (stream.serviceId === serviceId && stream.provider === peer) this.providerFailed(stream, 'Route unavailable');
   }
   private remove(peer: Peer<P>) {
     this.peers.delete(peer);
-    for (const [id, route] of this.routes) if (route.peer === peer) this.withdraw(id, peer);
-    for (const stream of [...peer.streams.values()]) this.closeStream(stream, 'Relay disconnected');
+    // Consumers cannot fail over after disconnecting; remove them first.
+    for (const stream of [...peer.streams.values()]) if (stream.owner === peer) this.closeStream(stream, 'Relay disconnected');
+    for (const [id, routes] of this.routes) if (routes.has(peer)) this.withdraw(id, peer);
+    for (const stream of [...peer.streams.values()]) this.providerFailed(stream, 'Relay disconnected');
   }
   private closeStream(s: Stream<P>, reason: string) {
-    s.owner.streams.delete(s.ownerId); s.provider.streams.delete(s.providerId);
+    if (s.owner.streams.get(s.ownerId) !== s) return;
+    clearTimeout(s.deadline);
+    s.owner.streams.delete(s.ownerId);
+    if (s.provider.streams.get(s.providerId) === s) {
+      s.provider.streams.delete(s.providerId);
+      send(s.provider.ws, { type: 'close', streamId: s.providerId, reason }, this.limits);
+    }
     send(s.owner.ws, { type: 'close', streamId: s.ownerId, reason }, this.limits);
+  }
+  private providerFailed(s: Stream<P>, reason: string) {
+    if (s.owner.streams.get(s.ownerId) !== s) return;
+    clearTimeout(s.deadline);
+    s.provider.streams.delete(s.providerId);
     send(s.provider.ws, { type: 'close', streamId: s.providerId, reason }, this.limits);
+    const route = this.routes.get(s.serviceId)?.get(s.provider);
+    if (route) route.retryAfter = Date.now() + 5000;
+    // Never replay ciphertext (or terminal input) onto a replacement transport.
+    if (s.opened || !this.openProvider(s)) this.closeStream(s, reason);
+  }
+  private openProvider(s: Stream<P>): boolean {
+    if (this.stopped || Date.now() >= s.expires || s.owner.ws.readyState !== 1 || !this.canRoute(s.owner, s.serviceId)) return false;
+    for (const provider of this.providers(s.serviceId)) {
+      if (provider === s.owner || s.attempted.has(provider) || provider.streams.size >= this.limits.maxStreams) continue;
+      s.attempted.add(provider); s.provider = provider; s.providerId = randomUUID();
+      provider.streams.set(s.providerId, s);
+      if (!send(provider.ws, { type: 'open', streamId: s.providerId, serviceId: s.serviceId }, this.limits)) {
+        provider.streams.delete(s.providerId); continue;
+      }
+      s.deadline = setTimeout(() => this.providerFailed(s, 'Target timeout'), Math.min(this.limits.connectTimeoutMs, s.expires - Date.now()));
+      s.deadline.unref?.();
+      return true;
+    }
+    return false;
   }
   private receive(peer: Peer<P>, f: RelayFrame) {
     if (f.type === 'register') {
       if (!f.serviceIds.every(id => this.canRegister(peer, id))) throw new Error('Registration denied');
+      for (const [id, routes] of this.routes) if (routes.has(peer) && !f.serviceIds.includes(id)) this.withdraw(id, peer);
       for (const id of f.serviceIds) {
-        const old = this.routes.get(id);
-        if (old && old.peer !== peer && old.expires > Date.now()) throw new Error('Route already registered');
+        let routes = this.routes.get(id);
+        if (!routes) { routes = new Map(); this.routes.set(id, routes); }
+        routes.set(peer, { expires: Date.now() + Math.min(f.ttlMs, this.limits.maxRouteTtlMs), retryAfter: routes.get(peer)?.retryAfter ?? 0 });
       }
-      for (const [id, r] of this.routes) if (r.peer === peer && !f.serviceIds.includes(id)) this.withdraw(id, peer);
-      for (const id of f.serviceIds) this.routes.set(id, { peer, expires: Date.now() + Math.min(f.ttlMs, this.limits.maxRouteTtlMs) });
       return;
     }
     if (f.type === 'open') {
-      const route = this.routes.get(f.serviceId);
       if (peer.streams.has(f.streamId)) throw new Error('Duplicate stream');
-      if (!this.canRoute(peer, f.serviceId) || !route || route.expires <= Date.now() || route.peer === peer) {
+      if (!this.canRoute(peer, f.serviceId) || !this.hasRoute(f.serviceId)) {
         send(peer.ws, { type: 'close', streamId: f.streamId, reason: 'Route unavailable or denied' }, this.limits); return;
       }
-      if (peer.streams.size >= this.limits.maxStreams || route.peer.streams.size >= this.limits.maxStreams) throw new Error('Stream budget exceeded');
-      const s: Stream<P> = { owner: peer, ownerId: f.streamId, provider: route.peer, providerId: randomUUID(), serviceId: f.serviceId };
-      peer.streams.set(s.ownerId, s); route.peer.streams.set(s.providerId, s);
-      if (!send(route.peer.ws, { ...f, streamId: s.providerId }, this.limits)) this.closeStream(s, 'Relay disconnected');
+      if (peer.streams.size >= this.limits.maxStreams) throw new Error('Stream budget exceeded');
+      const s: Stream<P> = { owner: peer, ownerId: f.streamId, provider: peer, providerId: '', serviceId: f.serviceId, opened: false, expires: Date.now() + this.limits.routeTimeoutMs, attempted: new Set() };
+      peer.streams.set(s.ownerId, s);
+      if (!this.openProvider(s)) this.closeStream(s, 'Route unavailable or congested');
       return;
     }
     const s = peer.streams.get(f.streamId);
     if (!s) return;
-    if (!this.canRoute(s.owner, s.serviceId) || !this.canRegister(s.provider, s.serviceId)) { this.closeStream(s, 'Authorization revoked'); return; }
-    if (f.type === 'close') { this.closeStream(s, 'Channel closed'); return; }
+    if (!this.canRoute(s.owner, s.serviceId)) { this.closeStream(s, 'Authorization revoked'); return; }
+    const registration = this.routes.get(s.serviceId)?.get(s.provider);
+    if (!registration || registration.expires <= Date.now() || !this.canRegister(s.provider, s.serviceId)) {
+      this.withdraw(s.serviceId, s.provider); return;
+    }
+    if (f.type === 'close') {
+      if (peer === s.provider) this.providerFailed(s, 'Channel closed');
+      else this.closeStream(s, 'Channel closed');
+      return;
+    }
     if (f.type === 'opened' && peer !== s.provider) throw new Error('Invalid channel direction');
+    if (f.type === 'opened') {
+      if (s.opened) throw new Error('Channel already opened');
+      clearTimeout(s.deadline); s.opened = true;
+    } else if (!s.opened) throw new Error('Channel not ready');
     const target = peer === s.owner ? s.provider : s.owner;
     if (!send(target.ws, { ...f, streamId: peer === s.owner ? s.providerId : s.ownerId }, this.limits)) this.closeStream(s, 'Relay congestion');
   }
@@ -203,6 +261,7 @@ export class RelayClient {
   private limits: Limits;
   private streams = new Map<string, WebSocket | null>();
   private renewal: ReturnType<typeof setInterval>;
+  private pending = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
   constructor(private upstream: WebSocket, private options: RelayClientOptions) {
     this.limits = { ...defaults, ...options };
@@ -213,6 +272,7 @@ export class RelayClient {
     upstream.on('message', raw => { void this.receive(raw).catch(() => upstream.close(1008, 'Invalid relay frame')); });
   }
   private drop(id: string, reason: string) {
+    clearTimeout(this.pending.get(id)); this.pending.delete(id);
     const target = this.streams.get(id); this.streams.delete(id); target?.close();
     send(this.upstream, { type: 'close', streamId: id, reason }, this.limits);
   }
@@ -221,14 +281,20 @@ export class RelayClient {
     if (f.type === 'register') throw new Error('Unexpected registration');
     if (f.type === 'open') {
       const connect = this.options.targets.get(f.serviceId);
-      if (!connect || this.streams.has(f.streamId) || this.streams.size >= this.limits.maxStreams) { this.drop(f.streamId, 'Target unavailable'); return; }
+      if (this.streams.has(f.streamId)) throw new Error('Duplicate stream');
+      if (!connect || this.streams.size >= this.limits.maxStreams) { this.drop(f.streamId, 'Target unavailable'); return; }
       this.streams.set(f.streamId, null);
-      let timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; this.drop(f.streamId, 'Target timeout'); }, this.limits.connectTimeoutMs); timer.unref?.();
+      const timer = setTimeout(() => { this.drop(f.streamId, 'Target timeout'); }, this.limits.connectTimeoutMs); timer.unref?.();
+      this.pending.set(f.streamId, timer);
       let target: WebSocket;
-      try { target = await connect(); } catch { clearTimeout(timer); this.drop(f.streamId, 'Target unavailable'); return; }
-      clearTimeout(timer);
-      if (timedOut || this.stopped || !this.streams.has(f.streamId)) { target.close(); return; }
+      try { target = await connect(); } catch {
+        if (this.pending.get(f.streamId) === timer) this.drop(f.streamId, 'Target unavailable');
+        return;
+      }
+      // A canceled attempt may complete after the same ID has been reused.
+      if (this.pending.get(f.streamId) !== timer || this.stopped) { target.close(); return; }
+      clearTimeout(timer); this.pending.delete(f.streamId);
+      if (target.readyState !== 1) { target.close(); this.drop(f.streamId, 'Target not ready'); return; }
       this.streams.set(f.streamId, target);
       watch(target, this.limits, () => { if (this.streams.get(f.streamId) === target) this.drop(f.streamId, 'Target disconnected'); });
       target.on('message', (data, isBinary) => {

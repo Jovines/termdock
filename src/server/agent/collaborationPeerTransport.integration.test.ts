@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { X509Certificate } from 'node:crypto';
 import express from 'express';
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import { createFederationRuntime } from '../federation/runtime.js';
 import { createIdentity } from '../federation/secureProtocol.js';
-import { RelayRouter } from '../federation/relay.js';
+import { RelayClient, RelayRouter } from '../federation/relay.js';
 import { attachRegisteredDirectTargets } from '../federation/directRoutes.js';
 import { CollaborationPeerTransport, connectCollaborationRpc, remoteSession, type CollaborationNode } from './collaborationPeerTransport.js';
 import { CollaborationStore } from './collaborationStore.js';
@@ -82,10 +82,24 @@ it('uses real verified WSS and Noise without a page, rejects unregistered identi
   f.store.getGroup('cross-wire')!.deleted = true;
   await expect(reconnected.request(request)).rejects.toThrow('NOT_AUTHORIZED');
 }, 15000);
-it('carries the same encrypted RPC through an entry relay with the final service identity pinned', async () => {
+it.each(['direct', 'failed-provider'] as const)('carries encrypted RPC through an entry with the final identity pinned (%s)', async mode => {
   const f = await fixture();
-  const router = new RelayRouter<string>({ authenticate: () => 'source', allowRegister: () => false, allowRoute: (_, target) => target === f.target.serviceId });
+  const router = new RelayRouter<string>({ authenticate: context => String(context), allowRegister: p => p === 'relay', allowRoute: (_, target) => target === f.target.serviceId });
   cleanups.push(() => router.close());
+  let primaryAttempts = 0;
+  if (mode === 'failed-provider') {
+    const relayServer = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(relayServer, 'listening');
+    cleanups.push(() => { for (const ws of relayServer.clients) ws.terminate(); relayServer.close(); });
+    const accepted = once(relayServer, 'connection'), address = relayServer.address();
+    if (!address || typeof address === 'string') throw new Error('address');
+    const upstream = new WebSocket(`ws://127.0.0.1:${address.port}`); await once(upstream, 'open');
+    const peer = (await accepted)[0] as WebSocket; await router.attach(peer, 'relay');
+    const registered = once(peer, 'message');
+    const relay = new RelayClient(upstream, { targets: new Map([[f.target.serviceId, async () => {
+      primaryAttempts++; throw new Error('primary network unavailable');
+    }]]) });
+    cleanups.push(() => relay.close()); await registered;
+  }
   cleanups.push(attachRegisteredDirectTargets(router, [{ serviceId: f.target.serviceId, url: f.target.origin, caPath: join(f.dir, 'ca.pem') }]));
   const entry = createServer({ cert: f.ca, key: f.key }, (req, res) => { if (req.url === '/onboarding/ca.crt') res.end(f.ca); else res.writeHead(404).end(); });
   const wss = new WebSocketServer({ server: entry });
@@ -98,4 +112,5 @@ it('carries the same encrypted RPC through an entry relay with the final service
   cleanups.push(() => client.close());
   expect(await client.request({ type: 'collaboration-exchange', groupId: 'cross-wire', message: f.message, ids: [f.message.id] })).toMatchObject({ receipts: [{ status: 'delivered' }] });
   expect(f.deliveries()).toBe(1);
+  expect(primaryAttempts).toBe(mode === 'failed-provider' ? 1 : 0);
 }, 15000);

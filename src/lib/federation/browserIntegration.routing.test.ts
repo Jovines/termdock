@@ -434,6 +434,21 @@ describe('browser federation entry routing', () => {
     await expect(integration.prepareRelayConnection({ url: 'https://b.example', targetPeerId: 'B' }, 'hidden')).rejects.toThrow('不可见');
     expect(clients.get('B')!.request.mock.calls.some(([packet]) => packet.type === 'route-grant')).toBe(false);
   });
+  it('preserves another address of the same entry when preparing a relay target', async () => {
+    const existing = { url: 'https://entry-home.example', targetPeerId: 'B' };
+    local.setItem('termdock.federation.connections.v1', JSON.stringify([
+      { id: 'C', url: 'https://c.example', targetPeerId: 'C', label: 'Target', routes: [existing] },
+    ]));
+    const base = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      const client = await base(args);
+      client.request.mockResolvedValue({ items: [{ serviceId: 'C', available: true, authorized: true }] });
+      return client;
+    });
+    const integration = await import('./browserIntegration');
+    const alternate = { url: 'https://entry-office.example', targetPeerId: 'B' };
+    expect(await integration.prepareRelayConnection(alternate, 'C')).toMatchObject({ routes: [alternate, existing] });
+  });
   it('logs in to a first-time target entirely through its entry when direct access is impossible', async () => {
     const base = mocks.connect.getMockImplementation()!;
     mocks.connect.mockImplementation(async args => {
@@ -459,6 +474,43 @@ describe('browser federation entry routing', () => {
     expect(mocks.relay).not.toHaveBeenCalled();
     expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ routes }));
     expect(integration.currentConnectionPath()).toBe('direct');
+  });
+  it('keeps alternate addresses of the same relay and deduplicates normalized pairs', async () => {
+    const integration = await import('./browserIntegration');
+    expect(integration.connectionRoutes({ url: 'https://c.example', targetPeerId: 'C', routes: [
+      { url: 'bad://address', targetPeerId: 'B' },
+      { url: 'https://home.example/', targetPeerId: 'B' },
+      { url: 'https://home.example', targetPeerId: 'B' },
+      { url: 'https://office.example', targetPeerId: 'B' },
+      { url: 'https://c.example', targetPeerId: 'C' },
+    ] })).toEqual([
+      { url: 'https://home.example', targetPeerId: 'B' },
+      { url: 'https://office.example', targetPeerId: 'B' },
+    ]);
+  });
+  it('tries the next address of the same entry when the first relay endpoint fails', async () => {
+    const dial = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !args.socketFactory) throw new Error('direct unavailable');
+      if (args.url.startsWith('wss://entry-home.example/api/federation/relay')) throw new Error('home relay unavailable');
+      return dial(args);
+    });
+    const integration = await import('./browserIntegration');
+    const routes = [
+      { url: 'https://entry-home.example', targetPeerId: 'A' },
+      { url: 'https://entry-office.example', targetPeerId: 'A' },
+    ];
+    await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B', routes });
+    expect(mocks.connect.mock.calls.map(([args]) => args.url)).toEqual([
+      'wss://b.example/api/federation/secure',
+      'wss://entry-home.example/api/federation/secure',
+      'wss://entry-home.example/api/federation/relay?routeToken=B-ticket',
+      'wss://entry-office.example/api/federation/secure',
+      'wss://entry-office.example/api/federation/relay?routeToken=B-ticket',
+    ]);
+    expect(integration.currentConnectionPath()).toBe('relay');
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ routes }));
+    expect(nativeFetch).not.toHaveBeenCalled();
   });
   it('verifies a manually entered address against the existing identity and restores the offline PWA', async () => {
     mocks.boot = 'C';

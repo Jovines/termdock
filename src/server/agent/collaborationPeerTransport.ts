@@ -1,3 +1,4 @@
+import { RELAY_CLIENT_CONNECT_TIMEOUT_MS } from '../federation/streamLimits.js';
 import type { Request } from 'express';
 import { encryptedRequestSubject } from '../federation/requestContext.js';
 import { randomUUID } from 'node:crypto';
@@ -119,7 +120,7 @@ function relayDuplex(socket: WebSocket, target: string) {
   let readyResolve: () => void, readyReject: (error: Error) => void;
   const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   void ready.catch(() => {});
-  const timer = setTimeout(() => fail(new Error('ROUTE_TIMEOUT')), 5000);
+  const timer = setTimeout(() => fail(new Error('ROUTE_TIMEOUT')), RELAY_CLIENT_CONNECT_TIMEOUT_MS);
   const fail = (error: Error) => { clearTimeout(timer); readyReject(error); queue.end(error); socket.close(); };
   const send = (frame: unknown) => {
     if (socket.readyState !== 1 || socket.bufferedAmount > 1024 * 1024) throw new Error('ROUTE_CONGESTED');
