@@ -389,9 +389,11 @@ export class AndroidMirrorController {
           output: frame => this.onDecodedFrame(frame),
           error: error => {
             // 解码器致命错误后会被关闭：下次收到帧时重建，并请求关键帧重置。
+            if (this.closedByUser) return;
             this.configured = false;
+            this.decoderRecovering = true;
             console.warn('[android] video decoder error', error);
-            this.callbacks.onState('error', error instanceof Error ? error.message : 'VIDEO_DECODER_ERROR');
+            this.callbacks.onState('error', `VIDEO_DECODER_ERROR: ${error.message}`);
             this.sendControl(serializeSimple(CONTROL_TYPE_RESET_VIDEO));
           },
         });
@@ -453,11 +455,13 @@ export class AndroidMirrorController {
     }
   }
 
+  private decoderRecovering = false;
   private decodeFailureCount = 0;
 
   private lastTimestamp = 0;
 
   private onDecodedFrame(frame: VideoFrame): void {
+    if (this.closedByUser) { frame.close(); return; }
     this.frameCount++;
     this.decodedFrames++;
     const width = frame.displayWidth || frame.codedWidth;
@@ -476,6 +480,11 @@ export class AndroidMirrorController {
       context.drawImage(frame, 0, 0, canvas.width, canvas.height);
     }
     frame.close();
+    // A new decoder may recover on the existing stream before the view retries.
+    if (this.decoderRecovering) {
+      this.decoderRecovering = false;
+      this.callbacks.onState('streaming');
+    }
   }
 
   // ---- 输入注入 ----

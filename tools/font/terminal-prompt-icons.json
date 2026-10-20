@@ -1,0 +1,60 @@
+{
+  "description": "Small first-frame Nerd Font fallback for common shell prompts: Powerline, OS/distribution, folders, Git, locks and terminal status. Other symbols keep the full Termdock Mono fallback.",
+  "ranges": [
+    [
+      "E0A0",
+      "E0A3"
+    ],
+    [
+      "E0B0",
+      "E0D8"
+    ],
+    [
+      "F300",
+      "F380"
+    ]
+  ],
+  "codepoints": [
+    "F00C",
+    "F00D",
+    "F011",
+    "F015",
+    "F017",
+    "F019",
+    "F023",
+    "F024",
+    "F03E",
+    "F04B",
+    "F055",
+    "F05A",
+    "F05B",
+    "F05C",
+    "F07B",
+    "F07C",
+    "F0AD",
+    "F0D4",
+    "F105",
+    "F113",
+    "F114",
+    "F115",
+    "F120",
+    "F126",
+    "F141",
+    "F179",
+    "F17A",
+    "F17C",
+    "F17E",
+    "F243",
+    "F24B",
+    "F407",
+    "F413",
+    "F418",
+    "F426",
+    "F447",
+    "F489",
+    "F021B",
+    "F044B",
+    "F049C",
+    "F0519"
+  ]
+}

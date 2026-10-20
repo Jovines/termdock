@@ -1742,9 +1742,9 @@ function toDevicePoint(canvas: HTMLCanvasElement, clientX: number, clientY: numb
   return { x: Math.max(0, Math.min(width, x)), y: Math.max(0, Math.min(height, y)) };
 }
 
-/** 缺依赖、无权限、解码器不可用等错误重试也不会好，避免无限重连。 */
+/** 只排除明确不支持/缺依赖等错误；运行中的临时解码故障可以重建连接恢复。 */
 function isRetryableMirrorError(message: string): boolean {
-  if (/ADB_NOT_FOUND|SCRCPY_NOT_FOUND|SCRCPY_SERVER_NOT_FOUND|SCRCPY_VERSION_UNKNOWN|SCRCPY_UNSUPPORTED_CODEC|VIDEO_DECODER_UNSUPPORTED|decoder|decode/i.test(message)) return false;
+  if (/ADB_NOT_FOUND|SCRCPY_NOT_FOUND|SCRCPY_SERVER_NOT_FOUND|SCRCPY_VERSION_UNKNOWN|SCRCPY_UNSUPPORTED_CODEC|VIDEO_DECODER_UNSUPPORTED/i.test(message)) return false;
   if (/INVALID_SERIAL|INVALID_ADDRESS|API_NOT_ALLOWED|AUTHORIZATION_DENIED/i.test(message)) return false;
   return true;
 }

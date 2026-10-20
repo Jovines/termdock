@@ -84,3 +84,48 @@ describe('live bitrate over the existing encrypted socket', () => {
     controller.disconnect();
   });
 });
+
+describe('transient video decoder recovery', () => {
+  it('requests a reset and clears the error when a rebuilt decoder produces a frame', () => {
+    const decoders: Decoder[] = [];
+    class Decoder {
+      state = 'unconfigured';
+      decodeQueueSize = 0;
+      constructor(readonly callbacks: VideoDecoderInit) { decoders.push(this); }
+      configure() { this.state = 'configured'; }
+      decode() {}
+      close() { this.state = 'closed'; }
+    }
+    vi.stubGlobal('VideoDecoder', Decoder);
+    vi.stubGlobal('EncodedVideoChunk', class {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const socket = { readyState: 1, send: vi.fn(), close: vi.fn(), onmessage: null as null | ((event: { data: string }) => void) };
+    vi.mocked(secureSocket).mockReturnValue(socket as unknown as WebSocket);
+    const onState = vi.fn();
+    const canvas = document.createElement('canvas');
+    const drawImage = vi.fn();
+    vi.spyOn(canvas, 'getContext').mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
+    const controller = new AndroidMirrorController(canvas, { onState, onHeader: vi.fn(), onWarning: vi.fn(), onStats: vi.fn() });
+    const message = (value: unknown) => socket.onmessage?.({ data: JSON.stringify(value) });
+    try {
+      controller.connect('test');
+      message({ type: 'header', codec: 'h264', width: 100, height: 200 });
+      message({ type: 'frame', config: true, data: 'AAAAAQ==' });
+      decoders[0].close();
+      decoders[0].callbacks.error(new DOMException('decoder resource reclaimed', 'EncodingError'));
+      expect(onState).toHaveBeenLastCalledWith('error', 'VIDEO_DECODER_ERROR: decoder resource reclaimed');
+      expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('control'));
+      message({ type: 'frame', key: true, data: 'AAAAAQ==' });
+      expect(decoders).toHaveLength(2);
+      const frame = { displayWidth: 100, displayHeight: 200, close: vi.fn() } as unknown as VideoFrame;
+      decoders[1].callbacks.output(frame);
+      expect(drawImage).toHaveBeenCalled();
+      expect(onState).toHaveBeenLastCalledWith('streaming');
+      controller.disconnect();
+      const count = onState.mock.calls.length;
+      decoders[1].callbacks.output(frame);
+      decoders[1].callbacks.error(new DOMException('late error'));
+      expect(onState).toHaveBeenCalledTimes(count);
+    } finally { controller.disconnect(); vi.unstubAllGlobals(); }
+  });
+});

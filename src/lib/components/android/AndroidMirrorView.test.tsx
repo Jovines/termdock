@@ -78,6 +78,55 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
 
   afterEach(() => { vi.restoreAllMocks(); });
 
+  it.each(['VIDEO_DECODER_ERROR: decoder resource reclaimed', 'EncodingError: Unable to decode frame', 'SCRCPY_CONNECTION_CLOSED'])('临时故障自动重连：%s', async message => {
+    await streamingView(async () => {});
+    const connection = (globalThis as Record<string, unknown>).__mirrorConnection as {
+      callbacks: { onState: (state: string, error?: string) => void };
+    };
+    vi.useFakeTimers();
+    try {
+      act(() => connection.callbacks.onState('error', message));
+      await act(() => vi.advanceTimersByTimeAsync(699));
+      expect((globalThis as Record<string, unknown>).__mirrorConnection).toBe(connection);
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect((globalThis as Record<string, unknown>).__mirrorConnection).not.toBe(connection);
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+
+  it.each(['VIDEO_DECODER_UNSUPPORTED', 'ADB_NOT_FOUND'])('明确不支持时不自动重试：%s', async message => {
+    await streamingView(async () => {});
+    const connection = (globalThis as Record<string, unknown>).__mirrorConnection as {
+      callbacks: { onState: (state: string, error?: string) => void };
+    };
+    vi.useFakeTimers();
+    try {
+      act(() => connection.callbacks.onState('error', message));
+      await act(() => vi.advanceTimersByTimeAsync(10000));
+      expect((globalThis as Record<string, unknown>).__mirrorConnection).toBe(connection);
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+
+  it('原视频流恢复出帧后取消重连，卸载也取消重连', async () => {
+    const view = await streamingView(async () => {});
+    const connection = (globalThis as Record<string, unknown>).__mirrorConnection as {
+      callbacks: { onState: (state: string, error?: string) => void };
+    };
+    vi.useFakeTimers();
+    try {
+      act(() => connection.callbacks.onState('error', 'VIDEO_DECODER_ERROR'));
+      await act(() => vi.advanceTimersByTimeAsync(300));
+      act(() => connection.callbacks.onState('streaming'));
+      await act(() => vi.advanceTimersByTimeAsync(1000));
+      expect((globalThis as Record<string, unknown>).__mirrorConnection).toBe(connection);
+      act(() => connection.callbacks.onState('error', 'VIDEO_DECODER_ERROR'));
+      view.unmount();
+      await act(() => vi.advanceTimersByTimeAsync(10000));
+      expect((globalThis as Record<string, unknown>).__mirrorConnection).toBe(connection);
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+
   it('分屏不依赖侧栏：截图绑定原终端，录屏保存对话框退出分屏后仍可操作', async () => {
     const host = document.createElement('div'); document.body.append(host);
     useCollaborationPanelDock.setState({

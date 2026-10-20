@@ -114,7 +114,8 @@
   --z-popover: 200;
 
   /*
-   * 字体单一来源 —— 所有 UI / 终端 / Tailwind / xterm 都从这两个变量读取。
+   * 字体单一来源 —— UI / Tailwind 用 --font-mono / --font-sans，
+   * 终端 / xterm 用 --font-terminal（Maple + 原有等宽回退）。
    * 任何字体改动只动这里，不再散落到 index.html / 业务组件 / tailwind.config。
    *
    * --font-mono 字体链顺序（"大和全"原则）:
@@ -143,6 +144,8 @@
     'Termdock Star Symbol',
     'Noto Sans Symbols 2',
     ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+
+  --font-terminal: 'Termdock Prompt Icons', 'Termdock Maple', var(--font-mono);
 
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI',
@@ -927,16 +930,9 @@ html[data-termdock-touch-viewport='true'] .terminal-viewport-container {
   display: none !important;
 }
 
-/* Force xterm-screen and its canvases to fill the full width.
-   xterm.js reserves scrollbar space in inline styles, but we
-   hide the scrollbar so the space is wasted. */
-.xterm .xterm-screen {
-  width: 100% !important;
-}
-
-.xterm .xterm-screen canvas {
-  width: 100% !important;
-}
+/* Keep xterm's measured screen/canvas widths. Hidden scrollbars are configured
+   through xterm's scrollbar option; stretching the remaining partial cell to
+   100% scales the glyph bitmap and separates it from the measured cell grid. */
 
 .xterm,
 .xterm *,
@@ -948,15 +944,9 @@ html[data-termdock-touch-viewport='true'] .terminal-viewport-container {
      避免 ⏺ (U+23FA) 等被浏览器回退成彩色 Apple Color Emoji。
      仅 Chrome 131+ / Safari 17.4+ 支持；老浏览器靠 fontFamily 末尾的字体链兜底。 */
   font-variant-emoji: text;
-  /* 归一化回退字体的视觉大小，按字符单元宽度匹配回退缩放。
-     Termdock Mono 的 ex-height = 0.55em (OS/2 sxHeight = 550 / upem 1000)。
-     不加此属性时，浏览器按 font-size 原始值渲染回退字体，而 CJK 字体的
-     lineHeight = 1.448em (比 JetBrains Mono 的 1.32em 高 9.7%)，导致中文字符
-     在 cell 里偏大。font-size-adjust 让浏览器按 ex-height = 0.55em 缩放所有
-     字体，使 CJK 回退字体 (Noto Sans Mono CJK SC ex-height = 0.543em) 自动
-     放大 ~1.3%，与其按自身 metrics 渲染时的偏大效应抵消。
-     Chrome 127+ / Firefox 40+ / Safari 16.4+ 支持。 */
-  font-size-adjust: 0.55;
+  /* xterm measures cells without CSS font-size-adjust. Keep glyphs at their
+     native size so DOM rows and the measured cursor/selection grid agree. */
+  font-size-adjust: none;
   /* 优化字形渲染：geometricPrecision 在缩放时保持几何形状精确，
      对终端等宽字体比 optimizeSpeed (默认) 效果更好。 */
   text-rendering: geometricPrecision;

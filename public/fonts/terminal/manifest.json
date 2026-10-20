@@ -1344,6 +1344,104 @@
           "group": "cjk-9f"
         }
       ]
+    },
+    {
+      "source": "MapleMono-Regular.woff2",
+      "sourceSha256": "0f900ecac7020d4251bd5b7c963570d998f3dc1cd195e468f7c9d9902e5556a1",
+      "shards": [
+        {
+          "file": "TermdockMaple-Regular-text-58438803bf4c.woff2",
+          "bytes": 36792,
+          "codepoints": 1329,
+          "group": "text"
+        },
+        {
+          "file": "TermdockMaple-Regular-ascii-9a80fd4a5743.woff2",
+          "bytes": 21128,
+          "codepoints": 96,
+          "group": "ascii"
+        }
+      ]
+    },
+    {
+      "source": "MapleMono-Bold.woff2",
+      "sourceSha256": "869391b1f3bc7c60206abb5d89bce25504b6809ed638ed5e7695dffd1ff757d8",
+      "shards": [
+        {
+          "file": "TermdockMaple-Bold-text-57c71f86a6f8.woff2",
+          "bytes": 38484,
+          "codepoints": 1329,
+          "group": "text"
+        },
+        {
+          "file": "TermdockMaple-Bold-ascii-71449796b4f8.woff2",
+          "bytes": 22048,
+          "codepoints": 96,
+          "group": "ascii"
+        }
+      ]
+    },
+    {
+      "source": "MapleMono-Italic.woff2",
+      "sourceSha256": "d25092ab2c5722f531e3dd1f924673a5d9d0930179a4a4e347347869355d8539",
+      "shards": [
+        {
+          "file": "TermdockMaple-Italic-text-a346c77141da.woff2",
+          "bytes": 40048,
+          "codepoints": 1330,
+          "group": "text"
+        },
+        {
+          "file": "TermdockMaple-Italic-ascii-cd2f6088ed50.woff2",
+          "bytes": 24548,
+          "codepoints": 96,
+          "group": "ascii"
+        }
+      ]
+    },
+    {
+      "source": "MapleMono-BoldItalic.woff2",
+      "sourceSha256": "2ccfa88fb69a74c7786b4212cb5950bfc60f1ededef50e51adc6c59f50f18f50",
+      "shards": [
+        {
+          "file": "TermdockMaple-BoldItalic-text-b2e1a12c67be.woff2",
+          "bytes": 41504,
+          "codepoints": 1330,
+          "group": "text"
+        },
+        {
+          "file": "TermdockMaple-BoldItalic-ascii-6b6deb59a8cd.woff2",
+          "bytes": 25320,
+          "codepoints": 96,
+          "group": "ascii"
+        }
+      ]
+    },
+    {
+      "source": "JetBrainsMonoNLNerdFontMono-Regular.woff2",
+      "sourceSha256": "be3091a0a38e0ed8ff2db0519136ad3bfbb2b82b315ca6ea96cca3422bc444bd",
+      "shards": [
+        {
+          "file": "TermdockPromptIcons-Regular-icons-0d64d12759b8.woff2",
+          "bytes": 39492,
+          "codepoints": 210,
+          "group": "icons"
+        }
+      ],
+      "family": "Termdock Prompt Icons"
+    },
+    {
+      "source": "JetBrainsMonoNLNerdFontMono-Bold.woff2",
+      "sourceSha256": "e239160775bebb9988bddae1fd148985f74bc72ac2e502ee2edc335591dd33bc",
+      "shards": [
+        {
+          "file": "TermdockPromptIcons-Bold-icons-fa87935d39d0.woff2",
+          "bytes": 39452,
+          "codepoints": 210,
+          "group": "icons"
+        }
+      ],
+      "family": "Termdock Prompt Icons"
     }
   ]
 }

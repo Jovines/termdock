@@ -18,6 +18,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { createNativeWebLinkHandler } from '../../terminal/nativeWebLinks';
+import { ensureTerminalFontsReady } from '../../terminal/fontLoading';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -424,78 +425,15 @@ function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
   return !hasTmuxScroll;
 }
 
-/**
- * 等待终端使用的自托管字体加载完成，再让 xterm.js 实例化。
- *
- * 背景（xterm.js issue #1164 的根因）：xterm 在 `new Terminal()` 构造时就会
- * 用 fontFamily 测量 cell 宽高，如果此时 webfont 还没下载完成，xterm 会拿到
- * fallback 字体的尺寸，后续即使字体加载好也不会重新测量，从而导致光标错位
- * / 字符宽度算错 / canvas 重叠。VS Code、Hyper 都采用 document.fonts.ready
- * 守卫这一时机。
- *
- * 这里：
- *   - 用 module 级 promise 缓存，整个应用只等一次。
- *   - 显式 load 终端主字体 (Termdock Mono Regular / Bold)，避免 unicode-range
- *     懒加载导致 ready 提前 resolve（document.fonts.ready 只等当前已注册的
- *     FontFace，懒加载字体在被使用前不会注册）。
- *   - 兼容老浏览器 / 测试环境：API 缺失时直接 resolve。
- *   - 任何加载失败都吞掉，让终端继续以 fallback 启动，不阻塞用户。
- */
-let terminalFontsReadyPromise: Promise<void> | null = null;
-const TERMINAL_CRITICAL_FONT_PRELOADS = [
-  {
-    font: '400 13px "Termdock Mono"',
-    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
-  },
-  {
-    font: '700 13px "Termdock Mono"',
-    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
-  },
-  {
-    font: '400 13px "Noto Sans Mono CJK SC"',
-    text: '终端中文路径',
-  },
-  {
-    font: '700 13px "Noto Sans Mono CJK SC"',
-    text: '终端中文路径',
-  },
-  {
-    font: '400 13px "Termdock Star Symbol"',
-    text: '✦✧',
-  },
-  {
-    font: '400 13px "Noto Sans Symbols 2"',
-    text: '⏺⏸⏹✓✗',
-  },
-] as const;
-
-const ensureTerminalFontsReady = (): Promise<void> => {
-  if (terminalFontsReadyPromise) return terminalFontsReadyPromise;
-  if (typeof document === 'undefined' || !('fonts' in document)) {
-    terminalFontsReadyPromise = Promise.resolve();
-    return terminalFontsReadyPromise;
-  }
-  const fonts = document.fonts;
-  // Only faces that determine the first viewport's cell geometry block xterm.
-  const preload = Promise.allSettled(
-    TERMINAL_CRITICAL_FONT_PRELOADS.map(({ font, text }) => fonts.load(font, text)),
-  );
-  terminalFontsReadyPromise = preload
-    .then(() => fonts.ready)
-    .then(() => undefined)
-    .catch(() => undefined);
-  return terminalFontsReadyPromise;
-};
-
 const getTerminalFontFamily = (userFontFamily: string): string => {
-  // 单一来源：所有终端字体都从 :root 上的 --font-mono CSS 变量读取
+  // 单一来源：终端字体从 :root 上的 --font-terminal CSS 变量读取
   // （定义见 src/index.css）。这里保留 prop 形式只是兼容外部覆盖；当传入
   // 的字符串就是 var(...) 或为空时，回退到 documentElement 上的实际值，
   // xterm 的 canvas 渲染需要拿到一个具体的字体栈字符串而不是 var()。
   if (!userFontFamily || userFontFamily.includes('var(')) {
     if (typeof window !== 'undefined') {
       const resolved = getComputedStyle(document.documentElement)
-        .getPropertyValue('--font-mono')
+        .getPropertyValue(!userFontFamily || userFontFamily.trim() === 'var(--font-terminal)' ? '--font-terminal' : '--font-mono')
         .trim();
       if (resolved) return resolved;
     }

@@ -146,7 +146,6 @@ export function CollaborationKanban({ tasks, selectedId, onSelect, name, storage
         {filtersOpen && filterPanel}
       </>}
     </div>
-    <p className="px-1 text-[11px] leading-5 text-muted-foreground">{showSteps ? '包含执行子任务，可在筛选中切回目标视图。' : '每张卡片对应一个目标，待完成事项和最近交付直接显示在卡片中。'}</p>
     <nav hidden={desktop} aria-label="看板阶段" className={`${desktop ? "hidden" : "grid"} shrink-0 grid-cols-4 gap-1`}>{lanes.map(l => <button key={l.id} type="button" aria-pressed={lane === l.id} className={`min-h-11 rounded-lg px-1 text-xs ${lane === l.id ? 'bg-surface-2 text-foreground' : 'text-muted-foreground'}`} onClick={() => selectLane(l.id)}>{l.label}<span className="ml-1 tabular-nums">{scoped.filter(t => boardLane(t) === l.id).length}</span></button>)}</nav>
     <div ref={desktop ? undefined : laneScroll} data-kanban-scroll onPointerDown={() => { scrollingToLane.current = null; }} onWheel={() => { scrollingToLane.current = null; }} aria-label={desktop ? undefined : '可左右滑动的任务看板'} onScroll={desktop ? undefined : event => {
       if (event.target !== event.currentTarget || !event.currentTarget.clientWidth) return;

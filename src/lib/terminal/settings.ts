@@ -4,6 +4,7 @@ export type TerminalUnicodeVersion = '6' | '11';
 export type TerminalFontWeight = 'normal' | 'bold' | number;
 
 export interface TerminalSettings {
+  typographyVersion: 1;
   fontFamily: string;
   fontSize: number;
   rendererMode: TerminalRendererMode;
@@ -40,21 +41,23 @@ export const TERMINAL_FALLBACK_LIGATURES = [
 ];
 
 export function getDefaultTerminalFontSize(): number {
-  if (typeof window === 'undefined') return 13;
+  if (typeof window === 'undefined') return 14;
   const isMobileViewport = window.matchMedia('(max-width: 767px)').matches;
   const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
-  return isMobileViewport || isCoarsePointer ? 10 : 13;
+  return isMobileViewport || isCoarsePointer ? 12 : 14;
 }
 
 export function getDefaultTerminalSettings(): TerminalSettings {
   return {
-    fontFamily: 'var(--font-mono)',
+    typographyVersion: 1,
+    fontFamily: 'var(--font-terminal)',
     fontSize: getDefaultTerminalFontSize(),
     rendererMode: 'auto',
     fontWeight: 'normal',
     fontWeightBold: 'bold',
-    letterSpacing: 1,
-    lineHeight: 1.05,
+    // Preserve the font's cell advance so box drawing stays continuous.
+    letterSpacing: 0,
+    lineHeight: 1.1,
     minimumContrastRatio: 4.5,
     drawBoldTextInBrightColors: true,
     unicodeVersion: '11',
@@ -84,19 +87,33 @@ export function normalizeTerminalSettings(value: unknown): TerminalSettings {
   const defaults = getDefaultTerminalSettings();
   const data = (value && typeof value === 'object') ? value as Record<string, unknown> : {};
   const rendererMode = data.rendererMode ?? data.renderer;
+  const savedFamily = typeof data.fontFamily === 'string' ? data.fontFamily.trim() : '';
+  const usesDefaultFamily = !savedFamily || savedFamily === 'var(--font-mono)'
+    || savedFamily === defaults.fontFamily;
+  // Old clients persisted every default on mount. Migrate that complete legacy
+  // typography once, while keeping custom fonts, spacing and session overrides.
+  const migrateLegacyTypography = data.typographyVersion !== defaults.typographyVersion
+    && usesDefaultFamily
+    && (data.fontSize === 10 || data.fontSize === 13)
+    && (data.letterSpacing === 0 || data.letterSpacing === 1)
+    && data.lineHeight === 1.05
+    && (data.fontWeight === undefined || data.fontWeight === 'normal')
+    && (data.fontWeightBold === undefined || data.fontWeightBold === 'bold');
 
   return {
-    fontFamily: typeof data.fontFamily === 'string' && data.fontFamily.trim()
-      ? data.fontFamily.trim()
-      : defaults.fontFamily,
-    fontSize: clampNumber(data.fontSize, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, defaults.fontSize),
+    typographyVersion: defaults.typographyVersion,
+    fontFamily: usesDefaultFamily ? defaults.fontFamily : savedFamily,
+    fontSize: migrateLegacyTypography ? defaults.fontSize
+      : clampNumber(data.fontSize, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, defaults.fontSize),
     rendererMode: rendererMode === 'auto' || rendererMode === 'webgl' || rendererMode === 'canvas'
       ? rendererMode
       : defaults.rendererMode,
     fontWeight: normalizeFontWeight(data.fontWeight, defaults.fontWeight),
     fontWeightBold: normalizeFontWeight(data.fontWeightBold, defaults.fontWeightBold),
-    letterSpacing: Math.round(clampNumber(data.letterSpacing, -5, 10, defaults.letterSpacing)),
-    lineHeight: clampNumber(data.lineHeight, 1, 2, defaults.lineHeight),
+    letterSpacing: migrateLegacyTypography ? defaults.letterSpacing
+      : Math.round(clampNumber(data.letterSpacing, -5, 10, defaults.letterSpacing)),
+    lineHeight: migrateLegacyTypography ? defaults.lineHeight
+      : clampNumber(data.lineHeight, 1, 2, defaults.lineHeight),
     minimumContrastRatio: clampNumber(data.minimumContrastRatio, 1, 21, defaults.minimumContrastRatio),
     // Hidden advanced xterm capabilities are product defaults, not user-facing
     // preferences. Ignore stale localStorage booleans from earlier experimental

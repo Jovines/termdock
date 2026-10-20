@@ -229,24 +229,25 @@
     <title>Termdock</title>
     
     <!-- Preload the faces commonly present in the first terminal viewport.
-         Only text shards are preloaded; CJK and Nerd glyph ranges load on demand.
+         Preload text and compact prompt icons; other CJK/Nerd ranges load on demand.
          Text faces must settle before xterm opens; loading a bold face afterward
          makes the DOM renderer temporarily rebuild every visible row. -->
-    <link rel="preload" href="/fonts/terminal/JetBrainsMonoNLNerdFontMono-Regular-text-d7b9316fdf4f.woff2" as="font" type="font/woff2" crossorigin="anonymous">
-    <link rel="preload" href="/fonts/terminal/JetBrainsMonoNLNerdFontMono-Bold-text-9e8d9df2dd02.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/terminal/TermdockMaple-Regular-ascii-9a80fd4a5743.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/terminal/TermdockMaple-Bold-ascii-71449796b4f8.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/terminal/TermdockPromptIcons-Regular-icons-0d64d12759b8.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/terminal/TermdockPromptIcons-Bold-icons-fa87935d39d0.woff2" as="font" type="font/woff2" crossorigin="anonymous">
     <link rel="preload" href="/fonts/TermdockStarSymbol-Subset.woff2" as="font" type="font/woff2" crossorigin="anonymous">
     <link rel="preload" href="/fonts/NotoSansSymbols2-Subset.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
     <!-- Self-hosted terminal fonts.
          统一原则：每个 @font-face 都用 unicode-range 限定字符集，浏览器只在
          实际渲染到该区间时才下载，做到 "全字符覆盖 + 不浪费带宽"。
-         所有引用（Tailwind / 业务组件 / xterm）都通过 :root 上的 --font-mono
-         CSS 变量读取，单一来源见 src/index.css。 -->
+         字体链通过 :root 上的 --font-terminal / --font-mono 读取，
+         单一来源见 src/index.css。 -->
     <style>
-      /* JetBrains Mono NL Nerd Font Mono —— 终端主字体，保持 JetBrains
-         Mono NL 的无连字风格，同时内置 Nerd Font / Powerline / devicons。
-         使用 Mono 版本保证图标按终端 cell 设计；首屏强等字体，避免从
-         fallback/tofu 跳到完整图标。 */
+      /* Termdock Maple is the primary terminal face. The original JetBrains
+         Mono NL Nerd Font Mono remains the UI / Nerd Font / Powerline fallback.
+         Their generated unicode-range faces live in terminal/fontFaces.css. */
       /* Termdock Star Symbol —— 从 Menlo Regular 抽取 U+2726/U+2727
          (✦/✧) 的子集。Menlo 是 macOS 上这两个符号与等宽文本视觉大小
          最接近的系统字形，避免手机端走系统符号 fallback 后偏大。
