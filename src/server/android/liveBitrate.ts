@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 // The overlay implements a private scrcpy ABI: never load it into an unverified server.
 const SUPPORTED_SERVER_SHA256 = '8588238c9a5a00aa542906b6ec7e6d5541d9ffb9b5d0f6e1bc0e365e2303079e';
-const OVERLAY_SHA256 = '19eee1787a564bd2996a6443613aaa4700185838d4e42fe59d1d08ca6b12e828';
+const OVERLAY_SHA256 = 'f8eb6275ed255eba00c53146e874d22fe1e5766a466ba03d42a3b07df4f99d63';
 export const bitrateOverlayPath = fileURLToPath(new URL('../../../scripts/android-bitrate/bitrate.jar', import.meta.url));
 export const bitrateOverlayRemote = '/data/local/tmp/termdock-bitrate-' + OVERLAY_SHA256.slice(0, 16) + '.jar';
 export const bundledPreviewServerPath = fileURLToPath(new URL('../../../scripts/android-bitrate/scrcpy-server-v3.3.4', import.meta.url));
@@ -45,6 +45,8 @@ export async function supportsLiveBitrate(serverJar: string, version: string): P
 export class LiveBitrateChannel {
   private server = net.createServer(socket => this.accept(socket));
   private socket: net.Socket | null = null;
+  private forwardPort: number | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private buffer = Buffer.alloc(0);
   private ready = false;
   private diagnosticProtocol = false;
@@ -58,16 +60,41 @@ export class LiveBitrateChannel {
       this.server.once('error', reject);
       this.server.listen(0, '127.0.0.1', resolve);
     });
-    this.handshakeTimer = setTimeout(() => this.close('BITRATE_HANDSHAKE_TIMEOUT: no extension handshake within 15s'), 15000);
+    this.startHandshakeTimeout();
     return (this.server.address() as net.AddressInfo).port;
+  }
+  connectForward(port: number): void {
+    if (this.closed) return;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('BITRATE_FORWARD_INVALID_PORT');
+    this.forwardPort = port;
+    this.startHandshakeTimeout();
+    this.dialForward();
+  }
+  private startHandshakeTimeout(): void {
+    this.handshakeTimer = setTimeout(() => this.close('BITRATE_HANDSHAKE_TIMEOUT: no extension handshake within 15s'), 15000);
+  }
+  private dialForward(): void {
+    this.retryTimer = null;
+    if (!this.closed && this.forwardPort !== null) this.accept(net.connect({ host: '127.0.0.1', port: this.forwardPort }));
   }
   private accept(socket: net.Socket): void {
     if (this.socket || this.closed) { socket.destroy(); return; }
     this.socket = socket;
     socket.setNoDelay(true);
-    socket.on('error', error => this.close(`BITRATE_CHANNEL_ERROR: ${error.message}`));
-    socket.on('close', () => this.close('BITRATE_CHANNEL_CLOSED: device closed the bitrate channel'));
+    const disconnected = (detail: string) => {
+      if (this.socket !== socket || this.closed) return;
+      if (this.forwardPort !== null && !this.ready) {
+        // ADB may accept TCP before the device-side abstract socket is listening.
+        this.socket = null;
+        this.buffer = Buffer.alloc(0);
+        socket.destroy();
+        this.retryTimer = setTimeout(() => this.dialForward(), 100);
+      } else this.close(detail);
+    };
+    socket.on('error', error => disconnected(`BITRATE_CHANNEL_ERROR: ${error.message}`));
+    socket.on('close', () => disconnected('BITRATE_CHANNEL_CLOSED: device closed the bitrate channel'));
     socket.on('data', chunk => {
+      if (this.socket !== socket || this.closed) return;
       this.buffer = Buffer.concat([this.buffer, chunk]);
       while (this.buffer.length >= 4 && !this.closed) {
         const value = this.buffer.readUInt32BE();
@@ -114,6 +141,7 @@ export class LiveBitrateChannel {
     this.closed = true;
     this.lastFailure = detail;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+    if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.pending) {
       clearTimeout(this.pending.timer);
       this.pending.resolve(false);

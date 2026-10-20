@@ -5,6 +5,7 @@ package com.genymobile.scrcpy.video;
 
 import android.media.MediaCodec;
 import android.net.LocalSocket;
+import android.net.LocalServerSocket;
 import android.net.LocalSocketAddress;
 import android.os.Bundle;
 import java.io.DataInputStream;
@@ -59,25 +60,38 @@ public class CaptureReset implements SurfaceCapture.CaptureListener {
     }
 
     private void serve(String name) {
-        try (LocalSocket socket = new LocalSocket()) {
-            socket.connect(new LocalSocketAddress(name));
-            DataInputStream input = new DataInputStream(socket.getInputStream());
-            DataOutputStream output = new DataOutputStream(socket.getOutputStream());
-            output.writeInt(0x54444232); // TDB2: rejection includes length-prefixed UTF-8 diagnostic
-            output.flush();
-            while (true) {
-                int requested = input.readInt();
-                String failure = applyBitrate(requested);
-                output.writeInt(failure == null ? requested : 0);
-                if (failure != null) {
-                    byte[] detail = failure.substring(0, Math.min(512, failure.length())).getBytes(StandardCharsets.UTF_8);
-                    output.writeInt(detail.length);
-                    output.write(detail);
+        try {
+            if (Boolean.getBoolean("termdock.bitrateForward")) {
+                try (LocalServerSocket server = new LocalServerSocket(name);
+                     LocalSocket socket = server.accept()) {
+                    exchange(socket);
                 }
-                output.flush();
+            } else {
+                try (LocalSocket socket = new LocalSocket()) {
+                    socket.connect(new LocalSocketAddress(name));
+                    exchange(socket);
+                }
             }
         } catch (IOException ignored) {
             // A bitrate-channel failure must never tear down video/control.
+        }
+    }
+
+    private void exchange(LocalSocket socket) throws IOException {
+        DataInputStream input = new DataInputStream(socket.getInputStream());
+        DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+        output.writeInt(0x54444232); // TDB2: rejection includes length-prefixed UTF-8 diagnostic
+        output.flush();
+        while (true) {
+            int requested = input.readInt();
+            String failure = applyBitrate(requested);
+            output.writeInt(failure == null ? requested : 0);
+            if (failure != null) {
+                byte[] detail = failure.substring(0, Math.min(512, failure.length())).getBytes(StandardCharsets.UTF_8);
+                output.writeInt(detail.length);
+                output.write(detail);
+            }
+            output.flush();
         }
     }
 

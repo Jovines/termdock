@@ -87,3 +87,38 @@ it('preserves fragmented codec diagnostics instead of reporting an unsupported d
   expect(ready).toHaveBeenLastCalledWith(false, expect.stringContaining(text.toString()));
   expect(c.lastFailure).toContain('requested=8000000');
 });
+
+it('retries premature forward connections and changes bitrate on the same extension socket', async () => {
+  let connections = 0;
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer(socket => {
+    sockets.add(socket); socket.on('error', () => {});
+    connections++;
+    if (connections < 3) {
+      if (connections === 1) socket.end(Buffer.from([0x54]));
+      else socket.destroy();
+      return;
+    }
+    socket.write(Buffer.from([0x54, 0x44]));
+    socket.write(Buffer.from([0x42, 0x32]));
+    socket.on('data', data => socket.write(data));
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  cleanup.push(() => { for (const socket of sockets) socket.destroy(); server.close(); });
+  const ready = vi.fn(); const c = new LiveBitrateChannel(ready); cleanup.push(() => c.close());
+  c.connectForward((server.address() as net.AddressInfo).port);
+  await vi.waitFor(() => expect(ready).toHaveBeenCalledWith(true));
+  for (const value of [1_800_000, 6_000_000, 900_000, 4_000_000]) expect(await c.setBitrate(value)).toBe(true);
+  expect(connections).toBe(3);
+  expect(ready).toHaveBeenCalledTimes(1);
+});
+
+it('cancels forward connection retries and the handshake timeout on intentional close', async () => {
+  vi.useFakeTimers();
+  const ready = vi.fn(); const c = new LiveBitrateChannel(ready); cleanup.push(() => c.close());
+  c.connectForward(1);
+  c.close();
+  await vi.advanceTimersByTimeAsync(16000);
+  expect(ready).not.toHaveBeenCalled();
+  expect(await c.setBitrate(4_000_000)).toBe(false);
+});

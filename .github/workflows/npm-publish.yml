@@ -61,6 +61,7 @@ jobs:
           src/server/android/recordingTransport.test.ts
           src/lib/android/deviceOptions.test.ts
           src/server/android/liveBitrateTransport.test.ts
+          src/server/android/liveBitrate.test.ts
           src/server/utils/tmuxCopySelection.test.ts
           src/server/utils/tmuxSizeOwnership.test.ts
           src/server/utils/tmuxClientCapabilities.test.ts

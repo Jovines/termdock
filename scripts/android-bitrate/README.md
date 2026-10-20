@@ -1,10 +1,10 @@
 # scrcpy live bitrate extension
 
-Termdock loads this 3 KB Android DEX overlay before the bundled, verified scrcpy 3.3.4 server
+Termdock loads this small Android DEX overlay before the bundled, verified scrcpy 3.3.4 server
 for preview sessions only. The host scrcpy version no longer gates automatic quality. Recording uses the unmodified scrcpy executable/server.
 
 CaptureReset.java preserves scrcpy 3.3.4's existing ABI and reset behavior,
-adding a session-scoped ADB reverse socket. The running hardware encoder receives
+adding a session-scoped ADB socket. The running hardware encoder receives
 MediaCodec.PARAMETER_KEY_VIDEO_BITRATE via setParameters, under the same lock
 used to clear the codec before stop/reset. There is no transcoding, frame polling,
 forced keyframe, video reset, resolution change or new video connection.
@@ -30,9 +30,11 @@ quality with a diagnostic. Rejections and channel failures also preserve video.
 Network ADB preview sessions use `adb forward` for video and control; USB
 sessions retain `adb reverse`. The forward connector waits for the scrcpy dummy
 byte before opening control and removes only its own allocated TCP rule on stop.
-The optional bitrate channel still uses a separate reverse rule. If reverse rules
-register but carry no data, its handshake times out with a diagnostic; preview
-continues at the configured bitrate.
+The optional bitrate channel uses its own forward rule for network devices; its
+device-side listener accepts the host connection after the encoder starts. USB
+retains its separate reverse rule. Early forward TCP accepts are retried until
+the TDB handshake arrives, within the existing 15-second limit. Bitrate failures
+remain isolated from video/control, and stop removes both session-owned rules.
 
 Extend the allowlist only after verifying the CaptureReset ABI and real-device
 behavior. No global scrcpy installation is modified.
@@ -52,13 +54,17 @@ configuration packet.
 
 Mac server and iPhone preview rendering were also verified with network
 PTP-AN00 / Android 16 and Pixel 9 / Android 15 using forward video. On those cloud
-routes, reverse registration succeeded without carrying data: bitrate handshakes
-timed out while preview stayed alive. Physical identity properties matched across
+routes, reverse registration succeeded without carrying data; this motivated
+using forward for both video and the separate bitrate channel. Physical identity properties matched across
 the PTP IPv4/IPv6 routes; option grouping and selected-route preservation are
-covered by tests. These observations do not establish live bitrate support on
-those devices or full native input/recording acceptance.
+covered by tests. Full native input/recording acceptance remains outside these observations.
+The Pixel 9 forward bitrate channel was verified on the Mac server: all four
+1.8 → 6 → 0.9 → 4 Mbps requests received matching ACKs in 35–37 ms, with one
+video header and the same scrcpy process throughout a 20-second session. Both
+forward rules were removed on stop. API acceptance does not establish exact
+vendor output bandwidth.
 
-Diagnostics distinguish version/build, missing/corrupt extension, ADB push/reverse,
+Diagnostics distinguish version/build, missing/corrupt extension, ADB push/tunnel,
 15s handshake timeout, 2.5s device ACK timeout, 4s client confirmation timeout,
 channel/protocol failure and device codec rejection. Detailed reasons travel over
 the existing encrypted stream and appear in an expandable warning. Intentional

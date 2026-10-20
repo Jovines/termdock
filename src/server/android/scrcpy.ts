@@ -138,6 +138,7 @@ export class ScrcpySession {
   // Network ADB can acknowledge reverse rules without carrying their data.
   private readonly tunnelForward: boolean;
   private forwardPort = 0;
+  private bitrateForwardPort = 0;
   private readonly connectionAbort = new AbortController();
   private readonly scid = randomInt(1, 0x7fffffff);
   private bitrateChannel: LiveBitrateChannel | null = null;
@@ -218,11 +219,17 @@ export class ScrcpySession {
       if (!bitrateFailure) {
         try {
           this.bitrateChannel = new LiveBitrateChannel(reportBitrate);
-          const port = await this.bitrateChannel.listen();
+          const port = this.tunnelForward ? 0 : await this.bitrateChannel.listen();
           bitrateStage = 'BITRATE_PUSH_FAILED';
           await runAdbCapture(['-s', this.serial, 'push', bitrateOverlayPath, bitrateOverlayRemote]);
           bitrateStage = 'BITRATE_TUNNEL_FAILED';
-          await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:termdock_bitrate_${scidHex(this.scid)}`, `tcp:${port}`]);
+          if (this.tunnelForward) {
+            const assigned = Number(await runAdbCapture(['-s', this.serial, 'forward', 'tcp:0', `localabstract:termdock_bitrate_${scidHex(this.scid)}`]));
+            if (!Number.isInteger(assigned) || assigned < 1 || assigned > 65535) throw new Error('BITRATE_FORWARD_INVALID_PORT');
+            this.bitrateForwardPort = assigned;
+          } else {
+            await runAdbCapture(['-s', this.serial, 'reverse', `localabstract:termdock_bitrate_${scidHex(this.scid)}`, `tcp:${port}`]);
+          }
           liveBitrate = true;
         } catch (error) {
           bitrateFailure = `${bitrateStage}: ${String(error)}`;
@@ -243,7 +250,7 @@ export class ScrcpySession {
       const args = [
         '-s', this.serial, 'shell',
         `CLASSPATH=${liveBitrate ? bitrateOverlayRemote + ":" : ""}${remoteJar}`,
-        'app_process', ...(liveBitrate ? [`-Dtermdock.bitrate=termdock_bitrate_${scidHex(this.scid)}`] : []), '/',
+        'app_process', ...(liveBitrate ? [`-Dtermdock.bitrate=termdock_bitrate_${scidHex(this.scid)}`, ...(this.tunnelForward ? ['-Dtermdock.bitrateForward=true'] : [])] : []), '/',
         'com.genymobile.scrcpy.Server', version,
         `scid=${this.scid.toString(16)}`,
         'log_level=info',
@@ -263,6 +270,7 @@ export class ScrcpySession {
       void headerReady.catch(() => {});
       const child = spawn(adbBinary(), args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PATH: adbSearchPath() } });
       this.child = child;
+      if (liveBitrate && this.tunnelForward) this.bitrateChannel?.connectForward(this.bitrateForwardPort);
       child.stdout?.on('data', chunk => this.log(String(chunk).replace(/^\[server\]\s*/, '')));
       child.stderr?.on('data', chunk => this.log(String(chunk)));
       child.on('error', error => this.fail(error instanceof Error ? error : new Error('SCRCPY_SPAWN_FAILED')));
@@ -419,9 +427,10 @@ export class ScrcpySession {
   }
 
   private async removeForward(): Promise<void> {
-    const port = this.forwardPort;
+    const ports = [this.forwardPort, this.bitrateForwardPort].filter(port => port > 0);
     this.forwardPort = 0;
-    if (port) {
+    this.bitrateForwardPort = 0;
+    for (const port of ports) {
       try { await runAdbCapture(['-s', this.serial, 'forward', '--remove', `tcp:${port}`], 8000); }
       catch { /* The device or ADB may already have removed this exact rule. */ }
     }
