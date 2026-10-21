@@ -85,6 +85,8 @@ jobs:
           src/lib/computer/rdpSession.test.ts
       - name: Verify desktop bridge file-drop transport and lifecycle
         run: node --test desktop-rust/renderer/bridge.test.mjs
+      - name: Verify npm publication status handling
+        run: node --test tests/verifyNpmPublication.test.mjs
       - name: Verify systemd runtime isolation policy
         run: node --test tests/systemdKillMode.test.mjs
       - run: npm run build
@@ -137,28 +139,5 @@ jobs:
       - name: Publish the verified package using OIDC
         run: npm publish "./npm-package/termdock-${EXPECTED_VERSION}.tgz" --access public
       - name: Verify the registry package and latest tag
-        run: |
-          node --input-type=module <<'JS'
-          import fs from 'node:fs';
-          const [pack] = JSON.parse(fs.readFileSync('npm-package/pack.json', 'utf8'));
-          const { execFileSync } = await import('node:child_process');
-          const { setTimeout: pause } = await import('node:timers/promises');
-          const view = spec => JSON.parse(execFileSync('npm', ['view', ...spec, '--json', '--prefer-online'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 }));
-          for (let attempt = 1; attempt <= 24; attempt++) {
-            let integrity, latest;
-            try {
-              integrity = view([`termdock@${process.env.EXPECTED_VERSION}`, 'dist.integrity']);
-              latest = view(['termdock', 'dist-tags.latest']);
-            } catch (error) {
-              if (attempt === 24) throw error;
-            }
-            if (integrity && integrity !== pack.integrity) throw new Error('Published package integrity mismatch');
-            if (integrity === pack.integrity && latest === process.env.EXPECTED_VERSION) {
-              console.log(`Registry package integrity and latest verified: ${latest}`);
-              break;
-            }
-            if (attempt === 24) throw new Error('Registry processing did not complete within the verification window');
-            console.log(`Waiting for npm registry processing (${attempt}/24)`);
-            await pause(15000);
-          }
-          JS
+        id: registry
+        run: node .github/scripts/verify-npm-publication.mjs npm-package/pack.json --upload-accepted

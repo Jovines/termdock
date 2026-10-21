@@ -34,3 +34,23 @@ gh workflow run npm-publish.yml --ref master -f version=1.4.324 -F publish=true
 版本号应替换为当前已提交且尚未发布的版本。工作流不自动改版本，不发布 Rust Preview，也不会重启任何服务。发布完成后，按项目部署流程更新需要使用新版本的服务。
 
 官方文档：<https://docs.npmjs.com/trusted-publishers/>
+
+## 上传成功与 registry 延迟
+
+`npm publish` 被接受和 registry 公开可查询是两个阶段。发布后最多等待 10 分钟，
+匿名查询精确版本，下载公开 tarball 校验 SHA-512，并核对 `latest` 标签。
+404、限流、服务端错误和暂时的网络故障会重试。
+
+等待窗口结束仍未确认时，工作流保留上传成功结果，并输出 warning、
+`registry_state=pending` 和明确的步骤摘要，表示公开可用性尚未验收；
+不会因此发送发布失败邮件，也不会自动重复上传。后续应查询同一版本，
+不能直接重跑发布或另升版本。已公开且校验通过时输出 `registry_state=verified`。
+上传拒绝、非暂时性查询拒绝、版本身份或包完整性不匹配仍使工作流失败。
+
+可下载对应 run 的 `npm-package-VERSION` artifact 后单独核验，无需再次发布：
+
+```sh
+node .github/scripts/verify-npm-publication.mjs /path/to/npm-package/pack.json
+```
+
+手动核验未传 `--upload-accepted` 时，待生效结果仍返回非零，避免调用方误报公开成功。
