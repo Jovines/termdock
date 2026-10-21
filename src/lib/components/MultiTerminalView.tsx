@@ -1,3 +1,4 @@
+import { canDismissTmuxRecoveryOperation } from '../../server/utils/tmuxRecoveryDismissal';
 import { classifySessionCreationError, type NewSessionRequestOptions } from '../terminal/newSessionRequest';
 import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 import { legacySplitTree } from '../terminal/freeSplitLayout';
@@ -2353,7 +2354,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 )}
                 <button
                   type="button"
-                  disabled={tmuxRecoveryPending !== null || Boolean(tmuxRecovery.operation && !['succeeded', 'partial_failure'].includes(tmuxRecovery.operation.state))}
+                  disabled={tmuxRecoveryPending !== null || Boolean(tmuxRecovery.operation && !canDismissTmuxRecoveryOperation(tmuxRecovery.operation))}
                   onClick={() => void handleDismissTmuxRecovery()}
                   className="inline-flex min-h-9 items-center rounded-lg px-3 text-[11px] text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
                 >

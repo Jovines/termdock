@@ -31,6 +31,7 @@ export function normalizeTmuxRecoveryIncident(input: unknown): TmuxRecoveryIncid
 export function detectTmuxRecoveryIncident(input: {
   previousServerPid: number | null;
   currentServerPid: number | null;
+  authoritativeTmuxList: boolean;
   candidates: TmuxRecoveryCandidate[];
   liveSessionNames: ReadonlySet<string>;
   intentionallyDeleting?: ReadonlySet<string>;
@@ -38,6 +39,8 @@ export function detectTmuxRecoveryIncident(input: {
   dismissedSessionIds?: ReadonlySet<string>;
   now?: number;
 }): TmuxRecoveryIncident | null {
+  // A failed/disabled inventory is an unknown observation, never evidence of loss.
+  if (!input.authoritativeTmuxList) return input.existingIncident ?? null;
   if (input.existingIncident) return input.existingIncident;
   const intentionallyDeleting = input.intentionallyDeleting ?? new Set<string>();
   const recoverable = input.candidates.filter((candidate) =>

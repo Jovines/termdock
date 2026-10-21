@@ -159,3 +159,40 @@ it('finishes instead of leaving a paused operation stuck when its last running i
   finish();
   await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'succeeded', paused: false, succeeded: 1 }));
 });
+
+it('dismisses manual pauses durably without launching work, and explicit resume continues them', async () => {
+  const { store, file } = await makeStore(1);
+  const operation = await store.create({ incidentId: 'i', sessionIds: ['a'], scope: { kind: 'incident' }, idempotencyKey: 'dismiss-paused' });
+  await expect(store.dismissPausedOperations()).rejects.toMatchObject({ code: 'RECOVERY_OPERATION_ACTIVE' });
+  await store.pause(operation.id);
+  await store.dismissPausedOperations();
+  expect(store.get(operation.id)).toMatchObject({ state: 'paused', paused: true, dismissedAt: expect.any(Number), paused_count: 1 });
+  const restarted = new TmuxRecoveryOperationStore(file, 1);
+  await restarted.load();
+  const runner = vi.fn(async () => {});
+  restarted.setRunner(runner);
+  await restarted.resumePending();
+  expect(runner).not.toHaveBeenCalled();
+  expect(restarted.get(operation.id)?.dismissedAt).toBeDefined();
+  await restarted.resume(operation.id);
+  await vi.waitFor(() => expect(restarted.get(operation.id)).toMatchObject({ state: 'succeeded', succeeded: 1 }));
+  expect(restarted.get(operation.id)?.dismissedAt).toBeUndefined();
+  await restarted.flush();
+});
+
+it('rejects dismissal while a manually paused operation still has an in-flight launch', async () => {
+  const { store } = await makeStore(1);
+  let finish!: () => void;
+  store.setRunner(async () => new Promise<void>(resolve => { finish = resolve; }));
+  const operation = await store.create({ incidentId: 'i', sessionIds: ['a', 'b'], scope: { kind: 'incident' }, idempotencyKey: 'dismiss-drain' });
+  await vi.waitFor(() => expect(typeof finish).toBe('function'));
+  await store.pause(operation.id);
+  await expect(store.dismissPausedOperations()).rejects.toMatchObject({ code: 'RECOVERY_OPERATION_ACTIVE' });
+  expect(store.get(operation.id)?.dismissedAt).toBeUndefined();
+  finish();
+  await vi.waitFor(() => expect(store.get(operation.id)).toMatchObject({ state: 'paused', running: 0 }));
+  await store.dismissPausedOperations();
+  expect(store.get(operation.id)?.dismissedAt).toBeDefined();
+  expect(store.get(operation.id)?.paused_count).toBe(1);
+  await store.flush();
+});

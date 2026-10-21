@@ -79,6 +79,8 @@ jobs:
           src/server/utils/hostResources.test.ts
           src/server/utils/tmuxRecoveryOperations.test.ts
           src/server/utils/tmuxRecovery.test.ts
+          src/server/utils/tmuxRecoveryDismissal.test.ts
+          src/server/routes/terminalRecovery.test.ts
           src/lib/components/computer/ComputerControlView.test.tsx
           src/lib/computer/rdpSession.test.ts
       - name: Verify desktop bridge file-drop transport and lifecycle

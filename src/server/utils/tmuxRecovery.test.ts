@@ -10,6 +10,7 @@ const candidates = [
 describe('tmux recovery detection', () => {
   it('reports resumable sessions after the shared server disappears', () => {
     expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: true,
       previousServerPid: 100,
       currentServerPid: null,
       candidates,
@@ -26,6 +27,7 @@ describe('tmux recovery detection', () => {
 
   it('reports recoverable blank replacements when the server pid changed', () => {
     expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: true,
       previousServerPid: 100,
       currentServerPid: 200,
       candidates,
@@ -36,12 +38,14 @@ describe('tmux recovery detection', () => {
 
   it('reports unexpected single-session loss but ignores intentional deletion', () => {
     expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: true,
       previousServerPid: 100,
       currentServerPid: 100,
       candidates,
       liveSessionNames: new Set(['tmux-b', 'tmux-c']),
     })?.affectedSessionIds).toEqual(['a']);
     expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: true,
       previousServerPid: 100,
       currentServerPid: null,
       candidates,
@@ -62,6 +66,7 @@ describe('dismissed tmux losses', () => {
   it('does not recreate a dismissed incident on refresh or a replacement server', () => {
     for (const currentServerPid of [null, 200]) {
       expect(detectTmuxRecoveryIncident({
+        authoritativeTmuxList: true,
         previousServerPid: 100, currentServerPid, candidates,
         liveSessionNames: new Set(), dismissedSessionIds: new Set(['a', 'b']),
       })).toBeNull();
@@ -70,6 +75,7 @@ describe('dismissed tmux losses', () => {
 
   it('still reports another session loss', () => {
     expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: true,
       previousServerPid: 100, currentServerPid: null, candidates,
       liveSessionNames: new Set(), dismissedSessionIds: new Set(['a']),
     })?.affectedSessionIds).toEqual(['b']);
@@ -81,8 +87,28 @@ describe('dismissed tmux losses', () => {
     );
     expect(dismissed).toEqual(['b']);
     expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: true,
       previousServerPid: 200, currentServerPid: 200, candidates,
       liveSessionNames: new Set(), dismissedSessionIds: new Set(dismissed),
     })?.affectedSessionIds).toEqual(['a']);
+  });
+});
+
+describe('unknown tmux inventory', () => {
+  it('does not turn failed scans into loss, even with an unchanged or changed pid', () => {
+    for (const currentServerPid of [137991, 200, null]) {
+      expect(detectTmuxRecoveryIncident({
+        authoritativeTmuxList: false, previousServerPid: 137991, currentServerPid,
+        candidates, liveSessionNames: new Set(),
+      })).toBeNull();
+    }
+  });
+
+  it('preserves an existing incident until a successful observation', () => {
+    const existingIncident = normalizeTmuxRecoveryIncident({ id: 'existing', affectedSessionIds: ['a'] })!;
+    expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: false, previousServerPid: 137991, currentServerPid: 137991,
+      candidates, liveSessionNames: new Set(), existingIncident,
+    })).toBe(existingIncident);
   });
 });

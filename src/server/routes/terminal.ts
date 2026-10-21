@@ -3587,7 +3587,8 @@ async function getTmuxServerPid(): Promise<number | null> {
   try {
     const raw = (await runTmux(['display-message', '-p', '#{pid}'])).trim();
     const pid = Number.parseInt(raw, 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error('Invalid tmux server pid response');
+    return pid;
   } catch (error) {
     if (isTmuxServerMissingMessage(getErrorMessage(error))) return null;
     throw error;
@@ -3598,7 +3599,7 @@ function getTmuxRecoveryView(): SessionInventory['tmuxRecovery'] {
   const incident = tmuxRecoveryState.incident;
   const latestOperation = tmuxRecoveryOperations.latest();
   if (!incident) {
-    if (!latestOperation || ['succeeded', 'partial_failure'].includes(latestOperation.state)) return null;
+    if (!latestOperation || latestOperation.dismissedAt !== undefined || ['succeeded', 'partial_failure'].includes(latestOperation.state)) return null;
     const sessions = latestOperation.items.flatMap(item => {
       const record = globalSessionState.sessions.find(candidate => candidate.sessionId === item.sessionId);
       const agent = record?.agentResume ? agentBySlug(record.agentResume.slug) : null;
@@ -3629,12 +3630,15 @@ function getTmuxRecoveryView(): SessionInventory['tmuxRecovery'] {
     : null;
 }
 
-async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]): Promise<void> {
+async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[], authoritativeTmuxList: boolean): Promise<void> {
+  // Preserve the incident, acknowledgements and generation baseline on unknown scans.
+  if (!authoritativeTmuxList) return;
   let currentServerPid: number | null = null;
   try {
     currentServerPid = await getTmuxServerPid();
   } catch (error) {
     console.warn('[tmux-recovery] Failed to read tmux server pid:', getErrorMessage(error));
+    return;
   }
   const liveSessionNames = new Set(liveTmuxSessions.map((session) => session.name));
   const candidates = globalSessionState.sessions.flatMap((record) => {
@@ -3652,6 +3656,7 @@ async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]
   const incident = detectTmuxRecoveryIncident({
     previousServerPid: tmuxRecoveryState.lastServerPid,
     currentServerPid,
+    authoritativeTmuxList,
     candidates,
     liveSessionNames,
     intentionallyDeleting: intentionallyDeletingTmuxSessions,
@@ -3691,7 +3696,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       liveTmuxSessions = [];
     }
   }
-  await observeTmuxServerGeneration(liveTmuxSessions);
+  await observeTmuxServerGeneration(liveTmuxSessions, authoritativeTmuxList);
 
   const refreshedTmuxSessions = await Promise.all(liveTmuxSessions.map(async (tmux): Promise<TmuxInventoryMeta> => {
     if (!isTermdockManagedTmuxSession(tmux)) {
@@ -5185,13 +5190,14 @@ function getCwdFromTmuxLayout(layout: TmuxLayout): string | null {
   return activePane?.currentPath || null;
 }
 
-async function resolveLiveTmuxMetadata(tmuxSessionName: string, cached = false): Promise<(TmuxRuntimeMetadata & { shellTitle: string | null }) | null> {
+async function resolveLiveTmuxMetadata(tmuxSessionName: string, cached = false, freshProcess = false): Promise<(TmuxRuntimeMetadata & { shellTitle: string | null }) | null> {
   const layout = cached ? await getCachedTmuxLayout(tmuxSessionName) : await getTmuxLayout(tmuxSessionName);
   const activePane = getActivePaneFromLayout(layout);
   if (!activePane) {
     return null;
   }
-  const resolved = await resolveTmuxPaneProgram(activePane);
+  if (freshProcess && process.platform === 'linux') await getProcessSnapshot(true);
+  const resolved = await resolveTmuxPaneProgram(activePane, freshProcess, freshProcess);
   const fallback = getActiveProgramFromTmuxLayout(layout);
   const program = resolved?.command ?? fallback?.command ?? null;
   const cwd = getCwdFromTmuxLayout(layout);
@@ -7010,18 +7016,21 @@ async function restoreTmuxRecoverySession(operationId: string, frontendSessionId
   const command = agent ? buildResumeCommand(agent, record.agentResume.sessionId, record.agentResume.launchArgv) : null;
   if (!agent || !command) throw Object.assign(new Error('Agent does not support exact resume'), { code: 'EXACT_RESUME_UNSUPPORTED' });
   const target: AgentResumeTarget = { slug: agent.slug, nativeSessionId: record.agentResume.sessionId, command };
-  const activeBackend = findActiveAgentResumeOwner('', target);
-  const activeWriterPid = activeBackend ? null : await findExternalCodexWriter(target);
-  if (activeBackend || activeWriterPid) return {};
-
   await collaborationDeliveryWorker.reconfigure(frontendSessionId, () => tmuxLifecycle.run(`restore:${record.tmuxSessionName}`, async () => {
     // Reconcile ownership again inside the per-terminal serialization fence.
     if (findActiveAgentResumeOwner('', target) || await findExternalCodexWriter(target)) return;
     reportPhase('runtime_resolving');
     await prepareManagedTmuxSessionUnlocked(record.tmuxSessionName!, record.cwd!);
-    const metadata = await resolveLiveTmuxMetadata(record.tmuxSessionName!);
+    const metadata = await resolveLiveTmuxMetadata(record.tmuxSessionName!, false, true);
     const foreground = metadata?.program?.toLowerCase() ?? null;
-    if (foreground && !shellNamesBackend.has(foreground)) {
+    if (!foreground) {
+      throw Object.assign(new Error('Recovery target foreground is unknown'), { code: 'RECOVERY_TARGET_UNCONFIRMED' });
+    }
+    if (!shellNamesBackend.has(foreground)) {
+      const liveAgent = detectAgentFromCommand(metadata?.rawArgs ?? '', agentCustomCommands())
+        ?? detectAgentFromCommand(foreground, agentCustomCommands());
+      // Keep the running pane; the normal session attachment path reconnects it.
+      if (liveAgent?.slug === agent.slug) return;
       throw Object.assign(new Error(`pane is busy with ${foreground}`), { code: 'RECOVERY_TARGET_BUSY' });
     }
     const previous = collaborationRouting.get(frontendSessionId);
@@ -7186,8 +7195,11 @@ router.post('/tmux/recovery/operations/:id/resume', async (req, res) => {
 });
 
 router.delete('/tmux/recovery', async (_req, res) => {
-  if (tmuxRecoveryOperations.all().some(operation => !['succeeded', 'partial_failure'].includes(operation.state))) {
-    return res.status(409).json({ error: 'a recovery operation is active; pause or finish it before dismissing the incident', code: 'RECOVERY_OPERATION_ACTIVE' });
+  try {
+    await tmuxRecoveryOperations.dismissPausedOperations();
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'RECOVERY_OPERATION_ACTIVE') throw error;
+    return res.status(409).json({ error: getErrorMessage(error), code: 'RECOVERY_OPERATION_ACTIVE' });
   }
   tmuxRecoveryState.dismissedSessionIds = Array.from(new Set([
     ...tmuxRecoveryState.dismissedSessionIds,

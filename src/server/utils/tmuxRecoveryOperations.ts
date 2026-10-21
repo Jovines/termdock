@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { canDismissTmuxRecoveryOperation } from './tmuxRecoveryDismissal.js';
 import { randomUUID } from 'node:crypto';
 
 export type TmuxRecoveryItemState = 'queued' | 'resource_wait' | 'running' | 'paused' | 'succeeded' | 'failed';
@@ -35,6 +36,7 @@ export interface TmuxRecoveryOperation {
   scope: TmuxRecoveryScope;
   state: TmuxRecoveryOperationState;
   paused: boolean;
+  dismissedAt?: number;
   pauseReason?: 'manual' | 'resources';
   /** Additional keys coalesced while this exact intent was active. */
   idempotencyKeyAliases?: string[];
@@ -272,6 +274,7 @@ export class TmuxRecoveryOperationStore {
     if (!operation) return null;
     if (!terminalState(operation.state)) {
       operation.paused = false;
+      operation.dismissedAt = undefined;
       operation.pauseReason = undefined;
       for (const item of operation.items) {
         if (item.state === 'paused' && item.pauseReason === 'manual') {
@@ -287,6 +290,17 @@ export class TmuxRecoveryOperationStore {
       void this.pump();
     }
     return this.get(id);
+  }
+
+  async dismissPausedOperations(): Promise<void> {
+    if (this.all().some(operation => !canDismissTmuxRecoveryOperation(operation))) {
+      throw new TmuxRecoveryOperationError('RECOVERY_OPERATION_ACTIVE', 'Pause recovery and wait for running items to finish before dismissing the incident.');
+    }
+    for (const operation of this.state.operations) {
+      if (!terminalState(operation.state)) operation.dismissedAt = Date.now();
+    }
+    await this.persist();
+    this.emit();
   }
 
   stats(): { queued: number; paused: number; resource_wait: number; running: number; activeLaunches: number; lastCompletedAt: number | null; lastCompletedSessionId: string | null } {
