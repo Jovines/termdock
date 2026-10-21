@@ -33,7 +33,6 @@ import {
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
   Workflow as RiWorkflowLine,
-  GripVertical as RiDragHandle,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -842,19 +841,14 @@ export function LeftSidebar(
     setNewSessionComposerOpen(true);
   };
 
-  const getSessionStatusBackground = useCallback((sessionId: string): string | null => {
-    const state = sessionStates.get(sessionId);
-    if (state?.agentStatus === 'waiting' || state?.agentNeedsReview) {
-      return 'bg-[rgb(var(--warning-rgb)_/_0.10)] text-foreground';
+  // Selection is navigation state; Agent status stays in its icon so it cannot
+  // replace the selected row's background (especially inside split groups).
+  const getSessionRowAppearance = useCallback((sessionId: string): string => {
+    if (!mainCollaborationGroup && sessionId === activeSessionId) {
+      return 'sidebar-session-selected text-foreground';
     }
-    if (state?.agentStatus === 'working') {
-      return 'bg-[rgb(var(--success-rgb)_/_0.08)] text-foreground';
-    }
-    if (state?.inCopyMode) {
-      return 'bg-[rgb(var(--tmux-rgb)_/_0.08)] text-foreground';
-    }
-    return null;
-  }, [sessionStates]);
+    return 'text-muted-foreground hover:bg-surface-2';
+  }, [activeSessionId, mainCollaborationGroup]);
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // 目录和 Git 信息由外层目录分组表达，不在每个会话里重复；分屏成员再收紧一档。
@@ -888,17 +882,7 @@ export function LeftSidebar(
       contentShellTitle,
       ts?.promptState ?? null,
     );
-    // Shell integration (OSC 133) provides real-time running state.
-    // Fall back to agentStatus for AI tools that don't emit OSC 133.
     const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
-    const isRunning = ts?.promptState === 'running' || ts?.agentStatus === 'working' || tuiProgressActive;
-    const accentClass = isRunning
-      ? 'bg-[var(--success)]'
-      : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
-        ? 'bg-[var(--warning)]'
-        : ts?.inCopyMode
-          ? 'bg-[var(--tmux)]'
-          : 'bg-primary';
     return (
       <SwipeToCloseSession
         open={swipedSessionId === session.id}
@@ -910,6 +894,7 @@ export function LeftSidebar(
       >
         <button
           ref={isActive ? activeItemRef : null}
+          aria-current={isActive ? 'page' : undefined}
           type="button"
           {...(dragHandleProps ?? {})}
           onContextMenu={(event) => {
@@ -926,12 +911,12 @@ export function LeftSidebar(
             closeIfOverlay();
           }}
           className={`sidebar-session-primary relative min-w-0 flex flex-1 items-center overflow-hidden text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing ' : ''}${
-            compact ? 'gap-1.5 py-0.5 pl-1.5 pr-0.5' : 'gap-1.5 py-1 pl-2 pr-1'
+            compact ? 'min-h-7 gap-1.5 py-0.5 pl-2 pr-0.5' : 'min-h-[30px] gap-1.5 py-1 pl-2 pr-1'
           }`}
           title={ts?.cwd ?? session.name}
         >
           {isActive && (
-            <span className={`absolute inset-y-2 left-0 w-0.5 rounded-full ${accentClass}`} />
+            <span aria-hidden="true" className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-primary" />
           )}
           <span className={`relative inline-flex shrink-0 items-center justify-center rounded-md ${
             compact ? 'h-5 w-[22px]' : 'h-[22px] w-[22px]'
@@ -984,9 +969,7 @@ export function LeftSidebar(
           }}
           className={`sidebar-session-action inline-flex shrink-0 items-center justify-center rounded-md transition hover:bg-primary/15 hover:text-primary active:scale-95 ${
             compact ? 'h-6 w-6' : 'h-[26px] w-[26px]'
-          } ${
-            isSplit ? 'bg-primary/15 text-primary' : 'text-muted-foreground/70'
-          }`}
+          } text-muted-foreground`}
           aria-label={`${removeSplitPane ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
           title={removeSplitPane ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')}
         >
@@ -1010,7 +993,7 @@ export function LeftSidebar(
         </button>)}
       </SwipeToCloseSession>
     );
-  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId]);
+  }, [activeSessionId, mainCollaborationGroup, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId]);
 
   // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
   // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
@@ -1418,7 +1401,7 @@ export function LeftSidebar(
     handleEntityDragEnd(result, entities, groupKey);
   }, [collaborationGroups, folderGroups, sessionsById, splitWorkspaces, handleCollaborationMemberDragEnd, handleEntityDragEnd, handleSplitMemberDragEnd, onReorderSessions]);
 
-  const renderSplitLayoutControl = (workspace: SplitWorkspaceSummary) => {
+  const renderSplitLayoutControl = (workspace: SplitWorkspaceSummary, dragHandleProps?: DraggableProvidedDragHandleProps | null) => {
     const layoutMenuOpen = layoutMenuWorkspaceId === workspace.id;
     const layoutOptions: Array<{ layout: SplitLayout; label: string; icon: typeof RiSplitLine }> = [
       { layout: 'horizontal', label: t('tab.splitHorizontal'), icon: RiSplitLine },
@@ -1441,6 +1424,7 @@ export function LeftSidebar(
         onPointerDown={(event) => event.stopPropagation()}
       >
         <button
+          {...(dragHandleProps ?? {})}
           type="button"
           className={`sidebar-session-action inline-flex h-6 w-6 items-center justify-center rounded-md transition active:scale-95 ${
             layoutMenuOpen
@@ -1450,7 +1434,7 @@ export function LeftSidebar(
           aria-label={`${t('tab.splitLayout')}: ${currentLayoutLabel}`}
           aria-haspopup="menu"
           aria-expanded={layoutMenuOpen}
-          title={t('tab.splitLayout')}
+          title={dragHandleProps ? `${t('tab.splitLayout')} · 按住拖动分屏组` : t('tab.splitLayout')}
           onClick={(event) => {
             event.stopPropagation();
             setLayoutMenuWorkspaceId((current) => current === workspace.id ? null : workspace.id);
@@ -1496,15 +1480,6 @@ export function LeftSidebar(
     );
   };
 
-  const renderGroupDragHandle = (label: string, props?: DraggableProvidedDragHandleProps | null) => props && (
-    <button type="button" {...props}
-      aria-label={label} title={label}
-      onClick={(event) => event.stopPropagation()}
-      className="absolute -left-2 inset-y-0 z-10 flex w-3 cursor-grab items-start justify-center pt-1.5 text-muted-foreground/60 transition hover:text-foreground focus-visible:text-foreground active:cursor-grabbing">
-      <RiDragHandle size={10} />
-    </button>
-  );
-
   const renderSplitWorkspaceItem = (
     workspace: SplitWorkspaceSummary,
     members: LeftSidebarProps['sessions'],
@@ -1513,20 +1488,6 @@ export function LeftSidebar(
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
   ): React.ReactNode => {
     if (members.length < 2) return null;
-    const hasActive = members.some((session) => session.id === activeSessionId);
-    const reviewMembers: SidebarSession[] = [];
-    const workingMembers: SidebarSession[] = [];
-    const copyModeMembers: SidebarSession[] = [];
-    for (const member of members) {
-      const state = sessionStates.get(member.id);
-      if (state?.agentStatus === 'waiting' || state?.agentNeedsReview) {
-        reviewMembers.push(member);
-      } else if (state?.agentStatus === 'working') {
-        workingMembers.push(member);
-      } else if (state?.inCopyMode) {
-        copyModeMembers.push(member);
-      }
-    }
     const accessibleName = workspace.name?.trim()
       || `${t('tab.splitWorkspace')} ${splitWorkspaces.findIndex((candidate) => candidate.id === workspace.id) + 1}`;
     const layoutMenuOpen = layoutMenuWorkspaceId === workspace.id;
@@ -1534,23 +1495,14 @@ export function LeftSidebar(
       <section
         data-split-workspace={workspace.id}
         aria-label={accessibleName}
-        className={`group/split relative rounded-md p-0.5 before:pointer-events-none before:absolute before:inset-0 before:rounded-md before:border before:border-border transition-colors ${
+        className={`group/split relative rounded-md my-1 p-0.5 before:opacity-40 before:pointer-events-none before:absolute before:inset-0 before:rounded-md before:border before:border-border transition-colors ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
               ? 'bg-surface-elevated opacity-90 shadow-lg'
-              : reviewMembers.length > 0
-                ? 'bg-[rgb(var(--warning-rgb)_/_0.08)] hover:bg-[rgb(var(--warning-rgb)_/_0.12)]'
-                : workingMembers.length > 0
-                  ? 'bg-[rgb(var(--success-rgb)_/_0.06)] hover:bg-[rgb(var(--success-rgb)_/_0.10)]'
-                  : copyModeMembers.length > 0
-                    ? 'bg-[rgb(var(--tmux-rgb)_/_0.07)] hover:bg-[rgb(var(--tmux-rgb)_/_0.11)]'
-                    : hasActive
-                      ? 'bg-primary/[0.07]'
-                      : 'hover:bg-surface-2'
+              : 'bg-[var(--chrome-bg)]'
         }`}
       >
-        {renderGroupDragHandle(`移动分屏组 ${accessibleName}`, dragHandleProps)}
         <Droppable droppableId={`split-members:${workspace.id}`} type="split-member" direction="vertical">
           {(membersProvided, membersSnapshot) => (
             <div
@@ -1566,16 +1518,13 @@ export function LeftSidebar(
                       ref={memberProvided.innerRef}
                       {...memberProvided.draggableProps}
                       {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
-                      className={`${memberIndex === 0 && layoutMenuOpen ? 'relative z-20 ' : 'relative '}flex items-center rounded-sm pr-0.5 transition-colors ${
+                      className={`sidebar-session-row ${memberIndex === 0 && layoutMenuOpen ? 'relative z-20 ' : 'relative '}flex items-center rounded-sm pr-0.5 transition-colors ${
                         memberSnapshot.isDragging ? 'bg-surface-elevated opacity-90 shadow-lg ' : ''
                       }${
-                        getSessionStatusBackground(session.id)
-                          ?? (session.id === activeSessionId
-                            ? 'bg-surface-elevated/80 text-foreground'
-                            : 'text-muted-foreground hover:bg-surface-2')
+                        getSessionRowAppearance(session.id)
                       }`}
                     >
-                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true, memberIndex === 0 ? renderSplitLayoutControl(workspace) : undefined)}
+                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true, memberIndex === 0 ? renderSplitLayoutControl(workspace, dragHandleProps) : undefined)}
                     </div>
                   )}
                 </Draggable>
@@ -1619,7 +1568,6 @@ export function LeftSidebar(
     const collapseKey = `collaboration:${collaboration.id}`;
     const membersCollapsed = collapsedGroups.has(collapseKey);
     const membersRegionId = `collaboration-members-${collaboration.id}`;
-    const hasActive = mainCollaborationGroup === collaboration.id || (!mainCollaborationGroup && members.some((session) => session.id === activeSessionId));
     const completedIds = completedTaskSessions(collaborationTasks, collaboration.id);
     const retiredIds = collaboration.sessionIds.filter(id => completedIds.has(id) && id !== activeSessionId && !splitSessionIds.has(id));
     const expandedCompleted = completedSessionsExpanded[collaboration.id] === true;
@@ -1632,17 +1580,15 @@ export function LeftSidebar(
         data-collaboration-group={collaboration.id}
         data-collaboration-group-name={collaboration.name}
         aria-label={`Agent 工作组：${collaboration.name}`}
-        className={`group/collaboration relative rounded-md ${membersCollapsed ? '' : 'p-0.5 before:pointer-events-none before:absolute before:inset-0 before:rounded-md before:border before:border-border'} transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
+        className={`group/collaboration relative my-1 rounded-lg p-1 before:pointer-events-none before:absolute before:inset-0 before:rounded-lg before:border before:border-border/60 transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
               ? 'bg-surface-elevated opacity-90 shadow-lg'
-              : hasActive
-                ? 'bg-primary/[0.07]'
-                : 'hover:bg-surface-2'
+              : 'bg-[var(--chrome-bg)]'
         }`}
       >
-        {renderGroupDragHandle(`移动工作组 ${collaboration.name}`, dragHandleProps)}
+        <div className="rounded-md bg-surface">
         <CollaborationGroupActions group={rawCollaborationGroups.find(group => group.id === collaboration.id) ?? collaboration}
           collapsed={membersCollapsed} onOpen={() => { void openAgentOperations(collaboration.id); }}
           onMessages={messagePanelBusy === null && (activeSessionId || members.length) ? () => openGroupMessages(collaboration.id, members[0]?.id) : undefined}
@@ -1656,9 +1602,10 @@ export function LeftSidebar(
             <RiChevronRightLine size={14} className={membersCollapsed ? '' : 'rotate-90'} />
           </button>
         <button
+          {...(dragHandleProps ?? {})}
           type="button"
-          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1 text-left text-xs font-medium text-foreground transition hover:text-primary md:min-h-[30px]"
-          title={`打开 ${collaboration.name} 的协作工作区`}
+          className="flex min-h-11 min-w-0 flex-1 cursor-grab items-center gap-1.5 rounded-sm px-1 text-left text-xs font-medium text-foreground transition hover:text-primary active:cursor-grabbing md:min-h-[30px]"
+          title={`打开 ${collaboration.name} 的协作工作区 · 按住标题拖动排序`}
           aria-label={`打开协作工作区：${collaboration.name}`}
           aria-current={mainCollaborationGroup === collaboration.id ? "page" : undefined}
           onClick={(event) => {
@@ -1666,7 +1613,7 @@ export function LeftSidebar(
             void openAgentOperations(collaboration.id);
           }}
         >
-          <RiWorkflowLine size={14} className="shrink-0 text-primary" />
+          <RiWorkflowLine size={14} className="shrink-0 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate">{collaboration.name}</span>
           {taskInbox.some(t => t.groupId === collaboration.id) && <span className="shrink-0 text-[10px] font-normal text-primary">{taskInbox.filter(t => t.groupId === collaboration.id).length} 待处理</span>}
         </button>
@@ -1678,7 +1625,8 @@ export function LeftSidebar(
             {messagePanelBusy === collaboration.id ? <RefreshCw size={14} className="animate-spin" /> : <MessageCircle size={14} />}
           </button>
         </CollaborationGroupActions>
-        <div id={membersRegionId}>
+        </div>
+        <div id={membersRegionId} className={membersCollapsed ? undefined : "px-0.5 pt-1"}>
         {!membersCollapsed && <>
         {retiredIds.length > 0 && <button type="button" aria-expanded={expandedCompleted} className="flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-[11px] text-muted-foreground hover:bg-surface-elevated md:min-h-8" title="展开后可查看或归档执行会话，任务结果保留。" onClick={() => setCompletedSessionsExpanded(state => ({ ...state, [collaboration.id]: !expandedCompleted }))}><RiChevronRightLine size={12} className={expandedCompleted ? 'rotate-90' : ''} />已完成的执行会话 · {retiredIds.length}</button>}
         <Droppable
@@ -1718,15 +1666,10 @@ export function LeftSidebar(
                       data-collaboration-member={session.id}
                       data-split-member={splitSessionIds.has(session.id) ? 'true' : undefined}
                       {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
-                      className={`${section.workspace && id === section.sessionIds[0] && layoutMenuWorkspaceId === section.workspace.id ? 'z-20 ' : ''}relative flex items-center rounded-sm pr-0.5 transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
+                      className={`${section.workspace && id === section.sessionIds[0] && layoutMenuWorkspaceId === section.workspace.id ? 'z-20 ' : ''}sidebar-session-row relative flex items-center rounded-sm pr-0.5 transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
                         memberSnapshot.combineTargetFor ? 'bg-primary/15 ring-1 ring-primary/40 ' : memberSnapshot.isDragging ? 'bg-surface-elevated opacity-90 shadow-lg ' : ''
                       }${
-                        getSessionStatusBackground(session.id)
-                          ?? (session.id === activeSessionId
-                            ? 'bg-surface-elevated/80 text-foreground'
-                            : splitSessionIds.has(session.id)
-                              ? 'bg-primary/[0.05] text-muted-foreground hover:bg-primary/[0.09]'
-                              : 'text-muted-foreground hover:bg-surface-2')
+                        getSessionRowAppearance(session.id)
                       }`}
                     >
                       {renderSessionRowBody(session, memberProvided.dragHandleProps, true, section.workspace && id === section.sessionIds[0] ? renderSplitLayoutControl(section.workspace) : undefined,
@@ -1832,15 +1775,12 @@ export function LeftSidebar(
                           : (
                         <div
                           {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
-                          className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
+                          className={`sidebar-session-row group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
                             snapshot.combineTargetFor
                               ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
                               : snapshot.isDragging
                                 ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
-                                : getSessionStatusBackground(entity.session.id)
-                                  ?? (!mainCollaborationGroup && entity.session.id === activeSessionId
-                                    ? 'bg-surface-elevated text-foreground'
-                                    : 'text-muted-foreground hover:bg-surface-2')
+                                : getSessionRowAppearance(entity.session.id)
                           } cursor-grab active:cursor-grabbing`}
                         >
                           {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
@@ -1966,14 +1906,14 @@ export function LeftSidebar(
                                   toggleGroupCollapsed(group.key);
                                   autoExpandedGroupKeysRef.current.delete(group.key);
                                 }}
-                                className={`flex w-full shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2 ${groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'}`}
+                                className={`flex w-full shrink-0 items-center gap-1.5 rounded-md px-1.5 pb-1 pt-2.5 text-left text-muted-foreground transition hover:bg-surface-2 ${groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'}`}
                                 title={group.key || group.label}
                               >
                                 <RiChevronRightLine
                                   size={13}
                                   className={`shrink-0 transition-transform ${collapsed ? '' : 'rotate-90'}`}
                                 />
-                                <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold uppercase tracking-wide">
+                                <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold uppercase tracking-[0.08em]">
                                   {group.label}
                                 </span>
                                 {groupRunning > 0 && (
@@ -2027,15 +1967,12 @@ export function LeftSidebar(
                                                       : (
                                                     <div
                                                       {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
-                                                      className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
+                                                      className={`sidebar-session-row group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
                                                         snapshot.combineTargetFor
                                                           ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
                                                           : snapshot.isDragging
                                                             ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
-                                                            : getSessionStatusBackground(entity.session.id)
-                                                              ?? (!mainCollaborationGroup && entity.session.id === activeSessionId
-                                                                ? 'bg-surface-elevated text-foreground'
-                                                                : 'text-muted-foreground hover:bg-surface-2')
+                                                            : getSessionRowAppearance(entity.session.id)
                                                       } cursor-grab active:cursor-grabbing`}
                                                     >
                                                       {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}

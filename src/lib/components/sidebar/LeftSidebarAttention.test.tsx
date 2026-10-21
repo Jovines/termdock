@@ -17,7 +17,7 @@ describe('LeftSidebar attention state', () => {
       json: async () => ({ locale: 'en' }),
     })));
 
-    render(
+    const sidebar = (activeSessionId: string | null) => (
       <I18nProvider>
         <LeftSidebar
           isOpen
@@ -28,7 +28,7 @@ describe('LeftSidebar attention state', () => {
             { id: 'review-session', name: 'Review session', mode: 'shell' },
             { id: 'copy-session', name: 'Copy session', mode: 'tmux' },
           ]}
-          activeSessionId={null}
+          activeSessionId={activeSessionId}
           sessionStates={new Map([
             ['review-session', {
               cwd: null,
@@ -58,13 +58,23 @@ describe('LeftSidebar attention state', () => {
       </I18nProvider>,
     );
 
+    const view = render(sidebar('review-session'));
+
     expect(screen.getAllByText('Review session')).toHaveLength(1);
     expect(screen.queryByText('Needs attention')).toBeNull();
     expect(screen.queryByRole('button', { name: /Needs review/ })).toBeNull();
-    expect(screen.getByText('Review session').closest('.group')?.className)
-      .toContain('var(--warning-rgb)');
-    expect(screen.getByText('Copy session').closest('.group')?.className)
-      .toContain('var(--tmux-rgb)');
+    expect(screen.getByText('Review session').closest('.sidebar-session-row')?.className)
+      .toContain('sidebar-session-selected');
+    expect(screen.getByText('Review session').closest('button')?.getAttribute('aria-current')).toBe('page');
+    expect(screen.getByText('Copy session').closest('.sidebar-session-row')?.className)
+      .not.toContain('sidebar-session-selected');
+    view.rerender(sidebar('copy-session'));
+    expect(screen.getByText('Review session').closest('button')?.getAttribute('aria-current')).toBeNull();
+    expect(screen.getByText('Review session').closest('.sidebar-session-row')?.className)
+      .not.toContain('sidebar-session-selected');
+    expect(screen.getByText('Copy session').closest('button')?.getAttribute('aria-current')).toBe('page');
+    expect(screen.getByText('Copy session').closest('.sidebar-session-row')?.className)
+      .toContain('sidebar-session-selected');
     expect(screen.getByTitle('Copy mode').className).toContain('rounded-[2px]');
 
     fireEvent.click(screen.getByRole('button', { name: 'More actions' }));

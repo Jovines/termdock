@@ -21,7 +21,7 @@ export function SplitPaneTitle({ session, active, onActivate, onToggleRightSideb
   });
 
   return (
-    <div data-pane-titlebar="true" className="swiper-no-swiping flex h-6 min-h-6 shrink-0 items-center border-b border-border app-chrome-bg">
+    <div data-pane-titlebar="true" className={`swiper-no-swiping flex h-6 min-h-6 shrink-0 items-center border-b border-border ${active ? 'split-pane-title-active text-foreground' : 'app-chrome-bg text-muted-foreground'}`}>
     <button
       type="button"
       data-split-pane-title={session.id}
@@ -30,12 +30,11 @@ export function SplitPaneTitle({ session, active, onActivate, onToggleRightSideb
       aria-pressed={active}
       title={`${title} · 拖动标题移动，边缘拆分，中央交换`}
       onClick={onActivate}
-      className="split-pane-drag-handle flex h-full min-w-0 cursor-grab active:cursor-grabbing flex-1 items-center gap-1.5 overflow-hidden px-2 text-left text-[12px] font-medium leading-none text-foreground hover:bg-surface focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
+      className="split-pane-drag-handle flex h-full min-w-0 cursor-grab active:cursor-grabbing flex-1 items-center gap-1.5 overflow-hidden px-2 text-left text-[12px] font-medium leading-none hover:opacity-80 focus-visible:outline focus-visible:outline-1 focus-visible:outline-current focus-visible:-outline-offset-1"
     >
-      <Terminal size={11} className={`shrink-0 ${active ? 'text-primary' : 'text-muted-foreground'}`} />
+      <Terminal size={11} className="shrink-0" />
       <span className="min-w-0 flex-1 truncate">{title}</span>
-      <GripVertical size={12} aria-hidden="true" className="shrink-0 text-muted-foreground" />
-      {active && <span aria-hidden="true" className="h-1 w-1 shrink-0 rounded-full bg-primary" />}
+      <GripVertical size={12} aria-hidden="true" className="shrink-0 opacity-60" />
     </button>
     {onToggleRightSidebar && (
       <button
@@ -43,7 +42,7 @@ export function SplitPaneTitle({ session, active, onActivate, onToggleRightSideb
         onClick={onToggleRightSidebar}
         aria-label={t('tab.explorerTitle')}
         title={t('tab.explorerTitle')}
-        className="inline-flex h-full w-7 shrink-0 items-center justify-center text-muted-foreground hover:bg-surface hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary focus-visible:-outline-offset-1"
+        className="inline-flex h-full w-7 shrink-0 items-center justify-center hover:opacity-80 focus-visible:outline focus-visible:outline-1 focus-visible:outline-current focus-visible:-outline-offset-1"
       >
         <PanelRight size={14} />
       </button>

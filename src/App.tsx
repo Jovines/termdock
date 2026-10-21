@@ -5481,7 +5481,7 @@ function App() {
     return (
       <div className="w-screen h-full flex flex-row">
         {showPinnedLeft && <>
-        <div ref={pinnedLeftPanelRef} style={{ width: sidebarLeftWidth, flexShrink: 0, height: '100%' }}>
+        <div ref={pinnedLeftPanelRef} className="relative" style={{ width: sidebarLeftWidth, flexShrink: 0, height: '100%' }}>
           <LeftSidebar
             isOpen={sidebarLeftOpen}
             drawerWidthPx={sidebarLeftWidth}
@@ -5519,13 +5519,13 @@ function App() {
             pinned={true}
             onTogglePinned={handleToggleLeftPinned}
           />
-        </div>
         <div
           role="separator"
           tabIndex={-1}
-          className="shrink-0 w-[5px] h-full cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
+          className="absolute inset-y-0 right-0 z-20 w-[5px] cursor-col-resize hover:bg-border/30 active:bg-border/50 transition-colors"
           onMouseDown={handleResizeMouseDown}
         />
+        </div>
         </>}
         <div className="relative flex-1 min-w-0 h-full overflow-hidden">
           {body}

@@ -275,9 +275,9 @@ describe('Agent workgroup split navigation', () => {
   });
   it.each([false, true])('moves a workgroup as one item without splitting it (folders=%s)', async (folders) => {
     const handlers = await setup(folders);
-    const handle = screen.getByRole('button', { name: '移动工作组 Release team' });
+    const handle = screen.getByRole('button', { name: '打开协作工作区：Release team' });
     expect(handle.getAttribute('data-drag-id')).toBe('collaboration:team');
-    expect(screen.getByRole('button', { name: '打开协作工作区：Release team' }).hasAttribute('data-drag-id')).toBe(false);
+    expect(screen.queryByRole('button', { name: '移动工作组 Release team' })).toBeNull();
     const start: DragStart = {
       draggableId: 'collaboration:team', type: 'session', mode: 'FLUID',
       source: { droppableId: folders ? 'group-sessions:' : 'sidebar-entities', index: 0 },

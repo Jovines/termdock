@@ -311,6 +311,28 @@ body {
   }
 }
 
+.sidebar-session-selected,
+.sidebar-session-selected:hover,
+.split-pane-title-active,
+.split-pane-title-active:hover {
+  background-color: color-mix(in srgb, var(--primary) 16%, var(--surface));
+  box-shadow: inset 0 0 0 1px rgb(var(--primary-rgb) / 0.22);
+}
+
+/* Keep navigation selection prominent; reveal secondary desktop actions when
+   the row is targeted. Touch actions remain visible and keep their hit areas. */
+@media (hover: hover) and (pointer: fine) {
+  .sidebar-session-row .sidebar-session-action {
+    opacity: 0;
+  }
+
+  .sidebar-session-row:hover .sidebar-session-action,
+  .sidebar-session-row:focus-within .sidebar-session-action,
+  .sidebar-session-selected .sidebar-session-action {
+    opacity: 1;
+  }
+}
+
 /* Prevent iOS Safari from auto-zooming the page when focusing form fields
    whose effective font-size is below 16px. We force a 16px floor on touch
    devices only, so desktop layouts keep their compact sizes. */
