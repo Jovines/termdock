@@ -24,12 +24,15 @@ export function ConnectionQualityDetails({ quality }: { quality: ConnectionQuali
     </>)}
     {section(tr('当前发送与排队', 'Current buffers and queues'), d ? <>
       {rows([
+        [tr('当前传输', 'Current transport'), d.transport === 'webtransport' ? 'QUIC / HTTP/3' : 'WebSocket / TCP'],
         [tr('传输层发送缓冲', 'Transport send buffer'), `${d.bufferedBytes} B`],
         [tr('加密通道待发送', 'Channel writes pending'), d.pendingWrites ? tr('有', 'Yes') : tr('无', 'No')],
         [tr('进行中的非终端请求', 'Active non-terminal requests'), d.activeRequests],
         [tr('等待通道的请求', 'Requests waiting for capacity'), d.waitingRequests],
       ])}
-      <p className="mt-2">{tr('属于此服务共用的连接，包含文件等其他请求。', 'Shared by this service, including file transfers and other requests.')}</p>
+      <p className="mt-2">{d.transport === 'webtransport'
+        ? tr('此终端使用独立加密流，文件请求使用其他流。', 'This terminal has an independent encrypted stream; file requests use other streams.')
+        : tr('属于此服务共用的连接，包含文件等其他请求。', 'Shared by this service, including file transfers and other requests.')}</p>
     </> : <p>{tr('尚无连接记录。', 'No connection record yet.')}</p>)}
     {section(tr('本次连接建立 · 历史耗时', 'Connection setup · recorded timings'), <>
       {rows([

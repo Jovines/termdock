@@ -1,4 +1,6 @@
 import type { ByteDuplex } from './secureProtocol.js';
+import { compressRecord } from './recordCompression.js';
+import { BINARY_RECORD_FLAG, binaryPacketBody, readBinaryPacket } from './binaryPacket.js';
 
 /** Bounded queues are also used at the untrusted, pre-handshake boundary. */
 export class AsyncQueue<T> implements AsyncIterable<T> {
@@ -34,7 +36,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 }
 
 export interface Packet { type: string; id: string; [key: string]: unknown }
-interface QueuedPacket { id: string; bytes: Uint8Array }
+interface QueuedPacket { id: string; bytes: Uint8Array; compress: boolean }
 export class PacketQueueBackpressureError extends Error {
   readonly code = 'PACKET_QUEUE_BACKPRESSURE';
   constructor(message = 'Record queue capacity exceeded') { super(message); this.name = 'PacketQueueBackpressureError'; }
@@ -50,6 +52,7 @@ export class PacketChannel {
   private outgoing = new AsyncQueue<QueuedPacket>(256);
   private outgoingBytes = 0;
   private queuedBytesById = new Map<string, number>();
+  private writeWaiters = new Set<() => void>();
   private closed = false;
   get hasPendingWrites(): boolean { return this.outgoingBytes > 0; }
   queuedBytesFor(id: string): number { return this.queuedBytesById.get(id) ?? 0; }
@@ -58,7 +61,8 @@ export class PacketChannel {
     const self = this;
     this.done = duplex.sink((async function* () {
       for await (const packet of self.outgoing) {
-        try { yield packet.bytes; } finally { self.releaseQueuedPacket(packet); }
+        try { yield packet.compress ? await compressRecord(packet.bytes, packet.id) : packet.bytes; }
+        finally { self.releaseQueuedPacket(packet); }
       }
     })());
     void this.done.then(
@@ -66,23 +70,50 @@ export class PacketChannel {
       error => this.discardPending(error instanceof Error ? error : new Error('Transport failed')),
     );
   }
-  send(packet: Packet): void {
+  send(packet: Packet, compress = false): void {
+    if (this.closed) throw new Error('Channel closed');
     // The item-count cap protects against floods of tiny records. Check it
     // before encoding and keep this queue alive when it is temporarily full.
     if (this.outgoing.size >= 256) throw new PacketQueueBackpressureError('Record queue item limit exceeded');
-    const body = encoder.encode(JSON.stringify(packet));
+    const binary = binaryPacketBody(packet);
+    const body = binary ?? encoder.encode(JSON.stringify(packet));
     if (body.length > MAX_PACKET) throw new Error('Record too large');
     const bytes = new Uint8Array(body.length + 4);
-    new DataView(bytes.buffer).setUint32(0, body.length);
+    new DataView(bytes.buffer).setUint32(0, binary ? body.length + BINARY_RECORD_FLAG : body.length);
     bytes.set(body, 4);
     if (this.outgoingBytes + bytes.byteLength > 4 * 1024 * 1024) throw new PacketQueueBackpressureError('Record queue byte budget exceeded');
-    const queued = { id: packet.id, bytes };
+    const queued = { id: packet.id, bytes, compress };
     if (!this.outgoing.tryPush(queued)) throw new PacketQueueBackpressureError('Record queue item limit exceeded');
     this.outgoingBytes += bytes.byteLength;
     this.queuedBytesById.set(packet.id, this.queuedBytesFor(packet.id) + bytes.byteLength);
   }
+  /** Bulk producers wait below the hard cap, leaving room for input, ACKs and
+   * cancellation. A busy file stream must not tear down the shared connection. */
+  async sendBulk(packet: Packet, signal: AbortSignal, beforeSend?: () => void): Promise<void> {
+    const started = Date.now();
+    while (true) {
+      if (signal.aborted) throw signal.reason ?? new Error('CANCELLED');
+      if (this.closed) throw new Error('Channel closed');
+      if (this.outgoingBytes < 512 * 1024 && this.outgoing.size < 128) {
+        beforeSend?.();
+        try { this.send(packet); return; }
+        catch (error) { if (!(error instanceof PacketQueueBackpressureError)) throw error; }
+      }
+      if (Date.now() - started >= 30_000) throw new Error('Encrypted transport congested');
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); this.writeWaiters.delete(wake); };
+        const abort = () => { cleanup(); reject(signal.reason ?? new Error('CANCELLED')); };
+        const wake = () => { cleanup(); resolve(); };
+        const timer = setTimeout(() => { cleanup(); reject(new Error('Encrypted transport congested')); }, Math.max(1, 30_000 - (Date.now() - started)));
+        this.writeWaiters.add(wake);
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+      });
+    }
+  }
   private releaseQueuedPacket(packet: QueuedPacket): void {
     this.outgoingBytes = Math.max(0, this.outgoingBytes - packet.bytes.byteLength);
+    for (const wake of this.writeWaiters) wake();
     const current = this.queuedBytesById.get(packet.id);
     if (current === undefined) return;
     const remaining = current - packet.bytes.byteLength;
@@ -104,6 +135,7 @@ export class PacketChannel {
     this.outgoing.end(error);
     this.outgoingBytes = 0;
     this.queuedBytesById.clear();
+    for (const wake of this.writeWaiters) wake();
     this.duplex.close?.(error);
   }
   async *read(): AsyncGenerator<Packet> {
@@ -115,6 +147,7 @@ export class PacketChannel {
     let bufferedBytes = 0;
     let spareBlock: Uint8Array | undefined;
     const parseFrame = (frame: Uint8Array): Packet => {
+      if (frame[0] & 0x80) return readBinaryPacket(frame.subarray(4));
       const packet: unknown = JSON.parse(decoder.decode(frame.subarray(4)));
       if (!packet || typeof packet !== 'object' || typeof (packet as Packet).id !== 'string' || typeof (packet as Packet).type !== 'string') throw new Error('Invalid record');
       return packet as Packet;
@@ -197,7 +230,7 @@ export class PacketChannel {
     for await (const chunk of this.duplex.source) {
       if (bufferedBytes + chunk.byteLength > MAX_BUFFERED_PACKET_BYTES) throw new Error('Record buffer exceeded');
       if (bufferedBytes === 0 && chunk.byteLength >= 5) {
-        const size = ((chunk[0] * 0x1000000) + (chunk[1] << 16) + (chunk[2] << 8) + chunk[3]) >>> 0;
+        const size = (((chunk[0] & 0x7f) * 0x1000000) + (chunk[1] << 16) + (chunk[2] << 8) + chunk[3]) >>> 0;
         if (size > MAX_PACKET || size === 0) throw new Error('Invalid record size');
         if (chunk.byteLength === size + 4) {
           yield parseFrame(chunk);
@@ -206,7 +239,7 @@ export class PacketChannel {
       }
       if (chunk.byteLength) append(chunk);
       while (bufferedBytes >= 4) {
-        const size = ((byteAt(0) * 0x1000000) + (byteAt(1) << 16) + (byteAt(2) << 8) + byteAt(3)) >>> 0;
+        const size = (((byteAt(0) & 0x7f) * 0x1000000) + (byteAt(1) << 16) + (byteAt(2) << 8) + byteAt(3)) >>> 0;
         if (size > MAX_PACKET || size === 0) throw new Error('Invalid record size');
         if (bufferedBytes < size + 4) break;
         const frame = recordBytes(size + 4);

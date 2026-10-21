@@ -11,6 +11,8 @@ import { createPasswordLoginRouter } from './federation/passwordLoginRoutes.js';
 import { apiAccessGate, isTrustedLocalRequest } from './utils/apiAccess.js';
 import { isEncryptedRequest } from './federation/requestContext.js';
 import { createFederationRuntime } from './federation/runtime.js';
+import { startWebTransportServer } from './federation/webTransportServer.js';
+import type { WebTransportDescriptor } from './federation/webTransportProtocol.js';
 import { RouteAccess, type RoutePrincipal } from './federation/routeAccess.js';
 import { RouteInvitationStore } from './federation/routeInvitations.js';
 import { attachRegisteredDirectTargets, verifyDirectTarget } from './federation/directRoutes.js';
@@ -114,6 +116,7 @@ export interface CertificateRefreshResult {
 }
 
 export interface ServerOptions {
+  quic?: boolean;
   host?: string;
   port?: number;
   httpsCertPath?: string;
@@ -538,6 +541,9 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     runtimeMonitor,
   });
   const { server, scheme } = createServerForApp(app, options);
+  let webTransport: Awaited<ReturnType<typeof startWebTransportServer>> | undefined;
+  const webTransportDescriptor = (): WebTransportDescriptor | undefined => webTransport?.descriptor();
+  server.once('close', () => webTransport?.close());
   const collaborationChannels = new Map<string, Set<CollaborationRpc>>();
   const reverseCollaboration = (id: string) => [...(collaborationChannels.get(id) ?? [])].find(rpc => !rpc.closed);
   let collaborationService: CollaborationService | undefined;
@@ -580,6 +586,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket, android: handleAndroidWebSocket, computer: handleComputerWebSocket,
   }, {
+    webTransport: webTransportDescriptor,
     resolveSessionId: resolveStableFederationSessionId,
     collaborationConnected: (subjectId, rpc) => {
       const channels = collaborationChannels.get(subjectId) ?? new Set<CollaborationRpc>();
@@ -762,29 +769,13 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   let latestLocalAccessState = localAccessManager.getState();
   let latestOnboardingUrl: string | null = null;
 
-  // WebSocket for bidirectional terminal communication.
-  // Replaces SSE (server→client) + HTTP POST (client→server) with a single
-  // persistent connection per terminal session.
-  //
-  // perMessageDeflate: 终端输出是纯文本，压缩比通常 5-10x。弱网/跨城（高 RTT、
-  // 低带宽）下，刷新页面时 N 个终端各自一次性回放全量 scrollback（每个可达
-  // 100KB），未压缩会同时挤满链路、肉眼可见地卡几秒。开启压缩后带宽需求直接
-  // 降到 1/5~1/10。参数：
-  //  - threshold 1024：小于 1KB 的小包（按键回显等）不压缩，避免 CPU 浪费。
-  //  - concurrencyLimit：限制并发压缩任务，防止突发回放打满 CPU。
-  //  - zlib memLevel 7 + level 6：在压缩比和内存/CPU 间取均衡，避免每连接
-  //    分配过大 zlib 上下文（默认 memLevel 8 内存更高）。
-  //  - serverNoContextTakeover：每条消息独立压缩上下文，降低长连接常驻内存。
+  // Both public WebSocket endpoints carry Noise ciphertext. Compress eligible
+  // terminal records before encryption instead of spending CPU deflating random
+  // ciphertext (including at relay hops).
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: 1024 * 1024,
-    perMessageDeflate: {
-      threshold: 1024,
-      concurrencyLimit: 10,
-      serverNoContextTakeover: true,
-      clientNoContextTakeover: true,
-      zlibDeflateOptions: { level: 6, memLevel: 7 },
-    },
+    perMessageDeflate: false,
   });
 
 
@@ -850,6 +841,22 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     const displayHost = host === '0.0.0.0' ? 'localhost' : host;
     console.log(`Termdock server running at ${scheme}://${displayHost}:${listeningPort}`);
     console.log(`Health check: ${scheme}://${displayHost}:${listeningPort}/health`);
+    if ((options.quic ?? process.env.TERMDOCK_QUIC !== '0') && (scheme === 'https' || process.env.TERMDOCK_PUBLIC_ORIGIN?.startsWith('https://'))) {
+      const quicPort = process.env.TERMDOCK_QUIC_PORT === undefined ? listeningPort : Number(process.env.TERMDOCK_QUIC_PORT);
+      void federation.then(async runtime => {
+        if (!Number.isSafeInteger(quicPort) || quicPort < 1 || quicPort > 65535) throw new Error('Invalid TERMDOCK_QUIC_PORT');
+        const transport = await startWebTransportServer({
+          directory: path.join(homedir(), '.termdock', 'federation'), host: listeningHost, port: quicPort,
+          hostAllowed: isAllowedHost,
+          originAllowed: (origin, authority) => secureChannelOriginAllowed(origin, () => isUpgradeOriginAllowed(origin, authority)),
+          openAccessAllowed: (origin, authority) => !!origin && isUpgradeOriginAllowed(origin, authority),
+          accept: (duplex, context) => runtime.acceptDuplex(duplex, context),
+        });
+        if (!server.listening) { transport.close(); return; }
+        webTransport = transport;
+        console.log(`QUIC/WebTransport listening on UDP ${quicPort}; independent encrypted streams enabled`);
+      }).catch(error => console.warn('[quic] Encrypted WebSocket remains available:', error instanceof Error ? error.message : 'Transport unavailable'));
+    }
     const onboardingServerState = scheme === 'https'
       ? startOnboardingServer({ httpsPort: listeningPort, caCertPath: options.httpsCaPath })
       : { server: null, url: null };

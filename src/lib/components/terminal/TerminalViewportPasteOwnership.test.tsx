@@ -28,13 +28,18 @@ vi.mock('../../terminal/resizePresentation', () => ({ createResizePresentation: 
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
   constructor(options:Record<string,unknown>){this.options=options;terminalModel.instance=this;}
   _core={coreService:{isCursorInitialized:false}};
+  osc52Handler?: (data: string) => boolean;
+  dataHandler?: (data: string) => void;
+  parser = { registerOscHandler: (_code: number, handler: (data: string) => boolean) => {
+    this.osc52Handler = handler; return { dispose() {} };
+  } };
   hasSelection(){return !!terminalModel.selection;}getSelection(){return terminalModel.selection;}
   cols = 80; rows = 24; options: Record<string, unknown> = {}; unicode = { activeVersion: '11' };
   buffer = { active: { cursorX: 0, cursorY: 0, viewportY: 0, baseY: 0, length: 0, getLine: () => undefined } };
   textarea: HTMLTextAreaElement | null = null;
-  loadAddon() {} registerLinkProvider() {} refresh() {} focus=vi.fn(); blur=vi.fn(); clearSelection() {}
+  loadAddon() {} registerLinkProvider() { return { dispose() {} }; } refresh() {} focus=vi.fn(); blur=vi.fn(); clearSelection() {}
   attachCustomWheelEventHandler() {}
-  onCursorMove() { return { dispose() {} }; } onData() { return { dispose() {} }; }
+  onCursorMove() { return { dispose() {} }; } onData(handler: (data: string) => void) { this.dataHandler = handler; return { dispose() {} }; }
   onRender() { return { dispose() {} }; } onResize() { return { dispose() {} }; }
   open() {} dispose() {}
 } }));
@@ -44,7 +49,6 @@ vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: class {} }));
 vi.mock('@xterm/addon-search', () => ({ SearchAddon: class {} }));
 vi.mock('@xterm/addon-serialize', () => ({ SerializeAddon: class {} }));
-vi.mock('@xterm/addon-clipboard', () => ({ ClipboardAddon: class {}, BrowserClipboardProvider: class {} }));
 vi.mock('@xterm/addon-image', () => ({ ImageAddon: class {} }));
 vi.mock('@xterm/addon-ligatures', () => ({ LigaturesAddon: class {} }));
 vi.mock('@xterm/addon-progress', () => ({ ProgressAddon: class {} }));
@@ -127,6 +131,26 @@ describe('TerminalViewport async paste ownership', () => {
     mount(onInput);await waitFor(()=>expect(screen.getByRole('textbox')).toBeTruthy());terminalModel.selection='remote 中文';
     fireEvent.keyDown(screen.getByRole('textbox'),{key:'c',metaKey:true});
     await waitFor(()=>expect(writeClipboardText).toHaveBeenCalledExactlyOnceWith('remote 中文'));expect(onInput).not.toHaveBeenCalled();
+  });
+  it('Codex OSC 52 uses the client native bridge and ignores a hidden terminal', async () => {
+    const writeClipboardText = vi.fn(async () => {}), onInput = vi.fn();
+    desktop.bridge = { writeClipboardText };
+    const view = mount(onInput);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    act(() => terminalModel.instance.osc52Handler(`c;${btoa('Codex copy')}`));
+    await waitFor(() => expect(writeClipboardText).toHaveBeenCalledExactlyOnceWith('Codex copy'));
+    view.rerender(<TerminalViewport {...view.props} isLayoutVisible={false} />);
+    act(() => terminalModel.instance.osc52Handler(`c;${btoa('hidden copy')}`));
+    expect(writeClipboardText).toHaveBeenCalledTimes(1);
+    expect(onInput).not.toHaveBeenCalled();
+  });
+  it('forwards generated mouse and terminal replies without toolbar modifier transformation', async () => {
+    const onInput = vi.fn(); mount(onInput);
+    await waitFor(() => expect(terminalModel.instance?.dataHandler).toBeTypeOf('function'));
+    for (const sequence of ['\x1b[<35;48;29M', '\x1b[<0;48;29M', '\x1b[<0;48;29m', '\x1b[1;1R']) {
+      act(() => terminalModel.instance.dataHandler(sequence));
+      expect(onInput).toHaveBeenLastCalledWith(sequence, { skipModifierTransform: true });
+    }
   });
   it('macOS Edit Copy events use the xterm selection rather than the hidden input value',async()=>{
     mount(vi.fn());await waitFor(()=>expect(screen.getByRole('textbox')).toBeTruthy());terminalModel.selection='selected terminal output';const setData=vi.fn();

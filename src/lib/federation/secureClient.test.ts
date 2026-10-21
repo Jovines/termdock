@@ -11,6 +11,64 @@ function harness(handle: (packet: Packet, reply: (packet: Packet) => void) => vo
   return { client: new SecureClient(clientWire, { peerId: 'device' } as Identity, 'service'), received };
 }
 describe('SecureClient packet operations', () => {
+  it('negotiates pipelined uploads and reports only acknowledged bytes', async () => {
+    const uploads: Packet[] = [];
+    let reply!: (packet: Packet) => void;
+    const { client, received } = harness((packet, respond) => {
+      reply = respond;
+      if (packet.type === 'permissions') respond({ id: packet.id, type: 'result', httpWindow: 8 });
+      if (packet.type === 'upload') uploads.push(packet);
+      if (packet.type === 'upload-end') { respond({ id: packet.id, type: 'head', status: 204, headers: {} }); respond({ id: packet.id, type: 'end' }); }
+    });
+    const progress: number[] = [];
+    try {
+      await client.request({ type: 'permissions' });
+      const result = client.fetch('/api/test', { method: 'POST', body: new Uint8Array(9 * 65536), onUploadProgress: bytes => progress.push(bytes) });
+      await vi.waitFor(() => expect(uploads).toHaveLength(8));
+      expect(progress).toEqual([]);
+      expect(received.some(packet => packet.type === 'upload-end')).toBe(false);
+      reply({ id: uploads[0].id, type: 'upload-ack' });
+      await vi.waitFor(() => expect(uploads).toHaveLength(9));
+      for (let i = 1; i < 9; i++) reply({ id: uploads[i].id, type: 'upload-ack' });
+      expect((await result).status).toBe(204);
+      expect(progress).toEqual(Array.from({ length: 9 }, (_, i) => (i + 1) * 65536));
+    } finally { client.close(); }
+  });
+  it('keeps one upload in flight with an older server and can abort while waiting', async () => {
+    const abort = new AbortController();
+    const { client, received } = harness((packet, reply) => {
+      if (packet.type === 'permissions') reply({ id: packet.id, type: 'result' });
+    });
+    try {
+      await client.request({ type: 'permissions' });
+      const result = client.fetch('/api/test', { method: 'POST', body: new Uint8Array(9 * 65536), signal: abort.signal });
+      const rejection = expect(result).rejects.toThrow();
+      await vi.waitFor(() => expect(received.filter(packet => packet.type === 'upload')).toHaveLength(1));
+      abort.abort();
+      await rejection;
+      await vi.waitFor(() => expect(received.some(packet => packet.type === 'cancel')).toBe(true));
+      expect(client.closed).toBe(false);
+    } finally { client.close(); }
+  });
+  it('bounds an unread pipelined download and cancels it without closing terminals', async () => {
+    const { client, received } = harness((packet, reply) => {
+      if (packet.type === 'permissions') reply({ id: packet.id, type: 'result', httpWindow: 8 });
+      if (packet.type === 'upload-end') {
+        reply({ id: packet.id, type: 'head', status: 200, headers: {} });
+        for (let i = 0; i < 8; i++) reply({ id: packet.id, type: 'chunk', data: toBase64(new Uint8Array(65536)) });
+      }
+    });
+    try {
+      await client.request({ type: 'permissions' });
+      const response = await client.fetch('/api/test');
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(received.some(packet => packet.type === 'ack')).toBe(false);
+      expect(client.closed).toBe(false);
+      await response.body!.cancel();
+      await vi.waitFor(() => expect(received.some(packet => packet.type === 'cancel')).toBe(true));
+      expect(client.closed).toBe(false);
+    } finally { client.close(); }
+  });
   it('prepares renewal five minutes before expiry and defers while requests are pending', async () => {
     const now = Date.now();
     const { client } = harness(() => {});

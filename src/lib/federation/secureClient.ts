@@ -4,6 +4,11 @@ import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from './transportLif
 import { AsyncQueue, PacketChannel, fromBase64, toBase64, type Packet } from '../../server/federation/packets.js';
 import { socketDuplex } from '../../server/federation/socketDuplex.js';
 import { MAX_ACTIVE_HTTP_REQUESTS, MAX_OPEN_SECURE_SOCKETS } from '../../server/federation/streamLimits.js';
+import { MAX_TRANSFER_WINDOW, TRANSFER_CHUNK_BYTES, transferWindow } from '../../server/federation/transferWindow.js';
+import { expandRecord } from '../../server/federation/recordCompression.js';
+import { readWebTransportDescriptor, type WebTransportDescriptor } from '../../server/federation/webTransportProtocol.js';
+import { connectWebTransport, nativeWebTransportFactory, type SecureStreamPool, type WebTransportFactory, type StreamConnection } from './webTransportClient.js';
+import { DeviceAuthorizationRequired } from './deviceAuthorization.js';
 
 export interface SecureClientOptions {
   url: string;
@@ -12,14 +17,16 @@ export interface SecureClientOptions {
   pairingCode?: string;
   signal?: AbortSignal;
   socketFactory?: (url: string) => WebSocket;
+  webTransport?: boolean;
+  webTransportFactory?: WebTransportFactory;
 }
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 const MAX_PENDING = MAX_OPEN_SECURE_SOCKETS + MAX_ACTIVE_HTTP_REQUESTS + 8;
 const MAX_WAITING = 256;
 const REQUEST_IDLE_MS = 30_000;
-const CHUNK_BYTES = 64 * 1024;
+const CHUNK_BYTES = TRANSFER_CHUNK_BYTES;
 type OperationKind = 'http' | 'socket' | 'request';
-interface Pending { queue: AsyncQueue<Packet>; kind: OperationKind; socket?: SecureSocket; cancelUpload?: () => void }
+interface Pending { queue: AsyncQueue<Packet>; kind: OperationKind; socket?: SecureSocket; cancelUpload?: () => void; delegated?: boolean }
 interface Allocation { id: string; queue: AsyncQueue<Packet> }
 interface Waiter { kind: OperationKind; resolve: (allocation: Allocation) => void; reject: (reason: unknown) => void; cleanup: () => void }
 function failure(value: unknown): Error { return value instanceof Error ? value : new Error(String(value ?? 'Secure connection closed')); }
@@ -31,7 +38,8 @@ function pathOnly(input: string): string {
 /** WebSocket-shaped logical endpoint; its contents stay inside the authenticated Noise channel. */
 export class SecureSocket extends EventTarget {
   readonly CONNECTING = 0; readonly OPEN = 1; readonly CLOSING = 2; readonly CLOSED = 3;
-  readonly binaryType = 'arraybuffer'; readonly bufferedAmount = 0;
+  readonly binaryType = 'arraybuffer';
+  get bufferedAmount(): number { return this.pendingBytes(); }
   readonly protocol = 'termdock-e2ee-v1'; readonly extensions = '';
   getConnectionDiagnostics?: () => ConnectionDiagnostics | undefined;
   readonly createdAt = performance.now();
@@ -41,7 +49,7 @@ export class SecureSocket extends EventTarget {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
-  constructor(readonly url: string, private transmit: (data: string) => void, private disconnect: () => void) { super(); }
+  constructor(readonly url: string, private transmit: (data: string) => void, private disconnect: () => void, private pendingBytes: () => number = () => 0) { super(); }
   send(data: string) {
     if (this.readyState !== 1) throw new Error('Secure socket is not open');
     if (typeof data !== 'string' || new TextEncoder().encode(data).length > 1024 * 1024) throw new Error('Unsupported socket payload');
@@ -72,10 +80,30 @@ export class SecureClient {
   private waiting: Waiter[] = [];
   private stopped = false;
   private closeReason?: Error;
+  private httpWindow = 1;
+  private binaryChunks = false;
+  private streamConnector?: (descriptor: WebTransportDescriptor, signal: AbortSignal) => Promise<SecureStreamPool>;
+  private streamPool?: SecureStreamPool;
+  private streamDescriptor?: WebTransportDescriptor;
+  private streamConnecting = false;
+  private streamRetryAt = 0;
+  private streamFailure?: Error;
+  get webTransportFailure(): string | undefined { return this.streamFailure?.message; }
+  private streamAbort = new AbortController();
+  private streamChildren = new Set<SecureClient>();
+  private idleHttpStreams: SecureClient[] = [];
+  private operationGeneration = 0;
+  private quicControl?: SecureClient;
+  private sharedTransportClosed = false;
+  private socketUpgradeTimer?: ReturnType<typeof setTimeout>;
+  private idleHook?: () => void;
+  private closedHook?: () => void;
+  get transport(): 'websocket' | 'webtransport' { return this.streamPool?.available ? 'webtransport' : this.transportDiagnostics?.().transport ?? 'websocket'; }
   get canSwitchTransport(): boolean {
     return !this.channel.hasPendingWrites && performance.now() - this.lastInputAt >= 2000
       && ![...this.pending.values()].some(operation => operation.kind !== 'socket')
-      && !this.waiting.some(operation => operation.kind !== 'socket');
+      && !this.waiting.some(operation => operation.kind !== 'socket')
+      && [...this.streamChildren].every(child => child.canSwitchTransport);
   }
   get renewalDue(): boolean {
     return !this.stopped && Math.max(performance.now() - this.establishedAt, Date.now() - this.establishedWallTime)
@@ -83,8 +111,133 @@ export class SecureClient {
   }
   get closed(): boolean { return this.stopped; }
   constructor(private channel: PacketChannel, readonly identity: Identity, readonly targetPeerId: string) {
-    void this.read().catch(error => this.close(failure(error)));
-    void channel.done.catch(error => this.close(failure(error)));
+    void this.read().catch(error => this.sharedConnectionFailed(failure(error)));
+    void channel.done.catch(error => this.sharedConnectionFailed(failure(error)));
+  }
+  configureWebTransport(connector: (descriptor: WebTransportDescriptor, signal: AbortSignal) => Promise<SecureStreamPool>): void {
+    this.streamConnector = connector;
+  }
+  private sharedConnectionFailed(error: Error): void {
+    if (this.stopped) return;
+    this.sharedTransportClosed = true;
+    if (!this.streamPool?.available || !this.quicControl || this.quicControl.closed) { this.close(error); return; }
+    // QUIC remains independently authenticated if the old TCP connection dies.
+    // Only operations that were actually using that TCP channel fail.
+    for (const [id, pending] of this.pending) {
+      if (pending.delegated) continue;
+      pending.queue.end(error); pending.cancelUpload?.(); pending.socket?.fail(error); this.release(id);
+    }
+  }
+  private streamClient(connection: StreamConnection): SecureClient {
+    const child = new SecureClient(new PacketChannel(connection.duplex), this.identity, this.targetPeerId);
+    child.httpWindow = this.httpWindow; child.binaryChunks = this.binaryChunks;
+    child.transportDiagnostics = () => ({ ...connection.diagnostics, bufferedBytes: connection.duplex.bufferedBytes?.() ?? 0 });
+    this.streamChildren.add(child);
+    child.closedHook = () => { this.streamChildren.delete(child); };
+    return child;
+  }
+  private recordCapabilities(response: Packet): void {
+    this.httpWindow = transferWindow(response.httpWindow); this.binaryChunks = response.binaryChunks === true;
+    const descriptor = readWebTransportDescriptor(response.webTransport);
+    if (descriptor) { this.streamDescriptor = descriptor; this.startStreams(); }
+  }
+  private startStreams(): void {
+    if (!this.streamConnector || !this.streamDescriptor || this.stopped || this.streamPool?.available || this.streamConnecting || Date.now() < this.streamRetryAt) return;
+    this.streamConnecting = true;
+    const descriptor = this.streamDescriptor;
+    void (async () => {
+      let pool: SecureStreamPool | undefined, control: SecureClient | undefined;
+      try {
+        pool = await this.streamConnector!(descriptor, this.streamAbort.signal);
+        control = this.streamClient(await pool.open('socket', this.streamAbort.signal));
+        const permissions = await control.request({ type: 'permissions' }, { timeoutMs: 4000 });
+        if (permissions.type !== 'result' || typeof permissions.fullService !== 'boolean' || !Array.isArray(permissions.grants)) throw new Error('Invalid permission response');
+        if (!permissions.fullService && !permissions.grants.length) throw new DeviceAuthorizationRequired();
+        if (this.stopped) throw new Error('Secure connection closed');
+        this.quicControl = control; this.streamPool = pool;
+        this.streamFailure = undefined;
+        const currentPool = pool;
+        const detachedControl = control.closedHook;
+        control.closedHook = () => {
+          detachedControl?.();
+          if (!this.stopped && this.quicControl === control) currentPool.close();
+        };
+        void pool.closed.then(() => {
+          if (this.streamPool !== currentPool || this.stopped) return;
+          this.streamPool = undefined; this.quicControl?.close(); this.quicControl = undefined;
+          this.streamRetryAt = Date.now() + 30_000;
+          if (this.sharedTransportClosed) this.close(new Error('Secure connection closed'));
+        });
+        this.renewSharedSockets();
+      } catch (error) {
+        this.streamFailure = failure(error);
+        control?.close(); pool?.close(); this.streamRetryAt = Date.now() + 30_000;
+        if (error instanceof DeviceAuthorizationRequired || error instanceof Error && error.name === 'UnexpectedPeerError') this.close(failure(error));
+      } finally { this.streamConnecting = false; }
+    })();
+  }
+  private renewSharedSockets(): void {
+    if (this.stopped || !this.streamPool?.available) return;
+    // Let recently typed input reach the PTY. Output cursors, never input, are
+    // used to reattach terminals on the new independently encrypted streams.
+    if (performance.now() - this.lastInputAt < 2000 || this.channel.hasPendingWrites) {
+      this.socketUpgradeTimer = setTimeout(() => this.renewSharedSockets(), 250); return;
+    }
+    for (const [id, pending] of this.pending) {
+      if (!pending.socket || pending.delegated) continue;
+      pending.socket.accept({ type: 'ws-close', id, code: TRANSPORT_RENEWED_CODE, reason: TRANSPORT_RENEWED_REASON });
+      try { this.channel.send({ type: 'ws-close', id }); } catch { /* The old TCP path may already be gone. */ }
+      this.release(id);
+    }
+  }
+  private async operationStream(kind: 'http' | 'socket', signal?: AbortSignal): Promise<SecureClient | undefined> {
+    if (this.stopped) throw this.closeReason ?? new Error('Secure connection closed');
+    this.startStreams();
+    const pool = this.streamPool;
+    if (!pool?.available) {
+      if (this.sharedTransportClosed) throw new Error('Secure connection closed');
+      return;
+    }
+    const allocation = await this.reserve(kind, signal);
+    this.pending.get(allocation.id)!.delegated = true;
+    try {
+      let child: SecureClient | undefined;
+      if (kind === 'http') {
+        while (this.idleHttpStreams.length) {
+          const candidate = this.idleHttpStreams.pop()!;
+          if (!candidate.closed && !candidate.renewalDue) { child = candidate; break; }
+          candidate.close();
+        }
+      }
+      if (!child) child = this.streamClient(await pool.open(kind, AbortSignal.any([this.streamAbort.signal, ...(signal ? [signal] : [])])));
+      if (this.stopped || signal?.aborted) { child.close(); throw signal?.reason ?? new Error('Secure connection closed'); }
+      const stream = child;
+      const generation = stream.operationGeneration + 1;
+      let released = false;
+      const release = () => { if (!released) { released = true; this.release(allocation.id); } };
+      stream.closedHook = () => {
+        this.streamChildren.delete(stream);
+        this.idleHttpStreams = this.idleHttpStreams.filter(idle => idle !== stream);
+        release();
+      };
+      stream.idleHook = () => { queueMicrotask(() => {
+        // A response body may finish draining after this stream was leased again.
+        if (released || stream.pending.size || stream.operationGeneration < generation) return;
+        release();
+        if (kind === 'http' && !stream.closed && !stream.renewalDue && pool === this.streamPool && pool.available
+          && this.idleHttpStreams.length < MAX_ACTIVE_HTTP_REQUESTS) this.idleHttpStreams.push(stream);
+        else stream.close();
+      }); };
+      return child;
+    } catch (error) {
+      this.release(allocation.id);
+      if (error instanceof Error && error.name === 'UnexpectedPeerError') this.close(error);
+      if (signal?.aborted || this.stopped || error instanceof Error && error.name === 'UnexpectedPeerError') throw error;
+      // No application record has been sent. A failed stream handshake can
+      // safely use the still encrypted TCP path; never retry a dispatched body.
+      if (this.sharedTransportClosed) throw error;
+      return;
+    }
   }
   private hasCapacity(kind: OperationKind): boolean {
     if (this.pending.size >= MAX_PENDING) return false;
@@ -93,7 +246,8 @@ export class SecureClient {
   }
   private allocate(kind: OperationKind): Allocation {
     if (this.stopped) throw this.closeReason ?? new Error('Secure connection closed');
-    const id = crypto.randomUUID(), queue = new AsyncQueue<Packet>(4);
+    const id = crypto.randomUUID(), queue = new AsyncQueue<Packet>(kind === 'http' ? MAX_TRANSFER_WINDOW + 4 : 4);
+    this.operationGeneration++;
     this.pending.set(id, { queue, kind }); return { id, queue };
   }
   private reserve(kind: OperationKind, signal?: AbortSignal): Promise<Allocation> {
@@ -122,7 +276,13 @@ export class SecureClient {
   }
   private async read() {
     try {
-      for await (const packet of this.channel.read()) {
+      for await (let packet of this.channel.read()) {
+        if (packet.type === 'compressed') {
+          if (packet.encoding !== 'gzip') throw new Error('Invalid record encoding');
+          const expanded = await expandRecord(packet.data) as Packet | null;
+          if (!expanded || expanded.type !== 'ws-data' || expanded.id !== packet.id || typeof expanded.data !== 'string') throw new Error('Invalid compressed socket record');
+          packet = expanded;
+        }
         const pending = this.pending.get(packet.id); if (!pending) continue;
         if (pending.socket) {
           pending.socket.accept(packet);
@@ -134,10 +294,15 @@ export class SecureClient {
           if (packet.type === 'end' || packet.type === 'error') { pending.cancelUpload?.(); this.release(packet.id); }
         }
       }
-    } finally { this.close(new Error('Secure connection closed')); }
+    } finally { this.sharedConnectionFailed(new Error('Secure connection closed')); }
   }
-  private release(id: string) { this.pending.get(id)?.queue.end(); this.pending.delete(id); this.dispatchWaiting(); }
+  private release(id: string) { this.pending.get(id)?.queue.end(); this.pending.delete(id); this.dispatchWaiting(); this.idleHook?.(); }
   async request(packet: Omit<Packet, 'id'>, options?: { timeoutMs?: number }): Promise<Packet> {
+    if (this.quicControl && !this.quicControl.closed) {
+      const result = await this.quicControl.request(packet, options);
+      if (packet.type === 'permissions' && result.type === 'result') this.recordCapabilities(result);
+      return result;
+    }
     const { id, queue } = await this.reserve('request');
     const timeout = setTimeout(() => this.close(new Error('Secure connection timed out')),
       Math.max(1000, Math.min(REQUEST_IDLE_MS, options?.timeoutMs ?? REQUEST_IDLE_MS)));
@@ -147,10 +312,32 @@ export class SecureClient {
       const response = (await queue[Symbol.asyncIterator]().next()).value;
       if (!response) throw new Error('Secure request closed');
       if (response.type === 'error') throw failure(response.error);
+      // Piggyback on the permission check already required at connection time.
+      // Missing capabilities keep new clients compatible with older servers.
+      if (packet.type === 'permissions' && response.type === 'result') {
+        this.recordCapabilities(response);
+      }
       return response;
     } finally { clearTimeout(timeout); this.release(id); }
   }
   openSocket(path: string): SecureSocket {
+    pathOnly(path);
+    if (!this.streamPool?.available) { this.startStreams(); return this.openSharedSocket(path); }
+    const waiting = new AbortController();
+    let target: SecureSocket | undefined;
+    const socket = new SecureSocket(path, data => target?.send(data), () => { waiting.abort(); target?.close(); }, () => target?.bufferedAmount ?? 0);
+    void this.operationStream('socket', waiting.signal).then(child => {
+      if (socket.readyState === 3) { child?.close(); return; }
+      target = (child ?? this).openSharedSocket(path);
+      socket.getConnectionDiagnostics = () => target?.getConnectionDiagnostics?.();
+      target.onopen = () => socket.accept({ type: 'ws-ready', id: '' });
+      target.onmessage = event => socket.accept({ type: 'ws-data', id: '', data: event.data });
+      target.onclose = event => socket.accept({ type: 'ws-close', id: '', code: event.code, reason: event.reason });
+      target.onerror = () => socket.fail(new Error('Encrypted stream unavailable'));
+    }).catch(error => socket.fail(failure(error)));
+    return socket;
+  }
+  private openSharedSocket(path: string): SecureSocket {
     pathOnly(path);
     let id: string | undefined;
     const waiting = new AbortController();
@@ -162,7 +349,8 @@ export class SecureClient {
         try { if (JSON.parse(data)?.type === 'input') this.lastInputAt = performance.now(); } catch { /* non-JSON logical socket */ }
         this.channel.send({ id, type: 'ws-data', data });
       },
-      () => { waiting.abort(); if (id) { try { this.channel.send({ id, type: 'ws-close' }); } finally { this.release(id); } } });
+      () => { waiting.abort(); if (id) { try { this.channel.send({ id, type: 'ws-close' }); } finally { this.release(id); } } },
+      () => id ? this.channel.queuedBytesFor(id) : 0);
     let queueMs: number | undefined;
     socket.getConnectionDiagnostics = () => {
       const transport = this.transportDiagnostics?.();
@@ -177,7 +365,7 @@ export class SecureClient {
       if (socket.readyState === 3) { this.release(id); return; }
       const pending = this.pending.get(id); if (!pending) throw new Error('Secure connection closed');
       pending.socket = socket;
-      this.channel.send({ id, type: 'ws-open', path });
+      this.channel.send({ id, type: 'ws-open', path, compression: typeof DecompressionStream !== 'undefined' ? 'gzip' : undefined });
     }).catch(error => { if (id) this.release(id); socket.fail(failure(error)); });
     return socket;
   }
@@ -192,6 +380,11 @@ export class SecureClient {
     const path = pathOnly(url.pathname + url.search);
     const uploadLimit = url.pathname === '/api/terminal/fs/upload' ? 110 * 1024 * 1024 : MAX_REQUEST_BYTES;
     if (request.signal.aborted) throw request.signal.reason;
+    const child = await this.operationStream('http', request.signal);
+    if (child) {
+      try { return await child.fetch(request, { onUploadProgress: init?.onUploadProgress }); }
+      catch (error) { child.close(failure(error)); throw error; }
+    }
     const headers: Record<string, string> = {};
     request.headers.forEach((value, key) => { if (!['cookie', 'authorization', 'host', 'connection', 'content-length'].includes(key)) headers[key] = value; });
     const { id, queue } = await this.reserve('http', request.signal);
@@ -221,19 +414,29 @@ export class SecureClient {
     };
     try {
       if (request.signal.aborted) throw request.signal.reason;
-      this.channel.send({ id, type: 'http', method, path, headers });
+      const window = this.httpWindow;
+      const binaryChunks = this.binaryChunks;
+      this.channel.send({ id, type: 'http', method, path, headers, window, binaryChunks });
       if (request.body) {
         const reader = request.body.getReader(); uploadReader = reader; let uploaded = 0; let acknowledged = 0;
+        const inFlight: number[] = [];
+        const acknowledgeUpload = async () => {
+          if ((await receive()).type !== 'upload-ack') throw new Error('Invalid upload acknowledgement');
+          acknowledged += inFlight.shift()!;
+          init?.onUploadProgress?.(acknowledged);
+        };
         try {
           while (true) {
             const { done, value } = await reader.read(); if (done) break;
             uploaded += value.byteLength; if (uploaded > uploadLimit) throw new Error('Request body exceeds upload limit');
             for (let offset = 0; offset < value.byteLength; offset += CHUNK_BYTES) {
-              this.channel.send({ id, type: 'upload', data: toBase64(value.subarray(offset, offset + CHUNK_BYTES)) });
-              if ((await receive()).type !== 'upload-ack') throw new Error('Invalid upload acknowledgement');
-              acknowledged += Math.min(CHUNK_BYTES, value.byteLength - offset); init?.onUploadProgress?.(acknowledged);
+              if (inFlight.length >= window) await acknowledgeUpload();
+              const chunk = value.subarray(offset, offset + CHUNK_BYTES);
+              await this.channel.sendBulk({ id, type: 'upload', ...(binaryChunks ? { bytes: chunk } : { data: toBase64(chunk) }) }, request.signal);
+              inFlight.push(chunk.byteLength);
             }
           }
+          while (inFlight.length) await acknowledgeUpload();
         } catch (error) { await reader.cancel(error).catch(() => {}); throw error; }
         finally { uploadReader = undefined; reader.releaseLock(); }
       }
@@ -254,15 +457,15 @@ export class SecureClient {
             if (acknowledge) { this.channel.send({ id, type: 'ack' }); acknowledge = false; }
             const packet = await receive();
             if (packet.type === 'end') { controller.close(); release(); return; }
-            if (packet.type !== 'chunk' || typeof packet.data !== 'string') throw new Error('Invalid response chunk');
-            const bytes = fromBase64(packet.data);
+            if (packet.type !== 'chunk' || !(binaryChunks && packet.bytes instanceof Uint8Array) && typeof packet.data !== 'string') throw new Error('Invalid response chunk');
+            const bytes = binaryChunks && packet.bytes instanceof Uint8Array ? packet.bytes : fromBase64(packet.data as string);
             if (bytes.length > CHUNK_BYTES) throw new Error('Response chunk exceeds budget');
             controller.enqueue(bytes); acknowledge = true;
           } catch (error) { controller.error(error); abort(); release(); }
         },
         cancel: () => { abort(); release(); },
       // Like native fetch, drain small unread responses, but keep large downloads
-      // bounded to one chunk of browser-side prefetch before applying backpressure.
+      // bounded to one chunk of decoded prefetch plus the negotiated wire window.
       }, { highWaterMark: CHUNK_BYTES, size: chunk => chunk.byteLength });
       return new Response(body, { status: head.status, headers: responseHeaders });
     } catch (error) { abort(); release(); throw error; }
@@ -270,6 +473,7 @@ export class SecureClient {
   /** Called only after a replacement has authenticated and no requests remain.
    * Do not replay input: terminal consumers reattach using their output cursor. */
   retire(): void {
+    for (const child of this.streamChildren) child.retire();
     for (const pending of this.pending.values()) {
       pending.socket?.accept({ id: '', type: 'ws-close', code: TRANSPORT_RENEWED_CODE, reason: TRANSPORT_RENEWED_REASON });
     }
@@ -277,9 +481,13 @@ export class SecureClient {
   }
   close(error = new Error('Secure connection closed')) {
     if (this.stopped) return; this.stopped = true; this.closeReason = error;
+    clearTimeout(this.socketUpgradeTimer); this.streamAbort.abort(error);
+    for (const child of this.streamChildren) child.close(error);
+    this.streamPool?.close();
     for (const waiter of this.waiting.splice(0)) { waiter.cleanup(); waiter.reject(error); }
     for (const pending of this.pending.values()) { pending.queue.end(error); pending.cancelUpload?.(); pending.socket?.fail(error); }
     this.pending.clear(); this.channel.close(error);
+    this.closedHook?.();
   }
 }
 
@@ -314,11 +522,15 @@ export async function connect(options: SecureClientOptions): Promise<SecureClien
     const establishedAt = Date.now();
     const relay = (socket as unknown as { connectionTimings?: ConnectionDiagnostics['relay'] }).connectionTimings;
     client.transportDiagnostics = () => ({
-      endpoint: url.host, path: relay ? 'relay' : 'direct', targetPeerId: secure.authenticatedPeerId,
+      endpoint: url.host, path: relay ? 'relay' : 'direct', targetPeerId: secure.authenticatedPeerId, transport: 'websocket',
       transportOpenMs: transportOpened - started, handshakeMs: securedAt - transportOpened, establishedAt,
       relay: relay ? { ...relay } : undefined, bufferedBytes: socket.bufferedAmount,
       pendingWrites: false, activeRequests: 0, waitingRequests: 0,
     });
+    const webTransportFactory = options.webTransportFactory ?? nativeWebTransportFactory();
+    if (options.webTransport !== false && !relay && url.protocol === 'wss:' && webTransportFactory) {
+      client.configureWebTransport((descriptor, signal) => connectWebTransport({ baseUrl: url.href, descriptor, identity, targetPeerId: secure.authenticatedPeerId, factory: webTransportFactory, signal }));
+    }
     if (options.pairingCode) {
       try { await client.request({ type: 'pair', code: options.pairingCode }); } catch (error) { client.close(failure(error)); throw error; }
     }

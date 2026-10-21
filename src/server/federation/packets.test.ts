@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PacketChannel, PacketQueueBackpressureError, type Packet } from './packets.js';
+import { BINARY_RECORD_FLAG, binaryPacketBody, readBinaryPacket } from './binaryPacket.js';
 
 const encoder = new TextEncoder();
 function frame(body: Uint8Array): Uint8Array {
@@ -32,6 +33,59 @@ const sourceOf = (chunks: Uint8Array[]): AsyncIterable<Uint8Array> => ({
 });
 
 describe('PacketChannel fragmented record reader', () => {
+  it('reads mixed binary chunks and JSON controls across fragmented/coalesced transport frames', async () => {
+    const value = { type: 'chunk', id: 'download', bytes: Uint8Array.from({ length: 65536 }, (_, i) => i % 251) };
+    const body = binaryPacketBody(value)!;
+    const binary = frame(body); new DataView(binary.buffer).setUint32(0, body.length + BINARY_RECORD_FLAG);
+    const control = packet({ type: 'ack', id: 'download' });
+    const joined = new Uint8Array(binary.length + control.length); joined.set(binary); joined.set(control, binary.length);
+    expect(await readAll(sourceOf(fragmented(joined, [1, 5, 65536, 3])))).toEqual([value, { type: 'ack', id: 'download' }]);
+    expect(await readAll(sourceOf([binary]))).toEqual([value]);
+    expect(binary.length).toBeLessThan(packet({ type: value.type, id: value.id, data: Buffer.from(value.bytes).toString('base64') }).length * 0.76);
+  });
+  it('rejects malformed/oversized binary records and owns decoded bytes', () => {
+    for (const body of [new Uint8Array(), new Uint8Array([9, 1, 65]), new Uint8Array([1, 0]), new Uint8Array([1, 5, 65]), new Uint8Array([1, 129])]) {
+      expect(() => readBinaryPacket(body)).toThrow('Invalid binary record');
+    }
+    expect(() => binaryPacketBody({ type: 'chunk', id: 'large', bytes: new Uint8Array(65537) })).toThrow();
+    const body = binaryPacketBody({ type: 'upload', id: 'unicode-标识', bytes: new Uint8Array([1, 2, 3]) })!;
+    const decoded = readBinaryPacket(body); body.fill(0);
+    expect(decoded).toEqual({ type: 'upload', id: 'unicode-标识', bytes: new Uint8Array([1, 2, 3]) });
+  });
+  it('makes bulk traffic wait while preserving queue capacity for interactive messages', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const writing = new Promise<void>(resolve => { started = resolve; });
+    const channel = new PacketChannel({ source: sourceOf([]), sink: async source => {
+      for await (const _ of source) { started(); await gate; }
+    } });
+    try {
+      channel.send({ type: 'chunk', id: 'download', data: 'x'.repeat(600_000) });
+      await writing;
+      const abort = new AbortController();
+      const sent = vi.fn();
+      const bulk = channel.sendBulk({ type: 'chunk', id: 'download', data: 'next' }, abort.signal).then(sent);
+      await Promise.resolve(); expect(sent).not.toHaveBeenCalled();
+      expect(() => channel.send({ type: 'ws-data', id: 'input', data: 'typed input' })).not.toThrow();
+      expect(channel.queuedBytesFor('input')).toBeGreaterThan(0);
+      release(); await bulk; expect(sent).toHaveBeenCalledOnce();
+    } finally { release(); channel.close(); await channel.done; }
+  });
+  it('cancels a bulk producer waiting behind congestion without sending its packet', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const channel = new PacketChannel({ source: sourceOf([]), sink: async source => {
+      for await (const _ of source) await gate;
+    } });
+    try {
+      channel.send({ type: 'chunk', id: 'busy', data: 'x'.repeat(600_000) });
+      const abort = new AbortController();
+      const waiting = expect(channel.sendBulk({ type: 'chunk', id: 'cancelled', data: 'never sent' }, abort.signal)).rejects.toThrow('cancelled');
+      abort.abort(new Error('cancelled')); await waiting;
+      expect(channel.queuedBytesFor('cancelled')).toBe(0);
+    } finally { release(); channel.close(); await channel.done; }
+  });
   it('parses one complete source frame before yielding without retaining its bytes', async () => {
     const bytes = packet({ type: 'data', id: 'complete-frame', text: 'safe after parse' });
     const channel = new PacketChannel({

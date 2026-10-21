@@ -24,11 +24,12 @@ describe('encrypted transport architecture', () => {
       const visit = (node: ts.Node) => {
         if (ts.isNewExpression(node)) {
           const constructor = node.expression.getText(source).split('.').pop();
-          const transport = ['WebSocket', 'EventSource', 'XMLHttpRequest'].includes(constructor ?? '');
+          const transport = ['WebSocket', 'WebTransport', 'EventSource', 'XMLHttpRequest'].includes(constructor ?? '');
           const allowedSocket = constructor === 'WebSocket' && [
             'src/lib/federation/secureClient.ts', 'src/lib/federation/relaySocket.ts',
           ].includes(name);
-          if (transport && !allowedSocket) violations.push(`${name}: native ${constructor}`);
+          const allowedQuic = constructor === 'WebTransport' && name === 'src/lib/federation/webTransportClient.ts';
+          if (transport && !allowedSocket && !allowedQuic) violations.push(`${name}: native ${constructor}`);
         }
         if (ts.isCallExpression(node) && !legacyPreload && /(?:pasteClipboardImage|uploadClipboardImage|uploadDroppedFiles|sendBeacon)$/.test(node.expression.getText(source))) {
           violations.push(`${name}: ${node.expression.getText(source)}`);

@@ -20,6 +20,8 @@ export interface ByteDuplex {
   /** Called once per connection, consumes bytes in order and honors transport backpressure. */
   sink(source: AsyncIterable<Uint8Array>): Promise<void>
   close?(error?: Error): void
+  /** Bytes awaiting the local stream writer, not NIC bytes or peer ACKs. */
+  bufferedBytes?(): number
 }
 export interface Identity { readonly peerId: string; readonly privateKey: PrivateKey }
 export async function createIdentity(): Promise<Identity> {

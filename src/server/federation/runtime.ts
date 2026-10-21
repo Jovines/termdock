@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import type express from 'express';
 import type WebSocket from 'ws';
-import { createIdentity, importIdentity, exportIdentity, secureConnection, type Identity } from './secureProtocol.js';
+import { createIdentity, importIdentity, exportIdentity, secureConnection, type Identity, type ByteDuplex } from './secureProtocol.js';
+import type { WebTransportDescriptor } from './webTransportProtocol.js';
 import { InvitationStore, validateInvitation, type InvitationInput } from './invitations.js';
 import { AuthorizationStore, type GrantInput } from './authorization.js';
 import { resolveAccessRequest, isBusinessApiPath, terminalMessageAction } from './accessPolicy.js';
@@ -20,6 +21,7 @@ import { readTerminalHandshakeDimensions } from '../utils/terminalHandshakeDimen
 import { openAccessAllowed } from './openAccess.js';
 import { isAuthEnabled, getPasswordCredentialFingerprint, getPasswordVerifier, getLoginBlockMs, recordLoginFailure, recordLoginSuccess } from '../utils/authProtection.js';
 import { MAX_OPEN_SECURE_SOCKETS, MAX_SERVER_HTTP_REQUESTS } from './streamLimits.js';
+import { MAX_TRANSFER_WINDOW, TRANSFER_CHUNK_BYTES, TransferWindow, transferWindow } from './transferWindow.js';
 
 interface SocketHandlers {
   terminal(socket: WebSocket, sessionId: string, clientId: string, options: {pushClientId?: string; sinceSeq?: number; streamEpoch?: string; flowControl?: boolean; independentTmux?: boolean; outputActive?: boolean}, dimensions?: {cols: number; rows: number}): void;
@@ -34,7 +36,7 @@ class LogicalSocket extends EventEmitter {
   readyState = 1;
   get bufferedAmount(): number { return this.channel.queuedBytesFor(this.id); }
   private readonly maxQueuedBytes: number;
-  constructor(private channel: PacketChannel, readonly id: string, private canRead: () => boolean, maxQueuedBytes = 4 * 1024 * 1024) {
+  constructor(private channel: PacketChannel, readonly id: string, private canRead: () => boolean, maxQueuedBytes = 4 * 1024 * 1024, private compress = false) {
     super(); this.maxQueuedBytes = maxQueuedBytes;
   }
   send(data: string): void {
@@ -47,7 +49,7 @@ class LogicalSocket extends EventEmitter {
       this.close(1013, 'Output consumer is too slow');
       return;
     }
-    try { this.channel.send({ type: 'ws-data', id: this.id, data }); }
+    try { this.channel.send({ type: 'ws-data', id: this.id, data }, this.compress); }
     catch { this.close(1013, 'Output consumer is too slow'); }
   }
   close(code = 1000, reason = ''): void {
@@ -58,8 +60,9 @@ class LogicalSocket extends EventEmitter {
     finally { this.emit('close'); }
   }
 }
-interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: number; abort: AbortController; state: 'uploading' | 'running'; updatedAt: number; uploadSlot: boolean; ack?: () => void }
+interface HttpOperation { head: Packet; body: AsyncQueue<Uint8Array>; size: number; abort: AbortController; state: 'uploading' | 'running'; updatedAt: number; uploadSlot: boolean; responseWindow: TransferWindow }
 export interface FederationRuntimeOptions {
+  webTransport?: () => WebTransportDescriptor | undefined;
   collaborationConnected?: (subjectId: string, rpc: CollaborationRpc) => () => void;
   collaborationDescriptor?: () => Record<string, unknown>;
   collaborationService?: (subjectId: string, packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>;
@@ -118,6 +121,11 @@ export async function createFederationRuntime(app: express.Express, directory: s
     delete request.headers['x-termdock-full-service'];
     markEncryptedRequest(request, typeof subject === 'string' ? subject : undefined, fullService); app(request, response);
   });
+  // The outer encrypted consumer can apply backpressure long after a local
+  // response was written. Expiring this private keepalive socket while Undici
+  // still drains it can truncate a slow download (UND_ERR_SOCKET / terminated).
+  // Let the local client expire idle connections after it finishes consuming.
+  internal.keepAliveTimeout = 0;
   await new Promise<void>((resolve, reject) => { internal.once('error', reject); internal.listen(0, '127.0.0.1', resolve); });
   const address = internal.address();
   if (!address || typeof address === 'string') throw new Error('Internal transport unavailable');
@@ -134,7 +142,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
     return Array.isArray(inventory.clientSessions) ? inventory.clientSessions : [];
   }
 
-  async function accept(socket: WebSocket, context: { allowOpenAccess?: boolean } = {}): Promise<void> {
+  async function acceptDuplex(duplex: ByteDuplex, context: { allowOpenAccess?: boolean; singleOperation?: boolean } = {}): Promise<void> {
     let collaborationRpc: CollaborationRpc | undefined;
     let unregisterCollaboration: (() => void) | undefined;
     const open = (action?: string) => openAccessAllowed(context.allowOpenAccess === true, isAuthEnabled(), action);
@@ -158,7 +166,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
     const sockets = new Map<string, { socket: LogicalSocket; sessionId?: string; android?: boolean; computer?: boolean; computerProtocol?: string }>();
     let revokeTimer: ReturnType<typeof setInterval> | undefined;
     try {
-      const secured = await secureConnection({ identity, duplex: socketDuplex(socket), initiator: false, signal: AbortSignal.timeout(15000) });
+      const secured = await secureConnection({ identity, duplex, initiator: false, signal: AbortSignal.timeout(15000) });
       const subjectId = secured.authenticatedPeerId;
       channel = new PacketChannel(secured.duplex); channels.add(channel);
       const send = (packet: Packet) => channel!.send(packet);
@@ -204,20 +212,16 @@ export async function createFederationRuntime(app: express.Express, directory: s
           if (reader) while (true) {
             httpAllowed(operation.head);
             const { done, value } = await reader.read(); if (done) break;
-            for (let offset = 0; offset < value.length; offset += 65536) {
+            for (let offset = 0; offset < value.length; offset += TRANSFER_CHUNK_BYTES) {
               httpAllowed(operation.head);
-              await new Promise<void>((resolve, reject) => {
-                const cleanup = () => { clearTimeout(timeout); operation.abort.signal.removeEventListener('abort', abort); operation.ack = undefined; };
-                const timeout = setTimeout(() => { cleanup(); reject(new Error('CONSUMER_TIMEOUT')); }, 30000);
-                const abort = () => { cleanup(); reject(new Error('CANCELLED')); };
-                operation.abort.signal.addEventListener('abort', abort, { once: true });
-                operation.ack = () => { cleanup(); resolve(); };
-                if (operation.abort.signal.aborted) { abort(); return; }
-                try { sendHttp({ type: 'chunk', id, data: toBase64(value.subarray(offset, offset + 65536)) }); }
-                catch (error) { cleanup(); reject(error); }
-              });
+              await operation.responseWindow.wait();
+              httpAllowed(operation.head);
+              operation.responseWindow.sent();
+              const chunk = value.subarray(offset, offset + TRANSFER_CHUNK_BYTES);
+              await channel!.sendBulk({ type: 'chunk', id, ...(operation.head.binaryChunks === true ? { bytes: chunk } : { data: toBase64(chunk) }) }, operation.abort.signal, () => httpAllowed(operation.head));
             }
           }
+          await operation.responseWindow.wait(true);
           sendHttp({ type: 'end', id });
         } catch (error) { try { if (operations.get(id) === operation) send({ type: 'error', id, error: error instanceof Error ? error.message : 'REQUEST_FAILED' }); } catch { /* The encrypted connection has closed. */ } }
         finally { cancelHttp(operation); if (operations.get(id) === operation) operations.delete(id); }
@@ -307,7 +311,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             send({ type: 'result', id: packet.id, ok: true });
           } else if (packet.type === 'permissions') {
             const grants = store.listEffective({ subjectId, serviceId });
-            send({ type: 'result', id: packet.id, subjectId, serviceId, fullService: full(subjectId), grants });
+            send({ type: 'result', id: packet.id, subjectId, serviceId, fullService: full(subjectId), grants, httpWindow: MAX_TRANSFER_WINDOW, binaryChunks: true, webTransport: options.webTransport?.() });
           } else if (packet.type === 'session-list') {
             const inventory = await sessionInventory();
             const seen = new Set<string>();
@@ -393,20 +397,23 @@ export async function createFederationRuntime(app: express.Express, directory: s
           } else if (packet.type === 'delegate') {
             const grant = store.delegate(String(packet.parentGrantId), subjectId, packet.grant as GrantInput); send({ type: 'result', id: packet.id, grant });
           } else if (packet.type === 'http') {
-            if (operations.size >= MAX_SERVER_HTTP_REQUESTS || operations.has(packet.id) || sockets.has(packet.id)) throw new Error('STREAM_LIMIT');
+            if ((context.singleOperation ? operations.size + sockets.size >= 1 : operations.size >= MAX_SERVER_HTTP_REQUESTS) || operations.has(packet.id) || sockets.has(packet.id)) throw new Error('STREAM_LIMIT');
             httpAllowed(packet);
             const upload = !['GET', 'HEAD'].includes(String(packet.method));
             if (upload && uploadSlots >= 8) throw new Error('UPLOAD_CONCURRENCY_LIMIT');
-            const operation: HttpOperation = { head: packet, body: new AsyncQueue<Uint8Array>(2), size: 0, abort: new AbortController(), state: 'uploading', updatedAt: Date.now(), uploadSlot: upload };
+            const window = transferWindow(packet.window);
+            const abort = new AbortController();
+            const operation: HttpOperation = { head: packet, body: new AsyncQueue<Uint8Array>(Math.max(2, window)), size: 0, abort, state: 'uploading', updatedAt: Date.now(), uploadSlot: upload, responseWindow: new TransferWindow(window, abort.signal) };
             if (upload) uploadSlots++;
             operations.set(packet.id, operation);
             if (upload) void runHttp(packet.id, operation);
           } else if (packet.type === 'upload') {
-            const operation = operations.get(packet.id); if (!operation || operation.state !== 'uploading' || typeof packet.data !== 'string') throw new Error('INVALID_UPLOAD');
+            const operation = operations.get(packet.id); if (!operation || operation.state !== 'uploading'
+              || !(operation.head.binaryChunks === true && packet.bytes instanceof Uint8Array) && typeof packet.data !== 'string') throw new Error('INVALID_UPLOAD');
             httpAllowed(operation.head);
-            const bytes = fromBase64(packet.data); operation.size += bytes.length;
+            const bytes = operation.head.binaryChunks === true && packet.bytes instanceof Uint8Array ? packet.bytes : fromBase64(packet.data as string); operation.size += bytes.length;
             const limit = new URL(String(operation.head.path), 'http://inner').pathname === '/api/terminal/fs/upload' ? 110 * 1024 * 1024 : 5 * 1024 * 1024;
-            if (['GET', 'HEAD'].includes(String(operation.head.method)) || bytes.length > 65536 || operation.size > limit) { cancelHttp(operation); operations.delete(packet.id); throw new Error('UPLOAD_LIMIT'); }
+            if (['GET', 'HEAD'].includes(String(operation.head.method)) || bytes.length > TRANSFER_CHUNK_BYTES || operation.size > limit) { cancelHttp(operation); operations.delete(packet.id); throw new Error('UPLOAD_LIMIT'); }
             operation.updatedAt = Date.now();
             try { operation.body.push(bytes); } catch { cancelHttp(operation); operations.delete(packet.id); throw new Error('UPLOAD_QUEUE_LIMIT'); }
           } else if (packet.type === 'upload-end') {
@@ -414,11 +421,11 @@ export async function createFederationRuntime(app: express.Express, directory: s
             operation.state = 'running'; operation.body.end();
             if (['GET', 'HEAD'].includes(String(operation.head.method))) void runHttp(packet.id, operation);
           } else if (packet.type === 'ack') {
-            const operation = operations.get(packet.id); operation?.ack?.(); if (operation) operation.ack = undefined;
+            operations.get(packet.id)?.responseWindow.acknowledge();
           } else if (packet.type === 'cancel') {
             const operation = operations.get(packet.id); if (operation) cancelHttp(operation); operations.delete(packet.id);
           } else if (packet.type === 'ws-open') {
-            if (sockets.size >= MAX_OPEN_SECURE_SOCKETS || operations.has(packet.id) || sockets.has(packet.id)) throw new Error('STREAM_LIMIT');
+            if ((context.singleOperation ? operations.size + sockets.size >= 1 : sockets.size >= MAX_OPEN_SECURE_SOCKETS) || operations.has(packet.id) || sockets.has(packet.id)) throw new Error('STREAM_LIMIT');
             if (typeof packet.path !== 'string' || !isBusinessApiPath('GET', packet.path)) throw new Error('API_NOT_ALLOWED');
             const url = new URL(packet.path, 'http://inner');
             const match = /^\/api\/terminal\/([^/%]+)\/ws$/.exec(url.pathname);
@@ -428,7 +435,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             else if (url.pathname === '/api/control/ws') check('service.view');
             else if (androidMatch || computer) { if (!full(subjectId)) throw new Error('API_NOT_ALLOWED'); }
             else throw new Error('API_NOT_ALLOWED');
-            const logical = new LogicalSocket(channel, packet.id, () => (androidMatch || computer) ? full(subjectId) : allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]), match ? 1024 * 1024 : undefined);
+            const logical = new LogicalSocket(channel, packet.id, () => (androidMatch || computer) ? full(subjectId) : allowed(subjectId, match ? 'session.view' : 'service.view', match?.[1]), match ? 1024 * 1024 : undefined, !!match && packet.compression === 'gzip');
             sockets.set(packet.id, { socket: logical, sessionId: match?.[1], android: Boolean(androidMatch), computer,
               computerProtocol: computer ? url.searchParams.get('protocol') ?? 'vnc' : undefined });
             logical.once('close', () => sockets.delete(packet.id));
@@ -472,7 +479,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
           else throw new Error('UNKNOWN_PACKET');
         } catch (error) { send({ type: 'error', id: packet.id, error: error instanceof Error ? error.message : 'REQUEST_FAILED' }); }
       }
-    } catch { socket.close(4003, 'Secure channel closed'); }
+    } catch { duplex.close?.(new Error('Secure channel closed')); }
     finally {
       unregisterCollaboration?.(); collaborationRpc?.close();
       clearInterval(revokeTimer);
@@ -481,6 +488,8 @@ export async function createFederationRuntime(app: express.Express, directory: s
       if (channel) { channels.delete(channel); channel.close(); }
     }
   }
-  return { serviceId, identity, store, accept, close() { for (const channel of channels) channel.close(); internal.close(); } };
+  return { serviceId, identity, store, acceptDuplex,
+    accept(socket: WebSocket, context: { allowOpenAccess?: boolean } = {}) { return acceptDuplex(socketDuplex(socket), context); },
+    close() { for (const channel of channels) channel.close(); internal.close(); } };
 }
 export type FederationRuntime = Awaited<ReturnType<typeof createFederationRuntime>>;

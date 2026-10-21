@@ -528,7 +528,7 @@ export function secureSocket(url: string): WebSocket {
   const parsed = new URL(url, location.href);
   if (active && !active.closed) return active.openSocket(parsed.pathname + parsed.search) as unknown as WebSocket;
   let target: SecureSocket | undefined;
-  const pending = new SecureSocket(url, data => target?.send(data), () => target?.close());
+  const pending = new SecureSocket(url, data => target?.send(data), () => target?.close(), () => target?.bufferedAmount ?? 0);
   void getActiveClient().then(client => {
     if (pending.readyState === 3) return;
     target = client.openSocket(parsed.pathname + parsed.search);

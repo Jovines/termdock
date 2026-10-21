@@ -532,6 +532,32 @@ describe('federation runtime over real encrypted WebSocket', () => {
     owner.channel.send({ type: 'ack', id: 'large' }); await owner.take('large', 'end');
     expect(f.uploads.finished).toBe(1);
   }, 30000);
+  it('bounds negotiated downloads to eight unconsumed chunks and releases one per ACK', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    f.app.get('/api/terminal/fs/download', (_req, res) => res.end(Buffer.alloc(1024 * 1024)));
+    owner.channel.send({ type: 'http', id: 'window', method: 'GET', path: '/api/terminal/fs/download', window: 8 });
+    owner.channel.send({ type: 'upload-end', id: 'window' });
+    await owner.take('window', 'head');
+    for (let i = 0; i < 8; i++) await owner.take('window', 'chunk');
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(owner.pendingPackets().filter(packet => packet.id === 'window')).toEqual([]);
+    owner.channel.send({ type: 'ack', id: 'window' });
+    await owner.take('window', 'chunk');
+    owner.channel.send({ type: 'cancel', id: 'window' });
+    owner.channel.send({ type: 'permissions', id: 'after-cancel-window' });
+    expect(await owner.take('after-cancel-window')).toMatchObject({ httpWindow: 8, fullService: true });
+  });
+  it('accepts a negotiated upload window without waiting between chunks', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    owner.channel.send({ type: 'http', id: 'pipeline', method: 'POST', path: '/api/terminal/fs/upload', window: 8 });
+    for (let i = 0; i < 8; i++) owner.channel.send({ type: 'upload', id: 'pipeline', data: toBase64(new Uint8Array(65536)) });
+    for (let i = 0; i < 8; i++) await owner.take('pipeline', 'upload-ack');
+    owner.channel.send({ type: 'upload-end', id: 'pipeline' });
+    await owner.take('pipeline', 'head');
+    const output = await owner.take('pipeline', 'chunk');
+    expect(JSON.parse(new TextDecoder().decode(fromBase64(String(output.data))))).toEqual({ bytes: 8 * 65536 });
+    owner.channel.send({ type: 'ack', id: 'pipeline' }); await owner.take('pipeline', 'end');
+  });
   it('cancels streaming uploads and limits active upload bodies globally', async () => {
     const f = await fixture(), owner = await f.connect(); await owner.pair();
     for (let i = 0; i < 8; i++) owner.channel.send({ type: 'http', id: `up-${i}`, method: 'POST', path: '/api/terminal/fs/upload' });

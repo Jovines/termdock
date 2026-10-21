@@ -1983,7 +1983,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       let payload = data;
       let modifierConsumed = options?.consumeModifier ?? false;
 
-      if (!options?.skipModifierTransform && activeModifier && data.length > 0) {
+      if (!options?.skipModifierTransform && !isMouseOrFocusSeq && activeModifier && data.length > 0) {
         const firstChar = data[0];
         if (firstChar.length === 1 && /[a-zA-Z]/.test(firstChar)) {
           const upper = firstChar.toUpperCase();

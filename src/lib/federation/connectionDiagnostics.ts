@@ -2,6 +2,7 @@
 export interface ConnectionDiagnostics {
   endpoint: string;
   path: 'direct' | 'relay';
+  transport?: 'websocket' | 'webtransport';
   targetPeerId: string;
   transportOpenMs: number;
   handshakeMs: number;

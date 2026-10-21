@@ -18,11 +18,12 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { createNativeWebLinkHandler } from '../../terminal/nativeWebLinks';
+import { createWrappedWebLinkProvider } from '../../terminal/wrappedWebLinks';
 import { ensureTerminalFontsReady } from '../../terminal/fontLoading';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
-import { ClipboardAddon, BrowserClipboardProvider } from '@xterm/addon-clipboard';
+import { createOsc52ClipboardHandler } from '../../terminal/osc52Clipboard';
 import { ImageAddon } from '@xterm/addon-image';
 import { LigaturesAddon } from '@xterm/addon-ligatures';
 import { ProgressAddon } from '@xterm/addon-progress';
@@ -143,70 +144,6 @@ function isImeComposingKeyEvent(event: React.KeyboardEvent): boolean {
     (event as unknown as { isComposing?: boolean }).isComposing === true ||
     event.keyCode === 229
   );
-}
-
-function decodeBase64Utf8(base64Data: string): string | null {
-  try {
-    const raw = atob(base64Data);
-    const bytes = Uint8Array.from(raw, (ch) => ch.charCodeAt(0));
-    return new TextDecoder('utf-8').decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
-function processOsc52Clipboard(data: string): { cleaned: string; remainder: string } {
-  const osc52Prefix = '\u001b]52;';
-  let index = 0;
-  let cleaned = '';
-
-  while (index < data.length) {
-    const start = data.indexOf(osc52Prefix, index);
-    if (start === -1) {
-      cleaned += data.slice(index);
-      return { cleaned, remainder: '' };
-    }
-
-    cleaned += data.slice(index, start);
-
-    let end = -1;
-    let terminatorLength = 1;
-
-    for (let i = start + osc52Prefix.length; i < data.length; i += 1) {
-      const code = data.charCodeAt(i);
-      if (code === 0x07) {
-        end = i;
-        terminatorLength = 1;
-        break;
-      }
-      if (code === 0x1b && i + 1 < data.length && data[i + 1] === '\\') {
-        end = i;
-        terminatorLength = 2;
-        break;
-      }
-    }
-
-    if (end === -1) {
-      return { cleaned, remainder: data.slice(start) };
-    }
-
-    const content = data.slice(start + osc52Prefix.length, end);
-    const separatorIndex = content.indexOf(';');
-    if (separatorIndex >= 0) {
-      const payload = content.slice(separatorIndex + 1);
-      if (payload && payload !== '?') {
-        const text = decodeBase64Utf8(payload);
-        if (text !== null) {
-          navigator.clipboard?.writeText(text).catch(() => {
-          });
-        }
-      }
-    }
-
-    index = end + terminatorLength;
-  }
-
-  return { cleaned, remainder: '' };
 }
 
 function findScrollableViewport(container: HTMLElement): HTMLElement | null {
@@ -792,7 +729,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const desktopMouseFocusTimerRef = React.useRef<number | null>(null);
     const imageAddonLoadedRef = React.useRef(false);
     const remainderPxRef = React.useRef(0);
-    const osc52RemainderRef = React.useRef('');
     const webglAddonRef = React.useRef<WebglAddon | null>(null);
     const webglContextLossDisposableRef = React.useRef<{ dispose: () => void } | null>(null);
     // 标记"我们已知 WebGL 上下文死了"。仅由 onContextLoss 回调置 true，
@@ -1293,8 +1229,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const buttonRelease = `\x1b[<0;${charX};${charY}m`;
 
         // 发送按下和释放事件
-        inputHandlerRef.current(buttonPress);
-        inputHandlerRef.current(buttonRelease);
+        inputHandlerRef.current(buttonPress, { skipModifierTransform: true });
+        inputHandlerRef.current(buttonRelease, { skipModifierTransform: true });
       }
     }, [pixelToCharCoords]);
 
@@ -2279,7 +2215,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       // 把 N 个 SGR 序列拼成一条 string 一次性写进 PTY。
       // tmux 在收到时会逐个解析为 mouse wheel 事件，效果完全等价，
       // 但只产生 1 次 ws.send + 1 次 PTY write，不会被高频调用打爆。
-      inputHandlerRef.current(count === 1 ? seq : seq.repeat(count));
+      inputHandlerRef.current(count === 1 ? seq : seq.repeat(count), { skipModifierTransform: true });
     }, [tmuxBuildSgrScroll]);
 
     // 桌面 wheel handler 是闭包注册一次的，不能直接捕获 useCallback；
@@ -3105,7 +3041,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       writeScheduledRef.current = null;
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
-      osc52RemainderRef.current = '';
     }, []);
 
     const fitTerminal = React.useCallback((reason: string = 'unknown') => {
@@ -3937,6 +3872,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             window.termdockDesktop,
             url => { window.open(url); },
           );
+          // Prefer the complete TUI-wrapped URL over the addon's partial row.
+          localDisposables.push(terminal.registerLinkProvider(createWrappedWebLinkProvider(terminal, nativeWebLinkHandler)));
           terminal.loadAddon(new WebLinksAddon(nativeWebLinkHandler));
           terminal.registerLinkProvider(createTerminalPathLinkProvider(terminal, (path, line) => {
             directoryLinkActivateRef.current?.(path, line);
@@ -3949,11 +3886,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           terminal.loadAddon(serializeAddon);
           serializeAddonRef.current = serializeAddon;
           terminal.loadAddon(new ProgressAddon());
-          try {
-            terminal.loadAddon(new ClipboardAddon(undefined, new BrowserClipboardProvider()));
-          } catch (error) {
-            debugTerminal('clipboard addon skipped', { error });
-          }
+          // Program copy (Codex/vim OSC 52) uses the same client-native writer
+          // as explicit selection copy. xterm owns framing, including split ESCs.
+          localDisposables.push(terminal.parser.registerOscHandler(52, createOsc52ClipboardHandler(
+            () => !disposed && isWorkspaceActive() && isLayoutVisibleRef.current
+              && !(replayParseTokenRef.current?.depth),
+            () => setPasteError('程序复制失败，请重试或选中文字复制'),
+          )));
           localTerminal = terminal;
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
@@ -4197,7 +4136,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               // 再答一次 tmux 会当成键盘输入灌进 pane。
               const replayToken = replayParseTokenRef.current;
               if (replayToken !== null && replayToken.depth > 0) { return; }
-              inputHandlerRef.current(data);
+              // Reports are already encoded: sticky Alt must not add an ESC.
+              inputHandlerRef.current(data, { skipModifierTransform: true });
             })
           );
 
@@ -4552,9 +4492,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       if (pending.length > 0) {
         const rawChunk = pending.map((chunk) => chunk.data).join('');
-        const merged = osc52RemainderRef.current + rawChunk;
-        const { cleaned, remainder } = processOsc52Clipboard(merged);
-        osc52RemainderRef.current = remainder;
         // 这批字节此前已经解析过：id 没超过已写水位（同一批字节整段重写，
         // 例如 terminal 重建后从 store 重灌 buffer），或 buffer 被换掉后从
         // 头部重来。两种情况解析出的回包都不能再发一次。已经解析过才有
@@ -4562,14 +4499,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const highestEnqueued = highestEnqueuedChunkIdRef.current;
         const isReplayBatch = highestEnqueued !== null
           && (pending[0].id <= highestEnqueued || bufferReplaced);
-        if (cleaned) {
-          enqueueWrite(cleaned, pending[pending.length - 1].id, isReplayBatch);
-        } else {
-          // Control-only chunks (for example OSC 52) are fully consumed by
-          // the parser without entering xterm's write queue. They still cross
-          // the replay boundary and must not leave initial readiness waiting.
-          onWriteProgressRef.current?.(pending[pending.length - 1].id);
-        }
+        enqueueWrite(rawChunk, pending[pending.length - 1].id, isReplayBatch);
       }
 
       lastProcessedChunkIdRef.current = chunks[chunks.length - 1].id;

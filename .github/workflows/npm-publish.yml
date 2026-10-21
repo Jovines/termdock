@@ -54,8 +54,9 @@ jobs:
       - run: npm ci
       - name: Verify terminal copy and encrypted transport
         run: >-
-          npx vitest run
-          src/lib/federation/transportBoundary.test.ts
+          npx vitest run --maxWorkers=2
+          src/lib/federation
+          src/server/federation
           src/server/android/adb.test.ts
           src/server/android/scrcpyForward.test.ts
           src/server/android/recordingTransport.test.ts
@@ -67,6 +68,8 @@ jobs:
           src/server/utils/tmuxClientCapabilities.test.ts
           src/lib/terminal/clipboardText.test.ts
           src/lib/terminal/nativeWebLinks.test.ts
+          src/lib/terminal/wrappedWebLinks.test.ts
+          src/lib/terminal/osc52Clipboard.test.ts
           src/lib/components/terminal/TerminalViewportPasteOwnership.test.tsx
           src/lib/federation/SecureAccessGate.test.tsx
           src/lib/terminal/api.close.test.ts
