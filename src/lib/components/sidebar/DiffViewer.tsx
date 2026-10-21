@@ -356,7 +356,7 @@ interface DiffViewerProps {
   interactionId?: string | null;
   requestSlotId?: string | null;
   changedFile?: GitChangedFile | null;
-  onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  onInsertDiffReference?: (label: string, text: string, key?: string, source?: HTMLElement) => void;
   /**
    * Hunk-level git actions (stage / revert). Only provided for live worktree
    * diffs. Branch previews can supply comparison-based previewReverts separately.
@@ -1521,9 +1521,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     });
   }, [effectiveDiffContent, filePath, files, referenceRepoRoot, resolvedReferenceFilePath]);
 
-  const insertWholeDiff = useCallback(() => {
+  const insertWholeDiff = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
     if (!wholeDiffText || !onInsertDiffReference) return;
-    onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), wholeDiffText, wholeDiffReferenceKey);
+    onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), wholeDiffText, wholeDiffReferenceKey, event.currentTarget);
   }, [filePath, onInsertDiffReference, t, titleParts.name, wholeDiffReferenceKey, wholeDiffText]);
 
   // Hunk-level git actions (stage / revert). The patch is sliced from the raw
@@ -1811,7 +1811,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                 {onInsertDiffReference && files.length > 1 && (
                   <button
                     type="button"
-                    onClick={() => onInsertDiffReference(`${pathParts.name} diff`, fileDiffText, fileDiffReferenceKey)}
+                    onClick={(event) => onInsertDiffReference(`${pathParts.name} diff`, fileDiffText, fileDiffReferenceKey, event.currentTarget)}
                     {...getReferenceLongPressHandlers(fileDiffText, fileDiffReferenceKey)}
                     className={`rounded-full px-2 py-0.5 text-[10px] font-semibold active:scale-95 ${fileDiffReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
                     title={t('diffViewer.insertFileDiff')}
@@ -1903,7 +1903,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                       const sectionButton = onInsertDiffReference ? (
                         <button
                           type="button"
-                          onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}.${section.index + 1}`, sectionText, sectionKey)}
+                          onClick={(event) => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}.${section.index + 1}`, sectionText, sectionKey, event.currentTarget)}
                           {...getReferenceLongPressHandlers(sectionText, sectionKey)}
                           className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition active:scale-95 ${
                             activeSection
@@ -2001,7 +2001,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                               {onInsertDiffReference && (
                                 <button
                                   type="button"
-                                  onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, hunkDiffText, hunkReferenceKey)}
+                                  onClick={(event) => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, hunkDiffText, hunkReferenceKey, event.currentTarget)}
                                   {...getReferenceLongPressHandlers(hunkDiffText, hunkReferenceKey)}
                                   className={`inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-semibold active:scale-95 ${hunkReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
                                   title={t('diffViewer.insertHunkDiff')}
@@ -2127,7 +2127,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
           {lineReference && lineSelectionPillTop !== null && onInsertDiffReference && (
             <button
               type="button"
-              onClick={() => onInsertDiffReference(`${pathParts.name} ${lineReference.lineLabel}`, lineReference.text, lineReference.referenceKey)}
+              onClick={(event) => onInsertDiffReference(`${pathParts.name} ${lineReference.lineLabel}`, lineReference.text, lineReference.referenceKey, event.currentTarget)}
               {...getReferenceLongPressHandlers(lineReference.text, lineReference.referenceKey)}
               style={{ top: lineSelectionPillTop }}
               className={`${getReferenceFloatingButtonClass(lineSelectionIsMobile, lineReferenceInserted || lineReferenceCopied)} right-2`}

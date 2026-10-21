@@ -1,3 +1,4 @@
+import type { ReviewReferenceHandler } from './reviewReference';
 import { useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { FloatingAnnotationButton } from './FloatingAnnotationButton';
@@ -53,7 +54,7 @@ export function KicadProjectPreview({ content, filePath, localState, onInsertAnn
   content: string;
   filePath: string;
   localState: boolean;
-  onInsertAnnotation?: (text: string, key: string) => void;
+  onInsertAnnotation?: ReviewReferenceHandler;
 }) {
   const { t } = useI18n();
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -113,9 +114,9 @@ export function KicadProjectPreview({ content, filePath, localState, onInsertAnn
           <FloatingAnnotationButton
             anchor={{ xPercent: selected.xPercent, yPercent: selected.yPercent }}
             title={t('rightSidebar.kicadInsertSetting')}
-            onClick={() => {
-              onInsertAnnotation?.(formatKicadProjectAnnotation(filePath, selectedItem), `kicad-project:${filePath}:${selectedItem.label}`);
-              setSelected(null);
+            onClick={async (source) => {
+              const accepted = await onInsertAnnotation?.(formatKicadProjectAnnotation(filePath, selectedItem), `kicad-project:${filePath}:${selectedItem.label}`, undefined, source);
+              if (accepted !== false) setSelected(null);
             }}
           >
             {t('rightSidebar.kicadInsertSetting')}

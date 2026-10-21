@@ -65,7 +65,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { GitIgnoreFilterButton } from './GitIgnoreFilterButton';
 import { insertDirectReference } from './insertDirectReference';
-import { requestReferenceInsertion } from './requestReferenceInsertion';
+import { captureReferenceInsertionScope, requestReferenceInsertion } from './requestReferenceInsertion';
 import { MODEL_PREVIEW_REQUEST_TIMEOUT_MS } from '../../terminal/api';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { ReviewReferenceHandler } from './reviewReference';
@@ -3966,7 +3966,7 @@ interface AuditPromptScopeButtonProps {
   repos: AuditPromptScopeRepoOption[];
   selectedRoots: string[];
   onToggleRepo: (repoRoot: string | null) => void;
-  onGenerate: () => void;
+  onGenerate: (source: HTMLElement) => boolean | void | Promise<boolean | void>;
   onSecondaryAction?: () => void;
   disabled?: boolean;
   generateDisabled?: boolean;
@@ -4029,9 +4029,9 @@ function AuditPromptScopeButton({
         type="button"
         role={menuItem ? 'menuitem' : undefined}
         tabIndex={menuItem ? -1 : undefined}
-        onClick={() => {
+        onClick={(event) => {
           if (showScopePicker) onOpenChange(!open);
-          else if (!generateDisabled) onGenerate();
+          else if (!generateDisabled) void onGenerate(event.currentTarget);
         }}
         disabled={disabled}
         className={`relative flex items-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-50 ${menuItem ? 'min-h-10 w-full gap-2.5 px-2.5 text-left text-[12px] focus:bg-surface-2 focus:outline-none [@media(pointer:coarse)]:min-h-11' : 'h-7 shrink-0 justify-center gap-1 px-2 text-[11px] font-medium active:scale-95'} ${
@@ -4134,10 +4134,10 @@ function AuditPromptScopeButton({
               )}
               <button
                 type="button"
-                onClick={() => {
+                onClick={async (event) => {
                   if (generateDisabled) return;
-                  onOpenChange(false);
-                  onGenerate();
+                  const accepted = await onGenerate(event.currentTarget);
+                  if (accepted !== false) onOpenChange(false);
                 }}
                 disabled={generateDisabled}
                 className="flex h-7 w-full items-center justify-center gap-1 rounded-md bg-primary/15 px-2 text-[11px] font-semibold text-primary transition hover:bg-primary/25 disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
@@ -5200,7 +5200,7 @@ interface FilePreviewProps {
   onInsertReference: (path: string, key?: string, source?: HTMLElement) => void;
   onInsertText: (text: string, key: string, source?: HTMLElement) => void;
   /** Insert a model-feature reference (draft-aware, same as file refs). */
-  onInsertFeature?: (text: string, key: string) => void;
+  onInsertFeature?: ReviewReferenceHandler;
   onReferenceCopied: (key: string) => void;
   onClose?: () => void;
   onDirectoryLinkOpen?: (path: string) => void;
@@ -6030,7 +6030,7 @@ export function FilePreview({
 
   const insertRangeReference = (event: MouseEvent<HTMLElement>) => {
     if (onReviewReference) {
-      onReviewReference(lineReferenceText, lineReferenceKey);
+      onReviewReference(lineReferenceText, lineReferenceKey, undefined, event.currentTarget);
       return;
     }
     if (!lineRange) return;
@@ -6288,7 +6288,7 @@ export function FilePreview({
               blobUrl={previewState.objectUrl}
               filePath={readablePath}
               viewLabel="SVG 文件"
-              onInsertAnnotation={onInsertFeature}
+              onInsertAnnotation={onReviewReference ?? onInsertFeature}
             />
           ) : (
             <ZoomableImage
@@ -6566,6 +6566,7 @@ export function RightSidebar(
   const [repoPickerAnchor, setRepoPickerAnchor] = useState<{ x: number; y: number } | null>(null);
   const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
   const [copiedReferenceKey, setCopiedReferenceKey] = useState<string | null>(null);
+  const [referenceInsertFailed, setReferenceInsertFailed] = useState(false);
   const [contextDraftEnabled, setContextDraftEnabled] = useState(
     () => readCache(CONTEXT_DRAFT_ENABLED_STORAGE_KEY, isDiffWrap) ?? false,
   );
@@ -8080,6 +8081,8 @@ export function RightSidebar(
 
   const routeReferenceText = useCallback(async (text: string, key: string, suffix?: string, source?: HTMLElement) => {
     if (!text) return false;
+    setReferenceInsertFailed(false);
+    if (source && !captureReferenceInsertionScope(source)()) { setReferenceInsertFailed(true); return false; }
     if (routeCollaborationInput(suffix ? text + suffix : text)) {
       markReferenceInserted(key);
       return true;
@@ -8095,7 +8098,7 @@ export function RightSidebar(
       const session = sessionId ?? useTerminalStore.getState().activeSessionId;
       const accepted = await requestReferenceInsertion(suffix ? text + suffix : text, session,
         () => referenceMountedRef.current && session === useTerminalStore.getState().activeSessionId, source);
-      if (!accepted) return false;
+      if (!accepted) { setReferenceInsertFailed(true); return false; }
     }
     markReferenceInserted(key);
     return true;
@@ -8114,13 +8117,13 @@ export function RightSidebar(
 
   const uploadTargetRef = useRef({ sessionId, contextDraftEnabled, isOpen });
   uploadTargetRef.current = { sessionId, contextDraftEnabled, isOpen };
-  const handleTemporaryImageUpload = useCallback(async (file: File) => {
+  const handleTemporaryImageUpload = useCallback(async (file: File, source?: HTMLElement) => {
     const target = sessionId ?? useTerminalStore.getState().activeSessionId;
     const isCurrent = () => referenceMountedRef.current && uploadTargetRef.current.isOpen
       && (uploadTargetRef.current.sessionId ?? useTerminalStore.getState().activeSessionId) === target
       && useTerminalStore.getState().activeSessionId === target
       && uploadTargetRef.current.contextDraftEnabled === contextDraftEnabled;
-    const accepted = await upload.start('/tmp', [file], path => insertPathReference(path, `path:${path}`), isCurrent);
+    const accepted = await upload.start('/tmp', [file], path => insertPathReference(path, `path:${path}`, source), isCurrent);
     if (accepted && isCurrent() && isMobile && !contextDraftEnabled) onClose();
   }, [contextDraftEnabled, insertPathReference, isMobile, onClose, sessionId, upload.start]);
 
@@ -8133,20 +8136,22 @@ export function RightSidebar(
     return () => { mirrorDeliveryMounted.current = false; };
   }, []);
   const handleRecordingComplete = useCallback((file: AndroidRecording) => {
-    useAndroidRecordingDelivery.getState().enqueue(file, sessionId ?? null, rootPath || '/', path => {
-      if (contextDraftEnabled && mirrorDeliveryMounted.current && mirrorDeliverySession.current === sessionId) {
-        insertPathReference(path);
-      } else return insertAndroidPath(path, sessionId);
+    useAndroidRecordingDelivery.getState().enqueue(file, sessionId ?? null, rootPath || '/', async (path, source) => {
+      if (uploadTargetRef.current.contextDraftEnabled && mirrorDeliveryMounted.current && mirrorDeliverySession.current === sessionId) {
+        if (!await referenceRouteRef.current(buildReferenceInputText(path, null), `path:${path}`, source)) throw new Error(t('rightSidebar.uploadReferenceRejected'));
+      } else return insertAndroidPath(path, sessionId, source);
     });
-  }, [sessionId, rootPath, contextDraftEnabled, insertPathReference]);
-  const handleMirrorCaptureInsert = useCallback(async (file: File) => {
+  }, [sessionId, rootPath, contextDraftEnabled, insertPathReference, t]);
+  const handleMirrorCaptureInsert = useCallback(async (file: File, source?: HTMLElement) => {
+    const inScope = captureReferenceInsertionScope(source);
     const result = await uploadFiles('/tmp', [file]);
     const path = result.files[0]?.path;
     if (!path) throw new Error('截图上传未返回文件路径');
+    if (!inScope() || !mirrorDeliveryMounted.current || mirrorDeliverySession.current !== sessionId || uploadTargetRef.current.contextDraftEnabled !== contextDraftEnabled) throw new Error(t('rightSidebar.uploadReferenceRejected'));
     if (contextDraftEnabled && mirrorDeliveryMounted.current && mirrorDeliverySession.current === sessionId) {
-      insertPathReference(path);
-    } else await insertAndroidPath(path, sessionId);
-  }, [contextDraftEnabled, insertPathReference, sessionId]);
+      if (!await insertPathReference(path, undefined, source)) throw new Error(t('rightSidebar.uploadReferenceRejected'));
+    } else await insertAndroidPath(path, sessionId, source);
+  }, [contextDraftEnabled, insertPathReference, sessionId, t]);
 
   const insertReferenceText = useCallback((text: string, key: string, source?: HTMLElement) => {
     if (!text) return Promise.resolve(false);
@@ -8163,22 +8168,24 @@ export function RightSidebar(
     return () => { referenceMountedRef.current = false; };
   }, []);
   const pendingReferencesRef = useRef(new Set<string>());
-  const beginReviewReference: ReviewReferenceHandler = useCallback((text, key, evidence) => {
-    if (pendingReferencesRef.current.has(key)) return;
+  const beginReviewReference: ReviewReferenceHandler = useCallback((text, key, evidence, source) => {
+    if (pendingReferencesRef.current.has(key)) return false;
+    const inScope = captureReferenceInsertionScope(source);
+    if (!inScope()) return false;
     const session = sessionId ?? useTerminalStore.getState().activeSessionId;
     pendingReferencesRef.current.add(key);
-    void insertDirectReference(text, key, evidence, {
-      insert: insertReferenceText,
+    return insertDirectReference(text, key, evidence, {
+      insert: (value, referenceKey) => insertReferenceText(value, referenceKey, source),
       upload: async (file, signal) => (await uploadFiles('/tmp', [file], signal)).files[0]?.path,
-      isCurrent: () => referenceMountedRef.current && referenceRouteRef.current === insertReferenceText && session === useTerminalStore.getState().activeSessionId,
-    }).catch(() => { /* The reference stays available for retry; never mark a failed insert. */ })
+      isCurrent: () => inScope() && referenceMountedRef.current && referenceRouteRef.current === insertReferenceText && session === useTerminalStore.getState().activeSessionId,
+    }).catch(() => { setReferenceInsertFailed(true); return false; })
       .finally(() => pendingReferencesRef.current.delete(key));
   }, [insertReferenceText, sessionId]);
 
-  const insertContextText = useCallback((label: string, text: string, key?: string) => {
-    if (!text) return;
+  const insertContextText = useCallback((label: string, text: string, key?: string, source?: HTMLElement) => {
+    if (!text) return Promise.resolve(false);
     // 大段内容（agent 回复、diff 等）插入末尾加换行
-    routeReferenceText(text.endsWith(' ') ? text : `${text} `, key ?? `context:${label}`, '\n');
+    return routeReferenceText(text.endsWith(' ') ? text : `${text} `, key ?? `context:${label}`, '\n', source);
   }, [routeReferenceText]);
 
   const sendContextDraftToTerminal = useContextDraftDelivery({
@@ -9502,7 +9509,7 @@ export function RightSidebar(
     ].join('\n');
   }, [changeAuditTargetRepoRoots.length, changeAuditTargetRepos, gitRepositories, rootName, rootPath]);
 
-  const insertChangeAuditPrompt = useCallback((mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate') => {
+  const insertChangeAuditPrompt = useCallback(async (mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate', source?: HTMLElement) => {
     if (showGitRepoFilter && changeAuditRepoRoots.length === 0 && !activeGitRepoRoot) {
       setChangeAuditScopeOpen(true);
       return;
@@ -9523,9 +9530,11 @@ export function RightSidebar(
       hasAuditListCommand: promptText.includes('td audit-list'),
       promptLength: promptText.length,
     });
-    insertContextText(t('rightSidebar.insertChangeAuditPrompt'), promptText, `${changeAuditPromptKey}:${mode}`);
+    const accepted = await insertContextText(t('rightSidebar.insertChangeAuditPrompt'), promptText, `${changeAuditPromptKey}:${mode}`, source);
+    if (!accepted) return false;
     void loadChangeAuditRecords();
     if (!push) onClose();
+    return true;
   }, [activeGitRepoRoot, changeAuditPromptText, changeAuditRepoRoots.length, changeAuditTargetRepoRoots, insertContextText, loadChangeAuditRecords, onClose, push, rootPath, showGitRepoFilter, t]);
 
   const handleClearAuditRecord = useCallback(async (id: string) => {
@@ -9808,7 +9817,7 @@ export function RightSidebar(
     ].join('\n');
   }, [branchAuditRepoIncludeUncommitted, canIncludeRepoUncommitted, branchAuditReadyRepos, branchAuditRepoBaseBranches, branchAuditRepoBranches, rootPath]);
 
-  const insertBranchAuditScopePrompt = useCallback((mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate') => {
+  const insertBranchAuditScopePrompt = useCallback(async (mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate', source?: HTMLElement) => {
     const basePrompt = mode === 'generate'
       ? branchAuditPromptText
       : [
@@ -9818,8 +9827,10 @@ export function RightSidebar(
         '',
         branchAuditPromptText,
       ].join('\n');
-    insertContextText(t('rightSidebar.branchAuditShort'), basePrompt, `context:branch-audit-scope:${mode}`);
+    const accepted = await insertContextText(t('rightSidebar.branchAuditShort'), basePrompt, `context:branch-audit-scope:${mode}`, source);
+    if (!accepted) return false;
     if (!push) onClose();
+    return true;
   }, [branchAuditPromptText, insertContextText, onClose, push, t]);
 
   const openBranchAuditPreviewDiff = useCallback(async (options: { refresh?: boolean; repoRoot?: string; includeUncommitted?: boolean } = {}) => {
@@ -10491,7 +10502,7 @@ export function RightSidebar(
       repos={branchAuditScopeRepos}
       selectedRoots={branchAuditTargetRepoRoots}
       onToggleRepo={toggleBranchAuditRepoRoot}
-      onGenerate={() => insertBranchAuditScopePrompt(hasBranchAuditRecords ? 'regenerate' : 'generate')}
+      onGenerate={(source) => insertBranchAuditScopePrompt(hasBranchAuditRecords ? 'regenerate' : 'generate', source)}
       disabled={!branchAuditHasTargets}
       generateDisabled={!branchAuditReadyToGenerate}
       inserted={insertedReferenceKey?.startsWith('context:branch-audit-scope:') ?? false}
@@ -11425,9 +11436,10 @@ export function RightSidebar(
         repos={changeAuditScopeRepos}
         selectedRoots={changeAuditTargetRepoRoots}
         onToggleRepo={toggleChangeAuditRepoRoot}
-        onGenerate={() => {
-          closeMenu();
-          insertChangeAuditPrompt();
+        onGenerate={async (source) => {
+          const accepted = await insertChangeAuditPrompt('generate', source);
+          if (accepted !== false) closeMenu();
+          return accepted;
         }}
         disabled={!rootPath}
         inserted={insertedReferenceKey === changeAuditPromptKey}
@@ -11643,7 +11655,7 @@ export function RightSidebar(
             onChange={(event) => {
               const file = event.target.files?.[0];
               event.target.value = '';
-              if (file) void handleTemporaryImageUpload(file);
+              if (file) void handleTemporaryImageUpload(file, event.currentTarget.closest<HTMLElement>('[data-sidebar]') ?? undefined);
             }}
           />
           {onTogglePinned && (
@@ -12202,7 +12214,7 @@ export function RightSidebar(
                   active={isOpen && filesPaneActive}
                   onInsertReference={insertPathReference}
                   onInsertText={insertReferenceText}
-                  onInsertFeature={insertReferenceText}
+                  onInsertFeature={beginReviewReference}
                   onReviewReference={beginReviewReference}
                   onReferenceCopied={markReferenceCopied}
                   onDirectoryLinkOpen={handleMarkdownDirectoryOpen}
@@ -12306,7 +12318,7 @@ export function RightSidebar(
                     active={isOpen && filesPaneActive && mobileFileSlideIndex === 1}
                     onInsertReference={insertPathReference}
                     onInsertText={insertReferenceText}
-                      onInsertFeature={insertReferenceText}
+                      onInsertFeature={beginReviewReference}
                       onReviewReference={beginReviewReference}
                     onReferenceCopied={markReferenceCopied}
                     onClose={closeFilePreview}
@@ -12627,13 +12639,14 @@ export function RightSidebar(
             <AndroidMirrorView
               sessionId={sessionId ?? null}
               onCloseTab={() => toggleAndroidTab(false)}
-              onInsertPrompt={(text) => insertContextText('android-deps', text)}
+              onInsertPrompt={async (text, source) => { if (!await insertContextText('android-deps', text, undefined, source)) throw new Error(t('rightSidebar.uploadReferenceRejected')); }}
               onInsertFile={handleMirrorCaptureInsert}
               onRecordingComplete={handleRecordingComplete}
             />
           )}
         </Pane>
       </div>
+      {isOpen && referenceInsertFailed && <div role="alert" className="shrink-0 border-t border-border/15 px-3 py-2 text-xs text-destructive">{t('rightSidebar.referenceInsertFailed')}</div>}
       {isOpen && upload.task && (
         <SidebarUploadStatus task={upload.task}
           onCancel={upload.cancel} onRetry={() => void upload.retry()} onDismiss={upload.dismiss}
@@ -12661,8 +12674,8 @@ export function RightSidebar(
           onAutoCollapseAfterSendChange={setContextDraftAutoCollapse}
           onDisable={() => setContextDraftEnabled(false)}
           onClear={() => setContextDraftText('')}
-          onInsert={() => sendContextDraftToTerminal(false)}
-          onInsertAndSend={() => sendContextDraftToTerminal(true)}
+          onInsert={(source) => sendContextDraftToTerminal(false, source)}
+          onInsertAndSend={(source) => sendContextDraftToTerminal(true, source)}
           labels={{
             title: t('rightSidebar.contextDraftTitle'),
             hint: t('rightSidebar.contextDraftHint'),

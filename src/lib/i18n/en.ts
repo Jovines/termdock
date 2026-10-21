@@ -592,6 +592,7 @@ export const en: TranslationDictionary = {
     contextDraftAppended: 'Reference added',
     contextDraftResize: 'Drag to resize, double-click for default height',
     contextDraftAutoCollapseAfterSend: 'Collapse after insert/send',
+    referenceInsertFailed: 'Could not insert. Check the target terminal connection and retry.',
     contextDraftInsertFailed: 'Input not accepted — draft kept. Close the active form or return to the terminal and retry.',
     contextDraftPending: 'Waiting…',
     contextDraftCharacterCount: ({ count }) => `${count} chars`,

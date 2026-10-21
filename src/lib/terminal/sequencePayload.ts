@@ -10,7 +10,7 @@ export interface TerminalSequenceOptions {
 }
 
 export function terminalSequencePayload(seq: string, options?: TerminalSequenceOptions): string {
-  if (options?.ownedPaste) return buildBracketedPastePayload(seq, false);
+  if (options?.ownedPaste) return buildBracketedPastePayload(seq, options.ownedPaste.submitAfterPaste === true);
   if (options?.paste && /[\r\n]/.test(seq)) {
     return buildBracketedPastePayload(seq, options.submitAfterPaste ?? seq.endsWith('\r'));
   }

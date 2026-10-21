@@ -202,11 +202,11 @@ export function EdaPreview({
                 anchor={{ xPercent: pick.stageXPercent, yPercent: pick.stageYPercent }}
                 disabled={pick.inspecting}
                 title={t('rightSidebar.edaInsertAnnotation')}
-                onClick={() => {
-                  onInsertAnnotation?.(annotation, `eda:${view}:${pick.xPercent.toFixed(1)}:${pick.yPercent.toFixed(1)}`, {
+                onClick={async (source) => {
+                  const accepted = await onInsertAnnotation?.(annotation, `eda:${view}:${pick.xPercent.toFixed(1)}:${pick.yPercent.toFixed(1)}`, {
                     snapshot: imageRef.current ? captureReferenceCanvas(imageRef.current, pick) : Promise.resolve(null),
-                  });
-                  setPick(null);
+                  }, source);
+                  if (accepted !== false) setPick(null);
                 }}
               >
                 {t('rightSidebar.edaInsertAnnotation')}

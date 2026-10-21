@@ -1959,7 +1959,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (options?.ownedPaste && !ownedPaste) return Promise.resolve(false);
       if ((externalFocusSuspendedRef.current && !(ownedPaste && allowOwnedPasteWhileFocusSuspendedRef.current)) || ((focusSuspendedRef.current || isKeyboardLayerOpen()) && !ownedPaste)) {return Promise.resolve(false);}
       const ownedCurrent = () => !!options?.ownedPaste && isOwnedTerminalPasteCurrent(options.ownedPaste, sessionId)
-        && isActiveRef.current && (!externalFocusSuspendedRef.current || allowOwnedPasteWhileFocusSuspendedRef.current) && isStreamReadyRef.current
+        && (isActiveRef.current || options?.targeted === true) && (!externalFocusSuspendedRef.current || allowOwnedPasteWhileFocusSuspendedRef.current) && isStreamReadyRef.current
         && !isConnectionTransitionRef.current && !document.hidden && navigator.onLine !== false && isWorkspaceActive();
       if (ownedPaste && !ownedCurrent()) return Promise.resolve(false);
       if (!isActiveRef.current && !options?.targeted) {

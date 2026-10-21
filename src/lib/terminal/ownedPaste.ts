@@ -1,7 +1,7 @@
 import { getActiveKeyboardLayer, isKeyboardLayerSource } from '../hooks/useKeyboardLayer';
 import { buildBracketedPastePayload } from './bracketedPaste';
 
-export interface OwnedTerminalPaste { readonly nonce: string }
+export interface OwnedTerminalPaste { readonly nonce: string; readonly submitAfterPaste?: boolean }
 interface Request {
   source: HTMLElement;
   layer: ReturnType<typeof getActiveKeyboardLayer>;
@@ -13,11 +13,11 @@ interface Request {
 const requests = new Map<string, Request>();
 
 /** A short-lived, one-use intent from the visible action, bound to text and target. */
-export function createOwnedTerminalPasteRequest(source: HTMLElement, sessionId: string, text: string) {
+export function createOwnedTerminalPasteRequest(source: HTMLElement, sessionId: string, text: string, submitAfterPaste = false) {
   if (!text || !sessionId || !isKeyboardLayerSource(source)) return null;
   const nonce = `owned-paste-${crypto.randomUUID()}`;
-  requests.set(nonce, { source, layer: getActiveKeyboardLayer(), sessionId, text, token: { nonce } });
-  return { nonce, text, sessionId, paste: true, submitAfterPaste: false, focus: false, ownedPaste: true } as const;
+  requests.set(nonce, { source, layer: getActiveKeyboardLayer(), sessionId, text, token: { nonce, submitAfterPaste } });
+  return { nonce, text, sessionId, paste: true, submitAfterPaste, focus: false, ownedPaste: true } as const;
 }
 
 export function releaseOwnedTerminalPasteRequest(nonce: string): void { requests.delete(nonce); }
@@ -32,7 +32,7 @@ export function authorizeOwnedTerminalPaste(detail: {
 }, sessionId: string): OwnedTerminalPaste | null {
   const request = detail.nonce ? requests.get(detail.nonce) : undefined;
   return request && current(request) && detail.ownedPaste === true && detail.paste === true
-    && detail.submitAfterPaste === false && request.sessionId === sessionId && detail.sessionId === sessionId
+    && detail.submitAfterPaste === request.token.submitAfterPaste && request.sessionId === sessionId && detail.sessionId === sessionId
     && detail.text === request.text ? request.token : null;
 }
 
@@ -42,7 +42,7 @@ export function consumeOwnedTerminalPaste(token: OwnedTerminalPaste, sessionId: 
   if (request.consumed) return false;
   request.consumed = true;
   return current(request) && request.sessionId === sessionId
-    && payload === buildBracketedPastePayload(request.text, false);
+    && payload === buildBracketedPastePayload(request.text, request.token.submitAfterPaste === true);
 }
 
 /** ACK, timeout, layer closure and unmount revoke even an already consumed intent. */

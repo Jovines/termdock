@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type MouseEvent } from 'react';
 import {
   Check,
   LoaderCircle,
@@ -44,8 +44,8 @@ interface ContextDraftDockProps {
   onAutoCollapseAfterSendChange: (enabled: boolean) => void;
   onDisable: () => void;
   onClear: () => void;
-  onInsert: () => boolean | Promise<boolean>;
-  onInsertAndSend: () => boolean | Promise<boolean>;
+  onInsert: (source?: HTMLElement) => boolean | Promise<boolean>;
+  onInsertAndSend: (source?: HTMLElement) => boolean | Promise<boolean>;
 }
 
 const SEND_FEEDBACK_MS = 1400;
@@ -259,13 +259,13 @@ export function ContextDraftDock({
 
   // 插入/发送不再立即收起：父组件等终端 ack，成功才清空收起，
   // 失败（断联）保持编辑态并通过 insertError 提示
-  const runAction = async (action: 'inserted' | 'sent') => {
+  const runAction = async (action: 'inserted' | 'sent', source?: HTMLElement) => {
     if (!hasDraft || pendingRef.current) return;
     pendingRef.current = true;
     setPending(true);
     setLastAction(null);
     try {
-      const accepted = await (action === 'sent' ? onInsertAndSend() : onInsert());
+      const accepted = await (action === 'sent' ? onInsertAndSend(source) : onInsert(source));
       // The parent also guards the submitted snapshot before clearing it.
       if (accepted && mountedRef.current) markAction(action);
     } catch { /* Parent retains the draft and reports the failure. */ }
@@ -274,8 +274,8 @@ export function ContextDraftDock({
       if (mountedRef.current) setPending(false);
     }
   };
-  const handleInsert = () => { void runAction('inserted'); };
-  const handleSend = () => { void runAction('sent'); };
+  const handleInsert = (event: MouseEvent<HTMLButtonElement>) => { void runAction('inserted', event.currentTarget); };
+  const handleSend = (event: MouseEvent<HTMLButtonElement> | KeyboardEvent<HTMLTextAreaElement>) => { void runAction('sent', event.currentTarget); };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Escape') {
@@ -285,7 +285,7 @@ export function ContextDraftDock({
     }
     if (event.nativeEvent.isComposing || event.keyCode === 229 || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
     event.preventDefault();
-    handleSend();
+    handleSend(event);
   };
 
   // 不做失焦自动收起：草稿坞主打持续编辑（攒引用 + 补写），收起只靠

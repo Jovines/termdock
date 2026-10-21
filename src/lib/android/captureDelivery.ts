@@ -1,35 +1,32 @@
+import { requestReferenceInsertion } from '../components/sidebar/requestReferenceInsertion';
 import { create } from 'zustand';
 import type { AndroidRecording } from './api';
 import { buildReferenceInputText } from '../components/sidebar/referencePaths';
 
-export function insertAndroidText(text: string, sessionId?: string | null): Promise<void> {
-  if (!sessionId) return Promise.reject(new Error('没有可接收内容的终端'));
-  return new Promise((resolve, reject) => {
-    const nonce = crypto.randomUUID();
-    const finish = (ok: boolean) => {
-      window.clearTimeout(timer);
-      window.removeEventListener('termdock-insert-reference-ack', receive);
-      if (ok) resolve(); else reject(new Error('目标终端不可用，内容尚未插入，请连接终端后重试'));
-    };
-    const receive = (event: Event) => {
-      const detail = (event as CustomEvent).detail;
-      if (detail?.nonce === nonce) finish(detail.ok === true);
-    };
-    const timer = window.setTimeout(() => finish(false), 10000);
-    window.addEventListener('termdock-insert-reference-ack', receive);
-    window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text, sessionId, nonce, focus: false, paste: true },
-    }));
-  });
+export async function insertAndroidText(text: string, sessionId?: string | null, source?: HTMLElement): Promise<void> {
+  if (!sessionId) throw new Error('没有可接收内容的终端');
+  const accepted = await requestReferenceInsertion(text, sessionId, () => true, source);
+  if (!accepted) throw new Error('目标终端不可用，内容尚未插入，请连接终端后重试');
 }
-export function insertAndroidPath(path: string, sessionId?: string | null): Promise<void> {
-  return insertAndroidText(buildReferenceInputText(path, null), sessionId);
+export function insertAndroidPath(path: string, sessionId?: string | null, source?: HTMLElement): Promise<void> {
+  return insertAndroidText(buildReferenceInputText(path, null), sessionId, source);
 }
 
-interface PendingRecording { file: AndroidRecording; sessionId: string | null; initialPath: string; insert?: (path: string) => Promise<unknown> | void }
+// Keep a recording's destination across panel remounts and session switches.
+const recordingDestinations = new Map<string, (file: AndroidRecording) => void>();
+export function bindAndroidRecordingDestination(id: string, receive: (file: AndroidRecording) => void): void {
+  recordingDestinations.set(id, receive);
+}
+export function deliverAndroidRecording(file: AndroidRecording, fallback?: (file: AndroidRecording) => void): void {
+  const receive = recordingDestinations.get(file.id) ?? fallback;
+  receive?.(file);
+  if (receive) recordingDestinations.delete(file.id);
+}
+
+interface PendingRecording { file: AndroidRecording; sessionId: string | null; initialPath: string; insert?: (path: string, source?: HTMLElement) => Promise<unknown> | void }
 export const useAndroidRecordingDelivery = create<{
   pending: PendingRecording[];
-  enqueue: (file: AndroidRecording, sessionId: string | null, initialPath?: string, insert?: (path: string) => Promise<unknown> | void) => void;
+  enqueue: (file: AndroidRecording, sessionId: string | null, initialPath?: string, insert?: (path: string, source?: HTMLElement) => Promise<unknown> | void) => void;
   remove: (id: string) => void;
 }>(set => ({
   pending: [],

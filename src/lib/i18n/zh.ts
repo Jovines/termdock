@@ -592,6 +592,7 @@ export const zh: TranslationDictionary = {
     contextDraftAppended: '已追加引用',
     contextDraftResize: '拖动调整高度，双击恢复默认',
     contextDraftAutoCollapseAfterSend: '插入/发送后收起',
+    referenceInsertFailed: '未能插入，请检查目标终端连接后重试。',
     contextDraftInsertFailed: '输入未被接受，草稿已保留。关闭当前表单或返回终端后重试。',
     contextDraftPending: '等待接收…',
     contextDraftCharacterCount: ({ count }) => `${count} 字`,

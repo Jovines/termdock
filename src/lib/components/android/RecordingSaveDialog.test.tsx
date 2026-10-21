@@ -26,7 +26,7 @@ describe('server recording confirmation', () => {
     await userEvent.click(screen.getByText('Insert directly'));
     await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
     expect(saveAndroidRecording).toHaveBeenCalledWith('rec', undefined);
-    expect(onInsert).toHaveBeenCalledWith('/server/recording.mp4');
+    expect(onInsert).toHaveBeenCalledWith('/server/recording.mp4', screen.getByText('Insert directly'));
   });
   it('keeps recording when folder selection is cancelled and saves server-side when confirmed', async () => {
     const { onInsert, onDone } = setup();
@@ -58,6 +58,15 @@ describe('server recording confirmation', () => {
     await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
     expect(discardAndroidRecording).toHaveBeenCalledWith('rec');
   });
+  it('keeps the recording available when the terminal rejects insertion', async () => {
+    const onDone = vi.fn();
+    render(<RecordingSaveDialog file={file} initialPath="/project" onInsert={async () => false} onDone={onDone} />);
+    await userEvent.click(screen.getByText('Insert directly'));
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(onDone).not.toHaveBeenCalled();
+    expect((screen.getByText('Insert directly') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('does not offer a broken recording as a successful artifact', () => {
     setup({ ...file, status: 'error', error: 'Encoder failed' });
     expect(screen.getByRole('alert').textContent).toBe('Encoder failed');

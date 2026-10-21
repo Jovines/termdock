@@ -88,3 +88,15 @@ it('never downgrades a detached explicit source to an unowned background request
   expect(dispatch).not.toHaveBeenCalled();
   dispatch.mockRestore();
 });
+
+it('binds explicit draft Send to one submitted paste and rejects changing that intent', () => {
+  render(<Layer />);
+  const request = createOwnedTerminalPasteRequest(screen.getByRole('button', { name: 'Parent action' }), 'alpha', 'one\ntwo\r', true)!;
+  pending.add(request.nonce);
+  expect(authorizeOwnedTerminalPaste({ ...request, submitAfterPaste: false }, 'alpha')).toBeNull();
+  const token = authorizeOwnedTerminalPaste(request, 'alpha')!;
+  const payload = terminalSequencePayload(request.text, { ownedPaste: token, submitAfterPaste: false });
+  expect(payload).toBe('\x1b[200~one\rtwo\x1b[201~\r');
+  expect(consumeOwnedTerminalPaste(token, 'alpha', payload)).toBe(true);
+  expect(consumeOwnedTerminalPaste(token, 'alpha', payload)).toBe(false);
+});

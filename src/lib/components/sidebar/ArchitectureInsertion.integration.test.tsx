@@ -10,6 +10,10 @@ import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { isKeyboardLayerOpen } from '../../hooks/useKeyboardLayer';
 import { terminalSequencePayload } from '../../terminal/sequencePayload';
+import { RecordingSaveDialog } from '../android/RecordingSaveDialog';
+import { useAndroidRecordingDelivery, insertAndroidPath } from '../../android/captureDelivery';
+import { DiffViewer } from './DiffViewer';
+import { requestReferenceInsertion } from './requestReferenceInsertion';
 import { registerCollaborationInput } from '../../collaboration/inputTarget';
 import type { TerminalHandlers } from '../../terminal/types';
 
@@ -17,7 +21,7 @@ import type { TerminalHandlers } from '../../terminal/types';
 // boundary and payload encoder. Replace only the rendering/controller boundary
 // and the backend: the test must never launch a real shell or Agent.
 const env = vi.hoisted(() => ({ send: vi.fn(), controller: true, streams: new Map<string, TerminalHandlers>(),
-  inputs: new Map<string, (data: string, options?: object) => unknown>(), sequence: vi.fn(), map: null as unknown }));
+  inputs: new Map<string, (data: string, options?: object) => unknown>(), sequence: vi.fn(), upload: vi.fn(), captureError: vi.fn(), content: 'first\nsecond', map: null as unknown }));
 vi.mock('../terminal/TerminalViewport', async () => ({
   TerminalViewport: React.forwardRef((props: any, ref: any) => {
     env.inputs.set(props.sessionId, props.onInput);
@@ -42,19 +46,30 @@ vi.mock('../../terminal/factory', () => ({ createTermdockAPI: () => ({
   },
   checkHealth: vi.fn().mockResolvedValue({ healthy: true }),
 }) }));
+vi.mock('../android/AndroidMirrorView', () => ({ ANDROID_DOCK_GROUP: '@android', AndroidMirrorView: (props: any) => <div>
+  <button onClick={event => void props.onInsertFile(new File(['png'], 'shot.png', { type: 'image/png' }), event.currentTarget).catch(env.captureError)}>Fixture screenshot</button>
+  <button onClick={() => props.onRecordingComplete({ id: 'recording', name: 'screen.mp4', serial: 'phone', size: 100, status: 'ready', startedAt: 1 })}>Fixture recording</button>
+</div> }));
+vi.mock('../../android/api', async original => ({ ...await original<any>(), saveAndroidRecording: vi.fn(async () => ({ path: '/tmp/screen.mp4' })) }));
 vi.mock('./Sidebar', () => ({ Sidebar: ({ children }: any) => <div>{children}</div> }));
 vi.mock('../../architecture/api', () => ({ readArchitecture: vi.fn(async () => env.map), listArchitectures: vi.fn(async () => []) }));
+vi.mock('./diffWorkerClient', () => ({ parseDiffInWorker: async (text: string) => {
+  const { parseDiff } = await import('react-diff-view');
+  return { files: parseDiff(text), tokens: new Map(), parseMs: 0, tokenizeMs: 0 };
+} }));
 vi.mock('./HtmlPreviewFrame', () => ({ HtmlPreviewFrame: () => null }));
 vi.mock('../../terminal/api', async original => ({ ...await original<any>(),
-  getSettings: vi.fn(async () => ({ rightSidebarTabs: { architecture: true } })), listDirectory: vi.fn(async () => ({ entries: [], path: '/project' })),
-  readFileContent: vi.fn(async () => ({ path: '/project/src/demo.ts', content: 'first\nsecond', size: 12, modified: '', binary: false })),
+  uploadFiles: (...args: any[]) => env.upload(...args),
+  getSettings: vi.fn(async () => ({ rightSidebarTabs: { architecture: true }, androidPanel: { enabled: true } })), listDirectory: vi.fn(async () => ({ entries: [], path: '/project' })),
+  readFileContent: vi.fn(async (path: string) => ({ path, content: env.content, size: 12, modified: '', binary: false })),
   loadContextDraft: vi.fn(async () => ({ text: '' })), saveContextDraft: vi.fn(async () => ({})),
   openSessionInventoryEntry: vi.fn(async () => ({})), updateSessionInventoryEntry: vi.fn(async () => ({})),
   sendTerminalFocusState: vi.fn(), sendTerminalViewingState: vi.fn(), sendTerminalFlowControlState: vi.fn(),
 }));
 const sidebarInitial = useSidebarStore.getState();
 beforeEach(() => {
-  env.send.mockReset().mockResolvedValue(undefined); env.sequence.mockReset(); env.streams.clear(); env.inputs.clear(); env.controller = true; env.map = null;
+  env.send.mockReset().mockResolvedValue(undefined); env.sequence.mockReset(); env.streams.clear(); env.inputs.clear(); env.controller = true; env.map = null; env.content = 'first\nsecond'; env.upload.mockReset().mockResolvedValue({ files: [{ path: '/tmp/shot.png' }] }); env.captureError.mockReset();
+  useAndroidRecordingDelivery.setState({ pending: [] });
   sessionStorage.clear(); localStorage.clear();
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -69,11 +84,17 @@ beforeEach(() => {
   useTerminalStore.getState().setTerminalSession('beta', { sessionId: 'backend-beta', mode: 'shell', cols: 80, rows: 24 });
 });
 afterEach(() => { cleanup(); useSidebarStore.setState(sidebarInitial); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-function mount(extra: { suspended?: boolean; allowOwnedPaste?: boolean; beta?: boolean; width?: number } = {}) {
+function mount(extra: { suspended?: boolean; allowOwnedPaste?: boolean; beta?: boolean; width?: number; preview?: boolean } = {}) {
   return render(<I18nProvider><TerminalView sessionId="alpha" mode="shell" isActive focusSuspended={extra.suspended} allowOwnedPasteWhileFocusSuspended={extra.allowOwnedPaste} suppressKeyboard />
     {extra.beta && <TerminalView sessionId="beta" mode="shell" isActive={false} suppressKeyboard />}
-    <RightSidebar isOpen sessionId="alpha" drawerWidthPx={extra.width ?? 900} onClose={vi.fn()} />
+    <RightSidebar rightSidebarFilePreviewOpen={extra.preview} isOpen sessionId="alpha" drawerWidthPx={extra.width ?? 900} onClose={vi.fn()} /><PendingRecording />
   </I18nProvider>);
+}
+function PendingRecording() {
+  const first = useAndroidRecordingDelivery(state => state.pending[0]);
+  return first ? <RecordingSaveDialog file={first.file} initialPath={first.initialPath}
+    onInsert={(path, source) => first.insert ? first.insert(path, source) : insertAndroidPath(path, first.sessionId, source)}
+    onDone={() => useAndroidRecordingDelivery.getState().remove(first.file.id)} /> : null;
 }
 async function prepare() {
   await screen.findByRole('button', { name: 'Generate' });
@@ -176,4 +197,97 @@ it.each([900, 390])('delivers the explorer root reference through the real sideb
   fireEvent.click(await screen.findByRole('button', { name: 'Insert current folder reference' }));
   await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
   expect(env.send.mock.calls[0]).toEqual(['backend-alpha', '\x1b[200~/project \x1b[201~']);
+});
+
+it.each([900, 390])('inserts selected file content through the review router at width %s', async width => {
+  useSidebarStore.setState({ rightTab: 'files', selectedFilePath: '/project/src/demo.ts', fileSortModesHydrated: true, hideGitIgnoredRootsHydrated: true });
+  mount({ width, suspended: true, allowOwnedPaste: true, preview: true });
+  await waitFor(() => expect(document.querySelector('[data-file-preview-line="1"]')).not.toBeNull());
+  fireEvent.click(document.querySelector('[data-file-preview-line="1"]')!);
+  fireEvent.click(await screen.findByTitle('Insert code reference: /project/src/demo.ts:1'));
+  await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+  expect(env.send.mock.calls[0][0]).toBe('backend-alpha');
+  expect(env.send.mock.calls[0][1]).toContain('1 first');
+  expect(env.send.mock.calls[0][1]).toMatch(/^\x1b\[200~.*\x1b\[201~$/s);
+});
+it.each(['screenshot', 'recording'])('inserts Android %s from the sidebar into its original terminal', async kind => {
+  useSidebarStore.setState({ rightTab: 'android' });
+  mount({ width: 390, suspended: true, allowOwnedPaste: true, beta: true });
+  fireEvent.click(await screen.findByRole('button', { name: kind === 'screenshot' ? 'Fixture screenshot' : 'Fixture recording' }));
+  if (kind === 'recording') fireEvent.click(await screen.findByText('Insert directly'));
+  await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+  expect(env.send.mock.calls[0]).toEqual(['backend-alpha', kind === 'screenshot' ? '\x1b[200~/tmp/shot.png \x1b[201~' : '\x1b[200~/tmp/screen.mp4 \x1b[201~']);
+});
+it.each([false, true])('delivers the context draft from its visible action with explicit submit=%s', async submit => {
+  localStorage.setItem('termdock:right-sidebar:context-draft-enabled:v1', 'true');
+  localStorage.setItem('termdock:right-sidebar:context-draft-text:v1', JSON.stringify('draft line 1\ndraft line 2'));
+  useSidebarStore.setState({ rightTab: 'files' });
+  mount({ width: 390, suspended: true, allowOwnedPaste: true });
+  fireEvent.click(await screen.findByRole('button', { name: submit ? 'Send draft' : 'Insert' }));
+  await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+  const payload = env.send.mock.calls[0][1];
+  expect(payload).toContain('draft line 1\rdraft line 2');
+  expect(payload.endsWith(submit ? '\x1b[201~\r' : '\x1b[201~')).toBe(true);
+});
+it('allows a recording dialog to target its fixed inactive terminal without changing focus', async () => {
+  mount({ beta: true });
+  act(() => useAndroidRecordingDelivery.getState().enqueue({ id: 'inactive-recording', name: 'screen.mp4', serial: 'phone', size: 100, status: 'ready', startedAt: 1 }, 'beta'));
+  fireEvent.click(await screen.findByText('Insert directly'));
+  await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+  expect(env.send.mock.calls[0][0]).toBe('backend-beta');
+  expect(useTerminalStore.getState().activeSessionId).toBe('alpha');
+});
+
+it('keeps a CSV annotation mounted until the real terminal accepts it', async () => {
+  env.content = 'name,status\nboard,ready';
+  useSidebarStore.setState({ rightTab: 'files', selectedFilePath: '/project/bom.csv', fileSortModesHydrated: true, hideGitIgnoredRootsHydrated: true });
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400, toJSON() {} });
+  let accept!: () => void;
+  env.send.mockImplementationOnce(() => new Promise<void>(resolve => { accept = resolve; }));
+  mount({ width: 390, suspended: true, allowOwnedPaste: true, preview: true });
+  fireEvent.click(await screen.findByRole('button', { name: 'ready' }));
+  const insert = await screen.findByTitle('Insert table annotation');
+  fireEvent.click(insert);
+  await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+  expect(insert.isConnected).toBe(true);
+  await act(async () => { accept(); });
+  await waitFor(() => expect(insert.isConnected).toBe(false));
+  expect(env.send.mock.calls[0][1]).toContain('ready');
+});
+it.each(['Insert current diff as context', 'Insert this hunk'])('delivers Diff action %s through the terminal boundary', async title => {
+  const diff = 'diff --git a/demo.ts b/demo.ts\n--- a/demo.ts\n+++ b/demo.ts\n@@ -1 +1 @@\n-before\n+after\n';
+  render(<I18nProvider><TerminalView sessionId="alpha" mode="shell" isActive focusSuspended allowOwnedPasteWhileFocusSuspended suppressKeyboard />
+    <DiffViewer filePath="demo.ts" repoRoot="/project" diffOverride={diff} oldSourceOverride="before\n" onReferenceCopied={vi.fn()}
+      onInsertDiffReference={(_label, text, _key, source) => { void requestReferenceInsertion(text, 'alpha', () => true, source); }} />
+  </I18nProvider>);
+  await waitFor(() => expect(env.streams.has('backend-alpha')).toBe(true));
+  fireEvent.click(await screen.findByTitle(title));
+  await waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+  expect(env.send.mock.calls[0][1]).toContain('after');
+  expect(env.send.mock.calls[0][1].endsWith('\x1b[201~')).toBe(true);
+});
+
+it('reports rejected file content insertion and retains the selection for retry', async () => {
+  useSidebarStore.setState({ rightTab: 'files', selectedFilePath: '/project/src/demo.ts', fileSortModesHydrated: true, hideGitIgnoredRootsHydrated: true });
+  env.send.mockRejectedValueOnce(new Error('offline'));
+  mount({ width: 390, suspended: true, allowOwnedPaste: true, preview: true });
+  await waitFor(() => expect(document.querySelector('[data-file-preview-line="1"]')).not.toBeNull());
+  fireEvent.click(document.querySelector('[data-file-preview-line="1"]')!);
+  const insert = await screen.findByTitle('Insert code reference: /project/src/demo.ts:1');
+  fireEvent.click(insert);
+  expect((await screen.findByRole('alert')).textContent).toContain('Could not insert');
+  expect(insert.isConnected).toBe(true);
+  expect(screen.queryByText('Inserted')).toBeNull();
+});
+it('does not insert a screenshot after its source panel closes during upload', async () => {
+  let finish!: (value: unknown) => void;
+  env.upload.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  useSidebarStore.setState({ rightTab: 'android' });
+  const view = mount({ width: 390, suspended: true, allowOwnedPaste: true });
+  fireEvent.click(await screen.findByRole('button', { name: 'Fixture screenshot' }));
+  await waitFor(() => expect(env.upload).toHaveBeenCalledOnce());
+  view.unmount();
+  await act(async () => { finish({ files: [{ path: '/tmp/shot.png' }] }); });
+  expect(env.send).not.toHaveBeenCalled();
+  expect(env.captureError).toHaveBeenCalledOnce();
 });

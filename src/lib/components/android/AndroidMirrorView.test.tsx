@@ -153,6 +153,16 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     } finally { cleanup(); vi.useRealTimers(); }
   });
 
+  it('录屏期间切换终端仍交给开始录制时的接收方', async () => {
+    const original = vi.fn(), replacement = vi.fn();
+    const view = await streamingView(async () => {}, original);
+    await userEvent.click(screen.getByLabelText('Start recording'));
+    view.rerender(<AndroidMirrorView sessionId="different-terminal" onInsertFile={async () => {}} onRecordingComplete={replacement} />);
+    await userEvent.click(screen.getByLabelText('Stop recording'));
+    await waitFor(() => expect(original).toHaveBeenCalledOnce());
+    expect(replacement).not.toHaveBeenCalled();
+  });
+
   it('分屏不依赖侧栏：截图绑定原终端，录屏保存对话框退出分屏后仍可操作', async () => {
     const host = document.createElement('div'); document.body.append(host);
     useCollaborationPanelDock.setState({

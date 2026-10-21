@@ -20,7 +20,7 @@ export function useContextDraftDelivery(config: {
     mounted.current = true;
     return () => { mounted.current = false; revision.current += 1; };
   }, []);
-  return useCallback(async (submit: boolean): Promise<boolean> => {
+  return useCallback(async (submit: boolean, source?: HTMLElement): Promise<boolean> => {
     if (pending.current || !latest.current.active) return false;
     const snapshot = latest.current;
     const version = revision.current;
@@ -30,7 +30,7 @@ export function useContextDraftDelivery(config: {
     try {
       const accepted = await requestReferenceInsertion(text, snapshot.sessionId,
         () => mounted.current && latest.current.active && latest.current.sessionId === snapshot.sessionId,
-        undefined, options);
+        source, options);
       // Report input acceptance, but don't clear/collapse or label newer edits.
       const unchanged = mounted.current && version === revision.current;
       if (unchanged) {

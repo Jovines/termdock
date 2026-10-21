@@ -25,7 +25,7 @@ export function FloatingAnnotationButton({
   anchor: FloatingAnnotationAnchor;
   children: ReactNode;
   disabled?: boolean;
-  onClick: () => void;
+  onClick: (source: HTMLButtonElement) => void;
   title?: string;
 }) {
   return (
@@ -35,7 +35,7 @@ export function FloatingAnnotationButton({
       disabled={disabled}
       onClick={(event) => {
         event.stopPropagation();
-        onClick();
+        onClick(event.currentTarget);
       }}
       title={title}
       style={getFloatingAnnotationButtonStyle(anchor)}

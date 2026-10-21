@@ -1893,7 +1893,7 @@ function App() {
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
   const terminalReferenceAvailable = !mainCollaborationGroup
-    && (!activeHistoryOverlay || activeHistoryOverlay === 'right-sidebar' || activeHistoryOverlay === 'right-sidebar-file-preview')
+    && (!activeHistoryOverlay || activeHistoryOverlay === 'right-sidebar' || activeHistoryOverlay === 'right-sidebar-file-preview' || activeHistoryOverlay === 'left-sidebar')
     && !isLocalAccessOpen
     && !isNotificationsOpen
     && !isToolbarPresetsOpen

@@ -1,3 +1,4 @@
+import type { ReviewReferenceHandler } from './reviewReference';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Maximize2 as RiFullscreen, Minimize2 as RiFullscreenExit, Scan as RiFit } from 'lucide-react';
@@ -112,7 +113,7 @@ export function SvgInspectionPreview({
   blobUrl: string;
   filePath: string;
   viewLabel: string;
-  onInsertAnnotation?: (text: string, key: string) => void;
+  onInsertAnnotation?: ReviewReferenceHandler;
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -379,9 +380,9 @@ export function SvgInspectionPreview({
           <FloatingAnnotationButton
             anchor={{ xPercent: pick.stageXPercent, yPercent: pick.stageYPercent }}
             title="引用 SVG 标注"
-            onClick={() => {
-              onInsertAnnotation?.(annotation, `svg:${pick.x.toFixed(2)}:${pick.y.toFixed(2)}`);
-              setPick(null);
+            onClick={async (source) => {
+              const accepted = await onInsertAnnotation?.(annotation, `svg:${pick.x.toFixed(2)}:${pick.y.toFixed(2)}`, undefined, source);
+              if (accepted !== false) setPick(null);
             }}
           >
             引用 SVG 标注

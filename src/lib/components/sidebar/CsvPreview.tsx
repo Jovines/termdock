@@ -1,3 +1,4 @@
+import type { ReviewReferenceHandler } from './reviewReference';
 import { useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { FloatingAnnotationButton } from './FloatingAnnotationButton';
@@ -51,7 +52,7 @@ export function formatCsvAnnotation(filePath: string, headers: string[], row: st
 export function CsvPreview({ content, filePath, onInsertAnnotation }: {
   content: string;
   filePath: string;
-  onInsertAnnotation?: (text: string, key: string) => void;
+  onInsertAnnotation?: ReviewReferenceHandler;
 }) {
   const { t } = useI18n();
   const parsed = useMemo(() => parseCsv(content), [content]);
@@ -118,9 +119,9 @@ export function CsvPreview({ content, filePath, onInsertAnnotation }: {
           <FloatingAnnotationButton
             anchor={{ xPercent: selected.xPercent, yPercent: selected.yPercent }}
             title={t('rightSidebar.csvInsertAnnotation')}
-            onClick={() => {
-              onInsertAnnotation?.(annotation, `csv:${filePath}:${selected.row + 1}:${selected.column + 1}`);
-              setSelected(null);
+            onClick={async (source) => {
+              const accepted = await onInsertAnnotation?.(annotation, `csv:${filePath}:${selected.row + 1}:${selected.column + 1}`, undefined, source);
+              if (accepted !== false) setSelected(null);
             }}
           >
             {t('rightSidebar.csvInsertAnnotation')}

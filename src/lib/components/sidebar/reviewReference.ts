@@ -2,7 +2,7 @@ export interface ReferenceEvidence {
   snapshot?: Promise<Blob | null>;
 }
 
-export type ReviewReferenceHandler = (text: string, key: string, evidence?: ReferenceEvidence) => void;
+export type ReviewReferenceHandler = (text: string, key: string, evidence?: ReferenceEvidence, source?: HTMLElement) => boolean | void | Promise<boolean | void>;
 
 /** Freeze only the viewer, never surrounding chat or terminal content. */
 export function captureReferenceCanvas(source: HTMLCanvasElement | HTMLImageElement, point?: { xPercent: number; yPercent: number }, label?: string): Promise<Blob | null> {

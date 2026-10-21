@@ -1233,7 +1233,7 @@ export default function ModelPreview({
     return nodeBase || fileName.replace(/\.(stl|glb|gltf)$/i, '');
   };
 
-  const insertPickRef = () => {
+  const insertPickRef = (event: React.MouseEvent<HTMLButtonElement>) => {
     const p = pickedRef.current;
     if (!p) return;
     // 坐标统一用「被引用文件自己坐标系」: GLB/GLTF 按 glTF 规范是 Y-up
@@ -1253,7 +1253,7 @@ export default function ModelPreview({
     const unit = dimensionUnit ?? (isGlb ? '文件单位' : 'mm');
     const text = `${annotationPrefix ? `${annotationPrefix}: ` : ''}${filePath ?? fileName}\n${partLabel} · 点 (${point}) [${coordLabel}, ${unit}]${normal}`;
     const view = viewDescription();
-    onInsertFeature?.([text, view].filter(Boolean).join('\n'), `pick:${p.part}:${point}`, { snapshot: viewerRef.current?.capture(view) });
+    onInsertFeature?.([text, view].filter(Boolean).join('\n'), `pick:${p.part}:${point}`, { snapshot: viewerRef.current?.capture(view) }, event.currentTarget);
     setPicked(null);
   };
 
@@ -1388,7 +1388,7 @@ export default function ModelPreview({
     setPicked(null);
   }, [blobUrl, featureMode]);
 
-  const insertFeatureRef = () => {
+  const insertFeatureRef = (event: React.MouseEvent<HTMLButtonElement>) => {
     if (selectedFeatures.length === 0) return;
     const isGlb = resolveModel3dLoaderKind(ext) === 'gltf';
     const coordLabel = coordinateSystemLabel ?? (isGlb ? 'GLB Y-up' : 'STL Z-up');
@@ -1404,7 +1404,7 @@ export default function ModelPreview({
     });
     const text = `${annotationPrefix ? `${annotationPrefix}: ` : ''}${filePath ?? fileName}\n${parts.join(' ; ')}`;
     const view = viewDescription();
-    onInsertFeature?.([text, view].filter(Boolean).join('\n'), `features:${selectedFeatures.map((ft) => ft.id).join('+')}`, { snapshot: viewerRef.current?.capture(view) });
+    onInsertFeature?.([text, view].filter(Boolean).join('\n'), `features:${selectedFeatures.map((ft) => ft.id).join('+')}`, { snapshot: viewerRef.current?.capture(view) }, event.currentTarget);
     setSelectedFeatureIds([]);
   };
 

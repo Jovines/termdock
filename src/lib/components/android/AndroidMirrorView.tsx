@@ -1,3 +1,4 @@
+import { captureReferenceInsertionScope } from '../sidebar/requestReferenceInsertion';
 import { LoadingSpinner as Loader2 } from '../ui/Loading';
 import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
@@ -27,7 +28,7 @@ import {
 import { constrainMirrorPan, moveMirrorViewport, type ViewportGeometry } from '../../android/mirrorViewport';
 import type { AndroidSavedPresetState } from '../../terminal/api';
 
-import { insertAndroidPath, insertAndroidText, useAndroidRecordingDelivery } from '../../android/captureDelivery';
+import { bindAndroidRecordingDestination, deliverAndroidRecording, insertAndroidPath, insertAndroidText, useAndroidRecordingDelivery } from '../../android/captureDelivery';
 import { RecordingSaveDialog } from './RecordingSaveDialog';
 
 export const ANDROID_DOCK_GROUP = 'android-mirror';
@@ -117,9 +118,9 @@ const writeStoredQuality = (quality: AndroidQuality) => {
 export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt, onInsertFile, onRecordingComplete, onCloseTab }: {
   sessionId?: string | null;
   dockOnly?: boolean;
-  onInsertPrompt?: (text: string) => void | Promise<void>;
+  onInsertPrompt?: (text: string, source?: HTMLElement) => void | Promise<void>;
   /** 截图/录屏产物：上传到临时目录后插入路径引用。 */
-  onInsertFile?: (file: File) => Promise<unknown> | void;
+  onInsertFile?: (file: File, source?: HTMLElement) => Promise<unknown> | void;
   onRecordingComplete?: (file: AndroidRecording) => void;
   onCloseTab?: () => void;
 }) {
@@ -897,23 +898,25 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
 
   // 失败要显眼、要能读全，所以走头部错误条（本就是动态提示区）；
   // 成功只占用底部那行两秒半，不新开任何一行。
-  const insertFixPrompt = (text: string) => {
-    void Promise.resolve().then(() => onInsertPrompt?.(text)).catch(error => {
+  const insertFixPrompt = (text: string, source: HTMLElement) => {
+    void Promise.resolve().then(() => onInsertPrompt?.(text, source)).catch(error => {
       setCaptureError(error instanceof Error ? error.message : String(error));
     });
   };
 
-  const insertCapture = useCallback(async (file: File, done: string) => {
+  const insertCapture = useCallback(async (file: File, done: string, source: HTMLElement) => {
     try {
       if (!onInsertFile) throw new Error(t('android.captureUnavailable'));
-      await onInsertFile(file);
+      const accepted = await onInsertFile(file, source);
+      if (accepted === false) throw new Error(t('android.captureUnavailable'));
       showStatus(done);
     } catch (error) {
       setCaptureError(t('android.captureFailed') + (error instanceof Error ? `：${error.message}` : ''));
     }
   }, [onInsertFile, showStatus, t]);
 
-  const takeScreenshot = async () => {
+  const takeScreenshot = async (source: HTMLElement) => {
+    const inScope = captureReferenceInsertionScope(source);
     const canvas = canvasRef.current;
     if (!canvas || captureBusyRef.current) return;
     captureBusyRef.current = true;
@@ -921,7 +924,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     setCaptureError(null);
     try {
       const file = await captureMirrorScreenshot(canvas);
-      await insertCapture(file, t('android.captureInserted'));
+      if (!inScope()) throw new Error(t('android.captureUnavailable'));
+      await insertCapture(file, t('android.captureInserted'), source);
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -934,7 +938,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     if (item.status === 'ready' || item.status === 'error') {
       if (onRecordingCompleteRef.current && !deliveredRecordings.current.has(item.id)) {
         deliveredRecordings.current.add(item.id);
-        onRecordingCompleteRef.current?.(item);
+        deliverAndroidRecording(item, onRecordingCompleteRef.current);
       }
     }
   }, []);
@@ -957,11 +961,13 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
 
   const startRecording = async () => {
     if (!selectedSerial || recordingRequest.current || recordingRef.current) return;
+    const destination = onRecordingCompleteRef.current;
     recordingRequest.current = true;
     setRecordingBusy(true);
     setCaptureError(null);
     try {
       const item = await startAndroidRecording(selectedSerial);
+      if (destination) bindAndroidRecordingDestination(item.id, destination);
       if (item.status === 'recording' || item.status === 'starting' || item.status === 'stopping') {
         recordingRef.current = item;
         setRecording(true);
@@ -1162,7 +1168,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         {(streaming || recording) && (
           <button
             type="button"
-            onClick={() => void takeScreenshot()}
+            onClick={(event) => void takeScreenshot(event.currentTarget)}
             disabled={!onInsertFile || captureBusy}
             className={`${iconButtonClass} text-muted-foreground`}
             title={onInsertFile ? t('android.screenshot') : t('android.captureUnavailable')}
@@ -1361,13 +1367,13 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       {adbMissing && (
         <div className="flex items-start gap-2 border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-destructive">
           <span className="min-w-0 flex-1">{t('android.adbUnavailable')}</span>
-          <DependencyFixButton label={t('android.insertFixPrompt')} onClick={() => insertFixPrompt(buildAndroidFixPrompt('adb', listError ?? ''))} enabled={Boolean(onInsertPrompt)} />
+          <DependencyFixButton label={t('android.insertFixPrompt')} onClick={(source) => insertFixPrompt(buildAndroidFixPrompt('adb', listError ?? ''), source)} enabled={Boolean(onInsertPrompt)} />
         </div>
       )}
       {!adbMissing && scrcpyMissing && (
         <div className="flex items-start gap-2 border-b border-border bg-surface-2 px-2 py-1.5 text-[11px] text-warning">
           <span className="min-w-0 flex-1">{t('android.scrcpyUnavailable')}</span>
-          <DependencyFixButton label={t('android.insertFixPrompt')} onClick={() => insertFixPrompt(buildAndroidFixPrompt('scrcpy', ''))} enabled={Boolean(onInsertPrompt)} />
+          <DependencyFixButton label={t('android.insertFixPrompt')} onClick={(source) => insertFixPrompt(buildAndroidFixPrompt('scrcpy', ''), source)} enabled={Boolean(onInsertPrompt)} />
         </div>
       )}
       {connectedDevice && connectedDevice.state !== 'device' && (
@@ -1646,12 +1652,14 @@ export function AndroidMirrorDock({ sessionId }: { sessionId?: string | null }) 
   const targetSession = dock?.sessionId ?? sessionId ?? null;
   const pending = useAndroidRecordingDelivery(state => state.pending);
   const first = pending[0];
-  const insertScreenshot = useCallback(async (file: File) => {
+  const insertScreenshot = useCallback(async (file: File, source?: HTMLElement) => {
+    const inScope = captureReferenceInsertionScope(source);
     if (!targetSession) throw new Error('没有可接收截图的终端');
     const result = await uploadFiles('/tmp', [file]);
     const path = result.files[0]?.path;
     if (!path) throw new Error('截图上传未返回文件路径');
-    await insertAndroidPath(path, targetSession);
+    if (!inScope()) throw new Error('截图尚未插入，请返回原投屏面板重试');
+    await insertAndroidPath(path, targetSession, source);
   }, [targetSession]);
   const receiveRecording = useCallback((file: AndroidRecording) => {
     useAndroidRecordingDelivery.getState().enqueue(file, targetSession);
@@ -1673,21 +1681,21 @@ export function AndroidMirrorDock({ sessionId }: { sessionId?: string | null }) 
   return <>
     {docked && hostReady && <AndroidMirrorView sessionId={targetSession} dockOnly
       onInsertFile={targetSession ? insertScreenshot : undefined}
-      onInsertPrompt={targetSession ? text => insertAndroidText(text, targetSession) : undefined}
+      onInsertPrompt={targetSession ? (text, source) => insertAndroidText(text, targetSession, source) : undefined}
       onRecordingComplete={receiveRecording} />}
     {first && <RecordingSaveDialog key={first.file.id} file={first.file} initialPath={first.initialPath}
-      onInsert={path => first.insert ? first.insert(path) : insertAndroidPath(path, first.sessionId)}
+      onInsert={(path, source) => first.insert ? first.insert(path, source) : insertAndroidPath(path, first.sessionId, source)}
       onDone={() => useAndroidRecordingDelivery.getState().remove(first.file.id)} />}
   </>;
 }
 
 /** 环境不满足时：把可执行的修复步骤作为提示词插到当前会话，交给终端里的 Agent 处理。 */
-function DependencyFixButton({ label, onClick, enabled }: { label: string; onClick: () => void; enabled: boolean }) {
+function DependencyFixButton({ label, onClick, enabled }: { label: string; onClick: (source: HTMLElement) => void; enabled: boolean }) {
   if (!enabled) return null;
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={(event) => onClick(event.currentTarget)}
       className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10px] text-foreground hover:bg-surface-elevated"
     >
       {label}

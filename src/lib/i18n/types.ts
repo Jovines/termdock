@@ -609,6 +609,7 @@ export type TranslationDictionary = {
     contextDraftAppended: string;
     contextDraftResize: string;
     contextDraftAutoCollapseAfterSend: string;
+    referenceInsertFailed: string;
     contextDraftInsertFailed: string;
     contextDraftPending: string;
     contextDraftCharacterCount: (params: TranslatorParams) => string;

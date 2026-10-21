@@ -1,3 +1,5 @@
+import { captureReferenceInsertionScope } from '../sidebar/requestReferenceInsertion';
+import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
 import { LoadingSpinner as Loader2 } from '../ui/Loading';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -10,7 +12,7 @@ import { DirectoryPickerDialog } from '../sidebar/DirectoryPickerDialog';
 export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
   file: AndroidRecording;
   initialPath: string;
-  onInsert: (path: string) => Promise<unknown> | void;
+  onInsert: (path: string, source?: HTMLElement) => Promise<unknown> | void;
   onDone: () => void;
 }) {
   const { t } = useI18n();
@@ -21,6 +23,8 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  useKeyboardLayer(dialogRef, !picking, () => {});
 
   const discard = async () => {
     if (inFlight.current) return;
@@ -52,8 +56,9 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
     return () => document.removeEventListener('keydown', trapKeys, true);
   }, [picking]);
 
-  const run = async (directory?: string) => {
+  const run = async (directory?: string, source?: HTMLElement) => {
     if (inFlight.current) return;
+    const inScope = captureReferenceInsertionScope(source);
     inFlight.current = true;
     setBusy(true);
     setSaving(directory !== undefined);
@@ -61,7 +66,7 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
     setError(null);
     try {
       const result = await saveAndroidRecording(file.id, directory);
-      if (directory === undefined) await onInsert(result.path);
+      if (directory === undefined && (!inScope() || await onInsert(result.path, source) === false)) throw new Error(t('android.captureUnavailable'));
       onDone();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -88,7 +93,7 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
           {discarding ? `${t('android.recordingDiscard')}…` : t(saving ? 'android.recordingSaving' : 'android.captureInserting')}
         </p>}
         <div className="mt-4 flex flex-col gap-2">
-          <button type="button" disabled={busy || file.status !== 'ready'} onClick={() => { void run(); }} className="min-h-10 rounded-lg bg-primary px-3 text-sm text-primary-foreground disabled:opacity-40">{t('android.recordingInsert')}</button>
+          <button type="button" disabled={busy || file.status !== 'ready'} onClick={(event) => { void run(undefined, event.currentTarget); }} className="min-h-10 rounded-lg bg-primary px-3 text-sm text-primary-foreground disabled:opacity-40">{t('android.recordingInsert')}</button>
           <button type="button" disabled={busy || file.status !== 'ready'} onClick={() => setPicking(true)} className="min-h-10 rounded-lg bg-surface-2 px-3 text-sm disabled:opacity-40">{t('android.recordingSave')}</button>
           <button type="button" disabled={busy} onClick={() => void discard()} className="min-h-10 rounded-lg px-3 text-sm text-muted-foreground disabled:opacity-40">{t('android.recordingDiscard')}</button>
         </div>
