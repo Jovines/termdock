@@ -312,9 +312,7 @@ body {
 }
 
 .sidebar-session-selected,
-.sidebar-session-selected:hover,
-.split-pane-title-active,
-.split-pane-title-active:hover {
+.sidebar-session-selected:hover {
   background-color: color-mix(in srgb, var(--primary) 16%, var(--surface));
   box-shadow: inset 0 0 0 1px rgb(var(--primary-rgb) / 0.22);
 }

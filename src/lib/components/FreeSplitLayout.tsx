@@ -122,6 +122,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
   const geometry = layoutRects(tree);
   const four = fourPaneBoundaries(tree);
   const allPanes = [...panes, ...scopedDocks.map(([groupId]) => ({ id: collaborationPaneId(groupId), content: <CollaborationHost groupId={groupId} /> }))];
+  const hasActivePane = allPanes.some(pane => pane.id === activePaneId);
   const drag = useRef<{ id: string; x: number; y: number; moved: boolean; originX: number; originY: number; scale: number } | null>(null);
   const dropRef = useRef(drop); dropRef.current = drop;
   const activeResize = useRef<{ path?: string; side?: PaneSide; rect: PaneRect; axis: 'x' | 'y' } | null>(null);
@@ -178,7 +179,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
     { key: 'right', side: 'right' as const, axis: 'y' as const, x: (four.top + four.bottom) / 2, y: four.right, length: 1 - (four.top + four.bottom) / 2 },
   ].map(h => ({ ...h, rect: { x: 0, y: 0, width: 1, height: 1 }, path: undefined as string | undefined })) : geometry.dividers.map(d => ({ key: d.path, path: d.path, side: undefined as PaneSide | undefined, axis: d.node.axis, rect: d.rect,
     x: d.rect.x + (d.node.axis === 'x' ? d.rect.width * d.node.ratio : 0), y: d.rect.y + (d.node.axis === 'y' ? d.rect.height * d.node.ratio : 0), length: d.node.axis === 'x' ? d.rect.height : d.rect.width }));
-  return <div ref={container} data-split-container="true" className="relative h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-border [&_[data-split-pane-title]]:touch-none [&_[data-panel-drag-title]]:touch-none"
+  return <div ref={container} data-split-container="true" className="relative h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--chrome-bg)] [&_[data-split-pane-title]]:touch-none [&_[data-panel-drag-title]]:touch-none"
     onPointerMove={event => {
       if (activeResize.current) { event.preventDefault(); resize(event.clientX, event.clientY); return; }
       const current = drag.current, box = container.current?.getBoundingClientRect();
@@ -207,7 +208,8 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
     {allPanes.map(pane => {
       const rect = geometry.panes.find(p => p.id === pane.id)?.rect;
       const hidden = !rect || (!!focusId && pane.id !== focusId);
-      return <div key={pane.id} data-layout-pane={pane.id} data-pane-active={activePaneId === pane.id} className={`absolute min-h-0 min-w-0 overflow-hidden bg-[var(--chrome-bg)] ${dragPreview?.id === pane.id ? 'pointer-events-none z-30 rounded-lg ring-1 ring-primary/60 opacity-90 shadow-xl' : ''}`} style={{ ...rectStyle(focusId === pane.id ? { x: 0, y: 0, width: 1, height: 1 } : rect ?? { x: 0, y: 0, width: 0, height: 0 }), padding: allPanes.length > 1 ? '0.5px' : 0, transition: 'none', visibility: hidden ? 'hidden' : undefined, ...(dragPreview?.id === pane.id ? { transform: `translate(${dragPreview.dx}px, ${dragPreview.dy}px) scale(${dragPreview.scale})`, transformOrigin: `${dragPreview.originX}px ${dragPreview.originY}px` } : {}) }}
+      const dimmed = allPanes.length > 1 && !focusId && hasActivePane && activePaneId !== pane.id;
+      return <div key={pane.id} data-layout-pane={pane.id} data-pane-active={activePaneId === pane.id} className={`absolute min-h-0 min-w-0 overflow-hidden bg-[var(--chrome-bg)] ${dragPreview?.id === pane.id ? 'pointer-events-none z-30 rounded-lg ring-1 ring-primary/60 shadow-xl' : ''}`} style={{ ...rectStyle(focusId === pane.id ? { x: 0, y: 0, width: 1, height: 1 } : rect ?? { x: 0, y: 0, width: 0, height: 0 }), padding: allPanes.length > 1 ? '0.5px' : 0, opacity: dragPreview?.id === pane.id ? 0.9 : dimmed ? 0.7 : 1, transition: 'none', visibility: hidden ? 'hidden' : undefined, ...(dragPreview?.id === pane.id ? { transform: `translate(${dragPreview.dx}px, ${dragPreview.dy}px) scale(${dragPreview.scale})`, transformOrigin: `${dragPreview.originX}px ${dragPreview.originY}px` } : {}) }}
         onDragStart={event => { if ((event.target as Element).closest('[data-split-pane-title], [data-panel-drag-title]')) event.preventDefault(); }}>{pane.content}
         {mobile && allPanes.length > 1 && !isCollaborationPane(pane.id) && <button type="button" data-panel-drag-title="true" aria-label="拖动面板到其他区域" className="swiper-no-swiping absolute right-1 top-1 z-20 rounded bg-surface p-1 text-muted-foreground"><GripVertical size={14} /></button>}
         {drop?.id === pane.id && <div className="pointer-events-none absolute z-30 border-2 border-primary bg-primary/20" style={{ top: drop.side === 'bottom' ? '50%' : 0, bottom: drop.side === 'top' ? '50%' : 0, left: drop.side === 'right' ? '50%' : 0, right: drop.side === 'left' ? '50%' : 0 }}></div>}
