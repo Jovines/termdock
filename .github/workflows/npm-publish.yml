@@ -79,6 +79,11 @@ jobs:
           src/server/agent/integration.test.ts
           src/server/agent/integrationRecoveryBinding.test.ts
           src/server/agent/sessionLifecycle.test.ts
+          src/server/agent/sessionLaunchState.test.ts
+          src/server/agent/sessionStateReload.test.ts
+          src/server/agent/integrationShellWait.test.ts
+          src/server/agent/integrationProfileIdentity.test.ts
+          src/server/agent/nativeProcessIdentity.test.ts
           src/server/utils/hostResources.test.ts
           src/server/utils/tmuxRecoveryOperations.test.ts
           src/server/utils/tmuxRecovery.test.ts

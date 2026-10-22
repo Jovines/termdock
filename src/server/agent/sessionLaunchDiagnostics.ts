@@ -1,7 +1,8 @@
 import { CollaborationError } from './collaborationProtocol.js';
 import { TerminalInputTargetChangedError, type PromptWriteStage } from './terminalInput.js';
+import { IntegrationShellWaitError, type IntegrationShellEvidence } from './integrationShellWait.js';
 
-export type LaunchPhase = 'configuration' | 'runtime_prepare' | 'runtime_verify' | 'binding_persist'
+export type LaunchPhase = 'configuration' | 'runtime_prepare' | 'runtime_verify' | 'binding_persist' | 'runtime_shell_wait'
   | 'native_owner_check' | 'launch_intent' | 'binding_observe' | 'reconciled_shell' | PromptWriteStage;
 export interface SessionLaunchDiagnostics {
   operation_id: string; generation: number; kind: 'cold_start' | 'cold_retry' | 'native_restore';
@@ -11,6 +12,7 @@ export interface SessionLaunchDiagnostics {
   runtime_exists: boolean | null;
   steps: Array<{ phase: LaunchPhase; at: number }>;
   target_change?: TerminalInputTargetChangedError['evidence'];
+  shell_check?: IntegrationShellEvidence;
 }
 export function beginLaunchDiagnostics(operation_id: string, generation: number,
   kind: SessionLaunchDiagnostics['kind']): SessionLaunchDiagnostics {
@@ -35,5 +37,6 @@ export function launchFailure(current: SessionLaunchDiagnostics, error: unknown,
     : typeof value?.code === 'string' && standard.has(value.code) ? value.code
     : typeof value?.message === 'string' && standard.has(value.message) ? value.message : 'UNCLASSIFIED_LAUNCH_ERROR';
   return { ...current, updated_at: Date.now(), error_code, reason_code,
+    ...(error instanceof IntegrationShellWaitError ? { shell_check: structuredClone(error.shellEvidence) } : {}),
     ...(error instanceof TerminalInputTargetChangedError ? { target_change: error.evidence } : {}) };
 }

@@ -237,6 +237,9 @@ it('creates scoped background records, returns current execution in summaries an
     tmux_recovery_memory_psi_admission: true, tmux_recovery_memory_psi_admission_min_version: '1.4.326',
     tmux_recovery_td_owned_resident_admission: true, tmux_recovery_td_owned_resident_admission_min_version: '1.4.326',
     session_recovery_binding_reconcile: process.platform === 'linux', session_recovery_binding_reconcile_min_version: '1.4.328',
+    session_launch_reload_fence: true, session_launch_reload_fence_min_version: '1.4.346',
+    session_shell_startup_wait: true, session_shell_startup_wait_min_version: '1.4.346',
+    session_profile_native_identity: process.platform === 'linux', session_profile_native_identity_min_version: '1.4.346',
     session_release_batch: true, session_release_batch_min_version: '1.4.325',
   });
   const input = { title: 'Background', spec: 'Run', purpose: 'automation', idempotencyKey: 'background', assigneeSessionId: 'worker' };

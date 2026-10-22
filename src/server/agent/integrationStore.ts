@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CollaborationError } from './collaborationProtocol.js';
+import { resolveProfileNativeIdentity, type NativeProcessIdentityConfig } from './nativeProcessIdentity.js';
 
 export const INTEGRATION_PROTOCOL = 1;
 export const INTEGRATION_OPERATIONS = ['message.send', 'message.read', 'task.read', 'task.create', 'task.configure', 'task.assign', 'task.comment', 'task.revise', 'task.answer', 'events.read', 'session.create', 'session.read', 'session.restore', 'session.release', 'session.rename', 'session.close'] as const;
@@ -15,6 +16,8 @@ export interface LaunchProfile {
   /** Exact structured resume template; {sessionId} must be its own argument. */
   resumeArgv: string[];
   startupInput?: StartupInputCondition;
+  /** Explicit per-profile writer-lock scope; no process-environment probing. */
+  nativeIdentity?: NativeProcessIdentityConfig;
 }
 export interface IntegrationPolicy { id: string; groupId: string; permissions: IntegrationPermission[]; launchProfiles: LaunchProfile[] }
 export interface IntegrationPrincipal extends IntegrationPolicy { tokenHash: string; revoked: boolean }
@@ -56,6 +59,9 @@ export function validatePolicy(value: IntegrationPolicy): IntegrationPolicy {
     if (!Array.isArray(profile.argv) || !Array.isArray(profile.resumeArgv) || [...profile.argv, ...profile.resumeArgv].some(a => typeof a !== 'string' || /[\x00-\x1f\x7f]/.test(a) || a.length > 8192) || profile.argv.length > 128 || profile.resumeArgv.length > 128) integrationError('INVALID_INTEGRATION_POLICY', 'Invalid structured argv');
     if (profile.resumeArgv.filter(a => a === '{sessionId}').length !== 1 || profile.resumeArgv.filter(a => a === '{launchArgs}').length !== 1 || profile.resumeArgv.some(a => a.includes('{sessionId}') && a !== '{sessionId}') || profile.resumeArgv.includes('--last')) integrationError('INVALID_INTEGRATION_POLICY', 'resumeArgv requires one {sessionId} and one {launchArgs}; --last is forbidden');
     if (!Array.isArray(profile.cwdRoots) || !profile.cwdRoots.length || profile.cwdRoots.some(root => typeof root !== 'string' || !path.isAbsolute(root) || /[\x00-\x1f\x7f]/.test(root))) integrationError('INVALID_INTEGRATION_POLICY', 'cwdRoots must be absolute paths');
+    if (profile.nativeIdentity !== undefined && profile.cwdRoots.some(root => !resolveProfileNativeIdentity(profile.nativeIdentity, root))) {
+      integrationError('INVALID_INTEGRATION_POLICY', 'nativeIdentity must be an explicit owned-home writer-lock directory or a safe {cwd}/ relative template');
+    }
     if (profile.startupInput !== undefined) {
       const condition = profile.startupInput;
       const validTerms = (terms: unknown): terms is string[] => Array.isArray(terms) && terms.length <= 16

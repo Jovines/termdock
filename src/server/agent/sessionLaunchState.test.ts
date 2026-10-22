@@ -1,9 +1,44 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mergeSessionLaunchState, type SessionLaunchState } from './sessionLaunchState.js';
+import { createSessionStateWriter, mergeReloadedSessionState, mergeSessionLaunchState, type SessionLaunchState } from './sessionLaunchState.js';
 import { captureRuntimeInputGuard, serializeTerminalInput, type RuntimeInputIdentity } from './terminalInput.js';
 import { writeBracketedPrompt } from './promptDelivery.js';
 
 afterEach(() => vi.useRealTimers());
+it('serializes delayed global writes and persists the latest launch after an old snapshot', async () => {
+  let current = { token: null as string | null }, release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const stored: Array<typeof current> = [];
+  const write = createSessionStateWriter(() => current, async snapshot => { if (!stored.length) { entered(); await gate; } stored.push(snapshot); });
+  const first = write(); await started;
+  current = { token: 'launch-A' };
+  const second = write();
+  release(); await Promise.all([first, second]);
+  expect(stored).toEqual([{ token: null }, { token: 'launch-A' }]);
+});
+it('preserves a launch through a delayed disk read and does not resurrect a concurrently deleted session', () => {
+  const old = { sessionId: 'a', backendSessionId: 'backend', name: 'before', agentLaunchGeneration: null, agentLaunchCheck: null };
+  const before = [old, { ...old, sessionId: 'deleted' }];
+  const launched = { ...old, agentLaunchGeneration: 'launch-A', agentLaunchCheck: { id: 'launch-A', agentSlug: 'fixture', nativeSessionId: null, deadline: 1000 } };
+  expect(mergeReloadedSessionState(before, before, [launched])).toEqual([launched]);
+  // Even an unchanged live record must not lose its server-owned launch to
+  // an external snapshot that omits those fields.
+  expect(mergeReloadedSessionState([old], [launched], [launched])[0]).toMatchObject({ agentLaunchGeneration: 'launch-A', agentLaunchCheck: { id: 'launch-A' } });
+  expect(mergeReloadedSessionState([], [launched], [launched])).toEqual([launched]);
+});
+it('retains newly opened sessions while permitting external display metadata updates', () => {
+  const old = { sessionId: 'a', backendSessionId: 'backend', name: 'old' };
+  const added = { ...old, sessionId: 'new' };
+  expect(mergeReloadedSessionState([{ ...old, name: 'disk-name' }], [old], [old, added])).toMatchObject([{ name: 'disk-name' }, added]);
+});
+it('keeps an administrator profile identity scope through metadata, check completion, and disk reload', () => {
+  const old = { sessionId: 'a', backendSessionId: 'backend', agentLaunchGeneration: null, agentLaunchCheck: null };
+  const nativeIdentity = { kind: 'linux-flock-owner' as const, directory: '/owned/home/job/locks' };
+  const live = mergeSessionLaunchState(old, old, { expectedGeneration: null, expectedCheckId: null,
+    generation: 'A', check: null, nativeIdentity });
+  expect(mergeSessionLaunchState(old, live).agentNativeIdentity).toEqual(nativeIdentity);
+  expect(mergeReloadedSessionState([old], [live], [live])[0]!.agentNativeIdentity).toEqual(nativeIdentity);
+});
 function fixture() {
   const backend = { write: vi.fn() };
   let record: SessionLaunchState & { name: string } = { name: 'role', backendSessionId: 'backend',

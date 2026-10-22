@@ -4,7 +4,7 @@ import { isConfirmedEmptyTmuxServer } from '../utils/tmuxEmptyServerProbe.js';
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type ShellVerificationFailure } from '../agent/nativeResumeOwner.js';
-import { readNativeProcessIdentity } from '../agent/nativeProcessIdentity.js';
+import { nativeIdentityDirectory, readNativeProcessIdentity, resolveProfileNativeIdentity, type NativeProcessIdentityConfig } from '../agent/nativeProcessIdentity.js';
 import { closeSessionRuntime, foregroundProcessInstance, processStartIdentity, type SessionCloseTarget } from '../agent/sessionManagement.js';
 import { releaseSessionRuntime } from '../agent/sessionLifecycle.js';
 import { resumeConfigurationFingerprint } from '../agent/sessionResumeConfiguration.js';
@@ -145,7 +145,8 @@ import { assessAgentResourceBudget, collectHostResourceSnapshot, configuredAgent
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { writeBracketedPrompt, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { captureTerminalInputGuard, captureRuntimeInputGuard, waitAndWriteTerminalInput, type TerminalInputGuard, type PromptWriteProgress } from '../agent/terminalInput.js';
-import { mergeSessionLaunchState, type LaunchStateChange } from '../agent/sessionLaunchState.js';
+import { createSessionStateWriter, mergeReloadedSessionState, mergeSessionLaunchState, type LaunchStateChange } from '../agent/sessionLaunchState.js';
+import { waitForIntegrationShell, IntegrationShellWaitError } from '../agent/integrationShellWait.js';
 import type { LaunchPhase } from '../agent/sessionLaunchDiagnostics.js';
 import { agentLaunchBlockReason, normalizeAgentLaunchCheck, type AgentLaunchCheck } from '../agent/agentLaunchCheck.js';
 import { prepareSupervisionEnable } from '../utils/enableSupervision.js';
@@ -490,6 +491,7 @@ interface PersistedClientSession {
   agentLaunchCheck?: AgentLaunchCheck | null;
   /** Retained after the one-time check resolves, fencing old asynchronous input. */
   agentLaunchGeneration?: string | null;
+  agentNativeIdentity?: NativeProcessIdentityConfig | null;
 }
 
 interface GlobalSessionState {
@@ -956,14 +958,15 @@ async function migrateFromClientStatesFile(): Promise<GlobalSessionState | null>
   }
 }
 
-async function loadGlobalSessionStateFromDisk(): Promise<void> {
+async function loadGlobalSessionStateFromDisk(reload = false): Promise<void> {
+  const beforeRead = structuredClone(globalSessionState.sessions);
   try {
     const data = await readJsonFileIfExists<GlobalSessionState>(GLOBAL_SESSION_STATE_FILE);
     if (data) {
+      const sessions = deduplicateGlobalSessions(
+        (data.sessions || []).map(s => normalizePersistedClientSession(s)).filter((s): s is PersistedClientSession => s !== null));
       globalSessionState = {
-        sessions: deduplicateGlobalSessions(
-          (data.sessions || []).map(s => normalizePersistedClientSession(s)).filter((s): s is PersistedClientSession => s !== null)
-        ),
+        sessions: reload ? mergeReloadedSessionState(sessions, beforeRead, globalSessionState.sessions) : sessions,
         updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : Date.now(),
       };
       console.log(`[session-persist] Loaded ${globalSessionState.sessions.length} sessions from global state`);
@@ -1015,7 +1018,7 @@ async function persistTmuxRecoveryState(): Promise<void> {
 async function reloadGlobalSessionStateFromDisk(source: 'watch' | 'manual'): Promise<void> {
   try {
     const previous = JSON.stringify(globalSessionState);
-    await loadGlobalSessionStateFromDisk();
+    await loadGlobalSessionStateFromDisk(true);
     const next = JSON.stringify(globalSessionState);
     if (previous === next) {
       return;
@@ -1064,11 +1067,13 @@ async function watchGlobalSessionStateFile(): Promise<void> {
   }
 }
 
+const writeGlobalSessionState = createSessionStateWriter(() => globalSessionState,
+  snapshot => writeJsonFile(GLOBAL_SESSION_STATE_FILE, snapshot));
 function schedulePersistGlobalState(): void {
   if (persistGlobalStateTimer) clearTimeout(persistGlobalStateTimer);
   persistGlobalStateTimer = setTimeout(() => {
     try {
-      void writeJsonFile(GLOBAL_SESSION_STATE_FILE, globalSessionState).catch((error) => {
+      void writeGlobalSessionState().catch((error) => {
         console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
       });
     } catch (error) {
@@ -1083,7 +1088,7 @@ async function persistGlobalStateNow(strict = false): Promise<void> {
     persistGlobalStateTimer = null;
   }
   try {
-    await writeJsonFile(GLOBAL_SESSION_STATE_FILE, globalSessionState);
+    await writeGlobalSessionState();
   } catch (error) {
     console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
     if (strict) throw error;
@@ -1447,6 +1452,8 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
     agentLaunchCheck: normalizeAgentLaunchCheck(candidate.agentLaunchCheck),
     agentLaunchGeneration: typeof candidate.agentLaunchGeneration === 'string' ? candidate.agentLaunchGeneration
       : normalizeAgentLaunchCheck(candidate.agentLaunchCheck)?.id ?? null,
+    agentNativeIdentity: nativeIdentityDirectory(candidate.agentNativeIdentity)
+      ? { kind: 'linux-flock-owner', directory: nativeIdentityDirectory(candidate.agentNativeIdentity)! } : null,
   };
 }
 
@@ -2039,13 +2046,18 @@ function searchMetadataForBackend(backendSessionId: string, session: TerminalSes
   };
 }
 
-async function beginAgentLaunchCheck(frontendSessionId: string, agentSlug: string, nativeSessionId: string | null = null): Promise<TerminalInputGuard> {
+async function beginAgentLaunchCheck(frontendSessionId: string, agentSlug: string, nativeSessionId: string | null = null,
+  nativeIdentity?: NativeProcessIdentityConfig | null): Promise<TerminalInputGuard> {
   const record = globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId);
   if (!record) throw new Error('SESSION_REMOVED');
   const id = randomUUID();
   const updated = upsertGlobalSessionRecord(record, { expectedGeneration: record.agentLaunchGeneration ?? null,
     expectedCheckId: record.agentLaunchCheck?.id ?? null, generation: id,
-    check: { id, agentSlug, nativeSessionId, deadline: Date.now() + 120_000 } });
+    check: { id, agentSlug, nativeSessionId, deadline: Date.now() + 120_000 },
+    nativeIdentity: nativeIdentity === undefined
+      ? record.agentResume?.slug === agentSlug || collaborationRouting.get(frontendSessionId)?.agentSlug === agentSlug
+        ? record.agentNativeIdentity ?? null : null
+      : nativeIdentity });
   // Capture the guard before persistence yields. The launch command must use
   // this exact generation, even if another launch occurs during an await.
   const assertCurrent = terminalInputGuard(updated);
@@ -2252,7 +2264,8 @@ function formatLocalCollaborationMessages(frontendSessionId: string, messages: C
  *  agent-keyed selector can never reach it. Delivery still needs an agent (the
  *  confirm gate and prompt formatting assume a TUI); driving a terminal —
  *  run/capture — is a shell operation and works on any pane. */
-async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false, freshProcess = false, describeNativeFailure = false): Promise<ReturnType<typeof selectCollaborationPane> & { candidates?: CollaborationPaneCandidate[] }> {
+async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false, freshProcess = false, describeNativeFailure = false,
+  identityOverride?: NativeProcessIdentityConfig): Promise<ReturnType<typeof selectCollaborationPane> & { candidates?: CollaborationPaneCandidate[] }> {
   if (!binding.tmuxSessionName) return { state: 'offline', reason: 'TMUX_BINDING_MISSING' };
   const name = `=${binding.tmuxSessionName}`;
   try { await runTmux(['has-session', '-t', name]); }
@@ -2272,7 +2285,8 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
     // pane_current_command alone cannot prove an exact resumed conversation.
     const program = await resolveTmuxPaneProgram(pane, true, nativeProcessIdentity || freshProcess);
     const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
-    const identity = nativeProcessIdentity ? await observeProgramNativeIdentity(agent, program)
+    const identity = nativeProcessIdentity ? await observeProgramNativeIdentity(agent, program,
+      identityOverride ?? globalSessionState.sessions.find(record => record.sessionId === binding.sessionId)?.agentNativeIdentity ?? undefined)
       : { nativeId: agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null, failure: null, source: null };
     if (identity.failure && !describeNativeFailure) integrationError(identity.failure === 'NATIVE_SESSION_IDENTITY_CONFLICT'
       ? 'NATIVE_SESSION_ID_MISMATCH' : 'NATIVE_SESSION_OWNER_UNCONFIRMED', 'Current process native identity evidence conflicts or cannot be uniquely verified', 409);
@@ -2568,6 +2582,32 @@ async function spawnCollaborationAgentSession(
 async function integrationPaneIsIdleShell(pane: Pick<CollaborationPaneCandidate, 'isShell' | 'panePid'>): Promise<boolean> {
   return (await inspectIntegrationShell(pane)).confirmed;
 }
+function integrationNativeIdentity(record: IntegrationSession): NativeProcessIdentityConfig | undefined {
+  if (!record.profile.nativeIdentity) return undefined;
+  if (process.platform !== 'linux') integrationError('SESSION_PROFILE_NATIVE_IDENTITY_UNSUPPORTED', 'Profile writer-lock identity requires Linux', 409);
+  const config = resolveProfileNativeIdentity(record.profile.nativeIdentity, record.cwd);
+  if (!config) integrationError('INVALID_NATIVE_IDENTITY_CONFIG', 'Stored native identity scope is invalid', 409);
+  return config!;
+}
+async function waitForOwnedIntegrationShell(record: IntegrationSession, expected: CollaborationPaneBinding) {
+  return waitForIntegrationShell({ expected, async observe() {
+    const terminal = integrationTerminalRecord(record);
+    if (!terminal) return { binding: null, confirmed: false, agent: false, reason: 'RUNTIME_NOT_REGISTERED', pgid: null, tpgid: null };
+    const layout = await getTmuxLayout(terminal.tmuxSessionName!);
+    if (layout.windows.flatMap(window => window.panes).length !== 1) {
+      return { binding: null, confirmed: false, agent: false, reason: 'MULTIPLE_TERMINAL_PANES', pgid: null, tpgid: null };
+    }
+    const inspected = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId: terminal.backendSessionId,
+      mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: null, nativeSessionId: null, pane: expected }, null, true, false, true);
+    const pane = inspected.pane;
+    if (inspected.state !== 'ready' || !pane) return { binding: null, confirmed: false, agent: false,
+      reason: inspected.reason ?? 'PANE_UNCONFIRMED', pgid: null, tpgid: null };
+    const shell = await inspectIntegrationShell(pane);
+    return { binding: { serverPid: pane.serverPid, sessionId: pane.sessionId, paneId: pane.paneId, panePid: pane.panePid,
+      agentSlug: '', nativeSessionId: null }, confirmed: shell.confirmed, agent: !!pane.agentSlug,
+      reason: pane.isShell ? shell.failure : 'PANE_NOT_SHELL', pgid: shell.pgid, tpgid: shell.tpgid };
+  } });
+}
 async function inspectIntegrationShell(pane: Pick<CollaborationPaneCandidate, 'isShell' | 'panePid'>): Promise<{
   confirmed: boolean; failure: ShellVerificationFailure | null; pgid: number | null; tpgid: number | null;
 }> {
@@ -2650,7 +2690,7 @@ async function observeIntegrationCloseTarget(record: IntegrationSession): Promis
     if (!record.agent_native_session_id || agent.slug !== record.agent_slug || program?.source !== 'tmux-tty' || !program.processPid) {
       integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'A running Agent requires a live exact native identity', 409);
     }
-    const identity = await observeProgramNativeIdentity(agent, program);
+    const identity = await observeProgramNativeIdentity(agent, program, integrationNativeIdentity(record));
     if (identity.failure || identity.nativeId !== record.agent_native_session_id) integrationError('SESSION_IDENTITY_MISMATCH', 'Current Agent native identity differs from the owned record', 409);
     kind = 'agent'; pid = program.processPid!; nativeId = identity.nativeId;
   } else {
@@ -2716,7 +2756,7 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
     const command = agent && buildResumeCommand(agent, 'td-fingerprint-native-id', null);
     if (!agent || !command) integrationError('EXACT_RESUME_UNSUPPORTED', 'Agent must support exact native recovery', 409);
     return { version: 1, slug: agent.slug, aliases: agent.aliases, capabilities: agent.capabilities ?? [],
-      resume: getPluginResumeConfig(agent.slug) ?? command, nativeIdentity: getPluginNativeIdentityConfig(agent.slug) ?? null };
+      resume: getPluginResumeConfig(agent.slug) ?? command, nativeIdentity: integrationNativeIdentity(record) ?? getPluginNativeIdentityConfig(agent.slug) ?? null };
   },
   async runtimePresent(record) {
     if (integrationTerminalRecord(record)) return true;
@@ -2763,7 +2803,7 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
     const binding: CollaborationBinding = { sessionId: record.session_id, backendSessionId: terminal.backendSessionId,
       mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug,
       nativeSessionId: record.agent_native_session_id, pane: record.terminal_binding ?? null };
-    const inspected = await inspectCollaborationTmux(binding, undefined, false, true);
+    const inspected = await inspectCollaborationTmux(binding, undefined, false, true, false, false, integrationNativeIdentity(record));
     if (inspected.state === 'offline') return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
     if (inspected.state !== 'ready' || !inspected.pane) integrationError('SESSION_IDENTITY_MISMATCH', 'Owned tmux pane cannot be uniquely verified', 409);
     const pane = inspected.pane;
@@ -2888,7 +2928,8 @@ async function assertIntegrationNativeResumeAvailable(record: IntegrationSession
         return Promise.all(layout.windows.flatMap(window => window.panes).map(async pane => {
           const program = await resolveTmuxPaneProgram(pane, true, true);
           const agent = detectAgentFromCommand(program?.rawArgs ?? program?.command ?? '', agentCustomCommands());
-          const identity = await observeProgramNativeIdentity(agent, program);
+          const identity = await observeProgramNativeIdentity(agent, program,
+            globalSessionState.sessions.find(record => record.sessionId === candidate.sessionId)?.agentNativeIdentity ?? integrationNativeIdentity(record));
           const shell = await inspectIntegrationShell({ panePid: pane.pid,
             isShell: !agent && shellNamesBackend.has(normalizeProgramName(program?.command ?? '')?.toLowerCase() ?? '') });
           return { confirmed: !identity.failure && (shell.confirmed || program?.source === 'tmux-tty' && Boolean(program.rawArgs)),
@@ -2944,12 +2985,15 @@ async function launchIntegrationTerminal(record: IntegrationSession, restoring: 
       mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: null, nativeSessionId: null,
       // A recreated tmux may get a new pane only during explicit exact resume.
       pane: original.exists ? record.terminal_binding ?? null : null }, null, true);
-    if (inspected.state !== 'ready' || !inspected.pane || !await integrationPaneIsIdleShell(inspected.pane)) integrationError('SESSION_TARGET_NOT_SHELL', 'Refusing to launch into an unverified shell', 409);
+    if (inspected.state !== 'ready' || !inspected.pane) throw new IntegrationShellWaitError('SESSION_TARGET_NOT_SHELL', {
+      samples: 1, waited_ms: 0, reason: inspected.reason ?? 'PANE_UNCONFIRMED', binding: null, pgid: null, tpgid: null });
     const pane = inspected.pane;
     const pinned: CollaborationPaneBinding = { serverPid: pane.serverPid, sessionId: pane.sessionId,
       paneId: pane.paneId, panePid: pane.panePid, agentSlug: record.agent_slug, nativeSessionId: record.agent_native_session_id };
     progress?.('binding_persist');
     prepared(pinned); // Must persist before the command enters the terminal.
+    progress?.('runtime_shell_wait');
+    await waitForOwnedIntegrationShell(record, pinned);
     collaborationRouting.bind({ sessionId: record.session_id, backendSessionId: opened.terminalSession.sessionId,
       mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug, nativeSessionId: record.agent_native_session_id, pane: pinned });
     const latest = collaborationStore.getGroup(group.id);
@@ -2964,14 +3008,13 @@ async function launchIntegrationTerminal(record: IntegrationSession, restoring: 
     if (record.resume_configuration_fingerprint && record.resume_configuration_fingerprint !== await resumeConfigurationFingerprint(record, integrationSessionAdapter)) integrationError('RESUME_CONFIGURATION_CHANGED', 'Recovery configuration changed before terminal input', 409);
     if (restoring) { progress?.('native_owner_check'); await assertIntegrationNativeResumeAvailable(record); }
     progress?.('runtime_verify');
-    const shell = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId: opened.terminalSession.sessionId,
-      mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: null, nativeSessionId: null, pane: pinned });
-    if (shell.state !== 'ready' || !shell.pane || !await integrationPaneIsIdleShell(shell.pane)) integrationError('SESSION_TARGET_NOT_SHELL', 'Owned shell changed before launch', 409);
+    await waitForOwnedIntegrationShell(record, pinned);
     // This owned pane is a verified shell; clear stale rich state before a new
     // process starts, so its new SessionStart must supply the native binding.
     backend.agentSession = null; backend.agent = null; backend.agentResumeRecovered = false;
     progress?.('launch_intent');
-    const launchGuard = await beginAgentLaunchCheck(record.session_id, record.agent_slug, restoring ? record.agent_native_session_id : null);
+    const launchGuard = await beginAgentLaunchCheck(record.session_id, record.agent_slug, restoring ? record.agent_native_session_id : null,
+      integrationNativeIdentity(record) ?? null);
     await writeAutomaticTerminalPrompt(record.session_id, integrationLaunchCommand(record, restoring), progress, launchGuard);
     broadcastClientState();
   });
@@ -5143,10 +5186,10 @@ async function resolveTmuxPaneProgram(pane: TmuxPane, requireArgs = false, refre
 
 async function observeProgramNativeIdentity(agent: AgentInfo | null, program: {
   rawArgs: string | null; processPid?: number; processComm?: string;
-} | null): Promise<{ nativeId: string | null; source: 'argv' | 'linux-flock-owner' | null;
+} | null, override?: NativeProcessIdentityConfig): Promise<{ nativeId: string | null; source: 'argv' | 'linux-flock-owner' | null;
   failure: 'NATIVE_SESSION_IDENTITY_CONFLICT' | 'NATIVE_SESSION_IDENTITY_AMBIGUOUS' | 'NATIVE_SESSION_PROCESS_CHANGED' | 'NATIVE_SESSION_OWNERSHIP_UNCONFIRMED' | null }> {
   const fromArgs = agent && program?.rawArgs ? inferResumeSessionId(agent, splitCommandToArgv(program.rawArgs)) : null;
-  const config = agent ? getPluginNativeIdentityConfig(agent.slug) : undefined;
+  const config = agent ? override ?? getPluginNativeIdentityConfig(agent.slug) : undefined;
   if (config && program?.processPid) {
     const proof = await readNativeProcessIdentity(program.processPid, config, program.processComm, program.rawArgs ?? undefined);
     if (proof.outcome === 'ambiguous' || proof.outcome === 'process_changed' || proof.outcome === 'unconfirmed') return { nativeId: null, source: null,
@@ -5156,7 +5199,9 @@ async function observeProgramNativeIdentity(agent: AgentInfo | null, program: {
       if (fromArgs && fromArgs !== proof.nativeId) return { nativeId: null, source: null, failure: 'NATIVE_SESSION_IDENTITY_CONFLICT' };
       return { nativeId: proof.nativeId, source: 'linux-flock-owner', failure: null };
     }
+    if (override) return { nativeId: null, source: null, failure: 'NATIVE_SESSION_OWNERSHIP_UNCONFIRMED' };
   }
+  if (override && agent) return { nativeId: null, source: null, failure: 'NATIVE_SESSION_OWNERSHIP_UNCONFIRMED' };
   return { nativeId: fromArgs, source: fromArgs ? 'argv' : null, failure: null };
 }
 

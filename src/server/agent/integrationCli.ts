@@ -79,6 +79,16 @@ export const INTEGRATION_HELP = `td integration — local scoped integration adm
     Prior versions cannot reconstruct missing launch evidence retroactively.
   create --file <policy.json> --credential-file <private-output.json>
   update --file <policy.json> (same identity/group; preserves the credential)
+    1.4.346 launch profiles may declare nativeIdentity={kind:"linux-flock-owner",
+    directory:"{cwd}/.agent-home/cli/thread-writer-locks"} for an isolated Agent home.
+    Linux only; session_profile_native_identity=true required on the running service.
+    This configures read-only identity proof; it does not set Agent environment,
+    install hooks, create directories, or modify old session snapshots.
+    session_launch_reload_fence/session_shell_startup_wait (minimum 1.4.346)
+    protect launch tokens during disk reload and wait at most 5s for the same
+    unique foreground shell. This does not wait for application input-ready.
+    diagnostics may include shell_check (reason/pane/pgid/tpgid/samples/waited_ms),
+    never shell argv/output. A timed-out launch does not automatically retry.
   revoke <principal-id>
 Credentials are saved as a private file and never printed. Workers set
 TERMDOCK_INTEGRATION_CREDENTIAL_FILE, then use td collab --principal <id> …
@@ -210,15 +220,17 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
       if (!options['--file'] || Object.keys(options).length !== 1) throw new Error('update requires only --file');
       const policy = JSON.parse(fs.readFileSync(options['--file'], 'utf8'));
       const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (policy.launchProfiles?.some((profile: { nativeIdentity?: unknown }) => profile.nativeIdentity !== undefined) && capabilities.session_profile_native_identity !== true) throw new CollaborationError('SESSION_PROFILE_NATIVE_IDENTITY_UNSUPPORTED', 'CLI and Linux service must support profile native identity (minimum 1.4.346)', 409);
       if (capabilities.integration_policy_update !== true || policy.launchProfiles?.some((profile: { startupInput?: unknown }) => profile.startupInput !== undefined) && capabilities.startup_input_conditions !== true) throw new CollaborationError('STARTUP_INPUT_CONDITION_UNSUPPORTED', 'Running service does not support this policy update', 409);
       write(JSON.stringify(parsed(await request(socketPath, 'POST', `/admin/principals/${encodeURIComponent(policy.id)}/policy`, policy, headers(undefined, adminToken))))); return 0;
     }
     if (action === 'create') {
       if (!options['--file'] || !options['--credential-file'] || Object.keys(options).length !== 2) throw new Error('create requires --file and --credential-file');
       const policy = JSON.parse(fs.readFileSync(options['--file'], 'utf8'));
-      if (policy.launchProfiles?.some((profile: { startupInput?: unknown }) => profile.startupInput !== undefined)) {
+      if (policy.launchProfiles?.some((profile: { startupInput?: unknown; nativeIdentity?: unknown }) => profile.startupInput !== undefined || profile.nativeIdentity !== undefined)) {
         const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
-        if (capabilities.startup_input_conditions !== true) throw new CollaborationError('STARTUP_INPUT_CONDITION_UNSUPPORTED', 'Running service does not support startup input conditions', 409);
+        if (policy.launchProfiles.some((profile: { nativeIdentity?: unknown }) => profile.nativeIdentity !== undefined) && capabilities.session_profile_native_identity !== true) throw new CollaborationError('SESSION_PROFILE_NATIVE_IDENTITY_UNSUPPORTED', 'CLI and Linux service must support profile native identity (minimum 1.4.346)', 409);
+        if (policy.launchProfiles.some((profile: { startupInput?: unknown }) => profile.startupInput !== undefined) && capabilities.startup_input_conditions !== true) throw new CollaborationError('STARTUP_INPUT_CONDITION_UNSUPPORTED', 'Running service does not support startup input conditions', 409);
       }
       const destination = path.resolve(options['--credential-file']); fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
       fs.closeSync(fs.openSync(destination, 'wx', 0o600)); reserved = destination;

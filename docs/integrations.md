@@ -1354,3 +1354,32 @@ flock-owner 身份独立核验出原 agent slug 与原生 UUID。目标元组会
 fail-closed，旧绑定与原消息保留，`session get` 仍报告身份错误；不会按 tmux 名称、PID
 缓存、cwd、argv 中的 resume 参数或显示名猜测认领。此 capability 不新增权限；仅通过
 `session.read` 认证的所属 principal 可触发其自身记录的对账。
+
+## 1.4.346：启动磁盘重载、原 shell 核验与独立原生目录
+
+最低 CLI / 实际服务均为 **1.4.346**。通过所属 principal 的 `capabilities` 回读：
+
+- `session_launch_reload_fence=true`：服务运行期间的磁盘重载保留当前服务生成的 launch token、已解除的一次性 check 和显式原生目录。读取期间新增的会话不会消失，已删除的会话不会由旧读盘复活；全局状态写入串行，并在执行写入时采集当前快照。服务首次启动仍加载磁盘记录。这修复了磁盘 watch 路径绕过元数据 upsert 保护的缺口，不把每一例历史 `TERMINAL_INPUT_TARGET_CHANGED` 都归因为此。
+- `session_shell_startup_wait=true`：启动前先记录唯一原 pane 身份，再最多等待 5 秒核实该 shell 的前台关系和合格 shell 参数。只观察同一 tmux server/session/pane/PID，采样使用新鲜进程证据；承载改变、pane 不唯一或已有 Agent 时拒绝。不输入探针、不清理画面、不重建承载、不发送额外回车，也不把 shell 核验当成应用 input-ready。
+- `session_profile_native_identity=true`：当前仅 Linux 支持 profile 级只读 writer-lock 目录，覆盖该受管会话的插件缺省目录，不改变共享插件配置。三个字段分别有同名 `_min_version` 字段，值为 `1.4.346`。能力支持不等于 principal 已被授予权限。
+
+本机管理员可在现有完整 policy 的目标 `launchProfiles` 中加：
+
+```json
+"nativeIdentity": {
+  "kind": "linux-flock-owner",
+  "directory": "{cwd}/.agent-home/cli/thread-writer-locks"
+}
+```
+
+目录是示例，必须按实际 Agent 的持锁协议填写。支持管理员指定的绝对目录、`~/` 目录，以及仅以前缀 `{cwd}/` 锚定的模板；模板不允许 `..` 或其它变量，解析后的目录须在 TD 服务用户 home 内。调用现有 `td integration update --file <完整policy.json>`，不增加权限、不重建 principal 或凭据。CLI 在旧服务/非 Linux 服务上拒绝该配置，不能静默忽略。原有不配置此项的 profile 保持插件缺省行为。
+
+wrapper 负责实际设置 Agent 自己的数据目录、准备 hooks/参数，并最终运行真正的 Agent；这个字段只声明 TD 的核验目录，不设置环境、不执行脚本、不创建目录，不自动读取 `TRAECLI_HOME` 等私有变量。TD 仍检查目录与文件权限、进程 starttime、前台关系、实际 FD/inode 和当前内核 flock，要求唯一 native UUID。显式 profile 目录不可证明时不降级到 argv/hook/旧 UUID，多个持锁 UUID 仍拒绝。目录语义纳入恢复配置指纹，保存至启动代次；服务重启、metadata 更新、check 解除不会丢失它。
+
+该配置只用于之后创建的 session；旧 session 保留原 profile 快照，policy update 不迁移旧记录或修改运行 Agent。不要为旧未知结果自动 create 新 ID 或 retry-cold。原 UUID 恢复、重复 owner 保护、关闭仍遵守现有身份/代次/幂等门禁；独立数据目录不构成对同 UID 进程的安全隔离。
+
+启动失败管理员用 `td integration diagnostics <原TD-ID>` 回读；shell 等待失败新增 `shell_check={samples,waited_ms,reason,binding,pgid,tpgid}`，不包含 argv/env/终端正文。`SESSION_TARGET_NOT_SHELL` 表示有限核验未通过，不表示 wrapper 已执行；`paste/submit=not_attempted` 与后续 `runtime_present` 现场回读分开保存。失败不自动再次启动，只有符合原 `session retry-cold` 所有条件才可明确重试。
+
+用 stdin 文件给启动命令附带业务 prompt 是接入方的 bootstrap：TD 不为其中业务副作用提供消息幂等或执行确认；无 TD message 历史也不等于没有业务执行。冷启动与精确 resume 应分开处理，恢复时不得重放初始业务文件。host 收取 final/hook receipt 是 host 侧证据，不伪造成 TD 明确 reply。仍只粘贴一次、等待 50ms、写一次 CR。
+
+回归包含确定性交错的旧读盘覆盖/串行写入/删除不复活、同 pane shell 初始化等待与超时/换 pane/已有 Agent 拒绝、CLI 对旧服务拒绝，以及 Linux 真实 tmux/内核 flock 的独立目录核验。私有 TraeX/DevBox 的启动兼容仍需接入方维护窗实机验证；维护机合成测试不冒充该项通过。

@@ -18,6 +18,22 @@ export function nativeIdentityDirectory(config: unknown): string | null {
   const directory = path.resolve(expanded), relative = path.relative(os.homedir(), directory);
   return relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) ? directory : null;
 }
+/** Administrator-declared profile scope, never inferred from process env.
+ * {cwd} is permitted only as a leading directory anchor and cannot escape it. */
+export function resolveProfileNativeIdentity(config: unknown, cwd: string): NativeProcessIdentityConfig | null {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+  const value = config as Record<string, unknown>;
+  if (value.kind !== 'linux-flock-owner' || typeof value.directory !== 'string'
+    || Object.keys(value).some(key => !['kind', 'directory'].includes(key))) return null;
+  let directory = value.directory;
+  if (directory.startsWith('{cwd}/')) {
+    const suffix = directory.slice(6);
+    if (/[{}]/.test(suffix) || suffix.split(/[\\/]/).includes('..') || !path.isAbsolute(cwd)) return null;
+    directory = path.join(cwd, suffix);
+  } else if (/[{}]/.test(directory)) return null;
+  const normalized = nativeIdentityDirectory({ kind: value.kind, directory });
+  return normalized ? { kind: 'linux-flock-owner', directory: normalized } : null;
+}
 export interface NativeProcessIdentity {
   nativeId: string | null;
   outcome: 'verified' | 'unavailable' | 'unconfirmed' | 'ambiguous' | 'process_changed';

@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it } from 'vitest';
-import { nativeIdentityDirectory, readNativeProcessIdentity } from './nativeProcessIdentity.js';
+import { nativeIdentityDirectory, readNativeProcessIdentity, resolveProfileNativeIdentity } from './nativeProcessIdentity.js';
 
 const resources: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of resources.splice(0).reverse()) await close(); });
@@ -43,6 +43,22 @@ it('validates only a declarative ownership directory confined to home', () => {
   for (const directory of ['/tmp/locks', '~', '~/../escape', 'relative', `${os.homedir()}/bad\npath`])
     expect(nativeIdentityDirectory({ kind: 'linux-flock-owner', directory })).toBeNull();
   expect(nativeIdentityDirectory({ kind: 'linux-flock-owner', directory: '~/.agent', command: 'arbitrary' })).toBeNull();
+});
+it('resolves only explicitly declared per-profile directories and safe cwd-relative scopes', () => {
+  const cwd = path.join(os.homedir(), 'runs', 'job-1');
+  expect(resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory: '{cwd}/agent/locks' }, cwd))
+    .toEqual({ kind: 'linux-flock-owner', directory: path.join(cwd, 'agent/locks') });
+  for (const directory of ['{cwd}/../other', '{env:HOME}/locks', '/tmp/locks', '{cwd}/../../etc', 'relative']) {
+    expect(resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory }, cwd)).toBeNull();
+  }
+  expect(resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory: '{cwd}/locks', command: 'probe' }, cwd)).toBeNull();
+});
+it.skipIf(process.platform !== 'linux')('verifies an isolated native home by current kernel proof and rejects another home', async () => {
+  const one = await fixture(['one']), two = await fixture(['two']);
+  const config = resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory: '{cwd}/.' }, one.root)!;
+  expect(await readNativeProcessIdentity(one.pid, config)).toEqual({ nativeId: 'one', outcome: 'verified' });
+  expect(await readNativeProcessIdentity(two.pid, config)).toMatchObject({ nativeId: null });
+  expect(await readNativeProcessIdentity(two.pid, two.config)).toEqual({ nativeId: 'two', outcome: 'verified' });
 });
 it.skipIf(process.platform !== 'linux')('proves native identity with real kernel flock, live foreground PID, FD inode and process starttime', async () => {
   const f = await fixture();

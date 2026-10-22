@@ -77,6 +77,9 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     消息历史只覆盖仍保留记录；不存在的 after-id 返回 MESSAGE_NOT_FOUND，不能据此声称历史完整。
   session create --group <id> --launch-profile <id> --cwd <absolute-path> --idempotency-key <key>
   session get <id> | session restore <id> --idempotency-key <key>
+    启动一致性/原shell有限核验需服务1.4.346：session_launch_reload_fence/session_shell_startup_wait。
+    只等同一承载的前台shell证明，不判断应用input-ready，不自动重试失败启动。
+    独立Agent数据目录可由管理员在profile配置nativeIdentity；需Linux及session_profile_native_identity。
     get 可对账 tmux recovery 后仍指向旧 pane 的 IntegrationSession；需 Linux 服务1.4.328、session_recovery_binding_reconcile=true。
     仅凭成功恢复记录、唯一归属/承载与当前精确 native writer-lock 证明更新 binding/generation；证据不足仍拒绝。
     不另起 Agent、不重放已写入消息；成功后以 get 返回的 generation/terminal_binding 为准。

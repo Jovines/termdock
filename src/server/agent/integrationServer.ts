@@ -122,7 +122,7 @@ export class IntegrationRuntime {
     app.post('/admin/principals', run(req => { admin(req); this.group(req.body?.groupId); const provisioned = this.store.provision(req.body); try { this.sync(); } catch { this.scheduleRetry(); } return { id: provisioned.principal.id, token: provisioned.token, protocol: INTEGRATION_PROTOCOL }; }));
     app.post('/admin/principals/:id/policy', run(req => { admin(req); if (req.body?.id !== req.params.id) integrationError('INVALID_INTEGRATION_POLICY', 'Policy identity must match the requested identity'); this.group(req.body?.groupId); this.store.update(req.body); return { ok: true, id: req.params.id }; }));
     app.post('/admin/principals/:id/revoke', run(req => { admin(req); this.store.revoke(req.params.id); return { ok: true }; }));
-    app.get('/capabilities', run(req => { const p = principal(req); return { ...this.capabilities(), principal: { id: p.id, group_id: p.groupId, permissions: p.permissions, launch_profiles: p.launchProfiles.map(profile => ({ id: profile.id, agent_slug: profile.agentSlug, cwd_roots: profile.cwdRoots, startup_input_condition: !!profile.startupInput })) } }; }));
+    app.get('/capabilities', run(req => { const p = principal(req); return { ...this.capabilities(), principal: { id: p.id, group_id: p.groupId, permissions: p.permissions, launch_profiles: p.launchProfiles.map(profile => ({ id: profile.id, agent_slug: profile.agentSlug, cwd_roots: profile.cwdRoots, startup_input_condition: !!profile.startupInput, native_identity_scope: !!profile.nativeIdentity })) } }; }));
     app.get('/tasks', run(req => { const p = principal(req); this.authorize(p, 'task.read', req.query.group); return { tasks: options.tasks.list(p.groupId, null, req.query.purpose) }; }));
     app.get('/tasks/:id', run(async req => { const p = principal(req); this.taskPermission(p, req.params.id, 'task.read'); return { task: await options.tasks.get(req.params.id, null) }; }));
     app.post('/tasks', run(async req => {
@@ -244,6 +244,9 @@ export class IntegrationRuntime {
       terminal_input_runtime_fence: true, terminal_input_runtime_fence_min_version: '1.4.313',
       agent_launch_generation_consistency: true, agent_launch_generation_consistency_min_version: '1.4.322',
       terminal_input_check_diagnostics: true,
+      session_launch_reload_fence: true, session_launch_reload_fence_min_version: '1.4.346',
+      session_shell_startup_wait: true, session_shell_startup_wait_min_version: '1.4.346',
+      session_profile_native_identity: process.platform === 'linux', session_profile_native_identity_min_version: '1.4.346',
       session_launch_diagnostics: true, session_launch_diagnostics_min_version: '1.4.314',
       session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
       session_rename: true, session_rename_min_version: '1.4.315',
