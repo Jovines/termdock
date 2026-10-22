@@ -80,6 +80,22 @@ it('closes an unbound failed cold shell without native restore or retry', async 
   const f = await fixture(''); expect(f.created.state).toBe('failed');
   expect(await f.sessions.closeSession(f.p, f.created.session_id, 1, 'close')).toMatchObject({ state: 'closed', agent_native_session_id: null });
 });
+it('does not mutate management state for diagnostics and discards observations after a concurrent generation change', async () => {
+  const f = await fixture();
+  const report = { checked_at: 1, terminal_registration_present: false, binding_present: true, runtime_present: true,
+    target_confirmed: true, pending_messages: 0, code: null, target: f.target };
+  f.api.closeDiagnostics = vi.fn(async () => structuredClone(report));
+  const before = fs.readFileSync(f.file);
+  expect(await f.sessions.closeDiagnostics(f.created.session_id)).toMatchObject({ generation: 1, close_diagnostics: report });
+  expect(fs.readFileSync(f.file)).toEqual(before); expect(f.api.closeRuntime).not.toHaveBeenCalled();
+  let finish!: (v: typeof report) => void;
+  f.api.closeDiagnostics = () => new Promise(resolve => { finish = resolve; });
+  const observing = f.sessions.closeDiagnostics(f.created.session_id);
+  await f.sessions.rename(f.p, f.created.session_id, 1, 'Changed while observing', 'rename-concurrent');
+  finish(report);
+  expect(await observing).toMatchObject({ generation: 1, close_diagnostics: { target_confirmed: false, target: null, code: 'SESSION_CLOSE_TARGET_CHANGED' } });
+  expect((await f.sessions.get(f.p, f.created.session_id)).generation).toBe(2);
+});
 it('close rejects pending messages and unsafe preflight before committing intent', async () => {
   const f = await fixture(); f.setPending(1);
   await expect(f.sessions.closeSession(f.p, f.created.session_id, 1, 'close')).rejects.toMatchObject({ code: 'SESSION_PENDING_MESSAGES' });

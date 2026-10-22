@@ -67,6 +67,17 @@ export const INTEGRATION_HELP = `td integration — local scoped integration adm
     Minimum CLI/running service 1.4.309; capabilities.session_resume_configuration=true.
     Errors: RESUME_CONFIGURATION_CHANGED, EXACT_RESUME_UNSUPPORTED,
     SESSION_GENERATION_MISMATCH, SESSION_OPERATION_IN_PROGRESS, LAUNCHER_UNAVAILABLE.
+  close-diagnostics <TD-session-id> (fresh read-only close target; administrator only)
+    Minimum CLI/running service 1.4.349; session_close_diagnostics=true.
+    Returns {session_id,operation_id,generation,close_diagnostics:{checked_at,
+    terminal_registration_present,binding_present,runtime_present,pending_messages,
+    target_confirmed,code,target}}. target has exact pane/native/process instance facts,
+    never argv/environment/output. Does not change records, routing or generation,
+    close/restore a session, send keys or grant permission for a later close.
+    Linux session_close_detached_registration=true supports existing session.close
+    when active terminal inventory is missing: unique durable local ownership,
+    original single pane and live writer-lock native identity are still required.
+    No forced close by tmux name, argv UUID, stale PID or shell-only observation.
   diagnostics <TD-session-id> (read stored launch/restore diagnostics; administrator only)
     1.4.314 adds phase/timestamps, paste/submit write facts and target-change
     evidence; no argv/environment/credentials or application readiness claim.
@@ -198,6 +209,12 @@ export async function runIntegrationAdmin(argv: string[], port: number, adminTok
         body = { generation: Number(args['--generation']), fingerprint: args['--fingerprint'] };
       } else if (argv.length !== 2) throw new Error('resume-configuration requires one TD session id');
       write(JSON.stringify(parsed(await request(socketPath, body ? 'POST' : 'GET', `/admin/sessions/${encodeURIComponent(id)}/resume-configuration`, body, headers(undefined, adminToken))))); return 0;
+    }
+    if (action === 'close-diagnostics') {
+      if (argv.length !== 2 || !/^[a-zA-Z0-9._-]{1,80}$/.test(argv[1])) throw new Error('close-diagnostics requires one full TD session id');
+      const capabilities = parsed(await request(socketPath, 'GET', '/admin/capabilities', undefined, headers(undefined, adminToken)));
+      if (capabilities.session_close_diagnostics !== true) throw new CollaborationError('SESSION_CLOSE_DIAGNOSTICS_UNSUPPORTED', 'CLI and running service must support live close diagnostics (minimum 1.4.349)', 409);
+      write(JSON.stringify(parsed(await request(socketPath, 'GET', `/admin/sessions/${encodeURIComponent(argv[1])}/close-diagnostics`, undefined, headers(undefined, adminToken))))); return 0;
     }
     if (action === 'diagnostics') {
       if (argv.length !== 2 || !/^[a-zA-Z0-9._-]{1,80}$/.test(argv[1])) throw new Error('diagnostics requires one TD session id');

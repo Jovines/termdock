@@ -13,7 +13,7 @@ import { selectTmuxForegroundProgram, type TmuxProcessRow } from '../utils/tmuxP
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { IntegrationStore, validatePolicy, type IntegrationPolicy, type IntegrationPrincipal } from './integrationStore.js';
 import { IntegrationSessions, permittedCwd, integrationLaunchCommand, publicIntegrationSession, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
-import { IntegrationRuntime } from './integrationServer.js';
+import { IntegrationRuntime, integrationSocketPath } from './integrationServer.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates } from './nativeResumeOwner.js';
 import { readIntegrationCredential, runIntegrationAdmin, runIntegrationCollab } from './integrationCli.js';
 import { CollaborationDeliveryWorker } from './collaborationDeliveryWorker.js';
@@ -1094,6 +1094,42 @@ it('rename/close CLI validates required flags and fails closed against old capab
     supported = true; expect(await runIntegrationCollab(command, port, io)).toBe(0); expect(output.join('')).not.toContain('private-token');
   }
   expect(calls).toEqual(['/capabilities', '/capabilities', '/sessions/id/rename', '/capabilities', '/capabilities', '/sessions/id/close']);
+});
+it('exposes fresh close target facts only to the administrator and leaves session/events unchanged', async () => {
+  const fake = adapter();
+  const closeDiagnostics = vi.fn(async () => ({ checked_at: 123, terminal_registration_present: false, binding_present: true,
+    runtime_present: true, target_confirmed: false, pending_messages: 0, code: 'SESSION_CLOSE_OWNERSHIP_UNCONFIRMED', target: null }));
+  const f = await runtimeFixture({ ...fake.api, closeDiagnostics });
+  const created = await f.request('POST', '/sessions', { launch_profile: 'agent', cwd: dir, idempotency_key: 'create' });
+  const id = created.body.session.session_id, route = `/admin/sessions/${id}/close-diagnostics`;
+  const before = f.runtime.sessions.snapshot();
+  expect(await f.request('GET', route)).toMatchObject({ status: 401, body: { code: 'INTEGRATION_ADMIN_REQUIRED' } });
+  expect(closeDiagnostics).not.toHaveBeenCalled();
+  const headers = { 'x-termdock-integration-protocol': '1', 'x-termdock-local-token': 'local-admin' };
+  expect(await f.request('GET', route, undefined, headers)).toMatchObject({ status: 200,
+    body: { session_id: id, generation: 1, close_diagnostics: { checked_at: 123, terminal_registration_present: false, code: 'SESSION_CLOSE_OWNERSHIP_UNCONFIRMED' } } });
+  expect(f.runtime.sessions.snapshot()).toEqual(before);
+  expect(await f.request('GET', '/admin/sessions/missing/close-diagnostics', undefined, headers)).toMatchObject({ status: 404 });
+  expect((await f.request('GET', '/capabilities')).body).toMatchObject({ session_close_diagnostics: true, session_close_diagnostics_min_version: '1.4.349',
+    session_close_detached_registration: process.platform === 'linux', session_close_detached_registration_min_version: '1.4.349' });
+  expect(created.body.session).not.toHaveProperty('close_diagnostics');
+});
+it('validates and gates the read-only administrator close-diagnostics CLI', async () => {
+  const port = 40000 + Math.floor(Math.random() * 10000), socket = integrationSocketPath(port);
+  let supported = false; const calls: string[] = [], output: string[] = [];
+  const server = http.createServer((req, res) => {
+    calls.push(req.url!); res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(req.url === '/admin/capabilities' ? { session_close_diagnostics: supported } : { session_id: 'target', close_diagnostics: { code: null } }));
+  });
+  await new Promise<void>(resolve => server.listen(socket, resolve)); resources.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  expect(await runIntegrationAdmin(['close-diagnostics', 'target', '--force'], port, 'private-admin', line => output.push(line))).toBe(1);
+  expect(calls).toEqual([]);
+  expect(await runIntegrationAdmin(['close-diagnostics', 'target'], port, 'private-admin', line => output.push(line))).toBe(1);
+  expect(JSON.parse(output.at(-1)!).code).toBe('SESSION_CLOSE_DIAGNOSTICS_UNSUPPORTED');
+  supported = true;
+  expect(await runIntegrationAdmin(['close-diagnostics', 'target'], port, 'private-admin', line => output.push(line))).toBe(0);
+  expect(calls).toEqual(['/admin/capabilities', '/admin/capabilities', '/admin/sessions/target/close-diagnostics']);
+  expect(output.join('')).not.toContain('private-admin');
 });
 it('only local administrators can create empty groups without a terminal; body scope is strict and a new principal can use it', async () => {
   const f = await runtimeFixture(), body = { name: 'Case', idempotency_key: 'case-group' };

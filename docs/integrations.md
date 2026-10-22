@@ -1411,3 +1411,63 @@ wrapper 负责实际设置 Agent 自己的数据目录、准备 hooks/参数，�
 回归覆盖重复 ACK 零克隆/编码/写入、真实持久提交与中途写入/fsync 失败后重试、短写与 Unicode、64 MiB 精确字节上限、输入/输出不可修改历史、分页/保留缺口/撤权、推送事实等价，以及隔离真实 tmux 的多窗口/分屏/激活 pane/copy-mode 与 client/PID/尺寸不变。Linux 维护机验证不代替 macOS 实机或私有 Agent 的业务验收。生产升级须与共享服务的在途任务和维护窗协调，不能因为收到版本通知就自动重启别人的实验。
 
 同时修复独立 profile 目录的 home 别名误拒：当逻辑 home 指向真实 home，规范化 cwd 下的 `{cwd}` 路径可匹配逻辑 home 或 `realpath(home)` 的严格子目录；不会将同名前缀兄弟目录视为 home，不创建尚不存在的锁目录。实际 provider 继续核验 canonicalHome、目录权限、精确进程实例、FD/inode 和内核持锁关系。Linux capabilities 新增 `session_profile_native_identity_home_aliases=true` 及 `session_profile_native_identity_home_aliases_min_version="1.4.348"`。旧 profile 快照不迁移，不自动 retry/create；347 的 `~/` 每 job 精确路径声明仍可沿原契约使用，更新同一 profile 与捕获快照需要由接入方串行协调。
+
+## 1.4.349：活动终端登记缺失时的受限关闭与只读诊断
+
+问题是三个不同的事实层可能不一致：持久 IntegrationSession 仍有原 native UUID 与完整 pane 绑定，tmux/Agent 仍存在，但全局活动终端登记已经缺失。348 的 close 先依赖该登记，因而在真实身份核验之前拒绝；inspect 也可能将登记缺失表现为 `AGENT_NOT_RUNNING`。349 对仍存在 tmux 的缺登记观察改报 `SESSION_TERMINAL_REGISTRATION_MISSING`，不据此推断程序退出。这不解释或修复所有登记丢失的起因，也不自动重建 UI 记录、恢复会话或认领未知进程。
+
+最低 CLI / 实际服务 **1.4.349**，管理员和所属 principal capabilities：
+
+- `session_close_diagnostics=true`、`session_close_diagnostics_min_version="1.4.349"`。
+- Linux 上 `session_close_detached_registration=true`、`session_close_detached_registration_min_version="1.4.349"`；其它平台 false。没有新增 principal 权限，关闭仍需原 `session.close`，诊断仅管理员。
+
+管理员正式只读入口：
+
+```sh
+td integration close-diagnostics <原TD-session-id>
+```
+
+走原本机管理员 Unix socket，`GET /admin/sessions/:id/close-diagnostics`，返回：
+
+```json
+{
+  "session_id": "原逻辑ID",
+  "operation_id": "当前operation",
+  "generation": 2,
+  "close_diagnostics": {
+    "checked_at": 1790000000000,
+    "terminal_registration_present": false,
+    "binding_present": true,
+    "runtime_present": true,
+    "pending_messages": 0,
+    "target_confirmed": true,
+    "code": null,
+    "target": {
+      "binding": {"serverPid": 101, "sessionId": "$2", "paneId": "%2", "panePid": 102, "agentSlug": "已登记Agent", "nativeSessionId": "原UUID"},
+      "tmux_server_start_id": "linux:1000",
+      "kind": "agent",
+      "process_pid": 103,
+      "process_start_id": "linux:1001",
+      "native_id": "原UUID"
+    }
+  }
+}
+```
+
+这是字段示例，不代表某一现场已核验。诊断不调用 session get/refresh、不改变 descriptor/代次/路由/组，不启动或终止进程、不输入按键。`target` 只包含原 pane、当前进程实例和已证明 UUID，不读/返回 argv、环境或终端正文。记录在异步观察期间变化时丢弃 target，返回 `SESSION_CLOSE_TARGET_CHANGED`。`target_confirmed` 只表示本次目标核验通过，不等于后续关闭授权/成功；pending、进行中生命周期、当前代次等仍由真正 close 独立检查。观察失败保留 `target=null` 和准确 code；无法观察运行存在性时为 null，不假装已消失。已有 `td integration diagnostics` 仍只读原 launch/restore 持久诊断。
+
+缺活动登记时，现有显式 `session close` 只在以下证据全部满足后工作：
+
+1. 全机持久 IntegrationSession 只有一个 descriptor 声明该 session/principal/组；principal 未撤销且归属唯一；当前本机组仍存在且该成员只归属此组。组的 archived 显示元数据不影响此核验；缺组、跨服务组、重复/跨组归属拒绝。
+2. 无其它全局终端声明该逻辑 ID 或保留 tmux 名，无重复 backend、其它逻辑 owner 或冲突 route/pane owner；routing 不可读也拒绝。
+3. 保留名精确为 `wt-integration-<原ID>`，实时 server/session/pane/PID 全部等于持久原绑定，只有一个 pane，且未链接到其它 tmux session。不是仅凭名称、cwd、显示名、短 pane ID 或 PID 存在认领。
+4. 当前实际前台是原 Agent 类型，当前 Linux `linux-flock-owner` provider 独立证明原 UUID，并核验进程 starttime、FD/inode、权限及 kernel flock。argv/resume UUID、旧缓存或单纯 shell 观察不能给缺登记会话授权关闭；未安装相应只读身份 provider 时继续拒绝，不扩大为任意 Agent 黑盒支持。
+5. 沿原生命周期串行、worker 屏障、pending 检查、generation/CAS 和稳定幂等键，先持久化 close intent，再重新核验完整目标与进程实例，使用不可变 tmux session ID 终止一次。失败/重启结果不明沿现有 close 对账，不重复终止。并发外部 tmux 操作仍有系统级竞争边界，连续核验不能宣称绝对原子。
+
+无活动登记不再单独阻止已充分证明的目标关闭；未提供 force/裸 UUID/按名清理入口。没有补建 active terminal、backend 或网页客户端，没有修改旧 profile/启动配置、投递正文、重放消息或重新打开归档组。`closed` 仍保留逻辑记录、诊断、消息、工作目录和原生历史并拒绝 send/reply/restore；不是 release。
+
+现场接入先升级并核验 **实际服务** 两项 capability，再对原 ID 运行管理员 close-diagnostics。确认归属与 `target_confirmed` 后，由原 principal 正式 get 读当前 generation；若仍与原请求一致，沿原 generation/原 key 重试原 close。若 generation 已改变，先对账原请求，不擅自换 key；无历史 intent 的新关闭需据新代次明确生成新操作键。最终 get 必须确认 `closed/runtime_present=false/terminal_binding=null/close_pending=false`，并核对旧 pane/进程确已消失；诊断通过或 API 请求成功本身不代替回收验证。
+
+错误包括 `SESSION_CLOSE_OWNERSHIP_UNCONFIRMED`（持久 owner/本机组不唯一或缺失）、`SESSION_IDENTITY_MISMATCH`（其它声明或实际 native 冲突）、`SESSION_CLOSE_TARGET_UNCONFIRMED`（原绑定/实时 writer-lock/前台实例不足）、`SESSION_CLOSE_TARGET_CHANGED`、`SESSION_PENDING_MESSAGES` 及原有代次/权限/生命周期错误。管理员报告不能越过这些检查。
+
+回归包含唯一及重复/撤销/跨组/跨服务归属、缺登记精确关闭、argv-only/错误 UUID/换 pane/换进程拒绝、缺登记准确错误、诊断无副作用及代次变化丢弃、Unix 管理权限与 CLI capability 门控、原关闭意图/幂等/重启和失败 shell 兼容；隔离真实 tmux 验证只终止精确目标并保留邻接会话。该 tmux 测试用可控身份夹具，Linux 原生 writer-lock provider 另有真实内核/FD/starttime 回归；私有 TraeX 和上述远端目标仍须由接入方在维护窗实机验收，不以合成测试冒充。

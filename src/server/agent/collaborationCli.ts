@@ -103,6 +103,8 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
     generation递增；原launch operation_id保持。rename_pending=true时用get对账显示同步。
   session close <id> --generation <N> --idempotency-key <key>
     权限 session.close；显式终止精确自有Agent/原失败空shell，移除活动承载；保留历史与诊断。
+    1.4.349 缺活动终端登记时，Linux 仅凭唯一持久归属、原单pane及实时writer-lock身份核验关闭；
+    管理员用 td integration close-diagnostics <id> 只读核验，不按名称/argv/旧PID强制关闭。
     closed终态拒绝send/reply/restore/retry-cold；release才是保留精确恢复的入口。
     有pending/进行中操作/身份不明确时拒绝；中断只对账不自动再终止，close_pending=true表示结果未确认。
     rename/close最低CLI与实际服务1.4.315；session_rename/session_close=true；两个权限默认不授权。

@@ -164,6 +164,7 @@ import { CollaborationError } from '../agent/collaborationProtocol.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, assessCollaborationRouteIdentity, type CollaborationBinding, type CollaborationPaneBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { selectRecoveredIntegrationBinding } from '../agent/integrationRecoveryBinding.js';
+import { assertDetachedCloseOwnership } from '../agent/integrationCloseOwnership.js';
 import { readTmuxLayout, readTmuxLayouts, type TmuxLayout, type TmuxPane } from '../utils/tmuxLayoutReader.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
 import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane,
@@ -2628,8 +2629,8 @@ function integrationRuntimeRegistered(record: IntegrationSession): boolean {
 async function verifyIntegrationRuntimeOwnership(record: IntegrationSession): Promise<void> {
   await integrationSessionAdapter.prepareRelease!(record);
   const terminal = integrationTerminalRecord(record);
-  if (terminal && globalSessionState.sessions.some(other => other.sessionId !== record.session_id
-    && (other.tmuxSessionName === terminal.tmuxSessionName || terminal.backendSessionId && other.backendSessionId === terminal.backendSessionId))) {
+  if (globalSessionState.sessions.some(other => other.sessionId !== record.session_id
+    && (other.tmuxSessionName === `wt-integration-${record.session_id}` || terminal?.backendSessionId && other.backendSessionId === terminal.backendSessionId))) {
     integrationError('SESSION_IDENTITY_MISMATCH', 'Runtime has another logical owner', 409);
   }
 }
@@ -2644,12 +2645,33 @@ async function forgetIntegrationRuntime(record: IntegrationSession): Promise<voi
 async function observeIntegrationCloseTarget(record: IntegrationSession): Promise<SessionCloseTarget> {
   await verifyIntegrationRuntimeOwnership(record);
   const terminal = integrationTerminalRecord(record);
-  if (!terminal || !record.terminal_binding) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Original runtime binding is unavailable', 409);
-  const inspected = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId: terminal.backendSessionId,
-    mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug,
-    nativeSessionId: record.agent_native_session_id, pane: record.terminal_binding }, undefined, false, true);
+  const detached = !terminal;
+  const sessionName = terminal?.tmuxSessionName ?? `wt-integration-${record.session_id}`;
+  let backendSessionId = terminal?.backendSessionId ?? null;
+  if (!record.terminal_binding) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Original persisted pane binding is unavailable', 409);
+  if (!terminal) {
+    if (process.platform !== 'linux' || !record.agent_native_session_id) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Missing terminal registration requires a current Linux writer-lock native identity', 409);
+    const owners = await integrationRecoveryOwnership(record);
+    collaborationRouting.assertReadable();
+    const backends = [...terminalSessions].filter(([, backend]) => backend.mode === 'tmux' && backend.tmuxSessionName === sessionName);
+    const group = collaborationStore.getGroup(record.group_id);
+    assertDetachedCloseOwnership({ sessionId: record.session_id, groupId: record.group_id, principalId: record.principal_id,
+      ...owners, localGroup: !!group && !group.deleted && !group.federated,
+      groupOwners: collaborationStore.groupsForSession(record.session_id).map(g => g.id),
+      terminalClaims: globalSessionState.sessions.filter(s => s.sessionId === record.session_id || s.tmuxSessionName === sessionName).length,
+      backendClaims: backends.map(([id]) => ({ routeOwner: collaborationRouting.ownerOfBackend(id),
+        foreignTerminal: globalSessionState.sessions.some(s => s.backendSessionId === id && s.sessionId !== record.session_id) })),
+      otherPaneOwner: collaborationRouting.hasOtherPaneOwner(record.session_id, record.terminal_binding!),
+    });
+    // Local observation context only: never insert/adopt a global terminal or
+    // backend, revive a released session, or alter delivery routing.
+    backendSessionId = backends[0]?.[0] ?? null;
+  }
+  const inspected = await inspectCollaborationTmux({ sessionId: record.session_id, backendSessionId,
+    mode: 'tmux', tmuxSessionName: sessionName, agentSlug: record.agent_slug,
+    nativeSessionId: record.agent_native_session_id, pane: record.terminal_binding }, undefined, false, true, true, false, integrationNativeIdentity(record));
   if (inspected.state !== 'ready' || !inspected.pane) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Original pinned pane cannot be verified', 409);
-  const layout = await getTmuxLayout(terminal.tmuxSessionName!);
+  const layout = await getTmuxLayout(sessionName);
   const panes = layout.windows.flatMap(window => window.panes);
   if (panes.length !== 1 || layout.activePaneId !== record.terminal_binding.paneId) integrationError('SESSION_IDENTITY_MISMATCH', 'Only the single original owned pane can be closed', 409);
   const pane = panes[0];
@@ -2665,8 +2687,10 @@ async function observeIntegrationCloseTarget(record: IntegrationSession): Promis
     }
     const identity = await observeProgramNativeIdentity(agent, program, integrationNativeIdentity(record));
     if (identity.failure || identity.nativeId !== record.agent_native_session_id) integrationError('SESSION_IDENTITY_MISMATCH', 'Current Agent native identity differs from the owned record', 409);
+    if (detached && identity.source !== 'linux-flock-owner') integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Missing terminal registration requires independent live writer-lock proof, not argv or a cached UUID', 409);
     kind = 'agent'; pid = program.processPid!; nativeId = identity.nativeId;
   } else {
+    if (detached) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Missing terminal registration cannot authorize closing an unproven shell or another program', 409);
     if (!await integrationPaneIsIdleShell(inspected.pane)) integrationError('SESSION_CLOSE_TARGET_UNCONFIRMED', 'Current runtime is not a verified foreground shell', 409);
     kind = 'shell'; pid = pane.pid!;
   }
@@ -2695,6 +2719,20 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
     if (collaborationStore.pendingCount(record.session_id)) integrationError('SESSION_PENDING_MESSAGES', 'Pending messages must be resolved before closing', 409);
     await verifyIntegrationRuntimeOwnership(record);
     return await integrationTmuxPresent(record) ? observeIntegrationCloseTarget(record) : null;
+  },
+  async closeDiagnostics(record) {
+    const report = { checked_at: Date.now(), terminal_registration_present: false, binding_present: !!record.terminal_binding,
+      runtime_present: null as boolean | null, target_confirmed: false, pending_messages: collaborationStore.pendingCount(record.session_id),
+      code: null as string | null, target: null as SessionCloseTarget | null };
+    try {
+      report.terminal_registration_present = !!integrationTerminalRecord(record);
+      report.runtime_present = await integrationSessionAdapter.runtimePresent!(record);
+      if (await integrationTmuxPresent(record)) { report.target = await observeIntegrationCloseTarget(record); report.target_confirmed = true; }
+      else report.code = report.runtime_present ? 'SESSION_CLOSE_TARGET_UNCONFIRMED' : 'SESSION_RUNTIME_ABSENT';
+    } catch (error) {
+      report.code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'SESSION_CLOSE_OBSERVATION_FAILED';
+    }
+    return report;
   },
   async closeRuntime(record, reconcile) {
     await closeSessionRuntime({
@@ -2779,7 +2817,10 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
   },
   async inspect(record) {
     const terminal = integrationTerminalRecord(record);
-    if (!terminal) return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
+    if (!terminal) {
+      if (await integrationTmuxPresent(record)) integrationError('SESSION_TERMINAL_REGISTRATION_MISSING', 'Owned tmux exists but its active TD terminal registration is missing; use administrator close-diagnostics', 409);
+      return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
+    }
     const binding: CollaborationBinding = { sessionId: record.session_id, backendSessionId: terminal.backendSessionId,
       mode: 'tmux', tmuxSessionName: terminal.tmuxSessionName, agentSlug: record.agent_slug,
       nativeSessionId: record.agent_native_session_id, pane: record.terminal_binding ?? null };

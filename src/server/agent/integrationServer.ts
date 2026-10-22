@@ -116,6 +116,7 @@ export class IntegrationRuntime {
     }));
     app.get('/admin/capabilities', run(req => { admin(req); return this.capabilities(); }));
     app.get('/admin/sessions/:id/restore-diagnostics', run(req => { admin(req); return { ...this.sessions.restoreDiagnostics(req.params.id), ...this.sessions.launchDiagnostics(req.params.id) }; }));
+    app.get('/admin/sessions/:id/close-diagnostics', run(async req => { admin(req); return this.sessions.closeDiagnostics(req.params.id); }));
     app.get('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return this.sessions.resumeConfiguration(req.params.id); }));
     app.post('/admin/sessions/:id/resume-configuration', run(async req => { admin(req); return { session: publicIntegrationSession(await this.sessions.confirmResumeConfiguration(req.params.id, req.body?.generation, req.body?.fingerprint)) }; }));
     app.post('/admin/sessions/:id/startup-input/clear', run(async req => {
@@ -258,6 +259,8 @@ export class IntegrationRuntime {
       session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
       session_rename: true, session_rename_min_version: '1.4.315',
       session_close: true, session_close_min_version: '1.4.315',
+      session_close_diagnostics: true, session_close_diagnostics_min_version: '1.4.349',
+      session_close_detached_registration: process.platform === 'linux', session_close_detached_registration_min_version: '1.4.349',
       admin_local_group_create: true, admin_local_group_create_min_version: '1.4.318',
       admin_local_group_rename: true, admin_local_group_rename_min_version: '1.4.319',
       admin_local_group_archive: true, admin_local_group_archive_min_version: '1.4.323',

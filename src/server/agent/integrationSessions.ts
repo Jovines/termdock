@@ -53,6 +53,7 @@ export interface IntegrationSessionAdapter {
   rename?(record: IntegrationSession): Promise<void>;
   prepareClose?(record: IntegrationSession): Promise<SessionCloseTarget | null>;
   closeRuntime?(record: IntegrationSession, reconcile: boolean): Promise<void>;
+  closeDiagnostics?(record: IntegrationSession): Promise<IntegrationCloseDiagnostics>;
   create(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress?: (phase: LaunchPhase) => void): Promise<void>;
   restore(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress?: (phase: LaunchPhase) => void): Promise<void>;
   retryCold?(record: IntegrationSession, prepared: (binding: CollaborationPaneBinding) => void, progress: (phase: LaunchPhase) => void): Promise<void>;
@@ -72,6 +73,18 @@ export interface IntegrationSessionAdapter {
   subscribe(listener: () => void): () => void;
   capture?(record: IntegrationSession): Promise<string>;
   registerDeliveryGuard?(guard: (id: string) => Promise<IntegrationDeliveryReadiness | null>): () => void;
+}
+/** Administrator-only, fresh observations. Not permission or a promise that a
+ * later close will pass its own lifecycle and current-target checks. */
+export interface IntegrationCloseDiagnostics {
+  checked_at: number;
+  terminal_registration_present: boolean;
+  binding_present: boolean;
+  runtime_present: boolean | null;
+  target_confirmed: boolean;
+  pending_messages: number;
+  code: string | null;
+  target: SessionCloseTarget | null;
 }
 export interface IntegrationDeliveryReadiness { allowed: boolean; reason: string | null }
 function startupInput(record: Pick<IntegrationSession, 'profile' | 'startup_condition' | 'startup_input_disabled'>, now: number): IntegrationSession['startup_input'] {
@@ -238,6 +251,16 @@ export class IntegrationSessions {
     if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Integration session does not exist', 404);
     return structuredClone({ launch_diagnostics: record.launch_diagnostics ?? null,
       launch_diagnostics_history: record.launch_diagnostics_history ?? [] });
+  }
+  async closeDiagnostics(id: string) {
+    const record = structuredClone(this.doc.sessions.find(s => s.session_id === id));
+    if (!record) return integrationError('INTEGRATION_SESSION_NOT_FOUND', 'Integration session does not exist', 404);
+    if (!this.adapter.closeDiagnostics) integrationError('SESSION_CLOSE_DIAGNOSTICS_UNSUPPORTED', 'Live close diagnostics are unavailable', 409);
+    const report = await this.adapter.closeDiagnostics!(record);
+    if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) {
+      report.target_confirmed = false; report.target = null; report.code = 'SESSION_CLOSE_TARGET_CHANGED';
+    }
+    return { session_id: id, operation_id: record.operation_id, generation: record.generation, close_diagnostics: report };
   }
   assertRuntimeMessage(id: string): void {
     const record = this.doc.sessions.find(s => s.session_id === id);
