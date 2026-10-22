@@ -283,7 +283,7 @@ export type TerminalController = {
   /**
    * 用户在本端有交互（点击 / 键入 / 触摸）时调一次。viewport 比较本端
    * xterm 真实尺寸与服务端最近广播的尺寸，不一致就立即重推一次 resize。
-   * 内部带冷却（最近 ~1.5s 服务端刚广播过则跳过），避免多端互相拉扯。
+   * 真实交互恢复本端尺寸控制权；自动刷新和补画不能抢回控制权。
    * 仅在 document.visibilityState === 'visible' 时才会真正推。
    */
   ensureSizeMatches: (reason: string) => void;
@@ -3271,6 +3271,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 服务端 ACK / pty-size 广播确认过的尺寸，以及当前等待 ACK 的最新请求。
     // WebSocket.send() 只代表进入发送队列，不能据此乐观地认为 PTY 已 resize。
     const resizeSyncStateRef = React.useRef(createResizeSyncState());
+    // Keep this separate from confirmed/pending geometry: after a remote
+    // resize, future fits, reconnects and cursor recovery must stay passive
+    // until the user interacts with this terminal again.
+    const ownsResizeRef = React.useRef(true);
     const resizeAckTimerRef = React.useRef<number | null>(null);
     const pendingScreenSyncGenerationRef = React.useRef<number | null>(null);
     const lastAppliedScreenSyncGenerationRef = React.useRef(-1);
@@ -3314,6 +3318,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const sendResizeRequestRef = React.useRef<(request: ResizeRequest) => void>(() => {});
     const sendResizeRequest = React.useCallback((request: ResizeRequest) => {
+      if (!ownsResizeRef.current) return;
       clearResizeAckTimer();
       onSizeSynchronizedChangeRef.current?.(false);
       resizeHandlerRef.current(request.cols, request.rows, request.seq);
@@ -3343,6 +3348,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const pushResizeToServer = React.useCallback(
       (cols: number, rows: number) => {
+        if (!ownsResizeRef.current) return;
         if (!sessionReadyRef.current) {
           // WS 还没收到 connected 事件：不能推 resize 给服务端。
           // 之前 (没有这个 gate) 会用旧的 terminalIdRef 直接 POST，
@@ -3412,6 +3418,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // Another display took ownership. Cancel our queued/retrying request
         // so it cannot take the size back without another local interaction.
         if (source !== 'tmux-screen-sync') {
+          ownsResizeRef.current = false;
           clearResizeAckTimer();
           clearResizePushTimer();
           resizeSyncStateRef.current = clearPendingResize(resizeSyncStateRef.current);
@@ -3437,8 +3444,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return;
         }
         const now = Date.now();
+        const wasOwner = ownsResizeRef.current;
+        ownsResizeRef.current = true;
         // 本端短时间内已经检查过一次：交互高频时降频，避免无意义的尺寸比较。
-        if (now - lastEnsureSizeAtRef.current < ENSURE_SIZE_THROTTLE_MS) {
+        if (wasOwner && now - lastEnsureSizeAtRef.current < ENSURE_SIZE_THROTTLE_MS) {
           return;
         }
         const cols = terminal.cols;
@@ -3587,6 +3596,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         //    用于后端 terminalSessionId 变化（auto-recreate / restart）后，让下一次
         //    first-fit 重新走 immediate 路径，把当前真实尺寸告诉新的 session。
         if (reason === 'session-key-change') {
+          ownsResizeRef.current = true;
           resizeSyncStateRef.current = createResizeSyncState();
           clearResizeAckTimer();
           clearResizePushTimer();
@@ -4559,12 +4569,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return ok;
         },
         pasteClipboardText: async () => {
+          ensureSizeMatches('paste');
           suppressMobileTapFocus();
           const ok = await readClipboardIntoTerminal(hiddenInputRef.current);
           onMobilePasteResultRef.current?.(ok);
           return ok;
         },
         sendSequence: (seq: string, options?: TerminalSequenceOptions) => {
+          if (seq) ensureSizeMatches('send-sequence');
           return sendTerminalSeq(seq, null, options);
         },
         getDimensions: () => {
@@ -4653,7 +4665,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         ensureSizeMatches,
         requestPtyRedraw: () => {
           const terminal = terminalRef.current;
-          if (!terminal || !sessionReadyRef.current) return;
+          if (!terminal || !sessionReadyRef.current || !ownsResizeRef.current) return;
           // The pending resize already promises an authoritative screen. A
           // cursor recovery request must not restart that same transaction.
           if (resizeSyncStateRef.current.pending || pendingScreenSyncGenerationRef.current !== null) return;

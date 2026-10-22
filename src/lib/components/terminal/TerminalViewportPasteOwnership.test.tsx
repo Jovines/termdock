@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRef } from 'react';
 import type { TerminalController } from './TerminalViewport';
 
-const terminalModel=vi.hoisted(()=>({instance:null as any,selection:''}));
+const terminalModel=vi.hoisted(()=>({instance:null as any,selection:'', dimensions: { cols: 80, rows: 24 }}));
 const clipboard = vi.hoisted(() => ({
   uploadTerminalClipboardFiles: vi.fn(),
   uploadTerminalClipboardImage: vi.fn(),
@@ -35,15 +35,17 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
   } };
   hasSelection(){return !!terminalModel.selection;}getSelection(){return terminalModel.selection;}
   cols = 80; rows = 24; options: Record<string, unknown> = {}; unicode = { activeVersion: '11' };
+  resize(cols: number, rows: number) { this.cols = cols; this.rows = rows; }
   buffer = { active: { cursorX: 0, cursorY: 0, viewportY: 0, baseY: 0, length: 0, getLine: () => undefined } };
   textarea: HTMLTextAreaElement | null = null;
   loadAddon() {} registerLinkProvider() { return { dispose() {} }; } refresh() {} focus=vi.fn(); blur=vi.fn(); clearSelection() {}
   attachCustomWheelEventHandler() {}
   onCursorMove() { return { dispose() {} }; } onData(handler: (data: string) => void) { this.dataHandler = handler; return { dispose() {} }; }
   onRender() { return { dispose() {} }; } onResize() { return { dispose() {} }; }
-  open() {} dispose() {}
+  element?: HTMLElement;
+  open(element: HTMLElement) { this.element = element; } dispose() {} scrollToBottom() {}
 } }));
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } } }));
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return terminalModel.dimensions; } } }));
 vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class {} }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: class {} }));
@@ -77,6 +79,7 @@ function pasteImage(file: File) {
 describe('TerminalViewport async paste ownership', () => {
   beforeEach(() => {
     vi.clearAllMocks();terminalModel.selection='';terminalModel.instance=null;
+    terminalModel.dimensions = { cols: 80, rows: 24 };
     clipboard.uploadTerminalClipboardFiles.mockReset().mockResolvedValue([]);
     federation.selectedTarget.mockReturnValue({ targetPeerId: 'peer-a' });
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -114,6 +117,67 @@ describe('TerminalViewport async paste ownership', () => {
     expect(onResize).toHaveBeenCalledTimes(1);
     act(() => ref.current!.ensureSizeMatches('keydown'));
     expect(onResize).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps idle fits, reconnects and cursor recovery passive until local interaction', async () => {
+    const ref = createRef<TerminalController>();
+    const onResize = vi.fn();
+    const view = render(<TerminalViewport ref={ref} sessionKey="idle-resize" sessionId="idle-resize" chunks={[]} onInput={vi.fn()}
+      onResize={onResize} terminalSettings={{ rendererMode: 'dom' } as never} theme={{} as never} autoFocus={false} />);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    vi.spyOn(view.container.querySelector('.terminal-viewport-container')!, 'getBoundingClientRect')
+      .mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    vi.useFakeTimers();
+    act(() => {
+      ref.current!.setSessionReady(true);
+      // Even refresh work already scheduled when the phone takes over must
+      // not regain ownership when its animation frame eventually executes.
+      ref.current!.requestRefresh('connected', { reconcileServerSize: true });
+      ref.current!.notifyServerSize(50, 20, 'ws-resize:phone');
+      vi.advanceTimersByTime(3000);
+    });
+    act(() => {
+      terminalModel.dimensions = { cols: 120, rows: 32 };
+      ref.current!.requestRefresh('resize');
+      vi.advanceTimersByTime(3000);
+      ref.current!.requestPtyRedraw();
+      ref.current!.setSessionReady(false);
+      ref.current!.setSessionReady(true);
+      ref.current!.requestRefresh('connected', { reconcileServerSize: true });
+      vi.advanceTimersByTime(3000);
+    });
+    expect(onResize).not.toHaveBeenCalled();
+    act(() => ref.current!.ensureSizeMatches('pointerdown'));
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(120, 32, expect.any(Number));
+    // A new remote takeover must not leave interaction blocked by the local
+    // 400ms throttle from the preceding takeover.
+    act(() => {
+      ref.current!.notifyServerSize(50, 20, 'ws-resize:phone');
+      ref.current!.ensureSizeMatches('keydown');
+    });
+    expect(onResize).toHaveBeenCalledTimes(2);
+    act(() => {
+      ref.current!.acknowledgeResize({ seq: onResize.mock.calls[1][2], ok: true, cols: 120, rows: 32 });
+      terminalModel.dimensions = { cols: 140, rows: 36 };
+      ref.current!.requestRefresh('resize');
+      vi.advanceTimersByTime(200);
+    });
+    expect(onResize).toHaveBeenLastCalledWith(140, 36, expect.any(Number));
+  });
+
+  it('lets explicit toolbar input take over after a remote resize', async () => {
+    const ref = createRef<TerminalController>();
+    const onResize = vi.fn(), onInput = vi.fn();
+    render(<TerminalViewport ref={ref} sessionKey="toolbar-resize" sessionId="toolbar-resize" chunks={[]} onInput={onInput}
+      onResize={onResize} terminalSettings={{ rendererMode: 'dom' } as never} theme={{} as never} autoFocus={false} />);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    act(() => {
+      ref.current!.setSessionReady(true);
+      ref.current!.notifyServerSize(50, 20, 'ws-resize:phone');
+      ref.current!.sendSequence('\r');
+    });
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(80, 24, expect.any(Number));
+    expect(onInput).toHaveBeenCalledWith('\r', expect.any(Object));
   });
 
   function mount(onInput: (data: string) => void | Promise<boolean>, getOwnerKey = () => 'backend-a') {
