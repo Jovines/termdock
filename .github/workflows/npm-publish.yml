@@ -81,6 +81,8 @@ jobs:
           src/server/agent/collaborationStore.test.ts
           src/server/agent/integrationObservation.test.ts
           src/server/agent/integrationTmuxObservation.test.ts
+          src/server/agent/integrationPersistence.test.ts
+          src/server/utils/tmuxLayoutReader.test.ts
           src/server/agent/integrationRecoveryBinding.test.ts
           src/server/agent/sessionLifecycle.test.ts
           src/server/agent/sessionLaunchState.test.ts

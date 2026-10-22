@@ -1394,3 +1394,20 @@ wrapper 负责实际设置 Agent 自己的数据目录、准备 hooks/参数，�
 - 终端输出触发的后台会话观察按 250ms 窗口合并；一轮观察期间的新通知安排到后续一轮，不连续抢占。显式 `session get`、生命周期操作及投递前核验保留原路径，不以此窗口判断 Agent 可输入；不延迟业务输入来猜测应用状态。同一次 integration 观察复用其新鲜 tmux layout，下一次观察重新读取，不把缓存用作身份写入凭据。
 
 无删除消息/事件、缩短历史、停用消费者、额外 Enter 或正文重发。`pty_written` 仍只代表终端写入调用完成，不代表应用提交或任务完成。回归包含约 26 MB journal 的空/重复追加零克隆、相同群同步零写入、真实变化/持久化失败重试、授权后历史补收、通知洪峰合并、换 pane/原生身份冲突拒绝。生产 CPU、事件循环延迟和 health 改善须在实际维护窗升级后对比采样，不能用隔离基准代替实机验收。
+
+## 1.4.348：真实提交、事件推送与 tmux 查询
+
+本轮透明性能优化不改变现有接口、JSON journal 格式、保留策略、权限、消息/ACK 语义或默认交互。实际运行服务需升级到 **1.4.348**；不是仅替换 CLI 文件。性能修复无新增权限或配置。
+
+- 真实事件/ACK/授权变更采用 copy-on-write，仅复制发生变化的容器与新事件，不再深拷贝整个 journal。内部已提交事实由 store 独占且不修改，公共 page/policy 返回独立副本；调用者修改输入或返回值不影响历史或编码缓存。
+- 未变化事件与元数据复用 UTF-8 编码，按有界向量写入临时文件，不再为大小检查和落盘重复生成全库 JSON，也避免临时巨型 UTF-16 字符串。64 MiB 上限检查覆盖实际待写全部字节。短写、Unicode 字节边界与 EINTR 均保留位置；文件 fsync → 原子 rename → 目录 fsync 后才发布提交结果。中途失败不推进内存 source/consumer 状态，不向订阅者报告成功；重试仍沿原来源/游标。
+- 同 cursor 重复 ACK 在权限、consumer、cursor、rewind、retention 检查后 no-op；HTTP 的已发送连续前缀检查仍先执行。此前已持久确认的进度不再次克隆/写盘/fsync，不能借相等游标绕过撤权或保留缺口。重复 revoke 也不重写未变化状态。
+- 事件按组建引用索引，并按 sequence 二分定位 page；仅公开 page 复制最多 100 条返回事实。主动推送复用已编码事实，不为每个 consumer 重复制/重编码历史 payload，保留原 NDJSON 字段、顺序、背压、授权复核及断线重放边界。
+- 新鲜 session layout 由一次只读 `list-panes -s` 获取 server/session/window/pane 元数据；常见单窗口的 integration 观察从 5 次 tmux 命令降到 1 次，另行原生进程/锁核验保持。侧栏原有多会话 layout 缓存的数据获取也由 3 次全局查询改为 1 次；缓存仍只服务原有发现用途。没有启用持久 attach/control client，不新增 client、改尺寸、焦点、copy-mode 或发送输入。
+- 同轮已关闭/释放且已确认零承载的后台存在性观察用一次新鲜会话名查询合并。结果仅用于该轮、且 descriptor 完整快照不变时才复用；批量查询失败、记录改变、操作不确定或进行中的生命周期走原逐项核验。显式 get、close/release/restore、实际投递前身份核验不使用该后台结果。
+
+仍是兼容的全量 JSON 快照落盘：真实提交的物理写入量和同步 fsync 等待未变为增量日志或异步存储，慢磁盘仍可能阻塞。不能把隔离基准解释为所有 HTTPS 长尾已解决。服务重启会重建内存索引/编码缓存，首次提交需编码保留事实；不会删除历史换取速度，也不会暂停业务消费者。
+
+回归覆盖重复 ACK 零克隆/编码/写入、真实持久提交与中途写入/fsync 失败后重试、短写与 Unicode、64 MiB 精确字节上限、输入/输出不可修改历史、分页/保留缺口/撤权、推送事实等价，以及隔离真实 tmux 的多窗口/分屏/激活 pane/copy-mode 与 client/PID/尺寸不变。Linux 维护机验证不代替 macOS 实机或私有 Agent 的业务验收。生产升级须与共享服务的在途任务和维护窗协调，不能因为收到版本通知就自动重启别人的实验。
+
+同时修复独立 profile 目录的 home 别名误拒：当逻辑 home 指向真实 home，规范化 cwd 下的 `{cwd}` 路径可匹配逻辑 home 或 `realpath(home)` 的严格子目录；不会将同名前缀兄弟目录视为 home，不创建尚不存在的锁目录。实际 provider 继续核验 canonicalHome、目录权限、精确进程实例、FD/inode 和内核持锁关系。Linux capabilities 新增 `session_profile_native_identity_home_aliases=true` 及 `session_profile_native_identity_home_aliases_min_version="1.4.348"`。旧 profile 快照不迁移，不自动 retry/create；347 的 `~/` 每 job 精确路径声明仍可沿原契约使用，更新同一 profile 与捕获快照需要由接入方串行协调。

@@ -15,8 +15,17 @@ export function nativeIdentityDirectory(config: unknown): string | null {
     || typeof c.directory !== 'string' || c.directory.length > 1024 || /[\x00-\x1f\x7f]/.test(c.directory)) return null;
   const expanded = c.directory.startsWith('~/') ? path.join(os.homedir(), c.directory.slice(2)) : c.directory;
   if (!path.isAbsolute(expanded)) return null;
-  const directory = path.resolve(expanded), relative = path.relative(os.homedir(), directory);
-  return relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) ? directory : null;
+  const directory = path.resolve(expanded), home = os.homedir();
+  const within = (root: string) => {
+    const relative = path.relative(root, directory);
+    return !!relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  if (within(home)) return directory;
+  // cwd is canonicalized before launch. A symlinked home may therefore have
+  // two legitimate spellings even before the lock directory is created.
+  // Accept only the real home alias; the live provider still verifies the
+  // actual directory ownership, realpath, FD/inode, starttime and kernel lock.
+  try { return within(fs.realpathSync(home)) ? directory : null; } catch { return null; }
 }
 /** Administrator-declared profile scope, never inferred from process env.
  * {cwd} is permitted only as a leading directory anchor and cannot escape it. */

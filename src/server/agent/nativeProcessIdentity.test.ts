@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { nativeIdentityDirectory, readNativeProcessIdentity, resolveProfileNativeIdentity } from './nativeProcessIdentity.js';
 
 const resources: (() => Promise<void>)[] = [];
@@ -52,6 +52,25 @@ it('resolves only explicitly declared per-profile directories and safe cwd-relat
     expect(resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory }, cwd)).toBeNull();
   }
   expect(resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory: '{cwd}/locks', command: 'probe' }, cwd)).toBeNull();
+});
+it.skipIf(process.platform !== 'linux')('accepts a canonical cwd under a symlinked home without accepting siblings or weakening live lock proof', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'td-home-alias-'));
+  const real = path.join(root, 'real-home'), alias = path.join(root, 'home');
+  fs.mkdirSync(real, { mode: 0o700 }); fs.symlinkSync(real, alias);
+  const home = vi.spyOn(os, 'homedir').mockReturnValue(alias);
+  resources.push(async () => { home.mockRestore(); fs.rmSync(root, { recursive: true, force: true }); });
+  const one = await fixture(['alias-native']);
+  const cwd = fs.realpathSync(one.root);
+  const config = resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory: '{cwd}/.' }, cwd)!;
+  expect(config.directory).toBe(cwd);
+  expect(resolveProfileNativeIdentity({ kind: 'linux-flock-owner', directory: '{cwd}/future/locks' }, cwd)?.directory).toBe(path.join(cwd, 'future/locks'));
+  expect(fs.existsSync(path.join(cwd, 'future'))).toBe(false);
+  for (const directory of [real, alias, path.join(root, 'real-home-other', 'locks'), path.join(root, 'outside', 'locks')]) {
+    expect(nativeIdentityDirectory({ kind: 'linux-flock-owner', directory })).toBeNull();
+  }
+  expect(await readNativeProcessIdentity(one.pid, config)).toEqual({ nativeId: 'alias-native', outcome: 'verified' });
+  fs.writeFileSync(path.join(one.root, 'alias-native.owner.json'), JSON.stringify({ pid: one.pid, process_start_id: 'linux:wrong' }));
+  expect(await readNativeProcessIdentity(one.pid, config)).toMatchObject({ nativeId: null, outcome: 'unconfirmed' });
 });
 it.skipIf(process.platform !== 'linux')('verifies an isolated native home by current kernel proof and rejects another home', async () => {
   const one = await fixture(['one']), two = await fixture(['two']);

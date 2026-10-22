@@ -253,6 +253,7 @@ export class IntegrationRuntime {
       session_launch_reload_fence: true, session_launch_reload_fence_min_version: '1.4.346',
       session_shell_startup_wait: true, session_shell_startup_wait_min_version: '1.4.346',
       session_profile_native_identity: process.platform === 'linux', session_profile_native_identity_min_version: '1.4.346',
+      session_profile_native_identity_home_aliases: process.platform === 'linux', session_profile_native_identity_home_aliases_min_version: '1.4.348',
       session_launch_diagnostics: true, session_launch_diagnostics_min_version: '1.4.314',
       session_cold_retry: true, session_cold_retry_min_version: '1.4.314',
       session_rename: true, session_rename_min_version: '1.4.315',
@@ -450,7 +451,7 @@ export class IntegrationRuntime {
     const key = `${p.id}:${p.groupId}:${consumer}`;
     // Resolve the initial cursor before sending headers so retention gaps
     // and bad consumer names are ordinary machine-readable HTTP errors.
-    const initial = this.store.page(p, consumer); cursor = initial.cursor;
+    const initial = this.store.streamPage(p, consumer); cursor = initial.cursor;
     res.setHeader('Content-Type', 'application/x-ndjson'); res.setHeader('Cache-Control', 'no-store'); res.flushHeaders(); this.streams.add(res);
     const stop = this.store.subscribe(() => pump());
     const cleanup = () => { closed = true; stop(); clearInterval(heartbeat); this.streams.delete(res); };
@@ -459,11 +460,11 @@ export class IntegrationRuntime {
       try {
         this.authorize(p, 'events.read');
         for (;;) {
-          const page = this.store.page(p, consumer, cursor);
+          const page = this.store.streamPage(p, consumer, cursor);
           if (!page.events.length) break;
           for (const event of page.events) {
             if (res.writableLength > 1024 * 1024) integrationError('EVENT_CONSUMER_SLOW', 'Reconnect from the last acknowledged cursor', 503);
-            res.write(`${JSON.stringify({ type: 'event', ...event })}\n`); cursor = event.cursor;
+            res.write(event.line); cursor = event.cursor;
             this.sent.set(key, Math.max(this.sent.get(key) ?? 0, event.sequence));
           }
         }

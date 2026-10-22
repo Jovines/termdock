@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { IntegrationSessions, type IntegrationSessionAdapter } from './integrationSessions.js';
+import { IntegrationSessions, type IntegrationSessionAdapter, type IntegrationSession } from './integrationSessions.js';
 import type { IntegrationPrincipal } from './integrationStore.js';
 
 const close: Array<() => void> = [];
@@ -22,7 +22,7 @@ async function fixture() {
   close.push(() => sessions.close());
   const created = await sessions.create(principal, { profile: 'fixture', cwd: directory, idempotencyKey: 'create' });
   inspect.mockClear();
-  return { sessions, principal, created, inspect, notify };
+  return { sessions, principal, created, inspect, notify, api, file: path.join(directory, 'sessions.json') };
 }
 
 it('coalesces output notifications but leaves explicit session get immediate', async () => {
@@ -51,4 +51,40 @@ it('yields between full observation rounds even with notifications during an in-
   expect(f.inspect).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(249); expect(f.inspect).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(1); expect(f.inspect).toHaveBeenCalledTimes(2);
+});
+
+it('batches only already-zero dormant runtime observations and keeps explicit get fresh', async () => {
+  const f = await fixture(); f.sessions.close();
+  const doc = JSON.parse(fs.readFileSync(f.file, 'utf8'));
+  doc.sessions = Array.from({ length: 100 }, (_, index) => ({ ...f.created, session_id: `dormant-${index}`,
+    state: index % 2 ? 'closed' : 'released', runtime_present: false, terminal_binding: null }));
+  fs.writeFileSync(f.file, JSON.stringify(doc));
+  const batch = vi.fn(async (records: readonly IntegrationSession[]) => new Map(records.map(record => [record.session_id, false])));
+  const individual = vi.fn(async () => false);
+  const sessions = new IntegrationSessions(f.file, { ...f.api, runtimePresent: individual, runtimePresenceBatch: batch }); close.push(() => sessions.close());
+  await sessions.refreshAll();
+  expect(batch).toHaveBeenCalledTimes(1); expect(batch.mock.calls[0]![0]).toHaveLength(100);
+  expect(individual).not.toHaveBeenCalled();
+  await sessions.get(f.principal, 'dormant-1'); expect(individual).toHaveBeenCalledTimes(1);
+  batch.mockRejectedValueOnce(new Error('tmux query failed')); individual.mockClear();
+  await sessions.refreshAll(); expect(individual).toHaveBeenCalledTimes(100);
+});
+
+it('rejects a stale batch after a record changes while the fresh presence query is pending', async () => {
+  const f = await fixture(); f.sessions.close();
+  const doc = JSON.parse(fs.readFileSync(f.file, 'utf8'));
+  doc.sessions = [{ ...f.created, state: 'closed', runtime_present: false, terminal_binding: null }];
+  fs.writeFileSync(f.file, JSON.stringify(doc));
+  let finish!: (value: Map<string, boolean>) => void;
+  const batch = vi.fn(() => new Promise<Map<string, boolean>>(resolve => { finish = resolve; }));
+  const individual = vi.fn(async () => false);
+  const sessions = new IntegrationSessions(f.file, { ...f.api, runtimePresent: individual, runtimePresenceBatch: batch }); close.push(() => sessions.close());
+  const observing = sessions.refreshAll();
+  // Simulate a concurrent durable lifecycle update, preserving the actual
+  // refresh code's CAS checks while testing its before/after-await boundary.
+  const state = sessions as unknown as { doc: { sessions: IntegrationSession[] } };
+  state.doc.sessions[0] = { ...state.doc.sessions[0]!, generation: 10 };
+  finish(new Map([[f.created.session_id, true]])); await observing;
+  expect(individual).toHaveBeenCalledTimes(1);
+  expect((await sessions.get(f.principal, f.created.session_id)).state).toBe('closed');
 });

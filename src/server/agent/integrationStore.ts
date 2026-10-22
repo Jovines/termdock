@@ -33,15 +33,44 @@ interface Journal {
 }
 export function integrationError(code: string, message: string, status = 400): never { throw new CollaborationError(code, message, status); }
 export function atomicJson(file: string, value: unknown): void {
+  atomicJsonText(file, JSON.stringify(value));
+}
+function atomicJsonText(file: string, serialized: string): void {
+  atomicJsonWrite(file, descriptor => fs.writeFileSync(descriptor, serialized));
+}
+function atomicJsonWrite(file: string, write: (descriptor: number) => void): void {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   const descriptor = fs.openSync(temporary, 'w', 0o600);
-  try { fs.fchmodSync(descriptor, 0o600); fs.writeFileSync(descriptor, JSON.stringify(value)); fs.fsyncSync(descriptor); }
+  try { fs.fchmodSync(descriptor, 0o600); write(descriptor); fs.fsyncSync(descriptor); }
   finally { fs.closeSync(descriptor); }
   fs.renameSync(temporary, file);
   const directory = fs.openSync(path.dirname(file), 'r');
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
 }
+function atomicJsonBuffers(file: string, parts: Buffer[]): void {
+  atomicJsonWrite(file, descriptor => {
+    let index = 0, offset = 0;
+    while (index < parts.length) {
+      // Bound vectors below platform IOV_MAX, and handle short writes without
+      // replaying or dropping any byte of the checked JSON document.
+      const vectors = parts.slice(index, index + 512);
+      if (offset) vectors[0] = vectors[0]!.subarray(offset);
+      let written: number;
+      try { written = fs.writevSync(descriptor, vectors); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'EINTR') continue; throw error; }
+      if (written <= 0) throw new Error('Integration journal write made no progress');
+      while (index < parts.length) {
+        const available = parts[index]!.length - offset;
+        if (written < available) { offset += written; break; }
+        written -= available; index++; offset = 0;
+        if (!written) break;
+      }
+    }
+  });
+}
+const JSON_OPEN = Buffer.from('{'), JSON_CLOSE = Buffer.from('}'), JSON_COMMA = Buffer.from(','),
+  ARRAY_OPEN = Buffer.from('['), ARRAY_CLOSE = Buffer.from(']'), EVENT_PREFIX = Buffer.from('{"type":"event",'), NEWLINE = Buffer.from('\n');
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 function identifier(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(value)) integrationError('INVALID_INTEGRATION_POLICY', `Invalid ${label}`);
@@ -79,16 +108,49 @@ export function validatePolicy(value: IntegrationPolicy): IntegrationPolicy {
 export class IntegrationStore {
   private doc: Journal = { version: 1, principals: [], events: [], sequences: {}, prunedThrough: {}, sources: {}, consumers: {} };
   private listeners = new Set<() => void>();
+  // Committed events and metadata are immutable inside the store. Keep the
+  // encoded event fragments, not another deep copy of their payloads. Pruned
+  // objects become collectible with their encodings.
+  private encoded = new WeakMap<object, Buffer>();
+  private groupEvents = new Map<string, IntegrationEvent[]>();
   constructor(private file: string, private retention = 10000) {
     try {
       const document = JSON.parse(fs.readFileSync(file, 'utf8')) as Journal;
       if (document.version !== 1 || !Array.isArray(document.events) || !Array.isArray(document.principals) || !document.sources || !document.consumers || !document.sequences || !document.prunedThrough) throw new Error('Invalid integration journal');
       this.doc = document;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    this.indexEvents();
+  }
+  private indexEvents(): void {
+    this.groupEvents = new Map();
+    for (const event of this.doc.events) {
+      const events = this.groupEvents.get(event.group_id) ?? [];
+      events.push(event); this.groupEvents.set(event.group_id, events);
+    }
+  }
+  private encode(value: unknown): Buffer {
+    if (!value || typeof value !== 'object') return Buffer.from(JSON.stringify(value));
+    const cached = this.encoded.get(value);
+    if (cached !== undefined) return cached;
+    const serialized = Buffer.from(JSON.stringify(value)); this.encoded.set(value, serialized); return serialized;
   }
   private write(next: Journal): void {
-    if (Buffer.byteLength(JSON.stringify(next)) > 64 * 1024 * 1024) integrationError('EVENT_STORAGE_FULL', 'Integration journal is full; no event was acknowledged', 503);
-    atomicJson(this.file, next); this.doc = next;
+    const parts: Buffer[] = [JSON_OPEN];
+    for (const [index, [key, value]] of Object.entries(next).entries()) {
+      if (index) parts.push(JSON_COMMA);
+      parts.push(Buffer.from(`${JSON.stringify(key)}:`));
+      if (key === 'events') {
+        parts.push(ARRAY_OPEN);
+        for (const [index, event] of next.events.entries()) { if (index) parts.push(JSON_COMMA); parts.push(this.encode(event)); }
+        parts.push(ARRAY_CLOSE);
+      } else parts.push(this.encode(value));
+    }
+    parts.push(JSON_CLOSE);
+    if (parts.reduce((bytes, part) => bytes + part.length, 0) > 64 * 1024 * 1024) integrationError('EVENT_STORAGE_FULL', 'Integration journal is full; no event was acknowledged', 503);
+    atomicJsonBuffers(this.file, parts);
+    const eventsChanged = next.events !== this.doc.events;
+    this.doc = next;
+    if (eventsChanged) this.indexEvents();
     for (const listener of this.listeners) { try { listener(); } catch { /* Subscription reports its own failure. */ } }
   }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
@@ -97,11 +159,11 @@ export class IntegrationStore {
     const checked = validatePolicy(policy);
     if (this.doc.principals.some(p => p.id === checked.id)) integrationError('INTEGRATION_EXISTS', 'Use a new id; credentials cannot be silently replaced', 409);
     const token = randomBytes(32).toString('base64url');
-    const next = structuredClone(this.doc); next.principals.push({ ...checked, tokenHash: hash(token), revoked: false }); this.write(next);
-    return { principal: checked, token };
+    const next = { ...this.doc, principals: [...this.doc.principals, { ...checked, tokenHash: hash(token), revoked: false }] }; this.write(next);
+    return { principal: structuredClone(checked), token };
   }
   update(policy: IntegrationPolicy): void {
-    const checked = validatePolicy(policy), next = structuredClone(this.doc);
+    const checked = validatePolicy(policy), next = { ...this.doc, principals: [...this.doc.principals] };
     const index = next.principals.findIndex(principal => principal.id === checked.id);
     if (index < 0) integrationError('INTEGRATION_NOT_FOUND', 'Integration does not exist', 404);
     const existing = next.principals[index];
@@ -111,9 +173,10 @@ export class IntegrationStore {
     this.write(next);
   }
   revoke(id: string): void {
-    const next = structuredClone(this.doc), principal = next.principals.find(p => p.id === id);
+    const principal = this.doc.principals.find(p => p.id === id);
     if (!principal) integrationError('INTEGRATION_NOT_FOUND', 'Integration does not exist', 404);
-    principal.revoked = true; this.write(next);
+    if (principal.revoked) return;
+    this.write({ ...this.doc, principals: this.doc.principals.map(p => p.id === id ? { ...p, revoked: true } : p) });
   }
   authenticate(id: string, token: string): IntegrationPrincipal {
     const principal = this.doc.principals.find(p => p.id === id);
@@ -133,9 +196,10 @@ export class IntegrationStore {
     let next: Journal | undefined;
     for (const update of updates) {
       if ((next ?? this.doc).sources[update.sourceKey] === update.sourceVersion) continue;
-      next ??= structuredClone(this.doc);
+      next ??= { ...this.doc, events: [...this.doc.events], sequences: { ...this.doc.sequences },
+        sources: { ...this.doc.sources }, prunedThrough: { ...this.doc.prunedThrough } };
       const group = update.event.group_id, sequence = (next.sequences[group] ?? 0) + 1;
-      next.events.push({ ...update.event, event_id: update.eventId ?? randomUUID(), sequence, cursor: this.cursor(group, sequence) });
+      next.events.push({ ...structuredClone(update.event), event_id: update.eventId ?? randomUUID(), sequence, cursor: this.cursor(group, sequence) });
       next.sequences[group] = sequence; next.sources[update.sourceKey] = update.sourceVersion;
     }
     if (!next) return;
@@ -155,18 +219,32 @@ export class IntegrationStore {
     return value.sequence!;
   }
   private key(principal: IntegrationPrincipal, consumer: string): string { identifier(consumer, 'consumer'); return `${principal.id}:${principal.groupId}:${consumer}`; }
-  page(principal: IntegrationPrincipal, consumer: string, cursor?: string): { events: IntegrationEvent[]; cursor: string } {
+  private selectPage(principal: IntegrationPrincipal, consumer: string, cursor?: string): { events: IntegrationEvent[]; cursor: string } {
     this.authorize(principal, 'events.read');
     const key = this.key(principal, consumer), group = principal.groupId;
     const floor = this.doc.prunedThrough[group] ?? 0;
     // A new consumer explicitly starts at the earliest retained fact. Existing
     // consumers never silently skip a retention gap.
     if (this.doc.consumers[key] === undefined) {
-      const next = structuredClone(this.doc); next.consumers[key] = floor; this.write(next);
+      this.write({ ...this.doc, consumers: { ...this.doc.consumers, [key]: floor } });
     }
     const after = cursor ? this.decode(group, cursor) : this.doc.consumers[key];
     if (after < floor) integrationError('EVENT_RETENTION_GAP', 'Confirmed cursor is older than retained history; reconcile task/session snapshots and use a new consumer', 409);
-    return { events: structuredClone(this.doc.events.filter(e => e.group_id === group && e.sequence > after).slice(0, 100)), cursor: this.cursor(group, after) };
+    const events = this.groupEvents.get(group) ?? [];
+    let lo = 0, hi = events.length;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (events[mid]!.sequence <= after) lo = mid + 1; else hi = mid; }
+    return { events: events.slice(lo, lo + 100), cursor: this.cursor(group, after) };
+  }
+  page(principal: IntegrationPrincipal, consumer: string, cursor?: string): { events: IntegrationEvent[]; cursor: string } {
+    return structuredClone(this.selectPage(principal, consumer, cursor));
+  }
+  /** Push uses immutable encoded facts rather than copying and re-encoding
+   * every retained payload for each consumer. No mutable record escapes. */
+  streamPage(principal: IntegrationPrincipal, consumer: string, cursor?: string) {
+    const page = this.selectPage(principal, consumer, cursor);
+    return { cursor: page.cursor, events: page.events.map(event => ({ sequence: event.sequence, cursor: event.cursor,
+      line: Object.hasOwn(event, 'type') ? Buffer.from(`${JSON.stringify({ type: 'event', ...event })}\n`)
+        : Buffer.concat([EVENT_PREFIX, this.encode(event).subarray(1), NEWLINE]) })) };
   }
   ack(principal: IntegrationPrincipal, consumer: string, cursor: string): { cursor: string; ack_semantics: 'durable_received' } {
     this.authorize(principal, 'events.read');
@@ -176,7 +254,7 @@ export class IntegrationStore {
     if (confirmed < (this.doc.prunedThrough[principal.groupId] ?? 0)) integrationError('EVENT_RETENTION_GAP', 'Consumer has a retention gap', 409);
     // Cursor is a cumulative declaration that every preceding event is safely
     // in the bridge inbox. The subscription server separately checks it was sent.
-    const next = structuredClone(this.doc); next.consumers[key] = sequence; this.write(next);
+    if (sequence !== confirmed) this.write({ ...this.doc, consumers: { ...this.doc.consumers, [key]: sequence } });
     return { cursor, ack_semantics: 'durable_received' };
   }
   cursorSequence(group: string, cursor: string): number { return this.decode(group, cursor); }

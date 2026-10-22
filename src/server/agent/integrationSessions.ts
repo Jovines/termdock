@@ -62,6 +62,9 @@ export interface IntegrationSessionAdapter {
   recoveryBindingReconciled?(sessionId: string): void;
   /** Current runtime presence includes orphaned tmux/backend, not inventory alone. */
   runtimePresent?(record: IntegrationSession): Promise<boolean>;
+  /** A fresh read-only batch for stable, already-zero-runtime descriptors.
+   * Never used by close/release/restore or to prove a running Agent identity. */
+  runtimePresenceBatch?(records: readonly IntegrationSession[]): Promise<ReadonlyMap<string, boolean>>;
   release?(record: IntegrationSession, reconcile: boolean): Promise<void>;
   pendingMessages?(id: string): number;
   prepareRelease?(record: IntegrationSession): Promise<{ group_role?: string }>;
@@ -506,8 +509,11 @@ export class IntegrationSessions {
       record.updated_at = Date.now(); this.saveRecord(record); return record;
     }));
   }
-  private async refresh(id: string, allowBindingReconciliation = true): Promise<void> {
+  private async refresh(id: string, allowBindingReconciliation = true,
+    presence?: { record: IntegrationSession; present: boolean }): Promise<void> {
     const record = structuredClone(this.doc.sessions.find(s => s.session_id === id)); if (!record) return;
+    const runtimePresent = () => presence && JSON.stringify(record) === JSON.stringify(presence.record)
+      ? Promise.resolve(presence.present) : this.adapter.runtimePresent?.(record);
     if (record.rename_pending) {
       if (this.lifecycle.active(id)) return;
       try { await this.lifecycle.run(id, async () => {
@@ -525,7 +531,7 @@ export class IntegrationSessions {
           if (!this.adapter.closeRuntime) integrationError('SESSION_CLOSE_UNSUPPORTED', 'Close reconciliation is unavailable', 409);
           await this.adapter.closeRuntime(record, true);
         }
-        if (!this.adapter.runtimePresent || await this.adapter.runtimePresent(record)) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Runtime exists for a closed or closing session', 409);
+        if (!this.adapter.runtimePresent || await runtimePresent()) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Runtime exists for a closed or closing session', 409);
         const next = { ...record, state: 'closed' as const, runtime_present: false, terminal_binding: null, close_intent: undefined,
           operation_uncertain: false, error_code: null, startup_input: undefined };
         if (JSON.stringify(this.doc.sessions.find(s => s.session_id === id)) !== JSON.stringify(record)) return;
@@ -544,7 +550,7 @@ export class IntegrationSessions {
       if (this.lifecycle.active(id)) return;
       try {
         if (record.state !== 'released') await this.adapter.release?.(record, true);
-        const present = await this.adapter.runtimePresent?.(record);
+        const present = await runtimePresent();
         if (present === undefined) integrationError('SESSION_RELEASE_UNSUPPORTED', 'Runtime presence is unavailable', 409);
         if (record.state !== 'released') {
           if (present) integrationError('OPERATION_OUTCOME_UNCONFIRMED', 'Prior release still has a runtime; explicit release retry is required', 409);
@@ -682,7 +688,21 @@ export class IntegrationSessions {
     if (this.observationTimer) { clearTimeout(this.observationTimer); this.observationTimer = undefined; }
     this.observing = true;
     this.observeAgain = false;
-    try { for (const record of this.snapshot()) await this.refresh(record.session_id); }
+    try {
+      const records = this.snapshot();
+      const dormant = records.filter(record => ['closed', 'released'].includes(record.state) && record.runtime_present === false
+        && !record.operation_uncertain && !record.close_intent && !record.rename_pending && !record.cold_retry_pending);
+      let presence: ReadonlyMap<string, boolean> | undefined;
+      if (dormant.length && this.adapter.runtimePresenceBatch) {
+        try { presence = await this.adapter.runtimePresenceBatch(dormant); }
+        catch { /* Failed batch observations fall back to fresh per-record checks. */ }
+      }
+      const candidates = new Map(dormant.map(record => [record.session_id, record]));
+      for (const record of records) {
+        const candidate = candidates.get(record.session_id), present = presence?.get(record.session_id);
+        await this.refresh(record.session_id, true, candidate && typeof present === 'boolean' ? { record: candidate, present } : undefined);
+      }
+    }
     finally { this.observing = false; if (this.observeAgain) this.scheduleObservation(); }
   }
   close(): void {

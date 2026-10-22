@@ -17,7 +17,7 @@ const adapter = declaration.initializer as ts.ObjectLiteralExpression;
 const method = adapter.properties.find(node => ts.isMethodDeclaration(node) && node.name.getText(ast) === 'inspect')!;
 
 function fixture(panes = 1) {
-  const layout = { sessionId: '$1', sessionName: 'owned', activePaneId: '%1', windows: [{ panes: Array.from({ length: panes }, (_, index) => ({
+  const layout = { serverPid: 10, sessionId: '$1', sessionName: 'owned', activePaneId: '%1', windows: [{ panes: Array.from({ length: panes }, (_, index) => ({
     id: `%${index + 1}`, pid: 100 + index, currentPath: '/fixture',
   })) }] };
   const getTmuxLayout = vi.fn(async () => layout);

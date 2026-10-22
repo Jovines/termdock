@@ -270,6 +270,7 @@ it('creates scoped background records, returns current execution in summaries an
     session_launch_reload_fence: true, session_launch_reload_fence_min_version: '1.4.346',
     session_shell_startup_wait: true, session_shell_startup_wait_min_version: '1.4.346',
     session_profile_native_identity: process.platform === 'linux', session_profile_native_identity_min_version: '1.4.346',
+    session_profile_native_identity_home_aliases: process.platform === 'linux', session_profile_native_identity_home_aliases_min_version: '1.4.348',
     session_release_batch: true, session_release_batch_min_version: '1.4.325',
   });
   const input = { title: 'Background', spec: 'Run', purpose: 'automation', idempotencyKey: 'background', assigneeSessionId: 'worker' };

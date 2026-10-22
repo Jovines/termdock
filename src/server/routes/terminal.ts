@@ -164,6 +164,7 @@ import { CollaborationError } from '../agent/collaborationProtocol.js';
 import { resolveCollaborationBackend, resolveCollaborationSessionId } from '../agent/sessionBindingRecovery.js';
 import { CollaborationRoutingStore, selectCollaborationPane, selectDrivePane, assessCollaborationRouteIdentity, type CollaborationBinding, type CollaborationPaneBinding, type CollaborationPaneCandidate, type CollaborationRouteState } from '../agent/collaborationRouting.js';
 import { selectRecoveredIntegrationBinding } from '../agent/integrationRecoveryBinding.js';
+import { readTmuxLayout, readTmuxLayouts, type TmuxLayout, type TmuxPane } from '../utils/tmuxLayoutReader.js';
 import { CollaborationDeliveryWorker, type CollaborationRoute } from '../agent/collaborationDeliveryWorker.js';
 import { approveCollaborationDialog, captureTmuxPaneHistory, captureTmuxPaneText, sendTmuxPaneKey, writeCollaborationTmuxPane,
   type CollaborationPaneKey } from '../agent/collaborationTmuxDelivery.js';
@@ -317,38 +318,6 @@ const exitedAtBottom = new Set<string>();
 
 
 type TerminalMode = 'shell' | 'tmux';
-
-interface TmuxPane {
-  id: string;
-  index: number;
-  active: boolean;
-  width: number;
-  height: number;
-  top: number;
-  left: number;
-  command: string;
-  pid: number;
-  tty: string;
-  title: string;
-  currentPath: string;
-}
-
-interface TmuxWindow {
-  id: string;
-  name: string;
-  index: number;
-  active: boolean;
-  panes: TmuxPane[];
-}
-
-interface TmuxLayout {
-  sessionId: string;
-  sessionName: string;
-  windows: TmuxWindow[];
-  activeWindowId: string;
-  activePaneId: string;
-  inCopyMode: boolean;
-}
 
 // PTY backend abstraction
 interface PtyProvider {
@@ -2267,17 +2236,16 @@ function formatLocalCollaborationMessages(frontendSessionId: string, messages: C
 async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false, freshProcess = false, describeNativeFailure = false,
   identityOverride?: NativeProcessIdentityConfig): Promise<ReturnType<typeof selectCollaborationPane> & { candidates?: CollaborationPaneCandidate[]; layout?: TmuxLayout }> {
   if (!binding.tmuxSessionName) return { state: 'offline', reason: 'TMUX_BINDING_MISSING' };
-  const name = `=${binding.tmuxSessionName}`;
-  try { await runTmux(['has-session', '-t', name]); }
+  let layout: TmuxLayout;
+  try { layout = await getTmuxLayout(binding.tmuxSessionName); }
   catch (error) {
     if (/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) {
       return { state: 'offline', reason: 'TMUX_SESSION_NOT_RUNNING' };
     }
     throw error;
   }
-  const layout = await getTmuxLayout(binding.tmuxSessionName);
   if (layout.sessionName !== binding.tmuxSessionName) throw new Error('TMUX_SESSION_IDENTITY_CHANGED');
-  const serverPid = Number((await runTmux(['display-message', '-p', '#{pid}'])).trim());
+  const serverPid = Number(layout.serverPid);
   if (!Number.isInteger(serverPid) || serverPid <= 0) throw new Error('TMUX_SERVER_IDENTITY_UNAVAILABLE');
   if ((nativeProcessIdentity || freshProcess) && process.platform === 'linux') await getProcessSnapshot(true);
   const panes: CollaborationPaneCandidate[] = await Promise.all(layout.windows.flatMap((window) => window.panes).map(async (pane) => {
@@ -2652,6 +2620,11 @@ async function integrationTmuxPresent(record: IntegrationSession): Promise<boole
   try { await runTmux(['has-session', '-t', `=wt-integration-${record.session_id}`]); return true; }
   catch (error) { if (/can't find session|no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) return false; throw error; }
 }
+function integrationRuntimeRegistered(record: IntegrationSession): boolean {
+  return !!integrationTerminalRecord(record)
+    || [...terminalSessions.values()].some(s => s.mode === 'tmux' && s.tmuxSessionName === `wt-integration-${record.session_id}`)
+    || !!collaborationStore.getGroup(record.group_id)?.sessionIds.includes(record.session_id);
+}
 async function verifyIntegrationRuntimeOwnership(record: IntegrationSession): Promise<void> {
   await integrationSessionAdapter.prepareRelease!(record);
   const terminal = integrationTerminalRecord(record);
@@ -2759,10 +2732,17 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
       resume: getPluginResumeConfig(agent.slug) ?? command, nativeIdentity: integrationNativeIdentity(record) ?? getPluginNativeIdentityConfig(agent.slug) ?? null };
   },
   async runtimePresent(record) {
-    if (integrationTerminalRecord(record)) return true;
-    if ([...terminalSessions.values()].some(s => s.mode === 'tmux' && s.tmuxSessionName === `wt-integration-${record.session_id}`)) return true;
-    if (collaborationStore.getGroup(record.group_id)?.sessionIds.includes(record.session_id)) return true;
+    if (integrationRuntimeRegistered(record)) return true;
     return integrationTmuxPresent(record);
+  },
+  async runtimePresenceBatch(records) {
+    let names: Set<string>;
+    try { names = new Set((await runTmux(['list-sessions', '-F', '#{session_name}'])).trimEnd().split('\n')); }
+    catch (error) {
+      if (!/no server running|no sessions|error connecting.*No such file/i.test(getErrorMessage(error))) throw error;
+      names = new Set();
+    }
+    return new Map(records.map(record => [record.session_id, integrationRuntimeRegistered(record) || names.has(`wt-integration-${record.session_id}`)]));
   },
   async release(record, reconcile) {
     await releaseSessionRuntime({
@@ -5730,175 +5710,14 @@ async function prepareManagedTmuxSession(sessionName: string, cwd?: string): Pro
 }
 
 async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
-  const sessionInfoRaw = (await runTmux([
-    'display-message',
-    '-t',
-    sessionName,
-    '-p',
-    `#{session_id}${TMUX_DELIMITER}#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{pane_id}${TMUX_DELIMITER}#{pane_in_mode}`,
-  ])).trim();
-
-  const sessionInfo = parseDelimitedRow(sessionInfoRaw, 5);
-  if (!sessionInfo) {
-    throw new Error(`Failed to parse tmux session info: ${sessionInfoRaw}`);
-  }
-
-  const [sessionId, resolvedSessionName, activeWindowId, activePaneId, paneInMode] = sessionInfo;
-
-  const windowsRaw = await runTmux([
-    'list-windows',
-    '-t',
-    sessionName,
-    '-F',
-    `#{window_id}${TMUX_DELIMITER}#{window_name}${TMUX_DELIMITER}#{window_index}${TMUX_DELIMITER}#{window_active}`,
-  ]);
-
-  const windows: TmuxWindow[] = [];
-
-  for (const line of windowsRaw.trim().split('\n')) {
-    if (!line) {
-      continue;
-    }
-
-    const row = parseDelimitedRow(line, 4);
-    if (!row) {
-      continue;
-    }
-
-    const [windowId, windowName, windowIndexRaw, windowActiveRaw] = row;
-    const panesRaw = await runTmux([
-      'list-panes',
-      '-t',
-      windowId,
-      '-F',
-      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_pid}${TMUX_DELIMITER}#{pane_tty}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
-    ]);
-
-    const panes: TmuxPane[] = panesRaw.trim().split('\n').filter(Boolean).map((paneLine) => {
-      const paneRow = parseDelimitedRow(paneLine, 12);
-      if (!paneRow) {
-        return null;
-      }
-
-      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, pidRaw, tty, title, currentPath] = paneRow;
-      return {
-        id: paneId,
-        index: parseInt(paneIndexRaw || '0', 10),
-        active: paneActiveRaw === '1',
-        width: parseInt(widthRaw || '0', 10),
-        height: parseInt(heightRaw || '0', 10),
-        top: parseInt(topRaw || '0', 10),
-        left: parseInt(leftRaw || '0', 10),
-        command: command || '',
-        pid: parseInt(pidRaw || '0', 10) || 0,
-        tty: tty || '',
-        title: title || '',
-        currentPath: currentPath || '',
-      } as TmuxPane;
-    }).filter((pane): pane is TmuxPane => pane !== null);
-
-    windows.push({
-      id: windowId,
-      name: windowName || '',
-      index: parseInt(windowIndexRaw || '0', 10),
-      active: windowActiveRaw === '1',
-      panes,
-    });
-  }
-
-  return {
-    sessionId,
-    sessionName: resolvedSessionName,
-    windows,
-    activeWindowId,
-    activePaneId,
-    inCopyMode: paneInMode === '1',
-  };
+  return readTmuxLayout(runTmux, sessionName);
 }
 
 let tmuxLayoutsSnapshot: { layouts: Map<string, TmuxLayout>; fetchedAt: number } | null = null;
 let tmuxLayoutsSnapshotPromise: Promise<Map<string, TmuxLayout>> | null = null;
 
 async function buildTmuxLayoutsSnapshot(): Promise<Map<string, TmuxLayout>> {
-  const [sessionsRaw, windowsRaw, panesRaw] = await Promise.all([
-    runTmux([
-      'list-sessions',
-      '-F',
-      `#{session_id}${TMUX_DELIMITER}#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{pane_id}${TMUX_DELIMITER}#{pane_in_mode}`,
-    ]),
-    runTmux([
-      'list-windows',
-      '-a',
-      '-F',
-      `#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{window_name}${TMUX_DELIMITER}#{window_index}${TMUX_DELIMITER}#{window_active}`,
-    ]),
-    runTmux([
-      'list-panes',
-      '-a',
-      '-F',
-      `#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_pid}${TMUX_DELIMITER}#{pane_tty}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
-    ]),
-  ]);
-
-  const layouts = new Map<string, TmuxLayout>();
-  for (const line of sessionsRaw.trim().split('\n')) {
-    if (!line) continue;
-    const row = parseDelimitedRow(line, 5);
-    if (!row) continue;
-    const [sessionId, sessionName, activeWindowId, activePaneId, paneInMode] = row;
-    layouts.set(sessionName, {
-      sessionId,
-      sessionName,
-      windows: [],
-      activeWindowId,
-      activePaneId,
-      inCopyMode: paneInMode === '1',
-    });
-  }
-
-  const windowsById = new Map<string, TmuxWindow>();
-  for (const line of windowsRaw.trim().split('\n')) {
-    if (!line) continue;
-    const row = parseDelimitedRow(line, 5);
-    if (!row) continue;
-    const [sessionName, windowId, windowName, windowIndexRaw, windowActiveRaw] = row;
-    const layout = layouts.get(sessionName);
-    if (!layout) continue;
-    const window: TmuxWindow = {
-      id: windowId,
-      name: windowName || '',
-      index: parseInt(windowIndexRaw || '0', 10),
-      active: windowActiveRaw === '1',
-      panes: [],
-    };
-    layout.windows.push(window);
-    windowsById.set(`${sessionName}\0${windowId}`, window);
-  }
-
-  for (const line of panesRaw.trim().split('\n')) {
-    if (!line) continue;
-    const row = parseDelimitedRow(line, 14);
-    if (!row) continue;
-    const [sessionName, windowId, paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, pidRaw, tty, title, currentPath] = row;
-    const window = windowsById.get(`${sessionName}\0${windowId}`);
-    if (!window) continue;
-    window.panes.push({
-      id: paneId,
-      index: parseInt(paneIndexRaw || '0', 10),
-      active: paneActiveRaw === '1',
-      width: parseInt(widthRaw || '0', 10),
-      height: parseInt(heightRaw || '0', 10),
-      top: parseInt(topRaw || '0', 10),
-      left: parseInt(leftRaw || '0', 10),
-      command: command || '',
-      pid: parseInt(pidRaw || '0', 10) || 0,
-      tty: tty || '',
-      title: title || '',
-      currentPath: currentPath || '',
-    });
-  }
-
-  return layouts;
+  return readTmuxLayouts(runTmux);
 }
 
 async function getCachedTmuxLayout(sessionName: string): Promise<TmuxLayout> {
