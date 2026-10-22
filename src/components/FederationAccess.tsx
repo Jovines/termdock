@@ -1,6 +1,7 @@
 import { useKeyboardLayer } from '../lib/hooks/useKeyboardLayer';
 import { LoadingSpinner as Loader2 } from '../lib/components/ui/Loading';
 import type { DeviceProfile } from '../server/federation/deviceProfile';
+import type { PendingInvitation } from '../server/federation/invitations';
 import { RelayServices } from './services/RelayServices';
 import { DeviceAuthorizationRequired } from '../lib/federation/deviceAuthorization';
 import { ServiceRoutes } from './services/ServiceRoutes';
@@ -47,9 +48,11 @@ export interface FederationAccessProps {
   initialInvite?: FederationConnection;
   sessions?: { sessionId: string; name: string; sourceSessionId?: string }[];
   grants?: FederationGrant[];
+  invitations?: PendingInvitation[];
   /** Legacy integration compatibility; invitations are the normal authorization flow. */
   onGrant?: (grant: FederationGrantInput) => void | Promise<void>;
-  onCreateInvite?: (invite: FederationInviteInput) => Promise<{ url: string; expiresAt: number }>;
+  onCreateInvite?: (invite: FederationInviteInput) => Promise<{ id?: string; url: string; expiresAt: number }>;
+  onRevokeInvitation?: (invitationId: string) => Promise<void>;
   onRename?: (subjectId: string, name: string) => Promise<void>;
   onRevoke?: (grantId: string) => void | Promise<void>;
 }
@@ -78,7 +81,7 @@ function qrColors() {
   return brightness(background) < brightness(foreground) ? { dark: background, light: foreground } : { dark: foreground, light: background };
 }
 /** Pairing codes remain in component memory only and are cleared after successful use. */
-export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, sessions = [], grants = [], onCreateInvite, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
+export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, sessions = [], grants = [], invitations = [], onCreateInvite, onRevokeInvitation, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
   const [initialNeedsPassword, setInitialNeedsPassword] = useState(false);
   const [initialPassword, setInitialPassword] = useState('');
   const [serviceNavigation, setServiceNavigation] = useState<ServiceNavigation>({});
@@ -90,7 +93,9 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
   const [resource, setResource] = useState<'all' | 'selected'>('all'); const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false);
   const [label, setLabel] = useState(''); const [grantExpiry, setGrantExpiry] = useState('');
-  const [invitation, setInvitation] = useState<{ url: string; expiresAt: number }>(); const [qr, setQr] = useState('');
+  const [invitation, setInvitation] = useState<{ id?: string; url: string; expiresAt: number }>(); const [qr, setQr] = useState('');
+  const [pendingInvitationRevoke, setPendingInvitationRevoke] = useState<string>();
+  const [pendingGrantRevoke, setPendingGrantRevoke] = useState<string>();
   const [tab, setTab] = useState<'services' | 'devices'>('services');
   const [editingDevice, setEditingDevice] = useState<string>();
   const [deviceLabel, setDeviceLabel] = useState('');
@@ -108,7 +113,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     return { subjectId, grants: own, name: subjectId === currentIdentity ? '此设备' : own.find(grant => grant.label)?.label || '未命名设备' };
   }).sort((a, b) => Number(b.subjectId === currentIdentity) - Number(a.subjectId === currentIdentity));
   const overview = !editingDevice && !showDetails && paired && !adding && !inviting && !initialInvite;
-  const back = () => { setEditingDevice(undefined); setShowDetails(false); setAdding(false); setInviting(false); setInvitation(undefined); setAdvanced(false); setError(''); setNotice(''); setPendingRevoke(undefined); setEntryAddress(''); setCustomAddress(''); };
+  const back = () => { setEditingDevice(undefined); setShowDetails(false); setAdding(false); setInviting(false); setInvitation(undefined); setAdvanced(false); setError(''); setNotice(''); setPendingRevoke(undefined); setPendingInvitationRevoke(undefined); setPendingGrantRevoke(undefined); setEntryAddress(''); setCustomAddress(''); };
   const beginInvite = () => { setInviting(true); setAdding(false); setAdvanced(false); setError(''); setNotice(''); };
   const deviceName = (grant: FederationGrant) => grant.subjectId === currentIdentity ? '此设备' : grant.label || '未命名设备';
   const dismiss = () => { if (selectingSessions) setSelectingSessions(false); else onClose(); };
@@ -162,6 +167,16 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     try { await navigator.clipboard.writeText(invitation.url); setNotice('邀请链接已复制。'); }
     catch { setError('浏览器未允许复制，请长按下方链接复制。'); }
   }
+  const scopeDescription = (scope: FederationGrantInput['scope']) => scope.kind === 'service' ? '全部终端' : scope.sessionIds.map(id => sessions.find(session => session.sessionId === id || session.sourceSessionId === id)?.name || id).join('、');
+  const invitationRevokeControl = (id: string) => !onRevokeInvitation ? null : pendingInvitationRevoke === id ? <div className="mt-2 rounded-lg border border-border bg-background p-3 text-left">
+    <p className="text-xs leading-relaxed">撤销后，原邀请链接和二维码将立即失效。</p>
+    <div className="mt-2 flex justify-end gap-2"><button type="button" className={`${button} text-xs text-muted-foreground`} disabled={busy} onClick={() => setPendingInvitationRevoke(undefined)}>取消</button><button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={async () => {
+      setBusy(true); setError(''); setNotice('');
+      try { await onRevokeInvitation(id); if (invitation?.id === id) setInvitation(undefined); setPendingInvitationRevoke(undefined); setNotice('邀请已撤销，原链接和二维码已失效。'); }
+      catch { setError('暂时无法撤销。如果邀请已被接受，请在设备列表撤销访问权限。'); }
+      finally { setBusy(false); }
+    }}>确认撤销邀请</button></div>
+  </div> : <button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={() => { setPendingInvitationRevoke(id); setNotice(''); }}>撤销邀请</button>;
   const title = serviceNavigation.title || (editingDevice ? '设备名称' : showDetails ? (tab === 'devices' ? '授权详情' : '连接详情') : selectingSessions ? '选择终端' : inviting ? '邀请设备' : adding && paired ? '添加服务' : paired ? '服务与设备' : '连接 Termdock');
   const showBack = !!serviceNavigation.back || !!editingDevice || showDetails || selectingSessions || (paired && (adding || inviting));
   const returnToOverview = () => { if (serviceNavigation.back) { serviceNavigation.back(); return; } if (selectingSessions) setSelectingSessions(false); else back(); };
@@ -191,6 +206,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             {pendingRevoke === device.subjectId && <div className="mt-3 rounded-lg border border-border bg-background p-3"><p className="text-xs leading-relaxed">撤销后，这台设备将断开连接，需重新邀请才能访问。</p><div className="mt-2 flex justify-end gap-2"><button type="button" className={`${button} text-xs text-muted-foreground`} disabled={busy} onClick={() => setPendingRevoke(undefined)}>取消</button><button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={async () => { setBusy(true); setError(''); try { for (const grant of device.grants) await onRevoke?.(grant.id); setPendingRevoke(undefined); setNotice('设备访问权限已撤销。'); } catch { setError('暂时无法撤销，请重试。'); } finally { setBusy(false); } }}>确认撤销</button></div></div>}
           </div>)}{devices.length === 0 && !loadError && <p className="py-5 text-sm text-muted-foreground">暂无设备授权。{onCreateInvite ? '可通过邀请添加设备。' : ''}</p>}</div>}
           {onCreateInvite && <button type="button" className={`${button} mt-4 inline-flex w-full items-center justify-center gap-2 border border-border text-sm`} disabled={busy} onClick={beginInvite}><Plus size={16} />邀请设备</button>}
+          {invitations.length > 0 && <section className="mt-5 border-t border-border pt-4" aria-label="待接受的邀请"><h3 className="text-sm font-medium">待接受的邀请</h3><div className="divide-y divide-border">{invitations.map(item => <div key={item.id} className="py-3"><p className="text-sm">{item.label || '设备邀请'}</p><p className="mt-1 break-words text-xs text-muted-foreground">{permissionName(item.actions)} · {scopeDescription(item.scope)}</p><p className="mt-1 text-xs text-muted-foreground">{new Date(item.invitationExpiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 前有效</p>{invitationRevokeControl(item.id)}</div>)}</div></section>}
           {inactiveGrants.length > 0 && <details className="mt-4 text-xs text-muted-foreground"><summary className="cursor-pointer py-2">已失效的授权（{inactiveGrants.length}）</summary><div className="mt-1 space-y-2 border-l border-border pl-3">{inactiveGrants.map(grant => <p key={grant.id} className="flex gap-3"><span className="min-w-0 flex-1 truncate">{deviceName(grant)}</span><span className="shrink-0">{grant.revokedAt !== undefined ? '已撤销' : '已到期'}</span></p>)}</div></details>}
         </section>}
         {editingDevice && <form className="space-y-4" onSubmit={async event => { event.preventDefault(); setBusy(true); setError(''); try { await onRename?.(editingDevice, deviceLabel.trim()); setEditingDevice(undefined); } catch { setError('暂时无法保存设备名称，请重试。'); } finally { setBusy(false); } }}>
@@ -203,7 +219,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             <h3 className="text-sm font-medium">{device.name}</h3>
             <dl className="space-y-3 rounded-xl bg-surface-2 p-3 text-xs">
               <div><dt className="text-muted-foreground">访问权限</dt><dd className="mt-1">{permissionName(device.grants.flatMap(grant => grant.actions))} · {scopeName(device.grants)}</dd></div>
-              {device.grants.map(grant => <div key={grant.id}><dt className="text-muted-foreground">{grant.routeTargetServiceId ? '允许经此入口访问' : grant.scope.kind === 'sessions' ? '可访问终端' : '有效期'}</dt><dd className="mt-1 leading-relaxed">{grant.routeTargetServiceId ? grant.routeTargetName || '指定服务' : grant.scope.kind === 'sessions' ? grant.scope.sessionIds.map(id => sessions.find(session => session.sessionId === id)?.name || id).join('、') : grant.expiresAt ? new Date(grant.expiresAt).toLocaleString() : '保留至撤销'}</dd>{grant.routeTargetServiceId && onRevoke && <button type="button" className={`${button} mt-1 -ml-3 text-xs text-destructive`} disabled={busy} onClick={async () => { setBusy(true); setError(''); try { await onRevoke(grant.id); } catch { setError('暂时无法撤销，请重试。'); } finally { setBusy(false); } }}>撤销此中转权限</button>}</div>)}
+              {device.grants.map(grant => <div key={grant.id}><dt className="text-muted-foreground">{grant.routeTargetServiceId ? '允许经此入口访问' : permissionName(grant.actions)}</dt><dd className="mt-1 leading-relaxed">{grant.routeTargetServiceId ? grant.routeTargetName || '指定服务' : scopeDescription(grant.scope)}{!grant.routeTargetServiceId && <span className="mt-1 block text-muted-foreground">{grant.expiresAt ? new Date(grant.expiresAt).toLocaleString() : '保留至撤销'}</span>}</dd>{onRevoke && (grant.routeTargetServiceId || device.subjectId !== currentIdentity) && (pendingGrantRevoke === grant.id ? <div className="mt-2"><p className="leading-relaxed">确认撤销此项授权？此设备的其他授权将保留。</p><div className="mt-1 flex justify-end gap-2"><button type="button" className={`${button} text-xs text-muted-foreground`} disabled={busy} onClick={() => setPendingGrantRevoke(undefined)}>取消</button><button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={async () => { setBusy(true); setError(''); try { await onRevoke(grant.id); setPendingGrantRevoke(undefined); setNotice('此项授权已撤销。'); } catch { setError('暂时无法撤销，请重试。'); } finally { setBusy(false); } }}>确认撤销此项授权</button></div></div> : <button type="button" className={`${button} mt-1 -ml-3 text-xs text-destructive`} disabled={busy} onClick={() => setPendingGrantRevoke(grant.id)}>{grant.routeTargetServiceId ? '撤销此中转权限' : '撤销此项授权'}</button>)}</div>)}
               <div><dt className="text-muted-foreground">设备标识</dt><dd className="mt-1 break-all font-mono leading-relaxed text-muted-foreground select-text">{device.subjectId}</dd></div>
             </dl>
           </div>) : <dl className="space-y-4 text-xs"><div><dt className="text-muted-foreground">当前服务</dt><dd className="mt-1 text-sm">{currentServiceName || '当前服务'}</dd></div><div><dt className="text-muted-foreground">服务标识</dt><dd className="mt-1 break-all font-mono leading-relaxed select-text">{currentServiceId}</dd></div><div><dt className="text-muted-foreground">本设备标识</dt><dd className="mt-1 break-all font-mono leading-relaxed select-text">{currentIdentity}</dd></div></dl>}
@@ -220,6 +236,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             <p className="text-xs leading-relaxed text-muted-foreground">仅限一台设备使用 · {new Date(invitation.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 前有效</p>
             <button type="button" className={`${primaryButton} inline-flex w-full items-center justify-center gap-2 text-sm`} onClick={() => void copyInvite()}><Copy size={16} />复制邀请链接</button>
             <details className="text-left text-xs text-muted-foreground"><summary className="cursor-pointer py-2">查看链接</summary><p className="mt-2 select-all break-all">{invitation.url}</p></details>
+            {invitation.id && invitationRevokeControl(invitation.id)}
           </div> : <form className="space-y-5" onSubmit={createInvitation}>
             <fieldset><legend className="mb-2 text-sm font-medium">访问权限</legend><div className="space-y-2">{([
               ['read', '仅查看', '查看终端画面，不可输入命令'],

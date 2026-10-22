@@ -12,6 +12,33 @@ function fixture() {
   return { filePath, store: new InvitationStore(options), reload: () => new InvitationStore(options), advance: (ms: number) => { now += ms; } };
 }
 describe('single-use device invitations', () => {
+  it('lists pending metadata and persists revocation without disclosing a usable code', () => {
+    const f = fixture();
+    const input = { scope: { kind: 'sessions' as const, sessionIds: ['one'] }, actions: ['session.view', 'session.input'], label: '工作手机' };
+    const invite = f.store.create('admin', input);
+    const other = f.store.create('admin', input);
+    expect(f.reload().listPending()).toEqual([
+      { ...input, id: invite.invitationId, createdAt: 1000, invitationExpiresAt: 601000 },
+      { ...input, id: other.invitationId, createdAt: 1000, invitationExpiresAt: 601000 },
+    ]);
+    expect(JSON.stringify(f.store.listPending())).not.toContain(invite.code);
+    expect(f.store.revoke(invite.invitationId)).toBe(true);
+    expect(f.reload().revoke(invite.invitationId)).toBe(false);
+    expect(() => f.reload().consume(invite.code, 'phone', () => true)).toThrow('PAIRING_DENIED');
+    expect(f.reload().consume(other.code, 'phone', () => true)).toMatchObject({ subjectId: 'phone' });
+    expect(f.store.revoke(other.invitationId)).toBe(false);
+    expect(f.store.listPending()).toEqual([]);
+    expect(f.store.subjectLabels()).toEqual({ phone: '工作手机' });
+  });
+  it('omits expired links and expired authorizations from pending invitations', () => {
+    const f = fixture();
+    f.store.create('admin', { scope: { kind: 'service' }, actions: ['session.view'], expiresAt: 1500 });
+    f.advance(500);
+    expect(f.store.listPending()).toEqual([]);
+    f.store.create('admin', { scope: { kind: 'service' }, actions: ['session.view'] });
+    f.advance(600000);
+    expect(f.store.listPending()).toEqual([]);
+  });
   it('persists only a private hash and binds redemption to the actual device without broadening scope', () => {
     const f = fixture();
     const invitation = f.store.create('admin', { scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'], label: '工作手机', expiresAt: 900000 });

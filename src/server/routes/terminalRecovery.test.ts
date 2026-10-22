@@ -65,6 +65,59 @@ it('preserves the generation and acknowledgements on query failures, then detect
   expect((state.incident as unknown as { affectedSessionIds: string[] }).affectedSessionIds).toHaveLength(41);
 });
 
+it('does not flag 44 surviving sessions on PID changes and clears their persisted false alarm', async () => {
+  const sessions = Array.from({ length: 44 }, (_, i) => ({
+    sessionId: `s${i}`, mode: 'tmux', tmuxSessionName: `t${i}`, cwd: '/work',
+    agentResume: { slug: 'trae', sessionId: `native${i}` },
+  }));
+  const live = sessions.map(record => ({ name: record.tmuxSessionName, rawArgs: 'node /app/traex' }));
+  const state = { lastServerPid: 100, incident: null as null | { id: string; detectedAt: number; affectedSessionIds: string[] }, dismissedSessionIds: [] };
+  const persist = vi.fn();
+  const context = routeFunctions(['observeTmuxServerGeneration'], '', {
+    tmuxRecoveryState: state, persistTmuxRecoveryState: persist, getTmuxServerPid: async () => 200,
+    globalSessionState: { sessions }, terminalSessions: new Map(), intentionallyDeletingTmuxSessions: new Set(),
+    detectTmuxRecoveryIncident, retainDismissedTmuxSessions, getErrorMessage: String,
+    agentCustomCommands: () => [],
+    detectAgentFromCommand: (command: string) => command.includes('traex') ? { slug: 'trae' } : null,
+  });
+  await context.observeTmuxServerGeneration(live, true);
+  expect(state.incident).toBeNull();
+  expect(state.lastServerPid).toBe(200);
+
+  const oldIncident = { id: 'old', detectedAt: 123, affectedSessionIds: sessions.map(record => record.sessionId) };
+  state.incident = oldIncident;
+  // Failed scans must not clear persisted recovery information.
+  await context.observeTmuxServerGeneration(live, false);
+  expect(state.incident).toBe(oldIncident);
+  await context.observeTmuxServerGeneration(live, true);
+  expect(state.incident).toBeNull();
+  expect(persist).toHaveBeenCalledTimes(2);
+
+  state.incident = oldIncident;
+  // Neither cached program names nor a recreated shell prove Agent recovery.
+  await context.observeTmuxServerGeneration(live.map(record => ({ ...record, rawArgs: 'zsh', program: 'traex' })), true);
+  expect(state.incident).toBe(oldIncident);
+});
+
+it('uses refreshed pane argv for recovery reconciliation instead of cached tmux options', async () => {
+  const observe = vi.fn();
+  const context = routeFunctions(['buildSessionInventory'], '', {
+    getTmuxStatus: async () => ({ available: true }),
+    listLiveTmuxInventorySessions: async () => [{ name: 'original', program: 'zsh' }],
+    observeTmuxServerGeneration: observe,
+    isTermdockManagedTmuxSession: () => true,
+    resolveLiveTmuxMetadata: async () => ({ program: 'node', rawArgs: 'node /app/traex', cwd: '/work' }),
+    backfillAgentResumeFromTmuxProcess: vi.fn(), syncDynamicTmuxMetadata: vi.fn(),
+    globalSessionState: { sessions: [], updatedAt: 1 }, terminalSessions: new Map(),
+    getTmuxRecoveryView: () => null, inventoryTmuxLiveness: new WeakMap(),
+    dynamicTmuxMetadata: { retain: vi.fn() },
+    // Unbound live sessions are irrelevant to this test's client inventory.
+    isTmuxRecoveryCandidate: () => false,
+  });
+  await context.buildSessionInventory();
+  expect(observe).toHaveBeenCalledWith([expect.objectContaining({ name: 'original', rawArgs: 'node /app/traex' })], true);
+});
+
 function recoveryFixture(program: string | null, rawArgs: string | null = null) {
   const record = { sessionId: 'frontend', mode: 'tmux', tmuxSessionName: 'original', cwd: '/work',
     agentResume: { slug: 'trae', sessionId: 'native' } };

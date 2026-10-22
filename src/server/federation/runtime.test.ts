@@ -97,6 +97,46 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
 }
 
 describe('federation runtime over real encrypted WebSocket', () => {
+  it('lets administrators revoke pending session invitations and denies their redemption', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    owner.channel.send({ type: 'invite-create', id: 'invite', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view', 'session.input'] });
+    const invite = await owner.take('invite');
+    expect(invite).toMatchObject({ type: 'result', id: 'invite', invitationId: expect.any(String) });
+    owner.channel.send({ type: 'grants-list', id: 'list' });
+    const list = await owner.take('list');
+    expect(list.invitations).toEqual([expect.objectContaining({ id: invite.invitationId, scope: { kind: 'sessions', sessionIds: ['source-one'] } })]);
+    expect(JSON.stringify(list)).not.toContain(invite.code);
+    const phone = await f.connect();
+    phone.channel.send({ type: 'invite-revoke', id: 'forbidden', invitationId: invite.invitationId });
+    expect(await phone.take('forbidden')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    phone.channel.send({ type: 'grants-list', id: 'forbidden-list' });
+    expect(await phone.take('forbidden-list')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    owner.channel.send({ type: 'invite-revoke', id: 'cancel', invitationId: invite.invitationId });
+    expect(await owner.take('cancel')).toMatchObject({ type: 'result', revoked: true });
+    phone.channel.send({ type: 'pair', id: 'redeem', code: invite.code });
+    expect(await phone.take('redeem')).toMatchObject({ type: 'error', error: 'PAIRING_DENIED' });
+    owner.channel.send({ type: 'grants-list', id: 'after' });
+    expect(await owner.take('after')).toMatchObject({ invitations: [] });
+  });
+  it('revokes a redeemed session grant while preserving another grant on the same device', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    owner.channel.send({ type: 'invite-create', id: 'invite', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view', 'session.input'] });
+    const invite = await owner.take('invite'), phone = await f.connect();
+    phone.channel.send({ type: 'pair', id: 'redeem', code: invite.code });
+    expect(await phone.take('redeem')).toMatchObject({ type: 'result' });
+    const grant = f.runtime.store.list().find(g => g.subjectId === phone.identity.peerId)!;
+    const other = f.runtime.store.grant({ subjectId: phone.identity.peerId, scope: { kind: 'sessions', sessionIds: ['two'] }, actions: ['session.view'] });
+    phone.channel.send({ type: 'ws-open', id: 'terminal', path: '/api/terminal/one/ws' });
+    await phone.take('terminal', 'ws-ready'); await phone.take('terminal', 'ws-data');
+    owner.channel.send({ type: 'invite-revoke', id: 'already-used', invitationId: invite.invitationId });
+    expect(await owner.take('already-used')).toMatchObject({ revoked: false });
+    owner.channel.send({ type: 'revoke', id: 'revoke', grantId: grant.id });
+    expect(await owner.take('revoke')).toMatchObject({ revoked: true });
+    expect(await phone.take('terminal', 'ws-close')).toMatchObject({ code: 4003 });
+    expect((await phone.http('input-denied', 'POST', '/api/terminal/one/input'))[0]).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+    expect((await phone.http('other', 'GET', '/api/terminal/two/health'))[0]).toMatchObject({ type: 'head', status: 200 });
+    expect(f.runtime.store.list().find(g => g.id === other.id)?.revokedAt).toBeUndefined();
+  });
   it('lets open full-service devices read the task inbox without granting peer administration', async () => {
     let enabled = false;
     const spy = vi.spyOn(authProtection, 'isAuthEnabled').mockImplementation(() => enabled);

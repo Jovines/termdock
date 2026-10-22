@@ -1285,7 +1285,7 @@ export const en: TranslationDictionary = {
     resumeAgentConflict: 'This Agent conversation is already open in another terminal.',
     resumeAgentBusy: 'Wait for the current Agent turn to finish before resuming.',
     resumeAgentTimeout: 'The Agent did not confirm the restored conversation. Check the terminal or retry.',
-    tmuxRecoveryTitle: ({ count }) => `tmux exited unexpectedly; ${count} Agent session(s) can be restored`,
+    tmuxRecoveryTitle: ({ count }) => `${count} Agent session(s) awaiting recovery`,
     tmuxRecoveryHint: 'Termdock kept the native session IDs. Restore continues each conversation in its original tab.',
     tmuxRecoveryRestoreAll: 'Restore all',
     tmuxRecoveryRestoring: 'Restoring…',

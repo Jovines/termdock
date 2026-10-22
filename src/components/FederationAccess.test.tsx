@@ -9,6 +9,50 @@ const code = 'secret-invite-code'.repeat(3);
 const inviteUrl = createInviteLink({ v: 1, serviceId, code, entryUrl: 'https://c.example', name: '工作电脑' });
 afterEach(() => { cleanup(); localStorage.clear(); });
 describe('FederationAccess invitation flow', () => {
+  it('confirms revoking the generated invitation and removes its QR and link only on success', async () => {
+    const onCreateInvite = vi.fn().mockResolvedValue({ id: 'pending-one', url: inviteUrl, expiresAt: Date.now() + 600000 });
+    const onRevokeInvitation = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
+    render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} onRevokeInvitation={onRevokeInvitation} />);
+    fireEvent.click(screen.getByText('邀请设备')); fireEvent.click(screen.getByText('生成邀请'));
+    fireEvent.click(await screen.findByRole('button', { name: '撤销邀请' }));
+    expect(onRevokeInvitation).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(screen.getByText('复制邀请链接')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '撤销邀请' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认撤销邀请' }));
+    await screen.findByRole('alert');
+    expect(screen.getByText('复制邀请链接')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '确认撤销邀请' }));
+    await screen.findByText('邀请已撤销，原链接和二维码已失效。');
+    expect(onRevokeInvitation).toHaveBeenLastCalledWith('pending-one');
+    expect(screen.queryByText('复制邀请链接')).toBeNull();
+    expect(screen.queryByAltText('设备邀请二维码')).toBeNull();
+  });
+  it('lists a pending session invitation after reopening device management', async () => {
+    const onRevokeInvitation = vi.fn().mockResolvedValue(undefined);
+    render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onRevokeInvitation={onRevokeInvitation} sessions={[{ sessionId: 'backend-one', sourceSessionId: 'stable-one', name: '构建任务' }]} invitations={[
+      { id: 'pending', scope: { kind: 'sessions', sessionIds: ['stable-one'] }, actions: ['session.view', 'session.input'], createdAt: Date.now(), invitationExpiresAt: Date.now() + 600000 },
+    ]} />);
+    fireEvent.click(screen.getByRole('tab', { name: /设备/ }));
+    expect(screen.getByText('可操作 · 构建任务')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '撤销邀请' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认撤销邀请' }));
+    await waitFor(() => expect(onRevokeInvitation).toHaveBeenCalledWith('pending'));
+  });
+  it('revokes only the chosen session authorization from device details', async () => {
+    const onRevoke = vi.fn().mockResolvedValue(undefined);
+    render(<FederationAccess paired currentIdentity="owner" onConnect={() => {}} onClose={() => {}} onRevoke={onRevoke} sessions={[{ sessionId: 'backend-one', sourceSessionId: 'stable-one', name: '构建任务' }]} grants={[
+      { id: 'session-write', subjectId: 'phone', scope: { kind: 'sessions', sessionIds: ['stable-one'] }, actions: ['session.view', 'session.input'] },
+      { id: 'other-read', subjectId: 'phone', scope: { kind: 'sessions', sessionIds: ['two'] }, actions: ['session.view'] },
+    ]} />);
+    fireEvent.click(screen.getByRole('tab', { name: /设备/ }));
+    fireEvent.click(screen.getByRole('button', { name: '授权详情' }));
+    expect(screen.getByText('构建任务')).toBeTruthy();
+    fireEvent.click(screen.getAllByRole('button', { name: '撤销此项授权' })[0]);
+    expect(onRevoke).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '确认撤销此项授权' }));
+    await waitFor(() => expect(onRevoke).toHaveBeenCalledExactlyOnceWith('session-write'));
+  });
   it('opens device details separately and saves a recognizable name', async () => {
     const onRename = vi.fn().mockResolvedValue(undefined);
     render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onRename={onRename} onRevoke={async () => {}} grants={[{ id: 'one', subjectId: 'other', scope: { kind: 'service' }, actions: ['session.view'] }]} />);

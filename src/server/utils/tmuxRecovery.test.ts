@@ -25,7 +25,7 @@ describe('tmux recovery detection', () => {
     });
   });
 
-  it('reports recoverable blank replacements when the server pid changed', () => {
+  it('does not infer loss from a PID change when all sessions still exist', () => {
     expect(detectTmuxRecoveryIncident({
       authoritativeTmuxList: true,
       previousServerPid: 100,
@@ -33,7 +33,14 @@ describe('tmux recovery detection', () => {
       candidates,
       liveSessionNames: new Set(['tmux-a', 'tmux-b', 'tmux-c']),
       now: 124,
-    })?.affectedSessionIds).toEqual(['a', 'b']);
+    })).toBeNull();
+  });
+
+  it('includes only missing sessions after a PID change', () => {
+    expect(detectTmuxRecoveryIncident({
+      authoritativeTmuxList: true, previousServerPid: 100, currentServerPid: 200,
+      candidates, liveSessionNames: new Set(['tmux-b', 'tmux-c']),
+    })?.affectedSessionIds).toEqual(['a']);
   });
 
   it('reports unexpected single-session loss but ignores intentional deletion', () => {
@@ -59,6 +66,45 @@ describe('tmux recovery detection', () => {
       id: 'incident', detectedAt: 4, previousServerPid: 1,
       affectedSessionIds: ['a', 'a', '', 1],
     })).toMatchObject({ affectedSessionIds: ['a'], currentServerPid: null });
+  });
+});
+
+describe('persisted recovery reconciliation', () => {
+  const existingIncident = normalizeTmuxRecoveryIncident({
+    id: 'old', detectedAt: 123, previousServerPid: 100, currentServerPid: 200,
+    affectedSessionIds: ['a', 'b', 'deleted'],
+  })!;
+  const input = {
+    authoritativeTmuxList: true, previousServerPid: 200, currentServerPid: 200,
+    candidates, liveSessionNames: new Set(['tmux-a', 'tmux-b', 'tmux-c']), existingIncident,
+  };
+
+  it('removes verified running Agents and deleted records from an old incident', () => {
+    expect(detectTmuxRecoveryIncident({ ...input, restoredSessionIds: new Set(['a']) }))
+      .toEqual({ ...existingIncident, affectedSessionIds: ['b'] });
+    expect(detectTmuxRecoveryIncident({ ...input, restoredSessionIds: new Set(['a', 'b']) }))
+      .toBeNull();
+  });
+
+  it('keeps a recreated shell pending until its Agent is verified running', () => {
+    const pending = { ...existingIncident, affectedSessionIds: ['a', 'b'] };
+    expect(detectTmuxRecoveryIncident({ ...input, existingIncident: pending })).toBe(pending);
+  });
+
+  it('merges new losses while clearing recovered entries', () => {
+    expect(detectTmuxRecoveryIncident({
+      ...input, existingIncident: { ...existingIncident, affectedSessionIds: ['a'] },
+      liveSessionNames: new Set(['tmux-a', 'tmux-c']), restoredSessionIds: new Set(['a']),
+    })).toEqual({ ...existingIncident, affectedSessionIds: ['b'] });
+  });
+
+  it('drops acknowledged, intentionally deleted and no longer resumable entries', () => {
+    expect(detectTmuxRecoveryIncident({
+      ...input, dismissedSessionIds: new Set(['a']), intentionallyDeleting: new Set(['tmux-b']),
+    })).toBeNull();
+    expect(detectTmuxRecoveryIncident({
+      ...input, candidates: candidates.map(candidate => ({ ...candidate, resumable: false })),
+    })).toBeNull();
   });
 });
 

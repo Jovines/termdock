@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import type { AuthorizationScope, GrantInput } from './authorization.js';
 
 export interface InvitationInput { scope: AuthorizationScope; actions: string[]; label?: string; expiresAt?: number }
+export interface PendingInvitation extends InvitationInput { id: string; createdAt: number; invitationExpiresAt: number }
 interface Invitation extends InvitationInput {
   hash: string; issuerId: string; createdAt: number; invitationExpiresAt: number;
   consumedAt?: number; consumedBy?: string;
@@ -62,7 +63,18 @@ export class InvitationStore {
       fsyncSync(fd); closeSync(fd); fd = undefined; renameSync(temporary, this.options.filePath);
     } finally { if (fd !== undefined) closeSync(fd); try { unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
   }
-  create(issuerId: string, input: InvitationInput): { code: string; expiresAt: number } {
+  listPending(): PendingInvitation[] {
+    const now = this.now();
+    return this.read().filter(i => i.consumedAt === undefined && i.invitationExpiresAt > now && (i.expiresAt === undefined || i.expiresAt > now))
+      .map(({ hash, scope, actions, label, expiresAt, createdAt, invitationExpiresAt }) => ({ id: hash, scope, actions, ...(label ? { label } : {}), ...(expiresAt === undefined ? {} : { expiresAt }), createdAt, invitationExpiresAt }));
+  }
+  revoke(id: string): boolean {
+    const current = this.read();
+    const index = current.findIndex(i => i.hash === id && i.consumedAt === undefined);
+    if (index < 0) return false;
+    current.splice(index, 1); this.save(current); return true;
+  }
+  create(issuerId: string, input: InvitationInput): { invitationId: string; code: string; expiresAt: number } {
     requireValid(identity(issuerId)); validateInvitation(input);
     const now = this.now(); requireValid(input.expiresAt === undefined || input.expiresAt > now);
     const current = this.read().filter(i => i.consumedAt !== undefined || i.invitationExpiresAt > now);
@@ -71,7 +83,7 @@ export class InvitationStore {
     while (current.length >= 2048) { const index = current.findIndex(i => i.consumedAt !== undefined); if (index < 0) throw new Error('INVITATION_LIMIT'); current.splice(index, 1); }
     const code = randomBytes(32).toString('base64url');
     const invitation: Invitation = { ...structuredClone(input), ...(input.label ? { label: input.label.trim() } : {}), hash: this.hash(code), issuerId, createdAt: now, invitationExpiresAt: now + TTL };
-    current.push(invitation); this.save(current); return { code, expiresAt: invitation.invitationExpiresAt };
+    current.push(invitation); this.save(current); return { invitationId: invitation.hash, code, expiresAt: invitation.invitationExpiresAt };
   }
   consume(code: string, subjectId: string, issuerAllowed: (issuerId: string) => boolean): GrantInput {
     if (!/^[A-Za-z0-9_-]{43}$/.test(code) || !identity(subjectId)) throw new Error('PAIRING_DENIED');

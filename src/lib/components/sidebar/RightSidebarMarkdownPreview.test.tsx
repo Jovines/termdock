@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, computeMarkdownImageDisplayBox, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, isSvgImageSrc, resolveMarkdownLocalLinkTarget, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
 
@@ -1342,6 +1342,103 @@ describe('right sidebar Markdown preview rendering', () => {
     fireEvent.error(video);
     expect(container.querySelector('video')).toBeNull();
     expect(container.textContent).toContain('当前 Markdown 阅读器不支持内嵌视频时，请使用上方录屏链接。');
+  });
+
+  it('renders source-based HTML videos with a poster and responsive sizing', () => {
+    const { container } = renderPreview('<video controls preload="metadata" poster="http://10.3.64.5:18766/demo.png" style="width: 100%; max-width: 720px;"><source src="http://10.3.64.5:18766/demo.mp4" type="video/mp4"></video>');
+    const video = container.querySelector('video');
+    expect(video?.getAttribute('src')).toBe('http://10.3.64.5:18766/demo.mp4');
+    expect(video?.getAttribute('poster')).toBe('http://10.3.64.5:18766/demo.png');
+    expect(video?.controls).toBe(true);
+    expect(video?.playsInline).toBe(true);
+    expect(video?.style.width).toBe('100%');
+    expect(video?.style.maxWidth).toBe('720px');
+    expect(container.textContent).not.toContain('<source');
+  });
+
+  it('groups multiline video tags as one source block and resolves local sources and posters', () => {
+    const markdown = ['Before', '<video controls poster="cover.png">', '  <source src="demo.mkv">', '  <source src="../clips/demo%20one.mp4#t=2">', '  Fallback text', '</video>', 'After'];
+    const blocks = buildMarkdownPreviewBlocks(markdown, '/repo/docs/guide.md', '/repo');
+    expect(blocks[1]).toMatchObject({ startLine: 2, endLine: 6 });
+    const { container } = render(<>{blocks.map((block) => <div key={block.key}>{renderBlockContent(block.content)}</div>)}</>);
+    const video = container.querySelector('video');
+    expect(video?.getAttribute('src')).toBe('/api/terminal/fs/video?path=%2Frepo%2Fclips%2Fdemo%20one.mp4&action=view_file#t=2');
+    expect(video?.getAttribute('poster')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fcover.png');
+    expect(container.textContent).toContain('Before');
+    expect(container.textContent).toContain('After');
+    fireEvent.error(video!);
+    expect(container.textContent).toContain('Fallback text');
+  });
+
+  it.each([
+    '![Demo](../clips/demo.mp4 "Recording")',
+    '[Demo](../clips/demo.mp4 "Recording")',
+    '![Demo][clip]\n\n[clip]: ../clips/demo.mp4 "Recording"',
+    '[Demo][clip]\n\n[clip]: ../clips/demo.mp4 "Recording"',
+  ])('previews Markdown video destinations: %s', (markdown) => {
+    const { container } = renderPreview(markdown);
+    const video = container.querySelector('video');
+    expect(video?.getAttribute('src')).toBe('/api/terminal/fs/video?path=%2Frepo%2Fclips%2Fdemo.mp4&action=view_file');
+    expect(video?.getAttribute('aria-label')).toBe('Demo');
+    expect(video?.title).toBe('Recording');
+    expect(video?.controls).toBe(true);
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('keeps the original video link available and does not infer video from query strings', () => {
+    const { container } = renderPreview('[Demo](https://example.com/demo.MP4?token=abc#t=1) and [Page](https://example.com/view?file=demo.mp4)');
+    expect(container.querySelectorAll('video')).toHaveLength(1);
+    expect(container.querySelector('video')?.getAttribute('src')).toBe('https://example.com/demo.MP4?token=abc#t=1');
+    expect(screen.getByRole('link', { name: 'Demo' }).getAttribute('href')).toBe('https://example.com/demo.MP4?token=abc#t=1');
+    expect(screen.getByRole('link', { name: 'Page' })).toBeTruthy();
+  });
+
+  it('keeps unsafe video sources and fenced video examples inert', () => {
+    const { container } = renderPreview([
+      '<video controls poster="javascript:alert(1)"><source src="javascript:alert(1)"></video>',
+      '',
+      '```html',
+      '<video controls><source src="demo.mp4"></video>',
+      '```',
+      '',
+      '`![Demo](demo.mp4)` and `[Demo](demo.mp4)`',
+    ].join('\n'));
+    expect(container.querySelector('video')).toBeNull();
+    expect(container.querySelector('source')).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.textContent).toContain('<source src="javascript:alert(1)">');
+  });
+
+  it.each([false, true])('withholds native business sources without a worker and handles fetch failure (%s)', async (offline) => {
+    vi.useFakeTimers();
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: undefined });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      if (offline) throw new Error('Encrypted channel disconnected');
+      return new Response('video bytes', { headers: { 'Content-Type': 'video/mp4' } });
+    });
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = vi.fn(() => 'blob:https://app.test/video');
+    URL.revokeObjectURL = vi.fn();
+    try {
+      const { container } = renderPreview('![Demo](demo.mp4)');
+      expect(container.querySelector('video')).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledWith('/api/terminal/fs/video?path=%2Frepo%2Fdocs%2Fdemo.mp4&action=view_file', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      if (offline) {
+        expect(container.querySelector('video')).toBeNull();
+        expect(container.textContent).toBeTruthy();
+      } else {
+        expect(container.querySelector('video')?.getAttribute('src')).toBe('blob:https://app.test/video');
+      }
+    } finally {
+      cleanup();
+      fetchMock.mockRestore();
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+      vi.useRealTimers();
+    }
   });
 
   it('keeps raw <video> tags literal when the src cannot be served', () => {

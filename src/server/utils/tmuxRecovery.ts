@@ -37,30 +37,39 @@ export function detectTmuxRecoveryIncident(input: {
   intentionallyDeleting?: ReadonlySet<string>;
   existingIncident?: TmuxRecoveryIncident | null;
   dismissedSessionIds?: ReadonlySet<string>;
+  /** Sessions with a matching Agent confirmed running in their live pane. */
+  restoredSessionIds?: ReadonlySet<string>;
   now?: number;
 }): TmuxRecoveryIncident | null {
   // A failed/disabled inventory is an unknown observation, never evidence of loss.
   if (!input.authoritativeTmuxList) return input.existingIncident ?? null;
-  if (input.existingIncident) return input.existingIncident;
   const intentionallyDeleting = input.intentionallyDeleting ?? new Set<string>();
   const recoverable = input.candidates.filter((candidate) =>
     candidate.resumable
     && !input.dismissedSessionIds?.has(candidate.sessionId)
+    && !input.restoredSessionIds?.has(candidate.sessionId)
     && !intentionallyDeleting.has(candidate.tmuxSessionName));
   const missing = recoverable.filter((candidate) =>
     !input.liveSessionNames.has(candidate.tmuxSessionName));
-  if (recoverable.length === 0) return null;
-
-  const knownTmuxCount = input.candidates.filter((candidate) =>
-    !intentionallyDeleting.has(candidate.tmuxSessionName)).length;
-  const serverGenerationChanged = input.previousServerPid !== null
-    && input.currentServerPid !== input.previousServerPid;
-  const bulkLoss = knownTmuxCount >= 2
-    && input.liveSessionNames.size === 0
-    && missing.length >= 1;
-  if (!serverGenerationChanged && !bulkLoss && missing.length === 0) return null;
-  const affected = serverGenerationChanged ? recoverable : missing;
-  if (affected.length === 0) return null;
+  const existingIncident = input.existingIncident;
+  if (existingIncident) {
+    const eligibleIds = new Set(recoverable.map(candidate => candidate.sessionId));
+    // A recreated shell still needs recovery. Only a verified running Agent,
+    // removed record or explicit acknowledgement can retire its old entry.
+    const affectedSessionIds = Array.from(new Set([
+      ...existingIncident.affectedSessionIds.filter(id => eligibleIds.has(id)),
+      ...missing.map(candidate => candidate.sessionId),
+    ]));
+    if (affectedSessionIds.length === 0) return null;
+    if (affectedSessionIds.length === existingIncident.affectedSessionIds.length
+      && affectedSessionIds.every((id, index) => id === existingIncident.affectedSessionIds[index])) {
+      return existingIncident;
+    }
+    return { ...existingIncident, affectedSessionIds };
+  }
+  // A PID change is diagnostic context, not proof of session loss or a crash.
+  // Require an actually missing session before creating a recovery incident.
+  if (missing.length === 0) return null;
 
   const now = input.now ?? Date.now();
   return {
@@ -68,7 +77,7 @@ export function detectTmuxRecoveryIncident(input: {
     detectedAt: now,
     previousServerPid: input.previousServerPid,
     currentServerPid: input.currentServerPid,
-    affectedSessionIds: affected.map((candidate) => candidate.sessionId),
+    affectedSessionIds: missing.map((candidate) => candidate.sessionId),
   };
 }
 

@@ -389,7 +389,10 @@ export async function createFederationRuntime(app: express.Express, directory: s
             const name = packet.onlyIfMissing === true && existing && !deviceNames.list()[target] ? existing : deviceNames.set(target, packet.name, packet.onlyIfMissing === true);
             send({ type: 'result', id: packet.id, name });
           } else if (packet.type === 'grants-list') {
-            check('authorization.manage'); send({ type: 'result', id: packet.id, grants: store.list(), deviceProfiles: deviceProfiles.list(), subjectLabels: { ...invitations.subjectLabels(), ...deviceNames.list() } });
+            check('authorization.manage'); send({ type: 'result', id: packet.id, grants: store.list(), invitations: invitations.listPending(), deviceProfiles: deviceProfiles.list(), subjectLabels: { ...invitations.subjectLabels(), ...deviceNames.list() } });
+          } else if (packet.type === 'invite-revoke') {
+            check('authorization.manage');
+            send({ type: 'result', id: packet.id, revoked: typeof packet.invitationId === 'string' && invitations.revoke(packet.invitationId) });
           } else if (packet.type === 'grant') {
             check('authorization.manage'); send({ type: 'result', id: packet.id, grant: store.grant(packet.grant as GrantInput) });
           } else if (packet.type === 'revoke') {

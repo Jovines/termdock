@@ -1285,7 +1285,7 @@ export const zh: TranslationDictionary = {
     resumeAgentConflict: '该 Agent 会话已在另一个 Terminal 中打开。',
     resumeAgentBusy: '当前 Agent 回合尚未结束，暂时不能恢复。',
     resumeAgentTimeout: 'Agent 未确认已载入原会话，请查看 Terminal 输出或重试。',
-    tmuxRecoveryTitle: ({ count }) => `检测到 tmux 异常退出，${count} 个 Agent 可恢复`,
+    tmuxRecoveryTitle: ({ count }) => `${count} 个 Agent 会话待恢复`,
     tmuxRecoveryHint: 'Termdock 保留了原生会话 ID。恢复操作会在原标签页中继续之前的对话。',
     tmuxRecoveryRestoreAll: '恢复全部',
     tmuxRecoveryRestoring: '正在恢复…',

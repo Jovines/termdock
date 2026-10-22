@@ -206,6 +206,33 @@ describe('device authorization lifecycle', () => {
 });
 
 describe('entry recovery and invitation address contract', () => {
+  it('loads and revokes pending invitations over the active secure client, including redemption races', async () => {
+    const pending = { id: 'pending-session', scope: { kind: 'sessions', sessionIds: ['stable-one'] }, actions: ['session.view', 'session.input'], createdAt: Date.now(), invitationExpiresAt: Date.now() + 600000 };
+    let pendingItems = [pending], canRevoke = true;
+    mocks.request.mockImplementation(async (packet: { type: string }) => {
+      if (packet.type === 'session-list') return { items: [] };
+      if (packet.type === 'grants-list') return { grants: [], invitations: pendingItems };
+      if (packet.type === 'route-access') return { grants: [] };
+      if (packet.type === 'invite-create') { pendingItems = [pending]; return { invitationId: pending.id, code: 'b'.repeat(43), expiresAt: pending.invitationExpiresAt }; }
+      if (packet.type === 'invite-revoke') { pendingItems = []; return { revoked: canRevoke }; }
+      return permitted;
+    });
+    render(<SecureAccessGate><div>Active terminal</div></SecureAccessGate>);
+    await screen.findByText('Active terminal');
+    fireEvent(window, new Event('termdock:open-services'));
+    await waitFor(() => expect(mocks.accessProps.invitations).toEqual([pending]));
+    await act(async () => { await mocks.accessProps.onRevokeInvitation(pending.id); });
+    expect(mocks.request).toHaveBeenCalledWith({ type: 'invite-revoke', invitationId: pending.id });
+    expect(mocks.accessProps.invitations).toEqual([]);
+    await act(async () => {
+      const result = await mocks.accessProps.onCreateInvite({ scope: pending.scope, actions: pending.actions });
+      expect(result.id).toBe(pending.id);
+    });
+    expect(mocks.accessProps.invitations).toEqual([pending]);
+    canRevoke = false;
+    await act(async () => { await expect(mocks.accessProps.onRevokeInvitation(pending.id)).rejects.toThrow('INVITATION_NOT_PENDING'); });
+    expect(mocks.accessProps.invitations).toEqual([]);
+  });
   it('offers management before first single-service login and returns without authorization', async () => {
     mocks.saved.mockReturnValue(undefined);
     render(<SecureAccessGate><div>Active terminal</div></SecureAccessGate>);

@@ -546,6 +546,7 @@ function isMarkdownBlockStart(line: string): boolean {
     || isMarkdownHorizontalRule(line)
     || /^>\s?/.test(trimmed)
     || /^(```|~~~)/.test(trimmed)
+    || /^<video\b/i.test(trimmed)
     || /^(?:[-+*]|\d+[.)])\s+/.test(trimmed);
 }
 
@@ -879,7 +880,19 @@ function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, r
 function resolveMarkdownVideoSrc(src: string, markdownFilePath: string | null, rootPath: string | null): string | null {
   // The /video route streams with Range support, so the native <video> can
   // seek without buffering the whole file (unlike images' blob fetch).
-  return resolveMarkdownFsMediaSrc(src, markdownFilePath, rootPath, isPreviewableVideoPath, buildVideoPreviewUrl);
+  if (/^https?:\/\//i.test(src.trim())) return src.trim();
+  const target = resolveMarkdownLocalLinkTarget(src, markdownFilePath, rootPath);
+  if (!target || !isPreviewableVideoPath(target.path)) return null;
+  return buildVideoPreviewUrl(target.path) + (target.fragment ? `#${target.fragment}` : '');
+}
+
+function isMarkdownVideoTarget(src: string): boolean {
+  // Infer videos only from the path, never a query parameter or link label.
+  try {
+    return isPreviewableVideoPath(decodeURIComponent(new URL(src, 'https://markdown.invalid/').pathname));
+  } catch {
+    return false;
+  }
 }
 
 // Display-height band for normalizing SVGs in the markdown preview. SVG files
@@ -1151,6 +1164,10 @@ function renderMarkdownImage(
   // invalid HTML with conflicting click targets).
   options?: { fallbackText?: string; requestedWidthPx?: number; interactive?: boolean },
 ): ReactNode {
+  if (!options?.fallbackText && isMarkdownVideoTarget(src)) {
+    const url = resolveMarkdownVideoSrc(src, context.markdownFilePath, context.rootPath);
+    if (url) return <MarkdownVideo key={key} url={url} label={alt} title={title} hasControls />;
+  }
   const imageSrc = resolveMarkdownImageSrc(src, context.markdownFilePath, context.rootPath);
   if (!imageSrc) return options?.fallbackText ?? `![${alt}](${src})`;
 
@@ -1387,19 +1404,23 @@ function parseMarkdownHtmlImgAttrs(token: string): { src: string; alt?: string; 
   return { src, alt: attrs.get('alt'), title: attrs.get('title'), widthPx: width ? Number(width[1]) : undefined };
 }
 
-// Parses a raw-HTML `<video src="…" controls width="…">fallback</video>` tag:
+// Parses raw-HTML videos with either src or child <source> tags:
 // attrs from the open tag, plus the boolean controls attribute (detected on
 // the tag with quoted values removed, so words inside src don't false-positive)
 // and the inner text between the tags as the author's unsupported-reader fallback.
-function parseMarkdownHtmlVideoTag(token: string): { src: string; fallbackText: string; widthPx?: number; controls: boolean } {
+function parseMarkdownHtmlVideoTag(token: string): { sources: string[]; poster?: string; fallbackText: string; widthPx?: number; maxWidthPx?: number; controls: boolean } {
   const openEnd = token.indexOf('>');
   const openTag = openEnd < 0 ? token : token.slice(0, openEnd + 1);
   const attrs = parseMarkdownHtmlAttrs(openTag);
   const src = attrs.get('src')?.trim() ?? '';
+  const sources = src ? [src] : Array.from(token.slice(openEnd + 1).matchAll(/<source\b[^>]*>/gi), (match) => (
+    parseMarkdownHtmlAttrs(match[0]).get('src')?.trim() ?? ''
+  )).filter(Boolean);
   const width = attrs.get('width')?.trim().match(/^(\d+(?:\.\d+)?)(?:px)?$/i);
+  const maxWidth = attrs.get('style')?.match(/(?:^|;)\s*max-width\s*:\s*(\d+(?:\.\d+)?)px\s*(?:;|$)/i);
   const quotedStripped = openTag.replace(/=\s*(?:"[^"]*"|'[^']*')/g, ' ');
   const fallbackText = openEnd < 0 ? '' : token.slice(openEnd + 1).replace(/<\/video\s*>$/i, '').replace(/<[^>]*>/g, '').trim();
-  return { src, fallbackText, widthPx: width ? Number(width[1]) : undefined, controls: /\bcontrols\b/i.test(quotedStripped) };
+  return { sources, poster: attrs.get('poster'), fallbackText, widthPx: width ? Number(width[1]) : undefined, maxWidthPx: maxWidth ? Number(maxWidth[1]) : undefined, controls: /\bcontrols\b/i.test(quotedStripped) };
 }
 
 // Inline raw-HTML `<video>` in the markdown preview. The URL is the streaming
@@ -1407,14 +1428,16 @@ function parseMarkdownHtmlVideoTag(token: string): { src: string; fallbackText: 
 // file); auth rides the encrypted media source like the file-preview player.
 // On load failure the author's inner text — the content these tags carry
 // exactly for readers without video — is shown instead of a dead player.
-function MarkdownVideo({ url, fallbackText, widthPx, hasControls }: { url: string; fallbackText?: string; widthPx?: number; hasControls: boolean }) {
+function MarkdownVideo({ url, poster, fallbackText, widthPx, maxWidthPx, hasControls, label, title }: { url: string; poster?: string; fallbackText?: string; widthPx?: number; maxWidthPx?: number; hasControls: boolean; label?: string; title?: string }) {
   const { t } = useI18n();
   const [failed, setFailed] = useState(false);
   const mediaUrl = useEncryptedMediaSource(url, () => setFailed(true));
+  const posterUrl = useEncryptedMediaSource(poster ?? '');
+  useEffect(() => setFailed(false), [url]);
 
   // Not yet served by the worker controlling this page: mount nothing rather
   // than an empty frame; the video appears as soon as the source is usable.
-  if (!mediaUrl) return null;
+  if (!mediaUrl && !failed) return null;
 
   return (
     <span className="my-2 block max-w-full overflow-hidden rounded-md border border-border/20 bg-surface-2">
@@ -1424,9 +1447,12 @@ function MarkdownVideo({ url, fallbackText, widthPx, hasControls }: { url: strin
         <video
           className="block max-w-full"
           src={mediaUrl}
+          poster={posterUrl || undefined}
+          aria-label={label}
+          title={title}
           // React does not forward width/height as media-element attributes;
           // CSS width keeps the intrinsic aspect ratio (max-w-full caps it).
-          style={widthPx ? { width: `${widthPx}px` } : undefined}
+          style={{ width: widthPx ? `${widthPx}px` : '100%', maxWidth: maxWidthPx ? `${maxWidthPx}px` : undefined }}
           controls={hasControls}
           preload="metadata"
           playsInline
@@ -1473,11 +1499,11 @@ function renderMarkdownHtmlInline(token: string, key: string, context: MarkdownR
     return renderMarkdownImage(key, alt ?? '', src, title, context, { fallbackText: token, requestedWidthPx: widthPx });
   }
   if (/^<\s*video\b[^>]*>[\s\S]*?<\/video\s*>$/i.test(token)) {
-    const { src, fallbackText, widthPx, controls } = parseMarkdownHtmlVideoTag(token);
-    if (!src) return null;
-    const videoUrl = resolveMarkdownVideoSrc(src, context.markdownFilePath, context.rootPath);
+    const { sources, poster, fallbackText, widthPx, maxWidthPx, controls } = parseMarkdownHtmlVideoTag(token);
+    const videoUrl = sources.map((src) => resolveMarkdownVideoSrc(src, context.markdownFilePath, context.rootPath)).find(Boolean);
     if (!videoUrl) return null;
-    return <MarkdownVideo key={key} url={videoUrl} fallbackText={fallbackText} widthPx={widthPx} hasControls={controls} />;
+    const posterUrl = poster ? resolveMarkdownImageSrc(poster, context.markdownFilePath, context.rootPath) : null;
+    return <MarkdownVideo key={key} url={videoUrl} poster={posterUrl ?? undefined} fallbackText={fallbackText} widthPx={widthPx} maxWidthPx={maxWidthPx} hasControls={controls} />;
   }
   if (/^<br\s*\/?>$/i.test(token)) return <br key={key} />;
 
@@ -1606,11 +1632,19 @@ function renderMarkdownInlineContent(
       const href = inlineTarget?.href ?? definition?.href ?? null;
       const safeHref = href ? getSafeMarkdownHref(href) : null;
       const label = inlineLinkMatch?.[1] ?? referenceLinkMatch?.[1] ?? shortcutLinkMatch?.[1] ?? '';
-      nodes.push(safeHref ? (
+      const videoUrl = safeHref && isMarkdownVideoTarget(safeHref)
+        ? resolveMarkdownVideoSrc(safeHref, context.markdownFilePath, context.rootPath) : null;
+      const link = safeHref ? (
         <a key={key} href={safeHref} title={inlineTarget?.title ?? definition?.title} target="_blank" rel="noreferrer" className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
           {renderMarkdownInline(label, `${key}-link`, wrapLongTokens, context)}
         </a>
-      ) : token);
+      ) : token;
+      nodes.push(videoUrl ? (
+        <span key={key}>
+          <MarkdownVideo url={videoUrl} label={label} title={inlineTarget?.title ?? definition?.title} hasControls />
+          {link}
+        </span>
+      ) : link);
     }
 
     lastIndex = index + token.length;
@@ -2025,6 +2059,19 @@ function buildMarkdownQuoteNodeRenders(lines: string[], keyPrefix: string, conte
           </details>
         ),
       });
+      continue;
+    }
+
+    if (/^<video\b/i.test(trimmed)) {
+      const blockStart = index;
+      const videoLines = [line];
+      index += 1;
+      while (!videoLines[videoLines.length - 1].match(/<\/video\s*>/i) && index < lines.length && lines[index].trim()) {
+        context.budget.check();
+        videoLines.push(lines[index++]);
+      }
+      const token = videoLines.join('\n');
+      nodes.push({ kind: 'static', node: <div key={`${keyPrefix}-video-${blockStart}`}>{renderMarkdownInline(token, `${keyPrefix}-video-${blockStart}`, true, context)}</div> });
       continue;
     }
 
@@ -2463,6 +2510,23 @@ export function buildMarkdownPreviewRenderResult(
             )}
           </details>
         ),
+      });
+      continue;
+    }
+
+    if (/^<video\b/i.test(trimmed)) {
+      const blockStart = index;
+      const videoLines = [line];
+      index += 1;
+      while (!/<\/video\s*>/i.test(videoLines[videoLines.length - 1]) && index < lines.length && lines[index].trim()) {
+        context.budget.check();
+        videoLines.push(lines[index++]);
+      }
+      blocks.push({
+        key: `video-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: <div>{renderMarkdownInline(videoLines.join('\n'), `video-${blockStart}`, true, context)}</div>,
       });
       continue;
     }

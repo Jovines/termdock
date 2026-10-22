@@ -3642,9 +3642,21 @@ async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]
     return;
   }
   const liveSessionNames = new Set(liveTmuxSessions.map((session) => session.name));
+  const liveTmuxByName = new Map(liveTmuxSessions.map(session => [session.name, session]));
+  const restoredSessionIds = new Set<string>();
   const candidates = globalSessionState.sessions.flatMap((record) => {
     if (record.mode !== 'tmux' || !record.tmuxSessionName) return [];
     const backend = record.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+    const live = liveTmuxByName.get(record.tmuxSessionName);
+    // rawArgs comes from the refreshed foreground probe, not persisted tmux
+    // options. A live shell alone does not prove its Agent was restored.
+    const liveAgent = live?.rawArgs
+      ? detectAgentFromCommand(live.rawArgs, agentCustomCommands())
+      : null;
+    if (live && record.agentResume?.slug
+      && (liveAgent?.slug === record.agentResume.slug || backend?.agent?.slug === record.agentResume.slug)) {
+      restoredSessionIds.add(record.sessionId);
+    }
     return [{
       sessionId: record.sessionId,
       tmuxSessionName: record.tmuxSessionName,
@@ -3662,6 +3674,7 @@ async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]
     liveSessionNames,
     intentionallyDeleting: intentionallyDeletingTmuxSessions,
     existingIncident: tmuxRecoveryState.incident,
+    restoredSessionIds,
     // Apply acknowledgements before rearming sessions observed alive in this scan.
     dismissedSessionIds: new Set(tmuxRecoveryState.dismissedSessionIds),
   });
@@ -3671,7 +3684,7 @@ async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]
     tmuxRecoveryState.incident = incident;
     changed = true;
     if (incident) {
-      console.error(`[tmux-recovery] shared server loss detected; ${incident.affectedSessionIds.length} Agent session(s) can be restored`);
+      console.warn(`[tmux-recovery] session recovery pending; ${incident.affectedSessionIds.length} Agent session(s) can be restored`);
     }
   }
   if (currentServerPid !== null && currentServerPid !== tmuxRecoveryState.lastServerPid) {
@@ -3697,8 +3710,6 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       liveTmuxSessions = [];
     }
   }
-  await observeTmuxServerGeneration(liveTmuxSessions, authoritativeTmuxList);
-
   const refreshedTmuxSessions = await Promise.all(liveTmuxSessions.map(async (tmux): Promise<TmuxInventoryMeta> => {
     if (!isTermdockManagedTmuxSession(tmux)) {
       return tmux;
@@ -3724,6 +3735,8 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       return tmux;
     }
   }));
+
+  await observeTmuxServerGeneration(refreshedTmuxSessions, authoritativeTmuxList);
 
   const liveTmuxByName = new Map(refreshedTmuxSessions.map((session) => [session.name, session]));
   let synchronizedPersistedFields = false;

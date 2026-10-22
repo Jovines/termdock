@@ -7,6 +7,7 @@ import type { DeviceProfile } from '../../server/federation/deviceProfile';
 import { defaultDeviceName } from './deviceName';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import FederationAccess, { type FederationGrant, type FederationInviteInput } from '../../components/FederationAccess';
+import type { PendingInvitation } from '../../server/federation/invitations';
 import { connectDevice, connectionRoutes, connectionAddresses, createEntryInvitation, authenticateKnownConnection, preferDirectConnection, connectServiceAddress, connectOpenService, currentSecureClient, getActiveClient, getIdentity, invalidateSecureTransport, savedConnection, SECURE_STATE_EVENT, type ConnectionIntent } from './browserIntegration';
 import { createInviteLink, parseInviteLink } from './inviteLink';
 import { SessionAccessView } from './SessionAccessView';
@@ -48,6 +49,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [error, setError] = useState(false);
   const [connectionMessage, setConnectionMessage] = useState('正在连接服务…');
   const [grants, setGrants] = useState<FederationGrant[]>([]);
+  const [invitations, setInvitations] = useState<PendingInvitation[]>([]);
   const [sessions, setSessions] = useState<{ sessionId: string; name: string; sourceSessionId?: string }[]>([]);
   const [fullService, setFullService] = useState(false);
   const [canManage, setCanManage] = useState(false);
@@ -261,12 +263,14 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     try {
       if (canManage) {
         const result = await client.request({ type: 'grants-list' });
+        setInvitations((result.invitations ?? []) as PendingInvitation[]);
         const labels = (result.subjectLabels ?? {}) as Record<string, string>;
         const access = await client.request({ type: 'route-access' });
         const directory = await listServiceConnections();
         const routeGrants: FederationGrant[] = (Array.isArray(access.grants) ? access.grants as import('./browserIntegration').EntryRouteGrant[] : []).map(grant => ({ id: `route:${grant.id}`, subjectId: grant.subjectId, scope: { kind: 'service' }, actions: ['route.use'], routeTargetServiceId: grant.targetServiceId, routeTargetName: directory.find(service => service.targetPeerId === grant.targetServiceId)?.label || '指定服务', ...(grant.active ? {} : { revokedAt: grant.revokedAt ?? 0 }) }));
         setGrants([...(result.grants as FederationGrant[]), ...routeGrants].map(grant => ({ ...grant, label: labels[grant.subjectId], deviceProfile: (result.deviceProfiles as Record<string, DeviceProfile> | undefined)?.[grant.subjectId] })));
       } else {
+        setInvitations([]);
         const result = await client.request({ type: 'permissions' });
         setGrants((result.grants ?? []) as FederationGrant[]);
       }
@@ -377,7 +381,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     }
     const result = await client.request({ type: 'invite-create', ...grantInput });
     if (typeof result.code !== 'string' || typeof result.expiresAt !== 'number') throw new Error('暂时无法生成邀请。');
-    return { url: createInviteLink({ v: 1, serviceId: client.targetPeerId, code: result.code, entryUrl: backup?.url || targetUrl, serviceUrl: targetUrl, name: serviceName, entryServiceId: backup?.targetPeerId, routeCode: backup?.routeCode }), expiresAt: result.expiresAt };
+    await refresh();
+    return { id: typeof result.invitationId === 'string' ? result.invitationId : undefined, url: createInviteLink({ v: 1, serviceId: client.targetPeerId, code: result.code, entryUrl: backup?.url || targetUrl, serviceUrl: targetUrl, name: serviceName, entryServiceId: backup?.targetPeerId, routeCode: backup?.routeCode }), expiresAt: result.expiresAt };
   };
   return <>
     {ready ? fullService && !remoteSession ? children : <SessionAccessView client={currentSecureClient()!} initialSessionId={remoteSession} /> : checking && !error && !open ? <StartupScreen
@@ -402,6 +407,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     {open && <FederationAccess onConnect={connect} onClose={() => setOpen(false)} onAddService={addService} onOpenService={openService} onConnectWithPassword={async (connection, password) => { await authenticateKnownConnection(connection, password); await readPermissions(); setOpen(false); }} paired={ready || !!savedConnection()} initialInvite={incomingInvitation} currentServiceName={displayName} currentServiceId={currentSecureClient()?.targetPeerId || savedConnection()?.targetPeerId} currentServiceOrigin={displayOrigin} currentIdentity={deviceIdentity} grants={grants} sessions={sessions} loading={loadingAccess} loadError={accessError} onRetry={() => void refresh()}
       onRename={async (subjectId, name) => { await (await getActiveClient()).request({ type: 'device-name', subjectId, name }); await refresh(); }}
       hasBackup={!!savedConnection() && connectionRoutes(savedConnection()!).length > 0} inviteAddresses={inviteAddresses} onCreateInvite={canManage ? invite : undefined}
+      invitations={canManage ? invitations : []} onRevokeInvitation={canManage ? async invitationId => { try { const result = await (await getActiveClient()).request({ type: 'invite-revoke', invitationId }); if (result.revoked !== true) throw new Error('INVITATION_NOT_PENDING'); } finally { await refresh(); } } : undefined}
       onRevoke={canManage ? async grantId => { await (await getActiveClient()).request(grantId.startsWith('route:') ? { type: 'route-revoke', grantId: grantId.slice(6) } : { type: 'revoke', grantId }); await refresh(); } : undefined} />}
   </>;
 }
