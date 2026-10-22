@@ -419,6 +419,101 @@ describe('browser federation entry routing', () => {
     expect(integration.currentSecureClient()).toBeUndefined();
     expect(clients.get('B')!.close).toHaveBeenCalled();
   });
+  it('reads and revalidates the active relayed service directory without dialing or closing its terminal', async () => {
+    const dial = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('private address unreachable');
+      return dial(args);
+    });
+    const integration = await import('./browserIntegration');
+    const service = { id: 'B', targetPeerId: 'B', url: 'https://private.internal', label: 'Work', routes: [{ url: 'https://public.example', targetPeerId: 'A' }] };
+    await integration.connectDevice(service);
+    const target = clients.get('B')!, entry = clients.get('A')!;
+    target.request.mockImplementation(async ({ type }: { type: string }) => type === 'route-access'
+      ? { canManage: false, grants: [] } : { canManage: false, items: [{ serviceId: 'C', available: true, authorized: true }] });
+    target.request.mockClear();
+    mocks.connect.mockClear(); mocks.connect.mockRejectedValue(new Error('must not dial')); mocks.save.mockClear();
+    expect(await integration.listRelayTargets(service)).toMatchObject({ route: { targetPeerId: 'B' }, items: [{ serviceId: 'C' }] });
+    expect(await integration.prepareRelayConnection({ url: service.url, targetPeerId: 'B' }, 'C')).toMatchObject({ targetPeerId: 'C' });
+    await integration.inspectEntryRoute({ url: service.url, targetPeerId: 'B' }, 'C');
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
+    expect(target.close).not.toHaveBeenCalled(); expect(entry.close).not.toHaveBeenCalled();
+    expect(integration.currentSecureClient()).toBe(target); expect(integration.currentConnectionPath()).toBe('relay');
+    expect(target.request.mock.calls.every(([packet]) => ['route-targets', 'route-access'].includes(packet.type))).toBe(true);
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+  it('borrows the existing entry for another active target without replacing either connection', async () => {
+    mocks.boot = 'C';
+    const dial = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'C' && !args.socketFactory) throw new TypeError('direct target unavailable');
+      return dial(args);
+    });
+    const integration = await import('./browserIntegration');
+    await integration.connectDevice({ url: 'https://c.internal', targetPeerId: 'C', routes: [{ url: 'https://entry.example', targetPeerId: 'B' }] });
+    const target = clients.get('C')!, entry = integration.currentEntryClient()!;
+    expect(entry).toBeTruthy();
+    vi.mocked(entry.request).mockResolvedValue({ type: 'result', items: [], canManage: false });
+    mocks.connect.mockClear(); mocks.connect.mockRejectedValue(new Error('must not dial'));
+    await integration.listRelayTargets({ id: 'B', targetPeerId: 'B', url: 'https://entry.example', label: 'Entry' });
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(entry.close).not.toHaveBeenCalled(); expect(target.close).not.toHaveBeenCalled();
+    expect(integration.currentSecureClient()).toBe(target);
+  });
+  it('opens a temporary directory channel through saved grants without discovering or granting reverse routes', async () => {
+    const service = { id: 'B', url: 'https://private.internal', targetPeerId: 'B', label: 'Work', routes: [{ url: 'https://public.example', targetPeerId: 'A' }] };
+    local.setItem('termdock.federation.connections.v1', JSON.stringify([service]));
+    const before = local.getItem('termdock.federation.connections.v1');
+    const dial = mocks.connect.getMockImplementation()!;
+    const opened: Array<{ request: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }> = [];
+    mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !args.socketFactory) throw new TypeError('direct unreachable');
+      const client = await dial(args); opened.push(client);
+      if (args.targetPeerId === 'B') client.request.mockResolvedValue({ items: [], canManage: false });
+      return client;
+    });
+    const integration = await import('./browserIntegration');
+    expect(await integration.listRelayTargets(service)).toMatchObject({ items: [], canManage: false });
+    expect(mocks.connect.mock.calls.some(([args]) => args.targetPeerId === 'B' && args.socketFactory)).toBe(true);
+    expect(opened.flatMap(c => c.request.mock.calls.map(([packet]) => packet.type)).sort()).toEqual(['route-targets', 'route-ticket']);
+    expect(opened.every(c => c.close.mock.calls.length === 1)).toBe(true);
+    expect(local.getItem('termdock.federation.connections.v1')).toBe(before); expect(mocks.save).not.toHaveBeenCalled();
+    expect(integration.currentSecureClient()).toBeUndefined(); expect(nativeFetch).not.toHaveBeenCalled();
+  });
+  it('preserves a borrowed directory denial without reconnecting, granting access or closing the shared client', async () => {
+    const integration = await import('./browserIntegration'); await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B' });
+    const client = clients.get('B')!, denied = new Error('AUTHORIZATION_DENIED'); client.request.mockRejectedValue(denied);
+    mocks.connect.mockClear();
+    await expect(integration.listRelayTargets({ id: 'B', url: 'https://private.internal', targetPeerId: 'B', label: 'Work' })).rejects.toBe(denied);
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(client.close).not.toHaveBeenCalled();
+  });
+  it('keeps the exact pin mismatch when directory connection attempts fail', async () => {
+    const mismatch = Object.assign(new Error('expected service identity differs'), { name: 'UnexpectedPeerError' });
+    mocks.connect.mockRejectedValueOnce(mismatch).mockRejectedValue(new Error('Secure transport unavailable'));
+    const integration = await import('./browserIntegration');
+    await expect(integration.listRelayTargets({ id: 'B', url: 'https://b.example', targetPeerId: 'B', label: 'Entry', routes: [{ url: 'https://alternate.example', targetPeerId: 'B' }] })).rejects.toBe(mismatch);
+    expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId === 'B')).toBe(true); expect(nativeFetch).not.toHaveBeenCalled();
+  });
+  it('does not borrow a different target or automatically grant a reverse route to read a directory', async () => {
+    const integration = await import('./browserIntegration'); await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B' });
+    const active = clients.get('B')!; active.request.mockClear();
+    local.setItem('termdock.federation.connections.v1', JSON.stringify([
+      { id: 'B', url: 'https://b.example', targetPeerId: 'B', label: 'B', routes: [{ url: 'https://c.private', targetPeerId: 'C' }] },
+      { id: 'C', url: 'https://c.private', targetPeerId: 'C', label: 'C' },
+    ]));
+    const failure = new Error('Secure transport unavailable'); mocks.connect.mockClear(); mocks.connect.mockRejectedValue(failure);
+    await expect(integration.listRelayTargets({ id: 'C', url: 'https://c.private', targetPeerId: 'C', label: 'C' })).rejects.toBe(failure);
+    expect(active.request).not.toHaveBeenCalled(); expect(active.close).not.toHaveBeenCalled();
+    expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId === 'C' && !args.socketFactory)).toBe(true);
+  });
+  it('ignores a closed active client and disposes only the new temporary directory connection', async () => {
+    const integration = await import('./browserIntegration'); await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B' });
+    const old = clients.get('B')!; old.closed = true; old.request.mockClear();
+    const dial = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => { const client = await dial(args); client.request.mockResolvedValue({ items: [] }); return client; });
+    await expect(integration.listRelayTargets({ id: 'B', url: 'https://b.example', targetPeerId: 'B', label: 'B' })).resolves.toMatchObject({ items: [] });
+    expect(old.request).not.toHaveBeenCalled(); expect(old.close).not.toHaveBeenCalled();
+    expect(clients.get('B')).not.toBe(old); expect(clients.get('B')!.close).toHaveBeenCalledOnce();
+  });
   it('revalidates target visibility before granting only the current device, without prematurely saving C', async () => {
     const base = mocks.connect.getMockImplementation()!;
     mocks.connect.mockImplementation(async args => {

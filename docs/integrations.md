@@ -1471,3 +1471,17 @@ td integration close-diagnostics <原TD-session-id>
 错误包括 `SESSION_CLOSE_OWNERSHIP_UNCONFIRMED`（持久 owner/本机组不唯一或缺失）、`SESSION_IDENTITY_MISMATCH`（其它声明或实际 native 冲突）、`SESSION_CLOSE_TARGET_UNCONFIRMED`（原绑定/实时 writer-lock/前台实例不足）、`SESSION_CLOSE_TARGET_CHANGED`、`SESSION_PENDING_MESSAGES` 及原有代次/权限/生命周期错误。管理员报告不能越过这些检查。
 
 回归包含唯一及重复/撤销/跨组/跨服务归属、缺登记精确关闭、argv-only/错误 UUID/换 pane/换进程拒绝、缺登记准确错误、诊断无副作用及代次变化丢弃、Unix 管理权限与 CLI capability 门控、原关闭意图/幂等/重启和失败 shell 兼容；隔离真实 tmux 验证只终止精确目标并保留邻接会话。该 tmux 测试用可控身份夹具，Linux 原生 writer-lock provider 另有真实内核/FD/starttime 回归；私有 TraeX 和上述远端目标仍须由接入方在维护窗实机验收，不以合成测试冒充。
+
+## 1.4.350：通过已连接入口读取中转目录
+
+客户端修复，不增加服务端协议、principal 权限或授权配置。原问题：服务 B 已可经入口 A 打开，但“可中转的服务”列表又只枚举 B 的直接地址建立 WSS；手机无法直达 B 的公司/VPN 地址时，即使原终端通道可用也会显示“暂时连不上中转入口”。这不是 health 可达或服务器协作 serviceConnected 能单独证明的浏览器权限问题。
+
+目录读取与入口操作现在共用受限连接获取：优先借用 `targetPeerId` 精确匹配、未关闭的 active/entry secure client；不关闭借来的原终端通道、不切换 active service/workspace。没有可借通道时，建立自己持有的临时 Noise 通道，允许同 pin 直连备用地址和服务目录中已经保存的 relay 路线。临时通道由本次调用关闭，底层已借入口保持；不借用其它服务身份。
+
+只读连接获取不进行反向路由发现或自动 route-grant，不写服务目录、登录或邀请，不以列表为空/连接失败为由扩大授权、换 pin、使用原生 fetch 或回退 HTTP。目标服务自己的 route-targets 仍按当前设备主体过滤。已撤销、无授权、pin 不匹配和中断错误保留原 name/message；UNKNOWN/UNSUPPORTED 的旧服务提示保留原 cause。相等目标可以经不同地址成功验证，但任何成功通道都必须通过同一目标 pin。
+
+后续 prepareRelayConnection/inspectEntryRoute 也复用同一获取方式，防止目录已能读取而点选时又强制直连。显式授权、撤销和生成邀请沿用该通道获取，但其业务写操作仍只由原用户动作触发，服务端检查保持；目录读取本身不会调用这些动作。没有新增任意多跳协议：保存 routes 是既有替代入口，不被解释为任意有序链；读到 B 的目录不承诺其每个下游目标都可从手机建立新数据路径，实际目标访问仍须逐层可达且有权。
+
+需要更新的是**提供页面资源的入口服务**到 npm **1.4.350**，并让浏览器/PWA 实际加载新 bundle；CLI 文件版本或远端目标已经升级不能修复仍在运行的旧前端。正式包通过 `pinBundledRuntimeClientDist` 为当前运行进程固定页面快照，单独安装新包不会热替换旧进程提供的页面；按原 HTTPS/auth/supervisor 方式在维护窗重启该入口的 TD 服务，再核验资源，不手改快照。实际目标可保持原兼容版本（本轮场景349），无需为了此目录读取重启目标 Agent/DevBox。没有新 capability：这属于页面逻辑修复，以入口 /api/meta 版本与所服务主 JS 字节/手机实际脚本版本核验。已安装旧 SW 的 iPhone PWA 需等待更新后完全关闭重开；不清除配对/设备身份/授权数据作为修复。
+
+回归包含已接入 relay 的 active/entry 复用、点选复核、同 pin 备用地址、无活动通道时既有 relay 临时连接、借用与自有连接清理、不同目标/已关闭通道拒借、权限错误/pin 错误保留、不自动反向授权、不切服务、首次无 Service Worker 与断线不回退边界。另运行完整加密传输、拖放/预览/取消/通知桥接相关现有发布回归。维护机验证不冒充真实 iPhone/macOS 私有网络：正式手机原窗口“工作服务→可中转服务列表→原终端继续可用”仍由现场验收，不操作或重启 Arena。

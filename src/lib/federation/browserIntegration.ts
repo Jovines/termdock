@@ -264,14 +264,17 @@ function secureUrl(address: string): string {
 async function connectEntry(route: ServiceRoute, signal?: AbortSignal): Promise<SecureClient> {
   return connect({ url: secureUrl(route.url), targetPeerId: route.targetPeerId, identity: await getIdentity(), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) });
 }
-async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal?: AbortSignal): Promise<SecureClient> {
+async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal?: AbortSignal,
+  readOnly?: { connected: (key: string) => void }): Promise<SecureClient> {
   const identity = await getIdentity();
   const attempts: ConnectionAttempt<SecureClient>[] = connectionAddresses(intent).map(origin => ({
     key: `direct:${origin}`,
     run: signal => connect({ url: secureUrl(origin), targetPeerId: intent.targetPeerId, identity,
       signal: AbortSignal.any([signal, AbortSignal.timeout(8000), ...(outerSignal ? [outerSignal] : [])]) }),
   }));
-  const reverseRoutes = await reverseConnectionRoutes(intent);
+  // Directory reads may use saved grants, never discover/authorize a reverse
+  // route as a side effect of opening a settings panel.
+  const reverseRoutes = readOnly ? [] : await reverseConnectionRoutes(intent);
   for (const route of [...connectionRoutes(intent), ...reverseRoutes]) attempts.push({ key: relayRouteKey(route), run: async signal => {
     if (outerSignal) signal = AbortSignal.any([signal, outerSignal]);
     const reused = [active, entryClient].find(client => client && !client.closed && client.targetPeerId === route.targetPeerId);
@@ -290,7 +293,8 @@ async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal
   const preferred = preferredConnectionPath(intent.targetPeerId);
   attempts.sort((a, b) => Number(b.key === preferred) - Number(a.key === preferred));
   const result = await raceConnectionAttempts(attempts, client => client.close());
-  rememberConnectionPath(intent.targetPeerId, result.key);
+  if (readOnly) readOnly.connected(result.key);
+  else rememberConnectionPath(intent.targetPeerId, result.key);
   return result.value;
 }
 /** Read public bootstrap metadata through the saved, pinned Noise identity.
@@ -587,26 +591,38 @@ export function installEncryptedFetch(): void {
 export interface EntryRouteGrant { id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }
 export interface RelayTarget { serviceId: string; label?: string; url?: string; available: boolean; authorized: boolean }
 export interface RelayTargetDirectory { route: ServiceRoute; canManage: boolean; items: RelayTarget[] }
+/** Borrow the page's exact pinned service channel, or own a temporary channel
+ * over already saved routes. Release must never close a borrowed terminal. */
+async function acquireEntryClient(route: ServiceRoute, known?: import('../services/serviceDirectory').ServiceConnection) {
+  const origin = normalizeServiceAddress(route.url);
+  const reused = [active, entryClient].find(client => client && !client.closed && client.targetPeerId === route.targetPeerId);
+  if (reused) return { client: reused, route: { ...route, url: origin }, release() {} };
+  const saved = known ?? (await listServiceConnections()).find(service => service.targetPeerId === route.targetPeerId);
+  const routes = [...(saved?.routes ?? [])];
+  if (saved?.targetPeerId && normalizeServiceAddress(saved.serviceOrigin || saved.url) !== origin) {
+    routes.push({ url: saved.serviceOrigin || saved.url, targetPeerId: route.targetPeerId });
+  }
+  let connectedRoute = { ...route, url: origin };
+  const client = await openTargetForAuthentication({ url: origin, targetPeerId: route.targetPeerId, routes }, AbortSignal.timeout(15000), {
+    connected(key) { if (key.startsWith('direct:')) connectedRoute = { ...route, url: key.slice('direct:'.length) }; },
+  });
+  return { client, route: connectedRoute, release() { client.close(); } };
+}
 /** Browse only a pinned entry's explicit directory, without changing the active service. */
 export async function listRelayTargets(service: import('../services/serviceDirectory').ServiceConnection): Promise<RelayTargetDirectory> {
   if (!service.targetPeerId) throw new Error('请先连接这台服务，再查看可中转的服务。');
-  for (const url of connectionAddresses({ ...service, targetPeerId: service.targetPeerId })) {
-    let client: SecureClient;
-    const route = { url, targetPeerId: service.targetPeerId };
-    try { client = await connectEntry(route); } catch { continue; }
-    try {
-      const result = await client.request({ type: 'route-targets' }, { timeoutMs: 5000 });
-      if (!Array.isArray(result.items)) throw new Error('入口服务需要更新后才能查看中转列表。');
-      return { route, canManage: result.canManage === true, items: result.items as RelayTarget[] };
-    } catch (error) {
-      if (error instanceof Error && /UNKNOWN|UNSUPPORTED/i.test(error.message)) throw new Error('入口服务需要更新后才能查看中转列表。');
-      throw error;
-    } finally { client.close(); }
-  }
-  throw new Error('暂时连不上中转入口，请检查地址和网络后重试。');
+  const lease = await acquireEntryClient({ url: service.serviceOrigin || service.url, targetPeerId: service.targetPeerId }, service);
+  try {
+    const result = await lease.client.request({ type: 'route-targets' }, { timeoutMs: 5000 });
+    if (!Array.isArray(result.items)) throw new Error('入口服务需要更新后才能查看中转列表。');
+    return { route: lease.route, canManage: result.canManage === true, items: result.items as RelayTarget[] };
+  } catch (error) {
+    if (error instanceof Error && /UNKNOWN|UNSUPPORTED/i.test(error.message)) throw new Error('入口服务需要更新后才能查看中转列表。', { cause: error });
+    throw error;
+  } finally { lease.release(); }
 }
 export async function prepareRelayConnection(route: ServiceRoute, targetServiceId: string): Promise<ConnectionIntent> {
-  const entry = await connectEntry(route);
+  const lease = await acquireEntryClient(route), entry = lease.client;
   try {
     // Re-read visibility and grants at the click, so stale lists cannot authorize a target.
     const result = await entry.request({ type: 'route-targets' }, { timeoutMs: 5000 });
@@ -622,42 +638,42 @@ export async function prepareRelayConnection(route: ServiceRoute, targetServiceI
     }
     const origin = known?.serviceOrigin || known?.url || target.url || route.url;
     return { url: origin, serviceOrigin: origin, targetPeerId: target.serviceId, serviceName: known?.label || target.label || (target.url ? new URL(target.url).host : `中转服务 ${target.serviceId.slice(0, 8)}`), routes };
-  } finally { entry.close(); }
+  } finally { lease.release(); }
 }
 export async function inspectEntryRoute(route: ServiceRoute, targetServiceId: string): Promise<{ canManage: boolean; grants: EntryRouteGrant[] }> {
-  const client = await connectEntry(route);
+  const lease = await acquireEntryClient(route), client = lease.client;
   try {
     const result = await client.request({ type: 'route-access' }, { timeoutMs: 5000 });
     const subjectId = (await getIdentity()).peerId;
     return { canManage: result.canManage === true, grants: (Array.isArray(result.grants) ? result.grants as EntryRouteGrant[] : []).filter(grant => grant.subjectId === subjectId && grant.targetServiceId === targetServiceId) };
-  } finally { client.close(); }
+  } finally { lease.release(); }
 }
 export async function authorizeEntryRoute(target: ConnectionIntent, route: ServiceRoute, password?: string): Promise<void> {
   if (password !== undefined) {
     const verified = await authenticateServicePassword(normalizeServiceAddress(route.url), password);
     if (verified.targetPeerId !== route.targetPeerId) throw new Error('入口服务的身份已改变，请重新连接并确认。');
   }
-  const entry = await connectEntry(route);
+  const lease = await acquireEntryClient(route), entry = lease.client;
   try {
     await entry.request({ type: 'route-grant', serviceId: target.targetPeerId, subjectId: (await getIdentity()).peerId, url: normalizeServiceAddress(target.serviceOrigin || target.url) });
-  } finally { entry.close(); }
+  } finally { lease.release(); }
 }
 export async function revokeEntryRoute(targetServiceId: string, route: ServiceRoute): Promise<void> {
-  const entry = await connectEntry(route);
+  const lease = await acquireEntryClient(route), entry = lease.client;
   try {
     const result = await entry.request({ type: 'route-access' }, { timeoutMs: 5000 });
     const subjectId = (await getIdentity()).peerId;
     const grants = (Array.isArray(result.grants) ? result.grants as EntryRouteGrant[] : []).filter(grant => grant.subjectId === subjectId && grant.targetServiceId === targetServiceId && grant.active);
     for (const grant of grants) await entry.request({ type: 'route-revoke', grantId: grant.id });
-  } finally { entry.close(); }
+  } finally { lease.release(); }
 }
 export async function createEntryInvitation(target: ConnectionIntent, route: ServiceRoute): Promise<{ routeCode: string; expiresAt: number }> {
-  const entry = await connectEntry(route);
+  const lease = await acquireEntryClient(route), entry = lease.client;
   try {
     const result = await entry.request({ type: 'route-invite-create', serviceId: target.targetPeerId });
     if (typeof result.routeCode !== 'string' || typeof result.expiresAt !== 'number') throw new Error('暂时无法生成备用连接邀请。');
     return { routeCode: result.routeCode, expiresAt: result.expiresAt };
-  } finally { entry.close(); }
+  } finally { lease.release(); }
 }
 export async function saveServiceRoutes(service: import('../services/serviceDirectory').ServiceConnection, routes: ServiceRoute[]): Promise<void> {
   const latest = (await listServiceConnections()).find(item => item.id === service.id || (service.targetPeerId && item.targetPeerId === service.targetPeerId)) || service;
