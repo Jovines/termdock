@@ -237,6 +237,21 @@ describe('federation runtime over real encrypted WebSocket', () => {
     expect(await attacker.take('spoof')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
     expect(f.input).not.toHaveBeenCalled();
   });
+  it('keeps tmux control permission when copy-mode exit is combined with terminal input', async () => {
+    const f = await fixture(), client = await f.connect();
+    f.runtime.store.grant({ subjectId: client.identity.peerId, scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view', 'session.input'] });
+    client.channel.send({ type: 'ws-open', id: 'terminal', path: '/api/terminal/one/ws' });
+    await client.take('terminal', 'ws-ready'); await client.take('terminal', 'ws-data');
+    client.channel.send({ type: 'ws-data', id: 'terminal', data: JSON.stringify({ type: 'input', data: 'blocked', exitCopyMode: true }) });
+    expect(await client.take('terminal', 'error')).toMatchObject({ error: 'AUTHORIZATION_DENIED' });
+    expect(f.received).not.toHaveBeenCalled();
+    client.channel.send({ type: 'ws-data', id: 'terminal', data: JSON.stringify({ type: 'input', data: 'ordinary' }) });
+    await vi.waitFor(() => expect(f.received).toHaveBeenCalledWith({ type: 'input', data: 'ordinary' }));
+    await client.pair();
+    client.channel.send({ type: 'ws-data', id: 'terminal', data: JSON.stringify({ type: 'input', data: 'allowed', exitCopyMode: true }) });
+    await vi.waitFor(() => expect(f.received).toHaveBeenCalledWith({ type: 'input', data: 'allowed', exitCopyMode: true }));
+  });
+
   it('restricts session viewers to the granted resource and rejects terminal input/resize', async () => {
     const f = await fixture(), client = await f.connect();
     f.runtime.store.grant({ subjectId: client.identity.peerId, scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'] });

@@ -472,7 +472,13 @@ export async function createFederationRuntime(app: express.Express, directory: s
               if (!full(subjectId)) throw new Error('AUTHORIZATION_DENIED');
               if (!['control', 'ack', 'ping', 'bitrate'].includes(data?.type)) throw new Error('ACTION_NOT_ALLOWED');
             }
-            else if (item.sessionId) { const action = terminalMessageAction(data.type); if (!action) throw new Error('ACTION_NOT_ALLOWED'); check(action, action.startsWith('session.') ? item.sessionId : undefined); }
+            else if (item.sessionId) {
+              const action = terminalMessageAction(data.type); if (!action) throw new Error('ACTION_NOT_ALLOWED');
+              check(action, action.startsWith('session.') ? item.sessionId : undefined);
+              // Combining a tmux control action with input retains the control
+              // permission of the older two-message protocol.
+              if (data.type === 'input' && data.exitCopyMode === true) check('service.configure');
+            }
             else { check('service.view'); if (data?.type !== 'pong') throw new Error('ACTION_NOT_ALLOWED'); }
             item.socket.emit('message', Buffer.from(packet.data));
           } else if (packet.type === 'ws-close') sockets.get(packet.id)?.socket.close();

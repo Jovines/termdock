@@ -211,6 +211,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
+  copyModeInput?: boolean;
   type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'tmux-screen-sync' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress' | 'git-status';
   data?: string;
   layout?: TmuxLayout;
@@ -342,6 +343,8 @@ export interface TerminalAPI {
   createSession(options: CreateTerminalOptions): Promise<TerminalSession>;
   connect(sessionId: string, handlers: TerminalHandlers, options?: TerminalStreamOptions): Subscription;
   sendInput(sessionId: string, input: string): Promise<void>;
+  /** Returns false without sending when the server lacks atomic copy-mode exit. */
+  sendInputExitingCopyMode?(sessionId: string, input: string): boolean;
   resize(payload: ResizeTerminalPayload): Promise<void>;
   close(sessionId: string): Promise<void>;
   restartSession?(currentSessionId: string, options: CreateTerminalOptions): Promise<TerminalSession>;

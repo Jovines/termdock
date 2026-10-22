@@ -431,6 +431,7 @@ interface WsConnection {
   lastSeq: number;
   streamEpoch?: string;
   outputProtocol?: number;
+  copyModeInput?: boolean;
   flowSeq?: number;
   acknowledgedFlowSeq?: number;
   appliedSeq?: number;
@@ -457,7 +458,7 @@ interface WsConnection {
 const wsConnections = new Map<string, WsConnection>();
 const outputSubscriptions = new Map<string, boolean>();
 
-interface PendingTerminalInput { readonly message: string; readonly bytes: number }
+interface PendingTerminalInput { readonly message: string; readonly bytes: number; readonly requiresCopyModeExit?: boolean }
 interface PendingInputQueue { readonly items: Array<PendingTerminalInput | undefined>; head: number; bytes: number }
 
 export function getTerminalConnectionQuality(sessionId: string) {
@@ -526,6 +527,10 @@ function flushPendingInputs(c: WsConnection): TerminalInputError | undefined {
   while (queue.head < queue.items.length) {
     const pending = queue.items[queue.head];
     if (!pending) { queue.head++; compactPendingInputs(queue); continue; }
+    if (pending.requiresCopyModeExit && c.copyModeInput !== true) {
+      if (c.copyModeInput === undefined) return undefined; // Wait for the new connection's capabilities.
+      return failPendingInputs(c, new TerminalInputError('The reconnected server cannot safely resume this input; please type it again'));
+    }
     try { c.ws.send(pending.message); }
     catch (error) {
       if (!isTransientInputBackpressure(error)) {
@@ -1009,6 +1014,8 @@ export function connectTerminalStream(
           streamEpoch = event_.streamEpoch;
           newConn.streamEpoch = streamEpoch;
           newConn.outputProtocol = event_.outputProtocol;
+          newConn.copyModeInput = event_.copyModeInput === true;
+          if (scheduleInputFlush(newConn)) return;
           if (typeof event_.replayLastSeq === 'number' && event_.replayLastSeq >= 0) {
             lastSeq = event_.replayLastSeq;
             newConn.lastSeq = lastSeq;
@@ -1134,26 +1141,38 @@ export function connectTerminalStream(
 // 短线重连期间不再 fallback 到 HTTP（HTTP 大概率也失败），而是把 input 暂存到
 // 当前 conn.pendingInputs；WS 重新连上后 onopen 里会自动 flush。
 // 这样 iOS PWA 后台返回的瞬间用户敲的命令不会丢。
+function enqueueTerminalInput(conn: WsConnection, data: string, exitCopyMode = false): void {
+  const message = JSON.stringify({ type: 'input', data, ...(exitCopyMode ? { exitCopyMode: true } : {}) });
+  const bytes = inputEncoder.encode(message).byteLength;
+  if (bytes > INPUT_FRAME_MAX_BYTES || !fitsEncryptedInputRecord(message)) {
+    throw new TerminalInputError('Terminal input exceeds the encrypted socket frame limit');
+  }
+  const queue = conn.pendingInputs;
+  if (queue.bytes + bytes > INPUT_QUEUE_MAX_BYTES) throw new TerminalInputError('Terminal input queue is full; retry after the connection recovers');
+  queue.items.push({ message, bytes, ...(exitCopyMode ? { requiresCopyModeExit: true } : {}) });
+  queue.bytes += bytes;
+  // CONNECTING retains the bounded queue until onopen; OPEN tries to flush.
+  if (conn.ws.readyState === WebSocket.OPEN) {
+    const error = scheduleInputFlush(conn);
+    if (error) throw error;
+  }
+}
+
+/** One encrypted record, no browser/server acknowledgement round trip. */
+export function trySendInputExitingCopyMode(sessionId: string, data: string): boolean {
+  const conn = wsConnections.get(sessionId);
+  if (!conn || conn.ws.readyState !== WebSocket.OPEN || conn.copyModeInput !== true) return false;
+  enqueueTerminalInput(conn, data, true);
+  return true;
+}
+
 export async function sendTerminalInput(
   sessionId: string,
   data: string
 ): Promise<void> {
   const conn = wsConnections.get(sessionId);
   if (conn && (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING)) {
-    const message = JSON.stringify({ type: 'input', data });
-    const bytes = inputEncoder.encode(message).byteLength;
-    if (bytes > INPUT_FRAME_MAX_BYTES || !fitsEncryptedInputRecord(message)) {
-      throw new TerminalInputError('Terminal input exceeds the encrypted socket frame limit');
-    }
-    const queue = conn.pendingInputs;
-    if (queue.bytes + bytes > INPUT_QUEUE_MAX_BYTES) throw new TerminalInputError('Terminal input queue is full; retry after the connection recovers');
-    queue.items.push({ message, bytes });
-    queue.bytes += bytes;
-    // CONNECTING retains the bounded queue until onopen; OPEN tries to flush.
-    if (conn.ws.readyState === WebSocket.OPEN) {
-      const error = scheduleInputFlush(conn);
-      if (error) throw error;
-    }
+    enqueueTerminalInput(conn, data);
     return;
   }
   // 完全没有 conn（极少数边缘情况：cleanup 后又触发 input），fallback HTTP。

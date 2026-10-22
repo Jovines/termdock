@@ -1,5 +1,5 @@
 import type { TerminalAPI, TerminalHandlers, TerminalStreamOptions, CreateTerminalOptions, ResizeTerminalPayload, TerminalSession, ForceKillOptions, TmuxActionPayload, TmuxActionResult } from './types';
-import { createTerminalSession, connectTerminalStream, sendTerminalInput, resizeTerminal, closeTerminal, restartTerminalSession, forceKillTerminal, checkTerminalHealth, sendTmuxAction, listTmuxSessions, getTmuxStatus } from './api';
+import { createTerminalSession, connectTerminalStream, sendTerminalInput, trySendInputExitingCopyMode, resizeTerminal, closeTerminal, restartTerminalSession, forceKillTerminal, checkTerminalHealth, sendTmuxAction, listTmuxSessions, getTmuxStatus } from './api';
 
 const getRetryPolicy = (options?: TerminalStreamOptions) => {
   const retry = options?.retry;
@@ -34,6 +34,8 @@ export const createTermdockAPI = (): TerminalAPI => ({
       close: () => unsubscribe(),
     };
   },
+
+  sendInputExitingCopyMode: trySendInputExitingCopyMode,
 
   async sendInput(sessionId: string, input: string): Promise<void> {
     await sendTerminalInput(sessionId, input);

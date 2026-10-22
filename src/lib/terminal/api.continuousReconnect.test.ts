@@ -11,6 +11,7 @@ import {
   suspendTerminalConnectionReconnects,
   resizeTerminal,
   sendTerminalInput,
+  trySendInputExitingCopyMode,
   VISIBLE_WAKEUP_PROBE_TIMEOUT_MS,
 } from './api';
 
@@ -37,7 +38,7 @@ class FakeWebSocket {
     FakeWebSocket.instances.push(this);
   }
 
-  send(): void {}
+  send(_data?: string): void {}
 
   close(code = 1000, reason = ''): void {
     if (this.readyState === FakeWebSocket.CLOSED) return;
@@ -56,6 +57,39 @@ class FakeWebSocket {
 }
 
 describe('connectTerminalStream reconnect policy', () => {
+  it('sends copy-mode exit and its first key in one record only after capability negotiation', async () => {
+    const disconnect = connectTerminalStream('atomic-copy', vi.fn());
+    const socket = FakeWebSocket.instances[0]; socket.readyState = FakeWebSocket.OPEN; socket.onopen?.();
+    const send = vi.spyOn(socket, 'send');
+    expect(trySendInputExitingCopyMode('atomic-copy', 'first')).toBe(false);
+    socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'connected', copyModeInput: true }) }));
+    send.mockClear();
+    expect(trySendInputExitingCopyMode('atomic-copy', 'first')).toBe(true);
+    expect(send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ type: 'input', data: 'first', exitCopyMode: true }));
+    await sendTerminalInput('atomic-copy', 'second');
+    expect(send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'input', data: 'second' }));
+    disconnect();
+  });
+
+  it('does not send a queued atomic input to an older replacement server', () => {
+    const onEvent = vi.fn(), onError = vi.fn();
+    const disconnect = connectTerminalStream('atomic-downgrade', onEvent, onError);
+    const first = FakeWebSocket.instances[0]; first.readyState = FakeWebSocket.OPEN; first.onopen?.();
+    first.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'connected', copyModeInput: true }) }));
+    vi.spyOn(first, 'send').mockImplementationOnce(() => { throw Object.assign(new Error('busy'), { code: 'PACKET_QUEUE_BACKPRESSURE' }); });
+    expect(trySendInputExitingCopyMode('atomic-downgrade', 'not-replayed')).toBe(true);
+    first.closeFromServer(1012, 'Encrypted transport renewed'); vi.advanceTimersByTime(0);
+    const replacement = FakeWebSocket.instances[1]; const send = vi.spyOn(replacement, 'send');
+    replacement.readyState = FakeWebSocket.OPEN; replacement.onopen?.();
+    expect(send.mock.calls.some(call => String(call[0]).includes('not-replayed'))).toBe(false);
+    onEvent.mockClear();
+    replacement.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'connected' }) }));
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('cannot safely resume') }), true);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(send.mock.calls.some(call => String(call[0]).includes('not-replayed'))).toBe(false);
+    disconnect();
+  });
+
   it('reattaches immediately after planned renewal and does not resend delivered input', async () => {
     const onEvent = vi.fn();
     const disconnect = connectTerminalStream('renewal', onEvent);

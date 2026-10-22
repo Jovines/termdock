@@ -1,3 +1,4 @@
+import { InteractiveOutput } from '../../terminal/interactiveOutput';
 import { isKeyboardLayerOpen, useKeyboardLayerOpen } from '../../hooks/useKeyboardLayer';
 import { authorizeOwnedTerminalPaste, consumeOwnedTerminalPaste, isOwnedTerminalPasteCurrent } from '../../terminal/ownedPaste';
 import { isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../../services/workspaceHost';
@@ -341,6 +342,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const streamCleanupRef = React.useRef<(() => void) | null>(null);
   const activeTerminalIdRef = React.useRef<string | null>(null);
   const terminalIdRef = React.useRef<string | null>(null);
+  const interactiveOutputRef = React.useRef(new InteractiveOutput());
   const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
   const flowPausedRef = React.useRef(false);
@@ -1389,6 +1391,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     flowPausedBufferRef.current.push(event.data);
                   } else {
                     appendToBuffer(storeSessionId, event.data);
+                    if (interactiveOutputRef.current.consume(event.data.length, performance.now(),
+                      isActiveRef.current && !document.hidden && isWorkspaceActive())) {
+                      useTerminalStore.getState().flushPendingBufferWrites(storeSessionId);
+                    }
                   }
                 }
                 break;
@@ -2013,6 +2019,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const sendPayload = async () => {
         if (terminalIdRef.current !== terminalId || terminalOperationEpochRef.current !== operationEpoch) return false;
         try {
+          if (!isMouseOrFocusSeq || isMouseWheelSeq) interactiveOutputRef.current.input(performance.now());
           if (isTmuxMode && isMouseWheelSeq) shouldExitTmuxCopyModeOnInputRef.current = true;
           // 只有非鼠标序列的真键盘输入才触发退出 copy-mode；
           // wheel/drag/select 事件自身不退出。
@@ -2023,6 +2030,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             terminal.tmuxAction
           ) {
             shouldExitTmuxCopyModeOnInputRef.current = false;
+            if (ownedPaste && !ownedCurrent()) return false;
+            if (terminal.sendInputExitingCopyMode?.(terminalId, payload)) {
+              clearAgentNeedsReview(sessionId);
+              return true;
+            }
             try {
               await terminal.tmuxAction(terminalId, { action: 'copy-mode', enabled: false });
             } catch {

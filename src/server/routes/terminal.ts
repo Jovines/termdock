@@ -1,3 +1,4 @@
+import { TerminalInputQueue } from '../utils/terminalInputQueue.js';
 import { copyTmuxSelection, type TmuxCopySelectionResult } from '../utils/tmuxCopySelection.js';
 import { isConfirmedEmptyTmuxServer } from '../utils/tmuxEmptyServerProbe.js';
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
@@ -9936,6 +9937,7 @@ export function handleTerminalWebSocket(
       type: 'connected',
       streamEpoch: TERMINAL_STREAM_EPOCH,
       outputProtocol: options.flowControl ? 2 : undefined,
+      copyModeInput: ownTmux,
       cols: session.cols,
       rows: session.rows,
       runtime,
@@ -10007,6 +10009,17 @@ export function handleTerminalWebSocket(
     }
   });
 
+  const inputQueue = new TerminalInputQueue(data => {
+    session.lastActivity = Date.now();
+    if (attachment) attachment.write(data);
+    else if (session.mode === 'tmux') return enqueueTmuxIo(session, async () => { session.ptyProcess.write(data); });
+    else session.ptyProcess.write(data);
+  }, error => {
+    if (ws.readyState !== ws.OPEN) return;
+    ws.send(JSON.stringify({ type: 'error', error: error.message }));
+    ws.close(1011, 'Terminal input preparation failed');
+  });
+
   // Handle client → server messages
   ws.on('message', async (raw) => {
     const messageReceivedAt = performance.now();
@@ -10028,20 +10041,16 @@ export function handleTerminalWebSocket(
               ws.close(1008, 'Invalid terminal paste');
               return;
             }
-            for (const data of parts) {
-              if (attachment) {
-                session.lastActivity = Date.now();
-                attachment.write(data);
-              } else if (session.mode === 'tmux') {
-                await enqueueTmuxIo(session, async () => {
-                  session.lastActivity = Date.now();
-                  session.ptyProcess.write(data);
-                });
-              } else {
-                session.lastActivity = Date.now();
-                session.ptyProcess.write(data);
-              }
-            }
+            const exitCopyMode = msg.exitCopyMode === true && session.mode === 'tmux' && !!session.tmuxSessionName;
+            inputQueue.push(exitCopyMode && msg.data === '\x1b' ? [] : parts, exitCopyMode ? async () => {
+              await enqueueTmuxIo(session, () => executeTmuxAction(session.tmuxSessionName!, 'copy-mode', { enabled: false }, session.tmuxControl));
+              // Preserve the confirmed copy-mode state for all observers without
+              // holding the first key behind a layout query or a browser ACK.
+              const target = session.tmuxSessionName!;
+              void getTmuxLayout(target).then(layout => {
+                if (ws.readyState === ws.OPEN && session.tmuxSessionName === target) broadcastJsonWs(sessionId, { type: 'tmux-layout', layout });
+              }).catch(() => {});
+            } : undefined);
           }
           break;
         }
@@ -10223,6 +10232,7 @@ export function handleTerminalWebSocket(
 
   // Cleanup on close
   ws.on('close', () => {
+    inputQueue.close();
     pasteInput.clear();
     initialScreen?.cancel();
     initialScreen = null;
