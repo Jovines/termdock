@@ -128,14 +128,17 @@ export class IntegrationStore {
     if (groupId !== active.groupId || !active.permissions.includes(permission)) integrationError('INTEGRATION_PERMISSION_DENIED', 'Operation is outside the integration grant', 403);
   }
   append(updates: Array<{ sourceKey: string; sourceVersion: string; eventId?: string; event: Omit<IntegrationEvent, 'event_id' | 'sequence' | 'cursor'> }>): void {
-    const next = structuredClone(this.doc); let changed = false;
+    // Most reconciliations repeat already-journaled facts. Do not copy the
+    // retained event history until the first actual source-version change.
+    let next: Journal | undefined;
     for (const update of updates) {
-      if (next.sources[update.sourceKey] === update.sourceVersion) continue;
+      if ((next ?? this.doc).sources[update.sourceKey] === update.sourceVersion) continue;
+      next ??= structuredClone(this.doc);
       const group = update.event.group_id, sequence = (next.sequences[group] ?? 0) + 1;
       next.events.push({ ...update.event, event_id: update.eventId ?? randomUUID(), sequence, cursor: this.cursor(group, sequence) });
-      next.sequences[group] = sequence; next.sources[update.sourceKey] = update.sourceVersion; changed = true;
+      next.sequences[group] = sequence; next.sources[update.sourceKey] = update.sourceVersion;
     }
-    if (!changed) return;
+    if (!next) return;
     const counts = new Map<string, number>();
     next.events = next.events.reverse().filter(event => {
       const count = (counts.get(event.group_id) ?? 0) + 1; counts.set(event.group_id, count);

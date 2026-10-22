@@ -531,6 +531,10 @@ export class CollaborationStore {
   }
   mergeContext(groupId: string, context: CollaborationContext): void {
     const group = this.getGroup(groupId); if (!group || group.deleted || !context || typeof context !== 'object') return;
+    if (this.applyContext(group, context)) this.persist();
+  }
+  private applyContext(group: CollaborationGroup, context: CollaborationContext): boolean {
+    if (group.deleted) return false;
     let changed = false;
     const rules = context.instructions;
     if (rules && validRevision(rules) && typeof rules.text === 'string' && Buffer.byteLength(rules.text) <= 8192
@@ -547,7 +551,7 @@ export class CollaborationStore {
       else if (group.roles) delete group.roles[id];
       changed = true;
     }
-    if (changed) this.persist();
+    return changed;
   }
 
   removeSession(sessionId: string): { updatedGroups: number; dissolvedGroups: number } {
@@ -770,11 +774,14 @@ export class CollaborationStore {
     // while offline. A new collaboration always receives a new ID.
     if (existing && (!existing.federated || (existing.deleted && (!group.deleted || existing.updatedAt >= group.updatedAt))
       || (!group.deleted && existing.updatedAt > group.updatedAt))) return;
-    const incoming = group.deleted && existing && !existing.deleted
-      ? { ...group, updatedAt: Math.max(group.updatedAt, existing.updatedAt + 1) } : group;
-    const priorContext = existing ? this.context(group.id) : undefined;
-    this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), { ...incoming }];
-    if (priorContext) this.mergeContext(group.id, priorContext);
+    // Directory refreshes repeat the same group every few seconds. Compare
+    // content as well as the timestamp: equal timestamps can carry real edits.
+    if (existing && stableJson(existing) === stableJson(group)) return;
+    const incoming = structuredClone(group.deleted && existing && !existing.deleted
+      ? { ...group, updatedAt: Math.max(group.updatedAt, existing.updatedAt + 1) } : group);
+    if (existing) this.applyContext(incoming, this.context(group.id));
+    if (existing && stableJson(existing) === stableJson(incoming)) return;
+    this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), incoming];
     if (group.deleted) this.document.messages = this.document.messages.filter((item) => item.groupId !== group.id);
     this.persist();
   }
@@ -892,16 +899,35 @@ export class CollaborationStore {
   receipt(id: string, raw = false) {
     const message = this.getMessage(id);
     if (!message) throw new CollaborationError('MESSAGE_NOT_FOUND', 'Message not found or no longer retained', 404);
-    const replies = this.document.messages.filter(reply => reply.replyTo === id
-      && (message.toPrincipalId ? reply.integrationOrigin?.integrationId === message.toPrincipalId : reply.fromSessionId === message.toSessionId)
+    return this.messageReceipt(message, this.document.messages.filter(reply => reply.replyTo === id), raw);
+  }
+
+  /** Reconcile message events in one pass without rescanning the complete
+   * history for every receipt or formatting snapshots which events omit. */
+  snapshotMessagesWithReceipts(groups: ReadonlySet<string>) {
+    const replies = new Map<string, CollaborationMessage[]>();
+    for (const message of this.document.messages) if (message.replyTo) {
+      const list = replies.get(message.replyTo) ?? [];
+      list.push(message); replies.set(message.replyTo, list);
+    }
+    return structuredClone(this.document.messages.filter(message => groups.has(message.groupId)).map(message => {
+      const { snapshot: _, ...receipt } = this.messageReceipt(message, replies.get(message.id) ?? [], false, false);
+      return { message, receipt };
+    }));
+  }
+
+  private messageReceipt(message: CollaborationMessage, candidates: CollaborationMessage[], raw: boolean, includeSnapshot = true) {
+    const id = message.id;
+    const replies = candidates.filter(reply =>
+      (message.toPrincipalId ? reply.integrationOrigin?.integrationId === message.toPrincipalId : reply.fromSessionId === message.toSessionId)
       && (message.integrationOrigin ? reply.toPrincipalId === message.integrationOrigin.integrationId : reply.toSessionId === message.fromSessionId));
     const diagnostic = this.diagnostic(id);
-    const facts = terminalMessage(message, raw);
+    const facts = terminalMessage(includeSnapshot ? message : { ...message, snapshot: null }, raw);
     return { message_id: id, thread_id: message.threadId, status: facts.status, queued_at: message.status === 'stored' ? null : message.createdAt, stored_at: message.storedAt ?? null,
       from_principal_id: message.integrationOrigin?.integrationId ?? null, to_principal_id: message.toPrincipalId ?? null,
       delivered_at: facts.deliveredAt, expires_at: message.expiresAt ?? null,
       failure_reason: message.failureReason ?? null, delivery_semantics: message.status === 'stored' ? 'durable_storage' : facts.deliverySource ?? (facts.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'),
-      snapshot: message.snapshot ? (raw ? message.snapshot : plainCollaborationSnapshot(message.snapshot)) : null,
+      snapshot: includeSnapshot && message.snapshot ? (raw ? message.snapshot : plainCollaborationSnapshot(message.snapshot)) : null,
       delivery: { status: facts.status,
         stage: message.status === 'stored' ? 'stored' : facts.deliveredAt !== null ? 'terminal_written' : diagnostic?.route_state === 'identity-mismatch' || diagnostic?.last_error === 'TMUX_PANE_CHANGED' ? 'blocked' : diagnostic?.remote_received_at ? 'remote_received' : 'queued',
         ...(!diagnostic?.route_diagnostics && diagnostic?.last_error === 'TMUX_PANE_CHANGED' ? { requires_confirmation: true } : {}),

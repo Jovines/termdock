@@ -197,6 +197,36 @@ async function runtimeFixture(sessionAdapter?: IntegrationSessionAdapter) {
   };
   return { runtime, messages, group, taskStore, request, stream, options, issued };
 }
+it('reconciles only changed source domains and preserves dirty work across append failures', async () => {
+  const f = await runtimeFixture(); f.runtime.sync();
+  const messages = vi.spyOn(f.messages, 'snapshotMessagesWithReceipts');
+  const tasks = vi.spyOn(f.taskStore, 'snapshot');
+  const sessions = vi.spyOn(f.runtime.sessions, 'snapshot');
+  try {
+    f.runtime.sync(); f.runtime.sync();
+    expect(messages).not.toHaveBeenCalled(); expect(tasks).not.toHaveBeenCalled(); expect(sessions).not.toHaveBeenCalled();
+    await f.runtime.sessions.create(f.runtime.store.authenticate('bridge', f.issued.token), { profile: 'agent', cwd: dir, idempotencyKey: 'domain' });
+    expect(messages).not.toHaveBeenCalled(); expect(tasks).not.toHaveBeenCalled(); expect(sessions).toHaveBeenCalled();
+    sessions.mockClear();
+    const append = vi.spyOn(f.runtime.store, 'append').mockImplementationOnce(() => { throw new Error('temporary write failure'); });
+    try {
+      const [message] = f.messages.send({ groupId: f.group.id, fromSessionId: null, toSessionIds: ['worker'], kind: 'message', content: 'Durable retry' });
+      f.runtime.sync();
+      expect(messages).toHaveBeenCalledTimes(2); expect(tasks).not.toHaveBeenCalled(); expect(sessions).not.toHaveBeenCalled();
+      expect(f.runtime.store.page(f.runtime.store.authenticate('bridge', f.issued.token), 'domain-test').events.some(event => event.message_id === message!.id)).toBe(true);
+    } finally { append.mockRestore(); }
+  } finally { messages.mockRestore(); tasks.mockRestore(); sessions.mockRestore(); }
+});
+
+it('reconciles retained facts for a newly granted group even when no source changed', async () => {
+  const f = await runtimeFixture(); f.runtime.sync();
+  const other = f.messages.save({ name: 'New grant', sessionIds: ['other'] });
+  const [message] = f.messages.send({ groupId: other.id, fromSessionId: null, toSessionIds: ['other'], kind: 'message', content: 'Before grant' });
+  const issued = f.runtime.store.provision({ ...policy(other.id), id: 'other-bridge' });
+  f.runtime.sync();
+  const p = f.runtime.store.authenticate('other-bridge', issued.token);
+  expect(f.runtime.store.page(p, 'new-grant').events.map(event => event.message_id)).toContain(message!.id);
+});
 it('requires an explicit configure grant, preserves identity credentials, and pushes a durable background-purpose migration', async () => {
   const f = await runtimeFixture();
   const created = await f.request('POST', '/tasks', { input: { title: 'Existing', spec: 'Already executed', idempotencyKey: 'create', assigneeSessionId: 'worker' } });

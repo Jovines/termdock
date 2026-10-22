@@ -2265,7 +2265,7 @@ function formatLocalCollaborationMessages(frontendSessionId: string, messages: C
  *  confirm gate and prompt formatting assume a TUI); driving a terminal —
  *  run/capture — is a shell operation and works on any pane. */
 async function inspectCollaborationTmux(binding: CollaborationBinding, requestedPane?: string | null, allowPlainPane = false, nativeProcessIdentity = false, freshProcess = false, describeNativeFailure = false,
-  identityOverride?: NativeProcessIdentityConfig): Promise<ReturnType<typeof selectCollaborationPane> & { candidates?: CollaborationPaneCandidate[] }> {
+  identityOverride?: NativeProcessIdentityConfig): Promise<ReturnType<typeof selectCollaborationPane> & { candidates?: CollaborationPaneCandidate[]; layout?: TmuxLayout }> {
   if (!binding.tmuxSessionName) return { state: 'offline', reason: 'TMUX_BINDING_MISSING' };
   const name = `=${binding.tmuxSessionName}`;
   try { await runTmux(['has-session', '-t', name]); }
@@ -2303,7 +2303,7 @@ async function inspectCollaborationTmux(binding: CollaborationBinding, requested
     // pane so a plain shell member is drivable (run/capture are shell ops).
     return selectDrivePane(binding, candidates, layout.activePaneId);
   }
-  return { ...selectCollaborationPane(binding, candidates), candidates };
+  return { ...selectCollaborationPane(binding, candidates), candidates, layout };
 }
 
 function routeOwnershipConfirmed(frontendSessionId: string, binding: CollaborationBinding, panes: CollaborationPaneCandidate[]): boolean {
@@ -2807,7 +2807,7 @@ export const integrationSessionAdapter: IntegrationSessionAdapter = {
     if (inspected.state === 'offline') return { exists: false, running: false, shell: false, agentSlug: null, nativeId: null };
     if (inspected.state !== 'ready' || !inspected.pane) integrationError('SESSION_IDENTITY_MISMATCH', 'Owned tmux pane cannot be uniquely verified', 409);
     const pane = inspected.pane;
-    const layout = await getTmuxLayout(terminal.tmuxSessionName!);
+    const layout = inspected.layout!;
     if (layout.windows.flatMap(window => window.panes).length !== 1 || layout.activePaneId !== pane.paneId) integrationError('SESSION_IDENTITY_MISMATCH', 'Integration native binding requires the single owned pane', 409);
     const backend = terminal.backendSessionId ? terminalSessions.get(terminal.backendSessionId) : null;
     // Hook evidence is fresh process evidence only on the single owned pane.

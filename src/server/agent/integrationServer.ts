@@ -21,6 +21,7 @@ export interface IntegrationRuntimeOptions {
   tasks: CollaborationTaskService; peers: CollaborationService; sessions: IntegrationSessionAdapter;
 }
 type Update = { sourceKey: string; sourceVersion: string; eventId?: string; event: Omit<IntegrationEvent, 'event_id' | 'sequence' | 'cursor'> };
+type SyncSource = 'messages' | 'tasks' | 'sessions';
 type ReleaseBatchItem = { session_id: string; generation: number; state: 'queued' | 'running' | 'released' | 'failed'; error_code?: string; error?: string };
 type ReleaseBatchOperation = { id: string; principal_id: string; group_id: string; idempotency_key: string; request_hash: string; state: 'queued' | 'running' | 'succeeded' | 'partial_failure'; created_at: number; updated_at: number; items: ReleaseBatchItem[] };
 function scopedId(input: string, ids: string[], type: string): string {
@@ -39,6 +40,8 @@ export class IntegrationRuntime {
   private streams = new Set<ServerResponse>();
   private sent = new Map<string, number>();
   private syncing = false;
+  private dirtySources = new Set<SyncSource>(['messages', 'tasks', 'sessions']);
+  private syncedGroups = '';
   private retry?: ReturnType<typeof setTimeout>;
   private releaseBatchFile: string;
   private releaseBatchOperations: ReleaseBatchOperation[] = [];
@@ -58,8 +61,11 @@ export class IntegrationRuntime {
       atomicJson(this.releaseBatchFile, this.releaseBatchOperations);
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     this.stops.push(options.messages.registerRuntimeGuard(id => this.sessions.assertRuntimeMessage(id)));
-    const changed = () => { try { this.sync(); } catch (error) { this.failStreams(error); this.scheduleRetry(); } };
-    this.stops.push(options.messages.subscribe(changed), options.taskStore.subscribe(changed), this.sessions.subscribe(changed));
+    const changed = (source: SyncSource) => () => {
+      this.dirtySources.add(source);
+      try { this.sync(); } catch (error) { this.failStreams(error); this.scheduleRetry(); }
+    };
+    this.stops.push(options.messages.subscribe(changed('messages')), options.taskStore.subscribe(changed('tasks')), this.sessions.subscribe(changed('sessions')));
     const app = express(); app.use(express.json({ limit: '2mb' }));
     app.use((req, res, next) => {
       if (req.headers['x-termdock-integration-protocol'] !== String(INTEGRATION_PROTOCOL)) { res.status(409).json({ ...this.error(new CollaborationError('INCOMPATIBLE_INTEGRATION_PROTOCOL', 'Unsupported integration protocol', 409)), protocol: INTEGRATION_PROTOCOL }); return; }
@@ -375,10 +381,18 @@ export class IntegrationRuntime {
   }
   sync(): void {
     if (this.syncing) return; this.syncing = true;
+    let sources = new Set<SyncSource>();
     try {
       const groups = new Set(this.store.policies().filter(p => !p.revoked).map(p => p.groupId)), updates: Update[] = [];
-      if (!groups.size) return;
-      for (const task of this.options.taskStore.snapshot()) if (groups.has(task.groupId)) {
+      const groupVersion = JSON.stringify([...groups].sort());
+      // Newly granted groups need a complete source reconciliation, including
+      // retained facts that predate the grant. Never advance dirty state until
+      // the durable event append succeeds.
+      if (groupVersion !== this.syncedGroups) for (const source of ['messages', 'tasks', 'sessions'] as const) this.dirtySources.add(source);
+      sources = this.dirtySources; this.dirtySources = new Set();
+      if (!sources.size) return;
+      if (!groups.size) { this.syncedGroups = groupVersion; return; }
+      for (const task of sources.has('tasks') ? this.options.taskStore.snapshot() : []) if (groups.has(task.groupId)) {
         for (const event of task.events) updates.push({ sourceKey: `task:${task.id}:${event.id}`, sourceVersion: '1', eventId: event.id, event: {
           group_id: task.groupId, kind: `task.${event.kind}`, created_at: event.createdAt, task_id: task.id, attempt_id: event.attemptId,
           artifact_id: event.artifactId ?? null, reply_to_event_id: event.replyToEventId ?? null,
@@ -390,7 +404,7 @@ export class IntegrationRuntime {
           group_id: task.groupId, kind: 'task.delivery', created_at: delivery.deliveredAt ?? task.updatedAt,
           task_id: task.id, attempt_id: delivery.attemptId, message_id: delivery.messageId, source: 'system', payload: { delivery } } });
       }
-      for (const message of this.options.messages.snapshotMessages()) if (groups.has(message.groupId)) {
+      for (const { message, receipt } of sources.has('messages') ? this.options.messages.snapshotMessagesWithReceipts(groups) : []) {
         const link = message.metadata?.termdockTask as { taskId?: string; attemptId?: string; replyToEventId?: string } | undefined;
         const context = { group_id: message.groupId, task_id: link?.taskId ?? null, attempt_id: link?.attemptId ?? null,
           reply_to_event_id: link?.replyToEventId ?? null, message_id: message.id, source: message.integrationOrigin ? 'integration' : message.fromSessionId ? 'member' : 'system',
@@ -403,19 +417,26 @@ export class IntegrationRuntime {
             to_principal_id: message.toPrincipalId ?? null, integration_origin: message.integrationOrigin ?? null,
             response_kind: message.responseKind ?? null, stored_at: message.storedAt ?? null,
             content: message.content, metadata: message.metadata ?? null } } });
-        const { snapshot: _, ...receipt } = this.options.messages.receipt(message.id);
         updates.push({ sourceKey: `message-status:${message.id}`, sourceVersion: JSON.stringify(receipt), event: {
           ...context, kind: 'message.delivery', created_at: message.deliveredAt ?? message.createdAt, payload: { receipt } } });
       }
-      for (const session of this.sessions.snapshot()) if (groups.has(session.group_id)) updates.push({ sourceKey: `session:${session.session_id}`, sourceVersion: JSON.stringify(publicIntegrationSession(session)), event: {
+      const sessions = sources.has('sessions') ? this.sessions.snapshot() : [];
+      for (const session of sessions) if (groups.has(session.group_id)) updates.push({ sourceKey: `session:${session.session_id}`, sourceVersion: JSON.stringify(publicIntegrationSession(session)), event: {
         group_id: session.group_id, kind: `session.${session.state}`, created_at: session.updated_at, source: 'system', actor: { integration_id: session.principal_id }, payload: { session: publicIntegrationSession(session) } } });
-      for (const session of this.sessions.snapshot()) if (groups.has(session.group_id) && session.name_updated_at) updates.push({
+      for (const session of sessions) if (groups.has(session.group_id) && session.name_updated_at) updates.push({
         sourceKey: `session-name:${session.session_id}`, sourceVersion: JSON.stringify([session.name, session.name_updated_at, session.name_generation]), event: {
           group_id: session.group_id, kind: 'session.renamed', created_at: session.name_updated_at, source: 'system',
           actor: { integration_id: session.principal_id }, payload: { session_id: session.session_id, name: session.name, generation: session.name_generation, operation_id: session.name_operation_id } } });
       updates.sort((a, b) => a.event.created_at - b.event.created_at);
       this.store.append(updates);
-    } finally { this.syncing = false; }
+      this.syncedGroups = groupVersion;
+    } catch (error) {
+      for (const source of sources) this.dirtySources.add(source);
+      throw error;
+    } finally {
+      this.syncing = false;
+      if (this.dirtySources.size) this.scheduleRetry();
+    }
   }
   private failStreams(error: unknown): void {
     for (const stream of this.streams) stream.end(`${JSON.stringify(this.error(error))}\n`);

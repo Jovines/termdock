@@ -107,6 +107,8 @@ export class IntegrationSessions {
   private stopDeliveryGuard?: () => void;
   private observing = false;
   private observeAgain = false;
+  private observationTimer?: ReturnType<typeof setTimeout>;
+  private stopped = false;
   constructor(private file: string, private adapter: IntegrationSessionAdapter, private bindingTimeout = 120000) {
     try {
       const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Document;
@@ -117,7 +119,17 @@ export class IntegrationSessions {
     // A pre-restart partial match cannot prove continuity of the live screen.
     for (const record of this.doc.sessions) if (record.startup_input && record.startup_input.state !== 'observed') record.startup_input.matched_since = null;
     this.stopDeliveryGuard = adapter.registerDeliveryGuard?.(id => this.deliveryReadiness(id));
-    this.stopObservation = adapter.subscribe(() => { void this.refreshAll().catch(() => {}); });
+    this.stopObservation = adapter.subscribe(() => this.scheduleObservation());
+  }
+  private scheduleObservation(): void {
+    if (this.stopped) return;
+    if (this.observing) { this.observeAgain = true; return; }
+    if (this.observationTimer) return;
+    this.observationTimer = setTimeout(() => {
+      this.observationTimer = undefined;
+      void this.refreshAll().catch(() => {});
+    }, 250);
+    this.observationTimer.unref();
   }
   private scheduleRefresh(record: IntegrationSession): void {
     for (const deadline of new Set([record.deadline, ...(record.startup_input ? [record.startup_input.deadline] : [])])) {
@@ -667,9 +679,15 @@ export class IntegrationSessions {
   }
   async refreshAll(): Promise<void> {
     if (this.observing) { this.observeAgain = true; return; }
+    if (this.observationTimer) { clearTimeout(this.observationTimer); this.observationTimer = undefined; }
     this.observing = true;
-    try { do { this.observeAgain = false; for (const record of this.snapshot()) await this.refresh(record.session_id); } while (this.observeAgain); }
-    finally { this.observing = false; }
+    this.observeAgain = false;
+    try { for (const record of this.snapshot()) await this.refresh(record.session_id); }
+    finally { this.observing = false; if (this.observeAgain) this.scheduleObservation(); }
   }
-  close(): void { this.stopObservation(); this.stopDeliveryGuard?.(); for (const timer of this.timers) clearTimeout(timer); }
+  close(): void {
+    this.stopped = true; this.stopObservation(); this.stopDeliveryGuard?.();
+    if (this.observationTimer) clearTimeout(this.observationTimer);
+    for (const timer of this.timers) clearTimeout(timer);
+  }
 }
