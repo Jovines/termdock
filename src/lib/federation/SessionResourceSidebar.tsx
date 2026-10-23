@@ -14,7 +14,7 @@ import { useSidebarStore } from '../stores/useSidebarStore';
 const Android = lazy(() => import('../components/android/AndroidMirrorView').then(m => ({ default: m.AndroidMirrorView })));
 const Computer = lazy(() => import('../components/computer/ComputerControlView'));
 const Preview = lazy(() => import('../components/sidebar/RightSidebar').then(m => ({ default: m.FilePreview })));
-const action = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-xs hover:bg-hover disabled:opacity-40';
+const action = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-xs hover:bg-surface-2 disabled:opacity-40';
 function SharedPhone({ sessionId, canWrite, onInsert }: { sessionId?: string; canWrite: boolean; onInsert: (text: string, source?: HTMLElement) => unknown | Promise<unknown> }) {
   const [recording, setRecording] = useState<AndroidRecording>();
   const live = useRef(true), target = useRef({ sessionId, canWrite, onInsert }); target.current = { sessionId, canWrite, onInsert };

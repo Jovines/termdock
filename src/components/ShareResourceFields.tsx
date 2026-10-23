@@ -9,7 +9,7 @@ import { computerPreferences, type ComputerProfile } from '../lib/computer/prefe
 import { FileTree } from '../lib/components/sidebar/FileTree';
 import { useSidebarStore } from '../lib/stores/useSidebarStore';
 const select = 'min-h-11 rounded-lg border border-border bg-background px-2 text-sm';
-const action = 'min-h-11 rounded-lg px-3 text-sm hover:bg-hover disabled:opacity-50';
+const action = 'min-h-11 rounded-lg px-3 text-sm hover:bg-surface-2 disabled:opacity-50';
 export function ShareResourceFields({ value, onChange }: { value: ShareResources; onChange: (value: ShareResources) => void }) {
   const [phones, setPhones] = useState<AndroidDevice[]>([]);
   const [computers, setComputers] = useState<ComputerProfile[]>([]);
