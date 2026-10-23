@@ -12,7 +12,7 @@ using posix_spawnattr_t = int;
 using pid_t = int;
 #define sigset_t TestSigSet
 using TestSigSet = int;
-constexpr int STDIN_FILENO=0, STDOUT_FILENO=1, STDERR_FILENO=2;
+constexpr int STDIN_FILENO=0, STDERR_FILENO=2;
 constexpr int O_RDWR=1, O_NOCTTY=2, TCSANOW=0, TIOCPTYGNAME=1, TIOCSWINSZ=2;
 constexpr int POSIX_SPAWN_CLOEXEC_DEFAULT=1, POSIX_SPAWN_SETSIGDEF=2,
               POSIX_SPAWN_SETSIGMASK=4, POSIX_SPAWN_SETSID=8;
