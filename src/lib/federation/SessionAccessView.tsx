@@ -15,6 +15,8 @@ import type { SecureClient } from './secureClient';
 import { beginSidebarResize } from '../components/sidebar/sidebarResize';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { ShareAccessContext } from './ShareAccessContext';
+import { requestReferenceInsertion } from '../components/sidebar/requestReferenceInsertion';
+import { buildBracketedPastePayload } from '../terminal/bracketedPaste';
 
 interface RemoteSession { sessionId: string; sourceSessionId?: string; name: string; live: boolean; canWrite: boolean; canResize: boolean }
 export function SessionAccessView({ client, initialSessionId, initialViewMode }: { client: SecureClient; initialSessionId?: string; initialViewMode?: 'terminal' | 'chat' }) {
@@ -36,9 +38,9 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
   const resizeTerminal = useRef<() => void>(() => {});
   useEffect(() => { const frame = requestAnimationFrame(() => resizeTerminal.current()); return () => cancelAnimationFrame(frame); }, [mode]);
   useEffect(() => () => stopResize.current?.(), []);
-  const inputTerminal = useRef<(text: string) => void>(() => {});
+  const inputTerminal = useRef<(text: string) => boolean>(() => false);
   const hasResources = !!(resources.android?.length || resources.computers?.length || resources.directories?.length);
-  const insert = (text: string) => { if (!selected?.canWrite) return; if (mode === 'chat') window.dispatchEvent(new CustomEvent('termdock:chat-insert', { detail: { sessionId: selected.sourceSessionId || selected.sessionId, text } })); else inputTerminal.current(text); if (!wide) setSidebarOpen(false); };
+  const insert = async (text: string, source?: HTMLElement) => { if (!selected?.canWrite) return false; const accepted = mode === 'chat' ? await requestReferenceInsertion(text, selected.sourceSessionId || selected.sessionId, () => !client.closed, source) : inputTerminal.current(buildBracketedPastePayload(text, false)); if (accepted && !wide) setSidebarOpen(false); return accepted; };
   const autoSelected = useRef<string>();
   useEffect(() => {
     if (!initialSessionId || autoSelected.current === initialSessionId) return;
@@ -112,13 +114,13 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
     };
     socket.onclose = () => setStatus('连接已断开，请重连');
     socket.onerror = () => setStatus('连接失败，请重试');
-    inputTerminal.current = text => { if (selected.canWrite && socket.readyState === 1) socket.send(JSON.stringify({ type: 'input', data: text })); };
+    inputTerminal.current = text => { if (!selected.canWrite || socket.readyState !== 1) return false; socket.send(JSON.stringify({ type: 'input', data: text })); return true; };
     const input = terminal.onData(data => { if (selected.canWrite && socket.readyState === 1) socket.send(JSON.stringify({ type: 'input', data })); });
     const heartbeat = setInterval(() => { if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'ping' })); }, 20_000);
     const observer = new ResizeObserver(resize);
     observer.observe(element.current);
     void document.fonts?.ready.then(() => { if (!disposed) resize(); });
-    return () => { disposed = true; resizeTerminal.current = () => {}; inputTerminal.current = () => {}; clearInterval(heartbeat); observer.disconnect(); input.dispose(); socket.onclose = null; socket.onerror = null; socket.close(); terminal.dispose(); };
+    return () => { disposed = true; resizeTerminal.current = () => {}; inputTerminal.current = () => false; clearInterval(heartbeat); observer.disconnect(); input.dispose(); socket.onclose = null; socket.onerror = null; socket.close(); terminal.dispose(); };
   }, [client, selected?.sessionId, selected?.canWrite, selected?.canResize, theme, terminalStarted, reconnectEpoch]);
   return <ShareAccessContext.Provider value={resources}><div className="flex h-full min-h-0 flex-col bg-[var(--chrome-bg)] text-foreground">
     <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-border/40 px-3 pt-[env(safe-area-inset-top)] text-sm">
@@ -135,6 +137,6 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
       <div ref={element} className={`min-h-0 flex-1 overflow-auto p-2 ${mode !== 'terminal' ? 'hidden' : ''}`} />
       {selected && mode === 'chat' && <div className="min-h-0 flex-1"><Suspense fallback={<p className="p-6 text-sm text-muted-foreground">正在打开对话…</p>}><Chat key={selected.sourceSessionId || selected.sessionId} sessionId={selected.sourceSessionId || selected.sessionId} name={selected.name} terminalLink={false} canWrite={selected.canWrite} onTerminal={() => changeMode('terminal')} /></Suspense></div>}
       {!selected && <p className="p-6 text-sm text-muted-foreground">{status}</p>}
-    </main>{hasResources && <div ref={panel} className={wide ? sidebarOpen ? 'relative shrink-0 border-l border-border' : 'hidden' : ''} style={wide && sidebarOpen ? { width: Math.max(280, Math.min(sidebarWidth, window.innerWidth - 360)) } : undefined}>{wide && sidebarOpen && <button type="button" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" className="absolute inset-y-0 -left-0.5 z-20 w-[5px] cursor-col-resize bg-transparent transition hover:bg-primary/30 focus-visible:bg-primary/30" onMouseDown={event => { if (!panel.current) return; event.preventDefault(); stopResize.current?.(); stopResize.current = beginSidebarResize(panel.current, event.clientX, panel.current.getBoundingClientRect().width, width => Math.max(280, Math.min(width, window.innerWidth - 360)), width => useSidebarStore.getState().setRightSidebarWidth(width), -1); }} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); useSidebarStore.getState().setRightSidebarWidth(Math.max(280, Math.min(sidebarWidth + (event.key === 'ArrowLeft' ? 24 : -24), window.innerWidth - 360))); } }} />}<Suspense fallback={<p className="p-4 text-xs text-muted-foreground">正在打开侧栏…</p>}><ResourceSidebar resources={resources} sessionId={selected?.sourceSessionId || selected?.sessionId} pinned={wide} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onInsert={insert} /></Suspense></div>}</div>
+    </main>{hasResources && <div ref={panel} className={wide ? sidebarOpen ? 'relative shrink-0 border-l border-border' : 'hidden' : ''} style={wide && sidebarOpen ? { width: Math.max(280, Math.min(sidebarWidth, window.innerWidth - 360)) } : undefined}>{wide && sidebarOpen && <button type="button" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" className="absolute inset-y-0 -left-0.5 z-20 w-[5px] cursor-col-resize bg-transparent transition hover:bg-primary/30 focus-visible:bg-primary/30" onMouseDown={event => { if (!panel.current) return; event.preventDefault(); stopResize.current?.(); stopResize.current = beginSidebarResize(panel.current, event.clientX, panel.current.getBoundingClientRect().width, width => Math.max(280, Math.min(width, window.innerWidth - 360)), width => useSidebarStore.getState().setRightSidebarWidth(width), -1); }} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); useSidebarStore.getState().setRightSidebarWidth(Math.max(280, Math.min(sidebarWidth + (event.key === 'ArrowLeft' ? 24 : -24), window.innerWidth - 360))); } }} />}<Suspense fallback={<p className="p-4 text-xs text-muted-foreground">正在打开侧栏…</p>}><ResourceSidebar resources={resources} canWrite={selected?.canWrite === true} sessionId={selected?.sourceSessionId || selected?.sessionId} pinned={wide} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onInsert={insert} /></Suspense></div>}</div>
   </div></ShareAccessContext.Provider>;
 }

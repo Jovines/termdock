@@ -36,9 +36,10 @@ it('keeps read-only recipients from sending or accepting references', async () =
 
 it('keeps reply feedback through progress, renders consecutive updates together, and clears it on the final reply', async () => {
   let messages = [{ id: 'u', role: 'user', content: '帮我整理', createdAt: 1, status: 'delivered' }];
-  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, messages })));
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, agent: { slug: 'codex', displayName: 'Codex' }, messages })));
   const { container } = render(<SessionChatView sessionId="waiting" onTerminal={() => {}} />);
   await screen.findByText('思考中…');
+  expect(screen.getByRole('status', { name: 'Codex思考中' })).toBeTruthy();
   messages = [...messages, { id: 'a1', role: 'assistant', content: '先整理资料', createdAt: 2, status: 'stored', replyTo: 'u', responseKind: 'progress' } as typeof messages[number]];
   fireEvent(window, new Event('online')); await screen.findByText('先整理资料'); expect(screen.getByText('思考中…')).toBeTruthy();
   messages = [...messages, { id: 'a2', role: 'assistant', content: '这是结果', createdAt: 3, status: 'stored', replyTo: 'u', responseKind: 'result' } as typeof messages[number]];
@@ -49,7 +50,8 @@ it('keeps reply feedback through progress, renders consecutive updates together,
   expect(bodies).toHaveLength(2);
   expect(bodies[0].querySelector('[data-chat-continuation]')).toBeNull();
   expect(bodies[1].querySelector('[data-chat-continuation] time')?.getAttribute('datetime')).toBe(new Date(3).toISOString());
-  expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(1);
+  expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(2);
+  for (const body of bodies) expect(body.querySelector('[data-chat-message-actions] button[aria-label="引用消息"]')).toBeTruthy();
 });
 
 it('sends with Enter, keeps Shift+Enter for newlines, and never sends IME confirmation', async () => {

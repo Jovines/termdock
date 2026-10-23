@@ -56,6 +56,7 @@ jobs:
         run: >-
           npx vitest run --maxWorkers=2
           src/lib/federation
+          src/lib/components/chat
           src/components/services
           src/components/FederationAccess.test.tsx
           src/lib/services
@@ -64,6 +65,12 @@ jobs:
           src/server/android/adb.test.ts
           src/server/android/scrcpyForward.test.ts
           src/server/android/recordingTransport.test.ts
+          src/server/android/recording.test.ts
+          src/server/agent/sessionAttachmentRoutes.test.ts
+          src/server/agent/sessionChatRoutes.test.ts
+          src/server/agent/sessionViewModeRoutes.test.ts
+          src/server/routes/sharedFiles.test.ts
+          src/server/routes/vncReadOnly.test.ts
           src/lib/android/deviceOptions.test.ts
           src/server/android/liveBitrateTransport.test.ts
           src/server/android/liveBitrate.test.ts

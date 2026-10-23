@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
-import { uploadFiles } from '../../terminal/api';
+import { uploadFiles, uploadSessionAttachments } from '../../terminal/api';
 import { prepareTerminalClipboardImage, readTerminalClipboardFiles, readTerminalClipboardImage, readTerminalClipboardVideos, TerminalClipboardVideoError } from '../../terminal/clipboardImage';
 import { getTermdockDesktopBridge } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
@@ -7,7 +7,7 @@ import { selectedTarget } from '../../federation/clientScope';
 import { currentSecureClient } from '../../federation/browserIntegration';
 import { getActiveKeyboardLayer } from '../../hooks/useKeyboardLayer';
 interface Options {
-  sessionId: string; active: boolean; canWrite: boolean; directory?: string;
+  sessionId: string; active: boolean; canWrite: boolean; directory?: string; sessionAttachments?: boolean;
   input: RefObject<HTMLTextAreaElement>; insert: (text: string, focus?: boolean) => void; error: (message: string) => void;
 }
 interface Transfer { stage: 'reading' | 'uploading' | 'failed' | 'cancelled'; percent?: number; files?: File[]; paths?: string[] }
@@ -40,9 +40,11 @@ export function useChatInputTransfer(options: Options) {
     if (!operation.current()) return;
     setTransfer({ stage: 'uploading', percent: files.length ? 0 : undefined, files, paths }); latest.current.error('');
     try {
-      if (files.length && !latest.current.directory) throw new Error('当前分享未开放文件上传，请联系分享者');
-      const result = files.length ? await uploadFiles(latest.current.directory!, files, operation.controller.signal,
-        percent => { if (operation.current()) setTransfer({ stage: 'uploading', percent: Math.round(percent), files, paths }); }, operation.current) : { files: [] };
+      if (files.length && !latest.current.directory && !latest.current.sessionAttachments) throw new Error('附件上传暂不可用，请重试');
+      const progress = (percent: number) => { if (operation.current()) setTransfer({ stage: 'uploading', percent: Math.round(percent), files, paths }); };
+      const result = !files.length ? { files: [] } : latest.current.sessionAttachments
+        ? await uploadSessionAttachments(latest.current.sessionId, files, operation.controller.signal, progress, operation.current)
+        : await uploadFiles(latest.current.directory!, files, operation.controller.signal, progress, operation.current);
       if (!operation.current()) return;
       if (result.files.length !== files.length || result.files.some(file => !file.path)) throw new Error('部分文件未上传成功，请重试');
       const references = [...paths, ...result.files.map(file => file.path)];

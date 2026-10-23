@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ upload: vi.fn(), client: undefined, target: undefined as object | undefined }));
-vi.mock('../../terminal/api', () => ({ uploadFiles: mocks.upload }));
+vi.mock('../../terminal/api', () => ({ uploadFiles: mocks.upload, uploadSessionAttachments: mocks.upload }));
 vi.mock('../../federation/browserIntegration', () => ({ currentSecureClient: () => mocks.client }));
 vi.mock('../../federation/clientScope', () => ({ selectedTarget: () => mocks.target }));
 import { useChatInputTransfer } from './useChatInputTransfer';
@@ -20,6 +20,14 @@ it('uploads through the existing file API, escapes references, and never submits
   const f = fixture(); act(() => f.result.current.addFiles([file()]));
   await waitFor(() => expect(f.insert).toHaveBeenCalledWith('/tmp/file\\ with\\ space.txt ', true));
   expect(mocks.upload.mock.calls[0][0]).toBe('/tmp'); expect(f.result.current.busy).toBe(false);
+});
+it('adds shared-chat attachments without requiring filesystem directory access', async () => {
+  mocks.upload.mockResolvedValue({ files: [{ path: '/server/chat-attachments/image.png' }] });
+  const insert = vi.fn(), error = vi.fn(), input = { current: document.createElement('textarea') };
+  const hook = renderHook(() => useChatInputTransfer({ sessionId: 'shared', active: true, canWrite: true, sessionAttachments: true, input, insert, error }));
+  act(() => hook.result.current.addFiles([file()]));
+  await waitFor(() => expect(insert).toHaveBeenCalledWith('/server/chat-attachments/image.png ', true));
+  expect(mocks.upload.mock.calls[0][0]).toBe('shared'); expect(error).not.toHaveBeenCalledWith(expect.stringContaining('未开放'));
 });
 it('discards and aborts an upload when its session is hidden before completion', async () => {
   let finish!: (result: unknown) => void;

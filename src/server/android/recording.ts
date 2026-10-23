@@ -10,6 +10,7 @@ export interface AndroidRecording {
   id: string; serial: string; name: string; size: number; startedAt: number;
   status: 'starting' | 'recording' | 'stopping' | 'ready' | 'error';
   error?: string; savedPath?: string;
+  ownerId?: string;
 }
 interface Job { info: AndroidRecording; child?: ChildProcess; done?: Promise<void>; timer?: ReturnType<typeof setTimeout>; writing?: Promise<void> }
 
@@ -44,25 +45,26 @@ export class AndroidRecordings {
       }
     })();
   }
-  async list(serial: string): Promise<AndroidRecording[]> {
+  async list(serial: string, ownerId?: string): Promise<AndroidRecording[]> {
     await this.load();
-    return [...this.jobs.values()].filter(job => job.info.serial === serial && !job.info.savedPath).map(job => ({ ...job.info }));
+    return [...this.jobs.values()].filter(job => job.info.serial === serial && !job.info.savedPath && job.info.ownerId === ownerId).map(job => ({ ...job.info }));
   }
-  start(serial: string): Promise<AndroidRecording> {
-    const pending = this.starts.get(serial);
+  start(serial: string, ownerId?: string): Promise<AndroidRecording> {
+    const key = JSON.stringify([serial, ownerId]);
+    const pending = this.starts.get(key);
     if (pending) return pending;
-    const promise = this.startNew(serial).finally(() => this.starts.delete(serial));
-    this.starts.set(serial, promise);
+    const promise = this.startNew(serial, ownerId).finally(() => this.starts.delete(key));
+    this.starts.set(key, promise);
     return promise;
   }
-  private async startNew(serial: string): Promise<AndroidRecording> {
+  private async startNew(serial: string, ownerId?: string): Promise<AndroidRecording> {
     await this.load();
-    const active = [...this.jobs.values()].find(job => job.info.serial === serial && job.child);
+    const active = [...this.jobs.values()].find(job => job.info.serial === serial && job.info.ownerId === ownerId && job.child);
     if (active) return { ...active.info };
     const { bin, serverJar } = await resolveScrcpyBinaries();
     if ([...this.jobs.values()].filter(job => ['starting', 'recording', 'stopping'].includes(job.info.status)).length >= 3) throw new Error('同时最多录制三个设备');
     const id = randomUUID();
-    const job: Job = { info: { id, serial, name: `termdock-recording-${id}.mp4`, size: 0, startedAt: Date.now(), status: 'starting' } };
+    const job: Job = { info: { id, serial, name: `termdock-recording-${id}.mp4`, size: 0, startedAt: Date.now(), status: 'starting', ...(ownerId ? { ownerId } : {}) } };
     this.jobs.set(id, job);
     await this.persist(job);
     const child = spawn(bin, [
@@ -114,14 +116,15 @@ export class AndroidRecordings {
     await this.persist(job);
     return { ...job.info };
   }
-  private async get(id: string): Promise<Job> {
+  private async get(id: string, ownerId?: string): Promise<Job> {
     await this.load();
     const job = this.jobs.get(id);
-    if (!job) throw new Error('录像不存在');
+    if (!job || ownerId && job.info.ownerId !== ownerId) throw new Error('录像不存在');
     return job;
   }
-  async stop(id: string): Promise<AndroidRecording> {
-    const job = await this.get(id);
+  async info(id: string, ownerId?: string): Promise<AndroidRecording> { return { ...(await this.get(id, ownerId)).info }; }
+  async stop(id: string, ownerId?: string): Promise<AndroidRecording> {
+    const job = await this.get(id, ownerId);
     if (job.child && job.info.status !== 'stopping') {
       job.info.status = 'stopping';
       job.child.kill('SIGINT');
@@ -132,8 +135,8 @@ export class AndroidRecordings {
     await job.done;
     return { ...job.info };
   }
-  async save(id: string, directory?: string): Promise<string> {
-    const job = await this.get(id);
+  async save(id: string, directory?: string, ownerId?: string): Promise<string> {
+    const job = await this.get(id, ownerId);
     if (job.info.savedPath) {
       if (directory && join(directory, job.info.name) !== job.info.savedPath) throw new Error(`录像已保存到 ${job.info.savedPath}`);
       return job.info.savedPath;
@@ -147,10 +150,10 @@ export class AndroidRecordings {
     if (destination !== source) await fs.rm(source, { force: true }).catch(() => {});
     return destination;
   }
-  async discard(id: string): Promise<void> {
+  async discard(id: string, ownerId?: string): Promise<void> {
     await this.load();
     if (!this.jobs.has(id)) return;
-    const job = await this.get(id);
+    const job = await this.get(id, ownerId);
     if (job.info.savedPath) {
       await fs.rm(join(this.directory, `${id}.json`), { force: true });
       this.jobs.delete(id);

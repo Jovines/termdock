@@ -28,6 +28,21 @@ async function setup(failure = false) {
   return { manager, dir };
 }
 describe('server recording lifecycle', () => {
+  it('isolates shared-device recordings by owner across retries and restarts', async () => {
+    const { manager, dir } = await setup();
+    const first = await manager.start('phone', 'guest-a');
+    const retry = await manager.start('phone', 'guest-a'); expect(retry.id).toBe(first.id);
+    const second = await manager.start('phone', 'guest-b'); expect(second.id).not.toBe(first.id);
+    expect((await manager.list('phone', 'guest-a')).map(item => item.id)).toEqual([first.id]);
+    await expect(manager.stop(first.id, 'guest-b')).rejects.toThrow();
+    await expect(manager.save(first.id, undefined, 'guest-b')).rejects.toThrow();
+    await expect(manager.discard(first.id, 'guest-b')).rejects.toThrow();
+    await manager.stop(first.id, 'guest-a'); await manager.stop(second.id, 'guest-b');
+    const restored = new AndroidRecordings(dir);
+    expect((await restored.list('phone', 'guest-b')).map(item => item.id)).toEqual([second.id]);
+    await expect(restored.info(first.id, 'guest-b')).rejects.toThrow();
+    expect(await restored.save(first.id, undefined, 'guest-a')).toContain(first.name);
+  });
   it('uses an independent headless stream with fixed quality and coalesces start retries', async () => {
     const { manager } = await setup();
     const [a,b] = await Promise.all([manager.start('phone'), manager.start('phone')]);

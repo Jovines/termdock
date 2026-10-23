@@ -26,6 +26,7 @@ export function resourceHttpAllowed(resources: ShareResources, method: string, r
   const pathname = canonicalApiPath(requestPath);
   if (!pathname) return false;
   if (method === 'GET' && pathname === '/api/android/devices') return !!resources.android?.length;
+  if (resources.android?.length && ((['GET', 'POST'].includes(method) && pathname === '/api/android/recordings') || (method === 'POST' && /^\/api\/android\/recordings\/[a-f0-9-]{36}\/(?:stop|save)$/.test(pathname)) || (method === 'DELETE' && /^\/api\/android\/recordings\/[a-f0-9-]{36}$/.test(pathname)))) return true;
   if (method === 'GET' && pathname === '/api/computer/status') return !!resources.computers?.length;
   const url = new URL(requestPath, 'http://inner');
   const op = pathname.slice('/api/terminal/fs/'.length);

@@ -1,4 +1,5 @@
 import { sessionViewModeRoutes, SessionViewModeStore } from '../agent/sessionViewModeRoutes.js';
+import { sessionAttachmentRoutes } from '../agent/sessionAttachmentRoutes.js';
 import { TodoStore, TodoError } from '../todos/store.js';
 import { TodoRunner, todoRoutes, type TodoRuntime } from '../todos/routes.js';
 import { TerminalInputQueue } from '../utils/terminalInputQueue.js';
@@ -7435,6 +7436,7 @@ export function collaborationLocalActivity() {
 export function deliverPeerCollaboration(sessionId: string): void { void tryDeliverCollaborationInbox(sessionId); }
 
 router.use(sessionViewModeRoutes(new SessionViewModeStore(`${TERMDOCK_DIR}/session-view-modes.json`), resolveStableFederationSessionId));
+router.use(sessionAttachmentRoutes(`${TERMDOCK_DIR}/chat-attachments`, resolveStableFederationSessionId));
 
 router.use(sessionChatRoutes({ store: collaborationStore, resolve: id => {
   const stable = resolveStableFederationSessionId(id);

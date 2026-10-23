@@ -3,7 +3,7 @@ export interface ChatMessage {
   replyTo?: string; requestId?: string; responseKind?: string;
 }
 export interface ChatTurn { id: string; role: ChatMessage['role']; messages: ChatMessage[] }
-/** Adjacent assistant updates read as one turn, with one author and action row. */
+/** Adjacent assistant updates read as one turn, with a shared author and separate message actions. */
 export function chatTurns(messages: ChatMessage[]): ChatTurn[] {
   const turns: ChatTurn[] = [];
   for (const message of messages) {

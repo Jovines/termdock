@@ -5501,9 +5501,9 @@ router.post('/open-in-file-browser', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/upload', async (req: Request, res: Response) => {
+export async function handleFileUpload(req: Request, res: Response, destinationDirectory?: string) {
   try {
-    const dir = typeof req.query.dir === 'string' ? req.query.dir : '';
+    const dir = destinationDirectory ?? (typeof req.query.dir === 'string' ? req.query.dir : '');
     if (!dir) {
       res.status(400).json({ error: 'Missing dir query parameter', code: 'MISSING_DIR' });
       return;
@@ -5644,7 +5644,8 @@ router.post('/upload', async (req: Request, res: Response) => {
     const message = error instanceof Error ? error.message : 'Upload failed';
     res.status(500).json({ error: message, code: 'UPLOAD_FAILED' });
   }
-});
+}
+router.post('/upload', (req, res) => handleFileUpload(req, res));
 
 async function createUniqueUploadFile(filePath: string) {
   const ext = path.extname(filePath);

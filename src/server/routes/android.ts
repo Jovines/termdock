@@ -1,4 +1,5 @@
-import { encryptedRequestResources, hasEncryptedServiceAccess } from '../federation/requestContext.js';
+import { encryptedRequestResources, encryptedRequestSubject, hasEncryptedServiceAccess } from '../federation/requestContext.js';
+import { directoryResource } from '../federation/resourceAccess.js';
 import { Router } from 'express';
 import type { WebSocket } from 'ws';
 import { connectDevice, disconnectDevice, listDevices, resolveAdbBinary } from '../android/adb.js';
@@ -51,31 +52,45 @@ router.post('/disconnect', async (req, res) => {
   }
 });
 
+const recordingOwners = new WeakMap<object, string>();
+router.use('/recordings', async (req, res, next) => {
+  const resources = encryptedRequestResources(req);
+  if (!resources || hasEncryptedServiceAccess(req)) { next(); return; }
+  const subject = encryptedRequestSubject(req);
+  if (!subject) { res.sendStatus(403); return; }
+  try {
+    const id = /^\/([^/]+)(?:\/(?:stop|save))?$/.exec(req.path)?.[1];
+    const serial = id ? (await androidRecordings.info(id, subject)).serial : req.method === 'GET' ? req.query.serial : req.body?.serial;
+    if (typeof serial !== 'string' || !resources.android?.some(device => device.serial === serial)) throw new Error('PHONE_NOT_SHARED');
+    if (req.body?.directory !== undefined && (typeof req.body.directory !== 'string' || !directoryResource(resources, req.body.directory, true))) throw new Error('DIRECTORY_NOT_SHARED');
+    recordingOwners.set(req, subject); next();
+  } catch { res.status(403).json({ error: '此手机或录像未获授权', code: 'SHARE_ACCESS_DENIED' }); }
+});
 router.get('/recordings', async (req, res) => {
   const serial = typeof req.query.serial === 'string' ? req.query.serial : '';
   if (!isValidAndroidSerial(serial)) { res.status(400).json({ error: 'INVALID_SERIAL' }); return; }
-  try { res.json({ recordings: await androidRecordings.list(serial) }); }
+  try { res.json({ recordings: await androidRecordings.list(serial, recordingOwners.get(req)) }); }
   catch (error) { res.status(500).json({ error: String(error) }); }
 });
 router.post('/recordings', async (req, res) => {
   const serial = typeof req.body?.serial === 'string' ? req.body.serial : '';
   if (!isValidAndroidSerial(serial)) { res.status(400).json({ error: 'INVALID_SERIAL' }); return; }
-  try { res.json(await androidRecordings.start(serial)); }
+  try { res.json(await androidRecordings.start(serial, recordingOwners.get(req))); }
   catch (error) { res.status(500).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 router.post('/recordings/:id/stop', async (req, res) => {
-  try { res.json(await androidRecordings.stop(req.params.id)); }
+  try { res.json(await androidRecordings.stop(req.params.id, recordingOwners.get(req))); }
   catch (error) { res.status(400).json({ error: String(error) }); }
 });
 router.post('/recordings/:id/save', async (req, res) => {
   try {
     const directory = req.body?.directory === undefined ? undefined
       : await (req.pathValidator ?? pathValidator).validateAsync(req.body.directory);
-    res.json({ path: await androidRecordings.save(req.params.id, directory) });
+    res.json({ path: await androidRecordings.save(req.params.id, directory, recordingOwners.get(req)) });
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 router.delete('/recordings/:id', async (req, res) => {
-  try { await androidRecordings.discard(req.params.id); res.json({ ok: true }); }
+  try { await androidRecordings.discard(req.params.id, recordingOwners.get(req)); res.json({ ok: true }); }
   catch (error) { res.status(400).json({ error: String(error) }); }
 });
 

@@ -944,7 +944,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     if (item.status === 'ready' || item.status === 'error') {
       if (onRecordingCompleteRef.current && !deliveredRecordings.current.has(item.id)) {
         deliveredRecordings.current.add(item.id);
-        deliverAndroidRecording(item, onRecordingCompleteRef.current);
+        if (sharedRef.current) onRecordingCompleteRef.current(item);
+        else deliverAndroidRecording(item, onRecordingCompleteRef.current);
       }
     }
   }, []);
@@ -973,7 +974,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     setCaptureError(null);
     try {
       const item = await startAndroidRecording(selectedSerial);
-      if (destination) bindAndroidRecordingDestination(item.id, destination);
+      if (destination && !sharedRef.current) bindAndroidRecordingDestination(item.id, destination);
       if (item.status === 'recording' || item.status === 'starting' || item.status === 'stopping') {
         recordingRef.current = item;
         setRecording(true);
@@ -988,7 +989,6 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   // 服务端拥有录制生命周期；刷新、切换面板和预览重连都不会停止录像。
   useEffect(() => {
     let cancelled = false;
-    if (sharedRef.current) return;
     let polling = false;
     recordingRef.current = null;
     setRecording(false);
@@ -1189,7 +1189,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           <button
             type="button"
             onClick={() => { if (recording) void stopRecording('manual'); else void startRecording(); }}
-            disabled={!!shared || recordingBusy || (!recording && !onRecordingComplete)}
+            disabled={recordingBusy || (!recording && !onRecordingComplete)}
             className={`${iconButtonClass} ${recording ? 'text-destructive' : 'text-muted-foreground'}`}
             title={recording ? t('android.recordingStop') : (onRecordingComplete ? t('android.recordingStart') : t('android.captureUnavailable'))}
             aria-label={recording ? t('android.recordingStop') : t('android.recordingStart')}

@@ -75,6 +75,8 @@ export function resolveAccessRequest(method: string, path: string): ResolvedAcce
   if (read && serviceReads.has(route)) return { action: 'service.view' };
   if (read && route === 'directory-suggestions') return { action: 'file.read' };
   if (method === 'POST' && route === 'create') return { action: 'service.create-session' };
+  const attachment = /^([^/]+)\/chat\/attachments$/.exec(route);
+  if (method === 'POST' && attachment && !reservedSessionIds.has(attachment[1].toLowerCase())) return { action: 'session.input', sessionId: attachment[1] };
   const session = /^([^/]+)(?:\/(health|attach|stream|input|resize|tmux|restart|agent-resume|chat|view-mode))?$/.exec(route);
   if (session && !reservedSessionIds.has(session[1].toLowerCase())) {
     const sessionId = session[1]; const op = session[2];

@@ -3105,6 +3105,7 @@ export async function uploadFiles(
   signal?: AbortSignal,
   onProgress?: (percent: number) => void,
   isCurrent?: () => boolean,
+  sessionId?: string,
 ): Promise<UploadFilesResponse> {
   if (files.length > MAX_UPLOAD_FILES) {
     throw new UploadFilesError(`Choose up to ${MAX_UPLOAD_FILES} files per upload. None were uploaded.`, {
@@ -3121,7 +3122,7 @@ export async function uploadFiles(
   for (const file of files) {
     formData.append('files', file);
   }
-  const url = `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}&fileCount=${files.length}`;
+  const url = sessionId ? `/api/terminal/${encodeURIComponent(sessionId)}/chat/attachments?fileCount=${files.length}` : `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}&fileCount=${files.length}`;
   const csrfTokenHeader = await getCsrfToken();
   confirmOwner();
   // Use the encrypted fetch transport even before a Service Worker controls this
@@ -3154,6 +3155,10 @@ export async function uploadFiles(
   confirmOwner();
   onProgress?.(100);
   return result;
+}
+
+export function uploadSessionAttachments(sessionId: string, files: File[], signal?: AbortSignal, onProgress?: (percent: number) => void, isCurrent?: () => boolean): Promise<UploadFilesResponse> {
+  return uploadFiles('', files, signal, onProgress, isCurrent, sessionId);
 }
 
 export async function getLocalFileBrowserAvailability(signal?: AbortSignal): Promise<{ available: boolean; platform?: string }> {

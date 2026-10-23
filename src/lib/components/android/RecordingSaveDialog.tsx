@@ -7,6 +7,7 @@ import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import { saveAndroidRecording, discardAndroidRecording, type AndroidRecording } from '../../android/api';
 import { DirectoryPickerDialog } from '../sidebar/DirectoryPickerDialog';
+import { useShareAccess } from '../../federation/ShareAccessContext';
 
 /** 录像始终留在服务端；这里只传保存位置和文件引用。 */
 export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
@@ -16,6 +17,7 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
   onDone: () => void;
 }) {
   const { t } = useI18n();
+  const shared = useShareAccess();
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -94,7 +96,7 @@ export function RecordingSaveDialog({ file, initialPath, onInsert, onDone }: {
         </p>}
         <div className="mt-4 flex flex-col gap-2">
           <button type="button" disabled={busy || file.status !== 'ready'} onClick={(event) => { void run(undefined, event.currentTarget); }} className="min-h-10 rounded-lg bg-primary px-3 text-sm text-primary-foreground disabled:opacity-40">{t('android.recordingInsert')}</button>
-          <button type="button" disabled={busy || file.status !== 'ready'} onClick={() => setPicking(true)} className="min-h-10 rounded-lg bg-surface-2 px-3 text-sm disabled:opacity-40">{t('android.recordingSave')}</button>
+          {!shared && <button type="button" disabled={busy || file.status !== 'ready'} onClick={() => setPicking(true)} className="min-h-10 rounded-lg bg-surface-2 px-3 text-sm disabled:opacity-40">{t('android.recordingSave')}</button>}
           <button type="button" disabled={busy} onClick={() => void discard()} className="min-h-10 rounded-lg px-3 text-sm text-muted-foreground disabled:opacity-40">{t('android.recordingDiscard')}</button>
         </div>
       </div>
