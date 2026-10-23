@@ -107,6 +107,21 @@
   刻度有序、无裸数值、局部控件不碰全局档位,以及已登记的局部
   “兄弟控件 → 弹层宿主 → 弹层”链路有序。
 
+## 移动端软键盘布局
+
+- 全高输入工作区复用 `src/lib/components/layout/keyboardPanelLayout.ts` 的
+  `getKeyboardPanelStyles`：导航在补偿容器外，rootStyle 给 flex-col 外层，
+  contentStyle 给 `min-h-0 flex-1` 内容层，输入/工具栏为 `shrink-0` 兄弟。
+- 唯一视口计算源是 `useViewportHeight`；业务组件禁止复制键盘高度监听、CSS
+  补偿公式、根高度模式切换、viewport meta 切换或键盘动画期间 scrollTo 复位。
+- 同一条祖先链只补偿一次。现有共享分屏保留父级平移与工具栏 portal 的特殊
+  布局，子终端必须禁用自身补偿；不要将该特殊用法用于新页面。
+- 同类 iOS 可见输入框按需用 `useKeyboardFocusGuard`，遮罩期间必须配
+  `aria-hidden` / `pointer-events-none` 草稿镜像。普通弹窗优先使用原生布局。
+- 修改后运行 `npm run test:keyboard-layout`；涉及终端入口再运行下述两组
+  geometry 检查。自动化不替代 iOS 实机验收。设计与示例见
+  [docs/soft-keyboard-adaptation.md](docs/soft-keyboard-adaptation.md)。
+
 ## 终端尺寸架构
 
 - 浏览器终端统一通过 `src/lib/terminal/geometry.ts` 的 `createBrowserTerminal` 等待字体并创建，再交给 `TerminalGeometry` 管理尺寸；新增入口优先复用 `TerminalViewport`，不复制 `fit` / `resize` 流程。无调整尺寸权限的共享终端使用 `authority: 'server'`，禁止按本机容器改写远端网格。

@@ -1,3 +1,4 @@
+import { getKeyboardPanelStyles } from './layout/keyboardPanelLayout';
 import { useSessionViewMode } from './chat/sessionViewMode';
 import { SessionWorkspace } from './chat/SessionWorkspace';
 import { canDismissTmuxRecoveryOperation } from '../../server/utils/tmuxRecoveryDismissal';
@@ -2500,12 +2501,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                   {isSplit ? (
                     <div
                       className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--chrome-bg)]"
-                      style={isMobileLayout && activeViewMode !== 'chat'
-                        ? {
-                            transform: 'translateY(var(--kb-translate-y, 0px))',
-                            transition: 'none',
-                          }
-                        : undefined
+                      style={
+                        // Preserve the shared split pan/portal layout; descendants opt out.
+                        getKeyboardPanelStyles(isMobileLayout && activeViewMode !== 'chat').rootStyle
                       }
                     >
                     {showSplitWindowHeader && !isMobileLayout && <header

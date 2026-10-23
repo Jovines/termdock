@@ -1,87 +1,17 @@
-# Mobile Keyboard Toolbar Positioning
+# 移动键盘工具栏定位
 
-This note captures the root cause and final fix for mobile soft-keyboard toolbar placement in the terminal view.
+当前布局规则已统一到 [移动端软键盘布局](soft-keyboard-adaptation.md)。本文件保留工具栏排障入口，避免旧定位公式继续作为开发依据。
 
-## Problem Observed
+- 工具栏和内容在同一个 flex 流，工具栏是 `shrink-0` 的底部兄弟节点。
+- 布局使用 `getKeyboardPanelStyles`；内容变矮，顶部保持原位，工具栏上移。
+- 可见性状态与位置职责分开；不要仅因工具栏隐藏就折叠其占位造成额外 resize。
+- 共享分屏只有父容器接管平移，子终端禁用自己的补偿，工具栏 portal 到共享宿主。
+- 不额外重复添加键盘高度、安全区补偿或 scrollTo。
 
-- Toolbar was visible when keyboard opened, but position was wrong.
-- In one iteration, toolbar stayed at screen bottom (`fixed bottom-0`), not aligned with the visible terminal area.
-- In another iteration, toolbar was over terminal content (`absolute bottom-0`), causing overlap.
-- Extra gap appeared between toolbar and keyboard on iOS when safe-area padding was applied during keyboard-open state.
+排查时启用 `?debug=keyboard,viewport,terminal`，或设置：
 
-## Root Cause
+```js
+localStorage.setItem('termdock:debug', 'keyboard,viewport,terminal');
+```
 
-Toolbar visibility and toolbar positioning were handled by different coordinate systems:
-
-- Visibility: based on keyboard-open detection (`keyboardHeight > 0`).
-- Positioning: based on viewport/screen anchoring (`fixed` or `absolute`).
-
-When these are not aligned, keyboard state can be correct while UI position is still wrong.
-
-## Final Approach (Stable)
-
-Use an input-anchor focus signal to decide whether the toolbar should render, and keep the toolbar in normal layout flow.
-
-1. Keep terminal resize behavior driven by `visualViewport`/`--app-vh`.
-   - Compensate `visualViewport.offsetTop` only for small transient shifts; ignore large offsets to avoid canceling keyboard shrink.
-2. Use the terminal input anchor (`textarea`) focus state as the toolbar visibility signal.
-3. Do **not** use floating positioning (`fixed`/`absolute`) for the toolbar.
-4. Do **not** add extra `safe-area-inset-bottom` padding for this toolbar while keyboard is open.
-5. Avoid forcing `window.scrollTo(0, 0)` during keyboard animation.
-
-This ensures terminal area and toolbar are laid out in one flex flow, so there is no overlap and no duplicated bottom compensation.
-
-## Current Implementation
-
-- `src/lib/components/views/TerminalView.tsx`
-  - Keyboard visibility for toolbar is driven by input focus (`onInputFocusChange`).
-  - Backend resize calls are throttled and deduplicated to reduce keyboard-animation jitter.
-  - `MobileKeyboard` rendered as part of normal component tree.
-- `src/lib/components/terminal/MobileKeyboard.tsx`
-  - Visibility guard: `visible` (focus-based).
-  - Container is a regular block (`z-20 border-t ...`) without floating positioning.
-- `src/lib/components/terminal/TerminalViewport.tsx`
-  - Input anchor is positioned at a stable top-left spot inside terminal container.
-  - Input focus and blur state are emitted to parent.
-  - Prefer `WebglAddon` for visual quality, fallback to canvas on load/context-loss failure.
-  - Refresh texture atlas on resize/device-pixel-ratio changes to reduce transient stretch artifacts.
-
-## Validation Checklist
-
-Test on iOS Safari and Android Chrome:
-
-- Focus input in terminal, keyboard opens, toolbar appears.
-- Toolbar does not overlap terminal content.
-- Toolbar stays directly above keyboard/browser input bar area (no large unexpected gap).
-- Closing keyboard hides toolbar and terminal returns to full height.
-- Repeat open/close 10+ times; no drift or cumulative offset.
-
-## Debug Instrumentation
-
-When diagnosing keyboard animation issues, enable scoped debug channels:
-
-- URL query: `?debug=keyboard,viewport,terminal`
-- Or localStorage: `localStorage.setItem('termdock:debug', 'keyboard,viewport,terminal')`
-- Reload page after changing debug channels.
-
-Current channel coverage:
-
-- `viewport`: `--app-vh` sync decisions (`innerHeight`, `visualViewport.height`, `offsetTop`, compensated result).
-- `keyboard`: focus-driven keyboard visibility and throttled resize queue/flush events.
-- `terminal`: renderer selection (`webgl`/`canvas`), `ResizeObserver` events, and `fit` before/after rows/cols.
-
-## Related Troubleshooting: Duplicate Echo While Typing
-
-If users report repeated characters (including normal non-IME typing), check stream duplication first:
-
-- Verify one active stream per backend session in `/api/terminal/processes` (`clients` should not grow unexpectedly).
-- Ensure `TerminalView` cleanup closes old subscriptions on unmount/reconnect.
-- Guard stream callbacks with a connection version/token, and ignore stale callbacks.
-
-This issue can look like input-method behavior, but if plain English typing also duplicates, stream lifecycle is usually the root cause.
-
-## Anti-Patterns To Avoid
-
-- `fixed bottom-0` toolbar while terminal height is controlled by `--app-vh`.
-- `absolute bottom-0` floating toolbar inside terminal wrapper (content overlap risk).
-- Stacking keyboard compensation + safe-area compensation without explicit need.
+刷新后观察共享视口、焦点与终端尺寸日志。工具栏位置异常先检查补偿是否重复、root/content 是否配对、flex 内容是否缺少 `min-h-0`，再排查平台视口数据。验证命令和实机检查范围见主文档。

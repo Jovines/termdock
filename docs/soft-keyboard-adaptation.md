@@ -1,159 +1,80 @@
-# Soft Keyboard Adaptation
+# 移动端软键盘布局（当前约定）
 
-## Problem
+2026-10-24：聊天复用 Terminal 布局后，用户已在 iPhone 上确认体验正常。本次公共提取保留这套几何关系；后续改动的浏览器测试不能替代新的 iOS 实机验收。
 
-On mobile, when the soft keyboard opens, the browser's visual viewport shrinks.
-If the terminal container shrinks with it, xterm.js recalculates rows/cols and
-sends a resize event to the backend PTY — expensive and causes flicker.
+## 适用范围与布局关系
 
-Additionally, a toolbar (esc/tab/ctrl/arrow keys) is rendered below the terminal.
-If it toggles between visible/hidden (`max-h-40` ↔ `max-h-0`), the terminal's
-flex height changes, triggering another resize.
+适用于全高工作区中“固定顶部导航 + 可压缩内容 + 底部输入/工具栏”。键盘打开时，导航和内容区域的上沿保持原位，内容可用高度缩小，底部栏上移到键盘上方；列表按自身滚动策略保留阅读位置或跟随最新消息。
 
-## Solution Overview
+普通表单、弹窗优先使用原生焦点和正常文档流，不要全局套用工作区补偿。原生容器若已负责缩高，也不能再叠加本补偿。
 
-**Terminal pixel height never changes.**  When the keyboard opens, the entire
-terminal + toolbar is pushed *up* via `transform: translateY()`.  The toolbar
-always occupies its full space (only `opacity` toggles).  No resize events.
-
-## Architecture
-
-### Layer 1: Height anchoring
-
-`useViewportHeight` hook sets two CSS variables on `<html>`:
-
-| Variable | Value | Updates on |
-|----------|-------|------------|
-| `--app-base-vh` | `window.innerHeight` | startup, orientation change |
-| `--app-vh` | `visualViewport.height` | every `visualViewport.resize/scroll` |
-
-`--app-base-vh` does **not** shrink when the keyboard opens. On mobile, all
-root elements use it:
-
-```css
-@media (max-width: 768px) {
-  html, body, #root {
-    height: var(--app-base-vh, 100lvh);
-  }
-}
+```text
+App（保持基础高度）
+├── 导航（不在补偿容器内）
+└── 面板 root：flex-col / min-h-0，应用 rootStyle
+    ├── 内容：flex-1 / min-h-0，应用 contentStyle，内部滚动
+    └── 输入或工具栏：shrink-0，正常布局流
 ```
 
-This keeps the entire layout at full viewport height regardless of keyboard state.
+`useViewportHeight` 是全应用唯一的视口计算来源，统一处理基础高度、可视视口、安全区与键盘状态，并同步写入 `--kb-translate-y` 和 `--kb-margin-top`。页面消费这些变量，不另监听键盘高度。
 
-### Layer 2: translateY push
+设归一化键盘补偿为 H，面板整体平移 -H，内容上边距 +H：内容上沿的净变化为 0，flex 内容高度减少 H，底部栏上移 H。两项必须配对，且都关闭 transition，避免不同动画使顶部漂移。根容器沿用 `--app-base-vh`；不是把整个页面改为键盘弹起后的可视高度。**内容高度确实会变化，旧文档的“终端永不 resize”已经不适用。** 终端网格变化仍交给 `TerminalGeometry`。
 
-The `TerminalView` wrapper applies:
+## 公共入口与用法
+
+几何入口：`src/lib/components/layout/keyboardPanelLayout.ts`。
 
 ```tsx
-style={{
-  transform: `translateY(calc(var(--app-vh, 0px) - var(--app-base-vh, 0px)))`
-}}
+const touchLayout = usesTouchTerminalLayout();
+const layout = getKeyboardPanelStyles(touchLayout && !ancestorOwnsKeyboardLayout);
+
+return (
+  <div className="flex h-full min-h-0 flex-col overflow-hidden" style={layout.rootStyle}>
+    <div className="min-h-0 flex-1 overflow-y-auto" style={layout.contentStyle}>
+      {content}
+    </div>
+    <div className="shrink-0">{composer}</div>
+  </div>
+);
 ```
 
-- Keyboard closed: `--app-vh ≈ --app-base-vh` → `translateY(0)` → no shift.
-- Keyboard open (e.g., 300px): `translateY(-300px)` → content pushed up, reveals
-  the toolbar just above the keyboard.
+这是一个不创建 DOM、不注册事件的样式原语，适合保留已有 ref、语义标签、拖拽事件和终端宿主。桌面或祖先已接管时传 `false`，不会产生 transform/margin。不要把 input 本身再做 fixed/absolute 定位，不在子组件重复计算 H。
 
-The terminal DOM height is unchanged.  xterm.js does not fire a resize.
+已接入：
 
-### Layer 3: Toolbar always at full height
+- `TerminalView`：root/content 配对；共享分屏时禁用自身补偿。
+- `SessionChatView`：root/content 配对；输入栏与列表处于同一 flex 布局。
+- `MultiTerminalView` 的共享分屏：复用 rootStyle，**保留原有整体平移与工具栏 portal 的语义**，不在此次提取中新增内容补偿。不能把这个仅 rootStyle 的特殊用法抄到新的聊天/表单页面；需要改变分屏顶部行为时应单独验收。
 
-`MobileKeyboard` hidden state uses only `opacity-0 pointer-events-none`,
-**never** collapses its `max-h` or `py`.  The toolbar always occupies ~32–62px
-in the flex layout, so the terminal's `flex-1` allocation is constant.
+## 可见 iOS 输入框的焦点保护
 
-```
-TerminalView (flex-col h-full)
-├── Terminal area (flex-1 min-h-0)   ← constant height
-└── MobileKeyboard                    ← constant height, opacity toggled
-```
+`src/lib/hooks/useKeyboardFocusGuard.ts` 可供同类工作区中的可见 input/textarea 显式使用。键盘状态传入应用已有的 `useViewportKeyboardState`，不要新建高度监听。
 
-### Layer 4: Safe area (bottom inset)
+它在 iOS 焦点切换期间短暂令真实输入透明，减少系统自动平移页面；共享布局稳定后恢复。真实输入保留焦点、值、选区与 IME。返回 `true` 时，调用方必须显示同内容的视觉镜像，并设置 `aria-hidden` 和 `pointer-events-none`，避免文字闪空或重复朗读；见 `SessionChatView` 的 `inputMasked` 用法。已透明的终端输入无需额外套用。硬件键盘、失焦及取消打开均有恢复路径。
 
-`#root` reserves the iPhone safe area via padding:
+这是焦点保护，不是第二套定位逻辑。普通弹窗无需默认开启。
 
-```css
-#root {
-  padding-bottom: max(0px, env(safe-area-inset-bottom, 0px) - 16px);
-}
-```
+## 禁止重新引入的做法
 
-The `-16px` accounts for xterm.js's character-row rounding: removing safe-area
-padding gives the terminal extra pixel height, but xterm only renders whole
-rows.  If the extra pixels don't fill an entire row, they become dead space
-(a visible gap between xterm content and the toolbar).  Subtracting 16px
-(≈ one row on typical font sizes) absorbs this dead space.
+- 业务页面单独监听 `visualViewport`，自行算 keyboardHeight，或再减一次键盘高度。
+- 修改 viewport meta、切换根节点高度模式、冻结列表画布高度来补救局部布局。
+- 在键盘动画中强制 `window.scrollTo(0, 0)`，与系统平移互相拉扯。
+- 用 fixed/absolute 把输入栏覆盖在内容上，或让父子重复补偿。
+- 把 CSS 几何公式复制到聊天、抽屉等业务文件，或给平移/上边距加不同步动画。
 
-The translateY formula reads this computed padding from `#root` and exposes
-it as `--safe-bottom-px` (a plain JS-computed pixel value) to avoid nested
-`max()`/`calc()`/`env()` parsing issues on mobile browsers:
+## 回归与验收
 
-```tsx
-style={{
-  transform: `translateY(
-    min(0px, calc(
-      var(--app-vh, 0px) - var(--app-base-vh, 0px) + var(--safe-bottom-px, 0px)
-    ))
-  )`
-}}
+```sh
+npm run test:keyboard-layout
+# 影响 TerminalView / 公共终端入口时还要运行：
+npm run test:terminal-geometry
+npm run test:terminal-geometry:browser
+npm run lint
+npm run build
 ```
 
-`min(0px, ...)` prevents a positive translateY when the keyboard is closed
-(`--app-vh ≈ --app-base-vh`, but `--safe-bottom-px > 0`).
+公共几何浏览器用例覆盖重复开合、多个高度、桌面禁用和祖先接管；聊天用例挂载真实聊天及共享视口控制器，覆盖安全区、临时 offsetTop、草稿、最新消息可见和旧消息阅读位置。边界测试阻止业务组件复制几何公式。
 
-## Zero-Resize Guarantee
+`terminal-geometry.yml` 的 Linux CI 同步运行 `test:keyboard-layout`，让后续改动自动经过这些检查。
 
-| Action | Terminal height change? | Resize event? |
-|--------|------------------------|---------------|
-| Keyboard opens | No (translateY push) | No |
-| Keyboard closes | No (translateY returns) | No |
-| Toolbar appears | No (always at full height) | No |
-| Toolbar hidden | No (opacity only) | No |
-| Orientation change | Yes (legitimate) | Yes |
-
-## Key Files
-
-| File | Role |
-|------|------|
-| `useViewportHeight.ts` | `--app-vh`, `--app-base-vh`, `--safe-bottom-px` |
-| `index.css` | Mobile root heights, safe-area padding |
-| `TerminalView.tsx` | translateY inline style |
-| `MobileKeyboard.tsx` | Opacity-only toggle, `py-0 px-1` tight spacing |
-| `clientLog.ts` | Phone → server log forwarding |
-
-## Debugging
-
-Phone-side logs are forwarded to the server via `POST /api/client-log`.
-Use `clientLog(level, message, data)` from any client code.  Monitor with:
-
-```bash
-tail -f /tmp/termdock-dev.log | grep client-log
-```
-
-## Known Pitfalls
-
-### Nested `max()`/`env()` inside `calc()` breaks on mobile Safari
-
-Do **not** write:
-
-```css
-/* BROKEN — nested max() inside calc() ignored on iOS Safari */
-transform: translateY(min(0px, calc(var(--app-vh) - var(--app-base-vh) + max(0px, env(safe-area-inset-bottom) - 16px))));
-```
-
-The `max(0px, env(...))` inside `calc()` is silently dropped on mobile Safari,
-resulting in the wrong translateY and a gap between the toolbar and keyboard.
-
-**Fix:** Compute the value in JS and expose it as a plain px CSS variable:
-
-```typescript
-// In useViewportHeight.ts — read computed padding from #root
-const root = document.getElementById('root');
-const pad = parseFloat(getComputedStyle(root).paddingBottom) || 0;
-document.documentElement.style.setProperty('--safe-bottom-px', `${pad}px`);
-```
-
-```css
-/* OK — only simple arithmetic with plain px variables */
-transform: translateY(min(0px, calc(var(--app-vh) - var(--app-base-vh) + var(--safe-bottom-px, 0px))));
-```
+实机仍需检查 iOS Safari/PWA 的系统输入辅助栏、中文候选栏、重复开合、切换会话、横竖屏及硬件键盘；Android 使用对应系统键盘验证。报告中区分自动化结果和实机结果。发布按 AGENTS.md 构建并部署 9834。

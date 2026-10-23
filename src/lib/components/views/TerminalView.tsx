@@ -1,3 +1,4 @@
+import { getKeyboardPanelStyles } from '../layout/keyboardPanelLayout';
 import { InteractiveOutput } from '../../terminal/interactiveOutput';
 import { isKeyboardLayerOpen, useKeyboardLayerOpen } from '../../hooks/useKeyboardLayer';
 import { authorizeOwnedTerminalPaste, consumeOwnedTerminalPaste, isOwnedTerminalPasteCurrent } from '../../terminal/ownedPaste';
@@ -2671,21 +2672,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isKeyboardVisible = !suppressKeyboard && (isMobile || toolbarPreset.id === 'default' || toolbarPreset.showOnDesktop === true);
   const isKeyboardInteractive = isActive;
 
-  // Apply both values from the same CSS-variable update so the terminal top
-  // remains visible while the toolbar moves above the soft keyboard.
-  const wrapperStyle = isMobile && !sharedMobileKeyboardLayout
-    ? {
-        transform: 'translateY(var(--kb-translate-y, 0px))',
-        transition: 'none',
-      } as React.CSSProperties
-    : undefined;
-
-  const keyboardShrinkStyle = isMobile && !sharedMobileKeyboardLayout
-    ? {
-        marginTop: 'var(--kb-margin-top, 0px)',
-        transition: 'none',
-      } as React.CSSProperties
-    : undefined;
+  const { rootStyle: wrapperStyle, contentStyle: keyboardShrinkStyle } =
+    getKeyboardPanelStyles(isMobile && !sharedMobileKeyboardLayout);
 
   const keyboard = (
     <MobileKeyboard

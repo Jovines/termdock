@@ -1,73 +1,16 @@
-# Mobile Keyboard Adaptation Skill
+# Mobile Keyboard Adaptation — 仓库开发检查表
 
-Use this skill when mobile soft keyboard behavior causes layout jumps, parent scrolling, or unstable terminal sizing.
+本文件是仓库开发说明。当前权威设计与示例见 [移动端软键盘布局](soft-keyboard-adaptation.md)，不要沿用旧版“根节点随键盘缩高 / 强制 scrollTo / resizes-content”的建议。
 
-## Goal
+新增或修改移动输入工作区时：
 
-- Keep the app root locked to the visible viewport height.
-- Let keyboard open/close resize terminal height predictably.
-- Ensure touch scroll only affects terminal content, never parent containers.
-- Respect iOS safe areas without creating extra page height.
+1. 确认属于全高工作区；普通弹窗先保持系统默认行为。
+2. 使用 `getKeyboardPanelStyles`，导航在外，内容和底部栏处于同一 flex 流。
+3. rootStyle 与 contentStyle 配对，内容 `min-h-0 flex-1`，底部栏 `shrink-0`。
+4. 确认只有一层负责补偿；共享分屏遵循文档的现有 portal 例外。
+5. 只消费应用已有视口变量与键盘状态，不添加业务页面高度监听。
+6. 同类 iOS 可见编辑器需要时使用 `useKeyboardFocusGuard`，配无障碍隐藏的草稿镜像。
+7. 运行 `npm run test:keyboard-layout`，涉及终端再跑两组终端 geometry 测试。
+8. 检查桌面、移动端、重复开合、草稿/选区/中文输入、阅读位置。浏览器模拟不作为实机通过。
 
-## Core Rules
-
-1. Single height source
-   - Drive layout from `visualViewport.height`.
-   - Write to CSS var `--app-vh` in `requestAnimationFrame`.
-   - Root container height must use `var(--app-vh, 100dvh)`.
-
-2. Keyboard state is state only
-   - Prefer input-focus state from a terminal input anchor for toolbar visibility.
-   - Use viewport delta only as debugging/fallback signal, not primary toolbar switch.
-   - Do not apply a second `calc(100% - keyboardHeight)` on terminal wrappers.
-
-3. Lock page scroll chain
-   - Set `html, body, #root` to fixed viewport height and `overflow: hidden`.
-   - Use `overscroll-behavior: none` globally.
-   - Remove global safe-area paddings on `html/body` if they add document height.
-
-4. Terminal handles touch scroll
-   - Terminal viewport should use `touch-action: none` on mobile.
-   - In touch/pointer move handlers, call `preventDefault()` and `stopPropagation()`.
-   - Keep parent wrappers `min-height: 0` and `overflow: hidden` in flex layout.
-
-5. iOS focus stability
-   - Keep hidden input fixed and not dynamically repositioned per tap.
-   - Prefer `position: fixed`, tiny size, off interaction path.
-   - Use `font-size: 16px` for hidden text input to reduce iOS zoom/pan side effects.
-   - If viewport drifts, hard reset with `window.scrollTo(0, 0)` during viewport sync.
-
-## Implementation Checklist
-
-- [ ] Viewport meta includes `interactive-widget=resizes-content` and `viewport-fit=cover`.
-- [ ] `--app-vh` updater listens to `resize`, `orientationchange`, and `visualViewport` events.
-- [ ] Root/app wrappers use `--app-vh` and cannot scroll.
-- [ ] Terminal view has no duplicate height subtraction.
-- [ ] Mobile keyboard bar stays in normal layout flow (not `fixed`/`absolute`).
-- [ ] Touch scrolling never moves parent page.
-- [ ] iOS repeated open/close does not push terminal view out of screen.
-
-## Validation Scenarios
-
-1. iOS Safari
-   - Focus terminal repeatedly at different positions.
-   - Open/close keyboard 10+ times.
-   - Confirm no upward drift and no parent scrolling.
-
-2. Android Chrome
-   - Verify keyboard resize and terminal fit updates.
-   - Confirm terminal content scroll works while page stays fixed.
-
-3. Orientation changes
-   - Rotate with keyboard open and closed.
-   - Ensure terminal remains visible and sized correctly.
-
-## Related Files in This Project
-
-- `index.html`
-- `src/App.tsx`
-- `src/index.css`
-- `src/lib/components/views/TerminalView.tsx`
-- `src/lib/components/terminal/MobileKeyboard.tsx`
-- `src/lib/components/terminal/TerminalViewport.tsx`
-- `src/lib/hooks/useTouchScroll.ts`
+几何机制、适用边界和排障入口统一维护在上述设计文档中。

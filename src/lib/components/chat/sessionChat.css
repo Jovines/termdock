@@ -1,22 +1,9 @@
 /* Native scrolling needs both the page and the session swiper to permit x pans. */
 .swiper.session-chat-swiper { touch-action: pan-x pan-y; }
-.session-chat-input { min-height: 44px; max-height: min(176px, calc(var(--app-visual-vh, 100dvh) * 0.35)); transition: none; }
-/* The shell and conversation retain their layout throughout keyboard animation.
-   Move the composer over the conversation, following the visible bottom edge. */
-html[data-termdock-touch-viewport='true'] .session-chat-composer {
-  /* Match TerminalView's keyboard toolbar. Safari's offsetTop does not give a
-     fixed-root composer extra room above the keyboard accessory. */
-  transform: translateY(var(--kb-translate-y, 0px));
-  /* visualViewport already supplies animation frames. A second CSS transition
-     would trail the keyboard and leave the editor covered on every reversal. */
-  transition: none;
-  background: var(--chrome-bg);
-  z-index: 20;
-}
+.session-chat-input { min-height: 44px; max-height: 176px; }
 html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display: none; }
-/* Add scroll range without resizing/recentring the conversation or changing the
-   reading position. The last message can still be scrolled above the editor. */
-html[data-termdock-touch-viewport='true'] .session-chat-keyboard-spacer { height: var(--kb-height, 0px); }
+
+.session-chat-input { transition: none; }
 
 /* Move only the highlight; keep skeleton geometry stable while loading. */
 .chat-loading-skeleton { position: relative; overflow: hidden; }

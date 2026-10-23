@@ -3,7 +3,7 @@ import { playwright } from '@vitest/browser-playwright';
 
 export default defineConfig({
   test: {
-    include: ['src/lib/components/chat/chatViewport.browser.tsx'],
+    include: ['src/lib/components/chat/chatViewport.browser.tsx', 'src/lib/components/layout/keyboardPanelLayout.browser.tsx'],
     browser: {
       enabled: true,
       headless: true,
