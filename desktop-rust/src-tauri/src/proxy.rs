@@ -67,6 +67,27 @@ pub fn upstream(origin: String, pin: Option<&str>) -> Result<Upstream, String> {
         .map_err(|e| e.to_string())?;
     Ok(Upstream { origin, http, tls })
 }
+/// Validate the actual entry's TLS before opening any workspace, including
+/// invitations and saved peers. A routed target need not be directly reachable.
+/// This is public bootstrap metadata only; authorization stays in the page.
+pub async fn discover_connection_identity(
+    connection: &Connection,
+    pins: &std::collections::BTreeMap<String, String>,
+) -> Result<Option<String>, String> {
+    let source = upstream(connection.url.clone(), pins.get(&connection.url).map(String::as_str))?;
+    let response = source.http.get(format!("{}/api/auth/open/parameters", connection.url))
+        .send().await.map_err(|error| {
+            eprintln!("[Termdock Preview] service discovery failed for {}: {error:#}", connection.url);
+            "Cannot discover service. Verify the address and Preview certificate fingerprint."
+        })?;
+    if [401, 403].contains(&response.status().as_u16()) { return Ok(None); }
+    if !response.status().is_success() { return Err("服务授权入口暂不可用，请稍后重试".into()); }
+    if connection.target_peer_id.is_some() { return Ok(None); }
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() > 64 * 1024 { return Err("Invalid discovery response".into()); }
+    let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "Invalid discovery response")?;
+    data["serviceIdentity"].as_str().map(|id| Some(id.to_owned())).ok_or_else(|| "Missing serviceIdentity".into())
+}
 /// This public discovery is a compatibility hint, never device authorization.
 /// Pinned relay/legacy connections still validate Noise and actual packet support.
 pub fn validate_metadata(meta: &serde_json::Value) -> Result<(), String> {

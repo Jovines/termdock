@@ -1,5 +1,6 @@
 import { getCwdLeafName } from '../../server/utils/sessionDisplayName';
 export { DEFAULT_SESSION_DISPLAY_SHELL_NAMES, getCwdLeafName, getSessionDisplayLines, getSessionDisplayName } from '../../server/utils/sessionDisplayName';
+export { getSessionPresentation, type SessionDisplaySource, type SessionPresentation } from '../../server/utils/sessionDisplayName';
 
 export interface FolderGroup<T> {
   // 完整 cwd 作为稳定 key（折叠状态持久化用）；无 cwd 的会话归到 '' 组。

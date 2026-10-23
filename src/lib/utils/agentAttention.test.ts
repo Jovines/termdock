@@ -4,8 +4,30 @@ import {
   getNextRunningSessionId,
   isAgentRunning,
   needsAgentAttention,
+  shouldShowTuiLoading,
   type AgentAttentionSession,
 } from './agentAttention';
+
+describe('native terminal loading fallback', () => {
+  it('shows active progress even when hooks retained an idle or acknowledged done phase', () => {
+    for (const agentStatus of [null, 'idle', 'done'] as const) {
+      expect(shouldShowTuiLoading({ agentStatus, tuiProgress: { state: 'indeterminate', progress: null } })).toBe(true);
+      expect(shouldShowTuiLoading({ agentStatus, tuiProgress: { state: 'set', progress: 10 } })).toBe(true);
+    }
+  });
+
+  it('preserves hook activity and attention indicators and ignores stopped progress', () => {
+    for (const agentStatus of ['working', 'waiting'] as const) {
+      expect(shouldShowTuiLoading({ agentStatus, tuiProgress: { state: 'indeterminate', progress: null } })).toBe(false);
+    }
+    expect(shouldShowTuiLoading({ agentStatus: 'done', agentNeedsReview: true, tuiProgress: { state: 'set', progress: 10 } })).toBe(false);
+    for (const state of ['remove', 'error', 'pause'] as const) {
+      expect(shouldShowTuiLoading({ agentStatus: 'idle', tuiProgress: { state, progress: null } })).toBe(false);
+    }
+    expect(shouldShowTuiLoading({ agentStatus: 'idle', tuiProgress: null })).toBe(false);
+    expect(shouldShowTuiLoading()).toBe(false);
+  });
+});
 
 function session(
   sessionId: string,

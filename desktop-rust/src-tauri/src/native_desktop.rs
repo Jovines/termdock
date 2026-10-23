@@ -55,6 +55,34 @@ mod mac {
             td_notifications_init(clicked, std::ptr::null_mut());
         }
     }
+    pub async fn close_stable<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+        for attempt in 0..60 {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            app.run_on_main_thread(move || {
+                let id = objc2_foundation::NSString::from_str("com.jovines.termdock");
+                let applications = objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(&id);
+                let running = applications.iter().filter(|a| !a.isTerminated()).collect::<Vec<_>>();
+                if attempt == 0 { for application in &running { application.terminate(); } }
+                let _ = tx.send(running.is_empty());
+            }).map_err(|e| e.to_string())?;
+            if rx.await.map_err(|e| e.to_string())? { return Ok(()); }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Err("请先退出正在运行的 Termdock 正式版，再重试迁移；服务和终端会话可以继续运行".into())
+    }
+    pub async fn wait_stable<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+        for _ in 0..60 {
+            let (tx,rx)=tokio::sync::oneshot::channel();
+            app.run_on_main_thread(move || {
+                let id=objc2_foundation::NSString::from_str("com.jovines.termdock");
+                let applications=objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(&id);
+                let _=tx.send(applications.iter().any(|a| !a.isTerminated() && a.isFinishedLaunching()));
+            }).map_err(|e|e.to_string())?;
+            if rx.await.map_err(|e|e.to_string())? { return Ok(()); }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Err("正式版未能完成启动；已保留 Preview 和原应用备份".into())
+    }
     pub async fn show(app: &AppHandle, payload: Value) -> Result<Value, String> {
         let raw = CString::new(payload.to_string()).map_err(|e| e.to_string())?;
         let (tx, rx) = tokio::sync::oneshot::channel();

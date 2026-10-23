@@ -26,6 +26,7 @@ it('publishes the port and host of a real ephemeral loopback listener', async ()
     const start = vi.fn().mockResolvedValue(state);
     const onboarding = vi.fn().mockReturnValue({ server: null, url: 'http://192.168.1.20:20000/ca' });
     const context = vm.createContext({
+      process: { env: { TERMDOCK_QUIC: '0' } },
       server, port: 0, host: 'localhost', scheme: 'https', options: { httpsCaPath: '/test/ca.pem' },
       localAccessManager: { start }, startOnboardingServer: onboarding, console: { log: vi.fn(), warn: vi.fn() },
     });

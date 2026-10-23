@@ -1,3 +1,5 @@
+import { DownloadFeedback, useDownloadFeedback } from '../ui/DownloadFeedback';
+import { useFileDownload } from '../../hooks/useFileDownload';
 import { writeFileReferenceDrag } from '../chat/fileReferenceTransfer';
 import { buildReferenceInputText } from './referencePaths';
 import { useShareAccess } from '../../federation/ShareAccessContext';
@@ -28,10 +30,12 @@ import {
   FolderSearch as RiFolderSearch,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
-import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, deleteFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
+import { cancelIoSlot, searchFilesStream, deleteFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
+import { useDirectoryListing } from '../../hooks/useDirectoryListing';
+import { FileTreeCacheScope, useFileTreeCache, useFileTreeCacheStore } from './FileTreeCacheScope';
 
 /** Adapts the existing reference buttons for a bounded, read-only scope task. */
 export interface FileTreeReferenceSelection {
@@ -121,51 +125,27 @@ function textActionVisibilityClass(visible: boolean): string {
 
 const FileDownloadAction = memo(function FileDownloadAction({ path }: { path: string }) {
   const { t } = useI18n();
-  const [status, setStatus] = useState<'idle' | 'pending' | 'error'>('idle');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  const handleClick = useCallback(async (event: React.MouseEvent) => {
+  const download = useFileDownload(path);
+  const status = download.status;
+  const feedback = useDownloadFeedback(download);
+  const handleClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    if (status === 'pending') return;
-    setStatus('pending');
-    setErrorMsg(null);
-    try {
-      await downloadFile(path);
-      setStatus('idle');
-    } catch (err) {
-      setStatus('error');
-      setErrorMsg(err instanceof Error ? err.message : t('rightSidebar.downloadFailed'));
-    }
-  }, [path, status, t]);
+    if (download.status === 'pending') download.cancel(); else void download.start();
+  }, [download.status, download.cancel, download.start]);
 
   return (
     <button
       type="button"
-      disabled={status === 'pending'}
-      aria-label={t('rightSidebar.downloadFile')}
+      aria-label={status === 'pending' ? t('common.cancel') : t('rightSidebar.downloadFile')}
       onClick={(e) => void handleClick(e)}
       className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(status === 'pending')} ${status === 'pending' ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
-      title={status === 'error' ? errorMsg ?? t('rightSidebar.downloadFailed') : t('rightSidebar.downloadFile')}
+      title={status === 'pending' ? t('common.cancel') : feedback}
     >
       {status === 'pending' ? <RiLoader size={12} className="animate-spin" /> : <RiDownload size={12} />}
+      {status !== 'idle' && status !== 'pending' && <span role={status === 'error' ? 'alert' : 'status'} className="sr-only">{feedback}</span>}
     </button>
   );
 });
-
-function useFileDownloadAction() {
-  const { t } = useI18n();
-  const [state, setState] = useState<{ status: 'idle' | 'pending' | 'error'; message?: string }>({ status: 'idle' });
-  const run = useCallback(async (path: string) => {
-    setState({ status: 'pending' });
-    try {
-      await downloadFile(path);
-      setState({ status: 'idle' });
-    } catch (err) {
-      setState({ status: 'error', message: err instanceof Error ? err.message : t('rightSidebar.downloadFailed') });
-    }
-  }, [t]);
-  return { state, run };
-}
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
@@ -327,24 +307,28 @@ const FileTreeItem = memo(function FileTreeItem({
   revealedDirectoryPath,
   gitIgnoreRoot,
 }: FileTreeItemProps) {
+  const cacheStore = useFileTreeCacheStore();
   const shared = useShareAccess();
   const canDeleteShared = !shared || shared.directories?.some(d => d.access === 'write' && (node.path === d.path || node.path.startsWith(d.path.replace(/\/+$/, '') + '/')));
   const { t } = useI18n();
   // 精确订阅：每个节点只关心和自己相关的字段
-  const isExpanded = useSidebarStore((s) => s.expandedPaths.has(node.path));
-  const children = useSidebarStore((s) => s.directoryCache.get(node.path));
+  const isExpanded = useFileTreeCache((s) => s.expandedPaths.has(node.path));
+  const children = useFileTreeCache((s) => s.directoryCache.get(node.path));
   const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
-  const toggleExpanded = useSidebarStore((s) => s.toggleExpanded);
-  const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
+  const toggleExpanded = useFileTreeCache((s) => s.toggleExpanded);
+  const setDirectoryCache = useFileTreeCache((s) => s.setDirectoryCache);
   const sortMode = useSidebarStore((s) => s.fileSortModes[node.path] ?? 'name');
   const setDirectorySortMode = useSidebarStore((s) => s.setDirectorySortMode);
-  const [loading, setLoading] = useState(false);
+  const previousSortMode = useRef(sortMode);
+  useLayoutEffect(() => {
+    if (previousSortMode.current !== sortMode) cacheStore.getState().invalidateDirectoryCache(node.path);
+    previousSortMode.current = sortMode;
+  }, [sortMode, cacheStore, node.path]);
   const [actionsOpen, setActionsOpen] = useState(false);
   const { position: cursorMenuPosition, menuRef: directoryMenuRef, openAt: openDirectoryMenuAt, clearPosition: clearDirectoryMenuPosition } = useCursorAnchoredMenu(actionsOpen);
   const [dropTarget, setDropTarget] = useState(false);
   const dropDepthRef = useRef(0);
-  const loadAbortRef = useRef<AbortController | null>(null);
-  const referenceSlot = `file-tree-reference:${useId()}:${node.path}`;
+  const referenceSlot = `file-tree:${useId()}:${node.path}`;
   useKeyboardLayer(directoryMenuRef, actionsOpen && !!referenceSelection, () => setActionsOpen(false));
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isSelected = node.path === selectedFilePath || node.path === revealedDirectoryPath;
@@ -358,7 +342,8 @@ const FileTreeItem = memo(function FileTreeItem({
   const referenceCopied = copiedReferenceKey === referenceKey;
   const referenceText = getReferenceText?.(node.path) ?? node.path;
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied, !!referenceSelection);
-  const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
+  const fileDownloadState = useFileDownload(node.path);
+  const runFileDownload = fileDownloadState.start;
   const isDeleting = deletingFilePath === node.path;
   const hasDirectoryActions = isDirectory
     && !directoriesOnly
@@ -369,36 +354,22 @@ const FileTreeItem = memo(function FileTreeItem({
     if (!queryLower) return children;
     // 搜索过滤需要查 directoryCache 的孙节点 — 这里读一次就够，
     // 不会触发额外订阅（getState 不订阅）。
-    const cache = useSidebarStore.getState().directoryCache;
+    const cache = cacheStore.getState().directoryCache;
     return children.filter((child) => (!directoriesOnly || child.type === 'directory') && hasMatchingDescendant(child, queryLower, cache));
-  }, [children, directoriesOnly, queryLower]);
+  }, [children, directoriesOnly, queryLower, cacheStore]);
 
-  const loadChildren = useCallback(async () => {
-    const cached = useSidebarStore.getState().directoryCache.has(node.path);
-    if (!cached && !loading) {
-      const requestSlotId = referenceSelection ? referenceSlot : `file-tree:${node.path}`;
-      loadAbortRef.current?.abort();
-      cancelIoSlot(requestSlotId);
-      const controller = new AbortController();
-      loadAbortRef.current = controller;
-      setLoading(true);
-      try {
-        const result = await listDirectory(node.path, controller.signal, showHiddenFiles, 'expand_directory', requestSlotId, sortMode, gitIgnoreRoot);
-        if (controller.signal.aborted) return;
-        const treeNodes = toTreeNodes(result.entries);
-        setDirectoryCache(node.path, treeNodes);
-      } catch (error) {
-        if (!isAbortError(error)) {
-          // Silently fail — user can retry by collapsing and re-expanding
-        }
-      } finally {
-        if (loadAbortRef.current === controller) loadAbortRef.current = null;
-        setLoading(false);
-      }
-    }
-  }, [node.path, loading, setDirectoryCache, showHiddenFiles, sortMode, gitIgnoreRoot, !!referenceSelection, referenceSlot]);
+  const { loading } = useDirectoryListing({
+    path: node.path,
+    enabled: node.type === 'directory' && isExpanded && !children && !directoriesOnly,
+    showHidden: showHiddenFiles,
+    action: 'expand_directory',
+    requestSlotId: referenceSlot,
+    sortMode,
+    gitIgnoreRoot,
+    onLoad: result => setDirectoryCache(node.path, toTreeNodes(result.entries)),
+  });
 
-  const handleToggle = useCallback(async () => {
+  const handleToggle = useCallback(() => {
     if (node.type !== 'directory') {
       onFileSelect(node.path);
       return;
@@ -407,17 +378,8 @@ const FileTreeItem = memo(function FileTreeItem({
       onDirectoryRoot(node.path);
       return;
     }
-
-    const willExpand = !useSidebarStore.getState().expandedPaths.has(node.path);
     toggleExpanded(node.path);
-    if (willExpand) await loadChildren();
-  }, [directoriesOnly, node.path, node.type, loadChildren, onDirectoryRoot, toggleExpanded, onFileSelect]);
-
-  useEffect(() => {
-    if (node.type === 'directory' && isExpanded && !children && !loading) {
-      void loadChildren();
-    }
-  }, [children, isExpanded, loadChildren, loading, node.type]);
+  }, [directoriesOnly, node.path, node.type, onDirectoryRoot, toggleExpanded, onFileSelect]);
 
   const handleReferenceClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -457,7 +419,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const handleFileDownload = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     setActionsOpen(false);
-    void runFileDownload(node.path);
+    void runFileDownload();
   }, [node.path, runFileDownload]);
 
   const handleFileDelete = useCallback((event: React.MouseEvent) => {
@@ -542,16 +504,13 @@ const FileTreeItem = memo(function FileTreeItem({
     };
   }, [actionsOpen, directoryMenuRef]);
 
-  useEffect(() => () => {
-    loadAbortRef.current?.abort();
-  }, []);
-
   return (
     <div style={!showChildren && !actionsOpen ? { contentVisibility: 'auto', containIntrinsicSize: 'auto 32px' } : undefined}>
       <div ref={actionMenuRef} className="relative">
         {getReferenceLongPressHandlers.popoverNode}
         <div
         data-file-tree-path={node.path}
+        data-file-tree-type={node.type}
         draggable={!!onPathReference && !directoriesOnly}
         onDragStart={event => {
           if (!onPathReference || directoriesOnly || (event.target as Element).closest('button')) { event.preventDefault(); return; }
@@ -641,7 +600,7 @@ const FileTreeItem = memo(function FileTreeItem({
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             aria-label={t('fileTree.moreFileActions')}
             aria-expanded={actionsOpen}
-            title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
+            title={fileDownloadState.status === 'error' ? fileDownloadState.error ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
             {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
           </button>
@@ -660,7 +619,8 @@ const FileTreeItem = memo(function FileTreeItem({
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </button>
         )}
-        {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
+      <DownloadFeedback status={fileDownloadState.status} error={fileDownloadState.error} cancel={fileDownloadState.cancel} className="ml-1 text-[10px]" />
+      {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
           <div
             ref={directoryMenuRef}
             className={`${cursorMenuPosition ? referenceSelection ? 'fixed z-popover' : 'fixed z-menu-panel' : 'absolute right-2 top-[calc(100%+2px)] z-30'} w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in`}
@@ -860,7 +820,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const referenceCopied = copiedReferenceKey === referenceKey;
   const referenceText = getReferenceText?.(node.path) ?? node.path;
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied, !!referenceSelection);
-  const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
+  const fileDownloadState = useFileDownload(node.path);
+  const runFileDownload = fileDownloadState.start;
   const [actionsOpen, setActionsOpen] = useState(false);
   const { position: cursorMenuPosition, menuRef: directoryMenuRef, openAt: openDirectoryMenuAt, clearPosition: clearDirectoryMenuPosition } = useCursorAnchoredMenu(actionsOpen);
   useKeyboardLayer(directoryMenuRef, actionsOpen && !!referenceSelection, () => setActionsOpen(false));
@@ -895,7 +856,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const handleFileDownload = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     setActionsOpen(false);
-    void runFileDownload(node.path);
+    void runFileDownload();
   }, [node.path, runFileDownload]);
 
   const handleFileDelete = useCallback((event: React.MouseEvent) => {
@@ -941,6 +902,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
     <div ref={actionMenuRef} className="relative border-b border-border/10 last:border-b-0">
       {getReferenceLongPressHandlers.popoverNode}
       <div
+        data-file-tree-path={node.path}
+        data-file-tree-type={node.type}
         role="button"
         tabIndex={0}
         onClick={handleClick}
@@ -999,7 +962,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-md text-muted-foreground transition focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             aria-label={t('fileTree.moreFileActions')}
             aria-expanded={actionsOpen}
-            title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
+            title={fileDownloadState.status === 'error' ? fileDownloadState.error ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
             {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
           </button>
@@ -1019,6 +982,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </button>
         )}
       </div>
+      <DownloadFeedback status={fileDownloadState.status} error={fileDownloadState.error} cancel={fileDownloadState.cancel} className="ml-1 text-[10px]" />
       {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
         <div
           ref={directoryMenuRef}
@@ -1206,6 +1170,8 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
     <div className="border-b border-border/10 last:border-b-0">
       {getReferenceLongPressHandlers.popoverNode}
       <div
+        data-file-tree-path={entry.path}
+        data-file-tree-type="file"
         role="button"
         tabIndex={0}
         onClick={() => {
@@ -1283,13 +1249,19 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPathReference, referenceSelection, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onSearchFromDirectory, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchRootPath, searchOptions = {}, searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
+export function FileTree(props: FileTreeProps) {
+  const tree = <FileTreeContent {...props} />;
+  return props.directoriesOnly || props.referenceSelection ? <FileTreeCacheScope>{tree}</FileTreeCacheScope> : tree;
+}
+
+function FileTreeContent({ rootPath, onFileSelect, directoriesOnly = false, onPathReference, referenceSelection, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onSearchFromDirectory, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchRootPath, searchOptions = {}, searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
   const { t } = useI18n();
+  const cacheStore = useFileTreeCacheStore();
   const referenceNamespace = useId();
-  const rootRequestSlot = referenceSelection ? `file-tree-reference-root:${referenceNamespace}:${rootPath}` : `file-tree-root:${rootPath}`;
+  const rootRequestSlot = `${referenceSelection ? 'file-tree-reference-root' : 'file-tree-root'}:${referenceNamespace}:${rootPath}`;
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
-  const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
-  const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
+  const rootEntries = useFileTreeCache((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
+  const setDirectoryCache = useFileTreeCache((s) => s.setDirectoryCache);
   const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
   const fileSortModesHydrated = useSidebarStore((s) => s.fileSortModesHydrated);
   const rootSortMode = useSidebarStore((s) => s.fileSortModes[rootPath] ?? 'name');
@@ -1298,8 +1270,8 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const hideGitIgnored = useSidebarStore((s) => Boolean(s.hideGitIgnoredRoots[rootPath]));
   const hideGitIgnoredRootsHydrated = useSidebarStore((s) => s.hideGitIgnoredRootsHydrated);
   const gitIgnoreExceptionsKey = useSidebarStore((s) => JSON.stringify(s.gitIgnoreExceptions[rootPath] ?? []));
-  const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
-  const listingKey = `${rootPath}:${hideGitIgnored}:${gitIgnoreExceptionsKey}`;
+  const invalidateDirectoryCache = useFileTreeCache((s) => s.invalidateDirectoryCache);
+  const listingKey = `${rootPath}:${rootSortMode}:${showHiddenFiles}:${hideGitIgnored}:${gitIgnoreExceptionsKey}`;
   const [readyListing, setReadyListing] = useState('');
   // Cached paths can belong to another explorer root with a different filter.
   // Clear before paint, including after restoring a project's tree snapshot.
@@ -1307,8 +1279,6 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     if (rootPath) invalidateDirectoryCache(rootPath, true);
     setReadyListing(listingKey);
   }, [rootPath, hideGitIgnored, gitIgnoreExceptionsKey, invalidateDirectoryCache, listingKey]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [rootTruncated, setRootTruncated] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -1348,10 +1318,10 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     const relative = targetPath.slice(rootPath.length).replace(/^\/+/, '');
     const parts = relative ? relative.split('/') : [];
     const pathsToExpand = parts.map((_, index) => `${rootPath}/${parts.slice(0, index + 1).join('/')}`);
-    const store = useSidebarStore.getState();
+    const store = cacheStore.getState();
     const missingPaths = pathsToExpand.filter((path) => !store.expandedPaths.has(path));
     if (missingPaths.length > 0) {
-      useSidebarStore.setState((state) => ({
+      cacheStore.setState((state) => ({
         expandedPaths: new Set([...state.expandedPaths, ...missingPaths]),
       }));
     }
@@ -1374,13 +1344,13 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       cancelled = true;
       window.cancelAnimationFrame(frame);
     };
-  }, [revealDirectory?.nonce, revealDirectory?.path, rootPath]);
+  }, [revealDirectory?.nonce, revealDirectory?.path, rootPath, cacheStore]);
 
   const handleFileDeleteRequest = useCallback(async (node: FileTreeNode) => {
     if(deleteLock.current.busy||node.type==='directory')return;
     const epoch=deletePage.current,target=savedConnection(),client=currentSecureClient(),root=rootPath;
     const parent=node.path.slice(0,node.path.lastIndexOf('/'))||'/';
-    const lookup=()=>useSidebarStore.getState().directoryCache.get(parent)?.find(entry=>entry.path===node.path);
+    const lookup=()=>cacheStore.getState().directoryCache.get(parent)?.find(entry=>entry.path===node.path);
     const identity=(file:FileTreeNode)=>JSON.stringify([file.path,file.name,file.type,file.isSymlink,file.modified]);
     const original=identity(node),known=lookup(),knownIdentity=known?identity(known):null;let completed=false;
     const current=()=>{const file=lookup();return epoch===deletePage.current&&root===deleteRoot.current&&target===savedConnection()&&client===currentSecureClient()&&!client?.closed
@@ -1396,50 +1366,21 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       pending:value=>{if(epoch===deletePage.current)setDeletingFilePath(value?node.path:null);},
       failure:message=>showPageFeedback(t('fileTree.deleteFileFailed',{message})),expiredMessage:'File deletion context changed',
     });
-  }, [rootPath,onFilePinToggle,pinnedPaths,t]);
+  }, [rootPath,onFilePinToggle,pinnedPaths,t,cacheStore]);
 
-  // Load root directory
-  useEffect(() => {
-    if (!rootPath) return;
-    // The persisted sort mode determines the server request. Waiting for this
-    // lightweight hydration prevents a name-sorted request from completing
-    // just before hydration clears it and triggers a second visible loading.
-    if (!sortModeReady || readyListing !== listingKey) return;
-    if (queryLower) {
-      setLoading(false);
-      return;
-    }
-    if (useSidebarStore.getState().directoryCache.has(rootPath)) {
-      setLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-
-    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', rootRequestSlot, rootSortMode, rootPath)
-      .then((result) => {
-        if (cancelled) return;
-        const treeNodes = toTreeNodes(result.entries);
-        setRootTruncated(Boolean(result.truncated));
-        setDirectoryCache(rootPath, treeNodes);
-      })
-      .catch((err) => {
-        if (cancelled || isAbortError(err)) return;
-        setError(err instanceof Error ? err.message : 'Failed to load directory');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-      cancelIoSlot(rootRequestSlot);
-    };
-  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady, hideGitIgnored, gitIgnoreExceptionsKey, rootRequestSlot, readyListing, listingKey]);
+  const { loading, error, reload } = useDirectoryListing({
+    path: rootPath,
+    enabled: sortModeReady && readyListing === listingKey && !queryLower && !rootEntries,
+    showHidden: showHiddenFiles,
+    action: 'load_file_tree_root',
+    requestSlotId: rootRequestSlot,
+    sortMode: rootSortMode,
+    gitIgnoreRoot: rootPath,
+    onLoad: result => {
+      setRootTruncated(Boolean(result.truncated));
+      setDirectoryCache(rootPath, toTreeNodes(result.entries));
+    },
+  });
 
   useEffect(() => {
     if (!activeSearchRoot || !queryLower) {
@@ -1461,7 +1402,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     setVisibleSearchCount(isContentMode ? SEARCH_INITIAL_VISIBLE_CONTENT : SEARCH_INITIAL_VISIBLE);
     setSearchMeta({ truncated: false, total: 0, engine: 'rg', limited: false, done: false });
 
-    const requestSlotId = `file-search:${referenceSelection ? referenceNamespace + ":" : ""}${activeSearchRoot}:${++searchRequestSeqRef.current}`;
+    const requestSlotId = `file-search:${referenceNamespace}:${activeSearchRoot}:${++searchRequestSeqRef.current}`;
     searchFilesStream(activeSearchRoot, query.trim(), (progress) => {
       if (cancelled) return;
       if (progress.engine) {
@@ -1545,9 +1486,9 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const visibleRootEntries = useMemo(() => {
     if (!rootEntries) return undefined;
     if (!queryLower) return directoriesOnly ? rootEntries.filter((node) => node.type === 'directory') : rootEntries;
-    const cache = useSidebarStore.getState().directoryCache;
+    const cache = cacheStore.getState().directoryCache;
     return rootEntries.filter((node) => (!directoriesOnly || node.type === 'directory') && hasMatchingDescendant(node, queryLower, cache));
-  }, [directoriesOnly, queryLower, rootEntries]);
+  }, [directoriesOnly, queryLower, rootEntries, cacheStore]);
 
   if (!rootPath) {
     return (
@@ -1694,6 +1635,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     return (
       <div role={referenceSelection ? 'alert' : undefined} className="px-4 py-4 text-sm text-destructive">
         {error}
+        <button type="button" onClick={reload} className="mt-2 block rounded-md bg-surface-2 px-3 py-2 text-foreground hover:bg-surface-elevated">{t('common.retry')}</button>
       </div>
     );
   }

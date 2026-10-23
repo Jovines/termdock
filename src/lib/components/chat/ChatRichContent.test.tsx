@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, expect, it, vi } from 'vitest';
 import { ChatRichContent } from './ChatRichContent';
 import type { ChatMessage } from './chatMessages';
-vi.mock('../markdown/MarkdownPreview', () => ({ MarkdownPreview: ({ content }: { content: string }) => <p>{content}</p> }));
+vi.mock('../markdown/Markdown', () => ({ Markdown: ({ content }: { content: string }) => <p>{content}</p> }));
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 const code = 'root = Stack([Card("方案比较", [Table(["方案", "内存"], [["轻量", 4], ["完整", 8]])]), Form("choice", "选择方案", [Select("plan", "采用方案", ["轻量", "完整"], true), Input("notes", "补充要求"), Button("确认并继续", @ToAssistant("采用填写的方案"))])])';
 const message: ChatMessage = { id: 'ui-message', role: 'assistant', content: '轻量方案4GB，完整方案8GB。请选择方案。', createdAt: 1, status: 'stored', ui: { version: 1, code } };

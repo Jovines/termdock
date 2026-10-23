@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react';
-import { ArrowUp, ChevronRight, File, Folder, X } from 'lucide-react';
+import { useState } from 'react';
+import { ChevronRight, File, Folder, X } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { listDirectory, type FileEntry } from '../../terminal/api';
+import { useDirectoryListing } from '../../hooks/useDirectoryListing';
+import { useDirectoryNavigation } from '../../hooks/useDirectoryNavigation';
+import { normalizeDirectory, relativeDirectoryPath } from '../../filesystem/browserPaths';
+import { FileBrowserNavigationActions } from './FileBrowserNavigationActions';
 import { LoadingSpinner } from '../ui/Loading';
 
 interface Props {
@@ -14,34 +17,16 @@ interface Props {
 export function GitIgnoreExceptionPicker({ rootPath, paths, disabled, onChange }: Props) {
   const { t } = useI18n();
   // Browse using paths relative to the configured root, including when it is a symlink.
-  const [directory, setDirectory] = useState('');
-  const [revision, setRevision] = useState(0);
-  const [listing, setListing] = useState<{ directory: string; entries: FileEntry[]; truncated: boolean } | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const root = normalizeDirectory(rootPath);
+  const navigation = useDirectoryNavigation(root, root);
+  const browsePath = navigation.path;
+  const directory = relativeDirectoryPath(browsePath, root) ?? '';
+  // Omit gitIgnoreRoot so ignored entries remain available for selection.
+  const { result: listing, error, reload } = useDirectoryListing({ path: browsePath, showHidden: true, action: 'pick_git_ignore_exception' });
+  const loadFailed = !!error;
+  const ready = !!listing;
   const [limitReached, setLimitReached] = useState(false);
-  const browsePath = `${rootPath.replace(/[\\/]+$/, '')}/${directory}`;
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setListing(null);
-    setLoadFailed(false);
-    // Omit gitIgnoreRoot so ignored entries remain available for selection.
-    void listDirectory(browsePath, controller.signal, true, 'pick_git_ignore_exception')
-      .then((result) => {
-        if (!controller.signal.aborted) setListing({ directory, entries: result.entries, truncated: !!result.truncated });
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setLoadFailed(true);
-      });
-    return () => controller.abort();
-  }, [browsePath, directory, revision]);
-
-  const navigate = (next: string) => {
-    setListing(null);
-    setLoadFailed(false);
-    setDirectory(next);
-  };
-  const ready = listing?.directory === directory;
+  const navigate = (relative: string) => navigation.navigate(relative ? `${root === '/' ? '' : root}/${relative}` : root);
   const changePaths = (next: string[]) => {
     if (next.length > 200) {
       setLimitReached(true);
@@ -55,17 +40,16 @@ export function GitIgnoreExceptionPicker({ rootPath, paths, disabled, onChange }
     <div className="flex flex-col gap-3">
       <div className="overflow-hidden rounded-lg border border-border/30 bg-surface-2">
         <div className="flex items-center gap-2 border-b border-border/20 p-2">
-          <button type="button" disabled={disabled || !directory} onClick={() => navigate(directory.slice(0, Math.max(0, directory.lastIndexOf('/'))))} aria-label={t('rightSidebar.parentFolder')} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-surface-elevated hover:text-foreground disabled:opacity-30"><ArrowUp size={14} /></button>
-          <button type="button" disabled={disabled || !directory} onClick={() => navigate('')} aria-label={t('rightSidebar.backToProjectRoot')} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-surface-elevated hover:text-foreground disabled:opacity-30"><Folder size={14} /></button>
+          <FileBrowserNavigationActions buttonClassName="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-surface-elevated hover:text-foreground disabled:opacity-30" parent={{ disabled: disabled || !navigation.canGoParent, onClick: navigation.goParent }} root={{ disabled: disabled || !directory, onClick: navigation.goRoot }} />
           <span className="min-w-0 flex-1 truncate font-mono text-xs" title={browsePath}>{directory || './'}</span>
         </div>
         <div className="h-56 overflow-y-auto overscroll-contain p-1" role="group" aria-label={t('rightSidebar.gitIgnoreExceptionsPaths')} aria-busy={!ready && !loadFailed}>
           {loadFailed ? (
             <div className="flex flex-col items-center gap-2 p-4 text-center text-xs">
               <p role="alert" className="text-destructive">{t('rightSidebar.gitIgnoreExceptionsLoadFailed')}</p>
-              <button type="button" disabled={disabled} onClick={() => { setLoadFailed(false); setRevision((value) => value + 1); }} className="rounded-md px-3 py-2 text-primary hover:bg-surface-elevated disabled:opacity-40">{t('common.retry')}</button>
+              <button type="button" disabled={disabled} onClick={reload} className="rounded-md px-3 py-2 text-primary hover:bg-surface-elevated disabled:opacity-40">{t('common.retry')}</button>
             </div>
-          ) : !ready ? (
+          ) : !listing ? (
             <div className="flex h-full items-center justify-center"><LoadingSpinner size={18} /></div>
           ) : listing.entries.length === 0 ? (
             <p className="p-4 text-center text-xs text-muted-foreground">{t('rightSidebar.gitIgnoreExceptionsEmptyDirectory')}</p>
@@ -86,7 +70,7 @@ export function GitIgnoreExceptionPicker({ rootPath, paths, disabled, onChange }
               </div>
             );
           })}
-          {ready && listing.truncated && <p className="px-2 py-3 text-xs text-muted-foreground">{t('rightSidebar.gitIgnoreExceptionsTruncated')}</p>}
+          {listing?.truncated && <p className="px-2 py-3 text-xs text-muted-foreground">{t('rightSidebar.gitIgnoreExceptionsTruncated')}</p>}
         </div>
       </div>
       <div className="flex items-center justify-between gap-2 text-xs">

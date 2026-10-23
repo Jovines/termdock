@@ -37,7 +37,7 @@ describe('LeftSidebar session density', () => {
       .toEqual(['one', 'two', 'four', 'three']);
   });
 
-  it('keeps repository metadata out of session rows and expands split groups by default', () => {
+  it('keeps repository metadata out of custom session rows and expands split groups by default', () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       value: vi.fn(),
@@ -57,7 +57,7 @@ describe('LeftSidebar session density', () => {
           drawerWidthPx={280}
           onClose={vi.fn()}
           sessions={[
-            { id: 'one', name: 'Session 1', mode: 'shell' },
+            { id: 'one', name: 'Session 1', customName: true, mode: 'shell' },
             { id: 'two', name: 'Session 2', mode: 'shell' },
             { id: 'three', name: 'Session 3', mode: 'shell' },
           ]}

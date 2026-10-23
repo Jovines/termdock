@@ -12,6 +12,14 @@ function setup() {
   return { access: new RouteAccess(file, () => now, () => authorized), file, config, token, revokeSubject: () => { authorized = false; }, time: (value: number) => { now = value; } };
 }
 describe('route authentication', () => {
+  it('preserves desktop address families while explicit administrator targets replace that family', () => {
+    const { file } = setup();
+    const alternates = [{ serviceId: 'C', url: 'https://c-home.example' }, { serviceId: 'C', url: 'https://c-office.example' }];
+    const access = new RouteAccess(file, Date.now, () => true, () => alternates);
+    expect(access.configuredDirectTargets()).toEqual(alternates);
+    writeFileSync(file, JSON.stringify({ directTargets: [{ serviceId: 'C', url: 'https://c-admin.example' }] }));
+    expect(access.configuredDirectTargets()).toEqual([{ serviceId: 'C', url: 'https://c-admin.example' }]);
+  });
   it('exposes only target identities and normalized origins, never relay tokens or CA paths', () => {
     const { access, config, file } = setup();
     writeFileSync(file, JSON.stringify({ ...config, directTargets: [{ serviceId: 'D', url: 'wss://d.internal/api/federation/secure', caPath: '/private/root.pem' }] }));

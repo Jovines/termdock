@@ -11,7 +11,7 @@ interface DownloadState {
 const IDLE: DownloadState = { status: 'idle', error: null, result: null };
 
 /** A preview owns its download. Changing/closing it cancels its request. */
-export function useFileDownload(path: string | null, active = true) {
+export function useDownloadTask(task: (signal: AbortSignal) => Promise<DownloadResult>, owner: unknown, active = true) {
   const [state, setState] = useState<DownloadState>(IDLE);
   const request = useRef<{ controller: AbortController; targetPeerId: string | undefined } | null>(null);
 
@@ -30,7 +30,7 @@ export function useFileDownload(path: string | null, active = true) {
       request.current = null;
       previous?.controller.abort();
     };
-  }, [path, active]);
+  }, [owner, active]);
 
   const cancel = useCallback(() => {
     const previous = request.current;
@@ -41,13 +41,13 @@ export function useFileDownload(path: string | null, active = true) {
   }, []);
 
   const start = useCallback(async () => {
-    if (!active || !path || request.current) return;
+    if (!active || request.current) return;
     const controller = new AbortController();
     const targetPeerId = selectedTarget()?.targetPeerId;
     request.current = { controller, targetPeerId };
     setState({ status: 'pending', error: null, result: null });
     try {
-      const result = await downloadFile(path, controller.signal);
+      const result = await task(controller.signal);
       if (request.current?.controller !== controller) return;
       request.current = null;
       const settled = controller.signal.aborted ? 'canceled' : result;
@@ -61,7 +61,13 @@ export function useFileDownload(path: string | null, active = true) {
         setState({ status: 'error', error: error instanceof Error ? error.message : String(error), result: null });
       }
     }
-  }, [path, active]);
+  }, [task, active]);
 
   return { ...state, start, cancel };
+}
+
+/** File trees and previews share the same cancellation and result lifecycle. */
+export function useFileDownload(path: string | null, active = true) {
+  const task = useCallback((signal: AbortSignal) => downloadFile(path!, signal), [path]);
+  return useDownloadTask(task, path, active && !!path);
 }

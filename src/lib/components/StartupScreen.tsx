@@ -1,4 +1,20 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useRef, useSyncExternalStore } from 'react';
+import { useConnectionRecovery } from '../federation/connectionRecovery';
+import { useI18n } from '../i18n';
+
+const startupVisible = () => document.getElementById('termdock-startup')?.hidden === false;
+function subscribeStartupVisibility(listener: () => void) {
+  const surface = document.getElementById('termdock-startup');
+  if (!surface) return () => {};
+  const observer = new MutationObserver(listener);
+  observer.observe(surface, { attributes: true, attributeFilter: ['hidden'] });
+  return () => observer.disconnect();
+}
+
+/** Feedback follows the painted surface, including its two-frame handoff. */
+export function useStartupVisible() {
+  return useSyncExternalStore(subscribeStartupVisibility, startupVisible);
+}
 
 // One document-owned surface survives HTML → Suspense → authorization → restore.
 // Components hold leases instead of remounting the image and animations.
@@ -57,6 +73,13 @@ export function StartupHandoff() {
 }
 
 export function StartupScreen({ status = 'Loading Termdock', detail, actionLabel, onAction }: Partial<StartupPresentation> & { className?: string }) {
+  const connection = useConnectionRecovery();
+  const { locale } = useI18n();
+  if (connection !== 'ready') {
+    status = locale === 'zh'
+      ? connection === 'offline' ? '网络已断开，等待恢复…' : '正在恢复连接…'
+      : connection === 'offline' ? 'Offline. Waiting for network…' : 'Reconnecting…';
+  }
   const marker = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
     const element = marker.current!;

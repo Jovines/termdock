@@ -1,20 +1,54 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { SessionAccessView } from './SessionAccessView';
 import type { SecureClient } from './secureClient';
-const mocks = vi.hoisted(() => ({ writes: [] as Array<{ data: string; callback?: () => void }>, resize: vi.fn(), options: {} as Record<string, unknown>, fit: vi.fn() }));
+const mocks = vi.hoisted(() => ({ writes: [] as Array<{ data: string; callback?: () => void }>, resize: vi.fn(), options: {} as Record<string, unknown>, fit: vi.fn(), fontsReady: Promise.resolve() }));
+vi.mock('../terminal/fontLoading', () => ({ ensureTerminalFontsReady: () => mocks.fontsReady }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
   cols = 80; rows = 24;
-  constructor(options: Record<string, unknown>) { mocks.options = options; }
+  options: Record<string, unknown>;
+  buffer = { active: { type: 'normal', baseY: 0, viewportY: 0 } };
+  constructor(options: Record<string, unknown>) { mocks.options = options; this.options = options; }
   loadAddon() {} open() {} dispose() {}
   write(data: string, callback?: () => void) { mocks.writes.push({ data, callback }); }
-  resize(cols: number, rows: number) { mocks.resize(cols, rows); }
+  resize(cols: number, rows: number) { this.cols = cols; this.rows = rows; mocks.resize(cols, rows); }
+  scrollToBottom() {} refresh() {}
   onData() { return { dispose() {} }; }
 } }));
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() { mocks.fit(); } } }));
-afterEach(() => { cleanup(); mocks.writes.length = 0; vi.clearAllMocks(); vi.unstubAllGlobals(); });
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { proposeDimensions() { mocks.fit(); return { cols: 120, rows: 40 }; } } }));
+beforeEach(() => { mocks.fontsReady = Promise.resolve(); });
+afterEach(() => { cleanup(); mocks.writes.length = 0; vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('scoped encrypted terminal viewer', () => {
+  it('waits for fonts and advertises measured geometry on its first encrypted socket', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    let ready!: () => void;
+    mocks.fontsReady = new Promise(resolve => { ready = resolve; });
+    const socket = { readyState: 0, close: vi.fn() };
+    const client = { targetPeerId: 'geometry', request: vi.fn(async () => ({ items: [{ sessionId: 'backend', name: 'task', live: true, canWrite: true, canResize: true }] })), openSocket: vi.fn((_url: string) => socket) };
+    const view = render(<SessionAccessView client={client as unknown as SecureClient} />);
+    await act(async () => {});
+    expect(client.openSocket).not.toHaveBeenCalled();
+    await act(async () => ready());
+    await waitFor(() => expect(client.openSocket).toHaveBeenCalledOnce());
+    const query = new URL(client.openSocket.mock.calls[0][0], 'https://fixture.local').searchParams;
+    expect(query.get('cols')).toBe('120');
+    expect(query.get('rows')).toBe('40');
+    view.unmount();
+  });
+
+  it('does not open a stale terminal after unmounting during font initialization', async () => {
+    let ready!: () => void;
+    mocks.fontsReady = new Promise(resolve => { ready = resolve; });
+    const client = { targetPeerId: 'cancel-geometry', request: vi.fn(async () => ({ items: [{ sessionId: 'backend', name: 'task', live: true, canWrite: true, canResize: true }] })), openSocket: vi.fn() };
+    const view = render(<SessionAccessView client={client as unknown as SecureClient} />);
+    await act(async () => {});
+    view.unmount();
+    await act(async () => ready());
+    expect(client.openSocket).not.toHaveBeenCalled();
+  });
+
   it('uses the real grid in read-only mode and acknowledges flowSeq only after xterm applies output', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     const socket = { readyState: 1, send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null as ((e: { data: string }) => void) | null, onclose: null, onerror: null };

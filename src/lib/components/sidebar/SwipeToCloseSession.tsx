@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { Trash2 } from 'lucide-react';
 
@@ -24,6 +25,10 @@ export function SwipeToCloseSession({ children, open, onOpenChange, onClose, clo
     initialOffset: number; offset: number; horizontal: boolean;
   } | null>(null);
   const suppressClickUntilRef = useRef(0);
+  const trackSwipe = useDragLifetime(() => {
+    if (gestureRef.current?.horizontal) suppressClickUntilRef.current = Date.now() + 600;
+    gestureRef.current = null; setDragOffset(null);
+  });
   const [dragOffset, setDragOffset] = useState<number | null>(null);
   const offset = dragOffset ?? (open ? ACTION_WIDTH : 0);
 
@@ -52,6 +57,7 @@ export function SwipeToCloseSession({ children, open, onOpenChange, onClose, clo
           return;
         }
         if (!(event.target instanceof Element) || !event.target.closest('.sidebar-session-primary')) return;
+        trackSwipe(event);
         gestureRef.current = {
           pointerId: event.pointerId, x: event.clientX, y: event.clientY, startedAt: Date.now(),
           initialOffset: open ? ACTION_WIDTH : 0, offset: open ? ACTION_WIDTH : 0, horizontal: false,

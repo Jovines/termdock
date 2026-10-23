@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import DOMPurify from 'dompurify';
@@ -43,6 +44,9 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
   const [downloadError, setDownloadError] = useState(false);
   const [viewportSize, setViewportSize] = useState({ width: 320, height: 320, clipHeight: 0 });
   const pointers = useRef(new Map<number, { x: number; y: number; nodeId?: string }>());
+  const trackDiagramPointer = useDragLifetime((_reason, pointerId) => {
+    if (pointers.current.delete(pointerId)) dragged.current = true;
+  }, true);
   const dragged = useRef(false);
   const dragDistance = useRef(0);
   const diagram = useMemo(() => architectureDiagram(view, parentId, nesting), [view, parentId, nesting]);
@@ -222,6 +226,7 @@ export function ArchitectureDiagram({ view, parentId, selectedId, onSelect, acti
       : <div ref={viewport} data-sidebar-gesture-ignore className={`termdock-architecture-viewport overflow-auto overscroll-contain p-3 ${expanded ? 'min-h-0 min-w-0 flex-1' : 'h-[min(50dvh,26rem)]'}`} style={{ touchAction: 'none', maxHeight: !expanded && viewportSize.clipHeight ? Math.max(160, viewportSize.clipHeight - 150) : undefined }}
         onPointerDown={event => {
           if (event.button !== 0) return;
+          trackDiagramPointer(event);
           if (!pointers.current.size) { dragged.current = false; dragDistance.current = 0; }
           const nodeId = (event.target as Element).closest('[data-architecture-node]')?.getAttribute('data-architecture-node') ?? undefined;
           pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY, nodeId });

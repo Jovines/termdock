@@ -671,6 +671,12 @@ export class CollaborationStore {
     this.persist(true); return reply;
   }
 
+  /** References only: callers can select a bounded page before projecting bodies. */
+  listGroupMessages(groupId: string): CollaborationMessage[] {
+    this.expire();
+    return this.document.messages.filter(message => message.groupId === groupId);
+  }
+
   listMessages(groupId: string, limit = 200): CollaborationMessage[] {
     return this.document.messages.filter((message) => message.groupId === groupId).slice(-Math.max(1, Math.min(limit, 500)));
   }

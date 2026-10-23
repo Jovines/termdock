@@ -4,6 +4,6 @@
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string><string>zh-Hant</string></array>
 <key>NSUserNotificationAlertStyle</key><string>alert</string>
-<key>NSLocalNetworkUsageDescription</key><string>Termdock Preview connects to the existing Termdock services you select on your local network.</string>
+<key>NSLocalNetworkUsageDescription</key><string>Termdock connects to the existing Termdock services you select on your local network.</string>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>

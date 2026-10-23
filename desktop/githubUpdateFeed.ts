@@ -1,4 +1,5 @@
 import http from 'node:http';
+import os from 'node:os';
 
 const GITHUB_RELEASE_API = 'https://api.github.com/repos/Jovines/termdock/releases/latest';
 
@@ -20,6 +21,7 @@ interface GitHubRelease {
 export interface UpdateFeedResponse {
   status: 200 | 204;
   body?: string;
+  minimumSystemVersion?: string;
 }
 
 function parseVersion(value: string): [number, number, number] | null {
@@ -43,6 +45,7 @@ export async function buildGitHubUpdateFeed(
   platform: string,
   arch: string,
   fetchImpl: typeof fetch = fetch,
+  darwinRelease: string = os.release(),
 ): Promise<UpdateFeedResponse> {
   const response = await fetchImpl(GITHUB_RELEASE_API, {
     signal: AbortSignal.timeout(20_000),
@@ -60,7 +63,16 @@ export async function buildGitHubUpdateFeed(
   const version = tag.replace(/^v/, '');
   const assetName = `Termdock-${platform}-${arch}-${version}.zip`;
   const assets = Array.isArray(release.assets) ? release.assets as GitHubReleaseAsset[] : [];
-  const asset = assets.find((candidate) => candidate.name === assetName);
+  // Legacy clients select the compatibility ZIP. Once running this bridge,
+  // select the Rust ZIP on macOS 14+; Darwin 23 is macOS 14. Keep the bridge
+  // operational on 12/13 and explain the new requirement without a download loop.
+  const rustName = `Termdock-Rust-${platform}-${arch}-${version}.zip`;
+  const rust = assets.find((candidate) => candidate.name === rustName);
+  const darwinMajor = Number(darwinRelease.split('.')[0]);
+  if (rust && platform === 'darwin' && (!Number.isSafeInteger(darwinMajor) || darwinMajor < 23)) {
+    return { status: 204, minimumSystemVersion: '14' };
+  }
+  const asset = rust ?? assets.find((candidate) => candidate.name === assetName);
   const url = typeof asset?.browser_download_url === 'string' ? asset.browser_download_url : '';
   const digest = typeof asset?.digest === 'string' ? asset.digest : '';
   const size = typeof asset?.size === 'number' ? asset.size : 0;

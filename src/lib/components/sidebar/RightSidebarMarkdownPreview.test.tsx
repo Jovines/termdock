@@ -805,7 +805,7 @@ describe('right sidebar Markdown preview rendering', () => {
       />,
     );
 
-    fireEvent.click(screen.getByText('two'));
+    fireEvent.click(screen.getByText('two continuation'));
     expect(onLineRangeClick).toHaveBeenCalledWith(expect.anything(), 2, 3);
   });
 
@@ -913,18 +913,17 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(container.querySelector('ul ol ul ol')?.getAttribute('start')).toBe('2');
   });
 
-  it('renders indented continuation paragraphs inside list items', () => {
-    renderPreview([
+  it('joins source-wrapped continuation lines inside the same list paragraph', () => {
+    const { container } = renderPreview([
       '- parent',
       '  continuation with **strong** text',
       '  another continuation',
       '- sibling',
     ].join('\n'));
 
-    expect(screen.getByText('parent')).toBeTruthy();
-    expect(screen.getByText(/continuation with/)).toBeTruthy();
+    expect(container.querySelector('li')?.textContent).toBe('parent continuation with strong text another continuation');
+    expect(container.querySelector('li p, li br')).toBeNull();
     expect(screen.getByText('strong')).toBeTruthy();
-    expect(screen.getByText('another continuation')).toBeTruthy();
     expect(screen.getByText('sibling')).toBeTruthy();
   });
 

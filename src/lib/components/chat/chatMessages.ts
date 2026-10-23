@@ -1,6 +1,7 @@
 import type { ChatUI, ChatUIState } from '../../../server/shared/chatPresentation';
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant'; content: string; createdAt: number; status: string;
+  sequence?: number;
   replyTo?: string; requestId?: string; responseKind?: string;
   ui?: ChatUI; uiState?: ChatUIState;
 }
@@ -23,4 +24,15 @@ export function hasUnansweredMessage(messages: ChatMessage[]): boolean {
 }
 export function chatSendStatus(status: string): string {
   return ({ pending: '已发送', delivered: '已发送', stored: '已发送', failed: '发送失败', expired: '发送失败' }[status] || '待确认');
+}
+
+/** Merge overlapping cursor pages without moving or rebuilding unchanged rows. */
+export function mergeChatMessages(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  const byId = new Map(current.map(message => [message.id, message]));
+  let changed = false;
+  for (const message of incoming) {
+    const old = byId.get(message.id);
+    if (!old || JSON.stringify(old) !== JSON.stringify(message)) { byId.set(message.id, message); changed = true; }
+  }
+  return changed ? [...byId.values()].sort((a, b) => (a.sequence ?? a.createdAt) - (b.sequence ?? b.createdAt)) : current;
 }

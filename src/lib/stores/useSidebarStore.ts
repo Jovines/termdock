@@ -1,3 +1,5 @@
+import { directoryCacheActions } from '../filesystem/directoryCache';
+import { parentDirectory } from '../filesystem/browserPaths';
 import { trimCache } from '../utils/cacheBudget';
 import { create } from 'zustand';
 import { getSettings, updateSettings, type FileEntry, type FileSortMode, type FileWatchEvent, type GitChangedFile } from '../terminal/api';
@@ -483,11 +485,6 @@ export interface FileTreeNode {
   children?: FileTreeNode[];
 }
 
-function getParentPath(filePath: string): string {
-  const normalized = filePath.replace(/\/+$/, '') || '/';
-  if (normalized === '/') return '/';
-  return normalized.slice(0, normalized.lastIndexOf('/')) || '/';
-}
 
 function isSameOrChildPath(parent: string, child: string): boolean {
   const normalizedParent = parent.replace(/\/+$/, '') || '/';
@@ -676,6 +673,7 @@ interface SidebarState {
 }
 
 export const useSidebarStore = create<SidebarState>((set) => ({
+  ...directoryCacheActions(set),
   leftOpen: false,
   rightOpen: false,
   leftPinned: readLeftPinnedPreference(),
@@ -1110,14 +1108,6 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     return { pinnedExplorerRootsCache, pinnedExplorerRootsHydrated: true };
   }),
 
-  toggleExpanded: (path) =>
-    set((s) => {
-      const next = new Set(s.expandedPaths);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return { expandedPaths: next };
-    }),
-
   selectFile: (path) => set((s) => {
     writeSelectedFilePath(s.contextKey, path);
     return { selectedFilePath: path };
@@ -1159,15 +1149,6 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       else next.add(key);
       writeCollapsedGroups(next);
       return { collapsedGroups: next };
-    }),
-
-  setDirectoryCache: (path, entries) =>
-    set((s) => {
-      const next = new Map(s.directoryCache);
-      next.delete(path);
-      next.set(path, entries);
-      trimCache(next, 128, new Set([...s.expandedPaths, path, s.explorerRoot ?? s.rootPath ?? '']));
-      return { directoryCache: next };
     }),
 
   reconcileDirectoryCache: (path, entries) =>
@@ -1410,15 +1391,6 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     void updateSettings({ activeGitRepo: { contextKey, repoRoot: repoRoot ?? null } }).catch(() => {});
   },
 
-  invalidateDirectoryCache: (path, recursive = false) =>
-    set((s) => {
-      const next = new Map(s.directoryCache);
-      for (const key of next.keys()) {
-        if (key === path || (recursive && isSameOrChildPath(path, key))) next.delete(key);
-      }
-      return { directoryCache: next };
-    }),
-
   applyFileWatchEvents: (events) =>
     set((s) => {
       if (events.length === 0) return s;
@@ -1446,7 +1418,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
           continue;
         }
 
-        const parent = getParentPath(event.path);
+        const parent = parentDirectory(event.path);
         const siblings = directoryCache.get(parent);
 
         if (event.type === 'deleted') {

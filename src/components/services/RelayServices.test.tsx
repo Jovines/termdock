@@ -13,6 +13,24 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 describe('browse services through an entry', () => {
+  it('shows a mismatched registration as disabled with its target identity and the repair reason', async () => {
+    mocks.list.mockResolvedValue({ route: intent.routes[0], canManage: true, items: [{ serviceId: '12D3KooWAAAAabcdefgh', url: service.url, available: false, authorized: false, error: 'TARGET_IDENTITY_MISMATCH' }] });
+    const connect = vi.fn();
+    render(<RelayServices service={service} onBusyChange={() => {}} onConnect={connect} />);
+    const row = await screen.findByRole('button', { name: /服务身份与登记地址不一致/ });
+    expect((row as HTMLButtonElement).disabled).toBe(true);
+    expect(row.textContent).toContain('AAAAabcdefgh');
+    fireEvent.click(row); expect(connect).not.toHaveBeenCalled();
+  });
+  it('distinguishes reverse-only services by the varying ID suffix, rather than the common ID prefix', async () => {
+    mocks.list.mockResolvedValue({ route: intent.routes[0], canManage: true, items: [
+      { serviceId: '12D3KooWAAAAAAAA', available: true, authorized: true },
+      { serviceId: '12D3KooWBBBBBBBB', available: true, authorized: true },
+    ] });
+    render(<RelayServices service={service} onBusyChange={() => {}} onConnect={() => {}} />);
+    await screen.findByText('中转服务 AAAAAAAA');
+    await screen.findByText('中转服务 BBBBBBBB');
+  });
   it('keeps target login inside the relay flow and clears rejected passwords for retry', async () => {
     const connect = vi.fn().mockRejectedValue(new DeviceAuthorizationRequired());
     const login = vi.fn().mockRejectedValueOnce(new Error('目标密码错误')).mockResolvedValueOnce(undefined);

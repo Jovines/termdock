@@ -442,7 +442,11 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       const nextReport = report?.state === 'remove' ? null : report;
       if (
         existing.tuiProgress?.state === nextReport?.state &&
-        existing.tuiProgress?.progress === nextReport?.progress
+        existing.tuiProgress?.progress === nextReport?.progress &&
+        existing.tuiProgress?.source === nextReport?.source &&
+        existing.tuiProgress?.app === nextReport?.app &&
+        existing.tuiProgress?.message === nextReport?.message &&
+        existing.tuiProgress?.kind === nextReport?.kind
       ) return state;
       const newSessions = new Map(state.sessions);
       newSessions.set(sessionId, { ...existing, tuiProgress: nextReport, updatedAt: Date.now() });

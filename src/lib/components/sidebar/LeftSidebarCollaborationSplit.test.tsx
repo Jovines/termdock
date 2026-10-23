@@ -6,6 +6,7 @@ import { useCollaborationTaskInbox } from '../../stores/useCollaborationTaskInbo
 import type { DragStart, DropResult } from '@hello-pangea/dnd';
 import { useState } from 'react';
 import { normalizeSplitWorkspaces, reorderSplitWorkspaceSessions, type SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
+import { AppFeedbackHost } from '../ui/AppFeedback';
 import { I18nProvider } from '../../i18n';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
@@ -52,7 +53,7 @@ async function setup(groupByFolder = false, groupIds = baseGroup.sessionIds, ses
   useSidebarStore.setState({ groupByFolder, collapsedGroups: new Set() });
   mocks.list.mockResolvedValue({ groups: [{ ...baseGroup, sessionIds: groupIds }] });
   const handlers = callbacks();
-  render(<I18nProvider><LeftSidebar {...handlers} isOpen pinned={pinned} drawerWidthPx={300}
+  render(<I18nProvider><AppFeedbackHost /><LeftSidebar {...handlers} isOpen pinned={pinned} drawerWidthPx={300}
     sessions={sessionOrder.map((id) => ({ id, name: id.toUpperCase(), mode: 'shell' as const }))}
     activeSessionId="a" sessionStates={new Map()} splitWorkspaces={splitWorkspaces} /></I18nProvider>);
   await screen.findByRole('region', { name: 'Agent 工作组：Release team' });
@@ -93,7 +94,7 @@ describe('Agent workgroup split navigation', () => {
     mocks.list.mockResolvedValue({ groups: [remoteGroup] });
     mocks.save.mockResolvedValue({ group: { ...remoteGroup, sessionIds: ['a'], remoteSessions: [], updatedAt: 2 } });
     const handlers = callbacks();
-    render(<I18nProvider><LeftSidebar {...handlers} isOpen pinned drawerWidthPx={300}
+    render(<I18nProvider><AppFeedbackHost /><LeftSidebar {...handlers} isOpen pinned drawerWidthPx={300}
       sessions={[{ id: 'a', name: 'A', mode: 'shell' }]} activeSessionId="a" sessionStates={new Map()} splitWorkspaces={[]} /></I18nProvider>);
     fireEvent.contextMenu(await screen.findByText('n2w8lg8d'), { clientX: 100, clientY: 200 });
     const menu = screen.getByRole('dialog', { name: 'n2w8lg8d' });
@@ -205,7 +206,7 @@ describe('Agent workgroup split navigation', () => {
     const handlers = callbacks();
     function View() {
       const [splits, setSplits] = useState(() => normalizeSplitWorkspaces([{ ...workspace, sessionIds: ids, layout: 'grid' }]));
-      return <I18nProvider><LeftSidebar {...handlers} isOpen pinned drawerWidthPx={300}
+      return <I18nProvider><AppFeedbackHost /><LeftSidebar {...handlers} isOpen pinned drawerWidthPx={300}
         sessions={ids.map((id) => ({ id, name: id.toUpperCase(), mode: 'shell' as const }))}
         activeSessionId="a" sessionStates={new Map()} splitWorkspaces={splits}
         onReorderSplitWorkspace={(workspaceId, sessionIds) => {
@@ -357,7 +358,7 @@ describe('Agent workgroup split navigation', () => {
       { ...baseGroup, id: 'target', name: 'Target', sessionIds: ['c', 'd'], updatedAt: 9 }];
     mocks.list.mockResolvedValue({ groups });
     mocks.move.mockRejectedValue(new Error('协作组已变化，请刷新后重新移动成员'));
-    render(<I18nProvider><LeftSidebar {...callbacks()} isOpen pinned drawerWidthPx={300}
+    render(<I18nProvider><AppFeedbackHost /><LeftSidebar {...callbacks()} isOpen pinned drawerWidthPx={300}
       sessions={['a', 'b', 'c', 'd'].map(id => ({ id, name: id.toUpperCase(), mode: 'shell' as const }))}
       activeSessionId="a" sessionStates={new Map()} splitWorkspaces={[]} /></I18nProvider>);
     await screen.findByRole('region', { name: 'Agent 工作组：Target' });

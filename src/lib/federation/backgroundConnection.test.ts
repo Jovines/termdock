@@ -38,18 +38,20 @@ async function fixture() {
   cleanup.push(() => router.close());
   router.registerDirect(target.serviceId, async () => { const socket = new WebSocket(targetOrigin.replace('http:', 'ws:')); await once(socket, 'open'); return socket; });
   const issue = vi.fn(() => ({ routeToken: 'verified-ticket', expiresAt: Date.now() + 30000 }));
-  const entry = await createFederationRuntime(express(), join(dir, 'entry'), handlers, { hasRouteGrant: () => true, issueRouteTicket: issue });
+  let routeGranted = true;
+  const entry = await createFederationRuntime(express(), join(dir, 'entry'), handlers, { hasRouteGrant: () => routeGranted, issueRouteTicket: issue });
   entry.store.grant({ subjectId: state.identity.peerId, scope: { kind: 'service' }, actions: ['service:*'] });
   cleanup.push(() => entry.close());
   const entryServer = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(entryServer, 'listening');
   cleanup.push(() => { for (const socket of entryServer.clients) socket.terminate(); entryServer.close(); });
+  let entrySecureConnections = 0;
   entryServer.on('connection', (socket, req) => {
     const url = new URL(req.url!, 'http://entry');
     if (url.pathname.endsWith('/relay')) void router.attach(socket, url.searchParams.get('routeToken')).then(ok => { if (ok) socket.send(JSON.stringify({ type: 'ready' })); });
-    else void entry.accept(socket);
+    else { entrySecureConnections++; void entry.accept(socket); }
   });
   const config: BackgroundTarget = { targetPeerId: target.serviceId, addresses: [targetOrigin], routes: [{ url: `http://127.0.0.1:${(entryServer.address() as { port: number }).port}`, targetPeerId: entry.serviceId }], publicKey: '', preferences: { aiEnabled: true, exitEnabled: false, alertStyle: 'normal', locale: 'zh-CN' } };
-  return { config, received, wire, issue, target, grant };
+  return { config, received, wire, issue, target, grant, entrySecureConnections: () => entrySecureConnections, revokeRoute() { routeGranted = false; } };
 }
 it.each(['direct', 'relay'])('updates subscriptions over a real %s encrypted channel without a window or cookie', async mode => {
   const f = await fixture();
@@ -66,6 +68,31 @@ it.each(['direct', 'relay'])('updates subscriptions over a real %s encrypted cha
 });
 it('rejects a changed service pin without falling back to an unauthenticated request', async () => {
   const f = await fixture();
-  await expect(connectBackgroundTarget({ ...f.config, targetPeerId: (await createIdentity()).peerId, routes: [] })).rejects.toThrow('Background encrypted service unavailable');
+  await expect(connectBackgroundTarget({ ...f.config, targetPeerId: (await createIdentity()).peerId, routes: [] })).rejects.toMatchObject({ code: 'TARGET_IDENTITY_MISMATCH' });
   expect(f.received).toEqual([]);
+});
+it('does not dial the entry address as the target, even when an old background record calls it direct', async () => {
+  const f = await fixture();
+  const client = await connectBackgroundTarget({ ...f.config, addresses: [f.config.routes[0].url] });
+  cleanup.push(() => client.close());
+  expect(f.entrySecureConnections()).toBe(1);
+  expect(f.issue).toHaveBeenCalledOnce();
+  expect((await client.fetch('/api/notifications/status')).ok).toBe(true);
+});
+it('uses same-identity alternate routes as direct addresses in the background', async () => {
+  const f = await fixture();
+  const client = await connectBackgroundTarget({ ...f.config, addresses: [], routes: [{ url: f.config.addresses[0], targetPeerId: f.config.targetPeerId }] });
+  cleanup.push(() => client.close());
+  expect(f.issue).not.toHaveBeenCalled();
+  expect((await client.fetch('/api/notifications/status')).ok).toBe(true);
+});
+it('preserves confirmed target revocation without falling through to an entry', async () => {
+  const f = await fixture(); f.target.store.revoke(f.grant.id);
+  await expect(connectBackgroundTarget(f.config)).rejects.toMatchObject({ code: 'TARGET_AUTHORIZATION_REQUIRED' });
+  expect(f.issue).not.toHaveBeenCalled(); expect(f.received).toEqual([]);
+});
+it('preserves confirmed route revocation without replacing it with a generic offline error', async () => {
+  const f = await fixture(); f.revokeRoute();
+  await expect(connectBackgroundTarget({ ...f.config, addresses: [] })).rejects.toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED' });
+  expect(f.issue).not.toHaveBeenCalled(); expect(f.received).toEqual([]);
 });

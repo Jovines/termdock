@@ -10,13 +10,10 @@ import { pathValidator } from '../utils/pathValidator.js';
 
 const router = Router();
 
-const SERIAL_PATTERN = /^(?:[0-9a-zA-Z_.:\-]+|\[[0-9a-fA-F:.]+\]:\d{1,5})$/;
-/** 逐帧/逐控件的诊断日志默认关闭，需要时 TERMDOCK_ANDROID_DEBUG=1 打开。 */
+import { isValidAndroidSerial, androidRouteAccess } from '../shared/androidDevices.js';
+export { isValidAndroidSerial };
+/** Opt-in per-frame diagnostics. */
 const DEBUG_ANDROID = process.env.TERMDOCK_ANDROID_DEBUG === '1';
-
-export function isValidAndroidSerial(serial: string): boolean {
-  return serial.length <= 128 && SERIAL_PATTERN.test(serial);
-}
 
 router.get('/devices', async (req, res) => {
   try {
@@ -25,7 +22,7 @@ router.get('/devices', async (req, res) => {
     const adbAvailable = resolveAdbBinary() !== null;
     try { scrcpyVersion = (await resolveScrcpyBinaries()).version; } catch { scrcpyVersion = null; }
     const shared = encryptedRequestResources(req);
-    res.json({ adbAvailable, scrcpyVersion, devices: shared && !hasEncryptedServiceAccess(req) ? devices.filter(d => shared.android?.some(a => a.serial === d.serial)) : devices });
+    res.json({ adbAvailable, scrcpyVersion, devices: shared && !hasEncryptedServiceAccess(req) ? devices.filter(d => androidRouteAccess(shared.android, d.serial)) : devices });
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'ADB_UNAVAILABLE', code: 'ADB_UNAVAILABLE' });
   }
@@ -61,7 +58,7 @@ router.use('/recordings', async (req, res, next) => {
   try {
     const id = /^\/([^/]+)(?:\/(?:stop|save))?$/.exec(req.path)?.[1];
     const serial = id ? (await androidRecordings.info(id, subject)).serial : req.method === 'GET' ? req.query.serial : req.body?.serial;
-    if (typeof serial !== 'string' || !resources.android?.some(device => device.serial === serial)) throw new Error('PHONE_NOT_SHARED');
+    if (typeof serial !== 'string' || !androidRouteAccess(resources.android, serial)) throw new Error('PHONE_NOT_SHARED');
     if (req.body?.directory !== undefined && (typeof req.body.directory !== 'string' || !directoryResource(resources, req.body.directory, true))) throw new Error('DIRECTORY_NOT_SHARED');
     recordingOwners.set(req, subject); next();
   } catch { res.status(403).json({ error: '此手机或录像未获授权', code: 'SHARE_ACCESS_DENIED' }); }

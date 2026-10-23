@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppFeedbackHost } from '../ui/AppFeedback';
 import { I18nProvider } from '../../i18n';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
@@ -26,7 +27,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 async function setup(mode: 'pinned' | 'push') {
   const onNewSession = vi.fn(), onClose = vi.fn();
-  render(<I18nProvider><LeftSidebar isOpen pinned={mode === 'pinned'} push={mode === 'push'} drawerWidthPx={320}
+  render(<I18nProvider><AppFeedbackHost /><LeftSidebar isOpen pinned={mode === 'pinned'} push={mode === 'push'} drawerWidthPx={320}
     sessions={[{ id: 'old', name: 'Old shell', mode: 'shell' }]} activeSessionId="old" sessionStates={new Map()}
     onNewSession={onNewSession} onClose={onClose} onCloseSession={vi.fn()} onSplitSession={vi.fn()} onCloseSplit={vi.fn()}
     splitWorkspaces={[]} onRemoveFromSplit={vi.fn()} onSetSplitLayout={vi.fn()} onReorderSplitWorkspace={vi.fn()}

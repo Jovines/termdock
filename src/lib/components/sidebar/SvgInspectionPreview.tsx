@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import type { ReviewReferenceHandler } from './reviewReference';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from 'react';
 import { createPortal } from 'react-dom';
@@ -241,10 +242,16 @@ export function SvgInspectionPreview({
     return points.length >= 2 ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) : 0;
   };
 
+  const trackSvgPointer = useDragLifetime((_reason, pointerId) => {
+    if (!pointersRef.current.delete(pointerId)) return;
+    gestureRef.current = null; suppressClickRef.current = true;
+  }, true);
+
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     const root = rootRef.current;
     if (!root) return;
+    trackSvgPointer(event);
     pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     root.setPointerCapture?.(event.pointerId);
     if (pointersRef.current.size >= 2) {

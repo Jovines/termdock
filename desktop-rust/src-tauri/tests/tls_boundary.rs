@@ -76,5 +76,39 @@ async fn real_self_signed_tls_is_origin_scoped_and_rejects_changed_leaf_before_h
         .await
         .is_err());
     assert_eq!(http_requests.load(Ordering::SeqCst), 1);
+    // Saved identities and routed invitations must pass the same entry TLS
+    // check as a new address, without contacting the unreachable target.
+    let connection = termdock_preview::config::Connection {
+        id: "saved".into(), url: origin.clone(), label: "Saved target".into(),
+        target_peer_id: Some("saved-target".into()),
+        service_origin: Some("https://unreachable.invalid".into()),
+        entry_service_id: Some("entry".into()), routes: vec![],
+    };
+    assert!(proxy::discover_connection_identity(&connection, &Default::default()).await.is_err());
+    assert_eq!(http_requests.load(Ordering::SeqCst), 1);
+    let pins = [(origin.clone(), fingerprint)].into_iter().collect();
+    assert_eq!(proxy::discover_connection_identity(&connection, &pins).await.unwrap(), None);
+    assert_eq!(http_requests.load(Ordering::SeqCst), 2);
     server.abort();
+}
+
+#[tokio::test]
+async fn entry_probe_preserves_password_bootstrap_for_both_new_and_saved_services() {
+    use axum::{routing::get, Router};
+    for status in [401, 403] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/api/auth/open/parameters", get(move || async move {
+            axum::http::StatusCode::from_u16(status).unwrap()
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        for peer in [None, Some("saved-target".into())] {
+            let connection = termdock_preview::config::Connection {
+                id: "protected".into(), url: url.clone(), label: "Protected".into(),
+                target_peer_id: peer, service_origin: None, entry_service_id: None, routes: vec![],
+            };
+            assert_eq!(proxy::discover_connection_identity(&connection, &Default::default()).await.unwrap(), None);
+        }
+        server.abort();
+    }
 }

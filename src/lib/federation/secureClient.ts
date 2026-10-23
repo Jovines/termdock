@@ -1,4 +1,5 @@
 import type { ConnectionDiagnostics } from './connectionDiagnostics';
+import { httpUploadLimit } from '../../server/federation/httpUploadLimit.js';
 import { createIdentity, secureConnection, MAX_SECURE_CONNECTION_AGE_MS, type Identity } from '../../server/federation/secureProtocol.js';
 import { TRANSPORT_RENEWED_CODE, TRANSPORT_RENEWED_REASON } from './transportLifecycle.js';
 import { AsyncQueue, PacketChannel, fromBase64, toBase64, type Packet } from '../../server/federation/packets.js';
@@ -21,7 +22,6 @@ export interface SecureClientOptions {
   webTransport?: boolean;
   webTransportFactory?: WebTransportFactory;
 }
-const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 const MAX_PENDING = MAX_OPEN_SECURE_SOCKETS + MAX_ACTIVE_HTTP_REQUESTS + 8;
 const MAX_WAITING = 256;
 const REQUEST_IDLE_MS = 30_000;
@@ -383,7 +383,7 @@ export class SecureClient {
     const request = new Request(url, original ? new Request(original, init) : init);
     const method = request.method.toUpperCase();
     const path = pathOnly(url.pathname + url.search);
-    const uploadLimit = url.pathname === '/api/terminal/fs/upload' ? 110 * 1024 * 1024 : MAX_REQUEST_BYTES;
+    const uploadLimit = httpUploadLimit(url.pathname);
     if (request.signal.aborted) throw request.signal.reason;
     const child = await this.operationStream('http', request.signal);
     if (child) {

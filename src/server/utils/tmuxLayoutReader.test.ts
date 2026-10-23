@@ -8,7 +8,7 @@ const row = (overrides: Record<number, string> = {}) => Object.assign([
   '10', '$1', 'sample', '@1', 'window', '0', '1', '%1', '0', '1', '80', '24', '0', '0', 'sh', '100', '/dev/pts/1', 'title', '0', '/work with spaces',
 ], overrides).join('\x1f');
 it('gets server, active window, copy mode, and all panes in one exact-name read-only query', async () => {
-  const run = vi.fn(async () => row({ 18: '1' }));
+  const run = vi.fn(async (_args: string[]) => row({ 18: '1' }));
   expect(await readTmuxLayout(run, 'sample')).toMatchObject({ serverPid: 10, sessionId: '$1', activeWindowId: '@1', activePaneId: '%1', inCopyMode: true,
     windows: [{ name: 'window', panes: [{ id: '%1', currentPath: '/work with spaces' }] }] });
   expect(run).toHaveBeenCalledTimes(1);

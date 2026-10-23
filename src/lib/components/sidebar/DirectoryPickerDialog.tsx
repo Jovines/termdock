@@ -1,20 +1,11 @@
-import { ArrowUp, Check, FolderTree, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Check, FolderTree, X } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import { FileTree } from './FileTree';
 import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
-
-function normalizeDirectory(path: string): string {
-  return path.trim().replace(/\/+$/, '') || '/';
-}
-
-function parentDirectory(path: string): string {
-  const normalized = normalizeDirectory(path);
-  if (normalized === '/') return '/';
-  const separator = normalized.lastIndexOf('/');
-  return separator <= 0 ? '/' : normalized.slice(0, separator);
-}
+import { useDirectoryNavigation } from '../../hooks/useDirectoryNavigation';
+import { FileBrowserNavigationActions } from './FileBrowserNavigationActions';
 
 export function DirectoryPickerDialog({
   open,
@@ -47,11 +38,11 @@ export function DirectoryPickerDialog({
   };
   const dialogRef = useRef<HTMLElement>(null);
   useKeyboardLayer(dialogRef, open, onCancel);
-  const [currentPath, setCurrentPath] = useState(() => normalizeDirectory(initialPath));
-
+  const navigation = useDirectoryNavigation(initialPath.trim());
+  const currentPath = navigation.path;
   useEffect(() => {
-    if (open) setCurrentPath(normalizeDirectory(initialPath));
-  }, [initialPath, open]);
+    if (!open) navigation.navigate(initialPath.trim());
+  }, [open, initialPath]);
 
   useEffect(() => {
     if (!open) return;
@@ -90,12 +81,12 @@ export function DirectoryPickerDialog({
         </header>
 
         <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border/15 px-3 py-1.5">
-          <button type="button" disabled={currentPath === '/'} onClick={() => setCurrentPath(parentDirectory(currentPath))} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:opacity-30" aria-label={copy.parent}><ArrowUp size={14} /></button>
+          <FileBrowserNavigationActions parent={{ onClick: navigation.goParent, disabled: !navigation.canGoParent, label: copy.parent }} />
           <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-foreground" title={currentPath}>{currentPath}</span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1">
-          <FileTree rootPath={currentPath} directoriesOnly onFileSelect={() => undefined} onDirectoryRoot={setCurrentPath} selectedFilePath={initialPath || null} />
+          <FileTree rootPath={currentPath} directoriesOnly onFileSelect={() => undefined} onDirectoryRoot={navigation.navigate} selectedFilePath={initialPath || null} />
         </div>
 
         <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-border/15 bg-surface-elevated px-3 py-3">

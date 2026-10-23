@@ -82,7 +82,7 @@ afterEach(() => {
 });
 
 describe('AgentOperationsPanel', () => {
-  const customSession = { sessionId: 'custom-peer', name: '自定义 TraeX 会话', cwd: '/repo', status: 'ready', currentTask: '开发', capability: 'Custom plugin', agent: { slug: 'custom-traex', displayName: 'TraeX' } };
+  const customSession = { sessionId: 'custom-peer', name: '自定义 TraeX 会话', customName: true, cwd: '/repo', status: 'ready', currentTask: '开发', capability: 'Custom plugin', agent: { slug: 'custom-traex', displayName: 'TraeX' } };
 
   it('shows custom-plugin and plain terminal sessions while launcher discovery and automations are still pending', async () => {
     apiMocks.getAgentLaunchers.mockReturnValue(new Promise(() => {}));
@@ -267,7 +267,7 @@ describe('AgentOperationsPanel', () => {
   });
 
   it('shows independent peer loading and errors without blocking local candidates', async () => {
-    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions: [{ sessionId: 'one', name: '本服务会话', cwd: '/repo', currentTask: '', status: 'idle' }],
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions: [{ sessionId: 'one', name: '本服务会话', customName: true, cwd: '/repo', currentTask: '', status: 'idle' }],
       peers: { state: 'error', checkedAt: 1, services: [{ origin: 'https://offline.test', connected: false, error: 'OFFLINE' }] } });
     const user = userEvent.setup();
     render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
@@ -892,7 +892,7 @@ it('creates a group with no existing sessions and enters messages as the default
   expect(useCollaborationNavigation.getState()).toMatchObject({ groupId: 'new-empty', view: 'messages' });
 });
 it('uses readable member names in the optional session picker and keeps route IDs as values', async () => {
-  const sessions = ['one', 'two'].map(sessionId => ({ sessionId, name: `tmux:wt-${sessionId}`, cwd: '/project', status: 'ready', currentTask: '', capability: '', agent: { displayName: 'Codex' } }));
+  const sessions = ['one', 'two'].map(sessionId => ({ sessionId, name: `tmux:wt-${sessionId}`, activeProgram: 'Codex', cwd: '/project', status: 'ready', currentTask: '', capability: '', agent: { displayName: 'Codex' } }));
   apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions });
   render(<AgentOperationsPanel activeSessionId={null} onClose={() => {}} onNewSession={() => {}} />);
   await screen.findByText('Codex 1');

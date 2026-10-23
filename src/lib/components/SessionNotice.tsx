@@ -5,7 +5,7 @@ import { subscribeClientState, type ControlSessionNoticeEvent } from '../utils/c
 import { savedConnection } from '../federation/browserIntegration';
 import { useSessionNoticeStore } from '../stores/useSessionNoticeStore';
 import { readCachedSessionPersistenceSnapshot } from '../hooks/useSessionPersistence';
-import { getCwdLeafName, getSessionDisplayName } from '../terminal/display';
+import { getSessionPresentation } from '../terminal/display';
 import { useTerminalStore, getCachedShellTitle } from '../stores/useTerminalStore';
 import { getWorkspaceHost, isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../services/workspaceHost';
 import { useI18n } from '../i18n';
@@ -40,10 +40,10 @@ export function SessionNoticeBridge() {
     const root = window.parent;
     const session = readCachedSessionPersistenceSnapshot().sessions.find(item => item.sessionId === event.sessionId);
     const terminal = useTerminalStore.getState().sessions.get(event.sessionId);
-    const shellTitle = terminal?.shellTitle ?? getCachedShellTitle(event.sessionId);
-    const contentTitle = shellTitle === terminal?.cwd || shellTitle === getCwdLeafName(terminal?.cwd ?? null) ? null : shellTitle;
-    const sessionName = getSessionDisplayName(session ?? { name: event.sessionName },
-      terminal?.activeProgram ?? null, null, undefined, contentTitle, terminal?.promptState ?? null);
+    const shellTitle = terminal?.shellTitle ?? session?.shellTitle ?? getCachedShellTitle(event.sessionId);
+    const sessionName = getSessionPresentation({ ...(session ?? { name: event.sessionName }),
+      activeProgram: terminal?.activeProgram ?? session?.activeProgram, cwd: terminal?.cwd ?? session?.cwd, shellTitle,
+      promptState: terminal?.promptState, agent: terminal?.agent ?? session?.agent }).displayName;
     const detail: Notice = { ...event, sessionName, key: `${targetPeerId ?? 'local'}:${event.id}`, open: () => {
       if (targetPeerId && host) return host.focusSession(targetPeerId, event.sessionId);
       window.dispatchEvent(new CustomEvent('termdock:focus-session', { detail: event.sessionId }));

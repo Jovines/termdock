@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import express from 'express';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sessionChatRoutes } from './sessionChatRoutes';
@@ -91,4 +91,84 @@ it('only includes chat requests and their matching replies, without exposing oth
   f.store.send({ groupId: otherGroup.id, fromSessionId: null, toSessionIds: ['another'], kind: 'ask', content: '其他会话内容', integrationOrigin: { integrationId: original.integrationOrigin!.integrationId, source: 'session-chat' } });
   expect((await f.read('owner')).messages.map((m: { id: string }) => m.id)).toEqual([a.id]);
   expect((await f.read('alice', true)).messages.map((m: { id: string }) => m.id)).toEqual([a.id]);
+});
+
+it('returns a small revision acknowledgement for unchanged history and full data after a reply or form update', async () => {
+  const f = await fixture(), sent = await f.post('请比较方案').then(response => response.json());
+  const first = await f.read();
+  const poll = (revision: string) => fetch(`${f.base}/agent/chat?revision=${encodeURIComponent(revision)}`).then(response => response.json());
+  expect(await poll(first.revision)).toEqual({ unchanged: true, revision: first.revision });
+  const reply = f.store.storeIntegrationReply(sent.id, 'agent', JSON.stringify({ text: '方案说明', ui: 'root = Stack([Text("方案")])' }), { idempotencyKey: 'revision-reply', metadata: { openui: { version: 1 } } });
+  const updated = await poll(first.revision);
+  expect(updated.messages).toHaveLength(2); expect(updated.revision).not.toBe(first.revision);
+  f.store.saveChatUIState(reply.id, 'agent', { plan: 'A' }, 0);
+  const edited = await poll(updated.revision);
+  expect(edited.messages[1].uiState).toEqual({ revision: 1, values: { plan: 'A' } });
+  expect(edited.revision).not.toBe(updated.revision);
+  expect((await f.read('scoped-guest', true)).messages).toHaveLength(2);
+  expect((await fetch(`${f.base}/missing/chat?revision=${edited.revision}`)).status).toBe(404);
+});
+
+it('pages the retained history beyond 500 messages without gaps, overlaps or offset shifts from new arrivals', async () => {
+  const f = await fixture(), original = await f.post('seed').then(response => response.json());
+  const template = f.store.getMessage(original.id)!;
+  const document = JSON.parse(readFileSync(f.filePath, 'utf8'));
+  document.messages = Array.from({ length: 760 }, (_, index) => ({ ...template, id: `page-${index}`, sequence: index + 1, createdAt: index + 1, status: 'delivered', content: `message ${index}`, idempotencyKey: `seed-${index}` }));
+  writeFileSync(f.filePath, JSON.stringify(document));
+  const current = await fixture(f.filePath);
+  const page = (query = '') => fetch(`${current.base}/agent/chat?limit=30${query}`).then(response => response.json());
+  let result = await page();
+  expect(result.messages).toHaveLength(30);
+  expect(result.messages[0].id).toBe('page-730');
+  expect(result.page).toEqual({ hasOlder: true, hasNewer: false, mode: 'latest' });
+  const ids = result.messages.map((message: { id: string }) => message.id);
+  await current.post('new arrival', 'paging-new-arrival');
+  while (result.page.hasOlder) {
+    result = await page(`&before=${result.messages[0].id}`);
+    expect(result.messages.length).toBeLessThanOrEqual(30);
+    ids.unshift(...result.messages.map((message: { id: string }) => message.id));
+  }
+  expect(ids).toEqual(Array.from({ length: 760 }, (_, index) => `page-${index}`));
+  expect(new Set(ids).size).toBe(760);
+  expect((await current.read()).messages).toHaveLength(500);
+  const next = await page('&after=page-759');
+  expect(next.messages.map((message: { content: string }) => message.content)).toEqual(['new arrival']);
+  expect(next.updates).toHaveLength(30);
+  expect(next.updates[29].id).toBe('page-759');
+  const unchanged = await page(`&after=page-759&revision=${next.revision}`);
+  expect(unchanged).toEqual({ unchanged: true, revision: next.revision });
+});
+
+it('validates paging cursors within the visible conversation and retains per-page form and status updates', async () => {
+  const f = await fixture(), sent = await f.post('interactive').then(response => response.json());
+  const original = f.store.getMessage(sent.id)!;
+  const [external] = f.store.send({ groupId: original.groupId, fromSessionId: null, toSessionIds: ['agent'], kind: 'ask', content: 'private external body', integrationOrigin: { integrationId: 'external', source: 'external' } });
+  const fetchPage = (query: string) => fetch(`${f.base}/agent/chat?limit=2${query}`);
+  expect((await fetchPage(`&before=${external.id}`)).status).toBe(404);
+  expect((await fetchPage('&before=missing')).status).toBe(404);
+  for (const query of ['limit=0', 'limit=61', 'limit=wrong', 'limit=2&before=x&after=y']) expect((await fetch(`${f.base}/agent/chat?${query}`)).status).toBe(400);
+  const first = await fetchPage(`&after=${sent.id}`).then(response => response.json());
+  expect(first.messages).toEqual([]); expect(first.updates).toHaveLength(1);
+  f.store.fail(sent.id, 'test failure');
+  const changed = await fetchPage(`&after=${sent.id}&revision=${first.revision}`).then(response => response.json());
+  expect(changed.updates[0].status).toBe('failed'); expect(changed.revision).not.toBe(first.revision);
+  expect(JSON.stringify(changed)).not.toContain('private external body');
+  const reply = f.store.storeIntegrationReply(sent.id, 'agent', JSON.stringify({ text: 'plan', ui: 'root = Stack([Text("plan")])' }), { idempotencyKey: 'page-ui-reply', metadata: { openui: { version: 1 } } });
+  const uiPage = await fetchPage(`&after=${reply.id}`).then(response => response.json());
+  f.store.saveChatUIState(reply.id, 'agent', { selected: 'A' }, 0);
+  const edited = await fetchPage(`&after=${reply.id}&revision=${uiPage.revision}`).then(response => response.json());
+  expect(edited.updates.find((message: { id: string }) => message.id === reply.id).uiState.values).toEqual({ selected: 'A' });
+});
+
+it('confirms a retained pending request and reports its unanswered state without transferring the original request body', async () => {
+  const f = await fixture(), requestId = 'pending-outside-current-page';
+  const sent = await f.post('old request outside the page', requestId).then(response => response.json());
+  for (let index = 0; index < 35; index++) f.store.storeIntegrationReply(sent.id, 'agent', `progress ${index}`, { idempotencyKey: `progress-${index}`, responseKind: 'progress' });
+  const read = () => fetch(`${f.base}/agent/chat?limit=30&requestId=${requestId}`).then(response => response.json());
+  const page = await read();
+  expect(page.messages).toHaveLength(30); expect(page.messages.every((message: { role: string }) => message.role === 'assistant')).toBe(true);
+  expect(page.confirmedRequestId).toBe(requestId); expect(page.replyPending).toBe(true);
+  expect(JSON.stringify(page)).not.toContain('old request outside the page');
+  f.store.storeIntegrationReply(sent.id, 'agent', 'completed', { idempotencyKey: 'last-paged-result', responseKind: 'result' });
+  expect((await read()).replyPending).toBe(false);
 });

@@ -32,28 +32,35 @@ pub(crate) fn prepare_startup(config: &mut tauri::Config) -> Option<String> {
         .insert("updater".into(), safe_plugin_config());
     diagnostic
 }
+#[cfg(test)]
 fn channel(endpoint: Option<&str>, key: Option<&str>) -> Result<(url::Url, String), String> {
+    validate_channel(endpoint, key, false)
+}
+fn stable_channel(endpoint: Option<&str>, key: Option<&str>) -> Result<(url::Url, String), String> {
+    validate_channel(endpoint, key, true)
+}
+fn validate_channel(endpoint: Option<&str>, key: Option<&str>, stable: bool) -> Result<(url::Url, String), String> {
     use base64::Engine;
     let endpoint = endpoint
         .filter(|v| !v.trim().is_empty())
-        .ok_or("Preview 更新渠道尚未配置，请由发布构建提供独立 manifest 与公钥")?;
+        .ok_or("更新渠道尚未配置，请使用签名发布版")?;
     let key = key
         .filter(|v| !v.trim().is_empty())
-        .ok_or("Preview 更新签名公钥尚未配置")?;
-    let endpoint = url::Url::parse(endpoint).map_err(|_| "Preview 更新地址格式无效")?;
+        .ok_or("更新签名公钥尚未配置")?;
+    let endpoint = url::Url::parse(endpoint).map_err(|_| "更新地址格式无效")?;
     if endpoint.scheme() != "https"
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || endpoint.fragment().is_some()
-        || !endpoint.path().contains("preview")
+        || (if stable { endpoint.as_str() != "https://github.com/Jovines/termdock/releases/download/stable-channel/latest.json" } else { !endpoint.path().contains("preview") })
     {
-        return Err("更新地址必须是独立 Preview HTTPS 渠道".into());
+        return Err("更新地址必须是构建固定的 HTTPS 渠道".into());
     }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(key)
-        .map_err(|_| "Preview 更新签名公钥格式无效")?;
-    let text = std::str::from_utf8(&decoded).map_err(|_| "Preview 更新签名公钥格式无效")?;
-    minisign_verify::PublicKey::decode(text).map_err(|_| "Preview 更新签名公钥格式无效")?;
+        .map_err(|_| "更新签名公钥格式无效")?;
+    let text = std::str::from_utf8(&decoded).map_err(|_| "更新签名公钥格式无效")?;
+    minisign_verify::PublicKey::decode(text).map_err(|_| "更新签名公钥格式无效")?;
     Ok((endpoint, key.to_owned()))
 }
 pub struct Updater {
@@ -92,9 +99,9 @@ impl Updater {
     pub async fn check<R: tauri::Runtime>(&self, app: &AppHandle<R>) -> Value {
         self.check_channel(
             app,
-            channel(
-                option_env!("TERMDOCK_PREVIEW_UPDATE_ENDPOINT"),
-                option_env!("TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY"),
+            stable_channel(
+                option_env!("TERMDOCK_STABLE_UPDATE_ENDPOINT"),
+                option_env!("TERMDOCK_STABLE_UPDATE_PUBLIC_KEY"),
             ),
         )
         .await
@@ -126,26 +133,19 @@ impl Updater {
             let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
                 return Ok(false);
             };
-            let filename = update
-                .download_url
-                .path()
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .to_lowercase();
             if update.download_url.scheme() != "https"
-                || !filename.contains("preview")
-                || !filename.ends_with(".app.tar.gz")
+                || update.download_url.host_str() != Some("github.com")
+                || update.download_url.path() != format!("/Jovines/termdock/releases/download/v{}/Termdock_{}_aarch64.app.tar.gz", update.version, update.version)
             {
                 return Err(
-                    "更新资产必须是签名的 Termdock Preview .app.tar.gz；拒绝稳定 Electron 包"
+                    "更新资产必须是正式发布的签名 Termdock .app.tar.gz"
                         .into(),
                 );
             }
             {
                 let mut state = self.state.lock().unwrap();
                 state["latestVersion"] = json!(update.version);
-                state["releaseName"] = json!(format!("Termdock Preview {}", update.version));
+                state["releaseName"] = json!(format!("Termdock {}", update.version));
             }
             self.publish(app, "downloading", None);
             let bytes = update
@@ -154,7 +154,7 @@ impl Updater {
                 .map_err(|e| e.to_string())?;
             // download verifies the minisign signature before these bytes become
             // installable; validate Preview bundle identity before making it ready.
-            crate::update_artifact::validate(&bytes, &update.version)?;
+            crate::update_artifact::validate_stable(&bytes, &update.version)?;
             *self.pending.lock().unwrap() = Some((update, bytes));
             Ok(true)
         }
@@ -171,10 +171,24 @@ impl Updater {
             return self.publish(
                 app,
                 "error",
-                Some("尚无已验证可安装的 Preview 更新，请先检查更新".into()),
+                Some("尚无已验证可安装的更新，请先检查更新".into()),
             );
         };
         self.publish(app, "installing", None);
+        if crate::product::is_preview() {
+            #[cfg(target_os = "macos")]
+            {
+                // Only the explicitly released final Preview may hand off to
+                // the pinned stable channel. It never overwrites itself with a
+                // differently named bundle through the normal Tauri installer.
+                return match crate::migration::install_stable(app, bytes, update.version.clone()).await {
+                    Ok(()) => self.snapshot(),
+                    Err(error) => self.publish(app, "error", Some(error)),
+                };
+            }
+            #[cfg(not(target_os = "macos"))]
+            return self.publish(app, "error", Some("Preview 转正式版仅支持 macOS".into()));
+        }
         match update.install(bytes) {
             Ok(()) => {
                 app.request_restart();
@@ -307,6 +321,14 @@ mod tests {
                 .plugin(tauri_plugin_updater::Builder::new().build())
                 .build(context)
                 .unwrap();
+        }
+    }
+    #[test]
+    fn stable_channel_is_exact_and_does_not_accept_service_selected_or_preview_endpoints() {
+        let key=public_test_key();
+        assert!(stable_channel(Some("https://github.com/Jovines/termdock/releases/download/stable-channel/latest.json"),Some(&key)).is_ok());
+        for endpoint in ["http://github.com/Jovines/termdock/releases/download/stable-channel/latest.json", "https://example.test/stable-channel/latest.json", "https://github.com/Jovines/termdock/releases/download/preview-channel/preview.json", "https://github.com/Jovines/termdock/releases/download/stable-channel/latest.json?other=1"] {
+            assert!(stable_channel(Some(endpoint),Some(&key)).is_err());
         }
     }
 }

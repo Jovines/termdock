@@ -30,6 +30,8 @@ let checkTimeout: ReturnType<typeof setTimeout> | null = null;
 let updateFeedPromise: Promise<string> | null = null;
 let selectedFeed: UpdateFeedResponse | null = null;
 let nativeCheckInFlight = false;
+let requiredMacOS: string | null = null;
+let minimumOSDialogShown = false;
 const stateListeners = new Set<UpdateStateListener>();
 let updateState: DesktopAppUpdateState = {
   status: 'idle',
@@ -204,12 +206,15 @@ function reportCurrentVersion(): DesktopAppUpdateState {
     error: null,
   });
   finishPendingCheck(state);
-  if (!nativeCheckDialogPending || !showMessageBox) return state;
+  if ((!nativeCheckDialogPending && (!requiredMacOS || minimumOSDialogShown)) || !showMessageBox) return state;
   nativeCheckDialogPending = false;
+  if (requiredMacOS) minimumOSDialogShown = true;
   void showMessageBox({
     type: 'info',
-    title: '桌面版已是最新版本',
-    message: `当前 Termdock Desktop ${app.getVersion()} 已是最新版本。`,
+    title: requiredMacOS ? '新版 Termdock 需要升级 macOS' : '桌面版已是最新版本',
+    message: requiredMacOS
+      ? `新版 Termdock 需要 macOS ${requiredMacOS} 或更新版本。当前客户端可以继续使用；升级系统后再检查更新。`
+      : `当前 Termdock Desktop ${app.getVersion()} 已是最新版本。`,
   });
   return state;
 }
@@ -281,6 +286,7 @@ export async function checkForDesktopUpdates(options: {
     void buildGitHubUpdateFeed(app.getVersion(), process.platform, process.arch).then((feed) => {
       if (!active) return undefined;
       if (feed.status === 204) {
+        requiredMacOS = feed.minimumSystemVersion ?? null;
         reportCurrentVersion();
         return undefined;
       }

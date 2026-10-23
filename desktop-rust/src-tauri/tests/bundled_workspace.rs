@@ -193,10 +193,8 @@ window.__TAURI_INTERNALS__={{invoke:async (_command,{{op,args}})=>{{
  throw new Error('OS callback outside this bundle test: '+op);
 }}}}; }}
 {}
-{}
 if(window===window.top && !sessionStorage.getItem('termdock-secure-test-first-load'))sessionStorage.setItem('termdock-secure-test-first-load',JSON.stringify({{worker:!!navigator.serviceWorker.controller}}));"#,
-        include_str!("../../renderer/bridge.js"),
-        include_str!("../../renderer/lifecycle.js")
+        include_str!("../../renderer/bridge.js")
     );
     fs::write(&init, script).unwrap();
     let session = format!("td-bundled-{}-{}-{}", std::process::id(), relay,native_react);

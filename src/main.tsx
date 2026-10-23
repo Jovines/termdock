@@ -1,4 +1,5 @@
 import './lib/federation/scopeBootstrap';
+import { AppFeedbackHost } from './lib/components/ui/AppFeedback';
 import { installCollaborationEnrollment } from './lib/collaboration/connectionEnrollment';
 import React, { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
@@ -56,7 +57,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           if (params.get('dag-playground') === '1') return <DagPlayground />;
           if (params.get('diff-review-lab') === '1') return <DiffReviewLab />;
           if (params.get('diff-lab') === '1') return <DiffLab />;
-          return <ServiceWorkspaceHost><SecureAccessGate><SessionNoticeBridge /><App /></SecureAccessGate></ServiceWorkspaceHost>;
+          return <ServiceWorkspaceHost><SecureAccessGate><SessionNoticeBridge /><App /><AppFeedbackHost /></SecureAccessGate></ServiceWorkspaceHost>;
         })()}
       </Suspense>
       </ErrorBoundary>

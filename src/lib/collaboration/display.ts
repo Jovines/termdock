@@ -12,10 +12,7 @@ export function collaborationServiceLabel(service: { serviceLabel?: string; serv
 /** Repeated Agent names need a stable distinction inside their group. */
 export function collaborationMemberLabel<T extends { sessionId: string; name: string; agent?: { displayName?: string } | null }>(session: T, members: T[]): string {
   const humanName = (member: T) => {
-    const name = member.name.trim();
-    return !name || /^(?:tmux:|remote:|wt-)/i.test(name) || name === member.sessionId
-      ? member.agent?.displayName?.trim() || '成员'
-      : name;
+    return getSessionPresentation(member).displayName;
   };
   const name = humanName(session);
   const peers = members.filter(member => humanName(member) === name);
@@ -27,3 +24,4 @@ export function collaborationRemoteConnection(session: { serviceConnected?: bool
   if (session.serviceConnected === false || ['offline', 'disconnected', 'service-unreachable', 'closed', 'exited'].includes(session.status ?? '')) return 'disconnected';
   return session.serviceConnected === true ? 'connected' : 'unknown';
 }
+import { getSessionPresentation } from '../terminal/display';

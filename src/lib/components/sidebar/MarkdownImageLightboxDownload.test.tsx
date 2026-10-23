@@ -17,23 +17,23 @@ const images = [
 ];
 
 it('keeps download in the toolbar and disables duplicate clicks until saving finishes', async () => {
-  let resolve!: () => void;
-  vi.mocked(downloadMarkdownImage).mockReturnValue(new Promise<void>((done) => { resolve = done; }));
+  let resolve!: (result: 'saved') => void;
+  vi.mocked(downloadMarkdownImage).mockReturnValue(new Promise<'saved'>((done) => { resolve = done; }));
   const onClose = vi.fn();
   render(<MarkdownImageLightbox images={images} index={0} onChange={() => {}} onClose={onClose} />);
   const button = screen.getByRole('button', { name: 'Download file' });
   expect(button.closest('[data-markdown-image-lightbox-stage]')).toBeNull();
   fireEvent.click(button);
   fireEvent.click(button);
-  expect(downloadMarkdownImage).toHaveBeenCalledExactlyOnceWith(images[0]);
+  expect(downloadMarkdownImage).toHaveBeenCalledExactlyOnceWith(images[0], expect.any(AbortSignal));
   expect(button.hasAttribute('disabled')).toBe(true);
   expect(onClose).not.toHaveBeenCalled();
-  await act(async () => resolve());
+  await act(async () => resolve('saved'));
   expect(button.hasAttribute('disabled')).toBe(false);
 });
 
 it('shows a retryable download error and downloads the selected image after navigation', async () => {
-  vi.mocked(downloadMarkdownImage).mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
+  vi.mocked(downloadMarkdownImage).mockRejectedValueOnce(new Error('offline')).mockResolvedValue('saved');
   const onClose = vi.fn();
   const view = render(<MarkdownImageLightbox images={images} index={0} onChange={() => {}} onClose={onClose} />);
   fireEvent.click(screen.getByRole('button', { name: 'Download file' }));
@@ -42,6 +42,6 @@ it('shows a retryable download error and downloads the selected image after navi
   await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
   view.rerender(<MarkdownImageLightbox images={images} index={1} onChange={() => {}} onClose={onClose} />);
   fireEvent.click(screen.getByRole('button', { name: 'Download file' }));
-  await waitFor(() => expect(downloadMarkdownImage).toHaveBeenLastCalledWith(images[1]));
+  await waitFor(() => expect(downloadMarkdownImage).toHaveBeenLastCalledWith(images[1], expect.any(AbortSignal)));
   expect(onClose).not.toHaveBeenCalled();
 });

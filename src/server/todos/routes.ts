@@ -1,10 +1,18 @@
 import { Router, type Request, type Response } from 'express';
 import { launchConfig, TodoError, TodoStore } from './store.js';
-import type { TodoLaunchConfig, TodoRun } from './types.js';
+import type { TodoHandoffInput, TodoLaunchConfig, TodoRun } from './types.js';
 
 export interface TodoRuntime {
   validate(config: TodoLaunchConfig, req?: Request): Promise<TodoLaunchConfig>;
   launch(run: TodoRun, prompt: string, onSession: (id: string) => void, req?: Request): Promise<void>;
+  target?(id: string, req?: Request): Promise<{ config: TodoLaunchConfig; name: string }>;
+  deliver?(run: TodoRun, prompt: string, req?: Request): Promise<void>;
+}
+export function handoffPrompt(store: TodoStore, run: TodoRun): string {
+  return [run.handoff!.todoIds.length === 1 ? '请处理这条待办：' : '请一起处理这些待办：',
+    ...run.handoff!.todoIds.map((id, index) => { const todo = store.get(id); return `${index + 1}. ${todo.title}\n${todo.description}\n来源：${todo.source}${todo.sourceUrl ? `\n参考来源：${todo.sourceUrl}` : ''}`; }),
+    run.handoff!.note ? `我的补充要求：\n${run.handoff!.note}` : '',
+  ].filter(Boolean).join('\n\n');
 }
 function shellQuote(value: string): string { return "'" + value.replace(/'/g, "'\"'\"'") + "'"; }
 export function todoPrompt(store: TodoStore, run: TodoRun): string {
@@ -24,6 +32,28 @@ export class TodoRunner {
       .then(() => this.store.mark(run.id, { status: 'delivered' }))
       .catch(error => { this.store.mark(run.id, { status: 'failed', error: error instanceof Error ? error.message : String(error) }); });
     return run;
+  }
+  async handoff(body: TodoHandoffInput, req?: Request): Promise<TodoRun> {
+    if (!body || !Array.isArray(body.todoIds) || !body.todoIds.length || body.todoIds.length > 50 || body.todoIds.some(id => typeof id !== 'string')
+      || typeof body.note !== 'string' || body.note.length > 4000 || body.note.includes('\0') || typeof body.idempotencyKey !== 'string'
+      || (body.sessionId !== undefined && (typeof body.sessionId !== 'string' || !body.sessionId || body.sessionId.length > 200))
+      || (body.sessionId && body.config)) throw new TodoError('请选择待办和目标会话，补充要求最多 4000 字');
+    const input: TodoHandoffInput = { todoIds: [...new Set(body.todoIds)], note: body.note.trim(), idempotencyKey: body.idempotencyKey,
+      ...(body.sessionId ? { sessionId: body.sessionId } : { config: launchConfig(body.config ?? {}, this.store.snapshot().defaults) }) };
+    const previous = this.store.previousHandoff(input); if (previous) return previous;
+    if (input.todoIds.some(id => this.store.get(id).status !== 'open')) throw new TodoError('请先重新打开这条待办', 409);
+    const target = input.sessionId ? await this.runtime.target?.(input.sessionId, req) : undefined;
+    if (input.sessionId && (!target || !this.runtime.deliver)) throw new TodoError('目标会话不可用，请重新选择', 409);
+    const config = target?.config ?? await this.runtime.validate(input.config!, req);
+    // Target validation can await; recheck the durable request before reserving any side effect.
+    const concurrent = this.store.previousHandoff(input); if (concurrent) return concurrent;
+    const run = this.store.beginHandoff(input, config, target?.name ?? `待办 · ${this.store.get(input.todoIds[0]).title}`.slice(0, 120));
+    const prompt = handoffPrompt(this.store, run);
+    void (input.sessionId ? this.runtime.deliver!(run, prompt, req)
+      : this.runtime.launch(run, prompt, sessionId => this.store.mark(run.id, { sessionId }), req))
+      .then(() => this.store.mark(run.id, { status: 'delivered' }))
+      .catch(error => this.store.mark(run.id, { status: 'failed', error: error instanceof Error ? error.message : String(error) }));
+    return this.store.run(run.id);
   }
   async tick(): Promise<void> {
     for (const collector of this.store.due()) {
@@ -47,6 +77,7 @@ export function todoRoutes(store: TodoStore, runner: TodoRunner, runtime: TodoRu
   router.get('/', route((_req, res) => res.json(store.snapshot())));
   router.post('/', route((req, res) => res.json({ todo: store.create(req.body ?? {}) })));
   router.post('/defaults', route(async (req, res) => res.json({ defaults: store.defaults(await runtime.validate(launchConfig(req.body ?? {}), req)) })));
+  router.post('/handoff', route(async (req, res) => res.json({ run: await runner.handoff(req.body, req) })));
   router.post('/collectors', route(async (req, res) => {
     const input = req.body ?? {};
     const config = await runtime.validate(launchConfig(input.config ?? {}), req);

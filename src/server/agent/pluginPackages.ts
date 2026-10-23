@@ -22,17 +22,31 @@ const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
 const MAX_SINGLE_FILE_BYTES = 8 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 45_000;
 const IGNORED_NAMES = new Set(['.git', '.github', 'node_modules', SOURCE_METADATA_FILE]);
-const DEFAULT_GIT_HOSTS = new Set(['github.com', 'gitlab.com', 'codeberg.org', 'bitbucket.org']);
-
 function hardenedGitEnv(): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     GIT_TERMINAL_PROMPT: '0',
-    GIT_CONFIG_COUNT: '0',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_LFS_SKIP_SMUDGE: '1',
   };
+  // Keep the service user's credential helpers, SSH agent/config, CA and
+  // proxy settings. Only repository-local context inherited from a caller
+  // must not redirect these operations into another working tree.
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete env[key];
+  if (!env.GIT_SSH_COMMAND && !env.GIT_SSH) env.GIT_SSH_COMMAND = 'ssh -o BatchMode=yes';
+  return env;
 }
+
+const GIT_OPTIONS = [
+  '-c', `core.hooksPath=${os.devNull}`,
+  '-c', 'protocol.allow=never',
+  '-c', 'protocol.http.allow=always',
+  '-c', 'protocol.https.allow=always',
+  '-c', 'protocol.ssh.allow=always',
+  '-c', 'filter.lfs.smudge=',
+  '-c', 'filter.lfs.process=',
+  '-c', 'filter.lfs.required=false',
+];
 
 export interface PreparedPluginPackage {
   manifest: AgentPluginManifest;
@@ -49,24 +63,33 @@ export interface PluginUpdateCheck {
   checkedAt: number;
 }
 
-function allowedGitHosts(): Set<string> {
+function gitHostAllowed(host: string): boolean {
   const configured = (process.env.TERMDOCK_PLUGIN_GIT_HOSTS ?? '')
     .split(',')
     .map((host) => host.trim().toLowerCase())
     .filter(Boolean);
-  return new Set([...DEFAULT_GIT_HOSTS, ...configured]);
+  // An explicit administrative allowlist is optional. Self-hosted and
+  // private-network hosts work without having to edit service environment.
+  return configured.length === 0 || configured.includes(host.toLowerCase());
 }
 
 export function normalizeGitPluginSource(input: string): string | null {
+  const source = input.trim();
+  if (!source || source.startsWith('-') || /[\x00-\x20\x7f]/.test(source) || /^[A-Za-z]:[\\/]/.test(source)) return null;
+  if (!source.includes('://')) {
+    const scp = /^(?:[A-Za-z0-9_.-]+@)?(\[[0-9a-fA-F:]+\]|[A-Za-z0-9][A-Za-z0-9._-]*):([^?#\\]+)$/.exec(source);
+    if (!scp || scp[2].startsWith('-') || !gitHostAllowed(scp[1])) return null;
+    return source;
+  }
   let url: URL;
   try {
-    url = new URL(input.trim());
+    url = new URL(source);
   } catch {
     return null;
   }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
-  if (!allowedGitHosts().has(url.hostname.toLowerCase())) return null;
-  if (!/^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?\/?$/.test(url.pathname)) return null;
+  if (!['https:', 'http:', 'ssh:'].includes(url.protocol) || url.password || url.search || url.hash) return null;
+  if (!url.hostname || url.hostname.startsWith('-') || !gitHostAllowed(url.hostname)) return null;
+  if (url.pathname === '/' || /%0[0-9a-f]|%1[0-9a-f]|%7f/i.test(url.pathname)) return null;
   url.pathname = url.pathname.replace(/\/$/, '');
   return url.toString();
 }
@@ -180,10 +203,7 @@ export async function preparePluginPackage(sourceInput: string, expectedSlug?: s
     if (remote) {
       packageDir = path.join(temporaryRoot, 'repo');
       await execFileAsync('git', [
-        '-c', 'credential.helper=',
-        '-c', 'core.hooksPath=/dev/null',
-        '-c', 'filter.lfs.smudge=',
-        '-c', 'filter.lfs.required=false',
+        ...GIT_OPTIONS,
         'clone', '--depth', '1', '--single-branch', '--no-recurse-submodules', '--', remote, packageDir,
       ], {
         timeout: GIT_TIMEOUT_MS,
@@ -193,14 +213,18 @@ export async function preparePluginPackage(sourceInput: string, expectedSlug?: s
       const result = await execFileAsync('git', ['-C', packageDir, 'rev-parse', 'HEAD'], {
         timeout: 5000,
         maxBuffer: 128 * 1024,
+        env: hardenedGitEnv(),
       });
       revision = result.stdout.trim();
       type = 'git';
       normalizedSource = remote;
     } else {
-      const resolved = path.resolve(source);
+      if (source.includes('://') || /^(?:[^/]+@[^/]+:|[^/]+::)/.test(source)) {
+        throw new Error('Unsupported Git source: use an HTTPS, HTTP or SSH repository URL, an scp-style Git address, or a local package directory');
+      }
+      const resolved = path.resolve(source === '~' ? os.homedir() : source.startsWith('~/') ? path.join(os.homedir(), source.slice(2)) : source);
       const stat = await fs.promises.stat(resolved).catch(() => null);
-      if (!stat) throw new Error('Plugin source must be an existing local path or an allowed HTTPS Git repository');
+      if (!stat) throw new Error('Plugin source must be an existing local path or an accessible HTTPS, HTTP or SSH Git repository');
       packageDir = stat.isDirectory() ? resolved : path.dirname(resolved);
       if (!stat.isDirectory() && path.basename(resolved) !== MANIFEST_FILE) {
         throw new Error('A local plugin file must be named manifest.json');
@@ -245,7 +269,10 @@ export async function preparePluginPackage(sourceInput: string, expectedSlug?: s
 export async function commitPreparedPlugin(prepared: PreparedPluginPackage, replace = false): Promise<string> {
   await fs.promises.mkdir(PLUGINS_DIR, { recursive: true });
   const target = path.join(PLUGINS_DIR, prepared.manifest.slug);
-  if (!replace && fs.existsSync(target)) throw new Error(`Plugin "${prepared.manifest.slug}" already exists`);
+  if (!replace && fs.existsSync(target)) {
+    await prepared.cleanup();
+    throw new Error(`Plugin "${prepared.manifest.slug}" already exists`);
+  }
   const stage = path.join(PLUGINS_DIR, `.stage-${prepared.manifest.slug}-${randomUUID()}`);
   const backup = path.join(PLUGINS_DIR, `.backup-${prepared.manifest.slug}-${randomUUID()}`);
   try {
@@ -276,11 +303,10 @@ export async function checkPluginPackageUpdate(plugin: LoadedPlugin): Promise<Pl
   let latestRevision: string;
   if (metadata.type === 'git') {
     const remote = normalizeGitPluginSource(metadata.source);
-    if (!remote) throw new Error('The stored Git source is no longer allowed');
+    if (!remote) throw new Error('The stored Git source is invalid or excluded by TERMDOCK_PLUGIN_GIT_HOSTS');
     const { stdout } = await execFileAsync('git', [
-      '-c', 'credential.helper=',
-      '-c', 'core.hooksPath=/dev/null',
-      'ls-remote', remote, 'HEAD',
+      ...GIT_OPTIONS,
+      'ls-remote', '--', remote, 'HEAD',
     ], {
       timeout: 15_000,
       maxBuffer: 128 * 1024,

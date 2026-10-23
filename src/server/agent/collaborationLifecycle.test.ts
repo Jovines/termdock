@@ -36,7 +36,7 @@ it('retries a partially provisioned team without duplicating the first member',a
  await expect(ensureTeam(options)).rejects.toThrow('startup failed');expect(members).toHaveLength(1);
  const team=await ensureTeam(options);expect(team).toEqual({coordinatorSessionId:'member-0',reviewerSessionIds:['member-1']});
  expect(await ensureTeam(options)).toEqual(team);expect(calls).toBe(3);
- await expect(ensureTeam({...options,cwd:'/another'})).rejects.toThrow('原 Agent 和目录');expect(calls).toBe(3);
+ await expect(ensureTeam({...options,cwd:'/another'})).rejects.toThrow('原 Agent、启动方案和目录');expect(calls).toBe(3);
 });
 it('reuses existing agents, but does not assign one session to both roles',async()=>{
  const ids=await ensureTeam({members:()=>[{id:'lead',cwd:'/project',agentSlug:'codex'},{id:'worker',cwd:'/project',agentSlug:'codex'}],cwd:'/project',agentSlug:'codex',spawn:async()=>{throw Error('unexpected launch')}});

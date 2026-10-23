@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { Maximize as RiMaximize, Minimize as RiMinimize, Pause as RiPause, Play as RiPlay, RotateCw as RiRotateCw, Volume2 as RiVolume2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -202,9 +203,13 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
     seekTo(latestScrubRef.current);
   }, [seekTo]);
 
+  const trackScrub = useDragLifetime(() => { if (scrubbingRef.current) endScrub(); });
+
   const startScrub = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const video = videoRef.current;
     if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    if (event.button !== 0) return;
+    trackScrub(event);
     wasPlayingRef.current = !video.paused;
     video.pause();
     scrubbingRef.current = true;
@@ -215,7 +220,7 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
       // jsdom / 老环境没有 pointer capture 也不影响拖动。
     }
     handleScrubMove(event.clientX);
-  }, [handleScrubMove]);
+  }, [handleScrubMove, trackScrub]);
 
   const endScrub = useCallback(() => {
     scrubbingRef.current = false;
@@ -483,7 +488,7 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
             data-testid="file-preview-video-track"
             onPointerDown={startScrub}
             onPointerMove={(event) => {
-              if (dragging) handleScrubMove(event.clientX);
+              if (scrubbingRef.current) handleScrubMove(event.clientX);
             }}
             onPointerUp={endScrub}
             onPointerCancel={endScrub}

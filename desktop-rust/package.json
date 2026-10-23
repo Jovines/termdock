@@ -1,7 +1,7 @@
 {
-  "name": "termdock-preview-shell",
+  "name": "termdock-desktop",
   "private": true,
-  "version": "0.1.13",
+  "version": "1.4.358",
   "type": "module",
   "scripts": {
     "dev": "npm run prepare:workspace && npm run prepare:renderer && tauri dev",
@@ -12,10 +12,12 @@
     "verify": "npm run test && npm run check",
     "prepare:renderer": "node scripts/prepare-renderer.mjs",
     "prepare:workspace": "npm --prefix .. run build:client && node scripts/prepare-workspace.mjs",
-    "package:preview": "node scripts/preview-release.mjs"
+    "package:preview": "node scripts/preview-release.mjs",
+    "package:stable": "node scripts/stable-release.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.6",
     "fake-indexeddb": "^6.2.5"
-  }
+  },
+  "previewVersion": "0.1.14"
 }

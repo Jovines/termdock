@@ -309,3 +309,12 @@ it('persists independent group dock and floating preferences on the same client'
   expect(groups.beta.position).toEqual({ x: 0.2, y: 0.6 });
   expect(groups.beta.dock).toBeUndefined();
 });
+
+it('preserves a bracketed IPv6 Android selection and its physical identity across saving and reloading', () => {
+  const file = tempSettingsPath();
+  const settings = loadSettingsFile(file);
+  settings.androidPanel.deviceSerial = '[fd00::2]:5555';
+  settings.androidPanel.devicePhysicalId = 'a'.repeat(64);
+  saveSettingsFile(settings, file);
+  expect(loadSettingsFile(file).androidPanel).toMatchObject({ deviceSerial: '[fd00::2]:5555', devicePhysicalId: 'a'.repeat(64) });
+});

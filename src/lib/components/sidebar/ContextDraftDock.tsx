@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type MouseEvent } from 'react';
 import {
   Check,
@@ -295,10 +296,16 @@ export function ContextDraftDock({
   };
 
   // 顶部手柄拖动调高：向上拖增大。双击恢复默认高度。
+  const trackResizeLifetime = useDragLifetime(() => {
+    if (!dragStateRef.current) return;
+    dragStateRef.current = null;
+  });
+
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     const el = textareaRef.current;
     if (!el) return;
+    trackResizeLifetime(event);
     dragStateRef.current = { startY: event.clientY, startHeight: el.getBoundingClientRect().height };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   };

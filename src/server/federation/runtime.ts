@@ -1,3 +1,4 @@
+import { androidRouteAccess } from '../shared/androidDevices.js';
 import { SessionSharingPresence } from './sessionSharing.js';
 import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
 import { mergeShareResources } from '../shared/shareResources.js';
@@ -18,6 +19,7 @@ import type { WebTransportDescriptor } from './webTransportProtocol.js';
 import { InvitationStore, validateInvitation, type InvitationInput } from './invitations.js';
 import { AuthorizationStore, type GrantInput } from './authorization.js';
 import { resolveAccessRequest, isBusinessApiPath, terminalMessageAction } from './accessPolicy.js';
+import { httpUploadLimit } from './httpUploadLimit.js';
 import { AsyncQueue, PacketChannel, toBase64, fromBase64, type Packet } from './packets.js';
 import { socketDuplex } from './socketDuplex.js';
 import { markEncryptedRequest } from './requestContext.js';
@@ -167,7 +169,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
       return stable !== undefined && store.authorize({ subjectId, serviceId, action, sessionId: stable }).allowed;
     };
     const resources = (subjectId: string) => mergeShareResources(store.listEffective({ subjectId, serviceId }).map(g => g.resources));
-    const androidAllowed = (subjectId: string, serial: string, control = false) => full(subjectId) || resources(subjectId).android?.some(d => d.serial === serial && (!control || d.access === 'control')) === true;
+    const androidAllowed = (subjectId: string, serial: string, control = false) => full(subjectId) || (control ? androidRouteAccess(resources(subjectId).android, serial) === 'control' : !!androidRouteAccess(resources(subjectId).android, serial));
     const computerAllowed = (subjectId: string, target: { host: string; protocol: string; port: number }) => full(subjectId) || !!computerResource(resources(subjectId), target.host, target.protocol, target.port);
     const full = (subjectId: string) => open() || store.hasFullServiceAccess({ subjectId, serviceId });
     let channel: PacketChannel | undefined;
@@ -451,7 +453,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
               || !(operation.head.binaryChunks === true && packet.bytes instanceof Uint8Array) && typeof packet.data !== 'string') throw new Error('INVALID_UPLOAD');
             httpAllowed(operation.head);
             const bytes = operation.head.binaryChunks === true && packet.bytes instanceof Uint8Array ? packet.bytes : fromBase64(packet.data as string); operation.size += bytes.length;
-            const limit = new URL(String(operation.head.path), 'http://inner').pathname === '/api/terminal/fs/upload' ? 110 * 1024 * 1024 : 5 * 1024 * 1024;
+            const limit = httpUploadLimit(new URL(String(operation.head.path), 'http://inner').pathname);
             if (['GET', 'HEAD'].includes(String(operation.head.method)) || bytes.length > TRANSFER_CHUNK_BYTES || operation.size > limit) { cancelHttp(operation); operations.delete(packet.id); throw new Error('UPLOAD_LIMIT'); }
             operation.updatedAt = Date.now();
             try { operation.body.push(bytes); } catch { cancelHttp(operation); operations.delete(packet.id); throw new Error('UPLOAD_QUEUE_LIMIT'); }

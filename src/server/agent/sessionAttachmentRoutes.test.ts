@@ -48,6 +48,17 @@ it.each([false, true])('uploads Session attachments without directory grants, en
   const response = await upload(); expect(response.status).toBe(200); const { files } = await response.json();
   expect(files).toHaveLength(1); expect(files[0].path.startsWith(join(directory, 'attachments') + '/')).toBe(true); expect(readFileSync(files[0].path, 'utf8')).toBe('private-chat-attachment');
   const second = await upload(); expect((await second.json()).files[0].path).not.toBe(files[0].path);
+  // Session attachments must get the file-upload budget on both direct and
+  // relay channels, rather than the 5 MiB ordinary request limit.
+  const large = new Uint8Array(6 * 1024 * 1024);
+  large.set(new TextEncoder().encode('private-large-chat-attachment'));
+  const largeBody = new FormData(); largeBody.append('files', new Blob([large]), 'large-attachment.bin');
+  const largeResponse = await client.fetch('/api/terminal/one/chat/attachments?fileCount=1', { method: 'POST', body: largeBody });
+  expect(largeResponse.status).toBe(200);
+  const largeFile = (await largeResponse.json()).files[0];
+  expect(readFileSync(largeFile.path).byteLength).toBe(large.byteLength);
+  expect(wire.every(chunk => !chunk.includes('private-large-chat-attachment') && !chunk.includes('large-attachment.bin'))).toBe(true);
+
   await expect(upload('one', '&dir=/tmp')).rejects.toThrow('400');
   await expect(upload('other')).rejects.toThrow();
   await expect(client.fetch('/api/terminal/fs/list?path=/tmp')).rejects.toThrow();

@@ -34,7 +34,7 @@ const electronMock = vi.hoisted(() => {
 
 const feedMock = vi.hoisted(() => ({
   buildGitHubUpdateFeed: vi.fn(async (): Promise<
-    { status: 200; body: string } | { status: 204 }
+    { status: 200; body: string } | { status: 204; minimumSystemVersion?: string }
   > => ({
     status: 200 as const,
     body: JSON.stringify({
@@ -68,6 +68,19 @@ afterEach(() => {
 });
 
 describe('desktop updater', () => {
+  it('explains the macOS requirement once automatically and again on manual request without installing', async () => {
+    const updater=await import('./updater.js');
+    const dialog=vi.fn(async(_options:{message?:string})=>({response:0,checkboxChecked:false}));
+    updater.configureDesktopUpdater(dialog);
+    feedMock.buildGitHubUpdateFeed.mockResolvedValueOnce({status:204,minimumSystemVersion:'14'});
+    await updater.checkForDesktopUpdates();
+    expect(dialog.mock.calls[0]?.[0]).toMatchObject({message:expect.stringContaining('macOS 14')});
+    expect(electronMock.autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+    feedMock.buildGitHubUpdateFeed.mockResolvedValueOnce({status:204,minimumSystemVersion:'14'});
+    await updater.checkForDesktopUpdates();expect(dialog).toHaveBeenCalledTimes(1);
+    feedMock.buildGitHubUpdateFeed.mockResolvedValueOnce({status:204,minimumSystemVersion:'14'});
+    await updater.checkForDesktopUpdates({presentNativeDialogs:true});expect(dialog).toHaveBeenCalledTimes(2);
+  });
   it('checks the desktop release feed', async () => {
     const updater = await import('./updater.js');
     updater.configureDesktopUpdater(vi.fn(async () => ({ response: 0, checkboxChecked: false })));

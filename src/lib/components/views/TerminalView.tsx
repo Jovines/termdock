@@ -374,6 +374,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const cursorPositionCandidateTimerRef = React.useRef<number | null>(null);
   const cursorPositionFallbackTimerRef = React.useRef<number | null>(null);
   const isActiveRef = React.useRef(isActive);
+  const isLayoutVisibleRef = React.useRef(isLayoutVisible);
+  isLayoutVisibleRef.current = isLayoutVisible;
   // Interaction capture in MultiTerminalView can synchronously promote a split
   // pane while the original wheel event is still propagating into xterm. Keep
   // this gate current during render so that same event is accepted immediately.
@@ -657,7 +659,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         activeElement instanceof HTMLSelectElement ||
         activeElement?.isContentEditable === true;
 
-      if (isEditableElement && !isTerminalInput) {
+      if ((isEditableElement && !isTerminalInput) || activeElement?.closest('[data-file-browser-keyboard]')) {
         debugKeyboard('desktop resume focus skipped: editable active', { reason });
         return;
       }
@@ -722,6 +724,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       desktopInteractionFocusTimerRef.current = window.setTimeout(() => {
         desktopInteractionFocusTimerRef.current = null;
         const activeElement = document.activeElement as HTMLElement | null;
+        // File rows and previews use arrow keys; pointer-up must not hand
+        // their keyboard ownership back to the terminal.
+        if (activeElement?.closest('[data-file-browser-keyboard]')) return;
         const isTerminalInput = activeElement?.getAttribute('data-terminal-input-anchor') === 'true';
         const activeElementIsEditable = !isTerminalInput && Boolean(activeElement && (
           activeElement instanceof HTMLInputElement ||
@@ -1611,7 +1616,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         },
         {
           ...STREAM_OPTIONS,
-          getDimensions: () => terminalControllerRef.current?.getDimensions() ?? null,
+          // Only visible grids may take the initial tmux size. Retained
+          // offscreen sessions still reconnect without competing with them.
+          getDimensions: () => isLayoutVisibleRef.current && !document.hidden && isWorkspaceActive()
+            ? terminalControllerRef.current?.getDimensions() ?? null
+            : null,
         }
       );
 

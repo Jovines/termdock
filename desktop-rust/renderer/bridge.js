@@ -53,6 +53,7 @@
     const detail = typeof reason === 'string' ? reason : reason?.message || String(reason);
     console.error('[Termdock Preview] openConnection rejected:', detail);
     if (/cannot discover service/i.test(detail)) return {code:'PREVIEW_DISCOVERY_FAILED',message:'暂时无法连接服务。请检查地址、网络或证书指纹后重试。'};
+    if (/pinned (?:target|service) identity/i.test(detail)) return {code:'PREVIEW_IDENTITY_REJECTED',message:'无法验证服务证书或身份。请核对服务地址和已保存的证书指纹。'};
     if (/certificate|\bcert\b|\btls\b|unknownissuer|pinned target identity|fingerprint/i.test(detail)) return {code:'PREVIEW_CERTIFICATE_REJECTED',message:'无法验证服务证书或身份。请核对服务地址和已保存的证书指纹。'};
     if (/\b401\b|\b403\b|unauthori[sz]ed|forbidden|authorization denied|password required|invitation (?:does not match|identity does not match|invalid)/i.test(detail)) return {code:'PREVIEW_AUTHORIZATION_REJECTED',message:'服务拒绝或无法验证此次授权。请检查邀请、服务权限或密码。'};
     return {code:'PREVIEW_OPEN_FAILED',message:'暂时无法打开服务，请检查地址和网络后重试。'};
@@ -396,6 +397,8 @@
     reloadWorkspace: ({force=false}={}) => reloadWorkspace(force),
     snapshot: () => invoke('snapshot'),
     ...(boot.local ? {
+      takeServiceConnectionReview: () => invoke('takeConnectionReview'),
+      onServiceConnectionReview: callback => subscribe('termdock:preview-connection-review', callback),
       certificatePins: () => invoke('certificatePins'),
       inspectCertificate: origin => invoke('inspectCertificate', {origin}),
       trustCertificate: async (origin, fingerprint, receipt) => {
@@ -410,7 +413,9 @@
       },
       discardCertificateInspection: receipt => invoke('discardCertificateInspection', {receipt}),
       revokeCertificate: origin => invoke('revokeCertificate', {origin}),
-    } : {}),
+    } : {
+      reviewServiceConnection: (connection, invitation) => invoke('reviewConnection', {connection, invitation}),
+    }),
     prepareLocalService: (install = false) => invoke('prepareLocal', {install}),
     downloadNode: () => invoke('downloadNode'),
     probe: url => invoke('probe', {url}),

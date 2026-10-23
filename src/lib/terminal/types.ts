@@ -34,12 +34,9 @@ export interface AgentResumeInfo {
   launchArgv: string[] | null;
   updatedAt: number;
 }
-export type TuiProgressState = 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
+export type TuiProgressState = import('../../server/shared/programStatus').TerminalProgressReport['state'];
 
-export interface TuiProgressReport {
-  state: TuiProgressState;
-  progress: number | null;
-}
+export type TuiProgressReport = import('../../server/shared/programStatus').TerminalProgressReport;
 
 /** Server-probed git snapshot for the pane's cwd (branch +N −M vs HEAD). */
 export interface GitStatusReport {
@@ -101,6 +98,9 @@ export interface SessionInventoryClientSession {
   frontendSessionId: string;
   sessionId: string;
   name: string;
+  /** Shared UI projection; `name` is the stored identity used for persistence. */
+  displayName?: string;
+  displaySubtitle?: string | null;
   customName: boolean;
   backendSessionId: string | null;
   mode: TerminalMode;
@@ -379,7 +379,8 @@ export interface TerminalChunk {
 
 // Connect Stream Options
 export interface ConnectStreamOptions {
-  /** Read the fitted grid before each socket opens, including the first one. */
+  /** Read measured geometry before every socket. null declines size ownership;
+   * only callers without a provider use the legacy reconnect-size cache. */
   getDimensions?: () => { cols: number; rows: number } | null;
   maxRetries?: number;
   initialRetryDelay?: number;

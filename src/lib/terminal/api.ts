@@ -626,7 +626,9 @@ function getWebSocketUrl(sessionId: string, sinceSeq: number, epoch?: string, vi
   });
   if (sinceSeq > 0) params.set('since', String(sinceSeq));
   if (epoch) params.set('epoch', epoch);
-  const dimensions = viewportDimensions ?? reconnectDimensions.get(sessionId);
+  // null explicitly opts out of size ownership (hidden/unmeasured viewer).
+  // Only older callers with no geometry provider use the reconnect cache.
+  const dimensions = viewportDimensions === undefined ? reconnectDimensions.get(sessionId) : viewportDimensions;
   if (dimensions) {
     params.set('cols', String(dimensions.cols));
     params.set('rows', String(dimensions.rows));
@@ -1859,6 +1861,7 @@ export interface AndroidPanelSettingsState {
   presets: AndroidSavedPresetState[];
   docked: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
   deviceSerial: string | null;
+  devicePhysicalId?: string | null;
 }
 
 export interface SettingsState {
@@ -2081,7 +2084,7 @@ export interface AgentHookInfo {
   slug: string;
   displayName: string;
   targetDisplay: string;
-  state: 'not-installed' | 'installed' | 'outdated' | 'needs-approval';
+  state: 'not-installed' | 'installed' | 'outdated' | 'needs-approval' | 'unverified';
   accentColor: string | null;
   icon: string | null;
   iconMode: string | null;

@@ -16,13 +16,13 @@ export const todoSecondary = `${todoButton} bg-surface-2 text-foreground hover:b
 export const todoGhost = `${todoButton} text-muted-foreground hover:bg-surface-2 hover:text-foreground`;
 const input = 'w-full min-h-11 min-w-0 rounded-lg border border-border/40 bg-surface-2 px-3 py-2.5 text-base text-foreground outline-none focus:border-primary sm:text-sm';
 const label = 'block space-y-2 text-sm text-muted-foreground';
-export function TodoDialog({ title, busy, error, onClose, children }: { title: string; busy: boolean; error: string; onClose: () => void; children: ReactNode }) {
+export function TodoDialog({ title, busy, error, onClose, children, compact = false }: { title: string; busy: boolean; error: string; onClose: () => void; children: ReactNode; compact?: boolean }) {
   const ref = useRef<HTMLElement>(null), titleId = useId();
   useKeyboardLayer(ref, true, () => { if (!busy) onClose(); });
   return createPortal(<>
     <button className="fixed inset-0 z-drawer-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" aria-label="关闭待办面板" disabled={busy} onClick={onClose} />
     <section ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-busy={busy} tabIndex={-1}
-      className="fixed inset-y-0 right-0 z-drawer-panel flex w-full min-w-0 flex-col border-l border-border/30 bg-surface pt-[env(safe-area-inset-top,0px)] text-foreground shadow-xl sm:w-[32rem] sm:max-w-[90vw]">
+      className={compact ? 'fixed bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-3 right-3 z-drawer-panel flex max-h-[calc(100svh-2rem)] min-w-0 flex-col overflow-hidden rounded-2xl border border-border/30 bg-surface text-foreground shadow-xl sm:bottom-auto sm:left-1/2 sm:right-auto sm:top-1/2 sm:w-[28rem] sm:max-w-[90vw] sm:-translate-x-1/2 sm:-translate-y-1/2' : 'fixed inset-y-0 right-0 z-drawer-panel flex w-full min-w-0 flex-col border-l border-border/30 bg-surface pt-[env(safe-area-inset-top,0px)] text-foreground shadow-xl sm:w-[32rem] sm:max-w-[90vw]'}>
       <header className="flex min-h-16 shrink-0 items-center gap-3 border-b border-border/20 px-5"><h2 id={titleId} className="flex-1 text-base font-semibold">{title}</h2><button type="button" className={todoGhost} aria-label="关闭" disabled={busy} onClick={onClose}><X size={18} /></button></header>
       {error && <p role="alert" className="shrink-0 border-b border-[color-mix(in_srgb,var(--destructive)_20%,transparent)] bg-[color-mix(in_srgb,var(--destructive)_10%,transparent)] px-5 py-3 text-sm leading-6 text-destructive">{error}</p>}
       <div className="flex min-h-0 flex-1 flex-col">{children}</div>
@@ -37,9 +37,9 @@ export function TodoEditor({ workspace, todo, busy, onSave, onCancel }: { worksp
   return <form className="flex min-h-0 flex-1 flex-col" onSubmit={e => { e.preventDefault(); submit(!todo); }}>
     <FormBody><label className={label}>要做什么<input autoFocus required maxLength={200} className={input} value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })} placeholder="一句话描述这件事" /></label>
       <label className={label}>背景和处理要求<textarea className={`${input} min-h-44 resize-y`} maxLength={40000} value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} placeholder="为什么要做、参考资料、希望得到什么结果…" /></label>
-      {!todo && <p className="text-xs leading-6 text-muted-foreground">可以先存进清单，也可以保存后立即交给 Agent。</p>}
+      {!todo && <p className="text-xs leading-6 text-muted-foreground">可以先存进清单，也可以选一个会话交出去。</p>}
     </FormBody>
-    <FormFooter><button type="button" className={todoGhost} disabled={busy} onClick={onCancel}>取消</button>{!todo && <button type="button" className={todoSecondary} disabled={busy || !draft.title.trim()} onClick={() => submit(false)}>仅保存</button>}<button className={todoPrimary} disabled={busy || !draft.title.trim()}>{busy ? '正在保存…' : todo ? '保存修改' : '保存并处理'}</button></FormFooter>
+<FormFooter><button type="button" className={todoGhost} disabled={busy} onClick={onCancel}>取消</button>{!todo && <button type="button" className={todoSecondary} disabled={busy || !draft.title.trim()} onClick={() => submit(false)}>仅保存</button>}<button className={todoPrimary} disabled={busy || !draft.title.trim()}>{busy ? '正在保存…' : todo ? '保存修改' : '保存并交给会话'}</button></FormFooter>
   </form>;
 }
 export function resolveTodoConfig(config: TodoLaunchConfig, agents: AgentLauncherInfo[], preferred?: string | null, cwd?: string): TodoLaunchConfig {

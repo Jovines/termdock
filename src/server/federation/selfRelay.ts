@@ -4,7 +4,8 @@ import { resolve } from 'node:path';
 import type { DirectTargetConfig } from './directRoutes.js';
 import { desktopDirectTargets } from './desktopTargets.js';
 import { RelayClient } from './relay.js';
-import { readPinnedCertificateAuthority } from './trustedCa.js';
+import { openServiceSocket } from './serviceTransport.js';
+import { serviceEndpoint, normalizeServiceAddress } from './connectionModel.js';
 import type { Identity } from './secureProtocol.js';
 import { connectCollaborationRpc } from '../agent/collaborationPeerTransport.js';
 
@@ -12,12 +13,14 @@ interface SelfRelayTarget {
   serviceId: string;
   url: string;
   caFingerprint256?: string;
+  certificateFingerprint256?: string;
   caPath?: string;
 }
 
 interface SelfRelayState {
   signature: string;
   stopped: boolean;
+  lifetime: AbortController;
   upstream?: WebSocket;
   client?: RelayClient;
   wake?: () => void;
@@ -30,53 +33,14 @@ export interface DesktopSelfRelayOptions {
   baseDir?: string;
   identity: Identity;
   serviceId: string;
-  localOrigin: string;
+  localOrigin: string | (() => string);
   localCa?: Buffer;
 }
 
 function relayEndpoint(origin: string, selfRelayToken: string): string {
-  const url = new URL('/api/federation/relay', origin);
-  url.protocol = 'wss:';
+  const url = serviceEndpoint(origin, 'relay');
   url.searchParams.set('selfRelayToken', selfRelayToken);
   return url.href;
-}
-
-function secureEndpoint(origin: string): string {
-  const url = new URL('/api/federation/secure', origin);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  return url.href;
-}
-
-function openSocket(url: string, ca?: Buffer, maxPayload = 256 * 1024): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const secure = new URL(url).protocol === 'wss:';
-    const socket = new WebSocket(url, {
-      ...(secure ? { ...(ca ? { ca } : {}), rejectUnauthorized: true } : {}),
-      followRedirects: false,
-      handshakeTimeout: 10_000,
-      maxPayload,
-    });
-    const failed = () => { cleanup(); socket.terminate(); reject(new Error('SELF_RELAY_CONNECTION_FAILED')); };
-    const opened = () => { cleanup(); socket.on('error', () => socket.terminate()); resolve(socket); };
-    const cleanup = () => { socket.off('open', opened); socket.off('error', failed); socket.off('close', failed); };
-    socket.once('open', opened); socket.once('error', failed); socket.once('close', failed);
-  });
-}
-
-function waitForReady(socket: WebSocket): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => fail(), 10_000); timer.unref?.();
-    const cleanup = () => { clearTimeout(timer); socket.off('message', ready); socket.off('close', fail); };
-    const fail = () => { cleanup(); socket.terminate(); reject(new Error('SELF_RELAY_AUTHENTICATION_FAILED')); };
-    const ready = (raw: WebSocket.RawData, binary: boolean) => {
-      try {
-        const frame = binary ? null : JSON.parse(raw.toString());
-        if (frame?.type !== 'ready') { fail(); return; }
-        cleanup(); resolve();
-      } catch { fail(); }
-    };
-    socket.once('message', ready); socket.once('close', fail);
-  });
 }
 
 /**
@@ -110,16 +74,16 @@ export class DesktopSelfRelay {
     if (this.stopped) return;
     const desired = new Map([...desktopDirectTargets(this.options.desktopFile, this.options.serviceId), ...(this.options.targets?.() || [])]
       .filter(target => target.serviceId !== this.options.serviceId)
-      .map(target => [target.serviceId, { ...target, url: new URL(target.url.replace(/^wss:/, 'https:')).origin } as SelfRelayTarget]));
+      .map(target => [JSON.stringify([target.serviceId, normalizeServiceAddress(target.url)]), { ...target, url: normalizeServiceAddress(target.url) } as SelfRelayTarget]));
     for (const [serviceId, state] of this.states) {
       const target = desired.get(serviceId);
-      const signature = target && JSON.stringify([target.url, target.caFingerprint256, target.caPath]);
+      const signature = target && JSON.stringify([target.url, target.caFingerprint256, target.caPath, target.certificateFingerprint256]);
       if (!target || signature !== state.signature) {
         this.stopState(state); this.states.delete(serviceId);
       }
     }
     for (const [serviceId, target] of desired) if (!this.states.has(serviceId)) {
-      const state: SelfRelayState = { signature: JSON.stringify([target.url, target.caFingerprint256, target.caPath]), stopped: false };
+      const state: SelfRelayState = { signature: JSON.stringify([target.url, target.caFingerprint256, target.caPath, target.certificateFingerprint256]), stopped: false, lifetime: new AbortController() };
       this.states.set(serviceId, state);
       void this.run(state, target);
     }
@@ -127,7 +91,7 @@ export class DesktopSelfRelay {
 
   private stopState(state: SelfRelayState): void {
     if (state.stopped) return;
-    state.stopped = true; state.wake?.(); state.wake = undefined;
+    state.stopped = true; state.lifetime.abort(); state.wake?.(); state.wake = undefined;
     state.client?.close(); state.client = undefined;
     state.upstream?.terminate(); state.upstream = undefined;
   }
@@ -151,7 +115,7 @@ export class DesktopSelfRelay {
   private async connect(state: SelfRelayState, target: SelfRelayTarget): Promise<void> {
     const peer = { serviceId: target.serviceId, origin: target.url, ...(target.caFingerprint256 ? { caFingerprint256: target.caFingerprint256 } : {}) };
     const configuredCa = target.caPath ? readFileSync(resolve(this.options.baseDir || process.cwd(), target.caPath)) : undefined;
-    const rpc = await connectCollaborationRpc(this.options.identity, peer, undefined, undefined, configuredCa);
+    const rpc = await connectCollaborationRpc(this.options.identity, peer, undefined, undefined, configuredCa, target.certificateFingerprint256, state.lifetime.signal);
     let selfRelayToken: string;
     try {
       const result = await rpc.request({ type: 'self-relay-ticket' });
@@ -161,15 +125,13 @@ export class DesktopSelfRelay {
     } finally { rpc.close(); }
     if (this.stopped || state.stopped) return;
 
-    const ca = target.caFingerprint256 ? await readPinnedCertificateAuthority(target.url, target.caFingerprint256) : configuredCa;
-    const upstream = await openSocket(relayEndpoint(target.url, selfRelayToken), ca);
+    const upstream = await openServiceSocket(relayEndpoint(target.url, selfRelayToken), target, { baseDir: this.options.baseDir, maxPayload: 256 * 1024, relayReady: true, signal: state.lifetime.signal });
     state.upstream = upstream;
     try {
       if (this.stopped || state.stopped) return;
-      await waitForReady(upstream);
-      if (this.stopped || state.stopped) return;
       const client = new RelayClient(upstream, { targets: new Map([[this.options.serviceId,
-        () => openSocket(secureEndpoint(this.options.localOrigin), this.options.localCa, 1024 * 1024)]]) });
+        (signal: AbortSignal) => openServiceSocket(serviceEndpoint(typeof this.options.localOrigin === 'function' ? this.options.localOrigin() : this.options.localOrigin).href,
+          { ca: this.options.localCa }, { signal: AbortSignal.any([signal, state.lifetime.signal]) })]]) });
       state.client = client;
       await new Promise<void>(resolve => {
         if (upstream.readyState !== WebSocket.OPEN) resolve();

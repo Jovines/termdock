@@ -280,6 +280,7 @@ impl WindowState {
 pub struct Config {
     pub version: u8,
     pub imported_bookmarks: bool,
+    pub imported_preview: bool,
     pub connections: Vec<Connection>,
     pub removed_keys: Vec<String>,
     pub ports: BTreeMap<String, u16>,
@@ -296,6 +297,7 @@ impl Default for Config {
         Self {
             version: 1,
             imported_bookmarks: false,
+            imported_preview: false,
             connections: vec![],
             removed_keys: vec![],
             ports: BTreeMap::new(),

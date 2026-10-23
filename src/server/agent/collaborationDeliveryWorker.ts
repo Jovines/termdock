@@ -7,6 +7,8 @@ export interface CollaborationRoute {
   reason?: string;
   diagnostics?: CollaborationRouteIdentity;
   write?: (messages: CollaborationMessage[]) => Promise<void>;
+  /** Plain task handoff using the same pinned recipient and input queue. */
+  writeText?: (text: string) => Promise<void>;
   /** Best-effort capture of the recipient terminal after a successful write. */
   capture?: () => Promise<string>;
 }

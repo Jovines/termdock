@@ -17,7 +17,7 @@ export function captureReferenceInsertionScope(source?: HTMLElement): () => bool
 }
 
 /** An ACK confirms local input acceptance, not execution or an Agent reply. */
-export function requestReferenceInsertion(text: string, sessionId: string | null, isCurrent: () => boolean, source?: HTMLElement, options?: TerminalSequenceOptions): Promise<boolean> {
+export function requestReferenceInsertion(text: string, sessionId: string | null, isCurrent: () => boolean, source?: HTMLElement, options?: TerminalSequenceOptions & { focus?: boolean }): Promise<boolean> {
   if (!text || !sessionId || !isCurrent()) return Promise.resolve(false);
   const owned = source ? createOwnedTerminalPasteRequest(source, sessionId, text, options?.submitAfterPaste === true) : null;
   if (source && !owned) return Promise.resolve(false);
@@ -39,7 +39,7 @@ export function requestReferenceInsertion(text: string, sessionId: string | null
     const timer = window.setTimeout(() => finish(false), 1500);
     window.addEventListener('termdock-insert-reference-ack', onAck);
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: owned ?? { text, sessionId, nonce, focus: false, paste: true, submitAfterPaste: false, ...options },
+      detail: owned ? { ...owned, focus: options?.focus ?? owned.focus } : { text, sessionId, nonce, focus: false, paste: true, submitAfterPaste: false, ...options },
     }));
   });
 }

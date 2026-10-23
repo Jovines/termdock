@@ -12,6 +12,7 @@ function block(selector) {
   throw new Error(`Unclosed color token block: ${selector}`);
 }
 const destination = new URL('../.renderer-dist/', import.meta.url);
+const preview = process.env.TERMDOCK_DESKTOP_CHANNEL === 'preview';
 fs.mkdirSync(destination, { recursive: true });
 const chrome=block(':root').match(/--chrome-bg:\s*#([0-9a-f]{6})/i);
 if(!chrome)throw new Error('Missing initial window background token');
@@ -22,8 +23,8 @@ fs.writeFileSync(new URL('tokens.css', destination), ['/* Generated from src/ind
 for (const name of ['index.html', 'app.js', 'styles.css', 'floating.html', 'floating.js', 'floating.css']) {
   let text = fs.readFileSync(new URL(`../../desktop/renderer/${name}`, import.meta.url), 'utf8');
   if (name === 'index.html') text = text.replace('class="brand"','class="brand" data-tauri-drag-region').replace('class="topbar"','class="topbar" data-tauri-drag-region').replace('class="rail"','class="rail" data-termdock-window-rail="true"');
-  if (name.endsWith('.html')) text = text.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '').replace('Termdock 连接中心', 'Termdock Preview 连接中心');
-  if (name === 'app.js') text = text.replace('Termdock Desktop ${snapshot.appVersion}', 'Termdock Preview ${snapshot.appVersion}');
+  if (name.endsWith('.html')) text = text.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '').replace('Termdock 连接中心', `${preview ? 'Termdock Preview' : 'Termdock'} 连接中心`);
+  if (name === 'app.js') text = text.replace('Termdock Desktop ${snapshot.appVersion}', `${preview ? 'Termdock Preview' : 'Termdock'} \${snapshot.appVersion}`);
   fs.writeFileSync(new URL(name, destination), text);
 }
 await build({ entryPoints: [new URL('../../desktop/renderer/services.tsx', import.meta.url).pathname], bundle: true, platform: 'browser', format: 'iife', minify: true, outfile: new URL('services.js', destination).pathname });

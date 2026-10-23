@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 import type { AgentLauncherInfo } from '../terminal/api';
-import type { TodoItem, TodoLaunchConfig, TodoSnapshot } from './api';
+import type { TodoItem, TodoSnapshot } from './api';
 
 export type TodoFilter = 'open' | 'review' | 'completed' | 'ignored';
-export type TodoModal = { kind: 'edit'; todo?: TodoItem } | { kind: 'launch'; ids: string[]; configs?: Record<string, TodoLaunchConfig> } | { kind: 'collector'; id?: string } | { kind: 'defaults' } | { kind: 'integration' } | null;
+export type TodoModal = { kind: 'edit'; todo?: TodoItem } | { kind: 'handoff'; ids: string[] } | { kind: 'collector'; id?: string } | { kind: 'integration' } | null;
 export interface TodoView {
   tab: 'todos' | 'collectors'; filter: TodoFilter; source: string; query: string;
   selectedId: string | null; mobileDetail: boolean; selecting: boolean; checked: string[];
@@ -42,7 +42,7 @@ export function useTodoDraft<T>(key: string, id: string, initial: T): [T, (value
   const saved = useTodoWorkspace(state => state.views[key]?.drafts[id]) as T | undefined;
   return [saved ?? initial, value => useTodoWorkspace.getState().draft(key, id, value)];
 }
-export function latestTodoRun(data: TodoSnapshot, id: string) { return data.runs.filter(run => run.todoId === id).at(-1); }
+export function latestTodoRun(data: TodoSnapshot, id: string) { return data.runs.filter(run => run.todoId === id || run.handoff?.todoIds.includes(id)).at(-1); }
 export function matchesTodo(data: TodoSnapshot, todo: TodoItem, filter: TodoFilter): boolean {
   if (filter === 'review') return todo.status === 'open' && latestTodoRun(data, todo.id)?.status === 'complete';
   return todo.status === (filter === 'completed' ? 'completed' : filter === 'ignored' ? 'ignored' : 'open');

@@ -1,4 +1,4 @@
-import { RELAY_PROVIDER_CONNECT_TIMEOUT_MS, RELAY_ROUTE_OPEN_TIMEOUT_MS } from './streamLimits.js';
+import { RELAY_PROVIDER_CONNECT_TIMEOUT_MS, RELAY_ROUTE_OPEN_TIMEOUT_MS, RELAY_MAX_FRAME_BYTES, RELAY_MAX_BUFFERED_BYTES } from './streamLimits.js';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { WebSocket, RawData } from 'ws';
@@ -14,7 +14,7 @@ export interface RelayLimits {
   maxFrameBytes?: number; maxBufferedBytes?: number; maxStreams?: number;
   heartbeatMs?: number; maxRouteTtlMs?: number; connectTimeoutMs?: number; routeTimeoutMs?: number;
 }
-const defaults = { maxFrameBytes: 256 * 1024, maxBufferedBytes: 1024 * 1024,
+const defaults = { maxFrameBytes: RELAY_MAX_FRAME_BYTES, maxBufferedBytes: RELAY_MAX_BUFFERED_BYTES,
   maxStreams: 128, heartbeatMs: 30_000, maxRouteTtlMs: 90_000, connectTimeoutMs: RELAY_PROVIDER_CONNECT_TIMEOUT_MS, routeTimeoutMs: RELAY_ROUTE_OPEN_TIMEOUT_MS };
 type Limits = typeof defaults;
 const identifier = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_.:-]{1,160}$/.test(v);
@@ -119,14 +119,15 @@ export class RelayRouter<P = string> {
       .map(([peer]) => peer);
   }
   hasRoute(serviceId: string): boolean {
-    return !this.stopped && this.providers(serviceId).length > 0;
+    return this.providerCount(serviceId) > 0;
   }
+  providerCount(serviceId: string): number { return this.stopped ? 0 : this.providers(serviceId).length; }
   activeRouteIds(): string[] {
     return [...this.routes.keys()].filter(serviceId => this.hasRoute(serviceId));
   }
   /** Trusted local configuration only. Clients never supply a target URL or factory. */
-  registerDirect(serviceId: string, connect: () => Promise<WebSocket>): () => void {
-    if (this.stopped || !identifier(serviceId) || typeof connect !== 'function' || [...this.peers].some(peer => this.directPeers.get(peer) === serviceId)) throw new Error('Invalid or already registered direct target');
+  registerDirect(serviceId: string, connect: (signal: AbortSignal) => Promise<WebSocket>): () => void {
+    if (this.stopped || !identifier(serviceId) || typeof connect !== 'function') throw new Error('Invalid direct target');
     const [routerWire, clientWire] = memoryPair();
     // The private WeakMap marks this peer; its placeholder principal is never
     // passed to externally supplied authentication/authorization callbacks.
@@ -267,7 +268,7 @@ export class RelayRouter<P = string> {
 
 export interface RelayClientOptions extends RelayLimits {
   /** Fixed service-ID registry. Each factory connects only to its configured secure endpoint. */
-  targets: ReadonlyMap<string, () => Promise<WebSocket>>;
+  targets: ReadonlyMap<string, (signal: AbortSignal) => Promise<WebSocket>>;
   routeTtlMs?: number;
 }
 /** Shared Mac/CLI middle hop. Target factories resolve only after their sockets are open. */
@@ -276,6 +277,7 @@ export class RelayClient {
   private streams = new Map<string, WebSocket | null>();
   private renewal: ReturnType<typeof setInterval>;
   private pending = new Map<string, ReturnType<typeof setTimeout>>();
+  private connecting = new Map<string, AbortController>();
   private stopped = false;
   constructor(private upstream: WebSocket, private options: RelayClientOptions) {
     this.limits = { ...defaults, ...options };
@@ -287,6 +289,7 @@ export class RelayClient {
   }
   private drop(id: string, reason: string) {
     clearTimeout(this.pending.get(id)); this.pending.delete(id);
+    this.connecting.get(id)?.abort(); this.connecting.delete(id);
     const target = this.streams.get(id); this.streams.delete(id); target?.close();
     send(this.upstream, { type: 'close', streamId: id, reason }, this.limits);
   }
@@ -300,14 +303,16 @@ export class RelayClient {
       this.streams.set(f.streamId, null);
       const timer = setTimeout(() => { this.drop(f.streamId, 'Target timeout'); }, this.limits.connectTimeoutMs); timer.unref?.();
       this.pending.set(f.streamId, timer);
+      const controller = new AbortController(); this.connecting.set(f.streamId, controller);
       let target: WebSocket;
-      try { target = await connect(); } catch {
+      try { target = await connect(controller.signal); } catch {
         if (this.pending.get(f.streamId) === timer) this.drop(f.streamId, 'Target unavailable');
         return;
       }
       // A canceled attempt may complete after the same ID has been reused.
       if (this.pending.get(f.streamId) !== timer || this.stopped) { target.close(); return; }
       clearTimeout(timer); this.pending.delete(f.streamId);
+      this.connecting.delete(f.streamId);
       if (target.readyState !== 1) { target.close(); this.drop(f.streamId, 'Target not ready'); return; }
       this.streams.set(f.streamId, target);
       watch(target, this.limits, () => { if (this.streams.get(f.streamId) === target) this.drop(f.streamId, 'Target disconnected'); });

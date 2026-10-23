@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { LeftSidebar } from './LeftSidebar';
+import { AppFeedbackHost } from '../ui/AppFeedback';
 
 const codex = {
   slug: 'codex',
@@ -86,7 +87,7 @@ describe('LeftSidebar launch actions', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ locale: 'en' }) })));
     const user = userEvent.setup();
     const onNewSession = vi.fn();
-    render(<I18nProvider><LeftSidebar isOpen pinned drawerWidthPx={320} sessions={[]}
+    render(<I18nProvider><AppFeedbackHost /><LeftSidebar isOpen pinned drawerWidthPx={320} sessions={[]}
       activeSessionId={null} sessionStates={new Map()} onNewSession={onNewSession}
       onClose={vi.fn()} onCloseSession={vi.fn()} onSplitSession={vi.fn()} onCloseSplit={vi.fn()}
       onRemoveFromSplit={vi.fn()} splitWorkspaces={[]} onSetSplitLayout={vi.fn()}
@@ -108,7 +109,7 @@ describe('LeftSidebar launch actions', () => {
     expect(screen.queryByRole('region', { name: 'Start a session' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'New terminal' }));
     act(() => onNewSession.mock.calls[2][0].onResult({ ok: false, error: 'connection' }));
-    expect(screen.getByRole('alert').textContent).toContain('connect');
+    expect((await screen.findByRole('alert')).textContent).toContain('connect');
     expect(screen.getByRole('button', { name: 'New terminal' }).hasAttribute('disabled')).toBe(false);
     await user.click(screen.getByRole('button', { name: 'More actions' }));
     await user.click(screen.getByRole('button', { name: /^Start / }));
@@ -117,7 +118,7 @@ describe('LeftSidebar launch actions', () => {
     await user.click(screen.getByRole('button', { name: 'More actions' }));
     expect(screen.queryByRole('region', { name: 'Start a session' })).toBeNull();
     act(() => onNewSession.mock.calls[3][0].onResult({ ok: false, error: 'directoryUnavailable' }));
-    expect(screen.getByRole('alert').textContent).toContain('working directory');
+    expect((await screen.findByRole('alert')).textContent).toContain('working directory');
     await user.click(screen.getByRole('button', { name: 'More actions' }));
     expect(screen.queryByRole('alert')).toBeNull();
   });

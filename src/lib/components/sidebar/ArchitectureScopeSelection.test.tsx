@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArchitectureGenerationForm } from './ArchitectureGenerationForm';
 import { ArchitecturePathPicker } from './ArchitecturePathPicker';
 import { FileTree } from './FileTree';
+import { DirectoryPickerDialog } from './DirectoryPickerDialog';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { analysisFile, DEFAULT_ANALYSIS } from '../../architecture/model';
 const { list, cancel, search } = vi.hoisted(() => ({ list: vi.fn(), cancel: vi.fn(), search: vi.fn() }));
@@ -43,9 +44,25 @@ describe('architecture scope selection', () => {
     render(<><FileTree rootPath="/project" selectedFilePath={null} onFileSelect={vi.fn()} /><ArchitecturePathPicker rootPath="/project" initial={[]} onCancel={vi.fn()} onConfirm={vi.fn()} /></>);
     await screen.findByRole('button', { name: 'Add to analysis scope: auth.ts' });
     const slots = list.mock.calls.filter(call => call[3] === 'load_file_tree_root').map(call => call[4]);
-    expect(slots).toContain('file-tree-root:/project');
+    expect(slots.some(slot => slot.startsWith('file-tree-root:'))).toBe(true);
     expect(slots.some(slot => slot.startsWith('file-tree-reference-root:'))).toBe(true);
     expect(new Set(slots).size).toBe(slots.length);
+  });
+  it('keeps chooser listings and expanded folders out of the main explorer cache', async () => {
+    const tree = <FileTree rootPath="/project" selectedFilePath={null} onFileSelect={vi.fn()} />;
+    const view = render(<>{tree}</>);
+    await screen.findByTitle('/project/auth.ts');
+    const mainCache = useSidebarStore.getState().directoryCache;
+    const mainEntries = mainCache.get('/project');
+    list.mockImplementation(async (path: string) => ({ path, entries: path === '/project' ? [{ name: 'picker-only', path: '/project/picker-only', type: 'directory' }] : [] }));
+    view.rerender(<>{tree}<DirectoryPickerDialog open initialPath="/project" title="Choose directory" onConfirm={vi.fn()} onCancel={vi.fn()} /><ArchitecturePathPicker rootPath="/project" initial={[]} onConfirm={vi.fn()} onCancel={vi.fn()} /></>);
+    const scope = screen.getByRole('dialog', { name: 'Choose folders or files' });
+    fireEvent.click(await within(scope).findByTitle('/project/picker-only'));
+    await waitFor(() => expect(list.mock.calls.some(call => call[3] === 'expand_directory')).toBe(true));
+    expect(useSidebarStore.getState().directoryCache).toBe(mainCache);
+    expect(useSidebarStore.getState().directoryCache.get('/project')).toBe(mainEntries);
+    expect(useSidebarStore.getState().expandedPaths.size).toBe(0);
+    expect(list.mock.calls.filter(call => call[0] === '/project' && !String(call[4]).startsWith('file-tree-reference-root:'))).toHaveLength(2);
   });
   it('references the open directory and starts browsing there without changing the feature question', async () => {
     const input = props();
@@ -173,7 +190,7 @@ describe('architecture scope selection', () => {
     fireEvent.click(row);
     const child = await screen.findByTitle('/project/src/auth.ts');
     fireEvent.click(within(child).getByRole('button', { name: 'Add to analysis scope: auth.ts' }));
-    expect(useSidebarStore.getState().expandedPaths.has('/project/src')).toBe(true);
+    expect(useSidebarStore.getState().expandedPaths.has('/project/src')).toBe(false);
     expect(screen.queryByRole('button', { name: 'More file actions' })).toBeNull();
     fireEvent.click(within(row).getByRole('button', { name: 'More folder actions' }));
     const enter = screen.getByRole('button', { name: 'Open' });
@@ -196,8 +213,6 @@ describe('architecture scope selection', () => {
     fireEvent.click(within(row).getByRole('button', { name: 'More folder actions' }));
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
-    // Returning to the cached root is normally immediate; invalidate it to exercise a real reload failure.
-    useSidebarStore.getState().invalidateDirectoryCache('/project', true);
     fireEvent.click(screen.getByRole('button', { name: 'Parent folder' }));
     expect(await screen.findByRole('alert')).toBeTruthy();
     await act(async () => finish({ entries: [{ name: 'stale', path: '/project/src/stale', type: 'file' }] }));

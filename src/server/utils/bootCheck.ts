@@ -1,326 +1,61 @@
 import { ensureNodePty } from './ensureNodePty.js';
-/**
- * Termdock 启动自检 — 确保原生模块和系统依赖在启动时可用
- *
- * 设计目标：覆盖 npm 全局安装不跑 postinstall 的缺口。
- * 每次 CLI 启动时检查，通过后写 marker 避免重复检查。
- *
- * 检查项目：
- *   1. node-pty : 实际 spawn 测试 → 失败则从源码重编译
- *   2. tmux     : 检测是否安装 → 缺失则尝试自动安装
- *
- * —— 如何新增检查项 ——
- *   在 BootChecks 接口加字段，在 runBootChecks() 加 step，
- *   在 formatBootCheckReport() 加对应的输出行。
- */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
 
-import { execSync, spawnSync } from 'child_process';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-import { createRequire } from 'module';
+export interface PtyCheckResult { ok: boolean; rebuilt: boolean; error?: string }
+export interface TmuxCheckResult { ok: boolean; installed: boolean; version?: string; error?: string }
+export interface BootChecks { nodePty: PtyCheckResult; tmux: TmuxCheckResult }
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface PtyCheckResult {
-  ok: boolean;
-  rebuilt: boolean;
-  error?: string;
-}
-
-export interface TmuxCheckResult {
-  ok: boolean;
-  installed: boolean;
-  version?: string;
-  error?: string;
-}
-
-export interface BootChecks {
-  nodePty: PtyCheckResult;
-  tmux: TmuxCheckResult;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
+const require = createRequire(import.meta.url);
+const tools = require('../../../scripts/install-utils.cjs') as {
+  checkTmux(): TmuxCheckResult;
+  probeNodePty(root: string): void;
+  clearPtyModuleCache(root: string): void;
+};
+const { rebuildNodePty } = require('../../../scripts/ensure-node-pty.cjs') as {
+  rebuildNodePty(root: string, options?: { timeout?: number }): void;
+};
 const MARKER_FILE = path.join(os.homedir(), '.termdock', '.boot-check-ok');
 
-function which(bin: string): string | null {
-  // 先查 PATH
-  try {
-    const result = execSync(`command -v ${bin} 2>/dev/null`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    if (result) return result;
-  } catch { /* not in PATH */ }
-
-  // macOS non-interactive SSH 的 PATH 不包含 Homebrew 路径，手动检查
-  const extraPaths = [
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-    '/opt/local/bin',    // MacPorts
-  ];
-  for (const dir of extraPaths) {
-    const fullPath = path.join(dir, bin);
-    try {
-      fs.accessSync(fullPath, fs.constants.X_OK);
-      return fullPath;
-    } catch { /* not here */ }
-  }
-  return null;
-}
-
-function runQuiet(cmd: string, timeoutMs = 30_000): { ok: boolean; stdout: string; stderr: string } {
-  try {
-    const r = spawnSync(cmd, [], {
-      shell: true,
-      timeout: timeoutMs,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    return { ok: r.status === 0, stdout: r.stdout, stderr: r.stderr };
-  } catch {
-    return { ok: false, stdout: '', stderr: '' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 1. node-pty 验证 + 重建
-// ---------------------------------------------------------------------------
-
 function checkNodePty(): PtyCheckResult {
-  const result: PtyCheckResult = { ok: false, rebuilt: false };
-
+  let ptyPath: string;
   try {
-    const require_ = createRequire(import.meta.url);
-    let ptyPath: string;
-    try {
-      ptyPath = require_.resolve('node-pty/package.json').replace('/package.json', '');
-    } catch {
-      result.error = 'node-pty not found in module resolution path';
-      return result;
-    }
-    const pty = require_(ptyPath);
-
-    // 修复 spawn-helper 可能因 npm 安装丢失的执行权限
-    try {
-      const prebuildsDir = path.join(ptyPath, 'prebuilds');
-      if (fs.existsSync(prebuildsDir)) {
-        for (const entry of fs.readdirSync(prebuildsDir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const helperPath = path.join(prebuildsDir, entry.name, 'spawn-helper');
-          if (!fs.existsSync(helperPath)) continue;
-          try {
-            const mode = fs.statSync(helperPath).mode;
-            if ((mode & 0o111) === 0) fs.chmodSync(helperPath, mode | 0o111);
-          } catch { /* skip */ }
-        }
-      }
-    } catch { /* prebuilds dir may not exist (compiled from source) */ }
-
-    // 实际 spawn 测试（不仅仅是 require，macOS ARM 预编译包可能 require 成功但 spawn 失败）
-    const proc = pty.spawn(process.env.SHELL || '/bin/bash', [], { name: 'xterm', cols: 80, rows: 24 });
-    proc.kill();
-    result.ok = true;
-    return result;
-  } catch (e) {
-    // require 失败或 spawn 失败 → 尝试重编译
-  }
-
+    // Never bypass the Darwin FD patch after a repair failure.
+    ensureNodePty();
+    ptyPath = path.dirname(require.resolve('node-pty/package.json'));
+  } catch (error) { return { ok: false, rebuilt: false, error: String(error) }; }
+  try { tools.probeNodePty(ptyPath); return { ok: true, rebuilt: false }; }
+  catch { /* An incompatible addon needs a rebuild in a non-global npx. */ }
   try {
-    const require_ = createRequire(import.meta.url);
-    let ptyPath: string;
-    try {
-      ptyPath = require_.resolve('node-pty/package.json').replace('/package.json', '');
-    } catch {
-      result.error = 'node-pty not found in module resolution path';
-      return result;
-    }
-
-    // 清除预编译二进制缓存
-    const prebuildsDir = path.join(ptyPath, 'prebuilds');
-    if (fs.existsSync(prebuildsDir)) {
-      fs.rmSync(prebuildsDir, { recursive: true, force: true });
-    }
-
-    const rebuild = runQuiet(`cd ${ptyPath} && npx --yes node-gyp rebuild`, 120_000);
-    if (rebuild.ok) {
-      // 重试 spawn
-      try {
-        const pty = require_(ptyPath);
-        const proc = pty.spawn(process.env.SHELL || '/bin/bash', [], { name: 'xterm', cols: 80, rows: 24 });
-        proc.kill();
-        result.ok = true;
-        result.rebuilt = true;
-        return result;
-      } catch {
-        result.error = 'node-pty 重编译成功但 spawn 仍然失败';
-        return result;
-      }
-    }
-    result.error = `node-pty 重编译失败: ${rebuild.stderr.slice(0, 200)}`;
-    return result;
-  } catch (e) {
-    result.error = `node-pty 未找到或无法初始化: ${String(e).slice(0, 200)}`;
-    return result;
-  }
+    fs.rmSync(path.join(ptyPath, 'prebuilds'), { recursive: true, force: true });
+    rebuildNodePty(ptyPath, { timeout: 120_000 });
+    tools.clearPtyModuleCache(ptyPath);
+    tools.probeNodePty(ptyPath);
+    return { ok: true, rebuilt: true };
+  } catch (error) { return { ok: false, rebuilt: false, error: String(error) }; }
 }
 
-// ---------------------------------------------------------------------------
-// 2. tmux 检测 + 自动安装
-// ---------------------------------------------------------------------------
-
-function checkTmux(): TmuxCheckResult {
-  const result: TmuxCheckResult = { ok: false, installed: false };
-
-  // 先检查是否已安装
-  const tmuxPath = which('tmux');
-  if (tmuxPath) {
-    try {
-      result.version = execSync('tmux -V', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    } catch { /* ignore */ }
-    result.ok = true;
-    result.installed = false; // 没有新安装
-    return result;
-  }
-
-  // —— 尝试自动安装 ——
-  const platform = process.platform;
-
-  if (platform === 'darwin') {
-    // macOS: 尝试多个包管理器
-    const brew = which('brew');
-    if (brew) {
-      const r = runQuiet(`${brew} install tmux 2>&1`, 120_000);
-      if (r.ok || which('tmux')) {
-        try {
-          result.version = execSync('tmux -V', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-        } catch { /* ignore */ }
-        result.ok = true;
-        result.installed = true;
-        return result;
-      }
-    }
-
-    const port = which('port'); // MacPorts
-    if (port) {
-      const r = runQuiet(`${port} install tmux 2>&1`, 120_000);
-      if (r.ok || which('tmux')) {
-        try {
-          result.version = execSync('tmux -V', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-        } catch { /* ignore */ }
-        result.ok = true;
-        result.installed = true;
-        return result;
-      }
-    }
-
-    const nixEnv = which('nix-env');
-    if (nixEnv) {
-      const r = runQuiet(`${nixEnv} -iA nixpkgs.tmux 2>&1`, 120_000);
-      if (r.ok || which('tmux')) {
-        try {
-          result.version = execSync('tmux -V', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-        } catch { /* ignore */ }
-        result.ok = true;
-        result.installed = true;
-        return result;
-      }
-    }
-
-    result.error = 'tmux 未安装且未找到包管理器 (brew/port/nix)。请安装 Homebrew: https://brew.sh';
-    return result;
-  }
-
-  if (platform === 'linux') {
-    // 尝试多种 Linux 包管理器
-    const managers = [
-      { bin: 'apt-get',  cmd: 'apt-get install -y tmux' },
-      { bin: 'dnf',      cmd: 'dnf install -y tmux' },
-      { bin: 'yum',      cmd: 'yum install -y tmux' },
-      { bin: 'apk',      cmd: 'apk add tmux' },
-      { bin: 'pacman',   cmd: 'pacman -S --noconfirm tmux' },
-      { bin: 'zypper',   cmd: 'zypper install -y tmux' },
-    ];
-
-    for (const m of managers) {
-      if (!which(m.bin)) continue;
-      // 需要 root 权限
-      const r = runQuiet(`sudo ${m.cmd} 2>&1`, 120_000);
-      if (r.ok || which('tmux')) {
-        try {
-          result.version = execSync('tmux -V', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-        } catch { /* ignore */ }
-        result.ok = true;
-        result.installed = true;
-        return result;
-      }
-      // 也试一下不用 sudo
-      const r2 = runQuiet(`${m.cmd} 2>&1`, 120_000);
-      if (r2.ok || which('tmux')) {
-        try {
-          result.version = execSync('tmux -V', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-        } catch { /* ignore */ }
-        result.ok = true;
-        result.installed = true;
-        return result;
-      }
-    }
-
-    result.error = 'tmux 未安装。请用系统包管理器安装，例如: sudo apt install tmux';
-    return result;
-  }
-
-  // 其他平台
-  result.error = `不支持在 ${platform} 上自动安装 tmux。请手动安装。`;
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// 主入口
-// ---------------------------------------------------------------------------
-
-let _cachedResult: BootChecks | null = null;
-
+let cachedResult: BootChecks | null = null;
 export function runBootChecks(): BootChecks {
-  ensureNodePty(); // Must precede the global marker and any native module load.
-  if (_cachedResult) return _cachedResult;
-
-  // 如果 marker 存在且有效，读取缓存的检查结果
-  if (fs.existsSync(MARKER_FILE)) {
-    try {
-      const cached = JSON.parse(fs.readFileSync(MARKER_FILE, 'utf-8'));
-      if (cached.nodePty?.ok && cached.tmux?.ok) {
-        _cachedResult = {
-          nodePty: cached.nodePty,
-          tmux: cached.tmux,
-        };
-        return _cachedResult;
-      }
-      // marker 存在但状态不完整（例如 postinstall 部分失败）→ 重新检查
-    } catch { /* marker 损坏 → 重新检查 */ }
-  }
-
-  const nodePty = checkNodePty();
-  const tmux = checkTmux();
-
-  _cachedResult = { nodePty, tmux };
-
-  // 全部通过则写 marker
+  if (cachedResult) return cachedResult;
+  // The on-disk marker is diagnostic only. Node upgrades, a removed tmux, or
+  // another installation must never be accepted solely because it says "ok".
+  const nodePty = checkNodePty(), tmux = tools.checkTmux();
+  cachedResult = { nodePty, tmux };
   if (nodePty.ok && tmux.ok) {
     try {
-      fs.mkdirSync(path.dirname(MARKER_FILE), { recursive: true });
-      fs.writeFileSync(MARKER_FILE, JSON.stringify({ checkedAt: new Date().toISOString(), nodePty, tmux }), 'utf-8');
-    } catch { /* 非关键 */ }
+      fs.mkdirSync(path.dirname(MARKER_FILE), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(MARKER_FILE, JSON.stringify({ checkedAt: new Date().toISOString(), nodePty, tmux,
+        runtime: { node: process.version, abi: process.versions.modules, platform: process.platform, arch: process.arch } }), { mode: 0o600 });
+    } catch { /* A read-only home does not prevent running the terminal. */ }
+  } else {
+    try { fs.rmSync(MARKER_FILE, { force: true }); } catch { /* Diagnostic only. */ }
   }
-
-  return _cachedResult;
+  return cachedResult;
 }
-
-export function getBootChecks(): BootChecks {
-  return _cachedResult ?? runBootChecks();
-}
+export function getBootChecks(): BootChecks { return cachedResult ?? runBootChecks(); }
 
 /**
  * 格式化启动检查报告，用于 CLI 启动时显示给用户。

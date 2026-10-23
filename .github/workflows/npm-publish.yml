@@ -121,8 +121,8 @@ jobs:
         run: node --test desktop-rust/renderer/bridge.test.mjs
       - name: Verify npm publication status handling
         run: node --test tests/verifyNpmPublication.test.mjs
-      - name: Verify global installation rebuild isolation
-        run: node --test tests/nodePtyInstall.test.mjs
+      - name: Verify installation and initialization failure matrix
+        run: npm run test:initialization
       - name: Verify systemd runtime isolation policy
         run: node --test tests/systemdKillMode.test.mjs
       - run: npm run build

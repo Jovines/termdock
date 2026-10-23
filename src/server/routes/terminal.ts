@@ -1,11 +1,13 @@
 import { sessionViewModeRoutes, SessionViewModeStore } from '../agent/sessionViewModeRoutes.js';
+import { incompleteOscSuffix } from '../utils/oscBuffer.js';
+import { terminalProgramStatus, PROGRAM_STATUS_REPLY, type TerminalProgressReport } from '../shared/programStatus.js';
 import { sessionAttachmentRoutes } from '../agent/sessionAttachmentRoutes.js';
 import { TodoStore, TodoError } from '../todos/store.js';
 import { TodoRunner, todoRoutes, type TodoRuntime } from '../todos/routes.js';
 import { TerminalInputQueue } from '../utils/terminalInputQueue.js';
 import { copyTmuxSelection, type TmuxCopySelectionResult } from '../utils/tmuxCopySelection.js';
 import { isConfirmedEmptyTmuxServer } from '../utils/tmuxEmptyServerProbe.js';
-import { collaborationSessionDisplayName } from '../utils/sessionDisplayName.js';
+import { getSessionPresentation } from '../utils/sessionDisplayName.js';
 import { integrationError } from '../agent/integrationStore.js';
 import { assertNativeResumeAvailable, collectNativeResumeOwnerCandidates, type ShellVerificationFailure } from '../agent/nativeResumeOwner.js';
 import { nativeIdentityDirectory, readNativeProcessIdentity, resolveProfileNativeIdentity, type NativeProcessIdentityConfig } from '../agent/nativeProcessIdentity.js';
@@ -25,8 +27,9 @@ import { TerminalPasteBuffer } from '../utils/terminalPasteBuffer.js';
 import { SharedSessionSampler, SharedSnapshotCache, type SampleEvent } from '../utils/sharedSampling.js';
 import { batchTmuxOptions, TmuxMetadataWriter } from '../utils/tmuxMetadataWriter.js';
 import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
-import { claimTmuxSize } from '../utils/tmuxSizeOwnership.js';
+import { TmuxDisplayGeometry } from '../utils/tmuxDisplayGeometry.js';
 import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
+import { readTmuxObserverSize } from '../utils/tmuxObserverSize.js';
 import { TerminalOutputDelivery, resolveTerminalReplayCursor, type OutputFrame } from '../utils/terminalOutputDelivery.js';
 import express from 'express';
 import fs from 'fs';
@@ -73,7 +76,6 @@ import {
   setAndroidPanelSetting,
   getRightSidebarTabsSetting,
   setRightSidebarTabsSetting,
-  normalizeAndroidPanel,
   getCollaborationFloatingGroupIdSetting,
   setCollaborationFloatingGroupIdSetting,
   getServiceSwitcherExpandedSetting,
@@ -178,6 +180,7 @@ import {
   listAllHookAgents,
   refreshStaleHooksAtLaunch,
   installHooksForSlug,
+  runtimeHooksStateForSlug,
   uninstallHooksForSlug,
 } from '../agent/installers.js';
 import {
@@ -438,10 +441,7 @@ interface TerminalSession {
   tmuxIoChain?: Promise<void>;
 }
 
-type TuiProgressReport = {
-  state: 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
-  progress: number | null;
-};
+type TuiProgressReport = TerminalProgressReport;
 
 interface PersistedClientSession {
   sessionId: string;
@@ -496,6 +496,8 @@ interface TmuxInventoryMeta {
 }
 
 interface SessionInventoryClientSession extends PersistedClientSession {
+  displayName: string;
+  displaySubtitle: string | null;
   frontendSessionId: string;
   customName: boolean;
   connected: boolean;
@@ -1992,6 +1994,11 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
   const terminalConnected = Boolean(backend);
   const slug = binding?.pane?.agentSlug ?? binding?.agentSlug ?? record.agentResume?.slug;
   const agent = slug ? agentBySlug(slug) : backend?.agent;
+  const presentation = getSessionPresentation({ ...record,
+    activeProgram: backend?.activeProgram?.command ?? record.activeProgram,
+    shellTitle: backend?.lastOscTitle ?? record.shellTitle, cwd: backend?.cwd ?? record.cwd,
+    promptState: backend?.lastPromptState ?? null, agent,
+  }, shellNamesBackend);
   return {
     ...collaborationStore.sessionFacts(record.sessionId, terminalConnected || route.state === 'ready' || route.state === 'shell'),
     last_terminal_output_at: backend?.lastOutputAt || null,
@@ -2004,12 +2011,8 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
     sessionId: record.sessionId,
     agentNativeSessionId: binding?.pane ? binding.pane.nativeSessionId : binding?.nativeSessionId ?? backend?.agentSession?.sessionId ?? record.agentResume?.sessionId ?? null,
     backendSessionId: backendId ?? null,
-    name: collaborationSessionDisplayName({ ...record,
-      activeProgram: backend?.activeProgram?.command ?? record.activeProgram,
-      shellTitle: backend?.lastOscTitle ?? record.shellTitle,
-      cwd: backend?.cwd ?? record.cwd,
-      agent: agent ? { displayName: agent.displayName } : null,
-    }),
+    name: presentation.displayName,
+    ...presentation,
     cwd: backend?.cwd ?? record.cwd ?? '',
     agent: agent ? { slug: agent.slug, displayName: agent.displayName } : null,
     status: route.state === 'unchecked' && terminalConnected ? 'terminal-connected' : route.state,
@@ -2427,7 +2430,7 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     if (!backend) return { state: 'detached', reason: 'TMUX_BACKEND_UNAVAILABLE' };
     assertGeneration();
     const assertCurrent = terminalInputGuard(globalSessionState.sessions.find(candidate => candidate.sessionId === frontendSessionId)!);
-    return { state: 'ready', isShell: pane.isShell, capture: async () => captureTmuxPaneText(runTmux, pinned), write: async (messages) => {
+    const writeText = async (prompt: string) => {
       if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
       if (recoveredNativeIdentity) {
         const current = await inspectCollaborationTmux(binding, null, false, true, true, true);
@@ -2436,9 +2439,11 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
         if (!proof?.nativeIdentityVerified || proof.nativeIdentityFailure || proof.nativeSessionId !== pinned.nativeSessionId
           || proof.agentSlug !== pinned.agentSlug || !routeOwnershipConfirmed(frontendSessionId, binding, [proof])) throw new Error('ROUTE_NATIVE_IDENTITY_CHANGED_BEFORE_WRITE');
       }
-      await writeCollaborationTmuxPane(runTmux, pinned, formatLocalCollaborationMessages(frontendSessionId, messages), runTmuxStdin, () => { assertGeneration(); assertCurrent(); });
+      await writeCollaborationTmuxPane(runTmux, pinned, prompt, runTmuxStdin, () => { assertGeneration(); assertCurrent(); });
       backend!.lastActivity = Date.now();
-    } };
+    };
+    return { state: 'ready', isShell: pane.isShell, capture: async () => captureTmuxPaneText(runTmux, pinned), writeText,
+      write: messages => writeText(formatLocalCollaborationMessages(frontendSessionId, messages)) };
   }
   if (!backend || !binding.backendSessionId) return { state: 'offline', reason: 'SHELL_BACKEND_NOT_RUNNING' };
   await refreshCollaborationAgentIdentity(binding.backendSessionId, backend, Boolean(record.agentLaunchCheck));
@@ -2451,18 +2456,19 @@ async function resolveCollaborationRoute(frontendSessionId: string): Promise<Col
     const launch = await observeAgentLaunchCheck(record, { agentSlug: agent?.slug ?? null, nativeSessionId });
     if (launch) return launch;
   }
-  return { state: 'ready',
-    isShell: backend.activeProgram?.source !== 'unknown' && shellNamesBackend.has(backend.activeProgram?.command?.toLowerCase() ?? ''),
-    capture: async () => target.autoTitleContext,
-    write: async (messages) => {
+  const writeText = async (prompt: string) => {
     if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === frontendSessionId)) throw new Error('SESSION_REMOVED');
     if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('SHELL_BACKEND_CHANGED');
-    await writeBracketedPrompt(target.ptyProcess, formatLocalCollaborationMessages(frontendSessionId, messages), () => {
+    await writeBracketedPrompt(target.ptyProcess, prompt, () => {
       assertGeneration(); assertCurrent();
       if (terminalSessions.get(binding.backendSessionId!) !== target) throw new Error('TERMINAL_INPUT_TARGET_CHANGED');
     });
     target.lastActivity = Date.now();
-  } };
+  };
+  return { state: 'ready',
+    isShell: backend.activeProgram?.source !== 'unknown' && shellNamesBackend.has(backend.activeProgram?.command?.toLowerCase() ?? ''),
+    capture: async () => target.autoTitleContext, writeText,
+    write: messages => writeText(formatLocalCollaborationMessages(frontendSessionId, messages)) };
 }
 
 
@@ -3876,7 +3882,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     const tmuxMeta = session.tmuxSessionName ? liveTmuxByName.get(session.tmuxSessionName) : undefined;
     const activeProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? session.activeProgram ?? null;
     const cwd = backend?.cwd ?? tmuxMeta?.cwd ?? session.cwd ?? null;
-    const shellTitle = tmuxMeta?.shellTitle ?? backend?.lastOscTitle ?? session.shellTitle ?? null;
+    const shellTitle = backend?.lastOscTitle ?? tmuxMeta?.shellTitle ?? session.shellTitle ?? null;
     // Identity is available without opening a terminal stream. Use foreground
     // argv for interpreter/wrapper launches, and resume identity at shell prompts.
     const foregroundAgent = (backend ? detectSessionAgent(backend) : null)
@@ -3907,6 +3913,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       cwd,
       shellTitle,
       agent,
+      ...getSessionPresentation({ ...session, activeProgram, cwd, shellTitle, agent, promptState: backend?.lastPromptState ?? null }, shellNamesBackend),
     };
   });
 
@@ -4080,7 +4087,7 @@ function getPtyProcessPid(ptyProcess: PtyProcess): number | null {
 
 // ── OSC sniffing for CWD tracking + prompt state + title ──
 
-const OSC_SNIFF_CAP = 32768; // 32 KB rolling buffer
+const OSC_SNIFF_CAP = 512 * 1024; // bounded incomplete hook payload (JSON escaping can expand stdin)
 
 // Match all OSC sequences we care about:
 //   OSC 0;... / OSC 2;...  → title (may contain cwd or command name)
@@ -4252,7 +4259,7 @@ function sniffOsc(buf: string, home: string): OscSniffResult {
     }
   }
 
-  const remaining = buf.slice(lastMatchEnd).slice(-128);
+  const remaining = incompleteOscSuffix(buf, lastMatchEnd, OSC_SNIFF_CAP);
 
   return { cwd: lastCwd, title: lastTitle, promptState, exitCode, tuiProgress, agentEvents, notification, remaining };
 }
@@ -4633,7 +4640,7 @@ function serializeAgentIdentity(agent: AgentInfo | null): AgentStatusWirePayload
 
 let lastAgentStatusSnapshots = new Map<string, string>();
 
-function broadcastAgentStatus(sessionId: string, session: TerminalSession, force = false): void {
+function broadcastAgentStatus(sessionId: string, session: TerminalSession, force = false, notify = true): void {
   const payload = buildAgentStatusPayload(sessionId, session);
   const snapshot = JSON.stringify(payload);
   const previousSnapshot = lastAgentStatusSnapshots.get(sessionId);
@@ -4644,7 +4651,30 @@ function broadcastAgentStatus(sessionId: string, session: TerminalSession, force
   const previous = previousSnapshot
     ? JSON.parse(previousSnapshot) as AgentStatusWirePayload
     : null;
-  notifyAgentTransition(sessionId, previous, payload);
+  if (notify) notifyAgentTransition(sessionId, previous, payload);
+}
+
+const nativeStatusRecoveryTimers = new WeakMap<TerminalSession, ReturnType<typeof setTimeout>>();
+function cancelNativeStatusRecovery(session: TerminalSession): void {
+  const timer = nativeStatusRecoveryTimers.get(session);
+  if (timer) clearTimeout(timer);
+  nativeStatusRecoveryTimers.delete(session);
+}
+
+/** A matching program's explicit terminal completion can recover a missed
+ * Stop/Interrupt hook. Never infer completion from output silence or CPU. */
+function scheduleNativeStatusRecovery(sessionId: string, session: TerminalSession, endedApps: string[]): void {
+  const agent = session.agent, state = session.agentSession;
+  if (!agent || state?.status !== 'working' || !endedApps.some(app => agent.slug === app || agent.aliases.includes(app))) return;
+  cancelNativeStatusRecovery(session);
+  const timer = setTimeout(() => {
+    nativeStatusRecoveryTimers.delete(session);
+    if (terminalSessions.get(sessionId) !== session || session.agent !== agent || session.agentSession !== state || state.status !== 'working') return;
+    if (terminalProgramStatus(session).activeApps().some(app => agent.slug === app || agent.aliases.includes(app))) return;
+    state.status = 'idle'; state.message = null; state.presentation = null;
+    broadcastAgentStatus(sessionId, session, false, false);
+  }, 3000);
+  timer.unref?.(); nativeStatusRecoveryTimers.set(session, timer);
 }
 
 /** Persist the info needed to resume this pane's agent conversation after the
@@ -4780,6 +4810,7 @@ function applyAgentSignals(
   let completedTurnAgent: AgentInfo | null = null;
   for (const event of events) {
     if (!agentEventMatchesCurrentAgent(session.agent, event)) continue;
+    cancelNativeStatusRecovery(session);
     // An event naming an agent brands the pane even when the process poll
     // can't see through a wrapper: identity via protocol.
     if (!session.agent && event.agent) {
@@ -6266,11 +6297,10 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
   // Sniff OSC sequences for CWD tracking + prompt state + title
   try {
       const buf = session.oscSniffBuf + data;
-      if (buf.length > OSC_SNIFF_CAP) {
-        session.oscSniffBuf = buf.slice(-OSC_SNIFF_CAP / 4); // trim
-      }
       const result = sniffOsc(buf, home);
       session.oscSniffBuf = result.remaining;
+      const progress = terminalProgramStatus(session).feed(data);
+      if (progress.query && opts.broadcast) session.ptyProcess.write(PROGRAM_STATUS_REPLY);
 
       // CWD change
       if (result.cwd && result.cwd !== session.lastOscCwd) {
@@ -6307,8 +6337,8 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
         }
       }
 
-      if (result.tuiProgress !== null) {
-        session.tuiProgress = result.tuiProgress.state === 'remove' ? null : result.tuiProgress;
+      if (progress.changed) {
+        session.tuiProgress = progress.progress;
         broadcastJsonWs(sessionId, {
           type: 'tui-progress',
           tuiProgress: session.tuiProgress,
@@ -6320,6 +6350,7 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
       if (result.agentEvents.length > 0 || result.notification) {
         applyAgentSignals(sessionId, session, result.agentEvents, result.notification);
       }
+      if (progress.endedApps.length) scheduleNativeStatusRecovery(sessionId, session, progress.endedApps);
   } catch { /* sniff failure should never block data */ }
 
   appendAutoTitleContext(sessionId, session, data, opts.broadcast);
@@ -6339,6 +6370,11 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
 
   session.exitDisposable = session.ptyProcess.onExit(({ exitCode, signal }) => {
     console.log(`Terminal session ${sessionId} exited with code ${exitCode}, signal ${signal}`);
+    const progress = terminalProgramStatus(session).exit();
+    if (progress.changed) {
+      session.tuiProgress = progress.progress;
+      broadcastEvent(sessionId, { type: 'tui-progress', tuiProgress: session.tuiProgress });
+    }
     broadcastEvent(sessionId, { type: 'exit', exitCode, signal });
     // User-initiated closes dispose this listener before killing the pty, so
     // reaching here means the process exited on its own. Sessions with a live
@@ -6412,8 +6448,8 @@ async function spawnTerminalSession(req: express.Request, input: SpawnTerminalIn
 
 async function spawnTerminalSessionUnlocked(req: express.Request, input: SpawnTerminalInput): Promise<SpawnTerminalResult> {
   const cwd = await resolveWorkingDirectory(req, input.cwd);
-  const cols = input.cols || 80;
-  const rows = input.rows || 24;
+  let cols = input.cols || 80;
+  let rows = input.rows || 24;
   const sessionId = Math.random().toString(36).substring(2, 15) +
                     Math.random().toString(36).substring(2, 15);
   let mode = normalizeMode(input.mode);
@@ -6432,6 +6468,7 @@ async function spawnTerminalSessionUnlocked(req: express.Request, input: SpawnTe
     if (input.attachExistingOnly) {
       if (!await tmuxSessionExists(input.tmuxAttachTarget ?? `=${tmuxSessionName}`)) throw new Error('TMUX_SESSION_NOT_RUNNING');
     } else await prepareManagedTmuxSession(tmuxSessionName, cwd);
+    ({ cols, rows } = await readTmuxObserverSize(runTmux, input.tmuxAttachTarget ?? `=${tmuxSessionName}`));
   }
 
   const command = mode === 'tmux'
@@ -7301,6 +7338,20 @@ router.get('/session-inventory', async (_req, res) => {
 });
 
 const todoRuntime: TodoRuntime = {
+  async target(id) {
+    const record = globalSessionState.sessions.find(session => session.sessionId === id);
+    if (!record) throw new TodoError('这个会话已关闭，请重新选择', 409);
+    const route = await resolveCollaborationRoute(id);
+    const facts = orchestrationSessionSnapshot(record);
+    if (route.state !== 'ready' || route.isShell || !facts.agent) throw new TodoError('这个会话暂时无法接收待办，请先在终端启动 Agent', 409);
+    const launcher = (await listDetectedAgentLaunchers()).find(agent => agent.slug === facts.agent!.slug);
+    return { name: facts.name, config: { agentSlug: facts.agent.slug, command: launcher?.command ?? facts.agent.slug, cwd: record.cwd ?? '', prompt: '' } };
+  },
+  async deliver(run, prompt) {
+    const route = await resolveCollaborationRoute(run.sessionId!);
+    if (route.state !== 'ready' || route.isShell || !route.writeText) throw new TodoError('目标会话状态已变化，请检查终端后重试', 409);
+    await route.writeText(prompt);
+  },
   async validate(config, req) {
     const launcher = (await listDetectedAgentLaunchers()).find(agent => agent.slug === config.agentSlug);
     if (!launcher) throw new TodoError('请选择当前服务可用的 Agent');
@@ -8424,16 +8475,7 @@ router.put('/settings', async (req, res) => {
     setRightSidebarTabsSetting(body.rightSidebarTabs);
   }
   if (body.androidPanel && typeof body.androidPanel === 'object') {
-    // 与现有设置合并后再校验：允许只更新部分字段（如仅切开关）。
-    const merged = normalizeAndroidPanel({ ...getAndroidPanelSetting(), ...(body.androidPanel as Record<string, unknown>) });
-    setAndroidPanelSetting({
-      enabled: merged.enabled,
-      quality: merged.quality,
-      activePresetId: merged.activePresetId,
-      presets: merged.presets,
-      docked: merged.docked,
-      deviceSerial: merged.deviceSerial,
-    });
+    setAndroidPanelSetting(body.androidPanel as Parameters<typeof setAndroidPanelSetting>[0]);
   }
   if (body.collaborationPanel && typeof body.collaborationPanel.clientId === 'string') {
     setCollaborationPanelSetting(body.collaborationPanel.clientId, body.collaborationPanel.state);
@@ -8725,7 +8767,7 @@ router.post('/agent-hooks/:agent/install', async (req, res) => {
   const agent = req.params.agent;
   try {
     const result = await installHooksForSlug(agent);
-    res.json({ agent, ...result, state: 'installed' });
+    res.json({ agent, ...result, state: await runtimeHooksStateForSlug(agent) });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
@@ -9766,16 +9808,17 @@ export function handleTerminalWebSocket(
   let clientPaused = false;
   let replayRequest: Promise<void> | null = null;
   let replayRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  let clientCols = session.cols;
-  let clientRows = session.rows;
-  let initialAttachmentResize = true;
   let tmuxSizeOwnershipSupported = false;
   let initialScreen: TmuxInitialScreen | null = null;
-  if (initialDimensions && options.independentTmux) {
-    clientCols = initialDimensions.cols;
-    clientRows = initialDimensions.rows;
-  }
   const ownTmux = session.mode === 'tmux' && options.independentTmux === true;
+  const displayGeometry = ownTmux ? new TmuxDisplayGeometry(session, runTmux, session.tmuxSessionName!, () => {
+    const pids = new Set<number>();
+    for (const client of wsClients.get(sessionId)?.values() ?? []) {
+      const pid = tmuxAttachments.get(client)?.pid;
+      if (pid !== undefined) pids.add(pid);
+    }
+    return pids;
+  }, initialDimensions) : null;
   if (ownTmux) independentTmuxClients.add(ws);
   const attachment = ownTmux ? new TerminalClientAttachment(
     async (cols, rows) => {
@@ -9784,12 +9827,7 @@ export function handleTerminalWebSocket(
       const tmuxBinary = getTmuxBinary();
       const supportsFeatures = await supportsTmuxClientFeatures(tmuxBinary);
       tmuxSizeOwnershipSupported = supportsFeatures;
-      // The metadata observer must not choose the pane size while a browser
-      // owns an attached client. Resolve by exact PID, never another client.
-      const raw = await runTmux(['list-clients', '-t', session.tmuxSessionName!, '-F', '#{client_pid} #{client_tty}']);
-      const metadata = raw.split('\n').map(line => line.trim().split(/\s+/))
-        .find(([pid]) => pid === String(session.ptyProcess.pid));
-      if (metadata?.[1] && supportsFeatures) await runTmux(['refresh-client', '-t', metadata[1], '-f', 'ignore-size']);
+      await displayGeometry!.prepareAttach({ cols, rows }, supportsFeatures);
       const env = buildInteractiveColorEnvironment({ ...process.env, PATH: buildAugmentedPath() });
       delete env.TMUX;
       delete env.TMUX_PANE;
@@ -9834,7 +9872,7 @@ export function handleTerminalWebSocket(
       attachment.close();
       initialScreen?.cancel();
       initialScreen = null;
-      initialAttachmentResize = true;
+      displayGeometry!.reset();
       delivery.setActive(false); // Discard only this observer's obsolete stream.
     }
     replayRequest = (async () => {
@@ -9871,17 +9909,14 @@ export function handleTerminalWebSocket(
       if (delivery.active) {
         const screen = new TmuxInitialScreen();
         initialScreen = screen;
-        if (!await attachment.open(clientCols, clientRows)) {
+        if (!await attachment.open(displayGeometry!.size.cols, displayGeometry!.size.rows)) {
           screen.cancel();
           return;
         }
         const first = await screen.ready;
-        if (initialScreen === screen) initialScreen = null;
         if (first.status === 'cancelled' || ws.readyState !== ws.OPEN) return;
         if (first.status === 'overflow') throw new Error('Initial tmux screen exceeded output budget');
-        // Bootstrap with the actual first PTY redraw, not a standalone empty
-        // reset followed by the screen in a second client write. Subsequent
-        // bytes already wait in delivery and retain their original ordering.
+        initialScreen = null;
         replayChunks = first.data ? [first.data] : ['\x1bc'];
       } else {
         replayChunks = ['\x1bc'];
@@ -9917,8 +9952,8 @@ export function handleTerminalWebSocket(
       streamEpoch: TERMINAL_STREAM_EPOCH,
       outputProtocol: options.flowControl ? 2 : undefined,
       copyModeInput: ownTmux,
-      cols: session.cols,
-      rows: session.rows,
+      cols: displayGeometry?.size.cols ?? session.cols,
+      rows: displayGeometry?.size.rows ?? session.rows,
       runtime,
       ptyBackend: session.ptyBackend || 'unknown',
       mode: session.mode,
@@ -9966,7 +10001,11 @@ export function handleTerminalWebSocket(
         timer.unref();
         ws.once('close', cancelRetry);
       } else if (ws.readyState === ws.OPEN) ws.close(1011, 'Replay unavailable');
-    }).finally(() => { replayRequest = null; });
+    }).finally(() => {
+      initialScreen?.cancel();
+      initialScreen = null;
+      replayRequest = null;
+    });
     return replayRequest;
   };
   if (attachment) independentTmuxReplays.set(ws, async () => {
@@ -10039,35 +10078,17 @@ export function handleTerminalWebSocket(
           if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
             if (attachment) {
               await enqueueTmuxIo(session, async () => {
-                const cleanCols = Math.floor(cols), cleanRows = Math.floor(rows);
-                const displayPids = new Set<number>();
-                for (const client of wsClients.get(sessionId)?.values() ?? []) {
-                  const pid = tmuxAttachments.get(client)?.pid;
-                  if (pid !== undefined) displayPids.add(pid);
-                }
-                if (tmuxSizeOwnershipSupported) {
-                  await claimTmuxSize(runTmux, session.tmuxSessionName!, attachment.pid, displayPids);
-                }
-                const sameSize = clientCols === cleanCols && clientRows === cleanRows;
-                const ok = sameSize ? attachment.attached : attachment.resize(cleanCols, cleanRows);
-                if (ok) {
-                  // The first resize confirms the grid supplied at attachment.
-                  // Its PTY is already drawing that grid; forcing refresh-client
-                  // here repeats the initial clear/full redraw. Later same-size
-                  // requests remain explicit display recovery requests.
-                  const needsRedraw = sameSize && !initialAttachmentResize;
-                  initialAttachmentResize = false;
-                  clientCols = cleanCols;
-                  clientRows = cleanRows;
+                const result = await displayGeometry!.resize(attachment, { cols, rows }, tmuxSizeOwnershipSupported);
+                if (result.ok) {
                   session.lastActivity = Date.now();
                   broadcastJsonWs(sessionId, {
-                    type: 'pty-size', cols: clientCols, rows: clientRows, source: `ws-resize:${clientId}`,
+                    type: 'pty-size', cols: result.cols, rows: result.rows, source: `ws-resize:${clientId}`,
                   }, clientId);
-                  if (needsRedraw) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
+                  if (result.redraw) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
                 }
                 if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({
                   type: 'resize-ack', seq: typeof msg.seq === 'number' ? msg.seq : undefined,
-                  ok, cols: clientCols, rows: clientRows, screenSyncPending: false,
+                  ok: result.ok, cols: result.cols, rows: result.rows, screenSyncPending: false,
                 }));
               });
               break;
@@ -10157,9 +10178,17 @@ export function handleTerminalWebSocket(
           if (!options.flowControl || typeof msg.active !== 'boolean') break;
           outputWanted = msg.active;
           const resumed = delivery.setActive(outputWanted);
-          if (!delivery.active) attachment?.close();
+          if (!delivery.active) {
+            attachment?.close();
+            initialScreen?.cancel();
+          }
           if (resumed && delivery.active) {
-            void sendReplay(typeof msg.since === 'number' ? msg.since : 0, typeof msg.epoch === 'string' ? msg.epoch : undefined);
+            // A rapid hide/show can resume while the cancelled first redraw
+            // is still unwinding. Start a new attachment after it has settled.
+            await replayRequest;
+            if (ws.readyState === ws.OPEN && outputWanted) {
+              void sendReplay(typeof msg.since === 'number' ? msg.since : 0, typeof msg.epoch === 'string' ? msg.epoch : undefined);
+            }
           }
           break;
         }

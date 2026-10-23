@@ -1,14 +1,14 @@
-import { RELAY_CLIENT_CONNECT_TIMEOUT_MS } from '../federation/streamLimits.js';
 import type { Request } from 'express';
 import { encryptedRequestSubject } from '../federation/requestContext.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import WebSocket from 'ws';
-import { AsyncQueue, toBase64, fromBase64, PacketChannel, type Packet } from '../federation/packets.js';
+import { PacketChannel, type Packet } from '../federation/packets.js';
 import { secureConnection, type Identity } from '../federation/secureProtocol.js';
 import { socketDuplex } from '../federation/socketDuplex.js';
-import { readPinnedCertificateAuthority } from '../federation/trustedCa.js';
+import { RelayTransport, type RelayWireSocket } from '../federation/relayTransport.js';
+import { createServiceSocket, waitForServiceSocket } from '../federation/serviceTransport.js';
+import { serviceEndpoint } from '../federation/connectionModel.js';
 import { COLLAB_LIMITS, STATUS_RANK } from './collaborationProtocol.js';
 import { terminalMessage } from './collaborationStore.js';
 import type { CollaborationStore, CollaborationMessage, CollaborationContext } from './collaborationStore.js';
@@ -89,20 +89,18 @@ export class CollaborationRpc {
     this.pending.clear();
   }
 }
-export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string, receive?: (packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>, configuredCa?: Buffer): Promise<CollaborationRpc> {
+export async function connectCollaborationRpc(identity: Identity, peer: CollaborationNode, endpoint?: string, receive?: (packet: Packet) => Record<string, unknown> | Promise<Record<string, unknown>>, configuredCa?: Buffer, certificateFingerprint256?: string, signal?: AbortSignal): Promise<CollaborationRpc> {
   validateCollaborationNode(peer);
-  const ca = peer.caFingerprint256 ? await readPinnedCertificateAuthority(peer.origin, peer.caFingerprint256) : configuredCa;
-  const url = endpoint ?? `${peer.origin.replace(/^https:/, 'wss:')}/api/federation/secure`;
-  const socket = new WebSocket(url, { ca, rejectUnauthorized: true, followRedirects: false, handshakeTimeout: 3000, maxPayload: 1024 * 1024 });
-  const relay = endpoint ? relayDuplex(socket, peer.serviceId) : undefined;
-  const duplex = relay?.duplex ?? socketDuplex(socket);
+  const url = endpoint ?? serviceEndpoint(peer.origin).href;
+  const socket = await createServiceSocket(url, { ca: configuredCa, caFingerprint256: peer.caFingerprint256, certificateFingerprint256 }, { signal, handshakeTimeout: 3000 });
+  const relay = endpoint ? new RelayTransport(url, peer.serviceId, () => socket as unknown as RelayWireSocket, { entryUrl: peer.origin }) : undefined;
+  const wire = relay || socket;
+  const duplex = socketDuplex(wire);
   try {
-    await new Promise<void>((resolve, reject) => {
-      socket.once('open', resolve); socket.once('error', reject); socket.once('close', () => reject(new Error('PEER_DISCONNECTED')));
-    });
-    if (relay) await relay.ready;
-    const secured = await secureConnection({ identity, duplex, initiator: true, targetPinnedPeerId: peer.serviceId, signal: AbortSignal.timeout(5000) });
+    await waitForServiceSocket(wire, signal);
+    const secured = await secureConnection({ identity, duplex, initiator: true, targetPinnedPeerId: peer.serviceId, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) });
     const rpc = new CollaborationRpc(new PacketChannel(secured.duplex), receive);
+    if (relay) relay.addEventListener('close', () => rpc.close(relay.transportFailure), { once: true });
     if (receive) {
       try { await rpc.request({ type: 'collaboration-connect' }); }
       catch (error) {
@@ -113,41 +111,6 @@ export async function connectCollaborationRpc(identity: Identity, peer: Collabor
     }
     return rpc;
   } catch (error) { socket.terminate(); throw error; }
-}
-
-function relayDuplex(socket: WebSocket, target: string) {
-  const queue = new AsyncQueue<Uint8Array>(64), streamId = randomUUID();
-  let readyResolve: () => void, readyReject: (error: Error) => void;
-  const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
-  void ready.catch(() => {});
-  const timer = setTimeout(() => fail(new Error('ROUTE_TIMEOUT')), RELAY_CLIENT_CONNECT_TIMEOUT_MS);
-  const fail = (error: Error) => { clearTimeout(timer); readyReject(error); queue.end(error); socket.close(); };
-  const send = (frame: unknown) => {
-    if (socket.readyState !== 1 || socket.bufferedAmount > 1024 * 1024) throw new Error('ROUTE_CONGESTED');
-    socket.send(JSON.stringify(frame));
-  };
-  socket.on('error', fail); socket.on('close', () => fail(new Error('ROUTE_CLOSED')));
-  socket.on('message', (raw, binary) => {
-    try {
-      if (binary || raw.toString().length > 256 * 1024) throw new Error('INVALID_RELAY_FRAME');
-      const frame = JSON.parse(raw.toString());
-      if (frame.type === 'ready') { send({ type: 'open', streamId, serviceId: target }); return; }
-      if (frame.streamId !== streamId) return;
-      if (frame.type === 'opened') { clearTimeout(timer); readyResolve(); return; }
-      if (frame.type !== 'data' || frame.encoding !== 'base64' || typeof frame.payload !== 'string') throw new Error('ROUTE_CLOSED');
-      queue.push(fromBase64(frame.payload));
-    } catch (error) { fail(error instanceof Error ? error : new Error('INVALID_RELAY_FRAME')); }
-  });
-  return { ready, duplex: { source: queue, close: () => socket.close(), async sink(source: AsyncIterable<Uint8Array>) {
-    await ready;
-    for await (const bytes of source) for (let offset = 0; offset < bytes.length; offset += 65536) {
-      while (socket.bufferedAmount > 256 * 1024) {
-        if (socket.readyState !== 1) throw new Error('ROUTE_CLOSED');
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      send({ type: 'data', streamId, encoding: 'base64', payload: toBase64(bytes.subarray(offset, offset + 65536)) });
-    }
-  } } };
 }
 
 type Rpc = Pick<CollaborationRpc, 'request' | 'close' | 'closed'>;

@@ -32,19 +32,31 @@ config.ts 默认值
 
 ## 启动自检系统 (Boot Check)
 
-Termdock 在每次 CLI 启动时会自动检查系统依赖。通过后写入
-`~/.termdock/.boot-check-ok` marker 避免重复检查。
+Termdock 在每次 CLI 启动时实际检查系统依赖，同一进程内复用检查结果。
+`~/.termdock/.boot-check-ok` 仅记录诊断信息；不会用它跳过 Node 升级、
+切换安装目录或删除 tmux 后的检查。
 
 **检查项目：**
 
 | 检查项 | 失败行为 |
 |--------|---------|
 | node-pty spawn | 自动从源码重编译 |
-| tmux 可用性 | 自动尝试通过包管理器安装 |
+| tmux 可用性 | 验证实际可执行文件；root/免密码 sudo 可自动安装，否则给出适合该系统的命令，不等待密码输入 |
 
 **适用场景：**
-- npm 全局安装 (`npm i -g termdock`)：npm 10+ 默认不运行 lifecycle scripts，postinstall 被跳过。Boot check 在首次 `td` 启动时补做检查。
-- 系统环境变化后：删除 `~/.termdock/.boot-check-ok` 可强制下次启动时重新检查。
+- npm 安装通常会执行 postinstall；用户使用 `--ignore-scripts` 或安装策略跳过脚本时，首次 `td` 启动会补做检查。
+- 使用 `/bin/sh` 验证原生终端，不依赖 `$SHELL` 是否有效，也不要求精简 Linux 已安装 bash。原生终端无法修复时停止启动；缺 tmux 时保留 shell 模式。
+
+### 初始化回归
+
+`npm run test:initialization` 运行系统工具 Mock、失败注入及隔离 HOME 的真实 CLI 测试。
+覆盖包管理器、sudo 权限、旧 marker、原生模块重建、CA/密钥/SAN 校验、证书失败保留、
+自有证书、首次无界面启动及信任失败。不会修改系统信任库。
+
+`npm run test:initialization:real` 下载固定版本并校验 SHA-256 的官方 mkcert，
+在临时 CAROOT 中生成证书，执行真实 HTTPS 握手和续签，确认 CA 不变；需要联网。
+新增的 `initialization.yml` 在相关 push/PR 上分别使用 Linux 和 macOS runner 执行；
+npm 发布也会运行初始化失败矩阵。CI runner 不替代真实 macOS/iOS 客户端信任验收。
 
 ---
 

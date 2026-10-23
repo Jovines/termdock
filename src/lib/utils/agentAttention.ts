@@ -1,4 +1,18 @@
-import type { AgentStatus } from '../terminal/types';
+import type { AgentStatus, TuiProgressReport } from '../terminal/types';
+
+/** Native terminal progress is a visual fallback, not an Agent phase. Idle
+ * and acknowledged done states must not hide a new native progress report. */
+export function shouldShowTuiLoading(state?: {
+  agentStatus: AgentStatus | null;
+  agentNeedsReview?: boolean;
+  tuiProgress?: TuiProgressReport | null;
+}): boolean {
+  const progress = state?.tuiProgress?.state;
+  return (progress === 'set' || progress === 'indeterminate')
+    && state?.agentStatus !== 'working'
+    && state?.agentStatus !== 'waiting'
+    && !state?.agentNeedsReview;
+}
 
 export interface AgentAttentionSession {
   sessionId: string;

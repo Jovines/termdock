@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../hooks/useDragLifetime';
 import { LoadingSpinner as RiLoaderCircle } from './ui/Loading';
 /**
  * Agent / 会话状态相关的展示原语，统一收敛在这里。
@@ -18,17 +19,18 @@ import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
   CircleHelp as RiCircleHelp,
+  CircleAlert,
   BellDot as RiBellDot,
   Bot as RiBot,
   CircleDot as RiCircleDot,
 } from 'lucide-react';
-import type { AgentStatus, AgentIdentity, AgentIndicator, AgentStatusDetail } from '../terminal/types';
+import type { AgentStatus, AgentIdentity, AgentIndicator, AgentStatusDetail, TuiProgressReport } from '../terminal/types';
 import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { useViewportKeyboardState } from '../hooks/useViewportKeyboardState';
 import { useAgentIconSource } from '../hooks/useAgentIconSource';
-import { getNextAttentionSessionId } from '../utils/agentAttention';
+import { getNextAttentionSessionId, shouldShowTuiLoading } from '../utils/agentAttention';
 import {
   MOBILE_ATTENTION_EDGE_GAP_PX,
   MOBILE_ATTENTION_SIZE_PX,
@@ -168,6 +170,7 @@ function jumpToSession(sessionId: string): void {
 
 /** 给 tab 图标 / dot 共享的轻量 session 状态 */
 export interface AgentVisualState {
+  tuiProgress?: TuiProgressReport | null;
   inCopyMode?: boolean;
   agentStatus: AgentStatus | null;
   agent?: AgentIdentity | null;
@@ -330,6 +333,19 @@ export function AgentTabIcon({
     );
   }
 
+  if (shouldShowTuiLoading(state)) {
+    return <span title={state?.tuiProgress?.message ?? state?.tuiProgress?.app}>
+      <RiLoaderCircle size={size} className="shrink-0 animate-spin" style={{ color: AGENT_COLOR_RUNNING }} />
+    </span>;
+  }
+  if (state?.tuiProgress?.source === 'osc7501') {
+    const progress = state.tuiProgress;
+    const title = progress.message ?? progress.app;
+    if (progress.state === 'blocked') return <span title={title}><RiCircleHelp size={size} style={{ color: AGENT_COLOR_ATTENTION }} /></span>;
+    if (progress.state === 'done') return <span title={title}><RiBellDot size={size} style={{ color: AGENT_COLOR_ATTENTION }} /></span>;
+    if (progress.state === 'error') return <span title={title}><CircleAlert size={size} style={{ color: 'var(--destructive)' }} /></span>;
+  }
+
   if (state?.inCopyMode) {
     return sessionMode === 'tmux'
       ? <RiLayoutGridLine size={size} className="shrink-0 animate-pulse" style={{ color: AGENT_COLOR_COPY_MODE }} />
@@ -349,11 +365,13 @@ export function AgentSessionDot({
   detail,
   needsReview,
   inCopyMode,
+  progress,
 }: {
   status: AgentStatus | null;
   detail?: AgentStatusDetail | null;
   needsReview?: boolean;
   inCopyMode?: boolean;
+  progress?: TuiProgressReport | null;
 }): React.ReactElement | null {
   const { t } = useI18n();
   if (detail && !needsReview) {
@@ -381,13 +399,10 @@ export function AgentSessionDot({
       />
     );
   }
-  if (status === 'done' && needsReview) {
-    return (
-      <span
-        className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--warning)] ring-2 ring-surface shadow-[0_0_0_1px_rgb(var(--warning-rgb)_/_0.24)] animate-pulse"
-        title={t('agent.finishedReview')}
-      />
-    );
+  if (progress?.source === 'osc7501' && ['blocked', 'done', 'error'].includes(progress.state)) {
+    return <span className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-surface"
+      style={{ backgroundColor: progress.state === 'error' ? 'var(--destructive)' : 'var(--warning)' }}
+      title={progress.message ?? progress.app} />;
   }
   if (inCopyMode) {
     return (
@@ -793,10 +808,18 @@ export function AgentFloatingSessionButtons({
     if (drag.moved) suppressSyntheticClick('attention');
   }, [persistReleasedPosition, suppressSyntheticClick]);
 
+  const trackAttentionDrag = useDragLifetime(() => {
+    if (!dragRef.current) return;
+    if (dragRef.current.moved) suppressSyntheticClick('attention');
+    dragRef.current = null; setDraggingKind(null);
+  });
+
   const attentionDragHandlers: Pick<React.ButtonHTMLAttributes<HTMLButtonElement>,
     'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel'> = {
     onPointerDown: (event) => {
       event.stopPropagation();
+      if (event.button !== 0) return;
+      trackAttentionDrag(event);
       event.currentTarget.setPointerCapture(event.pointerId);
       dragRef.current = {
         kind: 'attention',
@@ -840,10 +863,20 @@ export function AgentFloatingSessionButtons({
     }
   };
 
+  const trackRunningDrag = useDragLifetime(() => {
+    const gesture = runningGestureRef.current;
+    if (!gesture) return;
+    clearRunningLongPress(gesture);
+    runningGestureRef.current = null; setRunningGestureMode('idle'); setSelectedRunningIndex(null);
+    if (gesture.mode !== 'pressing') suppressSyntheticClick('running');
+  });
+
   const runningPointerHandlers: Pick<React.ButtonHTMLAttributes<HTMLButtonElement>,
     'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel'> = {
     onPointerDown: (event) => {
       event.stopPropagation();
+      if (event.button !== 0) return;
+      trackRunningDrag(event);
       event.currentTarget.setPointerCapture(event.pointerId);
       const pointerId = event.pointerId;
       const gesture: NonNullable<typeof runningGestureRef.current> = {

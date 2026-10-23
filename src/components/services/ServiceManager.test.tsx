@@ -219,3 +219,13 @@ it('does not submit a consumed confirmation if checking a changed certificate fa
  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
  expect(trust.trust).toHaveBeenCalledOnce();expect(trust.inspect).toHaveBeenCalledTimes(3);expect(onAdd).toHaveBeenCalledTimes(2);
 });
+
+it('shows a password requested after certificate approval without losing the submitted address', async () => {
+ const trust=certificateFixture(),onAdd=vi.fn().mockRejectedValueOnce(failedDiscovery()).mockResolvedValueOnce({passwordRequired:true});
+ render(<ServiceManager initiallyAdding certificateTrust={trust} onAdd={onAdd} onOpen={async()=>{}}/>);
+ submitOffice();await screen.findByRole('region',{name:'HTTPS 证书确认'});
+ fireEvent.click(screen.getByRole('checkbox'));fireEvent.click(screen.getByRole('button',{name:'信任此指纹并重试一次'}));
+ await screen.findByLabelText('服务密码');
+ expect((screen.getByLabelText('服务地址或邀请链接') as HTMLInputElement).value).toBe('https://office.example');
+ expect(onAdd).toHaveBeenCalledTimes(2);
+});

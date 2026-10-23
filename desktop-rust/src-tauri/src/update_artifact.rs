@@ -1,6 +1,12 @@
 //! Signed updater content must still be the independent Preview application.
 use std::io::{Cursor, Read};
 pub fn validate(bytes: &[u8], version: &str) -> Result<(), String> {
+    validate_identity(bytes, version, "Termdock Preview.app", "com.jovines.termdock.preview")
+}
+pub fn validate_stable(bytes: &[u8], version: &str) -> Result<(), String> {
+    validate_identity(bytes, version, "Termdock.app", "com.jovines.termdock")
+}
+fn validate_identity(bytes: &[u8], version: &str, root: &str, identifier: &str) -> Result<(), String> {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
     let mut archive = tar::Archive::new(decoder);
     let mut valid = false;
@@ -22,7 +28,7 @@ pub fn validate(bytes: &[u8], version: &str) -> Result<(), String> {
         }
         let name = path.to_string_lossy();
         let name = name.trim_start_matches("./");
-        if name != "Termdock Preview.app" && !name.starts_with("Termdock Preview.app/") {
+        if name != root && !name.starts_with(&format!("{root}/")) {
             return Err("Preview 更新包不能包含其他应用".into());
         }
         budget = budget
@@ -52,7 +58,7 @@ pub fn validate(bytes: &[u8], version: &str) -> Result<(), String> {
                     _ => return Err("Unsafe Preview update link".into()),
                 }
             }
-            if !resolved.starts_with("Termdock Preview.app")
+            if !resolved.starts_with(root)
                 || paths.iter().any(|p| p != &path && p.starts_with(&path))
             {
                 return Err("Unsafe Preview update link".into());
@@ -67,7 +73,7 @@ pub fn validate(bytes: &[u8], version: &str) -> Result<(), String> {
         if !kind.is_file() && !kind.is_dir() && !kind.is_symlink() && !kind.is_hard_link() {
             return Err("Unsupported update archive entry".into());
         }
-        if name == "Termdock Preview.app/Contents/Info.plist" {
+        if name == format!("{root}/Contents/Info.plist") {
             if !kind.is_file() || entry.size() > 1024 * 1024 || valid {
                 return Err("Invalid Preview update plist".into());
             }
@@ -76,7 +82,7 @@ pub fn validate(bytes: &[u8], version: &str) -> Result<(), String> {
             let plist = plist::Value::from_reader(Cursor::new(data)).map_err(|e| e.to_string())?;
             let dict = plist.as_dictionary().ok_or("Invalid application plist")?;
             if dict.get("CFBundleIdentifier").and_then(|v| v.as_string())
-                != Some("com.jovines.termdock.preview")
+                != Some(identifier)
                 || dict
                     .get("CFBundleShortVersionString")
                     .and_then(|v| v.as_string())
@@ -117,6 +123,8 @@ mod tests {
     }
     #[test]
     fn actual_archive_identity_prevents_stable_or_wrong_version_installation() {
+        assert!(validate_stable(&artifact("com.jovines.termdock", "Termdock.app", "1.4.358"), "1.4.358").is_ok());
+        assert!(validate_stable(&artifact("com.jovines.termdock.preview", "Termdock Preview.app", "1.4.358"), "1.4.358").is_err());
         assert!(validate(
             &artifact(
                 "com.jovines.termdock.preview",

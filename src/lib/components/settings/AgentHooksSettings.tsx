@@ -45,6 +45,7 @@ import { useI18n } from '../../i18n';
 import { Switch } from '../ui/Switch';
 
 const STATE_STYLE: Record<AgentHookInfo['state'], string> = {
+  unverified: 'text-[color:var(--warning)]',
   installed: 'text-[color:var(--success)]',
   outdated: 'text-[color:var(--warning)]',
   'needs-approval': 'text-[color:var(--warning)]',
@@ -136,6 +137,7 @@ function AgentHooksSettings(): React.ReactElement {
     if (state === 'installed') return t('settings.agentHooksInstalled');
     if (state === 'outdated') return t('settings.agentHooksOutdated');
     if (state === 'needs-approval') return t('settings.agentHooksNeedsApproval');
+    if (state === 'unverified') return t('settings.agentHooksUnverified');
     return t('settings.agentHooksNotInstalled');
   };
 
@@ -494,7 +496,7 @@ function AgentHooksSettings(): React.ReactElement {
       )}
       {agents?.map((agent) => {
         const busy = busySlug === agent.slug;
-        const installed = agent.state !== 'not-installed';
+        const installed = agent.state !== 'not-installed' && agent.state !== 'outdated';
         const isPlugin = pluginSlugs.has(agent.slug);
         return (
           <div
@@ -523,7 +525,7 @@ function AgentHooksSettings(): React.ReactElement {
                 )}
                 <span className={`text-[10px] ${STATE_STYLE[agent.state]}`}>
                   {agent.state === 'installed' && <RiCircleCheck size={10} className="mr-0.5 inline" />}
-                  {(agent.state === 'outdated' || agent.state === 'needs-approval') && <RiAlertLine size={10} className="mr-0.5 inline" />}
+                  {(agent.state === 'outdated' || agent.state === 'needs-approval' || agent.state === 'unverified') && <RiAlertLine size={10} className="mr-0.5 inline" />}
                   {stateLabel(agent.state)}
                 </span>
               </div>
@@ -538,6 +540,11 @@ function AgentHooksSettings(): React.ReactElement {
               {agent.state === 'needs-approval' && (
                 <div className="mt-0.5 text-[10px] text-[color:var(--warning)]">
                   {t('settings.agentHooksApprovalHint')}
+                </div>
+              )}
+              {agent.state === 'unverified' && (
+                <div className="mt-0.5 text-[10px] text-[color:var(--warning)]">
+                  {t('settings.agentHooksUnverifiedHint')}
                 </div>
               )}
             </div>

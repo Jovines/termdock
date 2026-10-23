@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 
 export const repository = 'Jovines/termdock';
 export const previewEndpoint = `https://github.com/${repository}/releases/download/preview-channel/preview.json`;
+export const stableEndpoint = `https://github.com/${repository}/releases/download/stable-channel/latest.json`;
 export function outsideSource(root, target) {
   const relative = path.relative(root, target);
   return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
@@ -20,7 +21,8 @@ export function releasePlan(version, publicKey) {
   return {
     tag: `preview-v${version}`, version, prerelease: true,
     endpoint: previewEndpoint,
-    environment: { TERMDOCK_PREVIEW_UPDATE_ENDPOINT: previewEndpoint, TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY: publicKey },
+    environment: { TERMDOCK_DESKTOP_CHANNEL: 'preview', TERMDOCK_PREVIEW_UPDATE_ENDPOINT: previewEndpoint, TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY: publicKey,
+      TERMDOCK_STABLE_UPDATE_ENDPOINT: stableEndpoint, TERMDOCK_STABLE_UPDATE_PUBLIC_KEY: publicKey },
     config: { productName: 'Termdock Preview', identifier: 'com.jovines.termdock.preview', version,
       bundle: { createUpdaterArtifacts: true },
       plugins: { updater: { pubkey: publicKey, endpoints: [], requireSignedVersion: true } } },
@@ -51,6 +53,9 @@ function fsSafeOutput(result) {
   return result.stdout.trim();
 }
 export function buildPreview(version, destination, env = process.env) {
+  return buildRelease(version, destination, env, releasePlan(version, env.TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY));
+}
+export function buildRelease(version, destination, env, plan) {
   if (process.platform !== 'darwin') throw Error('Preview release packaging requires macOS');
   const root = fileURLToPath(new URL('../../', import.meta.url));
   const cwd = path.join(root, 'desktop-rust');
@@ -67,19 +72,21 @@ export function buildPreview(version, destination, env = process.env) {
   const revision = hasGit ? output('git', ['rev-parse', 'HEAD'], { cwd: root }) : env.TERMDOCK_PREVIEW_SOURCE_REVISION;
   if (!/^[a-f0-9]{40}$/.test(revision ?? '')) throw Error('Archive release requires an exact TERMDOCK_PREVIEW_SOURCE_REVISION');
   if (hasGit && output('git', ['status', '--porcelain'], { cwd: root })) throw Error('Preview release requires a clean source revision');
-  const plan = releasePlan(version, env.TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY);
   if (!env.TAURI_SIGNING_PRIVATE_KEY) throw Error('A private updater signing key must be supplied by the release environment');
   if (!env.APPLE_SIGNING_IDENTITY?.startsWith('Developer ID Application:')) throw Error('Preview release requires a Developer ID Application identity');
   const buildEnv = { ...env, ...plan.environment };
+  const target = env.CARGO_TARGET_DIR ? path.resolve(cwd, env.CARGO_TARGET_DIR) : path.join(cwd, 'src-tauri/target');
+  const bundle = path.join(target, 'release/bundle');
   fs.mkdirSync(out, { recursive: true });
-  const config = path.join(out, 'preview-build.json');
+  const config = path.join(out, 'build-config.json');
   fs.writeFileSync(config, JSON.stringify(plan.config, null, 2));
   for (const step of ['prepare:workspace', 'prepare:renderer']) run('npm', ['run', step], { cwd, env: buildEnv });
   run(process.execPath, ['scripts/prepare-workspace.mjs', '--require-clean'], { cwd, env: buildEnv });
+  // Stable and the final Preview may share a compilation cache, but each build
+  // must select only its newly generated DMG.
+  fs.rmSync(path.join(bundle, 'dmg'), { recursive: true, force: true });
   run(path.join(cwd, 'node_modules/.bin/tauri'), ['build', '--bundles', 'app,dmg', '--config', config], { cwd, env: buildEnv });
-  const target = env.CARGO_TARGET_DIR ? path.resolve(cwd, env.CARGO_TARGET_DIR) : path.join(cwd, 'src-tauri/target');
-  const bundle = path.join(target, 'release/bundle');
-  const app = path.join(bundle, 'macos/Termdock Preview.app');
+  const app = path.join(bundle, `macos/${plan.config.productName}.app`);
   const plist = path.join(app, 'Contents/Info.plist');
   if (output('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', plist]) !== plan.config.identifier
     || output('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', plist]) !== version) throw Error('Preview bundle identity/version mismatch');
@@ -90,21 +97,33 @@ export function buildPreview(version, destination, env = process.env) {
   const arch = output('/usr/bin/lipo', ['-archs', path.join(app, 'Contents/MacOS', executable)]);
   const platform = { arm64: 'darwin-aarch64', x86_64: 'darwin-x86_64' }[arch];
   if (!platform) throw Error('Only single-architecture release assets are supported');
-  const name = `Termdock-Preview_${version}_${platform.slice(7)}`;
+  const name = `${plan.prerelease ? 'Termdock-Preview' : 'Termdock'}_${version}_${platform.slice(7)}`;
   const tar = path.join(out, `${name}.app.tar.gz`);
   fs.copyFileSync(`${app}.tar.gz`, tar);
   fs.copyFileSync(`${app}.tar.gz.sig`, `${tar}.sig`);
   const signature = fs.readFileSync(`${tar}.sig`, 'utf8');
-  const manifest = updateManifest(plan, [{ platform, filename: path.basename(tar), signature }]);
-  fs.writeFileSync(path.join(out, 'preview.json'), JSON.stringify(manifest, null, 2));
+  const manifest = plan.prerelease ? updateManifest(plan, [{ platform, filename: path.basename(tar), signature }]) : {
+    version, notes: 'Termdock Rust 正式版。需要 macOS 14 或更新版本。', pub_date: new Date().toISOString(),
+    platforms: { [platform]: { signature: signature.trim(), url: `https://github.com/${repository}/releases/download/${plan.tag}/${path.basename(tar)}` } },
+  };
+  const manifestName = plan.prerelease ? 'preview.json' : 'latest.json';
+  fs.writeFileSync(path.join(out, manifestName), JSON.stringify(manifest, null, 2));
   const dmgFiles = fs.readdirSync(path.join(bundle, 'dmg')).filter(name => name.endsWith('.dmg'));
   if (dmgFiles.length !== 1) throw Error('Expected one Preview DMG');
   fs.copyFileSync(path.join(bundle, 'dmg', dmgFiles[0]), path.join(out, `${name}.dmg`));
-  const artifacts = [path.basename(tar), `${path.basename(tar)}.sig`, `${name}.dmg`, 'preview.json'];
+  const artifacts = [path.basename(tar), `${path.basename(tar)}.sig`, `${name}.dmg`, manifestName];
+  if (!plan.prerelease) {
+    const rustZip = `Termdock-Rust-darwin-${arch}-${version}.zip`;
+    run('/usr/bin/ditto', ['-c', '-k', '--keepParent', app, path.join(out, rustZip)]);
+    const legacyZip = `Termdock-darwin-${arch}-${version}.zip`;
+    if (!env.TERMDOCK_LEGACY_BRIDGE_ZIP || !fs.existsSync(env.TERMDOCK_LEGACY_BRIDGE_ZIP)) throw Error('Supply the verified macOS 12 Electron bridge ZIP via TERMDOCK_LEGACY_BRIDGE_ZIP');
+    fs.copyFileSync(env.TERMDOCK_LEGACY_BRIDGE_ZIP, path.join(out, legacyZip));
+    artifacts.push(rustZip, legacyZip);
+  }
   fs.writeFileSync(path.join(out, 'release.json'), JSON.stringify({ ...plan, environment: undefined,
     revision, notarizationVerified: false,
     artifacts: artifacts.map(name => ({ name, sha256: createHash('sha256').update(fs.readFileSync(path.join(out, name))).digest('hex') })) }, null, 2));
-  console.log(`Prepared ${plan.tag}; publish as a GitHub prerelease, then update preview-channel/preview.json. No service or installed app was changed.`);
+  console.log(`Prepared ${plan.tag}; verify notarization before publishing the ${plan.prerelease ? 'Preview' : 'stable'} channel.`);
 }
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   try {

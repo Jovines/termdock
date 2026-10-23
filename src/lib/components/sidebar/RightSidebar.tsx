@@ -1,3 +1,5 @@
+import { DownloadFeedback } from '../ui/DownloadFeedback';
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import { type MarkdownLocalLinkTarget, MarkdownPreview, ZoomableImage, FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS, logFilePreviewLoadingEvent } from '../markdown/MarkdownPreview';
 export { type MarkdownLocalLinkTarget, resolveMarkdownLocalLinkTarget, isSvgImageSrc, computeMarkdownImageDisplayBox, shouldCloseMarkdownImageLightboxDrag, __testParseMarkdownListBlock, buildMarkdownPreviewRenderResult, buildMarkdownPreviewBlocks, getMarkdownHeadingPathAtLine, getMarkdownHeadingOutline, MarkdownImageLightbox, MarkdownPreview } from '../markdown/MarkdownPreview';
 
@@ -21,6 +23,9 @@ import 'swiper/css';
 import { X as RiCloseLine, ArrowLeft as RiArrowLeft, ArrowUp as RiArrowUp, ArrowDown as RiArrowDown, ChevronRight as RiChevronRight, ChevronDown as RiChevronDown, Folder as RiFolder, Smartphone as RiSmartphone, Monitor as RiMonitor, Home as RiHome, GitCompare as RiGitCompare, Search as RiSearch, MoreHorizontal as RiMoreHorizontal, FileText as RiFileText, Copy as RiCopy, Download as RiDownload, RefreshCw as RiRefresh, GitBranch as RiGitBranch, ListTree as RiListTree, Pin as RiPin, PinOff as RiPinOff, Link2 as RiLink, Eye as RiEye, EyeOff as RiEyeOff, Sparkles as RiSparkles, Upload as RiUpload, ImagePlus as RiImagePlus, Trash2 as RiTrash, PencilLine as RiPencilLine, Check as RiCheck, Maximize2 as RiFullscreen, Clock3 as RiClock, ArrowDownAZ as RiSortName, FolderSearch as RiFolderSearch, SlidersHorizontal as RiSliders, CaseSensitive as RiCaseSensitive, WholeWord as RiWholeWord, Regex as RiRegex, Plus as RiPlus, Archive as RiArchive, Network as RiNetwork } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
+import { FileBrowserNavigationActions } from './FileBrowserNavigationActions';
+import { navigateFileWithArrowKey } from './fileKeyboardNavigation';
+import { normalizeDirectory, parentDirectory } from '../../filesystem/browserPaths';
 import { GitIgnoreFilterButton } from './GitIgnoreFilterButton';
 import { insertDirectReference } from './insertDirectReference';
 import { captureReferenceInsertionScope, requestReferenceInsertion } from './requestReferenceInsertion';
@@ -1002,10 +1007,8 @@ function getPathBasename(path: string | null): string {
 
 function getParentPath(path: string | null): string | null {
   if (!path) return null;
-  const normalized = path.replace(/\/+$/, '') || '/';
-  if (normalized === '/') return null;
-  const parent = normalized.slice(0, normalized.lastIndexOf('/')) || '/';
-  return parent === normalized ? null : parent;
+  const normalized = normalizeDirectory(path);
+  return normalized === '/' ? null : parentDirectory(normalized);
 }
 
 export function getNextMarkdownPreviewLineRange(
@@ -2413,10 +2416,7 @@ export function FilePreview({
             )}
           </div>
         </div>
-        {downloadState.status === 'error' && <div role="alert" className="mt-2 text-xs text-destructive">{t('rightSidebar.downloadFailed')}: {downloadState.error}</div>}
-        {downloadState.status === 'canceled' && <div role="status" className="mt-2 text-xs text-muted-foreground">{t('rightSidebar.downloadCanceled')}</div>}
-        {downloadState.status === 'saved' && <div role="status" className="mt-2 text-xs text-muted-foreground">{t('rightSidebar.downloadSaved')}</div>}
-        {downloadState.status === 'started' && <div role="status" className="mt-2 text-xs text-muted-foreground">{t('rightSidebar.downloadStarted')}</div>}
+        <DownloadFeedback status={downloadState.status} error={downloadState.error} />
         {fileSearchOpen && searchableFilePreview && (
           <div className="mt-2 flex min-w-0 items-center gap-1.5" data-file-preview-search>
             <div className="flex min-w-0 flex-1 items-center rounded-lg bg-surface-2 px-2 focus-within:bg-surface-elevated">
@@ -3873,16 +3873,23 @@ export function RightSidebar(
     setFileTreeWidthPx((width) => clampFileTreeWidth(width, drawerWidthPx));
   }, [drawerWidthPx]);
 
+  const trackResizeLifetime = useDragLifetime(() => {
+    if (!fileTreeResizeRef.current) return;
+    fileTreeResizeRef.current = null;
+    flushCacheThrottled(FILE_TREE_WIDTH_STORAGE_KEY);
+  });
+
   const startFileTreeResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
     if (isMobile) return;
     event.preventDefault();
+    trackResizeLifetime(event);
     fileTreeResizeRef.current = {
       startX: event.clientX,
       startWidth: fileTreeWidthPx,
       pointerId: event.pointerId,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
-  }, [fileTreeWidthPx, isMobile]);
+  }, [fileTreeWidthPx, isMobile, trackResizeLifetime]);
 
   const handleFileTreeResizeMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
     const resize = fileTreeResizeRef.current;
@@ -4139,6 +4146,14 @@ export function RightSidebar(
     // On desktop the preview is already visible alongside the tree, so we
     // don't switch tabs and steal focus from the browse flow.
   }, [isMobile, onOpenRightSidebarFilePreview, selectFile]);
+
+  const handleFileNavigationKeyDown = useCallback((event: KeyboardEvent<HTMLElement>) => {
+    if (!isOpen || !filesPaneActive) return;
+    navigateFileWithArrowKey(event, fileTreeScrollRef.current, selectedFilePath, (path) => {
+      setScrollToLine(null);
+      handleFileSelect(path);
+    });
+  }, [filesPaneActive, handleFileSelect, isOpen, selectedFilePath]);
 
   // Jump straight to a content-search match: open the file and ask the preview
   // to highlight and scroll to the matched line once its content has loaded.
@@ -7388,36 +7403,12 @@ export function RightSidebar(
   const fileExplorerNavigation = (
     <div data-local-layer="file-explorer-menu-host" className="sticky top-0 z-20 bg-surface/95 px-2.5 py-1.5 backdrop-blur">
       <div className="flex min-h-9 min-w-0 items-center gap-1.5">
-        <button
-          type="button"
-          onClick={goToExplorerParent}
-          disabled={!explorerParentPath}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
-          aria-label={t('rightSidebar.parentFolder')}
-          title={t('rightSidebar.parentFolder')}
-        >
-          <RiArrowUp size={14} />
-        </button>
-        <button
-          type="button"
-          onClick={goToProjectRoot}
-          disabled={!rootPath || explorerRoot === rootPath}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
-          aria-label={t('rightSidebar.backToProjectRoot')}
-          title={t('rightSidebar.backToProjectRoot')}
-        >
-          <RiHome size={14} />
-        </button>
-        <button
-          type="button"
-          onClick={refreshExplorerRoot}
-          disabled={!fileTreeRoot}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
-          aria-label={t('rightSidebar.refreshFiles')}
-          title={fileWatchError ? t('rightSidebar.fileWatchUnavailable', { message: fileWatchError }) : t('rightSidebar.refreshFiles')}
-        >
-          <RiRefresh size={13} />
-        </button>
+        <FileBrowserNavigationActions
+          buttonClassName="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
+          parent={{ onClick: goToExplorerParent, disabled: !explorerParentPath }}
+          root={{ onClick: goToProjectRoot, disabled: !rootPath || explorerRoot === rootPath }}
+          refresh={{ onClick: refreshExplorerRoot, disabled: !fileTreeRoot, title: fileWatchError ? t('rightSidebar.fileWatchUnavailable', { message: fileWatchError }) : undefined }}
+        />
         <div className="min-w-0 flex-1 px-1" title={fileTreeRoot ?? undefined}>
           <div className="flex min-w-0 items-center gap-1 text-[12px] font-medium text-foreground">
             <span className="truncate">{explorerName}</span>
@@ -8360,7 +8351,7 @@ export function RightSidebar(
 
         <Pane active={filesPaneActive} mounted={hasMountedFilesPane || filesPaneActive}>
           {() => (!isMobile ? (
-            <div className="flex h-full min-h-0">
+            <div data-file-browser-keyboard className="flex h-full min-h-0" tabIndex={-1} onKeyDown={handleFileNavigationKeyDown}>
               <div
                 ref={fileTreeScrollRef}
                 onScroll={handleFileTreeScroll}
@@ -8453,6 +8444,9 @@ export function RightSidebar(
           ) : (
             <Swiper
               className="h-full min-h-0 w-full"
+              data-file-browser-keyboard
+              tabIndex={-1}
+              onKeyDown={handleFileNavigationKeyDown}
               slidesPerView={1}
               resistanceRatio={0.45}
               noSwiping

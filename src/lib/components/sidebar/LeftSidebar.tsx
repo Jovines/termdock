@@ -1,3 +1,5 @@
+import { DragDropContext } from '../DragDropContext';
+import { useAppFeedback } from '../ui/AppFeedback';
 import { SessionSharingBadge, useSessionSharingStatus } from './SessionSharingBadge';
 import { TodoNavigationButton } from '../todos/TodoNavigationButton';
 import { getAgentLaunchCommand } from '../../terminal/launchCommands';
@@ -6,6 +8,7 @@ import { Archive, RefreshCw, MessageCircle } from 'lucide-react';
 import { CollaborationExecutionArchives } from './CollaborationExecutionArchives';
 import { completedTaskSessions } from '../../collaboration/completedSessions';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
+import { useSessionDirectory } from '../../stores/useSessionDirectory';
 import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
 import { collaborationServiceLabel, collaborationRemoteConnection } from '../../collaboration/display';
 import { openCollaborationMessagesPanel } from '../../collaboration/panelPreferences';
@@ -38,16 +41,17 @@ import {
   Workflow as RiWorkflowLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { DragDropContext, Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
+import { Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport, TmuxSessionSummary } from '../../terminal/types';
-import { getCwdLeafName, getSessionDisplayName, deriveGroupedOrder, normalizeSessionOrderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
+import { shouldShowTuiLoading } from '../../utils/agentAttention';
+import { getSessionPresentation, deriveGroupedOrder, normalizeSessionOrderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds } from '../../terminal/display';
 import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
-import { interruptActiveDrag, interruptibleDragSensors } from '../../hooks/useDragInterruptionSensor';
+import { interruptActiveDrag } from '../../hooks/useDragInterruptionSensor';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import {
   archiveExecutionSession,
@@ -72,6 +76,7 @@ import { SwipeToCloseSession } from './SwipeToCloseSession';
 import { RecoverableSessions } from './RecoverableSessions';
 import { CollaborationGroupActions } from './CollaborationGroupActions';
 import { CollaborationSessionMenu } from './CollaborationSessionMenu';
+import { useSidebarScrollPosition } from './useSidebarScrollPosition';
 
 
 interface LeftSidebarProps {
@@ -257,12 +262,13 @@ export function reorderSessionIdsForSplitExit(
 }
 
 function StatusDot({
+  progress,
   status,
   detail,
   needsReview,
   inCopyMode,
-}: { status: AgentStatus | null; detail?: import('../../terminal/types').AgentStatusDetail | null; needsReview?: boolean; inCopyMode?: boolean }) {
-  return <AgentSessionDot status={status} detail={detail} needsReview={needsReview} inCopyMode={inCopyMode} />;
+}: { progress?: TuiProgressReport | null; status: AgentStatus | null; detail?: import('../../terminal/types').AgentStatusDetail | null; needsReview?: boolean; inCopyMode?: boolean }) {
+  return <AgentSessionDot progress={progress} status={status} detail={detail} needsReview={needsReview} inCopyMode={inCopyMode} />;
 }
 
 export function LeftSidebar(
@@ -292,6 +298,17 @@ export function LeftSidebar(
   const [newSessionComposerOpen, setNewSessionComposerOpenState] = useState(false);
   const [sessionLaunchPending, setSessionLaunchPending] = useState(false);
   const [sessionLaunchError, setSessionLaunchError] = useState<NewSessionCreationError | null>(null);
+  const retryLaunch = useRef<() => void>();
+  const retryLastLaunch = useCallback(() => retryLaunch.current?.(), []);
+  useAppFeedback(sessionLaunchError && (!newSessionComposerOpen || sessionLaunchError === 'connection')
+    ? { message: t(sessionCreationErrorKey(sessionLaunchError)), onAction: retryLastLaunch } : null);
+  useEffect(() => {
+    if (!sessionLaunchError || (newSessionComposerOpen && sessionLaunchError !== 'connection')) return;
+    const clear = () => setSessionLaunchError(null);
+    const timer = window.setTimeout(clear, 8000);
+    if (sessionLaunchError === 'connection') window.addEventListener(SECURE_READY_EVENT, clear);
+    return () => { clearTimeout(timer); window.removeEventListener(SECURE_READY_EVENT, clear); };
+  }, [sessionLaunchError, newSessionComposerOpen]);
   const sessionLaunchPendingRef = useRef(false);
   const composerGenerationRef = useRef(0);
   const setNewSessionComposerOpen = useCallback((open: boolean) => {
@@ -300,6 +317,8 @@ export function LeftSidebar(
   }, []);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const mainCollaborationGroup = useCollaborationNavigation(state => state.todoOpen ? "__todos__" : state.groupId);
+  const sessionDirectory = useSessionDirectory();
+  const sessionLabels = useMemo(() => new Map(sessionDirectory.map(session => [session.sessionId, session.displayName])), [sessionDirectory]);
   const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
   const agentOperationsOpen = workbenchOpen || Object.keys(groupPanels).length > 0;
   const panelIntent = useRef(false);
@@ -324,6 +343,7 @@ export function LeftSidebar(
   const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
   const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
   const [collaborationActionError, setCollaborationActionError] = useState<string | null>(null);
+  useAppFeedback(collaborationActionError ? { message: collaborationActionError } : null);
   const taskInbox = useCollaborationTaskInbox(state => state.tasks);
   const collaborationTasks = useCollaborationTaskInbox(state => state.allTasks);
   const [archivesVersion, setArchivesVersion] = useState(0);
@@ -331,6 +351,7 @@ export function LeftSidebar(
   const archivePending = useRef(false);
   const [completedSessionsExpanded, setCompletedSessionsExpanded] = useState<Record<string, boolean>>({});
   const taskInboxError = useCollaborationTaskInbox(state => state.error);
+  useAppFeedback(taskInboxError && (isOpen || pinned) ? { tone: 'recovering', message: '正在恢复待办同步…' } : null);
   const [inboxExpanded, setInboxExpanded] = useState(false);
   const [archivedGroupsExpanded, setArchivedGroupsExpanded] = useState(false);
   useEffect(() => {
@@ -387,6 +408,7 @@ export function LeftSidebar(
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
   const sessionListRef = useRef<HTMLDivElement | null>(null);
+  useSidebarScrollPosition(sessionListRef, isOpen || !!pinned, sessions.length > 0);
   const activeItemLayoutRef = useRef<{
     item: HTMLButtonElement; top: number; height: number; viewportHeight: number;
   } | null>(null);
@@ -624,7 +646,7 @@ export function LeftSidebar(
   useLayoutEffect(() => {
     const item = activeItemRef.current;
     const list = sessionListRef.current;
-    if (!isOpen || !item || !list) {
+    if (!(isOpen || pinned) || !item || !list) {
       activeItemLayoutRef.current = null;
       return;
     }
@@ -758,6 +780,7 @@ export function LeftSidebar(
     sessionLaunchPendingRef.current = true;
     setSessionLaunchPending(true);
     setSessionLaunchError(null);
+    retryLaunch.current = () => launchSession(options, fromComposer);
     const generation = composerGenerationRef.current;
     onNewSession({ ...options,
       shouldActivate: () => generation === composerGenerationRef.current && (options.shouldActivate?.() ?? true),
@@ -768,6 +791,7 @@ export function LeftSidebar(
         setSessionLaunchError(result.error);
         return;
       }
+      setSessionLaunchError(null);
       if (generation !== composerGenerationRef.current) return;
       if (fromComposer) setNewSessionComposerOpen(false);
       closeIfOverlay();
@@ -877,18 +901,11 @@ export function LeftSidebar(
     const isSplit = splitSessionIds.has(session.id);
     const removeSplitPane = Boolean(compact && isSplit);
     const ts = sessionStates.get(session.id);
-    const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
-    const shellTitle = ts?.shellTitle ?? getCachedShellTitle(session.id);
-    const contentShellTitle = shellTitle === ts?.cwd || shellTitle === cwdLeaf ? null : shellTitle;
-    const displayName = getSessionDisplayName(
-      session,
-      ts?.activeProgram ?? null,
-      null,
-      DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
-      contentShellTitle,
-      ts?.promptState ?? null,
-    );
-    const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
+    const displayName = sessionLabels.get(session.id) ?? getSessionPresentation({ ...session,
+      activeProgram: ts?.activeProgram, cwd: ts?.cwd,
+      shellTitle: ts?.shellTitle ?? getCachedShellTitle(session.id), promptState: ts?.promptState, agent: ts?.agent,
+    }).displayName;
+    const tuiProgressActive = shouldShowTuiLoading(ts);
     return (
       <SwipeToCloseSession
         open={swipedSessionId === session.id}
@@ -946,7 +963,7 @@ export function LeftSidebar(
                 ? 'bg-surface text-[rgb(var(--tmux-rgb)_/_0.80)]'
                 : 'bg-surface text-muted-foreground'
           }`}>
-            {ts?.isConnecting || (tuiProgressActive && !ts?.agentStatus) ? (
+            {ts?.isConnecting || tuiProgressActive ? (
               <RiLoaderCircle size={compact ? 10 : 11} className="animate-spin" />
             ) : (ts?.agent ?? getCachedAgentIdentity(session.id)) ? (
               <AgentBrandAvatar agent={ts?.agent ?? getCachedAgentIdentity(session.id)!} size={compact ? 13 : 15} />
@@ -956,6 +973,7 @@ export function LeftSidebar(
               <RiTerminalLine size={compact ? 10 : 11} />
             )}
             <StatusDot
+              progress={ts?.tuiProgress}
               status={ts?.agentStatus ?? null}
               detail={ts?.agentStatusDetail}
               needsReview={ts?.agentNeedsReview}
@@ -1011,7 +1029,7 @@ export function LeftSidebar(
         </button>)}
       </SwipeToCloseSession>
     );
-  }, [activeSessionId, mainCollaborationGroup, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId, sharing.items, sharing.refresh]);
+  }, [activeSessionId, mainCollaborationGroup, splitSessionIds, sessionStates, sessionLabels, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId, sharing.items, sharing.refresh]);
 
   // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
   // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
@@ -1749,7 +1767,6 @@ export function LeftSidebar(
     folderKey?: string,
   ): React.ReactNode => (
     <DragDropContext
-      sensors={interruptibleDragSensors}
       onBeforeCapture={captureSidebarDropGeometry}
       onDragStart={handleSidebarDragStart}
       onDragEnd={(result) => finishSidebarDrag(
@@ -1839,15 +1856,11 @@ export function LeftSidebar(
 
       <TodoNavigationButton onOpen={() => { setNewSessionComposerOpen(false); useCollaborationNavigation.getState().openTodos(); closeIfOverlay(); }} />
 
-      {collaborationActionError && <div role="alert" className="mx-2 mt-2 flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        <span className="min-w-0 flex-1">{collaborationActionError}</span>
-        <button type="button" aria-label="关闭协作错误提示" className="shrink-0" onClick={() => setCollaborationActionError(null)}><RiCloseLine size={14} /></button>
-      </div>}
       {/* Session list */}
       <div ref={sessionListRef} className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-1.5 pt-0.5 pb-1.5">
         {taskInbox.length > 0 && <section className="mb-2 rounded-lg border border-primary/20 bg-primary/5" aria-label="协作待处理事项">
           {taskInbox.length > 0 && <button type="button" className="flex min-h-11 w-full items-center gap-2 px-3 text-left text-xs text-primary" aria-expanded={inboxExpanded} onClick={() => setInboxExpanded(v => !v)}><RiWorkflowLine size={14} /><span className="min-w-0 flex-1">需要你处理</span><span>{taskInbox.length}</span><RiChevronRightLine size={12} className={inboxExpanded ? 'rotate-90' : ''} /></button>}
-          {(inboxExpanded || taskInbox.length === 0) && <div className="space-y-1 p-1 pt-0">{taskInboxError && <p role="alert" className="px-2 py-2 text-[11px] text-destructive">{taskInboxError}<button type="button" className="ml-2 text-primary" onClick={() => void useCollaborationTaskInbox.getState().refresh()}>重试</button></p>}{taskInbox.map(task => <button key={task.id} type="button" className="min-h-11 w-full rounded-md px-2 py-2 text-left hover:bg-surface-2" onClick={() => {
+          {(inboxExpanded || taskInbox.length === 0) && <div className="space-y-1 p-1 pt-0">{taskInbox.map(task => <button key={task.id} type="button" className="min-h-11 w-full rounded-md px-2 py-2 text-left hover:bg-surface-2" onClick={() => {
             requestCollaborationTask(task.groupId, task.id);
             void openAgentOperations(task.groupId).then(opened => { if (opened) requestCollaborationTask(task.groupId, task.id); });
           }}><span className="block truncate text-xs text-foreground">{task.title}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground">{rawCollaborationGroups.find(g => g.id === task.groupId)?.name ?? '协作组'} · {collaborationTaskStage(task)}</span></button>)}</div>}
@@ -1879,7 +1892,6 @@ export function LeftSidebar(
         ) : groupByFolder ? (
           <div className="flex flex-1 flex-col">
             <DragDropContext
-              sensors={interruptibleDragSensors}
               onBeforeCapture={captureSidebarDropGeometry}
               onDragStart={handleSidebarDragStart}
               onDragEnd={(result) => finishSidebarDrag(handleGroupedDragEnd, result)}
@@ -2046,7 +2058,7 @@ export function LeftSidebar(
           tmuxAvailable={tmuxAvailable}
           options={newSessionOptions}
           launchPending={sessionLaunchPending}
-          launchError={sessionLaunchError ? t(sessionCreationErrorKey(sessionLaunchError)) : null}
+          launchError={sessionLaunchError && sessionLaunchError !== 'connection' ? t(sessionCreationErrorKey(sessionLaunchError)) : null}
           agents={newSessionAgents}
           selectedAgent={newSessionAgent}
           detecting={detectingNewSessionAgents}
@@ -2125,7 +2137,6 @@ export function LeftSidebar(
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (
         <div className="relative z-10 shrink-0 bg-[var(--chrome-bg)] px-3 pb-3 pt-1 md:border-t md:border-border md:p-2">
-          {sessionLaunchError && <p role="alert" className="mb-2 text-[11px] leading-relaxed text-destructive">{t(sessionCreationErrorKey(sessionLaunchError))}</p>}
           <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
             <button
               type="button"

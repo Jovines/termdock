@@ -14,6 +14,7 @@ import {
 import { subscribeClientState } from '../utils/clientStateSync';
 import { pickSessionAfterClose } from '../utils/sessionSelection';
 import { removeSessionFontSize } from '../terminal/sessionFontSize';
+import { useSessionDirectoryStore } from '../stores/useSessionDirectory';
 
 const LEGACY_STORAGE_KEY = 'termdock-sessions';
 const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
@@ -181,6 +182,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const initialCached = useRef<PersistedSession[] | null>(readSessionsCache()).current;
   const initialActiveId = useRef<string | null>(readActiveSessionId()).current;
   const [sessions, setSessions] = useState<PersistedSession[]>(initialCached ?? []);
+  useEffect(() => { useSessionDirectoryStore.getState().replace(sessions); }, [sessions]);
   const [inventory, setInventory] = useState<SessionInventory | null>(null);
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(
     initialCached && initialCached.length > 0
@@ -222,6 +224,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const applySessionList = useCallback((sessionList: PersistedSession[], options?: { reconcileActive?: boolean }) => {
     const filteredSessionList = sessionList.filter((session) => !removedSessionIdsRef.current.has(session.sessionId));
     sessionsRef.current = filteredSessionList;
+    useSessionDirectoryStore.getState().replace(filteredSessionList);
     ++sessionSnapshotRevisionRef.current;
     setSessions((prev) => (sessionListKey(prev) === sessionListKey(filteredSessionList) ? prev : filteredSessionList));
     writeSessionsCache(filteredSessionList);

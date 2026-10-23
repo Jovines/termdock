@@ -93,25 +93,22 @@ them. Keep signing and notarization credentials outside the repository.
 
 ## GitHub releases and application updates
 
-macOS releases are built, signed, and notarized on the local Mac. Upload the
-verified `Termdock.dmg` and `Termdock-darwin-arm64-<package-version>.zip` to a
-draft GitHub Release targeting the matching source commit, then publish it as
-`v<package-version>` after both uploaded assets match their local SHA-256 hashes.
-GitHub hosts the release artifacts; creating a version tag does not run a
-macOS packaging workflow.
+The Rust application requires macOS 14+ on Apple Silicon. Download the versioned
+`Termdock_VERSION_aarch64.dmg` from GitHub Releases. Its bundle identity remains
+`com.jovines.termdock`. Application updates use the pinned, signed Tauri feed at
+`stable-channel/latest.json` and are installed after the user accepts.
 
-Users can download `Termdock.dmg` from the GitHub Releases page. Installed,
-signed builds use Electron's native Squirrel.Mac updater and the public
-GitHub Releases API through a loopback Squirrel feed. Termdock checks after launch and
-periodically in the background; **Termdock → Check for Updates…** starts a
-manual check. The in-app settings panel exposes the same desktop check beside
-the independently versioned CLI/Runtime update, and offers **Restart and
-install** after the download completes. A downloaded update is installed only
-after the user accepts either restart action.
+Old Electron clients select `Termdock-darwin-arm64-VERSION.zip`, which contains
+one fixed compatibility bridge (1.4.357, macOS 12+). The bridge selects
+`Termdock-Rust-darwin-arm64-VERSION.zip` on macOS 14+. On macOS 12/13 it keeps the
+working client and explains that the new application requires a system upgrade.
+The final Preview (0.1.14) installs the same Rust stable bundle, backs up existing
+applications, and retires its own Preview bundle to Trash after handoff.
 
-The ZIP filename includes `darwin-arm64`, which is required for the update
-service to select the Apple Silicon asset. The repository must remain public
-and releases must be published rather than left as drafts.
+Connections and preferences are imported with backups; WebView authentication
+and certificate trust are reauthorized in the new application identity. Existing
+services and tmux sessions keep running. See [the release contract](../desktop-rust/RELEASE.md)
+for signing, notarization, the one-time bridges and ordinary subsequent releases.
 
 ## Deferred macOS 27 issue
 

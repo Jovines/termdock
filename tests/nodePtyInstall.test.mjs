@@ -17,7 +17,7 @@ function fixture(t) {
   fs.mkdirSync(bin);
   const env = {
     ...process.env, HOME: root, PATH: `${bin}${path.delimiter}${process.env.PATH}`,
-    npm_config_global: 'true', TERMDOCK_INSTALL_FIXTURE: root,
+    npm_config_global: 'true', SHELL: '/nonexistent/login-shell', TERMDOCK_INSTALL_FIXTURE: root,
   };
   const executable = (name, code) => fs.writeFileSync(path.join(bin, name), `#!${process.execPath}\n${code}`, { mode: 0o755 });
   executable('npx', `
@@ -32,30 +32,30 @@ function fixture(t) {
   return { root, env };
 }
 
-for (const fail of [false, true]) test(`postinstall fallback with inherited global mode and a path containing spaces (${fail ? 'failure' : 'success'})`, t => {
+for (const fail of [false, true, 'probe']) test(`postinstall fallback with inherited global mode and a path containing spaces (${fail === 'probe' ? 'probe still fails' : fail ? 'build failure' : 'success'})`, t => {
   const { root, env } = fixture(t);
   const scripts = path.join(root, 'scripts');
   const pty = path.join(root, 'node_modules/node-pty');
   fs.mkdirSync(scripts);
   fs.mkdirSync(path.join(pty, 'prebuilds'), { recursive: true });
-  for (const name of ['postinstall.mjs', 'ensure-node-pty.cjs', 'node-pty-darwin-spawn.inc']) {
+  for (const name of ['postinstall.mjs', 'ensure-node-pty.cjs', 'node-pty-darwin-spawn.inc', 'install-utils.cjs']) {
     fs.copyFileSync(new URL(`../scripts/${name}`, import.meta.url), path.join(scripts, name));
   }
   // This exercises the cross-platform fallback, independently of the Darwin patch gate.
   fs.writeFileSync(path.join(pty, 'package.json'), JSON.stringify({ name: 'node-pty', main: 'index.cjs' }));
   fs.writeFileSync(path.join(pty, 'index.cjs'), `
     exports.spawn = () => {
-      if (!require('node:fs').existsSync(require('node:path').join(process.env.TERMDOCK_INSTALL_FIXTURE, 'rebuilt'))) throw new Error('incompatible binary');
+      if (process.env.TERMDOCK_PROBE_FAIL || !require('node:fs').existsSync(require('node:path').join(process.env.TERMDOCK_INSTALL_FIXTURE, 'rebuilt'))) throw new Error('incompatible binary');
       return { kill() {} };
     };
   `);
   const script = path.join(scripts, 'postinstall.mjs');
   const result = spawnSync(process.execPath, ['-e', `Object.defineProperty(process, 'platform', { value: 'linux' }); import(${JSON.stringify(pathToFileURL(script).href)});`], {
-    env: { ...env, ...(fail ? { TERMDOCK_REBUILD_FAIL: '1' } : {}) }, encoding: 'utf8', timeout: 30_000,
+    env: { ...env, ...(fail === true ? { TERMDOCK_REBUILD_FAIL: '1' } : fail === 'probe' ? { TERMDOCK_PROBE_FAIL: '1' } : {}) }, encoding: 'utf8', timeout: 30_000,
   });
   if (fail) {
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /exit status=17/);
+    assert.match(result.stderr, fail === 'probe' ? /terminal still cannot be created/ : /exit status=17/);
     assert.doesNotMatch(result.stdout, /postinstall complete/);
   } else {
     assert.equal(result.status, 0, result.stderr);

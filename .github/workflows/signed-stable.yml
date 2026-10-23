@@ -1,0 +1,133 @@
+name: Build signed and notarized Termdock
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish a new Rust stable version and update its channel'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stable-channel-publish
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/master'
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      CARGO_BUILD_JOBS: '3'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop-rust/package-lock.json
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-rust/src-tauri
+      - name: Check release identity and required secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY: ${{ secrets.TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY }}
+        run: |
+          test "$(uname -m)" = arm64
+          python3 - <<'PY'
+          import os
+          names = ['APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY', 'APPLE_API_KEY', 'APPLE_API_ISSUER', 'APPLE_API_PRIVATE_KEY', 'TAURI_SIGNING_PRIVATE_KEY', 'TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY']
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing: raise SystemExit('Missing GitHub Actions secrets: '+', '.join(missing))
+          print('All release credentials are configured')
+          PY
+          node -e 'require("fs").appendFileSync(process.env.GITHUB_ENV,`STABLE_VERSION=${require("./desktop-rust/package.json").version}\nSTABLE_REVISION=${process.env.GITHUB_SHA}\n`)'
+      - name: Refuse an existing published version before building
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          pages=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/releases?per_page=100','--paginate','--slurp']))
+          if any(r['tag_name']=='v'+os.environ['STABLE_VERSION'] for page in pages for r in page):
+              raise SystemExit('Version already has a release; bump the desktop stable version first')
+          PY
+      - name: Install build dependencies without starting services
+        run: |
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix desktop-rust
+      - name: Prepare and test release source
+        run: |
+          npm --prefix desktop-rust run prepare:workspace
+          npm --prefix desktop-rust run prepare:renderer
+          node desktop-rust/scripts/prepare-workspace.mjs --require-clean
+          cargo test --manifest-path desktop-rust/src-tauri/Cargo.toml --locked --lib
+          node --test desktop-rust/renderer/*.test.mjs desktop-rust/scripts/*.test.mjs
+      - name: Sign, notarize and verify App, updater and DMG
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY: ${{ secrets.TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/preview-notary.p8"
+          python3 - <<'PY'
+          import os, pathlib
+          pathlib.Path(os.environ['APPLE_API_KEY_PATH']).write_text(os.environ.pop('APPLE_API_PRIVATE_KEY'))
+          PY
+          unset APPLE_API_PRIVATE_KEY
+          trap 'rm -f "$APPLE_API_KEY_PATH"' EXIT
+          npm --prefix desktop-rust run package:stable -- "$STABLE_VERSION" "$RUNNER_TEMP/preview-output" 2>&1 | tee "$RUNNER_TEMP/preview-build.log"
+          python3 desktop-rust/scripts/notarize-preview.py "$RUNNER_TEMP/preview-output" 'desktop-rust/src-tauri/target/release/bundle/macos/Termdock.app' "$RUNNER_TEMP/preview-build.log"
+          rm "$RUNNER_TEMP/preview-output/build-config.json"
+      - name: Upload verified signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: notarized-stable-${{ env.STABLE_VERSION }}-${{ github.sha }}
+          path: ${{ runner.temp }}/preview-output/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Create exact source tag and draft, verify and publish
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          repo=os.environ['GITHUB_REPOSITORY']; tag='v'+os.environ['STABLE_VERSION']
+          subprocess.run(['gh','api',f'repos/{repo}/git/refs','--method','POST','-f','ref=refs/tags/'+tag,'-f','sha='+os.environ['GITHUB_SHA']],check=True)
+          subprocess.run(['gh','release','create',tag,'--repo',repo,'--verify-tag','--draft','--latest=false','--title','Termdock v'+os.environ['STABLE_VERSION'],'--notes','Signed and notarized Termdock Rust stable for macOS 14+. Legacy ZIP retains the macOS 12 compatibility bridge.'],check=True)
+          PY
+          PREFIX="$RUNNER_TEMP/preview-output/Termdock_${STABLE_VERSION}_aarch64"
+          gh release upload "v$STABLE_VERSION" "$PREFIX.dmg" "$PREFIX.app.tar.gz" "$PREFIX.app.tar.gz.sig" "$RUNNER_TEMP/preview-output/latest.json" "$RUNNER_TEMP/preview-output/release.json" "$RUNNER_TEMP/preview-output/Termdock-Rust-darwin-arm64-${STABLE_VERSION}.zip" "$RUNNER_TEMP/preview-output/Termdock-darwin-arm64-${STABLE_VERSION}.zip" --repo "$GITHUB_REPOSITORY"
+          python3 desktop-rust/scripts/promote-stable.py
+      - name: Remove temporary Apple credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/preview-notary.p8"

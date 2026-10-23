@@ -132,10 +132,10 @@ pub fn install_menu(app: &AppHandle) -> Result<(), String> {
     let commands: Vec<Value> = serde_json::from_str(include_str!("../../renderer/commands.json"))
         .map_err(|e| e.to_string())?;
     let menu = Menu::new(app).map_err(|e| e.to_string())?;
-    let application = Submenu::new(app, "Termdock Preview", true).map_err(|e| e.to_string())?;
+    let application = Submenu::new(app, crate::product::name(), true).map_err(|e| e.to_string())?;
     application
         .append(
-            &PredefinedMenuItem::about(app, Some("About Termdock Preview"), None)
+            &PredefinedMenuItem::about(app, Some(&format!("About {}", crate::product::name())), None)
                 .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
@@ -210,7 +210,7 @@ pub fn install_menu(app: &AppHandle) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 submenu
                     .append(
-                        &PredefinedMenuItem::hide(app, Some("Hide Termdock Preview"))
+                        &PredefinedMenuItem::hide(app, Some(&format!("Hide {}", crate::product::name())))
                             .map_err(|e| e.to_string())?,
                     )
                     .map_err(|e| e.to_string())?;
@@ -226,7 +226,7 @@ pub fn install_menu(app: &AppHandle) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             submenu
                 .append(
-                    &PredefinedMenuItem::quit(app, Some("Quit Termdock Preview"))
+                    &PredefinedMenuItem::quit(app, Some(&format!("Quit {}", crate::product::name())))
                         .map_err(|e| e.to_string())?,
                 )
                 .map_err(|e| e.to_string())?;
@@ -304,12 +304,12 @@ pub fn menu_event(app: &AppHandle, id: &str) {
                 let message = if value["status"] == "ready" {
                     "更新已下载，是否重启并安装？".to_owned()
                 } else if value["status"] == "current" {
-                    "当前已是最新 Preview".into()
+                    "当前已是最新版本".into()
                 } else {
                     value["error"].as_str().unwrap_or("更新检查完成").to_owned()
                 };
                 let answer = rfd::AsyncMessageDialog::new()
-                    .set_title("Termdock Preview 更新")
+                    .set_title(format!("{} 更新", crate::product::name()))
                     .set_description(message)
                     .set_buttons(if value["status"] == "ready" {
                         rfd::MessageButtons::YesNo
@@ -457,7 +457,7 @@ fn tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         }
     }
     menu.append(
-        &PredefinedMenuItem::quit(app, Some("退出 Termdock Preview")).map_err(|e| e.to_string())?,
+        &PredefinedMenuItem::quit(app, Some(&format!("退出 {}", crate::product::name()))).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     Ok(menu)
@@ -488,7 +488,7 @@ pub fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         tray.set_icon_as_template(true).map_err(|e| e.to_string())?;
         tray.set_title(Some("")).map_err(|e| e.to_string())?;
         tray.set_tooltip(Some(
-            status["tooltip"].as_str().unwrap_or("Termdock Preview"),
+            status["tooltip"].as_str().unwrap_or(crate::product::name()),
         ))
         .map_err(|e| e.to_string())?;
         tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
@@ -496,7 +496,7 @@ pub fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         let tray = TrayIconBuilder::with_id("preview-status")
             .icon(image)
             .icon_as_template(true)
-            .tooltip("Termdock Preview")
+            .tooltip(crate::product::name())
             .menu(&menu)
             .show_menu_on_left_click(false)
             .on_tray_icon_event(|tray, event| {
@@ -570,7 +570,7 @@ pub fn floating(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let position = constrain_floating(app, position, 152.);
     let mut builder =
         WebviewWindowBuilder::new(app, "floating", WebviewUrl::App("floating.html".into()))
-            .title("Termdock Preview Status")
+            .title(format!("{} Status", crate::product::name()))
             .inner_size(152., 40.)
             .decorations(false)
             .transparent(true)

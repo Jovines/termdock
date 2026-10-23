@@ -114,8 +114,10 @@ export class RouteAccess {
     writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600 }); renameSync(temporary, this.filePath);
   }
   configuredDirectTargets(): DirectTargetConfig[] {
-    const targets = new Map(this.additionalTargets().map(target => [target.serviceId, target]));
-    for (const target of this.registry().directTargets) targets.set(target.serviceId, target);
+    const explicit = this.registry().directTargets;
+    const overridden = new Set(explicit.map(target => target.serviceId));
+    const targets = new Map(this.additionalTargets().filter(target => !overridden.has(target.serviceId)).map(target => [JSON.stringify([target.serviceId, target.url]), target]));
+    for (const target of explicit) targets.set(JSON.stringify([target.serviceId, target.url]), target);
     return [...targets.values()];
   }
   configuredTargets(): Array<{ serviceId: string; url?: string; label?: string }> {

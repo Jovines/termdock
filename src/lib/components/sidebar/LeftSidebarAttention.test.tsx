@@ -55,7 +55,7 @@ describe('LeftSidebar attention state', () => {
           onReorderSessions={vi.fn()}
           onOpenSettings={vi.fn()}
         />
-      </I18nProvider>,
+      </I18nProvider>
     );
 
     const view = render(sidebar('review-session'));

@@ -1,3 +1,5 @@
+import { useDownloadTask } from '../../hooks/useFileDownload';
+import { DownloadFeedback } from '../ui/DownloadFeedback';
 import { collaborationGoalTracking, collaborationUpdatePreview } from '../../collaboration/taskTracking';
 import { CollaborationExecutionPreview } from './CollaborationExecutionPreview';
 import { taskRetryFeedback } from '../../collaboration/taskActionFeedback';
@@ -15,7 +17,7 @@ import { useCollaborationTaskWorkspace, taskWorkspaceDispatch, taskDetailDispatc
 import { collaborationMemberLabel } from '../../collaboration/display';
 import { isConnectionInterruption, SECURE_READY_EVENT, useConnectionRecovery } from '../../federation/connectionRecovery';
 import { createCollaborationTask, getCollaborationTask, listCollaborationTasks, updateCollaborationTask,
-  ensureCollaborationTeam, type AgentLauncherInfo, type CollaborationGroup, type CollaborationTaskView, type OrchestrationSession, type TaskMember, type TaskOperation } from '../../terminal/api';
+  saveDownloadBlob, ensureCollaborationTeam, type AgentLauncherInfo, type CollaborationGroup, type CollaborationTaskView, type OrchestrationSession, type TaskMember, type TaskOperation } from '../../terminal/api';
 
 const DirectoryPicker = lazy(() => import('./DirectoryPickerDialog').then(module => ({ default: module.DirectoryPickerDialog })));
 const TaskContent = lazy(() => import('./CollaborationTaskContent'));
@@ -422,11 +424,11 @@ function TaskDetail({ reader = false, active, paneKey, task, tasks, members, nam
   const children = task.children ?? [];
   const childrenPending = task.workflow?.kind === 'goal' && children.some(t => !['accepted', 'closed'].includes(t.status));
   const context = `任务：${task.title}\n任务 ID：${task.id}\n${task.spec}\n约束：${task.constraints || '未补充'}\n验收标准：${task.acceptance || '由用户决定'}\n${current ? `当前尝试：${current.id}\n负责人：${name(current.assignee)}\n` : ''}${task.artifacts.filter(a => a.attemptId === task.activeAttemptId).map(a => `${a.kind} · 版本 ${a.id} · ${stamp(a.createdAt)}\n${a.summary ? `结果摘要：${a.summary}\n` : ''}${a.content}`).join('\n\n')}\n${questions.map(q => `待回答：${q.question}`).join('\n')}`;
-  const exportRecord = () => {
-    const url = URL.createObjectURL(new Blob([JSON.stringify(task, null, 2)], { type: 'application/json' }));
-    const link = document.createElement('a'); link.href = url; link.download = `termdock-task-${task.id}.json`; link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
+  const exportTask = useCallback((signal: AbortSignal) => saveDownloadBlob(
+    new Blob([JSON.stringify(task, null, 2)], { type: 'application/json' }), `termdock-task-${task.id}.json`, signal,
+  ), [task]);
+  const exported = useDownloadTask(exportTask, task.id, active);
+
   const latestCoordination = task.events.filter(e => e.kind === 'coordinate' && (!e.attemptId || e.attemptId === task.activeAttemptId)).at(-1);
   const visibleArtifacts = view === 'results' ? task.artifacts.slice().reverse() : task.artifacts.filter(a => a.id === latestResult?.id || a.id === latestPlan?.id && task.approvedPlanArtifactId !== a.id || a.kind === 'review' && a.reviewsArtifactId === latestResult?.id).sort((a, b) => (a.kind === 'result' ? -1 : 1) - (b.kind === 'result' ? -1 : 1) || b.createdAt - a.createdAt);
   const executionRecords = children.flatMap(child => { const record = tasks.find(t => t.id === child.id); return record ? [record] : []; });
@@ -531,7 +533,7 @@ function TaskDetail({ reader = false, active, paneKey, task, tasks, members, nam
       {!open && <button type="button" className={secondary} disabled={busy} onClick={() => void act({ kind: 'reopen' })}>重新打开任务</button>}
       <details><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted-foreground">投递凭证与执行尝试 · {task.attempts.length} 轮</summary><div className="space-y-3 text-xs leading-5 text-muted-foreground">{task.outbox.map(o => <p key={o.id} className="break-words">{o.lastError ? `等待重试：${o.lastError}` : '已保存 · 等待投递'}{o.messageId ? ` · 消息 ${o.messageId}` : ''}</p>)}{task.attempts.map(a => <div key={a.id}><p>{a.id === task.activeAttemptId ? '当前分派' : '历史分派'} · {name(a.assignee)} · {stamp(a.createdAt)}</p><p className="mt-1 break-all font-mono text-[11px]">尝试 ID：{a.id}</p><p className="mt-1">{a.deliveryStatus === 'delivered' ? `已写入终端 · ${a.deliveredAt ? stamp(a.deliveredAt) : ''}` : a.deliveryStatus === 'failed' || a.deliveryStatus === 'expired' ? '本次消息投递未成功' : '等待写入终端'}{a.report ? ` · ${labels[a.report.status]}（${stamp(a.report.createdAt)}）` : ''}</p></div>)}{task.deliveries.filter(d => d.kind !== 'task').map(d => <p key={d.id} className="break-all">后续消息 {d.messageId} · {d.status === 'delivered' ? '已写入终端' : '等待投递'}{d.deliveredAt ? ` · ${stamp(d.deliveredAt)}` : ''}</p>)}<p className="text-[11px]">投递凭证确认终端写入；报告保留成员原始陈述。</p></div></details>
       <p className="select-text break-all text-[11px] text-muted-foreground">任务：{task.id}<br />来源服务：{task.ownerServiceId}<br />版本：{task.revision}</p>
-      <div className="flex flex-wrap gap-2"><button type="button" className={secondary} onClick={() => { void Promise.resolve().then(() => navigator.clipboard.writeText(context)).then(() => setCopyStatus('任务上下文已复制。')).catch(() => setCopyStatus('复制失败，可导出任务记录。')); }}>复制上下文</button><button type="button" className={secondary} onClick={exportRecord}>导出记录</button>{copyStatus && <span role="status" className="self-center text-[11px] text-muted-foreground">{copyStatus}</span>}</div>
+      <div className="flex flex-wrap gap-2"><button type="button" className={secondary} onClick={() => { void Promise.resolve().then(() => navigator.clipboard.writeText(context)).then(() => setCopyStatus('任务上下文已复制。')).catch(() => setCopyStatus('复制失败，可导出任务记录。')); }}>复制上下文</button><button type="button" className={secondary} disabled={exported.status === 'pending'} onClick={() => void exported.start()}>导出记录</button>{copyStatus && <span role="status" className="self-center text-[11px] text-muted-foreground">{copyStatus}</span>}<DownloadFeedback status={exported.status} error={exported.error} cancel={exported.cancel} /></div>
     </div></details>
     </div>
     {reader && latestResult && task.status !== 'closed' && <footer role="region" aria-label="结果验收" className="shrink-0 space-y-2 border-t border-border/25 bg-[var(--chrome-bg)] py-3 [padding-bottom:max(0.75rem,env(safe-area-inset-bottom))]">

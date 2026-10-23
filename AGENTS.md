@@ -107,8 +107,28 @@
   刻度有序、无裸数值、局部控件不碰全局档位,以及已登记的局部
   “兄弟控件 → 弹层宿主 → 弹层”链路有序。
 
+## 终端尺寸架构
+
+- 浏览器终端统一通过 `src/lib/terminal/geometry.ts` 的 `createBrowserTerminal` 等待字体并创建，再交给 `TerminalGeometry` 管理尺寸；新增入口优先复用 `TerminalViewport`，不复制 `fit` / `resize` 流程。无调整尺寸权限的共享终端使用 `authority: 'server'`，禁止按本机容器改写远端网格。
+- 生命周期为 `initialize`（字体与 renderer 就绪后同步测量，包括已有布局盒子的隐藏终端）、`reveal`（布局阶段、首次可见绘制前完成）、`update`（正常布局变化）。构造默认值和估算值不能作为连接尺寸；没有实测尺寸返回 `null`，重连不得用缓存覆盖这个显式退出尺寸接管的信号。
+- 独立 tmux 显示连接的挂载与 resize 统一走 `src/server/utils/tmuxDisplayGeometry.ts`；显示 PTY 和观测 PTY 的尺寸必须在同一会话 I/O 队列里一起维护。重建观测 PTY 前读取实际窗口尺寸，禁止用默认 80×24 缩小已有会话。
+- 修改这些公共入口、增加终端入口或重构初始化时，运行 `npm run test:terminal-geometry` 和 `npm run test:terminal-geometry:browser`；边界测试禁止入口直接调用 xterm / FitAddon 的尺寸方法，CI 包含真实 tmux 的断开后尺寸保持和 DPR 1/2 的首次显示检查。自动化浏览器和 CI 的 macOS PTY 检查不替代真实 macOS/iOS 客户端验收。
+
 ## 终端协作事实边界
 
 - 协作通信和观测基于 terminal，不依赖各家 Agent 的 hook。CLI 经本机服务完成跨节点通信，不依赖网页/PWA/桌面客户端持续转发。
 - 只报告实际观测：入队、远端接收、写入终端、终端快照、终端最后输出时间、明确回复。读取正文和回复都不能推导“已读”，不提供已读字段或状态。
 - 不提供无法可靠观测的 Agent 内部状态、工具活动、排队状态或任务进度。显式任务报告须保留原始消息和时间，不据此推断整个会话忙闲。
+
+## 会话数据与展示边界
+
+- 会话列表沿用 `useSessionPersistence` 的库存、控制 WebSocket、缓存及本地变更归并链路；它是共享会话目录的唯一写入者。功能组件不得另拉一份 inventory 维护自己的会话数据源。
+- 会话选择器使用 `useSessionDirectory()` 的 `SessionOption`，显示 `displayName` / `displaySubtitle`，用 `sessionId` 操作目标。原始 `name`、tmux 名称和路由 ID 不作为用户展示名。
+- 名称统一经 `src/server/utils/sessionDisplayName.ts` 的 `getSessionPresentation` 解析，保留自定义/自动标题、实时标题、程序检测配置、目录与冷启动缓存。前端旧展示函数也是该规则的兼容入口；新增功能不得另写一套标题兜底规则。
+- 服务端 inventory、协作目录与交接记录使用同一投影；持久化及路由身份保持独立。边界由 `sessionDirectoryBoundary.test.ts` 和共享目录回归测试守卫。详见 `docs/session-directory.md`。
+
+## 共享会话能力边界
+
+- 共享 UI 使用 `src/lib/federation/sessionCapabilities.ts` 的正向白名单：只从已认证的 session-list 与资源授权投影能力，未知或新增功能默认不开启，不复制本机完整菜单再逐项排除。
+- 公共会话组件通过 `useSessionCapabilities().has(...)` 判断功能；共享环境缺少明确能力时禁止输入或操作，不能因 `canWrite` 默认值而启用。输入权限不代表拥有待办、再次分享或会话管理权限。
+- 服务端授权校验始终生效，UI 隐藏不能替代鉴权；共享内容屏蔽应用操作右键，保留选中文字的原生复制。详见 `docs/shared-session-capabilities.md`。

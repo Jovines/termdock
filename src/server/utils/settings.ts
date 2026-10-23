@@ -1,3 +1,4 @@
+import { isValidAndroidSerial } from '../shared/androidDevices.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -50,6 +51,7 @@ export interface AndroidPanelSettings {
   /** 上次 dock 到终端分屏的位置，刷新后据此恢复。 */
   docked: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
   deviceSerial: string | null;
+  devicePhysicalId?: string | null;
 }
 
 export interface SettingsDoc {
@@ -273,8 +275,9 @@ export function normalizeAndroidPanel(value: unknown): AndroidPanelSettings {
       docked = { sessionId: item.sessionId, side };
     }
   }
-  const deviceSerial = typeof raw.deviceSerial === 'string' && /^[0-9a-zA-Z_.:\-]{1,128}$/.test(raw.deviceSerial) ? raw.deviceSerial : null;
-  return { enabled, quality, activePresetId, presets, docked, deviceSerial };
+  const deviceSerial = typeof raw.deviceSerial === 'string' && isValidAndroidSerial(raw.deviceSerial) ? raw.deviceSerial : null;
+  const devicePhysicalId = typeof raw.devicePhysicalId === 'string' && /^[a-f0-9]{64}$/.test(raw.devicePhysicalId) ? raw.devicePhysicalId : null;
+  return { enabled, quality, activePresetId, presets, docked, deviceSerial, devicePhysicalId };
 }
 
 export function normalizePinnedExplorerRoots(value: unknown): PinnedExplorerRoots {
@@ -940,7 +943,8 @@ export function getAndroidPanelSetting(): AndroidPanelSettings { return loadSett
 
 export function setAndroidPanelSetting(patch: Partial<AndroidPanelSettings>): SettingsDoc {
   return updateSettings((settings) => {
-    settings.androidPanel = normalizeAndroidPanel({ ...settings.androidPanel, ...patch });
+    const resetIdentity = patch.deviceSerial !== undefined && patch.deviceSerial !== settings.androidPanel.deviceSerial && patch.devicePhysicalId === undefined;
+    settings.androidPanel = normalizeAndroidPanel({ ...settings.androidPanel, ...(resetIdentity ? { devicePhysicalId: null } : {}), ...patch });
   });
 }
 

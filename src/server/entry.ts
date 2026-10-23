@@ -5,7 +5,7 @@ import { CollaborationPeerTransport, connectCollaborationRpc, type Collaboration
 import { collaborationStore, collaborationTaskStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions, prepareCollaborationTaskWorker, integrationSessionAdapter } from './routes/terminal.js';
 import { CollaborationTaskService } from './agent/collaborationTaskService.js';
 import { setPushTargetPeerId } from './notifications/pushService.js';
-import { desktopDirectTargets } from './federation/desktopTargets.js';
+import { desktopServiceTargets } from './federation/desktopTargets.js';
 import { createOpenAccessRouter } from './federation/openAccess.js';
 import { createPasswordLoginRouter } from './federation/passwordLoginRoutes.js';
 import { apiAccessGate, isTrustedLocalRequest } from './utils/apiAccess.js';
@@ -15,7 +15,8 @@ import { startWebTransportServer } from './federation/webTransportServer.js';
 import type { WebTransportDescriptor } from './federation/webTransportProtocol.js';
 import { RouteAccess, type RoutePrincipal } from './federation/routeAccess.js';
 import { RouteInvitationStore } from './federation/routeInvitations.js';
-import { attachRegisteredDirectTargets, verifyDirectTarget } from './federation/directRoutes.js';
+import { verifyDirectTarget } from './federation/directRoutes.js';
+import { DirectTargetRegistry } from './federation/directTargetRegistry.js';
 import { secureChannelOriginAllowed } from './federation/originPolicy.js';
 import { RelayRouter } from './federation/relay.js';
 import { DesktopSelfRelay } from './federation/selfRelay.js';
@@ -559,7 +560,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   let routeInvitations: RouteInvitationStore | undefined;
   let federationServiceId = '';
   let activeRouteIds = (): string[] => [];
-  const desktopTargets = () => desktopDirectTargets(path.join(homedir(), '.termdock', 'desktop.json'), federationServiceId);
+  const desktopTargets = () => desktopServiceTargets(homedir(), federationServiceId);
   const routeAccess = new RouteAccess(path.join(homedir(), '.termdock', 'federation', 'routes.json'), Date.now,
     (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true || collaborationTransport?.canRoute(subjectId, targetServiceId) === true,
     desktopTargets, () => activeRouteIds());
@@ -570,24 +571,13 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     allowRoute: (principal, serviceId) => routeAccess.allowRoute(principal, serviceId),
   });
   activeRouteIds = () => relayRouter.activeRouteIds();
-  const dynamicDirectTargets = new Map<string, { signature: string; close: () => void }>();
+  const directTargetRegistry = new DirectTargetRegistry(relayRouter, path.join(homedir(), '.termdock', 'federation'));
   const refreshDirectTargets = () => {
-    const desired = new Map(routeAccess.configuredDirectTargets().filter(target => target.serviceId !== federationServiceId).map(target => [target.serviceId, target]));
-    for (const [id, registered] of dynamicDirectTargets) {
-      const target = desired.get(id);
-      if (!target || registered.signature !== JSON.stringify([target.url, target.caPath, target.caFingerprint256])) {
-        registered.close(); dynamicDirectTargets.delete(id);
-      }
-    }
-    for (const [id, target] of desired) if (!dynamicDirectTargets.has(id)) {
-      try {
-        dynamicDirectTargets.set(id, { signature: JSON.stringify([target.url, target.caPath, target.caFingerprint256]), close: attachRegisteredDirectTargets(relayRouter, [target], path.join(homedir(), '.termdock', 'federation')) });
-      } catch { /* A malformed or unavailable local route remains unusable. */ }
-    }
+    directTargetRegistry.refresh(routeAccess.configuredDirectTargets().filter(target => target.serviceId !== federationServiceId));
   };
   refreshDirectTargets();
   const desktopRoutesTimer = setInterval(refreshDirectTargets, 2000); desktopRoutesTimer.unref();
-  onServerClose(() => { clearInterval(desktopRoutesTimer); for (const target of dynamicDirectTargets.values()) target.close(); });
+  onServerClose(() => { clearInterval(desktopRoutesTimer); directTargetRegistry.close(); });
   onServerClose(() => relayRouter.close());
   onServerClose(() => { void stopAllScrcpySessions(); void androidRecordings.stopAll(); });
   onServerClose(stopComputerBridges);
@@ -619,7 +609,10 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       if (!collaborationTransport) throw new Error('COLLABORATION_UNAVAILABLE');
       return collaborationTransport.receive(subjectId, packet);
     },
-    listRouteTargets: () => { refreshDirectTargets(); return routeAccess.configuredTargets().map(target => ({ ...target, available: relayRouter.hasRoute(target.serviceId) })); },
+    listRouteTargets: () => {
+      refreshDirectTargets();
+      return routeAccess.configuredTargets().map(target => directTargetRegistry.describe(target));
+    },
     listRouteAccess: () => routeInvitations?.list() || [],
     grantRouteAccess: async (issuerId, targetServiceId, subjectId, url) => {
       if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
@@ -727,7 +720,11 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     const selfRelay = new DesktopSelfRelay({
       desktopFile: path.join(homedir(), '.termdock', 'desktop.json'),
       targets: () => routeAccess.configuredDirectTargets(), baseDir: path.join(homedir(), '.termdock', 'federation'), identity: runtime.identity, serviceId: runtime.serviceId,
-      localOrigin: `${scheme}://${localAuthority}:${port}`, ...(localCa ? { localCa } : {}),
+      localOrigin: () => {
+        const address = server.address();
+        if (!address || typeof address === 'string') throw new Error('Local service is not listening');
+        return `${scheme}://${localAuthority}:${address.port}`;
+      }, ...(localCa ? { localCa } : {}),
     });
     selfRelay.start();
     onServerClose(() => selfRelay.close());

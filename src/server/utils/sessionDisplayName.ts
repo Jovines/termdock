@@ -1,5 +1,13 @@
 type TerminalMode = 'shell' | 'tmux';
 
+/** The shared display contract. `name` remains the stored identity, never a UI label by itself. */
+export interface SessionDisplaySource {
+  name: string; customName?: boolean; mode?: TerminalMode; sessionId?: string | null; id?: string;
+  activeProgram?: string | null; cwd?: string | null; shellTitle?: string | null;
+  promptState?: 'idle' | 'running' | null; agent?: { displayName?: string; slug?: string } | null;
+}
+export interface SessionPresentation { displayName: string; displaySubtitle: string | null }
+
 export const DEFAULT_SESSION_DISPLAY_SHELL_NAMES = new Set([
   'bash',
   'zsh',
@@ -20,14 +28,14 @@ export function getCwdLeafName(cwd: string | null): string | null {
 }
 
 export function getSessionDisplayLines(
-  session: { name: string; customName?: boolean; mode?: TerminalMode },
+  session: SessionDisplaySource,
   activeProgram: string | null,
   cwd: string | null,
   shellNames: ReadonlySet<string> = DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
   shellTitle: string | null = null,
   promptState: 'idle' | 'running' | null = null,
 ): { primary: string; secondary: string | null } {
-  if (session.customName) return { primary: session.name, secondary: getCwdLeafName(cwd) };
+  if (session.customName && session.name.trim()) return { primary: session.name, secondary: getCwdLeafName(cwd) };
 
   // Shell integration (OSC 2) provides real-time title: command name when running,
   // cwd when idle. This is faster and more accurate than server-side process polling.
@@ -47,11 +55,13 @@ export function getSessionDisplayLines(
 
   const dir = getCwdLeafName(cwd);
   if (dir) return { primary: dir, secondary: null };
-  return { primary: session.name, secondary: null };
+  const stored = session.name.trim();
+  const internal = /^(?:tmux:|remote:|wt-)/i.test(stored) || stored === session.sessionId || stored === session.id;
+  return { primary: stored && !internal ? stored : session.agent?.displayName || '终端会话', secondary: null };
 }
 
 export function getSessionDisplayName(
-  session: { name: string; customName?: boolean; mode?: TerminalMode },
+  session: SessionDisplaySource,
   activeProgram: string | null,
   cwd: string | null,
   shellNames: ReadonlySet<string> = DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
@@ -61,13 +71,14 @@ export function getSessionDisplayName(
   return getSessionDisplayLines(session, activeProgram, cwd, shellNames, shellTitle, promptState).primary;
 }
 
-/** Resolve the same title hints the session sidebar uses, without exposing route IDs. */
-export function collaborationSessionDisplayName(session: { name: string; sessionId?: string; customName?: boolean; activeProgram?: string | null; shellTitle?: string | null; cwd?: string | null; agent?: { displayName: string } | null }): string {
-  const cwdLeaf = getCwdLeafName(session.cwd ?? null);
-  const title = session.shellTitle === session.cwd || session.shellTitle === cwdLeaf ? null : session.shellTitle ?? null;
-  const name = getSessionDisplayName(session, session.activeProgram ?? null, null, DEFAULT_SESSION_DISPLAY_SHELL_NAMES, title);
-  return !name.trim() || /^(?:tmux:|remote:|wt-)/i.test(name) || name === session.sessionId
-    ? session.agent?.displayName || cwdLeaf || '终端会话'
-    : name;
+/** Sidebar, tabs, inventories, selectors and server messages use this same projection. */
+export function getSessionPresentation(session: SessionDisplaySource, shellNames: ReadonlySet<string> = DEFAULT_SESSION_DISPLAY_SHELL_NAMES): SessionPresentation {
+  const { primary, secondary } = getSessionDisplayLines(session, session.activeProgram ?? null, session.cwd ?? null,
+    shellNames, session.shellTitle ?? null, session.promptState ?? null);
+  return { displayName: primary, displaySubtitle: secondary };
+}
+/** Compatibility export for callers that still consume `name` in orchestration payloads. */
+export function collaborationSessionDisplayName(session: SessionDisplaySource): string {
+  return getSessionPresentation(session).displayName;
 }
 

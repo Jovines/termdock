@@ -17,7 +17,7 @@ it('serializes delayed global writes and persists the latest launch after an old
   expect(stored).toEqual([{ token: null }, { token: 'launch-A' }]);
 });
 it('preserves a launch through a delayed disk read and does not resurrect a concurrently deleted session', () => {
-  const old = { sessionId: 'a', backendSessionId: 'backend', name: 'before', agentLaunchGeneration: null, agentLaunchCheck: null };
+  const old: SessionLaunchState & { sessionId: string; name: string } = { sessionId: 'a', backendSessionId: 'backend', name: 'before', agentLaunchGeneration: null, agentLaunchCheck: null };
   const before = [old, { ...old, sessionId: 'deleted' }];
   const launched = { ...old, agentLaunchGeneration: 'launch-A', agentLaunchCheck: { id: 'launch-A', agentSlug: 'fixture', nativeSessionId: null, deadline: 1000 } };
   expect(mergeReloadedSessionState(before, before, [launched])).toEqual([launched]);
@@ -32,7 +32,7 @@ it('retains newly opened sessions while permitting external display metadata upd
   expect(mergeReloadedSessionState([{ ...old, name: 'disk-name' }], [old], [old, added])).toMatchObject([{ name: 'disk-name' }, added]);
 });
 it('keeps an administrator profile identity scope through metadata, check completion, and disk reload', () => {
-  const old = { sessionId: 'a', backendSessionId: 'backend', agentLaunchGeneration: null, agentLaunchCheck: null };
+  const old: SessionLaunchState & { sessionId: string } = { sessionId: 'a', backendSessionId: 'backend', agentLaunchGeneration: null, agentLaunchCheck: null };
   const nativeIdentity = { kind: 'linux-flock-owner' as const, directory: '/owned/home/job/locks' };
   const live = mergeSessionLaunchState(old, old, { expectedGeneration: null, expectedCheckId: null,
     generation: 'A', check: null, nativeIdentity });

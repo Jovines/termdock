@@ -20,7 +20,7 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   const app = express(); app.use(express.json());
   const inventory = { clientSessions: [
-    { backendSessionId: 'one', sessionId: 'source-one', name: 'Allowed', live: true, cwd: '/private', frontendSessionId: 'frontend-secret' },
+    { backendSessionId: 'one', sessionId: 'source-one', name: 'Allowed', customName: true, live: true, cwd: '/private', frontendSessionId: 'frontend-secret' },
     { backendSessionId: 'two', name: 'Hidden', live: true },
     { backendSessionId: null, name: 'Detached' },
   ], tmuxSessions: [{ name: 'unbound-secret' }], tmuxRecovery: { secret: true } };

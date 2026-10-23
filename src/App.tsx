@@ -1,8 +1,11 @@
+import { useAppFeedback } from './lib/components/ui/AppFeedback';
+import { observeDragLifetime } from './lib/gesture/dragLifetime';
+import { DragDropContext } from './lib/components/DragDropContext';
 import { confirmPageAction, runConfirmedPageAction, showPageFeedback } from './lib/desktop/pageFeedback';
 import { readBrowserServices } from './lib/services/serviceDirectory';
 import { parseArchitectureLink, consumeArchitectureLink, queueArchitectureLink } from './lib/architecture/link';
 import { sessionCreationErrorKey, type NewSessionCreationResult, type NewSessionRequestOptions } from './lib/terminal/newSessionRequest';
-import { interruptActiveDrag, interruptibleDragSensors } from './lib/hooks/useDragInterruptionSensor';
+import { interruptActiveDrag } from './lib/hooks/useDragInterruptionSensor';
 import { SessionCollaborationActions } from './lib/components/sidebar/SessionCollaborationActions';
 import { isKeyboardLayerOpen, useKeyboardLayer } from './lib/hooks/useKeyboardLayer';
 import { CollaborationWorkspaceFrame } from './lib/components/CollaborationWorkspaceFrame';
@@ -18,6 +21,8 @@ import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import { SessionViewActions } from './lib/components/chat/SessionViewActions';
+import { TODO_GUIDANCE } from './lib/todos/guidance';
+import { insertSessionDraft } from './lib/terminal/insertSessionDraft';
 import { SessionModeSwitch } from './lib/components/chat/SessionModeSwitch';
 import { Switch } from './lib/components/ui/Switch';
 import {
@@ -50,7 +55,7 @@ import {
   Cable as RiLinkLine,
   Type as RiFontSize,
 } from 'lucide-react';
-import { DragDropContext, Droppable, Draggable, type DragStart, type DragUpdate, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
+import { Droppable, Draggable, type DragStart, type DragUpdate, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
@@ -105,6 +110,7 @@ import { DeferredRightSidebar as RightSidebar } from './lib/components/sidebar/D
 import { AndroidMirrorDock } from './lib/components/android/AndroidMirrorView';
 import { QuotaView } from './lib/components/sidebar/QuotaView';
 import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloatingSessionButtons } from './lib/components/AgentIndicators';
+import { shouldShowTuiLoading } from './lib/utils/agentAttention';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
@@ -116,6 +122,8 @@ import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuilti
 import type { TermdockColorTheme } from './lib/terminal/theme';
 import { getTermdockDesktopBridge, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
 import { StartupScreen } from './lib/components/StartupScreen';
+import { useInitialRestoreGate } from './lib/hooks/useInitialRestoreGate';
+import { setSessionShellNames, useSessionDirectory } from './lib/stores/useSessionDirectory';
 import type { SplitLayout, SplitWorkspaceSummary } from './lib/terminal/splitWorkspaces';
 import { MOBILE_SESSION_DESTROY_DROPPABLE_ID, isMobileSessionDestroyDrop } from './lib/terminal/mobileSessionDestroy';
 
@@ -129,7 +137,7 @@ const RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_SESSION_CACHE_KEY = 'termdock:right-sid
 const RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY = 'termdock:running-session-button-enabled:v1';
 const ATTENTION_BUTTON_ENABLED_CACHE_KEY = 'termdock:attention-button-enabled:v1';
 const MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS = 60;
-const DESKTOP_TAB_MENU_WIDTH = 320;
+const DESKTOP_TAB_MENU_WIDTH = 280;
 const DESKTOP_TAB_MENU_MAX_HEIGHT = 420;
 const DESKTOP_TAB_MENU_GAP = 8;
 
@@ -137,7 +145,7 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-function getDesktopTabMenuPosition(anchor: { x: number; y: number } | null): React.CSSProperties {
+function getDesktopTabMenuPosition(anchor: { x: number; y: number } | null, height = DESKTOP_TAB_MENU_MAX_HEIGHT): React.CSSProperties {
   if (typeof window === 'undefined') {
     return { left: DESKTOP_TAB_MENU_GAP, top: DESKTOP_TAB_MENU_GAP };
   }
@@ -146,7 +154,7 @@ function getDesktopTabMenuPosition(anchor: { x: number; y: number } | null): Rea
   const sourceX = anchor?.x ?? fallbackX;
   const sourceY = anchor?.y ?? fallbackY;
   const maxLeft = Math.max(DESKTOP_TAB_MENU_GAP, window.innerWidth - DESKTOP_TAB_MENU_WIDTH - DESKTOP_TAB_MENU_GAP);
-  const maxTop = Math.max(DESKTOP_TAB_MENU_GAP, window.innerHeight - DESKTOP_TAB_MENU_MAX_HEIGHT - DESKTOP_TAB_MENU_GAP);
+  const maxTop = Math.max(DESKTOP_TAB_MENU_GAP, window.innerHeight - height - DESKTOP_TAB_MENU_GAP);
   return {
     left: clampNumber(sourceX + DESKTOP_TAB_MENU_GAP, DESKTOP_TAB_MENU_GAP, maxLeft),
     top: clampNumber(sourceY + DESKTOP_TAB_MENU_GAP, DESKTOP_TAB_MENU_GAP, maxTop),
@@ -495,7 +503,11 @@ function areTabTerminalSessionsEqual(
       currentState.shellTitle !== nextState.shellTitle ||
       currentState.promptState !== nextState.promptState ||
       currentState.tuiProgress?.state !== nextState.tuiProgress?.state ||
-      currentState.tuiProgress?.progress !== nextState.tuiProgress?.progress
+      currentState.tuiProgress?.progress !== nextState.tuiProgress?.progress ||
+      currentState.tuiProgress?.source !== nextState.tuiProgress?.source ||
+      currentState.tuiProgress?.app !== nextState.tuiProgress?.app ||
+      currentState.tuiProgress?.message !== nextState.tuiProgress?.message ||
+      currentState.tuiProgress?.kind !== nextState.tuiProgress?.kind
     ) {
       return false;
     }
@@ -590,6 +602,7 @@ function App() {
   const updateLatestVersion = useRef(termdockUpdateState?.latestVersion);
   updateLatestVersion.current = termdockUpdateState?.latestVersion;
   const [updateActionError, setUpdateActionError] = useState<string | null>(null);
+  useAppFeedback(updateActionError ? { message: updateActionError } : null);
   useEffect(() => {
     const invalidate = () => { updatePageEpoch.current++; };
     for (const event of ['pagehide', 'auth:unauthorized', SECURE_STATE_EVENT]) window.addEventListener(event, invalidate);
@@ -635,6 +648,8 @@ function App() {
   })));
   const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
   const todoWorkspaceOpen = useCollaborationNavigation(state => state.todoOpen);
+  const sessionDirectory = useSessionDirectory();
+  const sessionLabels = React.useMemo(() => new Map(sessionDirectory.map(session => [session.sessionId, session])), [sessionDirectory]);
   React.useEffect(() => {
     const showTerminal = () => useCollaborationNavigation.getState().terminal();
     window.addEventListener("switch-terminal-session", showTerminal);
@@ -645,11 +660,14 @@ function App() {
   // active xterm still needs to replay history and complete its first fit.
   // Keep the boot surface until MultiTerminalView confirms that whole path.
   const [hasRestoredSessionChrome, setHasRestoredSessionChrome] = React.useState(false);
+  const workspaceActive = todoWorkspaceOpen || !!mainCollaborationGroup;
+  const showInitialRestore = useInitialRestoreGate(hasRestoredSessionChrome, workspaceActive);
   React.useEffect(() => {
-    if (hasRestoredSessionChrome) reportWorkspace({ rendered: true });
-  }, [hasRestoredSessionChrome]);
+    if (hasRestoredSessionChrome || workspaceActive) reportWorkspace({ rendered: true });
+  }, [hasRestoredSessionChrome, workspaceActive]);
   const [agentResumeAction, setAgentResumeAction] = React.useState<AgentResumeActionState | null>(null);
   const [agentResumeNotice, setAgentResumeNotice] = React.useState<AgentResumeNotice | null>(null);
+  useAppFeedback(agentResumeNotice);
   const [splitWorkspaces, setSplitWorkspaces] = React.useState<SplitWorkspaceSummary[]>([]);
   // Only re-render the chrome when tab metadata changes, not on every terminal output chunk.
   const [terminalSessions, setTerminalSessions] = useState(() => {
@@ -989,7 +1007,31 @@ function App() {
     setTabMenuSessionId(null);
     setTabMenuAnchor(null);
   }, []);
+  const [promptInsertionError, setPromptInsertionError] = useState<string | null>(null);
+  useAppFeedback(promptInsertionError ? { message: promptInsertionError } : null);
+  const insertTodoGuidance = useCallback(async (sessionId: string) => {
+    setPromptInsertionError(null); closeTabMenu();
+    const result = await insertSessionDraft(sessionId, ` ${TODO_GUIDANCE} `);
+    if (result === 'failed') setPromptInsertionError('会话输入暂未就绪，提示词未插入，请稍后重试。');
+  }, [closeTabMenu]);
   useKeyboardLayer(tabMenuPanelRef, !!tabMenuSessionId, closeTabMenu);
+  React.useLayoutEffect(() => {
+    const panel = tabMenuPanelRef.current;
+    if (!tabMenuSessionId || !isDesktopViewport || !panel) return;
+    const position = () => {
+      const { top, left } = getDesktopTabMenuPosition(tabMenuAnchor, panel.getBoundingClientRect().height);
+      panel.style.top = `${top}px`;
+      panel.style.left = `${left}px`;
+    };
+    position();
+    const observer = new ResizeObserver(position);
+    observer.observe(panel);
+    window.addEventListener('resize', position);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', position);
+    };
+  }, [tabMenuSessionId, tabMenuAnchor, isDesktopViewport]);
   useEffect(() => {
     if (tabMenuSessionId && !sessions.some(session => session.id === tabMenuSessionId)) closeTabMenu();
   }, [sessions, tabMenuSessionId, closeTabMenu]);
@@ -1092,6 +1134,7 @@ function App() {
 
   const architectureLink = React.useRef(parseArchitectureLink(window.location.search) ?? consumeArchitectureLink(savedConnection()?.targetPeerId));
   const [architectureLinkError, setArchitectureLinkError] = React.useState('');
+  useAppFeedback(architectureLinkError ? { message: architectureLinkError } : null);
   React.useEffect(() => {
     const target = architectureLink.current; if (!target) return;
     if (target.peerId && target.peerId !== savedConnection()?.targetPeerId) {
@@ -1351,9 +1394,15 @@ function App() {
   const rightResizeStartXRef = useRef<number>(0);
   const rightResizeStartWidthRef = useRef<number>(0);
   const rightResizeRafRef = useRef<number | null>(null);
+  const stopRightResizeRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopRightResizeRef.current?.(), []);
 
   const handleRightResizeMouseDown = useCallback((event: React.MouseEvent) => {
+    if (event.button !== 0) return;
+    stopRightResizeRef.current?.();
     event.preventDefault();
+    const cursor = document.body.style.cursor;
+    const userSelect = document.body.style.userSelect;
     rightResizeStartXRef.current = event.clientX;
     const initialSidebarState = useSidebarStore.getState();
     const pinnedLeftWidth = initialSidebarState.leftPinned ? initialSidebarState.leftSidebarWidth : 0;
@@ -1380,19 +1429,19 @@ function App() {
 
     const handleMouseUp = () => {
       window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      stopRightResizeRef.current = null;
       if (rightResizeRafRef.current !== null) {
         cancelAnimationFrame(rightResizeRafRef.current);
         rightResizeRafRef.current = null;
       }
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = userSelect;
     };
 
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
+    stopRightResizeRef.current = observeDragLifetime({ onFinish: handleMouseUp });
     window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
   }, []);
 
   const handleToggleRightSidebar = useCallback(() => {
@@ -2027,7 +2076,7 @@ function App() {
     return getProgramDetection()
       .then((config) => {
         setProgramDetection(config);
-        SHELL_NAMES = new Set(config.shellNames);
+        SHELL_NAMES = new Set(config.shellNames); setSessionShellNames(config.shellNames);
         setProgramDetectionLoaded(true);
       })
       .catch(() => { /* use defaults */ });
@@ -2386,6 +2435,14 @@ function App() {
     setTabMenuAnchor(anchor ?? null);
     setTabMenuSessionId(sessionId);
   }, []);
+  useEffect(() => {
+    const open = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId: string; x: number; y: number }>).detail;
+      if (detail && sessions.some(session => session.id === detail.sessionId)) openTabMenu(detail.sessionId, { x: detail.x, y: detail.y });
+    };
+    window.addEventListener('termdock:session-context-menu', open);
+    return () => window.removeEventListener('termdock:session-context-menu', open);
+  }, [openTabMenu, sessions]);
   const bindTabLongPress = useSuperLongPress();
 
   // 请求聚焦某个 session：若它已在当前会话列表里，立即切换；否则记下来，
@@ -3051,7 +3108,7 @@ function App() {
     const isActive = session.id === activeSessionId;
     const isEditing = session.id === editingSessionId;
     const ts = terminalSessions.get(session.id);
-    const { primary: displayName, secondary: displaySubName } = getSessionDisplayLines(
+    const fallbackDisplay = getSessionDisplayLines(
       session,
       ts?.activeProgram ?? null,
       ts?.cwd ?? null,
@@ -3059,13 +3116,15 @@ function App() {
       ts?.shellTitle ?? null,
       ts?.promptState ?? null,
     );
+    const displayName = sessionLabels.get(session.id)?.displayName ?? fallbackDisplay.primary;
+    const displaySubName = sessionLabels.get(session.id)?.displaySubtitle ?? fallbackDisplay.secondary;
     const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
     const tabDirLabel = showDir
       ? (displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null))
       : null;
     const git = ts?.gitStatus;
     const tooltip = `${ts?.cwd || session.name}${git ? `\n⎇ ${git.branch}  +${git.added} −${git.removed}` : ''}`;
-    const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
+    const tuiProgressActive = shouldShowTuiLoading(ts);
     const accentColor = ts?.agentStatus === 'working' || tuiProgressActive
       ? 'var(--success)'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
@@ -3162,9 +3221,6 @@ function App() {
                   className="-ml-0.5 shrink-0 text-[color:var(--warning)]"
                   aria-label={t('tab.resumeAgentAvailable')}
                 />
-              )}
-              {tuiProgressActive && !ts?.agentStatus && (
-                <RiLoaderCircle size={compact ? 9 : 10} className="-ml-0.5 shrink-0 animate-spin text-[color:var(--success)]" />
               )}
             </span>
             {tabDirLabel ? (
@@ -3266,8 +3322,6 @@ function App() {
 
   const body = (
     <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
-      {updateActionError && <div role="alert" data-update-restart-error className="fixed right-3 top-3 z-toast flex max-w-md items-start gap-3 rounded-xl border border-border bg-surface p-3 text-sm text-foreground shadow-xl"><p className="break-words">{updateActionError}</p><button type="button" className="shrink-0 text-primary" aria-label={t('common.close')} onClick={() => setUpdateActionError(null)}>{t('common.close')}</button></div>}
-      {architectureLinkError && <div role="alert" className="flex shrink-0 items-center gap-2 bg-surface-2 px-3 py-2 text-xs"><p className="min-w-0 flex-1 break-words">{architectureLinkError}</p><button type="button" className="min-h-11 px-2 text-primary" onClick={() => setArchitectureLinkError('')}>{t('common.close')}</button></div>}
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <CollaborationWorkspaceFrame rightInset={pinnedRightSidebarInset} workspace={todoWorkspaceOpen ? <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开待办…</div>}><TodoWorkspace activeSessionId={activeSessionId} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} /></React.Suspense> : mainCollaborationGroup && <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开协作工作区…</div>}><CollaborationMainWorkspace key={mainCollaborationGroup} groupId={mainCollaborationGroup} activeSessionId={activeSessionId} defaultSessionMode={newSessionMode} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} onToggleRightSidebar={handleToggleRightSidebar} rightSidebarOpen={sidebarRightOpen || showPinnedRight} /></React.Suspense>}>
           <div
@@ -3328,7 +3382,7 @@ function App() {
                 )}
               </div>
             ) : groupByFolder ? (
-            <DragDropContext sensors={interruptibleDragSensors} onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleGroupedDragEnd}>
+            <DragDropContext onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleGroupedDragEnd}>
             {renderMobileSessionDestroyTarget()}
             <Droppable droppableId="groups" type="group" direction="horizontal">
               {(groupsProvided) => (
@@ -3443,7 +3497,7 @@ function App() {
             </Droppable>
             </DragDropContext>
             ) : (
-            <DragDropContext sensors={interruptibleDragSensors} onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleDragEnd}>
+            <DragDropContext onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleDragEnd}>
             {renderMobileSessionDestroyTarget()}
             <Droppable droppableId="tabs" type="session" direction="horizontal">
               {(provided) => (
@@ -4347,10 +4401,10 @@ function App() {
           ? 'border-b border-border/15 px-3 py-2'
           : 'border-b border-border/15 px-4 py-3';
         const menuItemClassName = isDesktopTabMenu
-          ? 'flex items-center gap-2 px-3 py-2 text-left text-[12px] transition'
+          ? 'flex min-h-8 items-center gap-2 px-3 py-1 text-left text-[12px] transition'
           : 'flex items-center gap-3 px-4 py-3 text-left text-[13px] transition';
         const menuIconClassName = isDesktopTabMenu
-          ? 'inline-flex h-6 w-6 items-center justify-center rounded-md'
+          ? 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded'
           : 'inline-flex h-7 w-7 items-center justify-center rounded-full';
         return (
           <>
@@ -4372,14 +4426,14 @@ function App() {
               style={menuPanelStyle}
             >
               <div className={`${menuHeaderClassName} shrink-0`}>
-                <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.session')}</div>
-                <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{menuName}</div>
+                {!isDesktopTabMenu && <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.session')}</div>}
+                <div className={`truncate font-medium text-foreground ${isDesktopTabMenu ? 'text-[12px]' : 'mt-0.5 text-[14px]'}`}>{menuName}</div>
                 {ts?.cwd && (
                   <div className="mt-0.5 truncate text-[11px] text-muted-foreground/80">{ts.cwd}</div>
                 )}
               </div>
               <div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain py-1">
-                <SessionViewActions sessionId={menuSession.id} onDone={closeTabMenu} />
+                <SessionViewActions sessionId={menuSession.id} compact={isDesktopTabMenu} onDone={closeTabMenu} onInsertTodoPrompt={() => void insertTodoGuidance(menuSession.id)} />
                 <button
                   type="button"
                   onClick={() => {
@@ -4397,7 +4451,7 @@ function App() {
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block font-medium">{t('tab.rename')}</span>
-                    <span className="block text-[11px] text-muted-foreground">{t('tab.renameHint')}</span>
+                    {!isDesktopTabMenu && <span className="block text-[11px] text-muted-foreground">{t('tab.renameHint')}</span>}
                   </span>
                 </button>
                 <button
@@ -4418,7 +4472,7 @@ function App() {
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block font-medium">{t('tab.copyCwd')}</span>
-                    <span className="block text-[11px] text-muted-foreground">{t('tab.copyCwdHint')}</span>
+                    {!isDesktopTabMenu && <span className="block text-[11px] text-muted-foreground">{t('tab.copyCwdHint')}</span>}
                   </span>
                   {tabCopiedHint && tabCopiedHint === ts?.cwd && (
                     <span className="ml-auto text-[11px] text-primary">{t('tab.copied')}</span>
@@ -4434,7 +4488,7 @@ function App() {
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block font-medium">{t('tab.fontSize')}</span>
-                        <span className="block text-[11px] text-muted-foreground">{t('tab.fontSizeHint')}</span>
+                        {!isDesktopTabMenu && <span className="block text-[11px] text-muted-foreground">{t('tab.fontSizeHint')}</span>}
                       </span>
                       <span className="flex shrink-0 items-center gap-1">
                         <button
@@ -4467,9 +4521,11 @@ function App() {
                               setSessionFontSize(menuSession.id, null);
                               setTabMenuFontTick((tick) => tick + 1);
                             }}
-                            className="ml-1 shrink-0 rounded-md px-1.5 py-1 text-[11px] text-primary transition hover:bg-primary/10"
+                            className={`ml-1 shrink-0 rounded-md text-[11px] text-primary transition hover:bg-primary/10 ${isDesktopTabMenu ? 'inline-flex h-7 w-7 items-center justify-center' : 'px-1.5 py-1'}`}
+                            aria-label={t('tab.fontSizeReset')}
+                            title={t('tab.fontSizeReset')}
                           >
-                            {t('tab.fontSizeReset')}
+                            {isDesktopTabMenu ? <RiRefreshLine size={13} /> : t('tab.fontSizeReset')}
                           </button>
                         )}
                       </span>
@@ -4494,12 +4550,12 @@ function App() {
                       <span className="block font-medium">
                         {t('tab.resumeAgent')}{ts.agent?.displayName ? ` · ${ts.agent.displayName}` : ''}
                       </span>
-                      <span className="block text-[11px] text-muted-foreground">{t('tab.resumeAgentHint')}</span>
+                      {!isDesktopTabMenu && <span className="block text-[11px] text-muted-foreground">{t('tab.resumeAgentHint')}</span>}
                     </span>
                   </button>
                 )}
                 <SessionCollaborationActions key={menuSession.id} sessionId={menuSession.id} backendSessionId={ts?.terminalSessionId}
-                  itemClassName={menuItemClassName} iconClassName={menuIconClassName} onDone={closeTabMenu}
+                  itemClassName={menuItemClassName} iconClassName={menuIconClassName} compact={isDesktopTabMenu} onDone={closeTabMenu}
                   onOpen={(groupId) => {
                     closeTabMenu();
                     useCollaborationNavigation.getState().open(groupId);
@@ -4520,7 +4576,7 @@ function App() {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block font-medium">{t('tab.destroySession')}</span>
-                      <span className="block text-[11px] text-muted-foreground">{t('tab.destroySessionHint')}</span>
+                      {!isDesktopTabMenu && <span className="block text-[11px] text-muted-foreground">{t('tab.destroySessionHint')}</span>}
                     </span>
                   </button>
                 ) : (
@@ -4537,7 +4593,7 @@ function App() {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block font-medium">{t('tab.close')}</span>
-                      <span className="block text-[11px] text-muted-foreground">{t('tab.closeHint')}</span>
+                      {!isDesktopTabMenu && <span className="block text-[11px] text-muted-foreground">{t('tab.closeHint')}</span>}
                     </span>
                   </button>
                 )}
@@ -5171,7 +5227,7 @@ function App() {
                               onClick={() => {
                                 const next = { ...programDetection, [key]: programDetection[key].filter((n) => n !== name) };
                                 setProgramDetection(next);
-                                if (key === 'shellNames') SHELL_NAMES = new Set(next.shellNames);
+                                if (key === 'shellNames') { SHELL_NAMES = new Set(next.shellNames); setSessionShellNames(next.shellNames); }
                                 replaceProgramDetection(next).catch(() => {});
                               }}
                               className="ml-0.5 text-muted-foreground hover:text-destructive"
@@ -5189,7 +5245,7 @@ function App() {
                             if (!val || programDetection[key].includes(val)) return;
                             const next = { ...programDetection, [key]: [...programDetection[key], val] };
                             setProgramDetection(next);
-                            if (key === 'shellNames') SHELL_NAMES = new Set(next.shellNames);
+                            if (key === 'shellNames') { SHELL_NAMES = new Set(next.shellNames); setSessionShellNames(next.shellNames); }
                             (e.target as HTMLInputElement).value = '';
                             replaceProgramDetection(next).catch(() => {});
                           }}
@@ -5202,7 +5258,7 @@ function App() {
                     onClick={() => {
                       resetProgramDetection().then((config) => {
                         setProgramDetection(config);
-                        SHELL_NAMES = new Set(config.shellNames);
+                        SHELL_NAMES = new Set(config.shellNames); setSessionShellNames(config.shellNames);
                       }).catch(() => {});
                     }}
                     className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
@@ -5448,30 +5504,6 @@ function App() {
         </button>
       )}
 
-      {agentResumeNotice && (
-        <div
-          className={`fixed inset-x-3 bottom-4 z-toast mx-auto flex max-w-md items-center gap-2 rounded-xl border px-4 py-3 text-[12px] shadow-lg animate-fade-in ${
-            agentResumeNotice.tone === 'success'
-              ? 'border-[rgb(var(--success-rgb)_/_0.24)] bg-surface-elevated text-foreground'
-              : 'border-destructive/30 bg-surface-elevated text-destructive'
-          }`}
-          role={agentResumeNotice.tone === 'error' ? 'alert' : 'status'}
-        >
-          {agentResumeNotice.tone === 'success'
-            ? <RiHistoryLine size={14} className="shrink-0 text-[color:var(--success)]" />
-            : <RiCircleHelp size={14} className="shrink-0" />}
-          <span className="min-w-0 flex-1">{agentResumeNotice.message}</span>
-          <button
-            type="button"
-            onClick={() => setAgentResumeNotice(null)}
-            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
-            aria-label={t('common.close')}
-          >
-            <RiCloseLine size={12} />
-          </button>
-        </div>
-      )}
-
       {/* Debug Info Panel */}
       {showDebug && (
         <>
@@ -5499,7 +5531,7 @@ function App() {
   // Keep the original boot surface above the already-mounted app while
   // MultiTerminalView restores the active terminal. Cached chrome may render
   // behind it, but must not expose the empty/history-replay/first-fit frames.
-  const initialSessionRestoreOverlay = !hasRestoredSessionChrome ? (
+  const initialSessionRestoreOverlay = showInitialRestore ? (
     <StartupScreen className="z-modal-panel" status="正在恢复会话…" />
   ) : null;
 

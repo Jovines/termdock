@@ -92,6 +92,37 @@ describe('browser federation entry routing', () => {
     expect(mocks.save).toHaveBeenLastCalledWith(expect.objectContaining({ targetPeerId: 'B', routes: selected.routes }));
     expect(nativeFetch).not.toHaveBeenCalled();
   });
+  it('recovers through an already-saved independent entry without reusing any address of the revoked entry or creating grants', async () => {
+    mocks.boot = 'A';
+    const routes = [{ url: 'https://b.example', targetPeerId: 'B' }, { url: 'https://b-alternate.example', targetPeerId: 'B' }, { url: 'https://c.example', targetPeerId: 'C' }];
+    const selected = { url: routes[0].url, targetPeerId: 'A', entryServiceId: 'B', routes };
+    mocks.saved.mockReturnValue(selected);
+    const integration = await import('./browserIntegration');
+    integration.pauseConnectionAccess(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { targetServiceId: 'A', entryServiceId: 'B' }));
+    expect(integration.canRetryConnectionAccess()).toBe(true);
+    const client = await integration.retryConnectionAccess();
+    expect(client.targetPeerId).toBe('A'); expect(integration.currentConnectionPath()).toBe('relay');
+    expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId !== 'B')).toBe(true);
+    expect(clients.get('C')!.request.mock.calls.some(([packet]) => packet.type === 'route-grant')).toBe(false);
+    expect(mocks.save).toHaveBeenLastCalledWith(expect.objectContaining({ targetPeerId: 'A', routes }));
+    client.close(); mocks.connect.mockClear();
+    await integration.getActiveClient();
+    expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId !== 'B')).toBe(true);
+  });
+  it('stops independent-entry recovery when all saved entries are revoked', async () => {
+    mocks.boot = 'A';
+    const selected = { url: 'https://b.example', targetPeerId: 'A', entryServiceId: 'B', routes: [{ url: 'https://b.example', targetPeerId: 'B' }, { url: 'https://c.example', targetPeerId: 'C' }] };
+    mocks.saved.mockReturnValue(selected);
+    const base = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => { const client = await base(args); client.request.mockRejectedValue(new Error('AUTHORIZATION_DENIED')); return client; });
+    const integration = await import('./browserIntegration');
+    integration.pauseConnectionAccess(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { targetServiceId: 'A', entryServiceId: 'B' }));
+    await expect(integration.retryConnectionAccess()).rejects.toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED' });
+    expect(integration.canRetryConnectionAccess()).toBe(false);
+    const calls = mocks.connect.mock.calls.length;
+    await expect(integration.retryConnectionAccess()).rejects.toThrow();
+    expect(mocks.connect).toHaveBeenCalledTimes(calls);
+  });
   it.each(['TARGET_AUTHORIZATION_REQUIRED', 'TARGET_IDENTITY_MISMATCH'] as const)('stops direct recovery on confirmed %s', async code => {
     mocks.saved.mockReturnValue({ url: 'https://b.example', targetPeerId: 'B', routes: [{ url: 'https://a.example', targetPeerId: 'A' }] });
     const integration = await import('./browserIntegration');
@@ -550,7 +581,7 @@ describe('browser federation entry routing', () => {
     await integration.connectDevice({ url: 'https://c.internal', targetPeerId: 'C', routes: [{ url: 'https://entry.example', targetPeerId: 'B' }] });
     const target = clients.get('C')!, entry = integration.currentEntryClient()!;
     expect(entry).toBeTruthy();
-    vi.mocked(entry.request).mockResolvedValue({ type: 'result', items: [], canManage: false });
+    vi.mocked(entry.request).mockResolvedValue({ id: 'fixture-response', type: 'result', items: [], canManage: false });
     mocks.connect.mockClear(); mocks.connect.mockRejectedValue(new Error('must not dial'));
     await integration.listRelayTargets({ id: 'B', targetPeerId: 'B', url: 'https://entry.example', label: 'Entry' });
     expect(mocks.connect).not.toHaveBeenCalled(); expect(entry.close).not.toHaveBeenCalled(); expect(target.close).not.toHaveBeenCalled();
@@ -625,6 +656,28 @@ describe('browser federation entry routing', () => {
     expect(local.getItem('termdock.federation.connections.v1')).toBeNull();
     await expect(integration.prepareRelayConnection({ url: 'https://b.example', targetPeerId: 'B' }, 'hidden')).rejects.toThrow('不可见');
     expect(clients.get('B')!.request.mock.calls.some(([packet]) => packet.type === 'route-grant')).toBe(false);
+  });
+  it('preserves a reverse-only target identity without recording the entry URL as a direct target origin', async () => {
+    mocks.boot = 'C';
+    const base = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => {
+      const client = await base(args);
+      if (args.targetPeerId === 'B') client.request.mockImplementation(async (packet: { type: string }) => packet.type === 'route-targets'
+        ? { canManage: true, items: [{ serviceId: 'C', available: true, authorized: true }] } : { routeToken: 'ticket' });
+      return client;
+    });
+    const integration = await import('./browserIntegration');
+    const intent = await integration.prepareRelayConnection({ url: 'https://b.example', targetPeerId: 'B' }, 'C');
+    expect(intent).toMatchObject({ url: 'https://b.example', targetPeerId: 'C', entryServiceId: 'B' });
+    expect(intent.serviceOrigin).toBeUndefined();
+    expect(integration.connectionAddresses(intent)).toEqual([]);
+    await integration.connectDevice(intent);
+    expect(integration.currentSecureClient()?.targetPeerId).toBe('C');
+    expect(integration.currentConnectionPath()).toBe('relay');
+    const saved = mocks.save.mock.calls.at(-1)![0];
+    expect(saved).toMatchObject({ targetPeerId: 'C', entryServiceId: 'B' });
+    expect(saved.serviceOrigin).toBeUndefined();
+    expect(mocks.connect.mock.calls.some(([args]) => args.targetPeerId === 'C' && !args.socketFactory)).toBe(false);
   });
   it('preserves another address of the same entry when preparing a relay target', async () => {
     const existing = { url: 'https://entry-home.example', targetPeerId: 'B' };

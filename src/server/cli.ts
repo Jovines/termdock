@@ -32,7 +32,7 @@ import { detectLocalSessionContext, resolveLocalCollaborationContext } from './a
 import { parseAutomationCommand, executeAutomationCommand, AUTOMATION_HELP, type AutomationCommand } from './agent/automationCli.js';
 import { parseCollaborationCommand, executeCollaborationCommand, COLLAB_HELP, type CollaborationCommand } from './agent/collaborationCli.js';
 import fs from 'fs';
-import { getMissingCertificateNames } from './utils/certificateNames.js';
+import { localCertificateNeedsRefresh, setupLocalHttps } from './utils/localHttpsSetup.js';
 import http from 'http';
 import https from 'https';
 import path from 'path';
@@ -160,6 +160,7 @@ interface CliOptions {
   httpsKey?: string;
   httpsCa?: string;
   setupLocalHttps: boolean;
+  installLocalCa: boolean;
   foreground: boolean;
   /** 前台运行 + 受 supervisor 监督（给 setsid/systemd/docker 用） */
   supervise: boolean;
@@ -234,7 +235,8 @@ Options:
   --https-key <p>    HTTPS private key path for local access
   --https-ca <p>     CA certificate path exposed through a temporary mobile setup server
   --setup-local-https
-                     Generate and trust local HTTPS certs with mkcert
+                     Generate local HTTPS certs; install verified mkcert if needed
+  --no-install-ca     Generate certificates without changing local trust stores
   --foreground       Run in the foreground
   --supervise        Like --foreground, but under the process supervisor
                      (auto-restarts on crash, records why). Use this for
@@ -283,7 +285,7 @@ Options:
   --plugin-create <file>
                      Create a plugin from a manifest JSON file
   --plugin-install <source>
-                     Install a complete plugin package from HTTPS Git or a local path
+                     Install a plugin package from Git (HTTPS/HTTP/SSH) or a local path
   --plugin-list      List installed agent plugins
   --plugin-check <slug>
                      Check the installed plugin source for updates
@@ -513,56 +515,6 @@ function resolveHealthTarget(
   return { url: `${scheme}://${displayHost}:${port}/health`, scheme, host: displayHost, port };
 }
 
-const EXTRA_EXECUTABLE_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'];
-
-function executableCandidates(command: string): string[] {
-  if (command.includes(path.sep)) return [command];
-  const dirs = [...(process.env.PATH ?? '').split(path.delimiter), ...EXTRA_EXECUTABLE_DIRS].filter(Boolean);
-  const seen = new Set<string>();
-  return dirs
-    .map((dir) => path.join(dir, command))
-    .filter((candidate) => {
-      if (seen.has(candidate)) return false;
-      seen.add(candidate);
-      return true;
-    });
-}
-
-async function findExecutable(command: string): Promise<string | null> {
-  for (const candidate of executableCandidates(command)) {
-    try {
-      await execFileAsync(candidate, ['--version'], { timeout: 5000, maxBuffer: 128 * 1024 });
-      return candidate;
-    } catch { /* try next candidate */ }
-  }
-  return null;
-}
-
-async function ensureMkcertInstalled(): Promise<string> {
-  const existing = await findExecutable('mkcert');
-  if (existing) return existing;
-
-  const brew = await findExecutable('brew');
-  if (!brew) {
-    throw new Error(`${ICON.err} ${c.red('mkcert is required for local HTTPS setup, and Homebrew was not found.')}\n  ${c.dim('Install Homebrew first, or manually install:')} ${c.cyan('brew install mkcert')}`);
-  }
-
-  console.log(`${ICON.info} ${c.dim('mkcert is not installed. Installing with Homebrew...')}`);
-  try {
-    await execFileAsync(brew, ['install', 'mkcert'], { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
-  } catch (error) {
-    const err = error as { stderr?: string; message?: string };
-    const detail = (err.stderr || err.message || '').toString().trim();
-    throw new Error(`${ICON.err} ${c.red('Failed to install mkcert with Homebrew.')}${detail ? `\n${detail}` : ''}`);
-  }
-
-  const installed = await findExecutable('mkcert');
-  if (!installed) {
-    throw new Error(`${ICON.err} ${c.red('mkcert installation completed, but mkcert was not found on PATH.')}`);
-  }
-  return installed;
-}
-
 function getRequiredLocalHttpsNames(): string[] {
   const localName = getLocalAccessSetting().name;
   return [
@@ -575,58 +527,28 @@ function getRequiredLocalHttpsNames(): string[] {
   ];
 }
 
-async function defaultCertificateNeedsRefresh(): Promise<boolean> {
-  if (!fileExists(defaultHttpsCertPath) || !fileExists(defaultHttpsKeyPath)) return true;
-  return (await getMissingCertificateNames(defaultHttpsCertPath, getRequiredLocalHttpsNames())).length > 0;
-}
-
 async function ensureDefaultHttpsCertificateFresh(): Promise<boolean> {
-  if (!(await defaultCertificateNeedsRefresh())) return false;
-  console.log(`${ICON.info} ${c.dim('Local HTTPS certificate is missing current domain/IP SANs; regenerating...')}`);
-  await runSetupLocalHttps({ quietRestartHint: true, installCa: false });
+  if (!localCertificateNeedsRefresh(certDir, getRequiredLocalHttpsNames())) return false;
+  console.log(`${ICON.info} ${c.dim('Local HTTPS certificate needs repair or renewal; preparing a validated replacement...')}`);
+  await runSetupLocalHttps({ quietRestartHint: true, installCa: false, allowCaChange: false });
   return true;
 }
 
-async function runSetupLocalHttps(options: { quietRestartHint?: boolean; installCa?: boolean } = {}): Promise<void> {
-  const mkcert = await ensureMkcertInstalled();
-
-  ensureStateDir();
-  fs.mkdirSync(certDir, { recursive: true, mode: 0o700 });
-
-  if (options.installCa !== false) {
-    console.log(`${ICON.info} ${c.dim('Installing local CA into this computer trust store...')}`);
-    await execFileAsync(mkcert, ['-install'], { timeout: 120000, maxBuffer: 1024 * 1024 });
-  }
-
-  console.log(`${ICON.info} ${c.dim('Generating local certificate for Termdock domains...')}`);
-  await execFileAsync(mkcert, [
-    '-cert-file', defaultHttpsCertPath,
-    '-key-file', defaultHttpsKeyPath,
-    ...getRequiredLocalHttpsNames(),
-  ], { cwd: certDir, timeout: 120000, maxBuffer: 1024 * 1024 });
-
-  try {
-    const { stdout } = await execFileAsync(mkcert, ['-CAROOT'], { timeout: 5000, maxBuffer: 64 * 1024 });
-    const rootCA = path.join(stdout.trim(), 'rootCA.pem');
-    if (fs.existsSync(rootCA)) {
-      fs.copyFileSync(rootCA, defaultHttpsCaPath);
-      try { fs.chmodSync(defaultHttpsCaPath, 0o600); } catch { /* ignore */ }
-    }
-  } catch { /* CA download is optional but recommended */ }
-
-  try { fs.chmodSync(defaultHttpsCertPath, 0o600); } catch { /* ignore */ }
-  try { fs.chmodSync(defaultHttpsKeyPath, 0o600); } catch { /* ignore */ }
-
-  console.log(`${ICON.ok} ${c.green('Local HTTPS certificates are ready.')}`);
-  console.log(`  ${c.dim('Cert:')} ${c.cyan(defaultHttpsCertPath)}`);
-  console.log(`  ${c.dim('Key:')}  ${c.cyan(defaultHttpsKeyPath)}`);
-  if (fs.existsSync(defaultHttpsCaPath)) {
-    console.log(`  ${c.dim('CA:')}   ${c.cyan(defaultHttpsCaPath)} ${c.dim('(served on mobile setup page)')}`);
-  }
+async function runSetupLocalHttps(options: { quietRestartHint?: boolean; installCa?: boolean; allowCaChange?: boolean } = {}): Promise<void> {
+  const result = await setupLocalHttps({
+    directory: certDir, names: getRequiredLocalHttpsNames(),
+    installCa: options.installCa, allowCaChange: options.allowCaChange,
+    log: message => console.log(`${ICON.info} ${c.dim(message)}`),
+  });
+  console.log(`${ICON.ok} ${c.green('Local HTTPS certificates are generated and validated.')}`);
+  console.log(`  ${c.dim('Cert:')} ${c.cyan(result.files.cert)}`);
+  console.log(`  ${c.dim('Key:')}  ${c.cyan(result.files.key)}`);
+  console.log(`  ${c.dim('CA:')}   ${c.cyan(result.files.ca)} ${c.dim('(install and trust this public certificate on each client device)')}`);
+  for (const warning of result.warnings) console.warn(`${ICON.warn} ${c.yellow(warning)}`);
+  if (result.trust === 'requested') console.log(`  ${c.dim('Local CA trust installation was requested; browser trust may require certutil and a browser restart.')}`);
+  else console.log(`  ${c.dim('Local CA trust has not been installed by this command.')}`);
   console.log('');
-  if (!options.quietRestartHint) {
-    console.log(`${ICON.info} ${c.dim('Restart Termdock to use HTTPS:')} ${c.cyan('td --stop && td')}`);
-  }
+  if (!options.quietRestartHint) console.log(`${ICON.info} ${c.dim('Restart Termdock to use HTTPS:')} ${c.cyan('td --stop && td')}`);
 }
 
 function printRunningState(state: ServerState) {
@@ -736,6 +658,7 @@ function parseArgs(argv: string[]): CliOptions {
   let httpsKey: string | undefined;
   let httpsCa: string | undefined;
   let setupLocalHttps = false;
+  let installLocalCa = true;
   let foreground = false;
   let supervise = false;
   let noSupervisor = false;
@@ -982,6 +905,11 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (arg === '--setup-local-https') {
       setupLocalHttps = true;
+      continue;
+    }
+
+    if (arg === '--no-install-ca') {
+      installLocalCa = false;
       continue;
     }
 
@@ -1236,6 +1164,7 @@ function parseArgs(argv: string[]): CliOptions {
     httpsKey,
     httpsCa,
     setupLocalHttps,
+    installLocalCa,
     foreground,
     supervise,
     noSupervisor,
@@ -2270,7 +2199,7 @@ function runPluginInitJson(): void {
       hooks: 'Hooks publish declared lifecycle/status events; collaboration does not wait for an idle phase and does not require hooks.',
     },
     security: {
-      source: 'Only public HTTPS repository roots on approved Git hosts or explicit local paths are accepted; URL credentials are rejected.',
+      source: 'Public and self-hosted Git repositories support HTTPS, HTTP, SSH and scp-style addresses. The service computer uses its Git credential helpers, SSH agent/configuration, proxy and CA settings. URL passwords and query tokens are rejected.',
       package: 'Symlinks, active/external SVG content, oversized files, submodules, and excessive unpacked size are rejected.',
       hooks: 'hooks.target must be a non-symlinked ~/ JSON path. Termdock generates the hook command; manifests cannot inject shell.',
       titleCommands: 'Installing or inspecting a plugin never executes its title/model commands. They run only after the user enables automatic titles for that plugin.',
@@ -2297,7 +2226,7 @@ function runPluginInitJson(): void {
     },
     integrationSteps: [
       'Create a repository with manifest.json at its root; icon.svg and helper files are optional.',
-      'Publish the repository, then install it with td plugin-install <https-git-url>. Local directories are also supported.',
+      'Publish the repository, then install it with td plugin-install <git-url>. Public/private HTTPS, HTTP, SSH and local directories are supported.',
       'For manifest-only development, td plugin-create <manifest-file> remains available.',
       'Ask the user to open Settings > Detection Rules and click Install for this Agent. They can uninstall it there later.',
       'If the Agent hook format is not a Claude-style hooks map, configure native hooks to call td agent-event directly.',
@@ -2451,7 +2380,7 @@ ${c.dim('──────────────────')}
   ${c.dim('# Inject the Agent definition; it appears in the UI immediately')}
   td plugin-create ./trae-manifest.json
 
-  ${c.dim('# Or install a complete, updateable package from a public HTTPS Git repository')}
+  ${c.dim('# Or install a complete, updateable package from a public or private Git repository')}
   td plugin-install https://github.com/owner/trae-termdock-plugin
 
   ${c.dim('# The user then opens Settings > Detection Rules and clicks Install.')}
@@ -3579,7 +3508,7 @@ async function promptLine(prompt: string): Promise<string> {
 }
 
 async function runFirstRunWizard(): Promise<void> {
-  if (!(process.stdin as NodeJS.ReadStream).isTTY || isFirstRunCompleted()) return;
+  if (!process.stdin.isTTY || !process.stdout.isTTY || isFirstRunCompleted()) return;
   console.log(`${ICON.info} ${c.bold('Termdock first-time local access setup')}`);
   const prefix = await promptLine('  Choose your .termdock.local prefix (e.g. jovn): ');
   const normalized = normalizeLocalAccessName(prefix);
@@ -3629,11 +3558,15 @@ async function waitForServerMetadata(result: StartServerResult, fallbackPort: nu
 }
 
 async function refreshDefaultHttpsCertificateSafely(): Promise<boolean> {
-  try {
-    return await ensureDefaultHttpsCertificateFresh();
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    return false;
+  // Explicit custom certificates belong to their operator. A declined setup or
+  // headless first run without any default files must not trigger a download.
+  const custom = options.httpsCert && options.httpsCert !== defaultHttpsCertPath
+    || options.httpsKey && options.httpsKey !== defaultHttpsKeyPath
+    || options.httpsCa && options.httpsCa !== defaultHttpsCaPath;
+  if (custom || ![defaultHttpsCertPath, defaultHttpsKeyPath, defaultHttpsCaPath].some(file => fs.existsSync(file))) return false;
+  try { return await ensureDefaultHttpsCertificateFresh(); }
+  catch (error) {
+    throw new Error(`Existing local HTTPS configuration could not be repaired; refusing to fall back to HTTP. Run td --setup-local-https. ${String(error)}`, { cause: error });
   }
 }
 
@@ -3665,7 +3598,7 @@ async function main(): Promise<void> {
 
   if (options.setupLocalHttps) {
     try {
-      await runSetupLocalHttps();
+      await runSetupLocalHttps({ installCa: options.installLocalCa });
       process.exit(0);
     } catch (error) {
       console.error(error instanceof Error ? error.message : error);
@@ -3794,7 +3727,7 @@ async function main(): Promise<void> {
 
   if (options.pluginInstall !== undefined) {
     if (!options.pluginInstall) {
-      console.error(`${ICON.err} ${c.red('plugin-install requires an HTTPS Git URL or local package path')}`);
+      console.error(`${ICON.err} ${c.red('plugin-install requires a Git URL (HTTPS/HTTP/SSH) or local package path')}`);
       process.exit(1);
     }
     await runPluginInstall(options.pluginInstall);
@@ -3987,8 +3920,11 @@ async function main(): Promise<void> {
   }
 
   if (options.foreground) {
-    // Boot check (marker prevents re-run if parent already completed)
-    runBootChecks();
+    const bootChecks = runBootChecks();
+    if (!bootChecks.nodePty.ok || !bootChecks.tmux.ok) {
+      for (const line of formatBootCheckReport(bootChecks, colorsEnabled)) console.log(line);
+    }
+    if (!bootChecks.nodePty.ok) throw new Error('Native terminal initialization failed; see the boot check above.');
     warnIfAuthDisabled(options.host ?? DEFAULT_HOST);
     // Dynamic import keeps terminal.ts side-effects (loadClientStatesFromDisk
     // etc.) out of fast paths like `termdock --tls` / `--status`.
@@ -4112,6 +4048,8 @@ async function main(): Promise<void> {
     }
     console.log("");
   }
+
+  if (!bootChecks.nodePty.ok) process.exit(1);
 
   await runFirstRunWizard();
 

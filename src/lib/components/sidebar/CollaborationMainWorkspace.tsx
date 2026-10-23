@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { PanelLeft, PanelRight, RefreshCw, Workflow } from 'lucide-react';
+import { PanelLeft, PanelRight, Workflow } from 'lucide-react';
+import { useAppFeedback } from '../ui/AppFeedback';
 import { CollaborationTab, openCollaborationSession } from './AgentOperationsPanel';
 import { collaborationPanelClientId, openCollaborationMessagesPanel } from '../../collaboration/panelPreferences';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
-import { isConnectionInterruption, SECURE_READY_EVENT, useConnectionRecovery } from '../../federation/connectionRecovery';
+import { SECURE_READY_EVENT } from '../../federation/connectionRecovery';
 import { startVisiblePolling } from './startVisiblePolling';
 import { getAgentLaunchers, getSettings, listCollaborationGroups, subscribeCollaborationGroups,
   type AgentLauncherInfo, type CollaborationGroupsResponse } from '../../terminal/api';
@@ -20,13 +21,8 @@ export default function CollaborationMainWorkspace({ groupId, activeSessionId, o
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const connection = useConnectionRecovery();
-  const [showRecovery, setShowRecovery] = useState(false);
-  useEffect(() => {
-    if (connection === 'ready') { setShowRecovery(false); return; }
-    const timer = setTimeout(() => setShowRecovery(true), 1000);
-    return () => clearTimeout(timer);
-  }, [connection]);
+  useAppFeedback(loadError ? { tone: 'recovering', message: '正在恢复协作同步…' } : null);
+  useAppFeedback(error ? { message: error } : null);
   const initialView = useCollaborationNavigation(state => state.view);
   const drafts = useCollaborationNavigation(state => state.drafts);
   const setDraft = useCollaborationNavigation(state => state.setDraft);
@@ -62,8 +58,6 @@ export default function CollaborationMainWorkspace({ groupId, activeSessionId, o
       {onToggleRightSidebar && <button type="button" aria-label="文件侧栏" title="文件侧栏" aria-pressed={rightSidebarOpen} className={`inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg ${rightSidebarOpen ? 'bg-surface-2 text-primary' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={onToggleRightSidebar}><PanelRight size={17} /></button>}
     </header>
     <div className="flex min-h-0 flex-1 flex-col px-4 py-2 sm:px-6">
-      {(showRecovery || isConnectionInterruption(loadError)) && <div role="status" className="mb-2 flex shrink-0 items-center gap-2 text-xs text-muted-foreground"><RefreshCw size={13} className={connection === 'offline' ? '' : 'animate-spin'} /><span>{connection === 'offline' ? '网络已断开，联网后自动恢复' : '正在恢复连接，当前结果和草稿已保留'}</span></div>}
-      {(error || loadError && connection === 'ready' && !isConnectionInterruption(loadError)) && <div role="alert" className="mb-3 flex shrink-0 items-center gap-2 rounded-lg bg-destructive/10 p-3 text-xs text-destructive"><span className="flex-1">{error || loadError}</span><button type="button" aria-label="重新加载协作组" className="min-h-11 px-3" onClick={() => void refresh()}><RefreshCw size={14} /></button></div>}
       {notice && <p role="status" className="mb-3 shrink-0 text-xs text-primary">{notice}</p>}
       {!directory ? <p role="status" className="py-10 text-center text-sm text-muted-foreground">正在加载协作工作区…</p> : !group ? <p className="py-10 text-center text-sm text-muted-foreground">协作组已移除或暂不可用。任务记录仍保留在原服务中。</p> : <CollaborationTab fullWorkspace initialView={initialView} active notice={notice} groups={directory.groups} sessions={directory.sessions} agents={agents} sessionsState="loaded" selectedGroupId={selectedGroupId} setSelectedGroupId={setSelectedGroupId} initialGroupId={groupId} activeSessionId={activeSessionId} initialDrafts={drafts} onDraftChange={setDraft} docked={false} inputKeySuffix="main" floatingVisible floating={false} onOpenSession={openTerminal} onOpenTaskSession={openTerminal} onDockMessages={activeSessionId ? async () => { await openCollaborationMessagesPanel(groupId, activeSessionId); } : undefined} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
     </div>

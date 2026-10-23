@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import { CollaborationMemberMenu } from './CollaborationMemberMenu';
 import { CollaborationGroupLauncher } from './CollaborationGroupLauncher';
 import { CollaborationLaunchSettings, CollaborationLaunchChoice } from './CollaborationLaunchSettings';
@@ -214,6 +215,8 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
     finally { setSavingFloating(false); }
   };
   const resizingFloating = useRef(false);
+  const trackFloatingDrag = useDragLifetime(() => { drag.current = null; });
+  const trackFloatingResize = useDragLifetime(() => { resizingFloating.current = false; });
   const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const clampPosition = useCallback((x: number, y: number) => {
     const box = panelRef.current?.getBoundingClientRect();
@@ -428,6 +431,7 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
         <header data-pane-titlebar={docked ? "true" : undefined} data-panel-drag-title={docked ? "true" : undefined} onDragStart={event => event.preventDefault()} className={`flex items-center gap-2 border-b border-border/15 ${docked ? 'min-h-9 shrink-0 cursor-grab select-none bg-[var(--chrome-bg)] px-3 active:cursor-grabbing' : floating ? 'px-3 py-2 cursor-move touch-none select-none' : 'px-4 py-3'}`}
           onPointerDown={event => {
             if (!floating || docked || event.button !== 0 || (event.target as Element).closest('button, summary')) return;
+            trackFloatingDrag(event);
             drag.current = { x: event.clientX, y: event.clientY, left: position.x, top: position.y };
             event.currentTarget.setPointerCapture?.(event.pointerId);
           }}
@@ -497,9 +501,9 @@ function AgentOperationsPanelView({ activeSessionId, initialCollaborationGroupId
           </div>}
         </div>
         {floating && !docked && <button type="button" aria-label="调整协作浮窗大小" className="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize touch-none text-muted-foreground hover:text-primary"
-          onPointerDown={event => { event.preventDefault(); resizingFloating.current = true; event.currentTarget.setPointerCapture(event.pointerId); }}
+          onPointerDown={event => { event.preventDefault(); trackFloatingResize(event); resizingFloating.current = true; event.currentTarget.setPointerCapture(event.pointerId); }}
           onPointerMove={event => {
-            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            if (!resizingFloating.current) return;
             const viewport = window.visualViewport;
             const width = viewport?.width ?? window.innerWidth;
             const height = viewport?.height ?? window.innerHeight;

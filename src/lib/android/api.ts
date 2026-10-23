@@ -1,15 +1,6 @@
-export interface AndroidDevice {
-  serial: string;
-  state: 'device' | 'offline' | 'unauthorized' | 'connecting' | 'unknown';
-  model?: string;
-  product?: string;
-  device?: string;
-  transport?: string;
-  isNetwork?: boolean;
-  androidVersion?: string;
-  sdk?: number;
-  physicalId?: string;
-}
+import { isValidAndroidSerial } from '../../shared/androidDevices';
+import type { AndroidDevice } from '../../shared/androidDevices';
+export type { AndroidDevice } from '../../shared/androidDevices';
 
 export interface AndroidDeviceList {
   adbAvailable: boolean;
@@ -73,7 +64,7 @@ export function normalizeAndroidQuality(value: unknown): AndroidQuality {
 
 /** serial 支持 IPv4/方括号 IPv6 网络设备；加密隧道按原始路径匹配，不编码 serial。 */
 export function androidStreamPath(serial: string, quality?: AndroidQuality): string {
-  if (serial.length > 128 || !/^(?:[0-9a-zA-Z_.:\-]+|\[[0-9a-fA-F:.]+\]:\d{1,5})$/.test(serial)) throw new Error('INVALID_SERIAL');
+  if (!isValidAndroidSerial(serial)) throw new Error('INVALID_SERIAL');
   const params = new URLSearchParams();
   if (quality) {
     params.set('max_size', String(quality.maxSize));

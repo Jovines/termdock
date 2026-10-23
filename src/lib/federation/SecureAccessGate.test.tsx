@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {createInviteLink} from './inviteLink';
+import { hasIndependentConnectionRoute, type ConnectionRecord } from '../../server/federation/connectionModel';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); return { request, fetch, connect: vi.fn(), retryDirect: vi.fn(), authenticate:vi.fn(), invalidate: vi.fn(), saved: vi.fn(), accessProps: {} as Record<string, any>, client: { request, fetch, targetPeerId: 'service',closed:false } }; });
@@ -16,6 +17,8 @@ vi.mock('./browserIntegration', () => ({
   getActiveClient: async () => mocks.client, savedConnection: mocks.saved,
   invalidateSecureTransport: mocks.invalidate, pauseConnectionAccess: vi.fn(), resumeConnectionAccess: vi.fn(),
   retryDirectConnection: mocks.retryDirect,
+  retryConnectionAccess: mocks.retryDirect,
+  canRetryConnectionAccess: (item: ConnectionRecord | null, error: { code: string; context: { entryServiceId?: string } }) => !!item && error.code === 'RELAY_AUTHORIZATION_REQUIRED' && hasIndependentConnectionRoute(item, error.context.entryServiceId),
 }));
 vi.mock('./deviceAuthorization', async importOriginal => {
   const original = await importOriginal<typeof import('./deviceAuthorization')>();
@@ -126,7 +129,7 @@ beforeEach(() => {
   mocks.saved.mockReturnValue({ url: 'https://service.example', targetPeerId: 'service',closed:false });
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
 });
-afterEach(() => { cleanup(); delete window.__termdockWorkspaceHost; delete window.termdockDesktop; vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); delete window.__termdockWorkspaceHost; delete window.termdockDesktop; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('remote session workspace navigation', () => {
   const entry = { id: 'entry', targetPeerId: 'entry', url: 'https://devbox.example', label: 'Devbox' };
   const remote = { id: 'remote', targetPeerId: 'remote', url: 'https://remote.internal', label: 'Remote', routes: [{ url: entry.url, targetPeerId: entry.targetPeerId }] };
@@ -207,6 +210,100 @@ describe('remote session workspace navigation', () => {
     expect(host.snapshot().activeKey).toBe('root');
     expect(mocks.connect).not.toHaveBeenCalled(); expect(directFetch).not.toHaveBeenCalled();
     expect(screen.getByText('Active terminal')).toBeTruthy();
+  });
+});
+describe('desktop relay workspace ownership', () => {
+  const owner = { id: 'service', targetPeerId: 'service', url: 'https://service.example', label: 'Entry' };
+  const intent = { targetPeerId: 'remote', url: 'https://remote.internal', serviceOrigin: 'https://remote.internal', serviceName: 'Remote',
+    routes: [{ url: owner.url, targetPeerId: owner.targetPeerId }] };
+  function install() {
+    const open = vi.fn().mockResolvedValue({ ok: true });
+    window.termdockDesktop = { getServiceConnection: async () => owner, openServiceConnection: open,
+      serviceConnections: async () => [owner], saveServiceConnection: vi.fn() } as unknown as NonNullable<Window['termdockDesktop']>;
+    return open;
+  }
+  async function manage() {
+    render(<SecureAccessGate><textarea aria-label="entry draft" defaultValue="keep input" /></SecureAccessGate>);
+    await screen.findByLabelText('entry draft');
+    fireEvent(window, new Event('termdock:open-services'));
+    await screen.findByText('Service management');
+  }
+  it('keeps PWA relay selection in the browser workspace and can switch back to the entry', async () => {
+    writeBrowserServices([owner]);
+    mocks.saved.mockReturnValue({ ...owner, serviceName: owner.label });
+    const host = installWorkspaceHost(owner)!;
+    await manage();
+    await act(async () => mocks.accessProps.onConnect(intent));
+    expect(host.snapshot().activeKey).toBe('remote');
+    expect(host.snapshot().items.map(item => item.service?.targetPeerId)).toEqual(['service', 'remote']);
+    fireEvent(window, new Event('termdock:open-services')); await screen.findByText('Service management');
+    await act(async () => mocks.accessProps.onOpenService(owner));
+    expect(host.snapshot().activeKey).toBe('root');
+    expect((screen.getByLabelText('entry draft') as HTMLTextAreaElement).value).toBe('keep input');
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.authenticate).not.toHaveBeenCalled();
+  });
+  it.each(['connect', 'password'] as const)('opens the relay target in its native window via %s without changing the entry document', async action => {
+    const open = install(); await manage();
+    const selected = mocks.saved();
+    await act(async () => action === 'connect' ? mocks.accessProps.onConnect(intent) : mocks.accessProps.onConnectWithPassword(intent, 'target-password'));
+    expect(open).toHaveBeenCalledExactlyOnceWith({ id: 'remote', targetPeerId: 'remote', url: owner.url, serviceOrigin: intent.serviceOrigin,
+      entryServiceId: 'service', label: 'Remote', routes: intent.routes }, undefined);
+    expect(mocks.saved()).toBe(selected);
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.authenticate).not.toHaveBeenCalled(); expect(mocks.invalidate).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('entry draft') as HTMLTextAreaElement).value).toBe('keep input');
+    fireEvent(window, new Event('termdock:open-services')); await screen.findByText('Service management');
+    await act(async () => mocks.accessProps.onOpenService(owner));
+    expect(open).toHaveBeenLastCalledWith(owner, undefined);
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+  it('retains the entry and surfaces a failed native open without falling back to a page connection', async () => {
+    const open = install(); open.mockRejectedValue(new Error('Native entry disconnected')); await manage();
+    await expect(mocks.accessProps.onConnect(intent)).rejects.toThrow('Native entry disconnected');
+    expect(screen.getByText('Service management')).toBeTruthy(); expect(screen.getByLabelText('entry draft')).toBeTruthy();
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.authenticate).not.toHaveBeenCalled();
+  });
+  it.each([true, false])('restores an already mismatched native window before mounting foreign content (online=%s)', async online => {
+    const open = install(), reload = vi.fn();
+    vi.stubGlobal('location', { origin: location.origin, hostname: location.hostname, reload });
+    mocks.saved.mockReturnValue(intent); mocks.client.targetPeerId = intent.targetPeerId;
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(online);
+    localStorage.setItem('termdock-service:remote:draft', 'foreign draft');
+    render(<SecureAccessGate><div>Foreign terminal</div></SecureAccessGate>);
+    await waitFor(() => expect(reload).toHaveBeenCalledOnce());
+    expect(JSON.parse(sessionStorage.getItem('termdock-secure-target-v1')!)).toMatchObject({ targetPeerId: 'service', url: owner.url, serviceName: 'Entry' });
+    expect(JSON.parse(localStorage.getItem('termdock-secure-target-v1')!)).toMatchObject({ targetPeerId: 'service' });
+    expect(localStorage.getItem('termdock-service:remote:draft')).toBe('foreign draft');
+    expect(screen.queryByText('Foreign terminal')).toBeNull();
+    expect(mocks.invalidate).toHaveBeenCalledOnce();
+    expect(open).not.toHaveBeenCalled(); expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.authenticate).not.toHaveBeenCalled();
+    expect(mocks.request).not.toHaveBeenCalled();
+    fireEvent.focus(window); fireEvent(window, new Event('pageshow')); fireEvent(window, new Event('termdock:secure-state'));
+    await act(async () => {});
+    expect(reload).toHaveBeenCalledOnce(); expect(mocks.request).not.toHaveBeenCalled();
+  });
+  it.each(['focus', 'select', 'connect', 'password'] as const)('repairs a window corrupted after startup on %s instead of merely focusing itself', async action => {
+    const open = install(), reload = vi.fn();
+    vi.stubGlobal('location', { origin: location.origin, hostname: location.hostname, reload });
+    await manage();
+    const requests = mocks.request.mock.calls.length;
+    mocks.saved.mockReturnValue(intent); mocks.client.targetPeerId = intent.targetPeerId;
+    await act(async () => {
+      if (action === 'focus') fireEvent.focus(window);
+      else if (action === 'select') await mocks.accessProps.onOpenService(owner);
+      else if (action === 'connect') await mocks.accessProps.onConnect({ ...owner, serviceName: owner.label });
+      else await mocks.accessProps.onConnectWithPassword({ ...owner, serviceName: owner.label }, 'owner-password');
+    });
+    await waitFor(() => expect(reload).toHaveBeenCalledOnce());
+    expect(JSON.parse(sessionStorage.getItem('termdock-secure-target-v1')!)).toMatchObject({ targetPeerId: 'service' });
+    expect(screen.queryByLabelText('entry draft')).toBeNull();
+    expect(open).not.toHaveBeenCalled(); expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.authenticate).not.toHaveBeenCalled();
+    expect(mocks.request).toHaveBeenCalledTimes(requests);
+  });
+  it('keeps password authorization for the owned service in the current document', async () => {
+    const open = install(); await manage();
+    await act(async () => mocks.accessProps.onConnectWithPassword({ ...owner, serviceName: owner.label }, 'password'));
+    expect(mocks.authenticate).toHaveBeenCalledWith(expect.objectContaining({ targetPeerId: 'service' }), 'password');
+    expect(open).not.toHaveBeenCalled();
   });
 });
 describe('device authorization lifecycle', () => {
@@ -429,6 +526,36 @@ describe('actual Preview bridge invitation receipt after real Gate permission su
  }
  beforeEach(()=>{vi.stubGlobal('crypto',webcrypto);mocks.client.targetPeerId=peer;mocks.saved.mockReturnValue({url:'https://service.example',targetPeerId:peer});install();});
  afterEach(()=>{window.fetch=originalFetch;window.WebSocket=originalSocket;Reflect.deleteProperty(window,'__TAURI_INTERNALS__');vi.unstubAllGlobals();});
+ it('repairs a leaked selection with the actual Preview bridge and rechecks permissions in the restored document',async()=>{
+  const reload=vi.fn(),documentLocation=location;
+  vi.stubGlobal('location',{origin:documentLocation.origin,hostname:documentLocation.hostname,reload});
+  const foreign={url:'https://foreign.example',targetPeerId:entry,serviceName:'Foreign'};
+  mocks.saved.mockReturnValue(foreign);mocks.client.targetPeerId=entry;
+  sessionStorage.setItem('termdock-secure-target-v1',JSON.stringify(foreign));
+  render(<SecureAccessGate><div>Foreign terminal</div></SecureAccessGate>);
+  await waitFor(()=>expect(reload).toHaveBeenCalledOnce());
+  const restored=JSON.parse(sessionStorage.getItem('termdock-secure-target-v1')!);
+  expect(restored).toMatchObject({targetPeerId:peer,entryServiceId:entry,serviceOrigin:'https://service.example',serviceName:'Owned'});
+  expect(JSON.stringify(restored)).not.toContain(invitation);
+  expect(mocks.request).not.toHaveBeenCalled();expect(screen.queryByText('Foreign terminal')).toBeNull();
+  cleanup();vi.unstubAllGlobals();install('');
+  mocks.saved.mockReturnValue(restored);mocks.client.targetPeerId=peer;
+  render(<SecureAccessGate><div>Restored owner terminal</div></SecureAccessGate>);
+  await screen.findByText('Restored owner terminal');
+  expect(mocks.request.mock.calls.some(([packet])=>packet.type==='permissions')).toBe(true);
+  expect(mocks.connect).not.toHaveBeenCalled();expect(mocks.authenticate).not.toHaveBeenCalled();
+ });
+ it.each([false,true])('actual Preview bridge dispatches a relay selection to a native window on first load (direct target known=%s)',async known=>{
+  const dispatch=vi.fn(async(_command:string,args:{op:string})=>args.op==='openConnection'?{ok:true}:args.op==='connections'?[]:{});
+  Object.assign(window,{__TAURI_INTERNALS__:{invoke:dispatch}});
+  render(<SecureAccessGate><div>Entry terminal</div></SecureAccessGate>);await screen.findByText('Service management');
+  await act(async()=>mocks.accessProps.onConnect({url:known?'https://remote.internal':'https://entry.example',targetPeerId:entry,
+   ...(known?{serviceOrigin:'https://remote.internal'}:{entryServiceId:peer}),serviceName:'Remote',routes:[{url:'https://entry.example',targetPeerId:peer}]}));
+  const opened=dispatch.mock.calls.find(([,args])=>args.op==='openConnection');
+  expect(opened?.[1]).toMatchObject({op:'openConnection',args:{connection:{id:entry,targetPeerId:entry,url:'https://entry.example',entryServiceId:peer,routes:[{url:'https://entry.example',targetPeerId:peer}]}}});
+  expect(mocks.connect).not.toHaveBeenCalled();expect(mocks.authenticate).not.toHaveBeenCalled();
+  expect(JSON.parse(sessionStorage.getItem('termdock-secure-target-v1')!).targetPeerId).toBe(peer);
+ });
  it.each(['password','pairing'] as const)('%s callback acknowledges only after actual permissions and a new document still reads normal permissions',async entry=>{
   render(<SecureAccessGate><div>Owned terminal</div></SecureAccessGate>);await screen.findByText('Service management');
   expect(sessionStorage.getItem('termdock-secure-preview-invitation-v1')).toBeNull();

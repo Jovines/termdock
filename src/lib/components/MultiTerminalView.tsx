@@ -1,7 +1,8 @@
 import { useSessionViewMode } from './chat/sessionViewMode';
 import { SessionWorkspace } from './chat/SessionWorkspace';
 import { canDismissTmuxRecoveryOperation } from '../../server/utils/tmuxRecoveryDismissal';
-import { classifySessionCreationError, type NewSessionRequestOptions } from '../terminal/newSessionRequest';
+import { classifySessionCreationError, openSessionWithRecovery, type NewSessionRequestOptions } from '../terminal/newSessionRequest';
+import { useAppFeedback } from './ui/AppFeedback';
 import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 import { legacySplitTree } from '../terminal/freeSplitLayout';
 import { FreeSplitLayout } from './FreeSplitLayout';
@@ -451,6 +452,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null);
   const navigationRevisionRef = useRef(0);
   const creationRevisionRef = useRef(0);
+  const [creationRecovering, setCreationRecovering] = useState(false);
+  useAppFeedback(creationRecovering ? { tone: 'recovering', message: '正在恢复会话连接…' } : null);
+  useEffect(() => () => { creationRevisionRef.current++; }, []);
   const selectedPaneId = useCollaborationPanelDock(state => state.activePaneId);
   useEffect(() => { useCollaborationPanelDock.getState().setActivePane(activeSessionId); }, [activeSessionId]);
   const [pendingSwitchSessionId, setPendingSwitchSessionId] = useState<string | null>(null);
@@ -1634,6 +1638,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
     const creationRevision = ++creationRevisionRef.current;
+    setCreationRecovering(false);
     const navigationRevision = navigationRevisionRef.current;
     const shouldActivate = () => creationRevision === creationRevisionRef.current
       && navigationRevision === navigationRevisionRef.current
@@ -1664,7 +1669,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         ? requestedCwd
         : (typeof activeCwd === 'string' && activeCwd.trim().length > 0 ? activeCwd : undefined);
 
-      const result = await openSession({
+      const result = await openSessionWithRecovery({
         preferredFrontendSessionId: options?.preferredFrontendSessionId,
         requireExisting: options?.requireExisting === true,
         mode,
@@ -1672,7 +1677,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         cwd: effectiveCwd,
         termType: 'xterm-256color',
         createIfEmpty: options?.createIfEmpty === true,
-      }, { shouldActivate });
+      }, request => openSession(request, { shouldActivate }), { current: shouldActivate,
+        pending: value => { if (creationRevision === creationRevisionRef.current) setCreationRecovering(value); } });
       // An explicitly closed frontend ID must not be resurrected by a pending
       // reopen/reuse response, even in the runtime list or startup queue.
       if (result.discarded) {
@@ -2258,7 +2264,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           />
         )}
         <div className="min-h-0 flex-1 app-chrome-bg">
-          <SessionWorkspace sessionId={session.id} name={session.name} active={isActive && isLayoutVisible} onChatReadyChange={handleChatReadyChange} onKeyboardChange={open => handleKeyboardVisibilityChange(session.id, open)}>{terminalVisible => shouldMountViewport && <TerminalView
+          <SessionWorkspace sessionId={session.id} terminalReady={readySessionIds.has(session.id) && viewportReadySessionIds.has(session.id)} name={getSessionLabel(session).primary} active={isActive && isLayoutVisible} onChatReadyChange={handleChatReadyChange} onKeyboardChange={open => handleKeyboardVisibilityChange(session.id, open)}>{terminalVisible => shouldMountViewport && <TerminalView
             sessionId={session.id}
             mode={session.mode}
             tmuxSessionName={session.tmuxSessionName}

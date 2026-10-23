@@ -2,7 +2,7 @@ import { lazy, Suspense } from 'react';
 import { ARCHITECTURE_FIELDS, type ArchitectureField, type ArchitectureFields, type ArchitectureMeta } from '../../architecture/model';
 import { useI18n } from '../../i18n';
 
-const Markdown = lazy(() => import('../markdown/MarkdownPreview').then(module => ({ default: module.MarkdownPreview })));
+const Markdown = lazy(() => import('../markdown/Markdown').then(module => ({ default: module.Markdown })));
 export function architectureFieldLabel(field: ArchitectureField, zh: boolean): string {
   return zh ? ({ description: '说明', diagram: '关系图源码', context: '上下文', constraint: '约束', concern: '问题与风险', todo: '待办', note: '备注' })[field] : ({ description: 'Description', diagram: 'Diagram source', context: 'Context', constraint: 'Constraints', concern: 'Concerns', todo: 'To do', note: 'Notes' })[field];
 }
@@ -11,7 +11,7 @@ export function ArchitectureDocumentFields({ value, rootPath, onEdit, onOpenFile
 }) {
   const { locale } = useI18n(), zh = locale === 'zh';
   const description = value.description?.replace(/^#\s+([^\n]+)\n\s*/, (heading, title: string) => title.trim() === value.title ? '' : heading);
-  const markdown = (content: string) => <Suspense fallback={<p className="whitespace-pre-wrap text-sm">{content}</p>}><Markdown referenceLines={false} content={content} filePath={null} rootPath={rootPath ?? null} lineRange={null} onLineRangeClick={() => {}} scrollTop={0} outlineOpen={false} lightboxOpen={false} onLocalLinkOpen={target => onOpenFile?.({ path: rootPath && target.path.startsWith(`${rootPath}/`) ? target.path.slice(rootPath.length + 1) : target.path })} /></Suspense>;
+  const markdown = (content: string) => <Suspense fallback={<p className="whitespace-pre-wrap text-sm">{content}</p>}><Markdown variant="document" content={content} rootPath={rootPath} onLocalLinkOpen={target => onOpenFile?.({ path: rootPath && target.path.startsWith(`${rootPath}/`) ? target.path.slice(rootPath.length + 1) : target.path })} /></Suspense>;
   return <div className="space-y-2">
     {description && <div className="min-w-0 overflow-x-auto">{markdown(description)}</div>}
     {ARCHITECTURE_FIELDS.filter(field => field !== 'description' && value[field]).map(field => <details key={field} className="rounded-lg border border-border/15 px-2"><summary className="min-h-11 cursor-pointer py-3 text-xs font-medium">{architectureFieldLabel(field, zh)}</summary><div className="min-w-0 overflow-x-auto pb-2">{field === 'diagram' ? <pre className="whitespace-pre-wrap break-all text-xs">{value[field]}</pre> : markdown(value[field]!)}{onEdit && <button type="button" className="min-h-11 rounded px-2 text-xs text-primary hover:bg-surface-elevated" onClick={() => onEdit(field)}>{zh ? '编辑此字段' : 'Edit field'}</button>}</div></details>)}

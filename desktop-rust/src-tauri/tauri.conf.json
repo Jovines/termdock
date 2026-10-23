@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Termdock Preview",
-  "version": "0.1.13",
-  "identifier": "com.jovines.termdock.preview",
+  "productName": "Termdock",
+  "version": "1.4.358",
+  "identifier": "com.jovines.termdock",
   "build": {
     "frontendDist": "../.renderer-dist"
   },

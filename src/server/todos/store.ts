@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { nextAutomationRunAt, normalizeAutomationSchedule } from '../agent/automationStore.js';
-import type { TodoCollector, TodoCreateInput, TodoItem, TodoLaunchConfig, TodoRun, TodoSnapshot } from './types.js';
+import type { TodoCollector, TodoCreateInput, TodoHandoffInput, TodoItem, TodoLaunchConfig, TodoRun, TodoSnapshot } from './types.js';
 
 interface Document extends TodoSnapshot { version: 1; requests: Record<string, { hash: string; id: string }> }
 export class TodoError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
@@ -103,7 +103,7 @@ export class TodoStore {
     if (previous) { if (previous.hash !== hash) throw new TodoError('同一请求标识的内容不一致', 409); return { run: this.run(previous.id), fresh: false }; }
     const item = kind === 'execute' ? this.get(id) : this.collector(id);
     if (kind === 'execute' && (item as TodoItem).status !== 'open') throw new TodoError('请先重新打开这条待办', 409);
-    if (this.doc.runs.some(r => r.status === 'launching' && (kind === 'execute' ? r.todoId === id : r.collectorId === id))) throw new TodoError('此项正在启动，请稍候', 409);
+    if (this.doc.runs.some(r => r.status === 'launching' && (kind === 'execute' ? r.todoId === id || r.handoff?.todoIds.includes(id) : r.collectorId === id))) throw new TodoError('此项正在启动，请稍候', 409);
     return this.transaction(doc => {
       const now = Date.now(); const run: TodoRun = { id: randomUUID(), kind, todoId: kind === 'execute' ? id : null, collectorId: kind === 'collect' ? id : null,
         name: kind === 'execute' ? (item as TodoItem).title : (item as TodoCollector).name, config, status: 'launching', createdAt: now, updatedAt: now, sessionId: null, result: '', error: '' };
@@ -111,6 +111,30 @@ export class TodoStore {
       if (kind === 'collect') { const c = doc.collectors.find(c => c.id === id)!; c.nextRunAt = c.schedule && c.enabled ? nextAutomationRunAt(c.schedule, now + 1, c.createdAt) : null; c.updatedAt = now; c.revision++; }
       return { run, fresh: true };
     });
+  }
+  previousHandoff(input: TodoHandoffInput): TodoRun | undefined {
+    if (!input.idempotencyKey || input.idempotencyKey.length > 200) throw new TodoError('缺少有效的请求标识');
+    const previous = this.doc.requests[`handoff:${input.idempotencyKey}`];
+    if (!previous) return;
+    if (previous.hash !== this.handoffHash(input)) throw new TodoError('同一请求标识的内容不一致', 409);
+    return this.run(previous.id);
+  }
+  beginHandoff(input: TodoHandoffInput, config: TodoLaunchConfig, sessionName: string): TodoRun {
+    const todos = input.todoIds.map(id => this.get(id));
+    if (todos.some(todo => todo.status !== 'open')) throw new TodoError('请先重新打开已完成或忽略的待办', 409);
+    if (this.doc.runs.some(run => run.status === 'launching' && input.todoIds.some(id => run.todoId === id || run.handoff?.todoIds.includes(id)))) throw new TodoError('这些待办正在发送，请稍候', 409);
+    return this.transaction(doc => {
+      const now = Date.now();
+      const run: TodoRun = { id: randomUUID(), kind: 'execute', todoId: todos[0].id, collectorId: null,
+        name: todos.length === 1 ? todos[0].title : `${todos.length} 条待办`, config, createdAt: now, updatedAt: now,
+        status: 'launching', sessionId: input.sessionId ?? null, result: '', error: '',
+        handoff: { todoIds: input.todoIds, note: input.note, targetSessionId: input.sessionId ?? null, sessionName } };
+      doc.runs.push(run); doc.requests[`handoff:${input.idempotencyKey}`] = { hash: this.handoffHash(input), id: run.id };
+      return run;
+    });
+  }
+  private handoffHash(input: TodoHandoffInput): string {
+    return this.hash({ todoIds: input.todoIds, note: input.note, sessionId: input.sessionId ?? null, config: input.sessionId ? null : input.config });
   }
   mark(id: string, update: { sessionId?: string; status?: 'delivered' | 'failed'; error?: string }): TodoRun {
     return this.transaction(doc => {

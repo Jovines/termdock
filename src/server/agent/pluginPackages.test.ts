@@ -36,9 +36,16 @@ afterEach(async () => {
 describe('plugin package sources', () => {
   it('accepts public HTTPS Git repository roots and rejects unsafe sources', () => {
     expect(normalizeGitPluginSource('https://github.com/example/agent-plugin')).toBe('https://github.com/example/agent-plugin');
-    expect(normalizeGitPluginSource('git@github.com:example/agent-plugin.git')).toBeNull();
-    expect(normalizeGitPluginSource('https://localhost/example/agent-plugin')).toBeNull();
+    expect(normalizeGitPluginSource('git@github.com:example/agent-plugin.git')).toBe('git@github.com:example/agent-plugin.git');
+    expect(normalizeGitPluginSource('https://localhost/example/agent-plugin')).toBe('https://localhost/example/agent-plugin');
     expect(normalizeGitPluginSource('https://github.com/example/agent-plugin?token=secret')).toBeNull();
+    expect(normalizeGitPluginSource('https://git.corp:8443/team/subgroup/agent.git')).toBe('https://git.corp:8443/team/subgroup/agent.git');
+    expect(normalizeGitPluginSource('ssh://git@git.corp:2222/team/agent.git')).toBe('ssh://git@git.corp:2222/team/agent.git');
+    expect(normalizeGitPluginSource('git@corp-alias:agent.git')).toBe('git@corp-alias:agent.git');
+    expect(normalizeGitPluginSource('http://10.0.0.2/scm/team/agent.git')).toBe('http://10.0.0.2/scm/team/agent.git');
+    for (const source of ['ext::sh -c anything', 'file:///etc', '-u@host:repo', 'https://user:secret@host/repo', 'ssh://-option/repo', 'https://host/repo%0aevil']) {
+      expect(normalizeGitPluginSource(source)).toBeNull();
+    }
   });
 
   it('installs and atomically updates a complete local package', async () => {

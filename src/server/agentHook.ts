@@ -53,6 +53,18 @@ const MAX_STDIN = 64 * 1024;
  * asking the user a question) survives there.
  */
 function effectiveEvent(agent: string, event: string, stdinJson: string): string | null {
+  // These tools ask a question without opening a permission dialog. Ordinary
+  // tool starts must stay silent so they cannot manufacture a waiting state.
+  if (event === 'tool-start') {
+    try {
+      const tool = JSON.parse(stdinJson)?.tool_name;
+      return (agent === 'claude' && tool === 'AskUserQuestion')
+        || (agent === 'codex' && tool === 'request_user_input')
+        ? 'question-asked' : null;
+    } catch {
+      return null;
+    }
+  }
   if ((agent === 'copilot' || agent === 'grok') && event === 'notification') {
     const blocks = stdinJson.includes('elicitation_dialog')
       || (agent === 'copilot' && stdinJson.includes('permission_prompt'));
@@ -62,11 +74,26 @@ function effectiveEvent(agent: string, event: string, stdinJson: string): string
 }
 
 /** Write raw bytes to a tty device, best-effort. */
-function writeDev(path: string, bytes: string): boolean {
+async function writeDev(path: string, bytes: string): Promise<boolean> {
   try {
-    const fd = fs.openSync(path, 'w');
+    // A leftover tmux client may no longer drain its PTY. It must not block
+    // this hook before the current observer gets its copy of the event.
+    const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOCTTY);
     try {
-      fs.writeSync(fd, bytes);
+      const buffer = Buffer.from(bytes);
+      let offset = 0;
+      const deadline = Date.now() + 250;
+      while (offset < buffer.length) {
+        try {
+          const written = fs.writeSync(fd, buffer, offset, buffer.length - offset);
+          if (written <= 0) return false;
+          offset += written;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (!['EAGAIN', 'EWOULDBLOCK', 'EINTR'].includes(code ?? '') || Date.now() >= deadline) return false;
+          await new Promise(resolve => setTimeout(resolve, 2));
+        }
+      }
     } finally {
       fs.closeSync(fd);
     }
@@ -157,25 +184,27 @@ function tmuxClientTtyDevices(): string[] {
  * enabled, as termdock sets on managed sessions) forwards to its client —
  * the termdock server — as the plain inner OSC.
  */
-function writeToControllingTty(sequence: string, inTmuxPane: boolean): boolean {
+async function writeToControllingTty(sequence: string, inTmuxPane: boolean): Promise<boolean> {
   if (inTmuxPane) {
     const clientTtys = tmuxClientTtyDevices();
-    if (clientTtys.length > 0) {
-      return clientTtys.some((device) => writeDev(device, sequence));
-    }
+    // A surviving client from a previous server may be listed first. Deliver
+    // to every managed observer; short-circuiting at the first successful
+    // write leaves the current server without any lifecycle events.
+    const delivered = await Promise.all(clientTtys.map(device => writeDev(device, sequence)));
+    if (delivered.includes(true)) return true;
   }
   // Only genuine tmux panes (TMUX_PANE is set by tmux itself) get the DCS
   // passthrough wrap; a bare inherited TMUX just means an ancestor ran tmux.
   const wire = inTmuxPane
     ? `\x1bPtmux;${sequence.replace(/\x1b/g, '\x1b\x1b')}\x1b\\`
     : sequence;
-  if (writeDev('/dev/tty', wire)) return true;
+  if (await writeDev('/dev/tty', wire)) return true;
   const dev = ancestorTtyDevice();
   if (dev) return writeDev(dev, wire);
   return false;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   try {
     // Gate: emit when (a) inside a termdock-spawned shell (TERMDOCK env), or
     // (b) inside any tmux pane (TMUX+TMUX_PANE) — there the passthrough wrap
@@ -203,18 +232,26 @@ function main(): void {
     let input = '';
     if (!process.stdin.isTTY) {
       try {
-        input = fs.readFileSync(0, 'utf8').slice(0, MAX_STDIN);
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of process.stdin) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          const part = bytes.subarray(0, MAX_STDIN - size);
+          chunks.push(part); size += part.length;
+          if (size >= MAX_STDIN) break;
+        }
+        input = Buffer.concat(chunks).toString('utf8');
       } catch { /* no payload */ }
     }
 
     const event = effectiveEvent(agent, eventArg, input);
     if (!event) return;
 
-    writeToControllingTty(buildHookSequence(agent, event, input, statusArg || undefined), inTmuxPane);
+    await writeToControllingTty(buildHookSequence(agent, event, input, statusArg || undefined), inTmuxPane);
   } catch {
     // Never break the agent's flow.
   }
   process.exit(0);
 }
 
-main();
+void main();

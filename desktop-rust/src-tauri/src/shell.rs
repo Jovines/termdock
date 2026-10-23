@@ -114,6 +114,7 @@ pub(crate) struct Shell {
     file_io: Arc<tokio::sync::Semaphore>,
     file_epochs: Arc<Mutex<BTreeMap<String, String>>>,
     certificate_receipts: CertificateReceipts,
+    connection_review: Mutex<Option<Value>>,
     quitting: AtomicBool,
     restoring: AtomicBool,
     setup_operation: tokio::sync::Mutex<()>,
@@ -168,7 +169,7 @@ pub(crate) fn show_center(app: &AppHandle) -> Result<(), String> {
     #[allow(unused_mut)]
     let mut builder =
         WebviewWindowBuilder::new(app, "center", WebviewUrl::App("index.html".into()))
-            .title("Termdock Preview · 连接中心")
+            .title(format!("{} · 连接中心", crate::product::name()))
             .visible(false)
             .background_color(initial_window_background())
             .inner_size(1280., 820.)
@@ -305,33 +306,15 @@ pub(crate) async fn open_connection(
     if !crate::window_diagnostics::active(){
         if let Some(pin) = local_service::local_pin(&connection.url) {pins.entry(connection.url.clone()).or_insert(pin);}
     }
-    if connection.target_peer_id.is_none() {
-        // Read-only open discovery is optional. Protected URL-only windows
-        // use the existing OPAQUE UI, then preserve the verified peer pin.
-        let source = proxy::upstream(
-            connection.url.clone(),
-            pins.get(&connection.url).map(String::as_str),
-        )?;
-        let response = source
-            .http
-            .get(format!("{}/api/auth/open/parameters", connection.url))
-            .send()
-            .await
-            .map_err(|error| {
-                eprintln!("[Termdock Preview] service discovery failed for {}: {error:#}", connection.url);
-                "Cannot discover service. Verify the address and Preview certificate fingerprint."
-            })?;
-        if response.status().is_success() {
-            let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-            if bytes.len() > 64 * 1024 {
-                return Err("Invalid discovery response".into());
-            }
-            let data: Value =
-                serde_json::from_slice(&bytes).map_err(|_| "Invalid discovery response")?;
-            connection.target_peer_id = Some(text(&data, "serviceIdentity")?.to_owned());
+    // Switching to an existing window must still work while its service is
+    // offline. Only creation of a new workspace needs the bootstrap TLS probe.
+    let existing_label = shell.windows.lock().unwrap().iter()
+        .find(|(_, w)| w.connection.key() == connection.key()).map(|(label, _)| label.clone());
+    let already_open = existing_label.and_then(|label| app.get_webview_window(&label)).is_some();
+    if !already_open {
+        if let Some(identity) = proxy::discover_connection_identity(&connection, &pins).await? {
+            connection.target_peer_id = Some(identity);
             connection = connection.validated()?;
-        } else if ![401, 403].contains(&response.status().as_u16()) {
-            return Err("服务授权入口暂不可用，请稍后重试".into());
         }
     }
     {
@@ -447,7 +430,7 @@ pub(crate) async fn open_connection(
     let navigation_app = app.clone();
     let new_window_app = app.clone();
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
-        .title(format!("{} · Termdock Preview", connection.label))
+        .title(format!("{} · {}", connection.label, crate::product::name()))
         .visible(false)
         .background_color(initial_window_background())
         .inner_size(1500., 820.)
@@ -520,7 +503,7 @@ pub(crate) async fn open_connection(
             .get(&connection.key())
             .cloned()
             .unwrap_or_else(|| connection.key());
-        let digest = Sha256::digest(format!("com.jovines.termdock.preview:{}", profile).as_bytes());
+        let digest = Sha256::digest(format!("{}:{}", crate::product::identifier(), profile).as_bytes());
         let mut id = [0u8; 16];
         id.copy_from_slice(&digest[..16]);
         builder = builder.data_store_identifier(id);
@@ -648,6 +631,7 @@ async fn preview_dispatch(
         "inspectCertificate",
         "discardCertificateInspection",
         "certificatePins",
+        "takeConnectionReview",
         "openLocal",
         "prepareLocal",
         "downloadNode",
@@ -906,6 +890,31 @@ async fn preview_dispatch(
             open_connection(&app, connection, invitation).await
         }
         "openLocal" => connect_local(&app).await,
+        "reviewConnection" => {
+            if center { return Err("Connection review must be requested by a workspace".into()); }
+            let connection = parse_connection(&args)?;
+            let invitation = args.get("invitation").and_then(Value::as_str);
+            if let Some(link) = invitation { connection.validate_invitation(link)?; }
+            {
+                let mut pending = shell.connection_review.lock().unwrap();
+                if pending.is_some() { return Err("连接中心已有待处理的连接，请先完成或取消后重试。".into()); }
+                *pending = Some(json!({"connection":connection,"invitation":invitation}));
+            }
+            if let Err(error) = show_center(&app) {
+                shell.connection_review.lock().unwrap().take();
+                return Err(error);
+            }
+            // Only the bundled center receives the notification. The request
+            // remains in memory until consumed, even while its page is loading.
+            if let Some(target) = app.get_webview_window("center") {
+                let _ = target.eval("window.dispatchEvent(new Event('termdock:preview-connection-review'));");
+            }
+            Ok(Value::Null)
+        }
+        "takeConnectionReview" => {
+            certificate_center_epoch(&app, &window)?;
+            Ok(shell.connection_review.lock().unwrap().take().unwrap_or(Value::Null))
+        }
         "certificatePins" => {
             certificate_center_epoch(&app, &window)?;
             Ok(json!(shell.config.lock().unwrap().certificate_pins))
@@ -1010,7 +1019,7 @@ async fn preview_dispatch(
             Ok(Value::Null)
         }
         "deviceInfo" => Ok(
-            json!({"system":std::env::consts::OS,"client":"Termdock Preview","arch":std::env::consts::ARCH,"mode":"desktop"}),
+            json!({"system":std::env::consts::OS,"client":crate::product::name(),"arch":std::env::consts::ARCH,"mode":"desktop"}),
         ),
         "clipboardImage" => {
             let _limits = file_limits(&app).await?;
@@ -1483,7 +1492,7 @@ pub fn run() {
             let (file,config)=if let Some(isolated)=crate::window_diagnostics::configuration(){isolated}else{
                 let file=app.path().app_config_dir()?.join("connections.json");
                 let stable=PathBuf::from(std::env::var_os("HOME").ok_or("Missing home directory")?).join(".termdock/desktop.json");
-                let config=Config::load(&file,&stable)?;(file,config)
+                let config=if crate::product::is_preview(){Config::load(&file,&stable)?}else{crate::migration::load_configuration(&file,&stable,&file.parent().ok_or("Missing configuration directory")?.parent().ok_or("Missing application support directory")?.join("com.jovines.termdock.preview/connections.json"))?};(file,config)
             };
             config.persist(&file)?;
             let restore_connections=config.open_connections.iter()
@@ -1543,6 +1552,7 @@ pub fn run() {
                 file_io: Arc::new(tokio::sync::Semaphore::new(1)),
                 file_epochs,
                 certificate_receipts: CertificateReceipts::default(),
+                connection_review: Mutex::new(None),
                 quitting: AtomicBool::new(false),
                 restoring: AtomicBool::new(restore_pending),
                 setup_operation: tokio::sync::Mutex::new(()),

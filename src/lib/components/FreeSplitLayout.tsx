@@ -1,7 +1,8 @@
+import { useDragLifetime } from '../hooks/useDragLifetime';
 import { GripVertical } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { getSettings } from '../terminal/api';
-import { collaborationGroupPreferences, openCollaborationGroups, collaborationPanelClientId, saveCollaborationPanel } from '../collaboration/panelPreferences';
+import { useLayoutSync } from '../hooks/useLayoutSync';
+import { collaborationGroupPreferences, openCollaborationGroups, collaborationPanelClientId } from '../collaboration/panelPreferences';
 import { collaborationPaneId, useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
 import { fourPaneBoundaries, layoutRects, leafIds, movePane, normalizeSplitNode, presetLayout, pruneLayout, resizeFourBoundary, resizeNode, splitLeaf, type PaneRect, type PaneSide, type SplitNode } from '../terminal/freeSplitLayout';
 
@@ -27,24 +28,13 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
   const container = useRef<HTMLDivElement>(null);
   const [tree, setTree] = useState<SplitNode>(() => initialTree ?? presetLayout(panes.map(p => p.id), mobile ? 'vertical' : preset));
   const treeRef = useRef(tree); treeRef.current = tree;
-  const [ready, setReady] = useState(false);
   const activePaneId = useCollaborationPanelDock(state => state.activePaneId);
-  const [error, setError] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<{ id: string; dx: number; dy: number; originX: number; originY: number; scale: number } | null>(null);
   const [drop, setDrop] = useState<{ id: string; side: PaneSide | 'center' } | null>(null);
   const previousPreset = useRef(preset);
   const previousIds = useRef(panes.map(p => p.id));
   const lastDock = useRef<Record<string, string>>({});
-  const dirty = useRef(false);
-  const persist = () => {
-    if (!dirty.current) return;
-    dirty.current = false;
-    void saveCollaborationPanel({ layouts: { [layoutId]: treeRef.current } }).catch(() => { dirty.current = true; setError('布局保存失败，调整后重试'); });
-  };
-  useEffect(() => {
-    let cancelled = false;
-    void getSettings().then(settings => {
-      if (cancelled) return;
+  const { ready, markChanged, persist } = useLayoutSync(layoutId, treeRef, settings => {
       const panel = settings.collaborationPanels?.[collaborationPanelClientId()];
       for (const id of openCollaborationGroups(panel)) {
         const savedGroup = collaborationGroupPreferences(panel, id);
@@ -60,11 +50,8 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
         saved = migrate(saved);
       }
       if (saved) setTree(saved);
-      setReady(true);
-    }).catch(() => { if (!cancelled) setError('布局加载失败，请刷新重试'); });
-    return () => { cancelled = true; };
-  }, [layoutId]);
-  const change = (next: SplitNode) => { dirty.current = true; treeRef.current = next; setTree(next); };
+  });
+  const change = (next: SplitNode) => { markChanged(); treeRef.current = next; setTree(next); };
   useLayoutEffect(() => {
     if (!ready) return;
     const ids = JSON.parse(idsKey) as string[];
@@ -126,6 +113,11 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
   const drag = useRef<{ id: string; x: number; y: number; moved: boolean; originX: number; originY: number; scale: number } | null>(null);
   const dropRef = useRef(drop); dropRef.current = drop;
   const activeResize = useRef<{ path?: string; side?: PaneSide; rect: PaneRect; axis: 'x' | 'y' } | null>(null);
+  const trackLayoutDrag = useDragLifetime(reason => {
+    activeResize.current = null; drag.current = null; dropRef.current = null;
+    if (reason !== 'dispose') { setDrop(null); setDragPreview(null); persist(); }
+    document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: false } }));
+  });
   // Portal children are DOM descendants but not React descendants of this layout.
   // Capture starts on the DOM container so terminal and collaboration titles share the path.
   useEffect(() => {
@@ -138,6 +130,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
       if (!handle || (control && control !== handle)) return;
       const pane = handle.closest<HTMLElement>('[data-layout-pane]');
       if (!pane || !host.contains(pane)) return;
+      trackLayoutDrag(event, host);
       document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: true } }));
       const box = pane.getBoundingClientRect();
       drag.current = { id: pane.dataset.layoutPane!, x: event.clientX, y: event.clientY, moved: false,
@@ -162,7 +155,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
     host.addEventListener('focusin', select, true);
     host.addEventListener('pointerdown', start, true);
     return () => { host.removeEventListener('pointerdown', start, true); host.removeEventListener('pointerdown', select, true); host.removeEventListener('focusin', select, true); };
-  }, [ready]);
+  }, [ready, trackLayoutDrag]);
   const resize = (clientX: number, clientY: number) => {
     const box = container.current?.getBoundingClientRect(), active = activeResize.current;
     if (!box || !active) return;
@@ -218,7 +211,7 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
     {!focusId && handles.map(h => <button key={h.key} type="button" role="separator" aria-label={h.side ? `调整${({ top: '上', bottom: '下', left: '左', right: '右' })[h.side]}半段分隔线` : '调整分屏大小'} aria-orientation={h.axis === 'x' ? 'vertical' : 'horizontal'} disabled={!ready}
       className={`swiper-no-swiping absolute z-10 touch-none bg-border hover:bg-primary focus-visible:bg-primary ${h.axis === 'x' ? 'w-px cursor-col-resize' : 'h-px cursor-row-resize'}`}
       style={{ left: `${h.x * 100}%`, top: `${h.y * 100}%`, ...(h.axis === 'x' ? { height: `${h.length * 100}%` } : { width: `${h.length * 100}%` }) }}
-      onPointerDown={event => { event.preventDefault(); event.stopPropagation(); document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: true } })); activeResize.current = h; container.current?.setPointerCapture?.(event.pointerId); }}
+      onPointerDown={event => { event.preventDefault(); event.stopPropagation(); trackLayoutDrag(event, container.current ?? undefined); document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: true } })); activeResize.current = h; container.current?.setPointerCapture?.(event.pointerId); }}
       onDoubleClick={() => { change(h.side ? resizeFourBoundary(treeRef.current, h.side, 0.5) : resizeNode(treeRef.current, h.path!, 0.5)); persist(); }}
       onKeyDown={event => {
         if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -227,6 +220,5 @@ export function FreeSplitLayout({ layoutId, panes, preset = 'grid', initialTree,
         const ratio = Math.max(0.05, Math.min(0.95, current + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 0.03 : -0.03)));
         change(h.side ? resizeFourBoundary(treeRef.current, h.side, ratio) : resizeNode(treeRef.current, h.path!, ratio)); persist();
       }}><span aria-hidden="true" className={`absolute ${h.axis === 'x' ? 'inset-y-0 -inset-x-1' : 'inset-x-0 -inset-y-1'}`} /></button>)}
-    {error && <div role="alert" className="absolute bottom-1 left-1 z-20 rounded bg-surface px-2 py-1 text-[10px] text-destructive">{error}</div>}
   </div>;
 }

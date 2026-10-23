@@ -1,3 +1,4 @@
+import type { DownloadResult } from '../../terminal/api';
 // @vitest-environment jsdom
 
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
@@ -17,7 +18,7 @@ const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.proto
 
 const { deleteFileMock, downloadFileMock, searchFilesStreamMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
   deleteFileMock: vi.fn(async (_path:string,_current?:()=>boolean):Promise<void> => undefined),
-  downloadFileMock: vi.fn(async () => undefined),
+  downloadFileMock: vi.fn(async (_path: string, _signal?: AbortSignal): Promise<DownloadResult> => 'saved'),
   searchFilesStreamMock: vi.fn(),
   getSettingsMock: vi.fn(async () => ({ fileSortModes: {} })),
   listDirectoryMock: vi.fn(async (path: string): Promise<{ path: string; entries: FileTreeNode[] }> => ({ path, entries: [] })),
@@ -47,6 +48,7 @@ async function renderFixture(ui: Parameters<typeof render>[0]) {
 
 describe('FileTree file deletion', () => {
   beforeEach(() => {
+    downloadFileMock.mockResolvedValue('saved');
     useSidebarStore.setState({
       rootPath: '/workspace',
       selectedFilePath: '/workspace/notes.txt',
@@ -79,6 +81,24 @@ describe('FileTree file deletion', () => {
     getSettingsMock.mockClear();
     updateSettingsMock.mockClear();
     vi.unstubAllGlobals();
+  });
+
+  it('offers one cancel action for a pending tree download and reports cancellation without opening the file', async () => {
+    const user = userEvent.setup(), onFileSelect = vi.fn();
+    let signal!: AbortSignal;
+    downloadFileMock.mockImplementation((_path, current) => {
+      signal = current!;
+      return new Promise(resolve => signal.addEventListener('abort', () => resolve('canceled')));
+    });
+    await renderFixture(<I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={onFileSelect} /></I18nProvider>);
+    await user.click(screen.getByRole('button', { name: 'More file actions' }));
+    await user.click(screen.getByRole('button', { name: 'Download file' }));
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1);
+    await user.click(cancel);
+    expect(signal.aborted).toBe(true);
+    await screen.findByText('Download canceled');
+    expect(onFileSelect).not.toHaveBeenCalled();
   });
 
   it('tabs to file actions and activates them without opening the row', async () => {
@@ -134,7 +154,7 @@ describe('FileTree file deletion', () => {
       const download = screen.getByRole('button', { name: 'Download file' });
       expect(document.activeElement).toBe(download);
       await user.keyboard('{Enter}');
-      await waitFor(() => expect(downloadFileMock).toHaveBeenCalledWith('/workspace/notes.txt'));
+      await waitFor(() => expect(downloadFileMock).toHaveBeenCalledWith('/workspace/notes.txt', expect.any(AbortSignal)));
       expect(screen.getByTitle('notes.txt:1')).toBeTruthy();
       download.focus(); await user.keyboard(' ');
       await waitFor(() => expect(downloadFileMock).toHaveBeenCalledTimes(2));
@@ -503,7 +523,7 @@ describe('FileTree file deletion', () => {
       expect.any(AbortSignal),
       false,
       'expand_directory',
-      'file-tree:/workspace/project',
+      expect.stringMatching(/^file-tree:.*:\/workspace\/project:\d+$/),
       'modified',
       '/workspace',
     ));

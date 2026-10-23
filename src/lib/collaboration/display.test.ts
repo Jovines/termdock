@@ -11,7 +11,7 @@ describe('collaboration member names', () => {
     const named = { sessionId: 'one', name: '设计评审' };
     expect(collaborationMemberLabel(named, [named])).toBe('设计评审');
     const unnamed = { sessionId: 'remote:node:two', name: 'remote:node:two' };
-    expect(collaborationMemberLabel(unnamed, [unnamed])).toBe('成员');
+    expect(collaborationMemberLabel(unnamed, [unnamed])).toBe('终端会话');
   });
 });
 

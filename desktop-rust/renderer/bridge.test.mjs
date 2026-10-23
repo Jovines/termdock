@@ -732,3 +732,24 @@ test('native remote upload displays progress and cancel aborts the page request 
  for(let i=0;i<50&&!signal;i++)await new Promise(resolve=>setTimeout(resolve,2));assert(signal);assert.equal(target.dataset.nativeFileDropState,'uploading');assert.equal(target.dataset.nativeFileDrag,'true');assert(Number(target.dataset.nativeFileDropProgress)>0);
  f.listeners.get('termdock:file-drop-cancel')({target});await new Promise(resolve=>setTimeout(resolve,0));assert(signal.aborted);assert.deepEqual(delivered,[]);assert.equal(target.dataset.nativeFileDropState,'cancelled');dom.window.close();
 });
+
+test('workspace transfers certificate recovery to the bundled center without receiving trust capabilities',async()=>{
+ const service=fixture(),center=fixture({local:true});
+ const connection={id:'owned',url:'https://entry.test',serviceOrigin:'https://target.test',routes:[{url:'https://backup.test',targetPeerId:'backup'}]};
+ await service.window.termdockDesktop.reviewServiceConnection(connection,'private-invitation');
+ assert.deepEqual(JSON.parse(JSON.stringify(service.ipc)),[{command:'preview_dispatch',op:'reviewConnection',args:{connection,invitation:'private-invitation'}}]);
+ assert.equal(service.window.termdockDesktop.takeServiceConnectionReview,undefined);
+ assert.equal(service.window.termdockDesktop.certificatePins,undefined);
+ assert.equal(center.window.termdockDesktop.reviewServiceConnection,undefined);
+ await center.window.termdockDesktop.takeServiceConnectionReview();
+ assert.equal(center.ipc[0].op,'takeConnectionReview');
+ let notified=0;
+ const stop=center.window.termdockDesktop.onServiceConnectionReview(()=>notified++);
+ center.listeners.get('termdock:preview-connection-review')({});assert.equal(notified,1);
+ stop();center.listeners.get('termdock:preview-connection-review')({});assert.equal(notified,1);
+});
+
+test('a saved service identity mismatch cannot be recovered by trusting a TLS certificate',async()=>{
+ const f=fixture({invoke:async()=>{throw 'Pinned target identity changed. Remove the old connection explicitly before adding it again.';}});
+ await assert.rejects(f.window.termdockDesktop.openServiceConnection({url:'https://owned.test'}),error=>error.code==='PREVIEW_IDENTITY_REJECTED');
+});

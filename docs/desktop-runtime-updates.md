@@ -5,9 +5,14 @@ Each connected service owns its CLI installation and Runtime update lifecycle.
 The CLI and service Runtime controls in Settings operate on that connected
 service through its encrypted page transport.
 
-The macOS application uses the Squirrel.Mac GitHub release feed. Its update
-check is independent of the connected service version; a downloaded application
-update is installed after the user chooses to restart and install.
+The Rust macOS application (macOS 14+, Apple Silicon) uses a build-pinned
+Tauri updater manifest and signing key. Legacy Electron clients first install a
+fixed compatibility bridge through their existing Squirrel.Mac ZIP feed. On
+macOS 14+ that bridge selects the Rust ZIP; macOS 12/13 keeps the bridge and
+explains the system upgrade requirement. The final Preview migrates to the same
+Rust stable application through the signed Tauri feed. Application updates are
+independent of the connected service version and require the user to accept
+installation. See [the release contract](../desktop-rust/RELEASE.md).
 
 Desktop no longer downloads or executes npm server runtimes, installs CLI
 symlinks, stages production dependencies, or manages a local server through an

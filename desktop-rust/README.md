@@ -1,8 +1,8 @@
-# Termdock Rust Preview
+# Termdock Rust desktop
 
 Rust/Tauri 桌面客户端，使用 Web/xterm 终端，并复用现有 React 工作区与连接中心。源码已合入 master。
 
-目前作为 `Termdock Preview` / `com.jovines.termdock.preview` 独立安装，与正式 Electron App 并存。Preview 的桌面版本及更新渠道独立于正式 App 和 Node CLI/服务端。
+正式客户端为 `Termdock` / `com.jovines.termdock`，要求 macOS 14+（Apple Silicon）。桌面版本及更新渠道独立于 Node CLI/服务端；`previewVersion` 仅用于最后一个迁移过渡版。
 
 ## 构建
 
@@ -17,7 +17,7 @@ npm --prefix desktop-rust run build
 
 `--ignore-scripts` 避免根项目 postinstall 初始化用户服务。构建入口准备 React 客户端与连接中心；工作区优先加载所连接服务自己的前端，同一窗口的页面及静态资源保持同一来源；服务部署后重新加载即可更新界面。目标前端不可达（包括只能中转访问业务的目标）时，使用签名 App 内置的完整工作区备用，不加载入口或其他服务的页面。缺失资源及业务请求失败不会触发来源切换。
 
-公开 Preview 的版本、签名更新包和渠道指针按 [发布契约](RELEASE.md) 生成与发布；普通本地构建没有发布密钥也能运行，但不能冒称已配置自动更新。用户确认稳定后，按同一契约将 Rust 转为正式版，并验证旧 Electron 到 Rust 的直接升级链路。
+正式包、旧客户端兼容 ZIP、Preview 迁移及后续发版按 [发布契约](RELEASE.md) 执行。普通本地构建没有发布密钥也能运行，但不能冒称已配置自动更新。
 
 ## 行为边界
 

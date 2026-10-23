@@ -1,3 +1,4 @@
+import { clipboardEventContent, readClipboardContent } from '../../terminal/clipboardContent';
 import { TerminalFileDropStatus } from './TerminalFileDropStatus';
 import {writeTerminalClipboardText as writeClipboardText, copyTmuxTerminalSelection} from '../../terminal/clipboardText';
 import { sanitizeTerminalInput } from '../../terminal/inputNormalization';
@@ -7,19 +8,18 @@ import { isWorkspaceActive } from '../../services/workspaceHost';
 import { selectedTarget } from '../../federation/clientScope';
 import { currentSecureClient } from '../../federation/browserIntegration';
 import React from 'react';
-import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
+import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
-import { TerminalClipboardVideoError, readTerminalClipboardFiles, uploadTerminalClipboardFiles, readTerminalClipboardImage, readTerminalClipboardVideos, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
+import { uploadTerminalClipboardFiles, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
 import { useI18n } from '../../i18n';
 import { flushSync } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
-import { Terminal, type FontWeight } from '@xterm/xterm';
+import type { Terminal, FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { createNativeWebLinkHandler } from '../../terminal/nativeWebLinks';
 import { createWrappedWebLinkProvider } from '../../terminal/wrappedWebLinks';
-import { ensureTerminalFontsReady } from '../../terminal/fontLoading';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -43,9 +43,8 @@ import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal
 import { detectTextareaPaste } from '../../terminal/bracketedPaste';
 import { terminalSequencePayload, type TerminalSequenceOptions } from '../../terminal/sequencePayload';
 import type { OwnedTerminalPaste } from '../../terminal/ownedPaste';
-import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
+import { shouldPushFittedSize } from '../../terminal/fitHysteresis';
 import {
-  shouldPreserveBottomAfterFit,
   shouldProcessObservedResize,
   shouldRefreshTerminalBuffer,
 } from '../../terminal/refreshRedraw';
@@ -89,8 +88,9 @@ import {
   type JoystickDirection,
 } from './joystickRepeat';
 import { createTerminalPathLinkProvider } from '../../terminal/pathLinks';
-import { repairXtermBufferInvariants } from '../../terminal/xtermBufferInvariant';
-import { setSessionFontSize } from '../../terminal/sessionFontSize';
+import { createBrowserTerminal, TerminalGeometry, type TerminalGeometryPhase } from '../../terminal/geometry';
+import { clampSessionFontSize, getSessionFontSize, setSessionFontSize } from '../../terminal/sessionFontSize';
+import { createFontZoomGesture } from '../../terminal/fontZoomGesture';
 import { estimateTerminalCellHeight } from '../../terminal/initialDimensions';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
@@ -185,7 +185,7 @@ function findScrollableViewport(container: HTMLElement): HTMLElement | null {
  */
 export type RefreshReason =
   | 'mount'                  // xterm 首次初始化
-  | 'init-fit'               // post-init timeout 之后的二次 fit
+  | 'init-fit'               // renderer 挂载后的同步首次测量
   | 'connected'              // WebSocket 已 connected
   | 'visibility'             // 页面从 hidden→visible
   | 'bfcache'                // 从 BFCache 恢复
@@ -203,6 +203,8 @@ export type RefreshReason =
   | 'webgl-context-loss';    // onContextLoss 回调
 
 export type RefreshOptions = {
+  /** Geometry lifecycle; reveal must complete before paint. */
+  geometryPhase?: TerminalGeometryPhase;
   /** 强制重建 renderer（即便 context 看起来还活着）。仅 'webgl-context-loss' 等极少数场景。 */
   forceRendererRecreate?: boolean;
   /** 不推 resize 给服务端（layout 来自服务端时，避免回环）。 */
@@ -251,7 +253,7 @@ export type TerminalController = {
    * 后续 textarea diff / 退格会全部打在错误的位置上。
    */
   sendSequence: (seq: string, options?: TerminalSequenceOptions) => void | Promise<boolean>;
-  /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
+  /** 实测后的 cols/rows；构造默认值、估算值和未测量状态返回 null。 */
   getDimensions: () => { cols: number; rows: number } | null;
   /**
    * 唯一刷新入口。所有"我想让终端重画一下"的需求都走这里。
@@ -680,6 +682,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const containerRef = React.useRef<HTMLDivElement>(null);
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
+    const geometryRef = React.useRef<TerminalGeometry | null>(null);
     const serializeAddonRef = React.useRef<SerializeAddon | null>(null);
     const resizePresentationRef = React.useRef<ReturnType<typeof createResizePresentation> | null>(null);
     const suppressSmoothScrollRef = React.useRef(suppressSmoothScroll);
@@ -755,6 +758,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pendingTextareaSyncTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingTextareaSyncTargetRef = React.useRef<HTMLTextAreaElement | null>(null);
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
+    // Keep the rate limit across xterm rebuilds after a font change.
+    const fontZoomGesture = React.useMemo(() => createFontZoomGesture(), [sessionId]);
+    React.useEffect(() => {
+      window.addEventListener('blur', fontZoomGesture.reset);
+      document.addEventListener('visibilitychange', fontZoomGesture.reset);
+      return () => {
+        window.removeEventListener('blur', fontZoomGesture.reset);
+        document.removeEventListener('visibilitychange', fontZoomGesture.reset);
+      };
+    }, [fontZoomGesture]);
     // 桌面 tmux wheel：累积像素余数，凑满 1 行立即发
     const desktopWheelRemainderRef = React.useRef(0);
     const keepInputFocusUntilRef = React.useRef(0);
@@ -1604,68 +1617,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       pasteData?: { files: File[]; text: string },
     ): Promise<boolean> => {
       const owner = pasteOwner();
-      const owned = async <T,>(promise: Promise<T>): Promise<T> => {
-        const value = await promise;
-        if (!owner.current()) throw new Error('Clipboard operation was superseded');
-        return value;
-      };
       setPasteError(null);
       try {
-        const targetPeerId = selectedTarget()?.targetPeerId;
-        let nativeFileError: unknown;
-        if (getTermdockDesktopBridge()?.readClipboardFiles) {
-          try {
-            const { files, paths } = await owned(readTerminalClipboardFiles());
-            if (paths.length || files.length) return pasteFilesIntoTerminal(files, textarea, paths, owner);
-          } catch (error) {
-            if (!owner.current() || error instanceof TerminalClipboardVideoError) throw error;
-            // File/movie detection must not prevent ordinary text or image
-            // paste, including when an older installed native reader fails.
-            nativeFileError = error;
+        const content = await readClipboardContent(pasteData, owner.current);
+        if (content.kind === 'text') return pasteTextIntoTerminal(content.text, textarea);
+        if (content.kind === 'files') {
+          if (!content.paths.length && content.files.length === 1 && content.files[0].type.startsWith('image/')) {
+            return pasteImageIntoTerminal(content.files[0], textarea, owner);
           }
-          if (selectedTarget()?.targetPeerId !== targetPeerId) throw new Error('目标服务已切换，请重新粘贴');
+          return pasteFilesIntoTerminal(content.files, textarea, content.paths, owner);
         }
-        // Snapshot the event payload before awaiting IPC: browsers can clear
-        // clipboardData after the synchronous paste handler has returned.
-        if (pasteData?.files.length) {
-          const image = pasteData.files[0];
-          return pasteData.files.length === 1 && image.type.startsWith('image/')
-            ? pasteImageIntoTerminal(image, textarea, owner)
-            : pasteFilesIntoTerminal(pasteData.files, textarea, [], owner);
-        }
-        if (pasteData?.text) {
-          return pasteTextIntoTerminal(pasteData.text, textarea);
-        }
-        if (!getTermdockDesktopBridge()?.readClipboardImage) {
-          if (typeof navigator.clipboard?.read === 'function') {
-            // Request access once, within the button's user gesture. Reuse the
-            // returned items for text too: a later readText() can be denied by iOS.
-            const items = await owned(navigator.clipboard.read());
-            const videos = await owned(readTerminalClipboardVideos({ read: async () => items }));
-            if (videos.length) return pasteFilesIntoTerminal(videos, textarea, [], owner);
-            const image = await owned(readTerminalClipboardImage({ read: async () => items }));
-            if (image) return pasteImageIntoTerminal(image, textarea, owner);
-            for (const item of items) {
-              if (!item.types.includes('text/plain')) continue;
-              const text = await owned((await owned(item.getType('text/plain'))).text());
-              return pasteTextIntoTerminal(text, textarea);
-            }
-            setPasteError('剪贴板未提供可读取的文字、图片或视频；视频可通过文件按钮选择上传。');
-            return false;
-          }
-          // Older browsers exposing only readText must call it before any await.
-          if (!navigator.clipboard?.readText) return false;
-          return pasteTextIntoTerminal(await owned(navigator.clipboard.readText()), textarea);
-        }
-        const image = await owned(readTerminalClipboardImage(navigator.clipboard));
-        if (image) return pasteImageIntoTerminal(image, textarea, owner);
-        if (!navigator.clipboard?.readText) {
-          if (nativeFileError) throw nativeFileError;
-          return false;
-        }
-        const text = await owned(navigator.clipboard.readText());
-        if (!text && nativeFileError) throw nativeFileError;
-        return pasteTextIntoTerminal(text, textarea);
+        if (owner.current()) setPasteError('剪贴板未提供可读取的文字、图片或视频；视频可通过文件按钮选择上传。');
+        return false;
       } catch (error) {
         if (owner.current()) setPasteError(error instanceof Error ? error.message : 'Clipboard read failed');
         return false;
@@ -3044,95 +3007,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       lastProcessedChunkIdRef.current = null;
     }, []);
 
-    const fitTerminal = React.useCallback((reason: string = 'unknown') => {
-      const fitAddon = fitAddonRef.current;
-      const terminal = terminalRef.current;
-      const container = containerRef.current;
-      if (!fitAddon || !terminal || !container || !isLayoutVisibleRef.current) {
-        return;
-      }
-      // Check if terminal element is attached and has dimensions
-      if (!terminal.element || !terminal.cols || !terminal.rows) {
-        return;
-      }
-      const rect = container.getBoundingClientRect();
-      if (rect.width < 24 || rect.height < 24) {
-        debugTerminal('skip fit: container too small', {
-          reason,
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        });
-        return;
-      }
+    const fitTerminal = React.useCallback((reason: string = 'unknown', phase: TerminalGeometryPhase = 'update') => {
       try {
-        const before = { cols: terminal.cols, rows: terminal.rows };
-        const activeBufferBeforeFit = terminal.buffer.active;
-        const preserveBottom = shouldPreserveBottomAfterFit(
-          activeBufferBeforeFit.type,
-          activeBufferBeforeFit.baseY,
-          activeBufferBeforeFit.viewportY,
-        );
-        const proposed = fitAddon.proposeDimensions();
-        if (!proposed || proposed.cols <= 0 || proposed.rows <= 0) {
-          return;
-        }
-        // xterm.js #6063 can leave the logical line store shorter than the
-        // current viewport. Repair before deciding whether a resize is needed,
-        // because a same-size Session activation still needs to recover it.
-        const repairedBeforeResize = repairXtermBufferInvariants(terminal, before.rows);
-        const hysteresis = decideFitHysteresis({
-          reason,
-          currentCols: before.cols,
-          currentRows: before.rows,
-          proposedCols: proposed.cols,
-          proposedRows: proposed.rows,
-        });
-        let repairedAfterResize = 0;
-        if (hysteresis.accept) {
-          if (sessionReadyRef.current && ownsResizeRef.current && onTmuxScrollRef.current
-            && (before.cols !== proposed.cols || before.rows !== proposed.rows)) {
-            resizePresentationRef.current?.begin();
-          }
-          // Public scrollToBottom() uses xterm's smooth-scroll duration. Disable
-          // it for the whole resize so restoring bottom-follow cannot animate
-          // through unrelated scrollback after the new geometry is painted.
-          const smoothScrollDuration = terminal.options.smoothScrollDuration;
-          try {
-            terminal.options.smoothScrollDuration = 0;
-            terminal.resize(proposed.cols, proposed.rows);
-            repairedAfterResize = repairXtermBufferInvariants(terminal, proposed.rows);
-            if (preserveBottom) terminal.scrollToBottom();
-          } finally {
-            terminal.options.smoothScrollDuration = smoothScrollDuration;
-          }
-          remainderPxRef.current = 0;
-        }
-        if (repairedBeforeResize > 0 || repairedAfterResize > 0) {
-          terminal.refresh(0, Math.max(0, terminal.rows - 1));
-          debugTerminal('xterm buffer invariant repaired', {
-            reason,
-            before: repairedBeforeResize,
-            after: repairedAfterResize,
-            cols: terminal.cols,
-            rows: terminal.rows,
-          });
-        }
-        const next = { cols: terminal.cols, rows: terminal.rows };
-
-        debugTerminal('fit', {
-          reason,
-          backend: 'xterm',
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-          before,
-          proposed,
-          next,
-          hysteresis,
-          changed: before.cols !== next.cols || before.rows !== next.rows,
-        });
+        const report = geometryRef.current?.fit(phase, isLayoutVisibleRef.current, reason);
+        if (!report) return;
+        if (report.changed) remainderPxRef.current = 0;
+        debugTerminal('fit', report);
       } catch {
         resizePresentationRef.current?.cancel();
-        // fit failure is non-fatal; the next refresh attempt will retry.
+        // A failed measurement is retried on the next layout event.
       }
     }, [debugTerminal]);
 
@@ -3536,7 +3419,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         // 2) fit() —— 这一步会触发 xterm 的 onResize
         const before = { cols: terminal.cols, rows: terminal.rows };
-        fitTerminal(`refresh:${reason}`);
+        fitTerminal(`refresh:${reason}`, options.geometryPhase);
         const after = { cols: terminal.cols, rows: terminal.rows };
         // A retained renderer can have lost its backing surface while hidden,
         // even when the grid is unchanged. Paint only after fitting real DOM.
@@ -3645,20 +3528,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     );
 
     const wasLayoutVisibleRef = React.useRef(isLayoutVisible);
-    React.useEffect(() => {
+    React.useLayoutEffect(() => {
       const revealed = isLayoutVisible && !wasLayoutVisibleRef.current;
       wasLayoutVisibleRef.current = isLayoutVisible;
       if (!isLayoutVisible) {
         clearResizePushTimer();
         resizePresentationRef.current?.cancel();
       } else if (revealed) {
-        requestRefresh('layout-visible', {
+        // A retained viewport can still have its hidden-time estimated grid.
+        // Measure synchronously before its first visible paint, not in the
+        // refresh scheduler's next frame.
+        runRefreshSequence('layout-visible', {
+          geometryPhase: 'reveal',
           forceRedraw: true,
           reconcileServerSize: true,
           skipScrollToBottom: true,
         });
       }
-    }, [isLayoutVisible, requestRefresh, clearResizePushTimer]);
+    }, [isLayoutVisible, runRefreshSequence, clearResizePushTimer]);
 
     const flushPendingRefresh = React.useCallback(
       (reason: RefreshReason) => {
@@ -3836,64 +3723,61 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         setErrorMessage(null);
         setIsInitializing(true);
 
-        // 等终端字体加载完成再实例化 xterm，否则 cell 测量会用 fallback 字体
-        // 的尺寸，事后字体加载好也不会重测，导致光标错位。详见
-        // ensureTerminalFontsReady 文档。
-        await ensureTerminalFontsReady();
-        if (disposed) return;
-
         try {
-          // 预估真实 cols/rows，避免 xterm 先以默认 80×24 渲染一帧再 fit。
-          // 估算失败时省略 cols/rows，xterm 用内置默认值，等 init-fit 校准。
-          const initialDims = estimateInitialDimensions(
-            container,
-            getTerminalFontFamily(fontFamily),
-            fontSize,
-            letterSpacing,
-            lineHeight,
-          );
-          const terminal = new Terminal({
-            ...(initialDims ? { cols: initialDims.cols, rows: initialDims.rows } : {}),
-            allowProposedApi: true,
-            fontFamily: getTerminalFontFamily(fontFamily),
-            fontSize,
-            fontWeight: normalizeXtermFontWeight(fontWeight),
-            fontWeightBold: normalizeXtermFontWeight(fontWeightBold),
-            theme: convertTheme(theme),
-            logLevel: 'off',
-            // WebGL renderer 在 idle 状态下也会因为 cursor blink 周期重绘；
-            // 某些 Chromium/GPU 组合会在这种空闲重绘中触发 atlas 花屏。
-            // WebGL 下禁用闪烁，避免“什么都不干”时仍持续 repaint；DOM 路径保持原行为。
-            cursorBlink: !shouldUseWebgl,
-            cursorStyle: 'block',
-            cursorInactiveStyle: cursorVisibleRef.current ? 'bar' : 'none',
-            scrollback: onTmuxScroll ? 2000 : 5000,
-            // FitAddon reads this option without changing the line buffer.
-            // Temporarily setting scrollback=0 during measurement trims
-            // history and triggers buffer resize/scroll events on every fit.
-            scrollbar: { showScrollbar: false },
-            allowTransparency: shouldAllowTerminalTransparency(rendererMode, enableImages),
-            convertEol: terminalConvertEol,
-            drawBoldTextInBrightColors,
-            rescaleOverlappingGlyphs,
-            minimumContrastRatio,
-            letterSpacing,
-            lineHeight,
-            // Initial history restore happens behind the boot surface. Animating
-            // that hidden scroll can outlive term.write's callback and produce a
-            // one-row jump immediately after the surface is removed.
-            smoothScrollDuration: smoothScrolling && !suppressSmoothScrollRef.current ? 125 : 0,
-            scrollOnEraseInDisplay: true,
-            tabStopWidth: 8,
-            vtExtensions: {
-              kittyKeyboard: true,
-            },
-            windowOptions: {
-              getWinSizePixels: true,
-              getCellSizePixels: true,
-              getWinSizeChars: true,
-            },
-          });
+          const terminal = await createBrowserTerminal(() => {
+            // 预估真实 cols/rows，避免 xterm 先以默认 80×24 渲染一帧再 fit。
+            // 估算失败时省略 cols/rows，xterm 用内置默认值，等 init-fit 校准。
+            const initialDims = estimateInitialDimensions(
+              container,
+              getTerminalFontFamily(fontFamily),
+              fontSize,
+              letterSpacing,
+              lineHeight,
+            );
+            return {
+              ...(initialDims ? { cols: initialDims.cols, rows: initialDims.rows } : {}),
+              allowProposedApi: true,
+              fontFamily: getTerminalFontFamily(fontFamily),
+              fontSize,
+              fontWeight: normalizeXtermFontWeight(fontWeight),
+              fontWeightBold: normalizeXtermFontWeight(fontWeightBold),
+              theme: convertTheme(theme),
+              logLevel: 'off',
+              // WebGL renderer 在 idle 状态下也会因为 cursor blink 周期重绘；
+              // 某些 Chromium/GPU 组合会在这种空闲重绘中触发 atlas 花屏。
+              // WebGL 下禁用闪烁，避免“什么都不干”时仍持续 repaint；DOM 路径保持原行为。
+              cursorBlink: !shouldUseWebgl,
+              cursorStyle: 'block',
+              cursorInactiveStyle: cursorVisibleRef.current ? 'bar' : 'none',
+              scrollback: onTmuxScroll ? 2000 : 5000,
+              // FitAddon reads this option without changing the line buffer.
+              // Temporarily setting scrollback=0 during measurement trims
+              // history and triggers buffer resize/scroll events on every fit.
+              scrollbar: { showScrollbar: false },
+              allowTransparency: shouldAllowTerminalTransparency(rendererMode, enableImages),
+              convertEol: terminalConvertEol,
+              drawBoldTextInBrightColors,
+              rescaleOverlappingGlyphs,
+              minimumContrastRatio,
+              letterSpacing,
+              lineHeight,
+              // Initial history restore happens behind the boot surface. Animating
+              // that hidden scroll can outlive term.write's callback and produce a
+              // one-row jump immediately after the surface is removed.
+              smoothScrollDuration: smoothScrolling && !suppressSmoothScrollRef.current ? 125 : 0,
+              scrollOnEraseInDisplay: true,
+              tabStopWidth: 8,
+              vtExtensions: {
+                kittyKeyboard: true,
+              },
+              windowOptions: {
+                getWinSizePixels: true,
+                getCellSizePixels: true,
+                getWinSizeChars: true,
+              },
+            };
+          }, () => !disposed);
+          if (!terminal) return;
 
           const fitAddon = new FitAddon();
           terminal.loadAddon(fitAddon);
@@ -3928,6 +3812,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           lastDevicePixelRatioRef.current = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
 
           terminal.open(container);
+          geometryRef.current = new TerminalGeometry(terminal, fitAddon, container, { authority: 'viewport', beforeLiveResize: () => {
+            if (sessionReadyRef.current && ownsResizeRef.current && onTmuxScrollRef.current) {
+              resizePresentationRef.current?.begin();
+            }
+          } });
           resizePresentationRef.current = createResizePresentation(terminal);
           if (fontLigatures) {
             terminal.loadAddon(new LigaturesAddon({
@@ -3970,10 +3859,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // via the tab menu. The desktop tmux SGR wheel handler deliberately
           // skips ctrl/meta-modified events so they land here.
           const handleWheel = (event: WheelEvent) => {
+            if (!document.hasFocus() || document.visibilityState === 'hidden') {
+              fontZoomGesture.reset();
+              return;
+            }
+            const delta = fontZoomGesture.consume(event, performance.now());
             if (event.ctrlKey || event.metaKey) {
               event.preventDefault();
-              const delta = event.deltaY > 0 ? -1 : 1;
-              setSessionFontSize(sessionId, fontSize + delta);
+              if (delta) {
+                const currentSize = getSessionFontSize(sessionId) ?? fontSize;
+                const nextSize = clampSessionFontSize(currentSize + delta);
+                if (nextSize !== currentSize) setSessionFontSize(sessionId, nextSize);
+              }
             }
           };
           wheelHandlerRef.current = handleWheel;
@@ -4242,7 +4139,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // Measure with the loaded font and mounted renderer before the
           // stream can start. A deferred fit lets the first output use an
           // estimated grid and then reflows that content a frame later.
-          fitTerminal('init-fit');
+          fitTerminal('init-fit', 'initialize');
 
           setLoadingState('ready');
           onReadyChangeRef.current?.(true);
@@ -4292,6 +4189,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         disposeWebglRenderer('component-unmount');
         localTerminal?.dispose();
         terminalRef.current = null;
+        geometryRef.current = null;
         fitAddonRef.current = null;
         viewportRef.current = null;
         resetWriteState({ notifyFlowResume: true });
@@ -4302,6 +4200,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       fitTerminal,
       fontFamily,
       fontSize,
+      fontZoomGesture,
       fontWeight,
       fontWeightBold,
       letterSpacing,
@@ -4598,11 +4497,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (seq) ensureSizeMatches('send-sequence');
           return sendTerminalSeq(seq, null, options);
         },
-        getDimensions: () => {
-          const terminal = terminalRef.current;
-          if (!terminal || !terminal.cols || !terminal.rows) return null;
-          return { cols: terminal.cols, rows: terminal.rows };
-        },
+        getDimensions: () => geometryRef.current?.dimensions ?? null,
         requestRefresh,
         setSessionReady: (ready: boolean) => {
           sessionReadyRef.current = ready;
@@ -5131,27 +5026,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               onPaste={(event) => {
                 // Browser paste events can expose videos as Files or file
                 // items even when the async clipboard API cannot read them.
-                const files = event.clipboardData.files.length
-                  ? Array.from(event.clipboardData.files)
-                  : Array.from(event.clipboardData.items)
-                    .filter(item => item.kind === 'file')
-                    .map(item => item.getAsFile())
-                    .filter((file): file is File => file !== null);
-                const text = event.clipboardData.getData('text/plain');
-                if (window.termdockDesktop?.readClipboardFiles) {
+                const { files, text } = clipboardEventContent(event.clipboardData);
+                if (window.termdockDesktop?.readClipboardFiles || files.length) {
                   event.preventDefault();
                   void readClipboardIntoTerminal(event.currentTarget, { files, text });
-                  return;
-                }
-                if (files.length && (files.length > 1 || !files[0].type.startsWith('image/'))) {
-                  event.preventDefault();
-                  void pasteFilesIntoTerminal(files, event.currentTarget);
-                  return;
-                }
-                const image = files[0];
-                if (image) {
-                  event.preventDefault();
-                  void pasteImageIntoTerminal(image, event.currentTarget);
                   return;
                 }
                 if (!text) {

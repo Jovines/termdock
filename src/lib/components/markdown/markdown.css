@@ -1,0 +1,16 @@
+/* Variants only change typography. Syntax and interactions live in Markdown. */
+.termdock-markdown[data-markdown-variant='prose'] { font-size: 15px; line-height: 1.85; }
+.termdock-markdown[data-markdown-variant='prose'] :is(p, li, blockquote) { font-size: 15px; line-height: 1.85; color: var(--foreground); }
+.termdock-markdown[data-markdown-variant='prose'] [data-markdown-preview-block-start] { padding-block: 0; }
+.termdock-markdown[data-markdown-variant='prose'] h1 { font-size: 1.5rem; line-height: 1.5; }
+.termdock-markdown[data-markdown-variant='prose'] h2 { font-size: 1.25rem; line-height: 1.6; }
+.termdock-markdown[data-markdown-variant='prose'] :is(h3, h4) { font-size: 1.05rem; line-height: 1.7; }
+.termdock-markdown[data-markdown-variant='prose'] :is(pre, pre code, pre span) { font-size: 13px; line-height: 1.7; }
+.termdock-markdown[data-markdown-variant='prose'] table { font-size: 14px; line-height: 1.7; }
+.termdock-markdown[data-markdown-variant='prose'] a { text-underline-offset: 3px; }
+
+.termdock-markdown[data-markdown-variant='compact'] { font-size: 14px; line-height: 24px; }
+.termdock-markdown[data-markdown-variant='compact'] h1 { font-size: 18px; }
+.termdock-markdown[data-markdown-variant='compact'] h2 { font-size: 16px; }
+.termdock-markdown[data-markdown-variant='compact'] h3 { font-size: 14px; }
+.termdock-markdown[data-markdown-variant='compact'] table { font-size: 12px; }

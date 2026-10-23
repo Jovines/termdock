@@ -59,7 +59,7 @@ jobs:
           if missing: raise SystemExit('Missing GitHub Actions secrets: '+', '.join(missing))
           print('All release credentials are configured')
           PY
-          node -e 'require("fs").appendFileSync(process.env.GITHUB_ENV,`PREVIEW_VERSION=${require("./desktop-rust/package.json").version}\nPREVIEW_REVISION=${process.env.GITHUB_SHA}\n`)'
+          node -e 'require("fs").appendFileSync(process.env.GITHUB_ENV,`PREVIEW_VERSION=${require("./desktop-rust/package.json").previewVersion}\nPREVIEW_REVISION=${process.env.GITHUB_SHA}\n`)'
       - name: Refuse an existing published version before building
         if: inputs.publish
         env:
@@ -106,7 +106,7 @@ jobs:
           trap 'rm -f "$APPLE_API_KEY_PATH"' EXIT
           npm --prefix desktop-rust run package:preview -- "$PREVIEW_VERSION" "$RUNNER_TEMP/preview-output" 2>&1 | tee "$RUNNER_TEMP/preview-build.log"
           python3 desktop-rust/scripts/notarize-preview.py "$RUNNER_TEMP/preview-output" 'desktop-rust/src-tauri/target/release/bundle/macos/Termdock Preview.app' "$RUNNER_TEMP/preview-build.log"
-          rm "$RUNNER_TEMP/preview-output/preview-build.json"
+          rm "$RUNNER_TEMP/preview-output/build-config.json"
       - name: Upload verified signed artifacts
         uses: actions/upload-artifact@v4
         with:

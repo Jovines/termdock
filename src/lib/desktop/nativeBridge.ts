@@ -43,6 +43,15 @@ export interface DesktopAppUpdateState {
 }
 
 export interface TermdockDesktopBridge extends ServiceDirectoryBridge {
+  /** Workspace requests are reviewed by the trusted bundled connection center. */
+  reviewServiceConnection?(connection: import('../services/serviceDirectory').ServiceConnection, invitation?: string): Promise<void>;
+  takeServiceConnectionReview?(): Promise<import('../services/desktopServiceConnection').ServiceConnectionReview | null>;
+  onServiceConnectionReview?(callback: () => void): () => void;
+  certificatePins?(): Promise<Record<string, string>>;
+  inspectCertificate?(origin: string): Promise<{ origin: string; fingerprint: string; trustedFingerprint?: string; receipt: string }>;
+  trustCertificate?(origin: string, fingerprint: string, receipt: string): Promise<void>;
+  discardCertificateInspection?(receipt: string): Promise<void>;
+  revokeCertificate?(origin: string): Promise<void>;
   capabilities?:{webWorkspace?:boolean};
   openExternal?(url:string):Promise<void>;
   writeClipboardText?(text:string):Promise<void>;

@@ -2,8 +2,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { normalizeAndroidQuality, startAndroidRecording, stopAndroidRecording, listAndroidRecordings } from '../../android/api';
-import { uploadFiles, updateSettings } from '../../terminal/api';
+import { normalizeAndroidQuality, startAndroidRecording, stopAndroidRecording, listAndroidRecordings, listAndroidDevices } from '../../android/api';
+import { uploadFiles, updateSettings, getSettings } from '../../terminal/api';
 import { AndroidMirrorView, AndroidMirrorDock, ANDROID_DOCK_GROUP } from './AndroidMirrorView';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useAndroidRecordingDelivery } from '../../android/captureDelivery';
@@ -24,7 +24,7 @@ vi.mock('../../android/mirrorController', () => {
         this.callbacks = callbacks;
       }
       connect(_serial?: string, quality?: unknown) {
-        (globalThis as Record<string, unknown>).__mirrorConnection = { quality, callbacks: this.callbacks };
+        (globalThis as Record<string, unknown>).__mirrorConnection = { serial: _serial, quality, callbacks: this.callbacks };
         if ((globalThis as Record<string, unknown>).__pauseMirrorConnect) { this.callbacks.onState?.('connecting'); return; }
         this.callbacks.onHeader?.({ deviceName: 'Test', codec: 'h264', width: 544, height: 1080 });
         this.callbacks.onState?.('streaming');
@@ -759,3 +759,51 @@ HTMLCanvasElement.prototype.captureStream = function captureStream() {
 async function zoomClick(element: HTMLElement) {
   await userEvent.click(element);
 }
+
+
+describe('shared physical device selection across refresh and restore', () => {
+  const id = 'a'.repeat(64);
+  const v4 = { serial: '10.0.0.2:5555', state: 'device' as const, physicalId: id, isNetwork: true, model: 'Phone' };
+  const v6 = { ...v4, serial: '[fd00::2]:5555' };
+  beforeEach(() => {
+    cleanup(); localStorage.clear(); vi.clearAllMocks();
+    vi.mocked(getSettings).mockResolvedValue({ androidPanel: undefined } as Awaited<ReturnType<typeof getSettings>>);
+    vi.mocked(listAndroidDevices).mockResolvedValue({ adbAvailable: true, scrcpyVersion: '4.0', devices: [v4, v6] });
+    (globalThis as Record<string, unknown>).__mirrorConnection = undefined;
+  });
+  afterEach(cleanup);
+  it('keeps one device option and reconnects via IPv6 when the selected IPv4 route goes offline', async () => {
+    render(<AndroidMirrorView sessionId="s1" />);
+    const choice = await screen.findByRole('combobox', { name: 'Device' }) as HTMLSelectElement;
+    await waitFor(() => expect(choice.value).toBe(v4.serial));
+    vi.mocked(listAndroidDevices).mockResolvedValue({ adbAvailable: true, scrcpyVersion: '4.0', devices: [{ ...v4, state: 'offline' }, v6] });
+    fireEvent.click(screen.getByTitle('Refresh devices'));
+    await waitFor(() => expect(choice.value).toBe(v6.serial));
+    expect(choice.options).toHaveLength(2);
+    expect((globalThis as any).__mirrorConnection.serial).toBe(v6.serial);
+    expect(updateSettings).toHaveBeenCalledWith({ androidPanel: { deviceSerial: v6.serial, devicePhysicalId: id } });
+  });
+  it('waits for saved preferences before auto-selecting and preserves an explicit restored IPv6 route', async () => {
+    let finish!: (settings: Awaited<ReturnType<typeof getSettings>>) => void;
+    vi.mocked(getSettings).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    render(<AndroidMirrorView sessionId="s1" />);
+    const choice = await screen.findByRole('combobox', { name: 'Device' }) as HTMLSelectElement;
+    expect(choice.value).toBe(''); expect(updateSettings).not.toHaveBeenCalled();
+    await act(async () => finish({ androidPanel: { deviceSerial: v6.serial, devicePhysicalId: id } } as Awaited<ReturnType<typeof getSettings>>));
+    await waitFor(() => expect(choice.value).toBe(v6.serial));
+    expect((globalThis as any).__mirrorConnection.serial).toBe(v6.serial);
+  });
+  it('keeps a recording on its original authorized route visible after mirror failover', async () => {
+    vi.mocked(listAndroidRecordings).mockImplementation(async serial => ({ recordings: serial === v4.serial
+      ? [{ id: 'route-recording', serial: v4.serial, name: 'route.mp4', size: 0, startedAt: Date.now(), status: 'recording' as const }] : [] }));
+    render(<AndroidMirrorView sessionId="s1" />);
+    await screen.findByRole('button', { name: 'Stop recording' });
+    vi.mocked(listAndroidRecordings).mockClear();
+    vi.mocked(listAndroidDevices).mockResolvedValue({ adbAvailable: true, scrcpyVersion: '4.0', devices: [v6] });
+    fireEvent.click(screen.getByTitle('Refresh devices'));
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe(v6.serial));
+    await waitFor(() => expect(listAndroidRecordings).toHaveBeenCalledWith(v4.serial));
+    expect(screen.getByRole('button', { name: 'Stop recording' })).toBeTruthy();
+  });
+
+});

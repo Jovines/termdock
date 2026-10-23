@@ -23,7 +23,7 @@ import { loadPlugins, resolveHookTarget, type PluginHookEvent } from './plugins.
 
 export type HookAgentSlug = 'claude' | 'codex' | 'copilot' | 'opencode' | 'pi' | 'grok' | 'kimi';
 
-export type HooksState = 'not-installed' | 'installed' | 'outdated' | 'needs-approval';
+export type HooksState = 'not-installed' | 'installed' | 'outdated' | 'needs-approval' | 'unverified';
 
 export interface HookAgentInfo {
   slug: string;
@@ -79,7 +79,7 @@ const OWNED_FILE_STEM_JS = 'termdock.js';
 function targetPath(agent: HookAgentSlug): string {
   switch (agent) {
     case 'claude': return claudeSettingsPath();
-    case 'codex': return path.join(homeDir(), '.codex', 'hooks.json');
+    case 'codex': return path.join(process.env.CODEX_HOME?.trim() || path.join(homeDir(), '.codex'), 'hooks.json');
     case 'copilot': return path.join(homeDir(), '.copilot', 'hooks', OWNED_FILE_STEM_JSON);
     case 'opencode': return path.join(xdgConfigDir(), 'opencode', 'plugins', OWNED_FILE_STEM_JS);
     case 'pi': return path.join(homeDir(), '.pi', 'agent', 'extensions', 'termdock', 'index.ts');
@@ -120,7 +120,7 @@ function hookCommand(agent: HookAgentSlug, event: string): string {
 /** Substring identifying a hook entry / owned file as termdock's. Every
  *  generated command and file embeds `agent-hook <slug>` verbatim. */
 function marker(agent: HookAgentSlug): string {
-  return `agent-hook ${agent}`;
+  return `agent-hook ${agent} `;
 }
 
 /** Best-effort atomic write: tmp file + rename. */
@@ -147,6 +147,8 @@ function writeAtomic(file: string, content: string): void {
 const CLAUDE_HOOK_EVENTS: Array<[string, string]> = [
   ['SessionStart', 'session-start'],
   ['UserPromptSubmit', 'prompt-submit'],
+  ['PermissionRequest', 'permission-request'],
+  ['PreToolUse', 'tool-start'],
   ['Notification', 'notification'],
   ['PostToolUse', 'tool-complete'],
   ['Stop', 'stop'],
@@ -158,8 +160,10 @@ const CODEX_HOOK_EVENTS: Array<[string, string]> = [
   ['SessionStart', 'session-start'],
   ['UserPromptSubmit', 'prompt-submit'],
   ['PermissionRequest', 'permission-request'],
+  ['PreToolUse', 'tool-start'],
   ['PostToolUse', 'tool-complete'],
   ['Stop', 'stop'],
+  ['Interrupt', 'stop'],
   ['SessionEnd', 'session-end'],
 ];
 
@@ -240,6 +244,21 @@ function markerCommand(entry: unknown, mark: string): string | null {
   return null;
 }
 
+/** Remove only our handlers, including when a user grouped their own
+ * command alongside ours. Preserve matcher metadata and unrelated agents. */
+function removeOwnedHookHandlers(list: unknown[], mark: string): unknown[] {
+  return list.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || !Array.isArray((entry as JsonObject).hooks)) return [entry];
+    const group = entry as JsonObject;
+    const handlers = group.hooks as unknown[];
+    const kept = handlers.filter(handler => !handler || typeof handler !== 'object'
+      || typeof (handler as JsonObject).command !== 'string'
+      || !((handler as JsonObject).command as string).includes(mark));
+    if (kept.length === handlers.length) return [entry];
+    return kept.length ? [{ ...group, hooks: kept }] : [];
+  });
+}
+
 function hookMapState(file: string, agent: HookAgentSlug, events: Array<[string, string]>): HooksState {
   const root = readJsonObject(file);
   if (!root) return 'not-installed';
@@ -302,7 +321,7 @@ function hookMapInstall(file: string, agent: HookAgentSlug, events: Array<[strin
     }
     if (!Array.isArray(list)) continue; // malformed user config; leave it alone
     // Drop any previous termdock entry (stale exe path), then append ours.
-    const kept = list.filter((entry) => markerCommand(entry, mark) === null);
+    const kept = removeOwnedHookHandlers(list, mark);
     const handler: JsonObject = { type: 'command', command };
     handler.timeout = hookTimeout(sentinel);
     kept.push({ hooks: [handler] });
@@ -325,8 +344,8 @@ function hookMapUninstall(file: string, agent: HookAgentSlug): string {
     for (const eventName of Object.keys(hooks)) {
       const list = hooks[eventName];
       if (!Array.isArray(list)) continue;
-      const kept = list.filter((entry) => markerCommand(entry, mark) === null);
-      removed += list.length - kept.length;
+      const kept = removeOwnedHookHandlers(list, mark);
+      removed += list.filter(entry => markerCommand(entry, mark) !== null).length;
       if (kept.length === 0) {
         delete hooks[eventName];
       } else {
@@ -710,19 +729,34 @@ export function hooksState(agent: HookAgentSlug): HooksState {
 }
 
 interface CodexHookMetadata {
+  eventName?: string;
   command?: string;
   trustStatus?: string;
   enabled?: boolean;
 }
 
-let codexRuntimeStateCache: { at: number; state: HooksState } | null = null;
+let codexRuntimeStateCache: { at: number; key: string; state: HooksState } | null = null;
+
+export function codexHookRegistryState(hooks: CodexHookMetadata[]): HooksState {
+  let approvalNeeded = false;
+  for (const [event, sentinel] of CODEX_HOOK_EVENTS) {
+    const eventName = event[0].toLowerCase() + event.slice(1);
+    const matching = hooks.filter(hook => hook.eventName === eventName && hook.command === hookCommand('codex', sentinel));
+    if (!matching.length) return 'outdated';
+    if (!matching.some(hook => hook.enabled === true && ['trusted', 'managed'].includes(hook.trustStatus ?? ''))) approvalNeeded = true;
+  }
+  return approvalNeeded ? 'needs-approval' : 'installed';
+}
 
 /** Query Codex's own hook registry: a structurally present hook can still be
  * quarantined until the user approves its current hash in `/hooks`. */
 async function codexRuntimeHooksState(): Promise<HooksState> {
   const structural = hooksState('codex');
   if (structural !== 'installed') return structural;
-  if (codexRuntimeStateCache && Date.now() - codexRuntimeStateCache.at < 30_000) {
+  let stat: fs.Stats;
+  try { stat = fs.statSync(targetPath('codex')); } catch { return 'unverified'; }
+  const key = `${targetPath('codex')}:${stat.mtimeMs}:${stat.size}:${process.cwd()}`;
+  if (codexRuntimeStateCache?.key === key && Date.now() - codexRuntimeStateCache.at < 30_000) {
     return codexRuntimeStateCache.state;
   }
   const state = await new Promise<HooksState>((resolve) => {
@@ -739,36 +773,40 @@ async function codexRuntimeHooksState(): Promise<HooksState> {
       child.kill();
       resolve(value);
     };
-    const timer = setTimeout(() => finish(structural), 5_000);
+    const timer = setTimeout(() => finish('unverified'), 5_000);
     timer.unref?.();
-    child.on('error', () => finish(structural));
+    child.on('error', () => finish('unverified'));
+    child.on('close', () => finish('unverified'));
+    child.stdin.on('error', () => finish('unverified'));
     child.stdout.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
+      if (buffer.length > 1024 * 1024) { finish('unverified'); return; }
       for (;;) {
         const newline = buffer.indexOf('\n');
         if (newline < 0) break;
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
-        let message: { id?: number; result?: { data?: Array<{ hooks?: CodexHookMetadata[] }> } };
+        let message: { id?: number; error?: unknown; result?: { data?: Array<{ hooks?: CodexHookMetadata[] }> } };
         try { message = JSON.parse(line) as typeof message; } catch { continue; }
+        if (message.error && (message.id === 1 || message.id === 2)) { finish('unverified'); return; }
         if (message.id === 1) {
           child.stdin.write(`${JSON.stringify({ method: 'initialized', params: {} })}\n`);
           child.stdin.write(`${JSON.stringify({ id: 2, method: 'hooks/list', params: { cwds: [process.cwd()] } })}\n`);
         } else if (message.id === 2) {
-          const ours = (message.result?.data ?? [])
-            .flatMap((entry) => entry.hooks ?? [])
-            .filter((hook) => typeof hook.command === 'string' && hook.command.includes(marker('codex')));
-          if (ours.length < CODEX_HOOK_EVENTS.length) finish('outdated');
-          else if (ours.some((hook) => hook.enabled === false || !['trusted', 'managed'].includes(hook.trustStatus ?? ''))) finish('needs-approval');
-          else finish('installed');
+          if (!Array.isArray(message.result?.data)) { finish('unverified'); return; }
+          finish(codexHookRegistryState(message.result.data.flatMap(entry => entry.hooks ?? [])));
         }
       }
     });
     child.stdin.write(`${JSON.stringify({ id: 1, method: 'initialize', params: { clientInfo: { name: 'termdock', version: '1' } } })}\n`);
   });
-  codexRuntimeStateCache = { at: Date.now(), state };
+  codexRuntimeStateCache = { at: Date.now(), key, state };
   return state;
+}
+
+export async function runtimeHooksStateForSlug(slug: string): Promise<HooksState> {
+  return slug === 'codex' ? codexRuntimeHooksState() : hooksStateForSlug(slug);
 }
 
 export function listHookAgents(): HookAgentInfo[] {
@@ -961,20 +999,17 @@ export function pluginHooksState(
     const list = hooks && typeof hooks === 'object'
       ? (hooks as JsonObject)[hookEvent]
       : null;
-    const ours = Array.isArray(list)
-      ? list.find((entry) => markerCommand(entry, mark) !== null)
-      : undefined;
-    if (ours !== undefined) {
+    const ours = Array.isArray(list) ? list.filter((entry) => markerCommand(entry, mark) !== null) : [];
+    if (ours.length) {
       any = true;
-      const group = ours && typeof ours === 'object' ? ours as JsonObject : {};
-      const handler = Array.isArray(group.hooks) && group.hooks[0] && typeof group.hooks[0] === 'object'
-        ? group.hooks[0] as JsonObject
-        : {};
-      if (
-        handler.command !== hookCommandForPlugin(slug, sentinel, status)
-        || (matcher ?? undefined) !== group.matcher
-        || (timeout ?? hookTimeout(sentinel)) !== handler.timeout
-      ) complete = false;
+      const covered = ours.some((entry) => {
+        const group = entry as JsonObject;
+        return (matcher ?? undefined) === group.matcher && Array.isArray(group.hooks)
+          && group.hooks.some(handler => handler && typeof handler === 'object'
+            && (handler as JsonObject).command === hookCommandForPlugin(slug, sentinel, status)
+            && (handler as JsonObject).timeout === (timeout ?? hookTimeout(sentinel)));
+      });
+      if (!covered) complete = false;
     } else {
       complete = false;
     }
@@ -1011,6 +1046,12 @@ export function installPluginHooks(
   const hooks = root.hooks as JsonObject;
   const mark = marker(slug as HookAgentSlug);
 
+  // Clear the previous owned set once, then add every mapping. Clearing on
+  // each mapping loses all but the last matcher sharing a native hook event.
+  for (const [eventName, list] of Object.entries(hooks)) {
+    if (Array.isArray(list)) hooks[eventName] = removeOwnedHookHandlers(list, mark);
+  }
+
   for (const [hookEvent, sentinel, matcher, timeout, status] of events) {
     const command = hookCommandForPlugin(slug, sentinel, status);
     let list = hooks[hookEvent];
@@ -1019,7 +1060,7 @@ export function installPluginHooks(
       hooks[hookEvent] = list;
     }
     if (!Array.isArray(list)) continue;
-    const kept = list.filter((entry) => markerCommand(entry, mark) === null);
+    const kept = [...list];
     const handler: JsonObject = { type: 'command', command };
     handler.timeout = timeout ?? hookTimeout(sentinel);
     const entry: JsonObject = { hooks: [handler] };
@@ -1043,8 +1084,8 @@ function uninstallPluginHooks(slug: string, file: string): string {
     for (const eventName of Object.keys(hooks)) {
       const list = hooks[eventName];
       if (!Array.isArray(list)) continue;
-      const kept = list.filter((entry) => markerCommand(entry, mark) === null);
-      removed += list.length - kept.length;
+      const kept = removeOwnedHookHandlers(list, mark);
+      removed += list.filter(entry => markerCommand(entry, mark) !== null).length;
       if (kept.length === 0) {
         delete hooks[eventName];
       } else {
@@ -1067,7 +1108,9 @@ export function refreshStaleHooksAtLaunch(): number {
   for (const agent of HOOK_AGENTS) {
     if (hooksState(agent) !== 'outdated') continue;
     try {
-      void installHooks(agent);
+      void installHooks(agent).catch((error) => {
+        console.warn(`[agent-hooks] could not refresh stale ${agent} hooks:`, (error as Error).message);
+      });
       refreshed++;
       console.log(`[agent-hooks] refreshed stale ${agent} hooks at ${abbreviateHome(targetPath(agent))}`);
     } catch (error) {

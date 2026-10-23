@@ -2,7 +2,7 @@
 mod runtime_icon;
 
 fn main() {
-    for key in ["TERMDOCK_PREVIEW_UPDATE_ENDPOINT", "TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY"] {
+    for key in ["TERMDOCK_PREVIEW_UPDATE_ENDPOINT", "TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY", "TERMDOCK_DESKTOP_CHANNEL", "TERMDOCK_STABLE_UPDATE_ENDPOINT", "TERMDOCK_STABLE_UPDATE_PUBLIC_KEY"] {
         println!("cargo:rerun-if-env-changed={key}");
     }
     if std::env::var_os("CARGO_FEATURE_DESKTOP").is_some() {

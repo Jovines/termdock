@@ -3,6 +3,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Folder, Monitor, Pencil, Smartphone, Upload, X } from 'lucide-react';
 import type { ShareResources, SharedDirectory } from '../../server/shared/shareResources';
 import { ShareAccessContext } from './ShareAccessContext';
+import { sharedResourceTabs } from './sessionCapabilities';
 import { FileTree } from '../components/sidebar/FileTree';
 import { Sidebar } from '../components/sidebar/Sidebar';
 import { readFileContent, uploadFiles, uploadSessionAttachments } from '../terminal/api';
@@ -61,12 +62,12 @@ function SharedFiles({ directories, onInsert, onDirty }: { directories: SharedDi
   </div>;
 }
 export function SessionResourceSidebar({ resources, sessionId, canWrite = false, pinned, open, onClose, onInsert }: { resources: ShareResources; sessionId?: string; canWrite?: boolean; pinned: boolean; open: boolean; onClose: () => void; onInsert: (text: string, source?: HTMLElement) => unknown | Promise<unknown> }) {
-  const tabs = [resources.android?.length ? 'android' : '', resources.computers?.length ? 'computer' : '', resources.directories?.length ? 'files' : ''].filter(Boolean);
+  const tabs = sharedResourceTabs(resources);
   const [tab, setTab] = useState(tabs[0]);
   const effectiveTab = tabs.includes(tab) ? tab : tabs[0];
   const dirty = useRef(false);
   const setDirty = useRef((value: boolean) => { dirty.current = value; }).current;
-  const changeTab = async (value: string) => { if (value === tab) return; if (dirty.current && !await confirmPageAction({ title: '放弃文件修改？', message: '当前文件有未保存的修改。', confirmLabel: '放弃修改', cancelLabel: '继续编辑' })) return; setTab(value); };
+  const changeTab = async (value: typeof tabs[number]) => { if (value === tab) return; if (dirty.current && !await confirmPageAction({ title: '放弃文件修改？', message: '当前文件有未保存的修改。', confirmLabel: '放弃修改', cancelLabel: '继续编辑' })) return; setTab(value); };
   const [computer, setComputer] = useState(0);
   const chosen = resources.computers?.[computer] ?? resources.computers?.[0];
   const context = effectiveTab === 'computer' ? { ...resources, computers: chosen ? [chosen] : [] } : resources;

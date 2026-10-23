@@ -1,3 +1,4 @@
+import { useDragLifetime } from '../../hooks/useDragLifetime';
 import type { PointerEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft as RiArrowLeft } from 'lucide-react';
@@ -73,16 +74,23 @@ export function DiffReviewFrame({
     setDesktopListWidthPx((width) => clampDesktopListWidth(width, frame.clientWidth));
   }, [desktopLayout, mobile]);
 
+  const trackResizeLifetime = useDragLifetime(() => {
+    if (!desktopResizeRef.current) return;
+    desktopResizeRef.current = null;
+    flushCacheThrottled(DESKTOP_LIST_WIDTH_STORAGE_KEY);
+  });
+
   const startDesktopListResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
     if (mobile || desktopLayout !== 'split') return;
     event.preventDefault();
+    trackResizeLifetime(event);
     desktopResizeRef.current = {
       startX: event.clientX,
       startWidth: desktopListWidthPx,
       pointerId: event.pointerId,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
-  }, [desktopLayout, desktopListWidthPx, mobile]);
+  }, [desktopLayout, desktopListWidthPx, mobile, trackResizeLifetime]);
 
   const handleDesktopListResizeMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
     const resize = desktopResizeRef.current;

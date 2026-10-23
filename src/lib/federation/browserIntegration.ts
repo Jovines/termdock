@@ -1,5 +1,7 @@
 import { RELAY_CLIENT_CONNECT_TIMEOUT_MS } from '../../server/federation/streamLimits';
+import { directConnectionAddresses, relayConnectionRoutes, serviceEndpoint, hasIndependentConnectionRoute, MAX_SAVED_ROUTES } from '../../server/federation/connectionModel';
 import { listServiceConnections, normalizeServiceAddress, saveServiceConnection, rememberServiceConnection, type ServiceRoute } from '../services/serviceDirectory';
+import { relayTargetName, relayTargetFailure } from './relayTarget';
 import { connect, SecureSocket, type SecureClient } from './secureClient';
 import { createRelaySocketFactory } from './relaySocket';
 import { installWorkerBridge } from './workerBridge';
@@ -23,12 +25,21 @@ let lastDirectProbe = 0;
 let renewing = false;
 let lastRenewalAttemptAt = -Infinity;
 const accessBlocks = new Map<string, ConnectionAccessError>();
+const deniedEntries = new Map<string, Set<string>>();
+function rememberDeniedEntry(error: ConnectionAccessError): void {
+  const { targetServiceId, entryServiceId } = error.context;
+  if (error.code !== 'RELAY_AUTHORIZATION_REQUIRED' || !targetServiceId || !entryServiceId) return;
+  if (deniedEntries.size > 32) deniedEntries.clear();
+  const entries = deniedEntries.get(targetServiceId) || new Set<string>(); entries.add(entryServiceId); deniedEntries.set(targetServiceId, entries);
+}
+function allowedEntry(targetId: string, entryId: string): boolean { return !deniedEntries.get(targetId)?.has(entryId); }
 export function pauseConnectionAccess(error: ConnectionAccessError): void {
+  rememberDeniedEntry(error);
   const id = error.context.targetServiceId || savedConnection()?.targetPeerId;
   if (id) { if (accessBlocks.size > 32) accessBlocks.clear(); accessBlocks.set(id, error); }
 }
 export function resumeConnectionAccess(): void {
-  const id = savedConnection()?.targetPeerId; if (id) accessBlocks.delete(id);
+  const id = savedConnection()?.targetPeerId; if (id) { accessBlocks.delete(id); deniedEntries.delete(id); }
 }
 const nativeFetch = globalThis.fetch.bind(globalThis);
 export interface ConnectionIntent { viewMode?: 'terminal' | 'chat'; url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean; routes?: ServiceRoute[] }
@@ -202,17 +213,7 @@ export function connectionRoutes(intent: ConnectionIntent): ServiceRoute[] {
     const legacy = JSON.parse(localStorage.getItem(ENTRY_KEY) || 'null') as ConnectionIntent | null;
     if (legacy && legacy.targetPeerId !== intent.targetPeerId && new URL(legacy.url).host === new URL(intent.url).host) candidates.push(legacy);
   } catch { /* Optional legacy metadata does not authorize a route. */ }
-  const seen = new Set<string>();
-  return candidates.flatMap(route => {
-    try {
-      if (!route.targetPeerId || route.targetPeerId === intent.targetPeerId) return [];
-      const url = normalizeServiceAddress(route.url);
-      const key = JSON.stringify([route.targetPeerId, url]);
-      if (seen.has(key)) return [];
-      seen.add(key);
-      return [{ url, targetPeerId: route.targetPeerId }];
-    } catch { return []; }
-  }).slice(0, 4);
+  return relayConnectionRoutes({ ...intent, routes: candidates });
 }
 const relayRouteKey = (route: ServiceRoute) => `relay:${route.targetPeerId}:${route.url}`;
 /** Recovery may inspect other saved, pinned services for a known target.
@@ -232,7 +233,7 @@ async function reverseConnectionRoutes(intent: ConnectionIntent): Promise<Servic
       if (!seen.has(relayRouteKey(route))) { seen.add(relayRouteKey(route)); candidates.push(route); }
     }
   }
-  return candidates.slice(0, Math.max(0, 4 - Math.max(intent.routes?.length ?? 0, explicit.length)));
+  return candidates.slice(0, Math.max(0, MAX_SAVED_ROUTES - Math.max(intent.routes?.length ?? 0, explicit.length)));
 }
 /** Every direct address must authenticate as the same pinned service. Keep
  * alternate addresses in the existing route format so desktop bridges preserve
@@ -240,18 +241,10 @@ async function reverseConnectionRoutes(intent: ConnectionIntent): Promise<Servic
  */
 export function connectionAddresses(intent: ConnectionIntent): string[] {
   const relays = connectionRoutes(intent);
-  const candidates = [intent.serviceOrigin || intent.url, ...(intent.routes || []).slice(0, 4)
-    .filter(route => route.targetPeerId === intent.targetPeerId).map(route => route.url)];
-  const addresses = new Set<string>();
-  for (const candidate of candidates) try {
-    const address = normalizeServiceAddress(candidate);
-    if (!relays.some(route => route.url === address)) addresses.add(address);
-  } catch { /* Ignore invalid persisted addresses, never replace the identity. */ }
-  return [...addresses];
+  return directConnectionAddresses({ ...intent, routes: [...relays, ...(intent.routes || [])] });
 }
 function secureUrl(address: string): string {
-  const url = new URL('/api/federation/secure', normalizeServiceAddress(address));
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; return url.href;
+  return serviceEndpoint(address).href;
 }
 async function connectEntry(route: ServiceRoute, signal?: AbortSignal): Promise<SecureClient> {
   return connect({ url: secureUrl(route.url), targetPeerId: route.targetPeerId, identity: await getIdentity(), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) });
@@ -267,7 +260,7 @@ async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal
   // Directory reads may use saved grants, never discover/authorize a reverse
   // route as a side effect of opening a settings panel.
   const reverseRoutes = readOnly ? [] : await reverseConnectionRoutes(intent);
-  for (const route of [...connectionRoutes(intent), ...reverseRoutes]) attempts.push({ key: relayRouteKey(route), run: async signal => {
+  for (const route of [...connectionRoutes(intent), ...reverseRoutes].filter(route => allowedEntry(intent.targetPeerId, route.targetPeerId))) attempts.push({ key: relayRouteKey(route), run: async signal => {
     if (outerSignal) signal = AbortSignal.any([signal, outerSignal]);
     const reused = [active, entryClient].find(client => client && !client.closed && client.targetPeerId === route.targetPeerId);
     const entry = reused || await connectEntry(route, signal);
@@ -285,7 +278,7 @@ async function openTargetForAuthentication(intent: ConnectionIntent, outerSignal
   } });
   const preferred = preferredConnectionPath(intent.targetPeerId);
   attempts.sort((a, b) => Number(b.key === preferred) - Number(a.key === preferred));
-  const result = await raceConnectionAttempts(attempts, client => client.close());
+  const result = await raceConnectionAttempts(attempts, client => client.close(), false, { signal: outerSignal });
   if (readOnly) readOnly.connected(result.key);
   else rememberConnectionPath(intent.targetPeerId, result.key);
   return result.value;
@@ -321,8 +314,9 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
   const serviceOrigin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
   const known = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId);
   const savedIntent = { ...intent, routes: intent.routes ?? known?.routes };
-  const reverseRoutes = options.directOnly ? [] : await reverseConnectionRoutes(savedIntent);
-  const routes = options.directOnly ? [] : [...connectionRoutes(savedIntent), ...reverseRoutes];
+  if (intent.routeCode && intent.entryServiceId) deniedEntries.get(intent.targetPeerId)?.delete(intent.entryServiceId);
+  const reverseRoutes = options.directOnly || accessBlocks.get(intent.targetPeerId)?.code === 'RELAY_AUTHORIZATION_REQUIRED' ? [] : await reverseConnectionRoutes(savedIntent);
+  const routes = options.directOnly ? [] : [...connectionRoutes(savedIntent), ...reverseRoutes].filter(route => allowedEntry(intent.targetPeerId, route.targetPeerId));
   const addresses = connectionAddresses(savedIntent);
   let next: SecureClient | undefined, nextEntry: SecureClient | undefined;
   let pairingCode = intent.pairingCode;
@@ -383,8 +377,10 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
       } catch (error) {
         client?.close();
         if (candidateEntry && candidateEntry !== previousEntry && candidateEntry !== previous) candidateEntry.close();
-        throw connectionAccessError(error, { targetServiceId: intent.targetPeerId,
-          ...(error instanceof ConnectionAccessError && error.code === 'RELAY_AUTHORIZATION_REQUIRED' ? { entryServiceId: route.targetPeerId, entryUrl: route.url } : {}) }) || error;
+        const access = connectionAccessError(error, { targetServiceId: intent.targetPeerId,
+          ...(error instanceof ConnectionAccessError && error.code === 'RELAY_AUTHORIZATION_REQUIRED' ? { entryServiceId: route.targetPeerId, entryUrl: route.url } : {}) });
+        if (access) rememberDeniedEntry(access);
+        throw access || error;
       }
     } });
     const preferred = preferredConnectionPath(intent.targetPeerId);
@@ -426,7 +422,10 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
     const serviceName = existing?.label || intent.serviceName || new URL(serviceOrigin).host;
     const reverse = reverseRoutes.find(route => relayRouteKey(route) === result.key);
     const savedRoutes = savedIntent.routes ?? connectionRoutes(savedIntent);
-    const saved = { url: serviceOrigin, targetPeerId: intent.targetPeerId, serviceName, serviceOrigin, routes: reverse ? [...savedRoutes, reverse] : savedRoutes };
+    const directOrigin = connectionAddresses(savedIntent)[0];
+    const saved = { url: directOrigin || serviceOrigin, targetPeerId: intent.targetPeerId, serviceName,
+      ...(directOrigin ? { serviceOrigin: directOrigin } : { entryServiceId: nextEntry?.targetPeerId || intent.entryServiceId }),
+      routes: reverse ? [...savedRoutes, reverse] : savedRoutes };
     await (options.rememberOnly ? rememberServiceConnection : saveServiceConnection)({ id: existing?.id || intent.targetPeerId, ...saved, label: serviceName });
     // A new verified service opens its own document; keep this document's
     // existing transport and stores bound to their original target.
@@ -553,6 +552,26 @@ export async function retryDirectConnection(): Promise<SecureClient> {
   }).finally(() => { connecting = undefined; });
   return connecting;
 }
+
+/** A revoked entry is excluded across all its addresses. Recovery may use an
+ * already-saved independent entry; it never discovers or grants a new route. */
+export function canRetryConnectionAccess(selected = savedConnection(), blocked = accessBlocks.get(selected?.targetPeerId || '')): boolean {
+  return !!selected && blocked?.code === 'RELAY_AUTHORIZATION_REQUIRED'
+    && hasIndependentConnectionRoute(selected, blocked.context.entryServiceId, deniedEntries.get(selected.targetPeerId));
+}
+export async function retryConnectionAccess(): Promise<SecureClient> {
+  const selected = savedConnection(), blocked = accessBlocks.get(selected?.targetPeerId || '');
+  if (!selected || !canRetryConnectionAccess(selected, blocked)) throw blocked || new Error('没有独立的已保存连接路线。');
+  const alternatives = connectionRoutes(selected).filter(route => allowedEntry(selected.targetPeerId, route.targetPeerId));
+  if (!alternatives.length) return retryDirectConnection();
+  if (connecting) return connecting;
+  connecting = connectDevice(selected, { rememberOnly: true }).catch(error => {
+    const access = connectionAccessError(error, { targetServiceId: selected.targetPeerId });
+    if (access) pauseConnectionAccess(access);
+    throw access || error;
+  }).finally(() => { connecting = undefined; });
+  return connecting;
+}
 export function secureSocket(url: string): WebSocket {
   const parsed = new URL(url, location.href);
   if (active && !active.closed && !accessBlocks.has(active.targetPeerId)) return active.openSocket(parsed.pathname + parsed.search) as unknown as WebSocket;
@@ -614,7 +633,7 @@ export function installEncryptedFetch(): void {
 }
 
 export interface EntryRouteGrant { id: string; subjectId: string; targetServiceId: string; active: boolean; revokedAt?: number }
-export interface RelayTarget { serviceId: string; label?: string; url?: string; available: boolean; authorized: boolean }
+export interface RelayTarget { serviceId: string; label?: string; url?: string; available: boolean; authorized: boolean; error?: string }
 export interface RelayTargetDirectory { route: ServiceRoute; canManage: boolean; items: RelayTarget[] }
 function assertRelayTarget(entryId: string, targetId: string): void {
   if (entryId === targetId) throw new ConnectionAccessError('RELAY_SELF_TARGET', { entryServiceId: entryId, targetServiceId: targetId });
@@ -663,16 +682,18 @@ export async function prepareRelayConnection(route: ServiceRoute, targetServiceI
     const result = await entry.request({ type: 'route-targets' }, { timeoutMs: 5000 });
     const target = (Array.isArray(result.items) ? result.items as RelayTarget[] : []).find(item => item.serviceId === targetServiceId);
     if (!target) throw new Error('该服务已不可见，请刷新列表或请入口管理员授权。');
-    if (!target.available) throw new Error('入口暂时无法中转到这台服务，请稍后重试。');
+    if (!target.available) throw new Error(relayTargetFailure(target));
     const known = (await listServiceConnections()).find(item => item.targetPeerId === target.serviceId);
     const routes = [route, ...(known?.routes || []).filter(item => item.targetPeerId !== route.targetPeerId || normalizeServiceAddress(item.url) !== normalizeServiceAddress(route.url))];
-    if (routes.length > 4) throw new Error('这台服务已保存 4 个备用连接，请先移除一个后重试。');
+    if (routes.length > MAX_SAVED_ROUTES) throw new Error(`这台服务已保存 ${MAX_SAVED_ROUTES} 个备用连接，请先移除一个后重试。`);
     if (!target.authorized) {
       if (!result.canManage) throw new Error('请先让入口管理员授权此设备。');
       await entry.request({ type: 'route-grant', serviceId: target.serviceId, subjectId: (await getIdentity()).peerId });
     }
-    const origin = known?.serviceOrigin || known?.url || target.url || route.url;
-    return { url: origin, serviceOrigin: origin, targetPeerId: target.serviceId, serviceName: known?.label || target.label || (target.url ? new URL(target.url).host : `中转服务 ${target.serviceId.slice(0, 8)}`), routes };
+    deniedEntries.get(targetServiceId)?.delete(route.targetPeerId);
+    const direct = known ? connectionAddresses({ ...known, targetPeerId: target.serviceId })[0] : undefined;
+    const origin = direct || (target.url && normalizeServiceAddress(target.url) !== normalizeServiceAddress(route.url) ? target.url : undefined);
+    return { url: origin || route.url, ...(origin ? { serviceOrigin: origin } : { entryServiceId: route.targetPeerId }), targetPeerId: target.serviceId, serviceName: known?.label || relayTargetName(target), routes };
   } finally { lease.release(); }
 }
 export async function inspectEntryRoute(route: ServiceRoute, targetServiceId: string): Promise<{ canManage: boolean; grants: EntryRouteGrant[] }> {
@@ -693,6 +714,7 @@ export async function authorizeEntryRoute(target: ConnectionIntent, route: Servi
   const lease = await acquireEntryClient(route), entry = lease.client;
   try {
     await entry.request({ type: 'route-grant', serviceId: target.targetPeerId, subjectId: (await getIdentity()).peerId, url: normalizeServiceAddress(target.serviceOrigin || target.url) });
+    deniedEntries.get(target.targetPeerId)?.delete(route.targetPeerId);
   } finally { lease.release(); }
 }
 export async function revokeEntryRoute(targetServiceId: string, route: ServiceRoute): Promise<void> {
@@ -735,7 +757,7 @@ export async function addServiceAddress(service: import('../services/serviceDire
     if (normalizeServiceAddress(current.serviceOrigin || current.url) === address || existing.some(route => normalizeServiceAddress(route.url) === address)) {
       throw new Error('这个地址已经在连接列表中。');
     }
-    if (existing.length >= 4) throw new Error('最多保存 4 个备用地址或入口，请先移除不再使用的连接。');
+    if (existing.length >= MAX_SAVED_ROUTES) throw new Error(`最多保存 ${MAX_SAVED_ROUTES} 个备用地址或入口，请先移除不再使用的连接。`);
     return [...existing, { url: address, targetPeerId }];
   };
   nextRoutes(await latestService());

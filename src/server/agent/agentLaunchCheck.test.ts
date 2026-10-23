@@ -12,7 +12,7 @@ describe('TD-initiated Agent launch before terminal delivery', () => {
   let worker: CollaborationDeliveryWorker;
   let check: AgentLaunchCheck | null;
   let observed: { agentSlug: string | null; nativeSessionId: string | null };
-  let write: ReturnType<typeof vi.fn>;
+  let write: ReturnType<typeof vi.fn<(...args: unknown[]) => Promise<void>>>;
   let group: string;
   beforeEach(() => {
     vi.useFakeTimers();

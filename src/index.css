@@ -585,6 +585,12 @@ textarea:focus-within {
   outline-offset: 0 !important;
 }
 
+/* Native choice controls have no custom ring to replace the global reset. */
+input:is([type='checkbox'], [type='radio'], [type='range']):not(.sr-only):focus-visible {
+  outline: 2px solid var(--ring) !important;
+  outline-offset: 2px !important;
+}
+
 /* Custom UI utility classes */
 .ui-kicker {
   font-size: 0.6875rem;

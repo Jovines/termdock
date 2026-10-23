@@ -6,9 +6,9 @@ import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { saveCollaborationGroup, type CollaborationGroup } from '../../terminal/api';
 
 /** Session menus edit membership only; the terminal and group history survive. */
-export function SessionCollaborationActions({ sessionId, backendSessionId, groupId, itemClassName, iconClassName, onOpen, onDone }: {
+export function SessionCollaborationActions({ sessionId, backendSessionId, groupId, itemClassName, iconClassName, compact = false, onOpen, onDone }: {
   sessionId: string; backendSessionId?: string | null; groupId?: string;
-  itemClassName: string; iconClassName: string;
+  itemClassName: string; iconClassName: string; compact?: boolean;
   onOpen: (groupId: string) => void; onDone: () => void;
 }) {
   const { t } = useI18n();
@@ -54,7 +54,7 @@ export function SessionCollaborationActions({ sessionId, backendSessionId, group
     <button type="button" disabled={busy} className={`${itemClassName} w-full text-foreground hover:bg-surface-2 disabled:opacity-50`}
       onClick={() => onOpen(group.id)}>
       <span className={`${iconClassName} bg-primary/15 text-primary`}><LayoutGrid size={14} /></span>
-      <span className="min-w-0 flex-1"><span className="block font-medium">{t('tab.openGroup')}</span><span className="block truncate text-[11px] text-muted-foreground" title={group.name}>{group.name}</span></span>
+      <span className={`min-w-0 flex-1 ${compact ? 'flex items-center gap-2' : ''}`}><span className="block shrink-0 font-medium">{t('tab.openGroup')}</span><span className="block truncate text-[11px] text-muted-foreground" title={group.name}>{group.name}</span></span>
     </button>
     {confirmation?.id === group.id ? <div ref={confirmRef} role="group" aria-label={t('tab.leaveGroupConfirm')} aria-busy={busy} className="mx-3 my-1 rounded-lg border border-border/30 bg-surface p-3">
       <p className="break-words text-xs leading-5 text-foreground">{t('tab.leaveGroupQuestion', { name: confirmation.name })}</p>
@@ -70,7 +70,7 @@ export function SessionCollaborationActions({ sessionId, backendSessionId, group
     </div> : <button type="button" ref={element => { if (element) leaveButtons.current.set(group.id, element); else leaveButtons.current.delete(group.id); }} disabled={busy} className={`${itemClassName} w-full text-foreground hover:bg-surface-2 disabled:opacity-50`}
       onClick={() => { setConfirmation(group); setError(''); }}>
       <span className={`${iconClassName} bg-surface-2 text-muted-foreground`}><LogOut size={14} /></span>
-      <span className="min-w-0 flex-1"><span className="block font-medium">{t('tab.leaveGroup')}</span><span className="block text-[11px] text-muted-foreground">{t('tab.leaveGroupShortHint')}</span></span>
+      <span className="min-w-0 flex-1"><span className="block font-medium">{t('tab.leaveGroup')}</span>{!compact && <span className="block text-[11px] text-muted-foreground">{t('tab.leaveGroupShortHint')}</span>}</span>
     </button>}
   </div>)}</>;
 }

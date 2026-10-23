@@ -229,6 +229,7 @@ describe('RelayRouter and RelayClient', () => {
     await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());
     const canceled = next(upstream.server);
     upstream.server.send(JSON.stringify({ type: 'close', streamId: 'reused' })); await canceled;
+    expect((connect.mock.calls[0][0] as AbortSignal).aborted).toBe(true);
     const opened = next(upstream.server);
     upstream.server.send(JSON.stringify({ type: 'open', streamId: 'reused', serviceId: 'C' }));
     expect((await opened).type).toBe('opened');

@@ -1,0 +1,53 @@
+name: Verify terminal geometry
+
+on:
+  push:
+    branches: [master]
+    paths: ['src/**', 'package*.json', 'vitest*.ts', '.github/workflows/terminal-geometry.yml']
+  pull_request:
+    paths: ['src/**', 'package*.json', 'vitest*.ts', '.github/workflows/terminal-geometry.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terminal-geometry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  geometry:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      OPENUI_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install tmux for the real refresh/reconnect regression
+        shell: bash
+        run: |
+          if ! command -v tmux >/dev/null; then
+            if [[ "$RUNNER_OS" == "macOS" ]]; then
+              brew install tmux
+            else
+              sudo apt-get update
+              sudo apt-get install -y tmux
+            fi
+          fi
+      - run: npm ci
+      - run: npm run test:terminal-geometry
+      - name: Install real browser
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chrome
+      - name: Check first visible frame at DPR 1 and 2
+        if: runner.os == 'Linux'
+        run: npm run test:terminal-geometry:browser

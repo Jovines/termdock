@@ -13,7 +13,7 @@ beforeEach(() => {
   writeFileSync(binary, `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === 'devices') {
-  console.log('List of devices attached\\n${serial} device product:PTP-AN00 model:PTP_AN00 device:HNPLP transport_id:6');
+  console.log('List of devices attached\\n${serial} ' + (process.env.TD_TEST_OFFLINE === '1' ? 'offline' : 'device') + ' product:PTP-AN00 model:PTP_AN00 device:HNPLP transport_id:6');
 } else if (args[0] === '-s' && args[1] === '${serial}' && args.slice(2).join(' ') === 'shell getprop') {
   if (process.env.TD_TEST_PROP_MODE === 'failure') process.exit(1);
   if (process.env.TD_TEST_PROP_MODE === 'diagnostic') console.log('getprop: Max 2 arguments');
@@ -69,4 +69,14 @@ describe('Android IPv6 devices', () => {
     expect(await connectDevice(serial)).toEqual({ serial, output: `connect ${serial}` });
     expect(await disconnectDevice(serial)).toBe(`disconnect ${serial}`);
   });
+});
+
+it('retains only recent offline identity hints and revalidates every live address', async () => {
+  vi.stubEnv('TD_TEST_PROP_MODE', 'identity');
+  const { listDevices } = await import('./adb');
+  const online = (await listDevices())[0];
+  vi.stubEnv('TD_TEST_OFFLINE', '1');
+  expect((await listDevices())[0]).toMatchObject({ state: 'offline', physicalId: online.physicalId });
+  vi.stubEnv('TD_TEST_OFFLINE', '0'); vi.stubEnv('TD_TEST_PROP_MODE', 'placeholder');
+  expect((await listDevices())[0].physicalId).toBeUndefined();
 });

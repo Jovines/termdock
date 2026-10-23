@@ -244,6 +244,22 @@ describe('connectTerminalStream reconnect policy', () => {
     subscription.close();
   });
 
+  it('does not promote a hidden viewer using its previous visible size', async () => {
+    let dimensions: { cols: number; rows: number } | null = { cols: 120, rows: 40 };
+    const subscription = createTermdockAPI().connect('hidden-geometry-owner', { onEvent: vi.fn() }, {
+      getDimensions: () => dimensions,
+    });
+    FakeWebSocket.instances[0].readyState = FakeWebSocket.OPEN;
+    await resizeTerminal('hidden-geometry-owner', 120, 40);
+    dimensions = null;
+    reconnectTerminalConnectionNow('hidden-geometry-owner');
+    vi.advanceTimersByTime(0);
+    const params = new URL(FakeWebSocket.instances[1].url).searchParams;
+    expect(params.has('cols')).toBe(false);
+    expect(params.has('rows')).toBe(false);
+    subscription.close();
+  });
+
   it('reconnects with the keyboard-closed grid without shrinking to metadata dimensions', async () => {
     const disconnect = connectTerminalStream('resume-geometry', vi.fn());
     const first = FakeWebSocket.instances[0];

@@ -37,7 +37,7 @@ Termdock 是一个可自托管的 Web 终端与 AI Agent 工作区。你可以�
 | Node.js | **22 或更新版本**，并安装 npm |
 | 持久会话 | `tmux`，需要能从 `PATH` 找到 |
 | 客户端 | 当前版本的 Chrome、Edge、Firefox 或 Safari；手机可通过 HTTPS 安装 PWA |
-| macOS 桌面安装包 | 当前打包目标为 Apple Silicon（arm64），见 [Releases](https://github.com/Jovines/termdock/releases) |
+| macOS 桌面安装包 | Rust 正式版要求 macOS 14+，当前打包目标为 Apple Silicon（arm64），见 [Releases](https://github.com/Jovines/termdock/releases) |
 
 安装过程会检查原生终端模块和 tmux，并尝试修复依赖。手动准备 tmux：
 
@@ -255,7 +255,7 @@ https://<name>.termdock.local:9834
 
 第一版仍然保留 `:9834` 端口；无端口的 `https://<name>.termdock.local` 需要后续单独引入 443 代理/Helper。
 
-第一次直接运行 `termdock` 时，CLI 会先引导你选择 `.termdock.local` 前缀，并询问是否立刻启用 HTTPS；选择启用后会自动安装/配置 mkcert、生成证书，然后继续启动服务。
+第一次在交互终端运行 `termdock` 时，CLI 会引导你选择 `.termdock.local` 前缀，并询问是否启用 HTTPS。选择启用后会准备 mkcert 并生成证书；选择稍后配置或无界面首次启动时，不会擅自下载工具。已有默认 HTTPS 配置损坏且无法修复时会停止启动，避免退回 HTTP。
 
 使用建议：
 
@@ -264,8 +264,12 @@ https://<name>.termdock.local:9834
 termdock --set-password
 
 # 2. 自动准备本地 HTTPS 证书
-#    会检查 mkcert；macOS 可通过 Homebrew 自动安装
+#    优先使用已安装的 mkcert；缺失时将固定版本官方二进制校验后安装到用户目录
+#    支持 Linux x64/ARM64/ARM、macOS Intel/Apple Silicon，无需 Homebrew 或 root
 termdock --setup-local-https
+
+# 只生成证书，不修改本机信任库（容器、无 sudo 的服务器或手动管理信任时）
+termdock --setup-local-https --no-install-ca
 
 # 3. 正常启动；如果 ~/.termdock/certs/ 下已有证书，会自动启用 HTTPS
 termdock
@@ -281,6 +285,15 @@ termdock --status
 ~/.termdock/certs/termdock-local-key.pem
 ~/.termdock/certs/rootCA.pem
 ```
+
+首次自动安装的 mkcert 位于 `~/.termdock/bin/mkcert`。证书在临时目录中生成，
+校验证书与私钥、CA 签名及域名/IP 后才替换现有文件；后台续签保留原 CA。
+不要分发 mkcert CAROOT 中的 `rootCA-key.pem`，客户端只需要公开的 `rootCA.pem`。
+
+证书生成和本机信任是两个步骤。交互配置可提示管理员授权；无界面且无 root/
+免密码 sudo 时跳过信任安装并给出补办命令，不等待密码。Linux 浏览器信任通常
+还需要 `certutil`：Debian/Ubuntu 的包名为 `libnss3-tools`，Fedora/RHEL 为
+`nss-tools`，Arch 为 `nss`，openSUSE 为 `mozilla-nss-tools`。其他设备仍需分别安装并信任 CA。
 
 也可以手动覆盖证书路径：
 
@@ -360,6 +373,10 @@ td plugin-remove my-agent
 ```
 
 `plugin-install/update/remove` 管理完整插件包；`plugin-hooks` 只管理写入 Agent 原生配置文件的 Termdock hook 条目，两者生命周期互相独立。设置界面提供相同操作。
+
+插件来源支持公开及自建 Git 服务，包括 HTTPS、HTTP、`ssh://git@git.internal:2222/team/plugin.git` 和 `git@git.internal:team/plugin.git`，也支持嵌套分组路径。拉取和检查更新均由当前连接的 Termdock 服务电脑执行，沿用该用户的 Git credential helper、SSH 配置与 agent、代理和 CA 配置；远程连接时，浏览器所在电脑的密钥不会自动出现在服务电脑上。Git 操作不等待终端密码输入，已有凭证或 SSH agent 必须可用。管理员可用 `TERMDOCK_PLUGIN_GIT_HOSTS` 指定允许的主机列表；未设置时不限制托管域名。
+
+安装插件后，用 `td plugin-list --json` 核对注册结果，再按需运行 `td plugin-hooks <slug> install`。Codex 的新 Hook 还须在 `/hooks` 中获准执行；设置页会区分“待授权”和“运行状态未确认”，不会只凭配置文件存在就认为已生效。终端也接受 OSC 7501 程序状态报告，显示运行、等待、完成及错误；该通道不修改 Agent 活动计数或发送 Hook 通知。
 
 安全上，安装插件只会注册声明式能力，不会自动安装 hooks，也不会因打开设置页就执行插件的模型探测命令。只有用户启用该插件的自动标题后，才会调用它声明的 CLI。插件 hook 目标必须是用户目录内、不经过符号链接的 JSON 文件；实际 hook 命令由 Termdock 生成，插件不能注入任意 shell。仍应只安装你信任且审查过的仓库。
 
@@ -492,7 +509,8 @@ termdock/
 │       ├── routes/             # 终端、文件与其他业务路由
 │       ├── agent/              # Agent 适配、协作与定时任务
 │       └── federation/         # 服务身份、加密传输与中继
-├── desktop/                    # Electron macOS 客户端
+├── desktop/                    # 旧 Electron 兼容客户端与共享桌面 UI
+├── desktop-rust/               # Rust/Tauri macOS 正式客户端
 ├── public/                     # 图标、字体与 Service Worker
 ├── docs/                       # 功能与开发文档
 ├── scripts/                    # 构建与维护脚本

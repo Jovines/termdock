@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path';
 import WebSocket from 'ws';
 import QRCode from 'qrcode';
 import { RelayClient } from './relay.js';
+import { openServiceSocket } from './serviceTransport.js';
+import { serviceEndpoint } from './connectionModel.js';
 
 export interface FederationRelayConfig {
   entryUrl: string;
@@ -15,7 +17,7 @@ function secureEndpoint(value: string, endpoint: string): string {
   const url = new URL(value);
   if (!['https:', 'wss:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Federation relay URLs must use HTTPS/WSS without credentials, query or fragment');
   if (url.pathname !== '/' && url.pathname !== endpoint) throw new Error('Federation relay URL must be a service origin or the exact tunnel endpoint');
-  url.protocol = 'wss:'; url.pathname = endpoint; return url.toString();
+  return serviceEndpoint(url.origin, endpoint === '/api/federation/relay' ? 'relay' : 'secure').href;
 }
 export function parseRelayConfig(value: unknown): FederationRelayConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid relay config');
@@ -29,28 +31,10 @@ export function parseRelayConfig(value: unknown): FederationRelayConfig {
   }
   return structuredClone(v) as unknown as FederationRelayConfig;
 }
-function connect(url: string, ca: Buffer | undefined, sockets: Set<WebSocket>, token?: string, readyHandshake = false): Promise<WebSocket> {
-  return new Promise((accept, reject) => {
-    const ws = new WebSocket(url, { ca, rejectUnauthorized: true, followRedirects: false, handshakeTimeout: 10_000, maxPayload: 256 * 1024, ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}) });
-    sockets.add(ws); ws.once('close', () => sockets.delete(ws));
-    const failed = () => { ws.terminate(); reject(new Error('Secure relay connection failed')); };
-    ws.once('error', failed); ws.once('close', failed);
-    ws.once('open', () => {
-      ws.off('error', failed); ws.off('close', failed); ws.on('error', () => ws.terminate());
-      if (readyHandshake) void awaitReady(ws).then(() => accept(ws), reject); else accept(ws);
-    });
-  });
-}
-async function awaitReady(ws: WebSocket): Promise<void> {
-  return new Promise((accept, reject) => {
-    const timer = setTimeout(() => fail(), 10_000);
-    const cleanup = () => { clearTimeout(timer); ws.off('message', ready); ws.off('close', fail); };
-    const fail = () => { cleanup(); ws.terminate(); reject(new Error('Relay authentication failed')); };
-    const ready = (raw: WebSocket.RawData) => {
-      try { const frame = JSON.parse(raw.toString()); if (frame.type !== 'ready') { fail(); return; } cleanup(); accept(); } catch { fail(); }
-    };
-    ws.once('message', ready); ws.once('close', fail);
-  });
+async function connect(url: string, ca: Buffer | undefined, sockets: Set<WebSocket>, token?: string, readyHandshake = false, signal?: AbortSignal): Promise<WebSocket> {
+  const ws = await openServiceSocket(url, { ca }, { maxPayload: 256 * 1024, handshakeTimeout: 10_000, relayReady: readyHandshake, signal,
+    ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}) });
+  sockets.add(ws); ws.once('close', () => sockets.delete(ws)); return ws;
 }
 export function pairingInviteUrl(serviceId: string, code: string, value: string): string {
   const url = new URL(value);
@@ -99,16 +83,17 @@ export async function runFederationCli(args: string[]): Promise<number> {
     const loadCa = (file?: string) => file ? readFileSync(resolve(dirname(configPath), file)) : undefined;
     const entryCa = loadCa(config.caPath);
     const targets = config.targets.map(t => ({ ...t, ca: loadCa(t.caPath ?? config.caPath) }));
+    const lifetime = new AbortController();
     const sockets = new Set<WebSocket>(); let stopped = false; let client: RelayClient | undefined; let wake: (() => void) | undefined;
-    const stop = () => { stopped = true; wake?.(); client?.close(); for (const socket of sockets) socket.terminate(); };
+    const stop = () => { stopped = true; lifetime.abort(); wake?.(); client?.close(); for (const socket of sockets) socket.terminate(); };
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
     let delay = 1000;
     try {
       while (!stopped) {
         try {
-          const upstream = await connect(secureEndpoint(config.entryUrl, '/api/federation/relay'), entryCa, sockets, config.relayToken, true);
+          const upstream = await connect(secureEndpoint(config.entryUrl, '/api/federation/relay'), entryCa, sockets, config.relayToken, true, lifetime.signal);
           if (stopped) { upstream.terminate(); break; }
-          client = new RelayClient(upstream, { targets: new Map(targets.map(t => [t.serviceId, () => connect(secureEndpoint(t.url, '/api/federation/secure'), t.ca, sockets)])) });
+          client = new RelayClient(upstream, { targets: new Map(targets.map(t => [t.serviceId, (signal: AbortSignal) => connect(secureEndpoint(t.url, '/api/federation/secure'), t.ca, sockets, undefined, false, AbortSignal.any([signal, lifetime.signal]))])) });
           process.stderr.write('加密中继已连接。\n'); delay = 1000;
           await new Promise<void>(done => { if (upstream.readyState !== WebSocket.OPEN) done(); else upstream.once('close', () => done()); });
         } catch { if (!stopped) process.stderr.write('中继连接失败或已断开，将重试；请检查授权和证书。\n'); }

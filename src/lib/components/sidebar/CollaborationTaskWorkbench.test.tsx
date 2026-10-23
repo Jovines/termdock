@@ -9,8 +9,8 @@ import type { CollaborationTaskView, OrchestrationSession } from '../../terminal
 import { useCollaborationTaskWorkspace } from '../../stores/useCollaborationTaskWorkspace';
 import { CollaborationTaskWorkbench } from './CollaborationTaskWorkbench';
 
-const api = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), upload: vi.fn(), team: vi.fn() }));
-vi.mock('../../terminal/api', () => ({ listCollaborationTasks: api.list, getCollaborationTask: api.get, createCollaborationTask: api.create, updateCollaborationTask: api.update, uploadFiles: api.upload, ensureCollaborationTeam: api.team }));
+const api = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), upload: vi.fn(), team: vi.fn(), save: vi.fn() }));
+vi.mock('../../terminal/api', () => ({ listCollaborationTasks: api.list, getCollaborationTask: api.get, createCollaborationTask: api.create, updateCollaborationTask: api.update, uploadFiles: api.upload, ensureCollaborationTeam: api.team, saveDownloadBlob: api.save }));
 vi.mock('./CollaborationTaskContent', () => ({ default: ({ content }: { content: string }) => <p>{content}</p> }));
 vi.mock('./DirectoryPickerDialog', () => ({ DirectoryPickerDialog: ({ onCancel }: { onCancel: () => void }) => {
   const ref = useRef<HTMLDivElement>(null);
@@ -452,7 +452,7 @@ it('shows the real failure on the card and opens the existing explicit retry flo
   vi.stubGlobal('ResizeObserver', class { constructor(private callback: typeof resize) {} observe() { this.callback([{ contentRect: { width: 1300 } }]); } disconnect() {} });
   const issue = '无法准备独立执行目录：当前仓库没有可用的提交。';
   const record = task({ automationIssue: issue });
-  setup([record], { board: true, sessions: sessions.map(s => ({ ...s, name: `tmux:wt-${s.sessionId}` })) });
+  setup([record], { board: true, sessions: sessions.map(s => ({ ...s, name: `tmux:wt-${s.sessionId}`, activeProgram: 'Codex' })) });
   const card = await screen.findByRole('button', { name: /查看原因与处理/ });
   expect(card.textContent).toContain(issue);
   expect(card.closest('article')?.textContent).toContain('Codex 1');
@@ -831,4 +831,12 @@ it('blocks a departed selected coordinator instead of silently replacing it', as
   expect(screen.getByText('所选协调者已离组或未运行 Agent，请重新选择。')).toBeTruthy();
   expect(screen.getByRole('button', { name: '开始协作' })).toHaveProperty('disabled', true);
   expect(api.team).not.toHaveBeenCalled(); expect(api.create).not.toHaveBeenCalled();
+});
+
+it('exports the complete task using the shared native/browser save flow and preserves cancellation', async () => {
+  api.save.mockResolvedValue('canceled');
+  setup([task()]); await choose();
+  fireEvent.click(screen.getByRole('button', { name: '导出记录' }));
+  await screen.findByText('Download canceled');
+  expect(api.save).toHaveBeenCalledExactlyOnceWith(expect.any(Blob), 'termdock-task-goal.json', expect.any(AbortSignal));
 });

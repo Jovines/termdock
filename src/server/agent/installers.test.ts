@@ -1,9 +1,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   KIMI_HOOK_EVENTS,
+  codexHookRegistryState,
+  hooksState,
+  installHooks,
   installPluginHooks,
   opencodePluginJs,
   pluginHooksState,
@@ -11,6 +14,71 @@ import {
   tomlHooksState,
   tomlHooksUninstall,
 } from './installers.js';
+
+vi.mock('node:child_process', () => ({
+  execFile: vi.fn((_program, _args, _options, callback) => callback(null, '', '')),
+  spawn: vi.fn(),
+}));
+
+describe('native Agent hook updates', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-native-hooks-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(dir);
+    vi.stubEnv('CODEX_HOME', path.join(dir, 'custom-codex'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', path.join(dir, 'custom-claude'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('updates the active Codex home, keeps user hooks, and detects missing lifecycle coverage', async () => {
+    const file = path.join(process.env.CODEX_HOME!, 'hooks.json');
+    const userHook = { hooks: [{ type: 'command', command: 'my-own-hook' }] };
+    fs.mkdirSync(path.dirname(file));
+    fs.writeFileSync(file, JSON.stringify({ hooks: { PreToolUse: [userHook] } }));
+
+    await installHooks('codex');
+    expect(hooksState('codex')).toBe('installed');
+    const once = fs.readFileSync(file, 'utf8');
+    const root = JSON.parse(once);
+    expect(root.hooks.PreToolUse[0]).toEqual(userHook);
+    expect(root.hooks.PreToolUse[1].hooks[0].command).toContain('agent-hook codex tool-start');
+    expect(root.hooks.Interrupt[0].hooks[0].command).toContain('agent-hook codex stop');
+    expect(fs.existsSync(path.join(dir, '.codex', 'hooks.json'))).toBe(false);
+    await installHooks('codex');
+    expect(fs.readFileSync(file, 'utf8')).toBe(once);
+    delete root.hooks.UserPromptSubmit;
+    fs.writeFileSync(file, JSON.stringify(root));
+    expect(hooksState('codex')).toBe('outdated');
+  });
+
+  it('installs Claude permission and question events as distinct blocking signals', async () => {
+    await installHooks('claude');
+    const root = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), 'utf8'));
+    expect(root.hooks.PermissionRequest[0].hooks[0].command).toContain('agent-hook claude permission-request');
+    expect(root.hooks.PreToolUse[0].hooks[0].command).toContain('agent-hook claude tool-start');
+    expect(hooksState('claude')).toBe('installed');
+  });
+
+  it('checks every enabled, trusted Codex event instead of counting duplicate hook entries', async () => {
+    await installHooks('codex');
+    const root = JSON.parse(fs.readFileSync(path.join(process.env.CODEX_HOME!, 'hooks.json'), 'utf8'));
+    const hooks = Object.entries(root.hooks).map(([event, entries]) => ({
+      eventName: event[0].toLowerCase() + event.slice(1),
+      command: (entries as Array<{ hooks: Array<{ command: string }> }>)[0].hooks[0].command,
+      enabled: true, trustStatus: 'trusted',
+    }));
+    expect(codexHookRegistryState(hooks)).toBe('installed');
+    expect(codexHookRegistryState(hooks.map(hook => hook.eventName === 'userPromptSubmit' ? { ...hook, enabled: false } : hook))).toBe('needs-approval');
+    expect(codexHookRegistryState(hooks.map(hook => hook.eventName === 'stop' ? { ...hook, trustStatus: 'untrusted' } : hook))).toBe('needs-approval');
+    expect(codexHookRegistryState(hooks.map(hook => hook.eventName === 'userPromptSubmit' ? hooks[0] : hook))).toBe('outdated');
+  });
+});
 
 describe('OpenCode plugin bridge', () => {
   it('forwards the native session id and ignores known child sessions', () => {
@@ -142,5 +210,24 @@ describe('plugin JSON hook-map installer', () => {
     root.hooks.BeforeTurn[0].hooks[0].timeout = 8;
     fs.writeFileSync(file, JSON.stringify(root));
     expect(pluginHooksState('fake-agent', file, events)).toBe('outdated');
+  });
+
+  it('retains multiple mappings of one native event and preserves grouped user handlers and neighboring plugin names', () => {
+    const user = { type: 'command', command: 'user-hook' };
+    const neighbor = { type: 'command', command: 'node old.js agent-hook fake-agent-extra stop' };
+    fs.writeFileSync(file, JSON.stringify({ hooks: { BeforeTool: [{ matcher: 'keep', hooks: [
+      user, neighbor, { type: 'command', command: 'node old.js agent-hook fake-agent stop' },
+    ] }] } }));
+    const mappings: Array<[string, string, string | null, number?, string?]> = [
+      ['BeforeTool', 'question-asked', '^Ask$', 2, 'question'],
+      ['BeforeTool', 'prompt-submit', '^Run$', 4, 'thinking'],
+    ];
+    installPluginHooks('fake-agent', file, mappings);
+    const installed = fs.readFileSync(file, 'utf8');
+    expect(JSON.parse(installed).hooks.BeforeTool).toHaveLength(3);
+    expect(JSON.parse(installed).hooks.BeforeTool[0]).toEqual({ matcher: 'keep', hooks: [user, neighbor] });
+    expect(pluginHooksState('fake-agent', file, mappings)).toBe('installed');
+    installPluginHooks('fake-agent', file, mappings);
+    expect(fs.readFileSync(file, 'utf8')).toBe(installed);
   });
 });

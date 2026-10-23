@@ -18,7 +18,7 @@ vi.mock('../../terminal/api', async original => ({
 }));
 vi.mock('./CollaborationTaskWorkbench', () => ({ CollaborationTaskWorkbench: ({ onManageMembers, boardNavigation, boardSettings }: { onManageMembers: () => void; boardNavigation?: React.ReactNode; boardSettings?: React.ReactNode }) => <section aria-label="目标编辑">{boardNavigation}{boardSettings}<button type="button" onClick={onManageMembers}>管理成员入口</button></section> }));
 const group = { id: 'team', name: '发布准备', sessionIds: ['lead', 'worker'], createdAt: 1, updatedAt: 1 };
-const sessions = group.sessionIds.map((id, i) => ({ sessionId: id, backendSessionId: id, name: i ? '执行成员' : '协调者', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'ready', capability: 'terminal', currentTask: '', updatedAt: 1 }));
+const sessions = group.sessionIds.map((id, i) => ({ sessionId: id, backendSessionId: id, name: i ? '执行成员' : '协调者', customName: true, cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'ready', capability: 'terminal', currentTask: '', updatedAt: 1 }));
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks(); useCollaborationNavigation.setState({ groupId: null, drafts: {} });
   api.settings.mockResolvedValue({}); api.list.mockResolvedValue({ groups: [group], sessions });

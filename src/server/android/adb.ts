@@ -2,7 +2,8 @@ import { execFile, type ExecFileOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
-import { isIP } from 'node:net';
+import { normalizeAndroidAddress } from '../shared/androidDevices.js';
+import type { AndroidDevice } from '../shared/androidDevices.js';
 import { createHash } from 'node:crypto';
 
 const execFileAsync = promisify(execFile) as unknown as (
@@ -64,18 +65,7 @@ export async function runAdb(args: readonly string[], options: AdbRunOptions = {
   }
 }
 
-export interface AndroidDeviceInfo {
-  serial: string;
-  state: 'device' | 'offline' | 'unauthorized' | 'connecting' | 'unknown';
-  model?: string;
-  product?: string;
-  device?: string;
-  transport?: string;
-  isNetwork?: boolean;
-  androidVersion?: string;
-  sdk?: number;
-  physicalId?: string;
-}
+export type AndroidDeviceInfo = AndroidDevice;
 
 function parseDeviceLine(line: string): AndroidDeviceInfo | null {
   const parts = line.trim().split(/\s+/);
@@ -122,6 +112,9 @@ export async function getDeviceProperties(serial: string): Promise<Pick<AndroidD
   }
 }
 
+const deviceIdentities = new Map<string, { physicalId: string; observed: number }>();
+const IDENTITY_TTL = 5 * 60_000;
+
 export async function listDevices(): Promise<AndroidDeviceInfo[]> {
   const output = await runAdb(['devices', '-l'], { timeout: 10_000 });
   const devices: AndroidDeviceInfo[] = [];
@@ -130,9 +123,21 @@ export async function listDevices(): Promise<AndroidDeviceInfo[]> {
     const info = parseDeviceLine(line);
     if (info) devices.push(info);
   }
-  await Promise.all(devices.filter(device => device.state === 'device').map(async device => {
-    Object.assign(device, await getDeviceProperties(device.serial));
+  const now = Date.now();
+  for (const [key, value] of deviceIdentities) if (now - value.observed > IDENTITY_TTL) deviceIdentities.delete(key);
+  const namespace = resolveAdbBinary() || '';
+  await Promise.all(devices.map(async device => {
+    const key = `${namespace}:${device.serial}`;
+    if (device.state === 'device') {
+      Object.assign(device, await getDeviceProperties(device.serial));
+      deviceIdentities.delete(key);
+      if (device.physicalId) deviceIdentities.set(key, { physicalId: device.physicalId, observed: now });
+    } else {
+      const previous = deviceIdentities.get(key);
+      if (previous) device.physicalId = previous.physicalId;
+    }
   }));
+  while (deviceIdentities.size > 512) deviceIdentities.delete(deviceIdentities.keys().next().value!);
   return devices;
 }
 
@@ -151,23 +156,4 @@ export async function disconnectDevice(address: string): Promise<string> {
 }
 
 /** 接受 `ip:port`、纯 ip（补 5555）、或带 scheme/路径的粘贴内容。 */
-export function normalizeAddress(raw: string): string | null {
-  let value = raw.trim();
-  if (!value) return null;
-  const urlMatch = /^[a-z]+:\/\/([^/]+)/i.exec(value);
-  if (urlMatch) value = urlMatch[1];
-  value = value.replace(/^\/+|\/+$/g, '');
-  const ipv6 = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(value);
-  if (ipv6) {
-    if (isIP(ipv6[1]) !== 6) return null;
-    const port = ipv6[2] ?? '5555';
-    if (Number(port) < 1 || Number(port) > 65535) return null;
-    return `[${ipv6[1]}]:${port}`;
-  }
-  if (!/^[0-9a-zA-Z_.\-]+(?::\d+)?$/.test(value)) return null;
-  if (!value.includes(':') && /^\d+\.\d+\.\d+\.\d+$/.test(value)) value = `${value}:5555`;
-  const [host, port] = value.split(':');
-  if (port !== undefined && !/^\d{1,5}$/.test(port)) return null;
-  if (!host) return null;
-  return port === undefined ? `${host}:5555` : `${host}:${port}`;
-}
+export const normalizeAddress = normalizeAndroidAddress;

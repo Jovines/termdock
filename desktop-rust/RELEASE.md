@@ -1,63 +1,75 @@
-# Rust Preview 与正式版发布契约
+# Rust 正式版与旧客户端迁移
 
-## 当前阶段：独立 Preview
+用户已确认 Rust 稳定并授权转正。正式版要求 **macOS 14+、Apple Silicon**。
+桌面版本在 `desktop-rust/package.json` / lockfile / `src-tauri/tauri.conf.json`；
+CLI/npm 版本独立。最后一个 Preview 版本取 `desktop-rust/package.json` 的 `previewVersion`。
 
-Rust Preview 已合入 master，但合并源码不等于发布安装包或切换正式版。
+## 一次性迁移
 
-| 项目 | 正式版（当前 Electron） | Rust Preview |
-| --- | --- | --- |
-| 应用名称 | Termdock | Termdock Preview |
-| Bundle ID | com.jovines.termdock | com.jovines.termdock.preview |
-| 版本 | 根 package.json 正式版本 | 独立数字版本，例如 0.1.1、0.1.2 |
-| GitHub Release | 正式 release | preview-v0.1.1 等 prerelease；不能标记 latest |
-| 更新格式 | 既有 Electron/Squirrel ZIP feed | Tauri 签名 .app.tar.gz + preview.json |
-| 更新源 | 既有正式更新源 | preview-channel Release 的 preview.json |
-| 桌面配置 | ~/.termdock/desktop.json 等既有路径 | Preview app_config_dir 下 connections.json 与独立 WebView profile |
+- 正式 Rust：`Termdock.app`、`com.jovines.termdock`，首版 `1.4.358`。
+- Electron 兼容桥：固定 `1.4.357`，继续支持 macOS 12；新正式 Release 的旧式
+  `Termdock-darwin-arm64-VERSION.zip` 始终携带这份已签名、公证的桥接 App。
+  老客户端只认这种文件名，先更新为桥。桥在 macOS 14+ 选取正式 Rust ZIP；
+  macOS 12/13 保留可运行客户端并提示升级系统，不重复下载桥接包。
+- 最后一个 Preview：`0.1.14`，保留 Preview 身份，让已发布的 Preview 通过原公钥
+  与 `preview-channel/preview.json` 正常验签更新。过渡版随后检查固定正式渠道，
+  验证正式更新包及 Developer ID 团队，退出旧正式 GUI、备份旧 App，再安装并启动
+  同目录的 `Termdock.app`。成功后旧 Preview 移至唯一 Trash 备份。
+- 配置只导入连接与偏好；原配置保留并生成私有备份。已存在正式配置时保留其选择；
+  不转移 cookie、设备私钥、端口、WebView profile 或证书信任，用户重新授权。
+- 两条路径都不停止独立服务或终端 PTY。旧客户端升级、Preview 升级、后续 Rust
+  更新、失败恢复和首次安装必须分别验收，不用一次成功 fetch 代替真实安装验证。
 
-Preview 只从构建时固定的 HTTPS manifest 和公钥接受更新；页面和服务不能替换它们。
-首次安装导入正式版书签/偏好，但不复制设备私钥、授权、cookie、证书信任。
-两种 App 可并存，连接同一个已有服务；更新 App 不代表更新 CLI/服务，也不能停止 daemon 或 PTY。
+## 正常正式发版
 
-## 生成 Preview 发布产物
+以后只构建一个 Rust 正式版。兼容桥复用首次发布的不可变资产，不重新编译 Electron；
+Preview 渠道永久保留最后过渡版，不能删除，也不继续发布常规 Preview。
 
-在配置好的 macOS 构建环境、干净精确提交执行：
+1. 递增桌面三个版本文件。完成回归、根构建及桌面检查；按仓库规则显式暂存路径、
+   提交并推送完整源码。发布源必须是干净且与 `origin/master` 一致的精确 SHA。
+2. 将 `git archive HEAD` 传到本次独立 Mac 目录；设置
+   `TERMDOCK_PREVIEW_SOURCE_REVISION=完整SHA`、`GITHUB_SHA=完整SHA`。
+   从机器私有配置加载原 Developer ID、Apple API 和已有 Tauri updater 密钥；
+   正式版与 Preview 沿用同一现有公钥，不能在迁移时生成或轮换密钥。
+3. 在签名 Mac 执行：
 
-```sh
-npm ci --ignore-scripts
-npm ci --prefix desktop-rust
-# 从机器私有发布配置加载；不得提交密钥或在命令行展开它们：
-# TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY（独立 Preview updater 公钥，base64）
-# TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-# APPLE_SIGNING_IDENTITY（Developer ID Application）
-npm --prefix desktop-rust run package:preview -- 0.1.1 /absolute/new/output-directory
-```
+   ```sh
+   npm ci --ignore-scripts
+   npm ci --ignore-scripts --prefix desktop-rust
+   npm --prefix desktop-rust run package:stable -- VERSION /absolute/new/output
+   python3 desktop-rust/scripts/notarize-preview.py /absolute/new/output \
+     desktop-rust/src-tauri/target/release/bundle/macos/Termdock.app /absolute/build.log
+   ```
 
-该入口固定 Preview 名称、Bundle ID、独立版本、更新源，开启 updater artifacts，构建 App/DMG，核对签名与包身份，再输出版本资产、`preview.json` 和含源码 revision/SHA-256 的 `release.json`。不会发布、安装 App、启动或停止服务。发布公钥与当前客户端内置公钥必须匹配；密钥轮换须先让旧公钥签名的客户端接纳新公钥，不能直接替换渠道信任。
+   首次正式版通过 `TERMDOCK_LEGACY_BRIDGE_ZIP` 提供已公证的 `1.4.357` ZIP。
+   后续脚本从 `v1.4.358` 的公开资产读取 GitHub SHA-256/size 并下载或复用本机缓存，
+   公证验证器仍检查桥的签名、Gatekeeper、staple、版本及实际 Mach-O minOS 12。
+   自定义 `CARGO_TARGET_DIR` 时同步调整 App 路径。
+4. 公证验证器要求 App、DMG、Rust ZIP、Tauri 更新包的签名、公证票据、minOS 14、
+   原 updater 公钥/正式 endpoint 和嵌入 workspace SHA/资源摘要全部通过。
+   DMG 公证并 staple 后重算最终资产摘要；不得先签更新包再改其字节。
+5. 传回独立 Linux 目录并比对摘要，删除临时 `build-config.json`，执行
+   `python3 desktop-rust/scripts/stage-release.py /absolute/artifacts` 上传草稿。
+   完成实际安装验收后执行：
 
-每个已发布 Preview 的版本都必须递增。多个架构需要分别构建、核对版本/公钥一致，再合并 manifest 的 platforms；不能把单架构资产冒充 universal。
+   ```sh
+   STABLE_VERSION=VERSION STABLE_REVISION=完整SHA \
+     python3 desktop-rust/scripts/promote-stable.py
+   ```
 
-发布步骤：
+   推广器核对实际 Git 标签、全部上传资产 size/SHA-256、公证记录与平台身份，
+   先公开非 prerelease 并设 Latest，再移动 `stable-channel/latest.json`。
+   拒绝已发布版本替换和渠道回退。公开后核验真实下载 URL/feed 字节与本地产物一致。
 
-1. 按 macOS 发布技能完成签名、公证及包内资源/minOS 检查；记录实际公证状态，不能将 ad-hoc 本地测试包当正式分发包。
-2. 为精确 revision 创建 `preview-v版本` **draft prerelease**，上传 DMG、`.app.tar.gz`、`.sig`、`preview.json`、`release.json`，核对远端每项大小和 SHA-256；确认后公开 prerelease，保持正式 latest 不变。
-3. 版本资产可下载且摘要匹配后，才将该 manifest 更新到专用 `preview-channel` prerelease 的 `preview.json`。这是唯一允许替换的渠道指针；已公开的版本资产不覆盖。
-4. 从上一版已签名 Preview 实际检查更新、下载验签、安装重启，确认仍是 Preview 身份和独立配置，连接/会话保留、正式 App 未变。随后再对新用户验证首次安装。
+## 正式 Release 资产
 
-当前本地开发安装包没有发布通道公钥；新增发布配置不能让这些旧包凭空具备信任。首个带公钥的已签名 Preview 需要安装一次，此后同一独立渠道可以持续更新。
+| 资产 | 消费者 |
+| --- | --- |
+| `Termdock_VERSION_aarch64.dmg` | macOS 14+ 首次安装 |
+| `Termdock-Rust-darwin-arm64-VERSION.zip` | Electron 桥在 macOS 14+ 继续升级 |
+| `Termdock-darwin-arm64-VERSION.zip` | 未迁移的旧 Electron，内容固定为兼容桥 |
+| `Termdock_VERSION_aarch64.app.tar.gz` / `.sig` | Rust 正式版与最后 Preview 桥 |
+| `latest.json` | 同时复制到 `stable-channel` 的正式 Tauri feed |
+| `release.json` | 精确源码、包身份、公证收据与全部资产摘要 |
 
-## 用户确认稳定后：Rust 接替正式版
-
-**只有用户明确确认稳定并要求转正，才执行切换。** Preview 期间不向正式用户推送 Rust 实验版。
-
-转正不是将 Preview 应用改个名字后上传；必须完成一次跨引擎升级：
-
-- 构建正式 Rust `Termdock.app`，使用 `com.jovines.termdock`、正式 Developer ID 团队/签名要求，版本高于当时线上正式版，最低系统与架构符合受影响用户范围。
-- 保持正式版更新入口。为旧 Electron/Squirrel 提供其能验证和安装的正式 ZIP/feed；不能把 Preview 的 Tauri `.app.tar.gz` 直接交给旧更新器。必要时先发布兼容过渡版本。
-- 新 Rust 正式版内置正式 Tauri updater 渠道/信任，完成“旧 Electron 更新一次成为 Rust，之后 Rust 持续独立更新”的交接。现有 Preview updater 的 Preview 身份限制不能被移除来冒充这一步。
-- 正式配置迁移保留连接、偏好和可安全复用的数据，旧数据先备份；Electron Chromium 与 WKWebView 的 profile、IndexedDB 及系统权限不假定兼容。不能在未实测时承诺所有登录态自动继承，也不能通过复制私钥/放松证书校验绕过重新授权。
-- 从真实已安装旧正式版完成升级验收：检查旧更新器接受签名与 ZIP、落盘/重启后是 Rust 正式身份、书签与偏好迁移、服务/PTY 不被关闭、后续 Rust 更新及失败恢复。覆盖已有用户与首次安装。
-- 正式升级链路通过后再停止 Preview 发布；Preview 用户通过单独、明确的迁移路径转正式版并备份配置，不能把 Preview 包直接改名覆盖正式安装。
-
-在跨引擎升级实际通过前，只能报告“已准备转正机制/产物”，不能报告“线上 Electron 已可无缝更新为 Rust”。
-
-实现所用更新协议参考：[Electron autoUpdater](https://www.electronjs.org/docs/latest/api/auto-updater)、[Tauri updater](https://v2.tauri.app/plugin/updater/)。
+只验证构建或签名不能宣称发布成功；尚未完成的真实 macOS/iOS 路径应明确记录。

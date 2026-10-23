@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { uploadFiles, uploadSessionAttachments } from '../../terminal/api';
-import { prepareTerminalClipboardImage, readTerminalClipboardFiles, readTerminalClipboardImage, readTerminalClipboardVideos, TerminalClipboardVideoError } from '../../terminal/clipboardImage';
-import { getTermdockDesktopBridge } from '../../desktop/nativeBridge';
+import { prepareTerminalClipboardImage } from '../../terminal/clipboardImage';
+import { readClipboardContent } from '../../terminal/clipboardContent';
 import { escapeShellPath } from '../../desktop/shellPath';
 import { selectedTarget } from '../../federation/clientScope';
 import { currentSecureClient } from '../../federation/browserIntegration';
@@ -63,32 +63,15 @@ export function useChatInputTransfer(options: Options) {
   const paste = useCallback(async (eventData?: { files: File[]; text: string }) => {
     if (!latest.current.active || !latest.current.canWrite) return;
     const operation = begin(); setTransfer({ stage: 'reading' }); latest.current.error('');
-    const check = <T,>(value: T): T => { if (!operation.current()) throw new DOMException('Clipboard target changed', 'AbortError'); return value; };
     const insert = (text: string) => { if (operation.current()) { latest.current.insert(text, operation.focus()); setTransfer(null); work.current = null; } };
     try {
-      const bridge = getTermdockDesktopBridge(); let nativeError: unknown;
-      if (bridge?.readClipboardFiles) {
-        try { const { files, paths } = check(await readTerminalClipboardFiles()); if (files.length || paths.length) return await performUpload(operation, files, paths); }
-        catch (error) { if (!operation.current() || error instanceof TerminalClipboardVideoError) throw error; nativeError = error; }
+      const content = await readClipboardContent(eventData, operation.current);
+      if (content.kind === 'text') { insert(content.text); return; }
+      if (content.kind === 'files') {
+        const files = content.files.length === 1 && content.files[0].type.startsWith('image/')
+          ? [prepareTerminalClipboardImage(content.files[0])] : content.files;
+        return await performUpload(operation, files, content.paths);
       }
-      if (eventData?.files.length) {
-        const files = eventData.files.length === 1 && eventData.files[0].type.startsWith('image/') ? [prepareTerminalClipboardImage(eventData.files[0])] : eventData.files;
-        return await performUpload(operation, files);
-      }
-      if (eventData?.text) { insert(eventData.text); return; }
-      if (!bridge?.readClipboardImage && typeof navigator.clipboard?.read === 'function') {
-        const items = check(await navigator.clipboard.read());
-        const videos = check(await readTerminalClipboardVideos({ read: async () => items }));
-        if (videos.length) return await performUpload(operation, videos);
-        const image = check(await readTerminalClipboardImage({ read: async () => items }));
-        if (image) return await performUpload(operation, [prepareTerminalClipboardImage(image)]);
-        for (const item of items) if (item.types.includes('text/plain')) { insert(check(await (check(await item.getType('text/plain'))).text())); return; }
-      } else {
-        const image = check(await readTerminalClipboardImage(navigator.clipboard));
-        if (image) return await performUpload(operation, [prepareTerminalClipboardImage(image)]);
-      }
-      if (navigator.clipboard?.readText) { const text = check(await navigator.clipboard.readText()); if (text) { insert(text); return; } }
-      if (nativeError) throw nativeError;
       throw new Error('剪贴板没有可读取的内容，请使用系统粘贴或选择文件');
     } catch (error) {
       if (operation.current()) { setTransfer(null); latest.current.error(error instanceof Error ? error.message : '粘贴失败，请重试'); }

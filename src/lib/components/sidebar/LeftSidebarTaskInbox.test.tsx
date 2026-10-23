@@ -6,6 +6,8 @@ import { I18nProvider } from '../../i18n';
 import { listCollaborationTasks, type CollaborationTaskView } from '../../terminal/api';
 import { useCollaborationTaskInbox } from '../../stores/useCollaborationTaskInbox';
 import { LeftSidebar } from './LeftSidebar';
+import { AppFeedbackHost } from '../ui/AppFeedback';
+import { SECURE_READY_EVENT } from '../../federation/connectionRecovery';
 
 vi.mock('../../terminal/api', async (original) => ({
   ...await original<typeof import('../../terminal/api')>(),
@@ -24,10 +26,10 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ locale: 'en', agents: [], groups: [] }))));
 });
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function renderSidebar() {
-  render(<I18nProvider><LeftSidebar
+  render(<I18nProvider><AppFeedbackHost /><LeftSidebar
     isOpen pinned drawerWidthPx={280} sessions={[]} activeSessionId={null}
     sessionStates={new Map()} splitWorkspaces={[]}
     onClose={vi.fn()} onNewSession={vi.fn()} onCloseSession={vi.fn()}
@@ -62,12 +64,16 @@ it('preserves actual pending tasks and retry feedback through a failed refresh',
   listTasks.mockResolvedValueOnce({ tasks: [pendingTask] });
   renderSidebar();
   const inbox = await screen.findByRole('button', { name: '需要你处理 1' });
+  vi.useFakeTimers();
   listTasks.mockRejectedValueOnce(new Error('连接中断'));
   await act(async () => { await useCollaborationTaskInbox.getState().refresh(); });
   fireEvent.click(inbox);
   expect(screen.getByText(pendingTask.title)).toBeTruthy();
-  expect(screen.getByRole('alert').textContent).toContain('连接中断');
+  expect(screen.queryByRole('alert')).toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(2500));
+  expect(screen.getByText('正在恢复待办同步…')).toBeTruthy();
 
-  fireEvent.click(screen.getByRole('button', { name: '重试' }));
-  await waitFor(() => expect(screen.queryByRole('region', { name: '协作待处理事项' })).toBeNull());
+  await act(async () => { window.dispatchEvent(new Event(SECURE_READY_EVENT)); });
+  expect(screen.queryByText('正在恢复待办同步…')).toBeNull();
+  expect(screen.queryByRole('region', { name: '协作待处理事项' })).toBeNull();
 });

@@ -1,13 +1,3 @@
-.session-chat-markdown { font-size: 15px; line-height: 1.85; }
-.session-chat-markdown p, .session-chat-markdown li, .session-chat-markdown blockquote { font-size: 15px; line-height: 1.85; color: var(--foreground); }
-.session-chat-markdown [data-markdown-preview-block-start] { padding-block: 0; }
-.session-chat-markdown h1 { font-size: 1.5rem; line-height: 1.5; }
-.session-chat-markdown h2 { font-size: 1.25rem; line-height: 1.6; }
-.session-chat-markdown h3, .session-chat-markdown h4 { font-size: 1.05rem; line-height: 1.7; }
-.session-chat-markdown pre, .session-chat-markdown pre code, .session-chat-markdown pre span { font-size: 13px; line-height: 1.7; }
-.session-chat-markdown table { font-size: 14px; line-height: 1.7; }
-.session-chat-markdown a { text-underline-offset: 3px; }
-
 /* Native scrolling needs both the page and the session swiper to permit x pans. */
 .swiper.session-chat-swiper { touch-action: pan-x pan-y; }
 .session-chat-input { min-height: 44px; max-height: min(176px, calc(var(--app-visual-vh, 100dvh) * 0.35)); }
@@ -20,3 +10,33 @@ html[data-termdock-touch-viewport='true'][data-termdock-chat-viewport='true'] #r
 html[data-termdock-touch-viewport='true'][data-termdock-chat-keyboard='true'] #root { padding-bottom: 0; }
 html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display: none; }
 html[data-termdock-chat-keyboard='true'] .session-chat-composer { padding-bottom: 8px; }
+
+/* Move only the highlight; keep skeleton geometry stable while loading. */
+.chat-loading-skeleton { position: relative; overflow: hidden; }
+.chat-loading-skeleton::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--foreground) 6%, transparent), transparent); transform: translateX(-100%); animation: chat-skeleton-sweep 1800ms ease-in-out infinite; }
+@keyframes chat-skeleton-sweep { to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .chat-loading-skeleton::after { animation: none; } }
+
+/* Keep message boundaries quiet and stable when their actions are revealed. */
+.chat-reply + .chat-reply { margin-top: 12px; }
+.chat-reply-meta { height: 24px; margin-top: 2px; }
+.chat-reply-meta > .chat-message-tools { height: 24px; }
+.chat-reply-meta .chat-message-action { height: 24px; min-height: 24px; min-width: 28px; }
+.chat-reply-divider { height: 1px; background: color-mix(in srgb, var(--border) 45%, transparent); }
+.chat-message-tools { display: inline-flex; align-items: center; gap: 4px; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+[data-chat-message]:focus-within > [data-chat-message-actions] > .chat-message-tools,
+[data-chat-message][data-actions-open] > [data-chat-message-actions] > .chat-message-tools { opacity: 1; pointer-events: auto; }
+@media (hover: hover) {
+  [data-chat-message]:hover > [data-chat-message-actions] > .chat-message-tools { opacity: 1; pointer-events: auto; }
+}
+@media (hover: none), (pointer: coarse) {
+  .chat-reply-meta, .chat-reply-meta > .chat-message-tools { height: 32px; }
+  .chat-user-meta { min-height: 44px; }
+  .chat-message-action { min-height: 44px; min-width: 44px; }
+  .chat-reply-meta .chat-message-action { height: 32px; min-height: 32px; min-width: 32px; }
+  .chat-reply + .chat-reply { margin-top: 12px; }
+}
+@media (prefers-reduced-motion: reduce) { .chat-message-tools { transition: none; } }
+
+/* The separator shares the compact actions/time row above the next reply. */
+.chat-replies > [data-chat-viewport-row] + [data-chat-viewport-row] { margin-top: 4px; }

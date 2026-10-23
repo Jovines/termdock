@@ -83,14 +83,14 @@ jobs:
         run: npx tauri build --bundles app --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
       - name: Verify and archive test App
         run: |
-          APP='desktop-rust/src-tauri/target/release/bundle/macos/Termdock Preview.app'
+          APP='desktop-rust/src-tauri/target/release/bundle/macos/Termdock.app'
           codesign --verify --deep --strict "$APP"
           test "$(lipo -archs "$APP/Contents/MacOS/termdock-preview")" = arm64
           test ! -e "$APP/Contents/Resources/native-terminal"
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           import crypto from 'node:crypto';
-          const root='desktop-rust/src-tauri/target/release/bundle/macos/Termdock Preview.app/Contents/Resources/workspace';
+          const root='desktop-rust/src-tauri/target/release/bundle/macos/Termdock.app/Contents/Resources/workspace';
           const manifest=JSON.parse(fs.readFileSync(`${root}/workspace-manifest.json`));
           if(manifest.sourceRevision!==process.env.GITHUB_SHA||manifest.dirty)throw Error('Wrong or dirty workspace revision');
           for(const [name,entry] of Object.entries(manifest.files)){
@@ -100,7 +100,7 @@ jobs:
           fs.mkdirSync(`${process.env.RUNNER_TEMP}/macos-check`);
           fs.writeFileSync(`${process.env.RUNNER_TEMP}/macos-check/build-info.json`,JSON.stringify({revision:process.env.GITHUB_SHA,architecture:'arm64',signing:'ad-hoc',notarized:false,publicRelease:false},null,2));
           JS
-          tar -czf "$RUNNER_TEMP/macos-check/Termdock-Preview-arm64-test.app.tar.gz" -C "$(dirname "$APP")" 'Termdock Preview.app'
+          tar -czf "$RUNNER_TEMP/macos-check/Termdock-Preview-arm64-test.app.tar.gz" -C "$(dirname "$APP")" 'Termdock.app'
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-test-${{ github.sha }}

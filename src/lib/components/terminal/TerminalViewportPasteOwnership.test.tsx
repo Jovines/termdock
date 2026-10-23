@@ -57,6 +57,7 @@ vi.mock('@xterm/addon-ligatures', () => ({ LigaturesAddon: class {} }));
 vi.mock('@xterm/addon-progress', () => ({ ProgressAddon: class {} }));
 
 import { TerminalViewport } from './TerminalViewport';
+import { getSessionFontSize, removeSessionFontSize } from '../../terminal/sessionFontSize';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -93,6 +94,63 @@ describe('TerminalViewport async paste ownership', () => {
     if ('termdockDesktop' in window) delete (window as Window & { termdockDesktop?: unknown }).termdockDesktop;
     desktop.bridge = undefined;
     vi.unstubAllGlobals();
+  });
+
+  it('keeps font size on open/refocus and tiny scrolls, and limits deliberate zoom across xterm rebuilds', async () => {
+    const focused = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(1000);
+    const props = { sessionKey: 'font-zoom', sessionId: 'font-zoom', chunks: [], onInput: vi.fn(), onResize: vi.fn(), terminalSettings: { rendererMode: 'dom', fontSize: 14 } as never, theme: {} as never, autoFocus: false };
+    removeSessionFontSize(props.sessionId);
+    try {
+      const view = render(<TerminalViewport {...props} />);
+      await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+      const container = view.container.querySelector('.terminal-viewport-container')!;
+      fireEvent.blur(window); fireEvent.focus(window);
+      fireEvent.wheel(container, { ctrlKey: true, deltaY: 1 });
+      expect(getSessionFontSize(props.sessionId)).toBeNull();
+      fireEvent.wheel(container, { ctrlKey: true, deltaY: 40 });
+      expect(getSessionFontSize(props.sessionId)).toBe(13);
+      view.rerender(<TerminalViewport {...props} terminalSettings={{ rendererMode: 'dom', fontSize: 13 } as never} />);
+      await waitFor(() => expect(terminalModel.instance?.options.fontSize).toBe(13));
+      clock.mockReturnValue(1010);
+      fireEvent.wheel(container, { ctrlKey: true, deltaY: 120 });
+      expect(getSessionFontSize(props.sessionId)).toBe(13);
+      focused.mockReturnValue(false); clock.mockReturnValue(2000);
+      fireEvent.wheel(container, { metaKey: true, deltaY: 120 });
+      expect(getSessionFontSize(props.sessionId)).toBe(13);
+      expect(getSessionFontSize('other-session')).toBeNull();
+    } finally {
+      focused.mockRestore(); clock.mockRestore(); removeSessionFontSize(props.sessionId);
+    }
+  });
+
+  it('initializes an offscreen terminal at its measured grid without publishing a hidden resize', async () => {
+    const measure = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    const canvas = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    const ref = createRef<TerminalController>();
+    const onResize = vi.fn();
+    terminalModel.dimensions = { cols: 120, rows: 40 };
+    try {
+      render(<TerminalViewport ref={ref} sessionKey="hidden-init" sessionId="hidden-init" chunks={[]} onInput={vi.fn()} onResize={onResize} isLayoutVisible={false} terminalSettings={{ rendererMode: 'dom' } as never} theme={{} as never} autoFocus={false} />);
+      await waitFor(() => expect(ref.current?.getDimensions()).toEqual({ cols: 120, rows: 40 }));
+      expect(onResize).not.toHaveBeenCalled();
+    } finally { measure.mockRestore(); canvas.mockRestore(); }
+  });
+
+  it('fits a hidden terminal before the first visible paint without waiting for a tmux redraw', async () => {
+    const ref = createRef<TerminalController>();
+    const props = { sessionKey: 'first-reveal', sessionId: 'first-reveal', chunks: [], onInput: vi.fn(), onResize: vi.fn(), onTmuxScroll: vi.fn(), terminalSettings: { rendererMode: 'dom' } as never, theme: {} as never, autoFocus: false };
+    const view = render(<TerminalViewport {...props} ref={ref} isLayoutVisible={false} />);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    vi.spyOn(view.container.querySelector('.terminal-viewport-container')!, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    vi.useFakeTimers();
+    act(() => ref.current!.setSessionReady(true));
+    terminalModel.dimensions = { cols: 120, rows: 40 };
+    presentation.begin.mockClear();
+    view.rerender(<TerminalViewport {...props} ref={ref} isLayoutVisible />);
+    // No animation-frame timer has run: this must finish in the layout phase.
+    expect(ref.current!.getDimensions()).toEqual({ cols: 120, rows: 40 });
+    expect(presentation.begin).not.toHaveBeenCalled();
   });
 
   it('refits and repaints the retained terminal on reveal, including unchanged dimensions', async () => {

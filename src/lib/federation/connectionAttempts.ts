@@ -1,6 +1,7 @@
 import { DeviceAuthorizationRequired } from './deviceAuthorization';
 import { ConnectionAccessError } from './accessFailure';
 import { invitationDenial } from './invitationFailure';
+import { CONNECTION_ROUND_TIMEOUT_MS } from '../../server/federation/streamLimits';
 
 export interface ConnectionAttempt<T> {
   key: string;
@@ -21,16 +22,22 @@ export function rememberConnectionPath(serviceId: string, key: string): void {
 
 /** Hedge slow network paths, never one-use invitations. A verified denial ends
  * the whole attempt; a reachable alternate must not bypass revoked access. */
-export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], dispose: (value: T) => void, sequential = false): Promise<{ value: T; key: string }> {
+export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], dispose: (value: T) => void, sequential = false, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<{ value: T; key: string }> {
   return new Promise((resolve, reject) => {
     let cursor = 0, pending = 0, settled = false, lastError: unknown, identityError: unknown, relayAccessError: unknown;
     let hedge: ReturnType<typeof setTimeout> | undefined;
     const controllers = new Set<AbortController>();
     const finish = () => {
       clearTimeout(hedge);
+      clearTimeout(deadline); options.signal?.removeEventListener('abort', aborted);
       for (const controller of controllers) controller.abort();
       controllers.clear();
     };
+    const stop = (error: unknown) => { if (settled) return; settled = true; finish(); reject(error); };
+    const aborted = () => stop(options.signal?.reason);
+    const deadline = setTimeout(() => stop(identityError || relayAccessError || new Error('连接路线尝试超时')), options.timeoutMs ?? CONNECTION_ROUND_TIMEOUT_MS);
+    options.signal?.addEventListener('abort', aborted, { once: true });
+    if (options.signal?.aborted) { aborted(); return; }
     const start = () => {
       if (settled) return;
       if (cursor >= attempts.length) {
@@ -41,11 +48,15 @@ export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], disp
       const attempt = attempts[cursor++];
       const started = performance.now();
       const measure = (ok: boolean) => {
-        if (performance.getEntriesByName('termdock:connection-path').length > 64) performance.clearMeasures('termdock:connection-path');
-        performance.measure('termdock:connection-path', { start: started, end: performance.now(), detail: { path: attempt.key.startsWith('relay:') ? 'relay' : 'direct', ok } });
+        try {
+          if (performance.getEntriesByName('termdock:connection-path').length > 64) performance.clearMeasures('termdock:connection-path');
+          performance.measure('termdock:connection-path', { start: started, end: performance.now(), detail: { path: attempt.key.startsWith('relay:') ? 'relay' : 'direct', ok } });
+        } catch { /* Optional timing APIs must never change connection results. */ }
       };
       const controller = new AbortController(); controllers.add(controller); pending++;
-      void attempt.run(controller.signal).then(value => {
+      let result: Promise<T>;
+      try { result = attempt.run(controller.signal); } catch (error) { result = Promise.reject(error); }
+      void result.then(value => {
         measure(true);
         controllers.delete(controller);
         if (settled) { dispose(value); return; }

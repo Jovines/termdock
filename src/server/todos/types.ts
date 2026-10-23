@@ -6,7 +6,9 @@ export interface TodoRun {
   name: string; config: TodoLaunchConfig; createdAt: number; updatedAt: number;
   status: 'launching' | 'delivered' | 'complete' | 'blocked' | 'failed';
   sessionId: string | null; result: string; error: string;
+  handoff?: { todoIds: string[]; note: string; targetSessionId: string | null; sessionName: string };
 }
+export interface TodoHandoffInput { todoIds: string[]; sessionId?: string; config?: TodoLaunchConfig; note: string; idempotencyKey: string }
 export interface TodoItem {
   id: string; title: string; description: string; source: string; sourceUrl: string;
   externalId: string; collectorId: string | null; status: 'open' | 'completed' | 'ignored';

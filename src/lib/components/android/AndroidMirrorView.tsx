@@ -1,3 +1,4 @@
+import { androidRouteAccess } from '../../../shared/androidDevices';
 import { useShareAccess } from '../../federation/ShareAccessContext';
 import { captureReferenceInsertionScope } from '../sidebar/requestReferenceInsertion';
 import { LoadingSpinner as Loader2 } from '../ui/Loading';
@@ -15,7 +16,7 @@ import { useI18n, type TranslationKey } from '../../i18n';
 import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { AutoQuality } from '../../android/autoQuality';
-import { androidDeviceOptions } from '../../android/deviceOptions';
+import { androidDeviceOptions, resolveAndroidSelection } from '../../android/deviceOptions';
 import { AndroidMirrorController, type MirrorHeader, type MirrorState, type MirrorStats } from '../../android/mirrorController';
 import {
   captureMirrorScreenshot, formatRecordingElapsed,
@@ -133,6 +134,9 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<AndroidMirrorController | null>(null);
   const connectedSerial = useRef<string | null>(null);
+  const selectedPhysicalId = useRef<string | null>(null);
+  const selectionEdited = useRef(false);
+  const [preferencesLoaded, setPreferencesLoaded] = useState(!!shared);
   const initialQuality = useMemo<AndroidQuality>(readStoredQuality, []);
   const qualityRef = useRef<AndroidQuality>(initialQuality);
   const adaptive = useRef<{ serial: string; policy: AutoQuality } | null>(null);
@@ -197,6 +201,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const [recording, setRecording] = useState(false);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   const recordingRef = useRef<AndroidRecording | null>(null);
+  const recordingPhysicalId = useRef<string | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(false);
   const recordingRequest = useRef(false);
   const deliveredRecordings = useRef(new Set<string>());
@@ -220,16 +225,21 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const dockHost = useCollaborationPanelDock(state => state.hosts[DOCK_GROUP]);
   const setDock = useCollaborationPanelDock(state => state.setDock);
 
+  const listRequest = useRef(0);
+  useEffect(() => () => { listRequest.current++; }, []);
   const refreshDevices = useCallback(async () => {
+    const request = ++listRequest.current;
     setLoadingList(true);
     try {
       const result = await listAndroidDevices();
+      if (request !== listRequest.current) return;
       setListing(result);
       setListError(null);
+      return result;
     } catch (error) {
-      setListError(error instanceof Error ? error.message : 'ADB_UNAVAILABLE');
+      if (request === listRequest.current) setListError(error instanceof Error ? error.message : 'ADB_UNAVAILABLE');
     } finally {
-      setLoadingList(false);
+      if (request === listRequest.current) setLoadingList(false);
     }
   }, []);
 
@@ -319,7 +329,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       onStats: next => { if (controllerRef.current === controller) setStats(next); },
       onWarning: message => { if (controllerRef.current === controller) setWarning(message); },
     });
-    controller.setReadOnly(!!sharedRef.current && !sharedRef.current.android?.some(d => d.serial === serial && d.access === 'control'));
+    controller.setReadOnly(!!sharedRef.current && androidRouteAccess(sharedRef.current.android, serial) !== 'control');
     controllerRef.current = controller;
     let quality = qualityRef.current;
     if (quality.id === 'auto') {
@@ -356,6 +366,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     presets?: AndroidSavedPresetState[];
     docked?: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
     deviceSerial?: string | null;
+    devicePhysicalId?: string | null;
   }) => {
     if (sharedRef.current) return;
     const payload = {
@@ -364,6 +375,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       ...(patch.presets !== undefined ? { presets: patch.presets } : {}),
       ...(patch.docked !== undefined ? { docked: patch.docked } : {}),
       ...(patch.deviceSerial !== undefined ? { deviceSerial: patch.deviceSerial } : {}),
+      ...(patch.devicePhysicalId !== undefined ? { devicePhysicalId: patch.devicePhysicalId } : {}),
     };
     void updateSettings({ androidPanel: payload }).catch(() => { /* keep local choice */ });
   }, []);
@@ -384,11 +396,12 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       }
       setPresets(panel?.presets ?? []);
       setActivePresetId(panel?.activePresetId ?? null);
-      if (panel?.deviceSerial) {
+      if (panel?.deviceSerial && !selectionEdited.current) {
+        selectedPhysicalId.current = panel.devicePhysicalId || null;
         autoConnected.current = panel.deviceSerial;
         setSelectedSerial(panel.deviceSerial);
       }
-    }).catch(() => { /* 设置读取失败时用本地初值 */ });
+    }).catch(() => { /* 设置读取失败时用本地初值 */ }).finally(() => { if (!cancelled) setPreferencesLoaded(true); });
     return () => { cancelled = true; };
   }, []);
 
@@ -501,20 +514,44 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [overlay, setOverlay]);
 
-  // 首次发现唯一一台已授权设备时自动投屏。
+  // One physical selection and one route policy for discovery, restore and failover.
   useEffect(() => {
-    const ready = devices.filter(device => device.state === 'device');
-    if (selectedSerial || ready.length !== 1) return;
-    const serial = ready[0]!.serial;
-    if (autoConnected.current === serial) return;
-    autoConnected.current = serial;
-    setSelectedSerial(serial);
-  }, [devices, selectedSerial]);
+    if (!listing || !preferencesLoaded && !selectionEdited.current) return;
+    const next = resolveAndroidSelection(listing.devices, selectedSerial, selectedPhysicalId.current);
+    if (!next) {
+      const reused = listing.devices.some(device => device.serial === selectedSerial && device.physicalId
+        && selectedPhysicalId.current && device.physicalId !== selectedPhysicalId.current);
+      if (reused) { controllerRef.current?.disconnect(); setSelectedSerial(''); }
+      return;
+    }
+    const identityChanged = selectedPhysicalId.current !== (next.physicalId || null);
+    selectedPhysicalId.current = next.physicalId || null;
+    if (next.serial !== selectedSerial) { autoConnected.current = next.serial; setSelectedSerial(next.serial); }
+    if (next.serial !== selectedSerial || identityChanged) persistAndroidPanel({ deviceSerial: next.serial, devicePhysicalId: next.physicalId || null });
+  }, [listing, selectedSerial, preferencesLoaded, persistAndroidPanel]);
 
+  const selectedRouteReady = !!listing?.devices.some(device => device.serial === selectedSerial && device.state === 'device'
+    && (!selectedPhysicalId.current || device.physicalId === selectedPhysicalId.current));
   useEffect(() => {
-    if (!selectedSerial) return;
+    if (!selectedSerial || !selectedRouteReady) { controllerRef.current?.disconnect(); return; }
     connect(selectedSerial);
-  }, [selectedSerial, connect]);
+  }, [selectedSerial, selectedRouteReady, connect]);
+
+  // When all known routes disappear, keep discovering in the foreground so
+  // recovery does not require manually reselecting the saved physical device.
+  useEffect(() => {
+    if (selectedRouteReady || !preferencesLoaded || !selectedSerial && !selectedPhysicalId.current
+      || listError && /NOT_ALLOWED|DENIED|UNAUTHORIZED|403/i.test(listError)) return;
+    const refresh = () => { if (!document.hidden) void refreshDevices(); };
+    const timer = window.setInterval(refresh, 3000);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [selectedRouteReady, selectedSerial, preferencesLoaded, listError, refreshDevices]);
 
   // 断链自动重连（指数退避）；缺依赖/无权限/解码器不可用等致命错误不重试。
   useEffect(() => {
@@ -526,13 +563,18 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     const delay = Math.min(8000, 700 * 2 ** retryAttempt.current);
     const attempt = retryAttempt.current + 1;
     setRetrySchedule({ attempt, delayMs: delay });
+    let canceled = false;
     const timer = window.setTimeout(() => {
       retryAttempt.current = attempt;
       setRetrySchedule(null);
-      connect(selectedSerial);
+      void refreshDevices().then(result => {
+        if (canceled || !result) return;
+        const next = resolveAndroidSelection(result.devices, selectedSerial, selectedPhysicalId.current);
+        if (next?.serial === selectedSerial && next.state === 'device') connect(selectedSerial);
+      });
     }, delay);
-    return () => window.clearTimeout(timer);
-  }, [mirrorState, mirrorError, selectedSerial, connect]);
+    return () => { canceled = true; window.clearTimeout(timer); };
+  }, [mirrorState, mirrorError, selectedSerial, connect, refreshDevices]);
 
   // ---- 视图缩放 / 平移 ----
   // 缩放靠 canvas 上的 transform，布局尺寸不变：指针换算用的 getBoundingClientRect
@@ -866,6 +908,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       setAddress('');
       setShowAddress(false);
       await refreshDevices();
+      selectionEdited.current = true;
+      selectedPhysicalId.current = null;
       setSelectedSerial(result.serial);
     } catch (error) {
       setListError(error instanceof Error ? error.message : 'ADB_CONNECT_FAILED');
@@ -977,6 +1021,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       if (destination && !sharedRef.current) bindAndroidRecordingDestination(item.id, destination);
       if (item.status === 'recording' || item.status === 'starting' || item.status === 'stopping') {
         recordingRef.current = item;
+        recordingPhysicalId.current = selectedPhysicalId.current;
         setRecording(true);
         setRecordingElapsed(Math.max(0, Date.now() - item.startedAt));
       } else receiveRecording(item);
@@ -985,20 +1030,36 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     } finally { recordingRequest.current = false; setRecordingBusy(false); }
   };
 
-  const readOnly = !!shared && !shared.android?.some(d => d.serial === selectedSerial && d.access === 'control');
-  // 服务端拥有录制生命周期；刷新、切换面板和预览重连都不会停止录像。
+  const readOnly = !!shared && androidRouteAccess(shared.android, selectedSerial) !== 'control';
+  // A recording belongs to the physical phone, while every query still uses
+  // an exact authorized route. Switching mirror routes must not hide its job.
+  const recordingRouteKey = JSON.stringify((listing?.devices || []).filter(device =>
+    device.serial === selectedSerial || selectedPhysicalId.current && device.physicalId === selectedPhysicalId.current,
+  ).map(device => device.serial).sort());
   useEffect(() => {
     let cancelled = false;
     let polling = false;
-    recordingRef.current = null;
-    setRecording(false);
+    const previous = recordingRef.current;
+    const retained = previous && recordingPhysicalId.current && recordingPhysicalId.current === selectedPhysicalId.current
+      && (!sharedRef.current || androidRouteAccess(sharedRef.current.android, previous.serial)) ? previous : null;
+    recordingRef.current = retained;
+    setRecording(Boolean(retained));
+    const routes = new Set<string>(JSON.parse(recordingRouteKey));
+    if (selectedSerial) routes.add(selectedSerial);
+    if (retained) routes.add(retained.serial);
     const poll = async () => {
       if (!selectedSerial || polling || recordingRequest.current) return;
       polling = true;
       try {
-        const { recordings } = await listAndroidRecordings(selectedSerial);
-        if (cancelled || recordingRequest.current) return;
-        const active = recordings.find(item => ['starting', 'recording', 'stopping'].includes(item.status));
+        const serials = [...routes];
+        const results = await Promise.allSettled(serials.map(serial => listAndroidRecordings(serial)));
+        if (cancelled || recordingRequest.current || results.every(result => result.status === 'rejected')) return;
+        const recordings = results.flatMap(result => result.status === 'fulfilled' ? result.value.recordings : []);
+        const known = recordingRef.current;
+        const knownRouteUnavailable = known && results[serials.indexOf(known.serial)]?.status === 'rejected';
+        const active = recordings.find(item => ['starting', 'recording', 'stopping'].includes(item.status))
+          ?? (knownRouteUnavailable ? known : null);
+        recordingPhysicalId.current = selectedPhysicalId.current;
         recordingRef.current = active ?? null;
         setRecording(Boolean(active));
         for (const item of recordings) receiveRecording(item);
@@ -1015,7 +1076,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       window.clearInterval(timer);
       if (recordingTimer.current !== null) window.clearInterval(recordingTimer.current);
     };
-  }, [selectedSerial, receiveRecording]);
+  }, [selectedSerial, recordingRouteKey, receiveRecording]);
 
   // ⋯ 菜单：点外部 / Esc / 视口变化都关掉。菜单是 portal 到 body 的浮层，
   // 用捕获阶段监听，确保 Esc 先被菜单吃掉，不会被下面的 onKeyDown 转成设备返回键。
@@ -1127,9 +1188,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
             value={selectedSerial}
             onChange={event => {
               const serial = event.target.value;
+              selectionEdited.current = true;
+              selectedPhysicalId.current = listing?.devices.find(device => device.serial === serial)?.physicalId || null;
               setSelectedSerial(serial);
               autoConnected.current = serial;
-              if (serial) persistAndroidPanel({ deviceSerial: serial });
+              persistAndroidPanel({ deviceSerial: serial || null, devicePhysicalId: selectedPhysicalId.current });
             }}
             className={nativeSelectClass}
             aria-label={t('android.device')}
