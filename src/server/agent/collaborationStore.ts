@@ -3,6 +3,7 @@ import { validateLaunchProfiles, type CollaborationLaunchProfile, type Collabora
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { chatPresentation, validChatUIValues, type ChatUIState } from '../shared/chatPresentation.js';
 import { COLLAB_NAME_FORBIDDEN, COLLAB_LIMITS, CollaborationError, STATUS_RANK, canonicalShortId, drawCollaborationId, newCollaborationId, resolveIdPrefix, validateExtras, type IdResolution, type MessageExtras, type MessageFragment, type TransportDiagnostic } from './collaborationProtocol.js';
 
 export interface CollaborationRules { text: string; version: string; updatedAt: number; updatedBy: string }
@@ -80,6 +81,7 @@ export type CollaborationMessageKind = 'message' | 'ask' | 'reply' | 'task' | 'h
 export type CollaborationMessageStatus = 'pending' | 'delivered' | 'read' | 'failed' | 'expired' | 'stored';
 
 export interface CollaborationMessage extends MessageExtras {
+  uiState?: ChatUIState;
   /** Server-authenticated source; never inferred from caller metadata. */
   integrationOrigin?: import('./collaborationTaskTypes.js').TaskOrigin;
   /** A nonterminal reply destination; never registered as an Agent or queued for PTY delivery. */
@@ -671,6 +673,17 @@ export class CollaborationStore {
 
   listMessages(groupId: string, limit = 200): CollaborationMessage[] {
     return this.document.messages.filter((message) => message.groupId === groupId).slice(-Math.max(1, Math.min(limit, 500)));
+  }
+  saveChatUIState(messageId: string, sessionId: string, values: unknown, revision: unknown): ChatUIState {
+    const message = this.getMessage(messageId), original = message?.replyTo ? this.getMessage(message.replyTo) : null;
+    if (!message || message.fromSessionId !== sessionId || !message.toPrincipalId || original?.integrationOrigin?.source !== 'session-chat'
+      || original.toSessionId !== sessionId || original.groupId !== message.groupId || original.integrationOrigin.integrationId !== message.toPrincipalId || !chatPresentation(message.content, message.metadata).ui) throw new CollaborationError('UI_MESSAGE_UNAVAILABLE', '此消息无法保存交互状态', 404);
+    if (!Number.isSafeInteger(revision) || Number(revision) < 0 || !validChatUIValues(values)) throw new CollaborationError('INVALID_UI_STATE', '填写内容无效或过长');
+    const current = message.uiState || { revision: 0, values: {} };
+    if (stableJson(current.values) === stableJson(values)) return structuredClone(current);
+    if (revision !== current.revision) throw new CollaborationError('UI_STATE_CHANGED', '填写内容已在其他客户端更新', 409, { state: current });
+    message.uiState = { revision: current.revision + 1, values: structuredClone(values) };
+    this.persist(true); return structuredClone(message.uiState);
   }
 
   getMessage(id: string): CollaborationMessage | null {

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { COLLAB_LIMITS, CollaborationError, canonicalShortId } from './collaborationProtocol.js';
 
 export interface CollaborationCommand {
-  action: 'events' | 'session' | 'task' | 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'route' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'transport' | 'group' | 'rules' | 'help';
+  action: 'events' | 'session' | 'task' | 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn' | 'message' | 'cursor' | 'route' | 'rebind' | 'role' | 'rename' | 'cleanup' | 'drive' | 'capabilities' | 'ui' | 'transport' | 'group' | 'rules' | 'help';
   target?: string; message?: string; groupId?: string; sessionId?: string; sessionIds?: string[]; agentSlug?: string; name?: string; cwd?: string; task?: string; role?: string;
   json: boolean;
   options: Record<string, string | boolean>;
@@ -31,6 +31,7 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
   task coordinate <目标id> --revision <当前版本> [--summary <用户可读进展>] --content <完整协调说明>
   task pause|resume|retry <任务id> --revision <当前版本>
   task create 支持 --managed --coordinator <成员id> --reviewers <成员id,成员id>；子任务用 --work-type read-only|code 分类，代码默认独立目录
+  ui [--text] 查看普通对话的 OpenUI 组件规范与结构化回复格式。
   正文支持 --file <文本文件> 或 --stdin；变更支持 --idempotency-key。
   report|plan|review 支持 --evidence <JSON> 保存证据。
   complete 提交结果；用户在工作台回答问题与验收。报告保留成员原文与时间。
@@ -279,7 +280,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     positional.push('capture');
   }
   const action = (requestedAction === 'capture' ? 'drive' : requestedAction === 'traits' ? 'role' : requestedAction) as CollaborationCommand['action'];
-  if (!['events', 'session', 'task', 'status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'route', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
+  if (!['events', 'session', 'task', 'status', 'inbox', 'send', 'handoff', 'reply', 'add', 'remove', 'spawn', 'message', 'cursor', 'route', 'rebind', 'role', 'rename', 'cleanup', 'drive', 'capabilities', 'ui', 'transport', 'group', 'rules', 'help'].includes(action)) throw new Error('Unknown collaboration command; see td collab --help');
   if (typeof options.session === 'string' && !options.session.trim()) throw new Error('--session requires a non-empty full Termdock session id');
   if (options.pane && !/^%\d+$/.test(String(options.pane))) throw new Error('pane must be a tmux pane id such as %3');
   if (['json', 'jsonl', 'text'].filter((key) => options[key]).length > 1) throw new Error('Choose one output format');
@@ -380,7 +381,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
   const byAction: Record<string, string[]> = {
     events: ['consumer', 'group', 'timeout'], session: ['group', 'launch-profile', 'cwd', 'idempotency-key', 'generation', 'name'],
     task: ['purpose', 'to-event', 'decision', 'source', 'external-actor', 'external-message-id', 'metadata', 'work-type', 'summary', 'integration', 'managed', 'shared-directory', 'reviewers', 'verdict', 'group', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'idempotency-key', 'file', 'stdin'],
-    rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], route: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
+    rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], ui: [], route: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
     reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
@@ -542,6 +543,11 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         output(await request('POST', command.operation === 'accept' ? '/transport/accept' : '/transport', command.operation === 'accept'
           ? { origin: o.origin, invitation: JSON.parse(raw) } : { groupId: command.groupId, nodes: JSON.parse(raw) }));
       }
+      return 0;
+    }
+    if (command.action === 'ui') {
+      const { chatUIPrompt } = await import('./chatUIPrompt.js');
+      io.write(o.text ? chatUIPrompt() : JSON.stringify({ version: 1, instructions: chatUIPrompt() }));
       return 0;
     }
     if (command.action === 'help') {

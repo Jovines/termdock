@@ -1,0 +1,51 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, expect, it, vi } from 'vitest';
+import { ChatRichContent } from './ChatRichContent';
+import type { ChatMessage } from './chatMessages';
+vi.mock('../markdown/MarkdownPreview', () => ({ MarkdownPreview: ({ content }: { content: string }) => <p>{content}</p> }));
+afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
+const code = 'root = Stack([Card("方案比较", [Table(["方案", "内存"], [["轻量", 4], ["完整", 8]])]), Form("choice", "选择方案", [Select("plan", "采用方案", ["轻量", "完整"], true), Input("notes", "补充要求"), Button("确认并继续", @ToAssistant("采用填写的方案"))])])';
+const message: ChatMessage = { id: 'ui-message', role: 'assistant', content: '轻量方案4GB，完整方案8GB。请选择方案。', createdAt: 1, status: 'stored', ui: { version: 1, code } };
+it('renders actual OpenUI tables and forms, saves before submission and continues the same conversation', async () => {
+  const onAction = vi.fn().mockResolvedValue(true), requests: { revision: number; values: unknown }[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => { const body = JSON.parse(String(init?.body)); requests.push(body); return Response.json({ revision: body.revision + 1, values: body.values }); }));
+  render(<ChatRichContent message={message} sessionId="session" canWrite onAction={onAction} />);
+  expect(await screen.findByRole('region', { name: '交互表格，可横向滚动' })).toBeTruthy();
+  fireEvent.change(screen.getByRole('combobox', { name: /采用方案/ }), { target: { value: '轻量' } });
+  fireEvent.change(screen.getByRole('textbox', { name: '补充要求' }), { target: { value: '离线运行' } });
+  fireEvent.click(screen.getByRole('button', { name: '确认并继续' }));
+  await waitFor(() => expect(onAction).toHaveBeenCalledOnce());
+  expect(onAction.mock.calls[0][0]).toContain('采用填写的方案');
+  expect(onAction.mock.calls[0][0]).toContain('离线运行');
+  expect(onAction.mock.calls[0][0]).toContain('采用方案：轻量');
+  expect(onAction.mock.calls[0][0]).not.toContain('"value"');
+  expect(requests[0].values).toBeTruthy();
+  expect(screen.queryByText('已显示文字说明')).toBeNull();
+});
+it('hydrates saved form values and follows newer server state without losing unsaved local input', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Promise<Response>(() => {})));
+  const values = { choice: { plan: { value: '完整' }, notes: { value: '第一次填写' } } };
+  const view = render(<ChatRichContent message={{ ...message, uiState: { revision: 1, values } }} sessionId="session" canWrite onAction={vi.fn()} />);
+  await waitFor(() => expect((screen.getByRole('textbox', { name: '补充要求' }) as HTMLInputElement).value).toBe('第一次填写'));
+  const next = { choice: { plan: { value: '轻量' }, notes: { value: '另一台设备的填写' } } };
+  view.rerender(<ChatRichContent message={{ ...message, uiState: { revision: 2, values: next } }} sessionId="session" canWrite onAction={vi.fn()} />);
+  await waitFor(() => expect((screen.getByRole('textbox', { name: '补充要求' }) as HTMLInputElement).value).toBe('另一台设备的填写'));
+  fireEvent.change(screen.getByRole('textbox', { name: '补充要求' }), { target: { value: '本机尚未保存' } });
+  view.rerender(<ChatRichContent message={{ ...message, uiState: { revision: 3, values } }} sessionId="session" canWrite onAction={vi.fn()} />);
+  expect((screen.getByRole('textbox', { name: '补充要求' }) as HTMLInputElement).value).toBe('本机尚未保存');
+});
+it('keeps readonly forms inert and falls back to readable text for unknown components or automatic tool calls', async () => {
+  const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+  const view = render(<ChatRichContent message={message} sessionId="session" canWrite={false} onAction={vi.fn()} />);
+  expect((screen.getByRole('button', { name: '确认并继续' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('textbox', { name: '补充要求' }) as HTMLInputElement).disabled).toBe(true);
+  view.unmount();
+  render(<ChatRichContent message={{ ...message, ui: { version: 1, code: 'root = UnknownComponent("secret")' } }} sessionId="session" canWrite onAction={vi.fn()} />);
+  expect(await screen.findByText(message.content)).toBeTruthy();
+  expect(fetch).not.toHaveBeenCalled();
+  cleanup();
+  render(<ChatRichContent message={{ ...message, ui: { version: 1, code: 'data = Query("private_files", {})\nroot = Stack([Text("结果")])' } }} sessionId="session" canWrite onAction={vi.fn()} />);
+  expect(await screen.findByText(message.content)).toBeTruthy();
+  expect(fetch).not.toHaveBeenCalled();
+});

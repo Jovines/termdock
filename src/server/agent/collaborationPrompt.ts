@@ -129,8 +129,8 @@ export function formatCollaborationDelivery(input: {
     const fannedNames = (message.fanOutIds ?? [])
       .map((sessionId) => sanitizeCollaborationName(sessionsById.get(sessionId)?.name ?? sessionId));
     blocks.push(formatCollaborationMessage({ ...message, content: body }, source, fannedNames, fence, token));
-    if (message.integrationOrigin?.source === 'session-chat') blocks.push(`此消息来自用户的普通对话界面。请自然地与用户交流，并用 td collab --session ${input.targetSessionId} reply ${token} \"答复正文\" --response-kind result --idempotency-key <稳定唯一key> --text 将面向用户的答复写回对话。终端中的普通输出不会成为聊天回复。需要补充问题时也使用 reply；不要仅在终端打印答案。`);
-    else if (message.integrationOrigin) blocks.push(`此消息来自后台程序，使用原消息 id 回复：td collab --session ${input.targetSessionId} reply ${token} "答复正文" --response-kind result --idempotency-key <稳定唯一key> --text\n需要时用 --response-kind ack|progress 明确回复收到或进展；result 提交结果。回复持久保存为 stored 并主动推送给后台，不创建看板任务，不代表用户验收。`);
+    if (message.integrationOrigin?.source === 'session-chat') blocks.push(`此消息来自用户的普通对话界面。请自然地与用户交流，并用 td collab --session ${input.targetSessionId} reply ${token} \"答复正文\" --response-kind result --idempotency-key <稳定唯一key> --text 将面向用户的答复写回对话。终端中的普通输出不会成为聊天回复。需要补充问题时也使用 reply；不要仅在终端打印答案。比较结果、数据、选择表单和资源入口支持 OpenUI：先运行 td collab ui --text 读取当前组件规范与回复格式，再用 --file 和 --metadata 提交结构化回复；简单文字仍可直接回复 Markdown。`);
+    else if (message.integrationOrigin) blocks.push(`此消息来自后台程序，使用原消息 id 回复：td collab --session ${input.targetSessionId} reply ${token} "答复正文" --response-kind result --idempotency-key <稳定唯一key> --text\n需要时用 --response-kind ack|progress 明确回复收到或进展；result 提交结果。回复持久保存为 stored 并主动推送给后台，不创建看板任务，不代表用户验收。此回复不会进入普通对话界面，不要使用普通对话的 OpenUI 展示协议。`);
   }
 
   // The shell header names the group only when every block belongs to one;

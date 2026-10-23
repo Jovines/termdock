@@ -4,6 +4,8 @@ describe('encrypted tunnel access policy', () => {
   it('maps backend Session operations to separate capabilities', () => {
     for (const op of ['health', 'attach', 'stream', 'agent-resume']) expect(resolveAccessRequest('GET', `/api/terminal/s1/${op}?since=1`)).toEqual({ action: 'session.view', sessionId: 's1' });
     expect(resolveAccessRequest('POST', '/api/terminal/s1/input')).toEqual({ action: 'session.input', sessionId: 's1' });
+    expect(resolveAccessRequest('PUT', '/api/terminal/s1/chat/msg/state')).toEqual({ action: 'session.input', sessionId: 's1' });
+    expect(resolveAccessRequest('PUT', '/api/terminal/settings/chat/msg/state')).toBeNull();
     expect(resolveAccessRequest('POST', '/api/terminal/s1/resize')).toEqual({ action: 'session.resize', sessionId: 's1' });
     expect(resolveAccessRequest('DELETE', '/api/terminal/s1')).toEqual({ action: 'session.terminate', sessionId: 's1' });
     expect(resolveAccessRequest('GET', '/api/terminal/s1/input')).toBeNull();

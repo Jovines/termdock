@@ -26,6 +26,7 @@ jobs:
     env:
       EXPECTED_VERSION: ${{ inputs.version }}
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      OPENUI_TELEMETRY_DISABLED: '1'
     steps:
       - uses: actions/checkout@v6
       - name: Verify release identity
@@ -69,6 +70,9 @@ jobs:
           src/server/android/recording.test.ts
           src/server/agent/sessionAttachmentRoutes.test.ts
           src/server/agent/sessionChatRoutes.test.ts
+          src/server/agent/collaborationCli.test.ts
+          src/server/agent/collaborationPrompt.test.ts
+          src/server/shared/sessionAppearance.test.ts
           src/server/agent/sessionViewModeRoutes.test.ts
           src/server/routes/sharedFiles.test.ts
           src/server/routes/vncReadOnly.test.ts

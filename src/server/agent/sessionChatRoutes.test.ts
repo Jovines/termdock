@@ -44,6 +44,23 @@ it('persists messages once and shares existing Session history across full-servi
   expect(f.deliver).toHaveBeenCalledWith('agent');
   expect(JSON.stringify(mine)).not.toContain('readAt');
 });
+it('persists OpenUI replies and versioned form values for authorized clients, with text compatibility and conflict detection', async () => {
+  const f = await fixture(), original = await f.post('选择方案').then(response => response.json());
+  const ui = 'root = Stack([Text("方案说明")])';
+  const reply = f.store.storeIntegrationReply(original.id, 'agent', JSON.stringify({ text: '完整的文字说明', ui }), { idempotencyKey: 'ui-reply', metadata: { openui: { version: 1 } } });
+  expect((await f.read('other-device', true)).messages[1]).toMatchObject({ content: '完整的文字说明', ui: { version: 1, code: ui } });
+  const save = (revision: number, values: unknown, id = reply.id) => fetch(`${f.base}/agent/chat/${id}/state`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision, values }) });
+  const values = { form: { plan: { value: 'A' } } };
+  expect(await save(0, values).then(response => response.json())).toEqual({ revision: 1, values });
+  expect((await save(0, { plan: 'B' })).status).toBe(409);
+  expect((await save(1, {}, original.id)).status).toBe(404);
+  expect((await save(1, { nested: JSON.parse('{"__proto__":{"polluted":true}}') })).status).toBe(400);
+  const restarted = await fixture(f.filePath);
+  expect((await restarted.read()).messages[1].uiState).toEqual({ revision: 1, values });
+  f.store.storeIntegrationReply(original.id, 'agent', JSON.stringify({ text: '版本升级仍可阅读', ui }), { idempotencyKey: 'future-ui-reply', metadata: { openui: { version: 99 } } });
+  expect((await f.read()).messages[2]).toMatchObject({ content: '版本升级仍可阅读' });
+  expect((await f.read()).messages[2].ui).toBeUndefined();
+});
 it('rejects shell sessions, arbitrary destinations and malformed requests without queuing work', async () => {
   const f = await fixture();
   expect((await fetch(`${f.base}/shell/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'rm -rf', requestId: 'request-00000000001' }) })).status).toBe(409);
@@ -68,6 +85,8 @@ it('only includes chat requests and their matching replies, without exposing oth
   const original = f.store.getMessage(a.id)!;
   const [external] = f.store.send({ groupId: original.groupId, fromSessionId: null, toSessionIds: ['agent'], kind: 'ask', content: '其他集成内容', integrationOrigin: { integrationId: original.integrationOrigin!.integrationId, source: 'external' }, idempotencyKey: 'external-0000000001' });
   f.store.storeIntegrationReply(external.id, 'agent', '其他集成回复', { idempotencyKey: 'reply-external-000001', responseKind: 'result' });
+  const externalUI = f.store.storeIntegrationReply(external.id, 'agent', JSON.stringify({ text: '其他集成的交互回复', ui: 'root = Stack([Text("other")])' }), { idempotencyKey: 'reply-external-ui', metadata: { openui: { version: 1 } } });
+  expect((await fetch(`${f.base}/agent/chat/${externalUI.id}/state`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision: 0, values: { plan: 'A' } }) })).status).toBe(404);
   const otherGroup = f.store.save({ name: 'Session 对话 another', sessionIds: ['another'] });
   f.store.send({ groupId: otherGroup.id, fromSessionId: null, toSessionIds: ['another'], kind: 'ask', content: '其他会话内容', integrationOrigin: { integrationId: original.integrationOrigin!.integrationId, source: 'session-chat' } });
   expect((await f.read('owner')).messages.map((m: { id: string }) => m.id)).toEqual([a.id]);

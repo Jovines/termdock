@@ -1533,6 +1533,10 @@ async function runAutomation(command: AutomationCommand): Promise<void> {
 }
 
 async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<void> {
+  if (command.action === 'ui') {
+    const { chatUIPrompt } = await import('./agent/chatUIPrompt.js');
+    console.log(command.options.text ? chatUIPrompt() : JSON.stringify({ version: 1, instructions: chatUIPrompt() })); return;
+  }
   const runningState = getRunningState();
   if (command.options.principal) {
     process.exitCode = await runIntegrationCollab(command, runningState?.port ?? 9834, { write: line => console.log(line), stdin: readStdinText }); return;

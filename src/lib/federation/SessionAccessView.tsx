@@ -17,8 +17,9 @@ import { useSidebarStore } from '../stores/useSidebarStore';
 import { ShareAccessContext } from './ShareAccessContext';
 import { requestReferenceInsertion } from '../components/sidebar/requestReferenceInsertion';
 import { buildBracketedPastePayload } from '../terminal/bracketedPaste';
+import { SessionIcon } from './SessionIcon';
 
-interface RemoteSession { sessionId: string; sourceSessionId?: string; name: string; live: boolean; canWrite: boolean; canResize: boolean }
+interface RemoteSession { sessionId: string; sourceSessionId?: string; name: string; icon?: string; live: boolean; canWrite: boolean; canResize: boolean }
 export function SessionAccessView({ client, initialSessionId, initialViewMode }: { client: SecureClient; initialSessionId?: string; initialViewMode?: 'terminal' | 'chat' }) {
   useViewportHeight();
   const [sessions, setSessions] = useState<RemoteSession[]>([]);
@@ -63,7 +64,7 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
           if (!previous) { if (items.length === 1) return items[0]; setStatus(items.length ? '请选择会话' : '暂无可用会话'); return previous; }
           const latest = items.find(item => item.sessionId === previous.sessionId);
           if (!latest) { setStatus('会话已不可用，请联系分享者'); return undefined; }
-          return latest.name === previous.name && latest.canWrite === previous.canWrite && latest.canResize === previous.canResize ? previous : latest;
+          return latest.name === previous.name && latest.icon === previous.icon && latest.canWrite === previous.canWrite && latest.canResize === previous.canResize ? previous : latest;
         }); } }
       catch { if (active) { setStatus('连接暂时中断，请重试'); setResources({}); } }
       try { const permissions = await client.request({ type: 'permissions' }); if (active && Array.isArray(permissions.grants)) { const next = mergeShareResources((permissions.grants as { resources?: ShareResources }[]).map(g => g.resources)); setResources(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next); } } catch { if (active) setResources({}); }
@@ -124,14 +125,14 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
   }, [client, selected?.sessionId, selected?.canWrite, selected?.canResize, theme, terminalStarted, reconnectEpoch]);
   return <ShareAccessContext.Provider value={resources}><div className="flex h-full min-h-0 flex-col bg-[var(--chrome-bg)] text-foreground">
     <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-border/40 px-3 pt-[env(safe-area-inset-top)] text-sm">
-      <div className="min-w-0 flex-1"><p className="truncate font-medium">{selected?.name || '共享工作空间'}</p><p className="truncate text-[10px] text-muted-foreground" role="status">{selected && !selected.canWrite ? '只读' : mode === 'terminal' ? status : ''}</p></div>
+      <span data-session-icon className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-primary"><SessionIcon icon={selected?.icon} /></span><div className="min-w-0 flex-1"><p className="truncate font-medium">{selected?.name || '共享工作空间'}</p><p className="truncate text-[10px] text-muted-foreground" role="status">{selected && !selected.canWrite ? '只读' : mode === 'terminal' ? status : ''}</p></div>
       <button type="button" onClick={() => changeMode(mode === 'chat' ? 'terminal' : 'chat')} className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-xs hover:bg-surface-2">{mode === 'chat' ? <TerminalSquare size={15} /> : <MessageCircle size={15} />}{mode === 'chat' ? '终端' : '对话'}</button>
       <button type="button" aria-label="重新连接会话" onClick={() => setReconnectEpoch(value => value + 1)} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-2"><RefreshCw size={15} /></button>
       {hasResources && <button type="button" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(v => !v)} className="inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-xs hover:bg-surface-2"><PanelRight size={15} />侧栏</button>}
 
     </header>
     {modeError && <p role="alert" className="px-3 py-2 text-xs text-destructive">{modeError}</p>}
-    {sessions.length > 1 && <div className="flex shrink-0 gap-2 overflow-x-auto border-b border-border/30 p-2">{sessions.map(session => <button key={`${client.targetPeerId}:${session.sessionId}`} aria-pressed={selected?.sessionId === session.sessionId} className={`min-h-11 shrink-0 rounded-lg px-3 text-xs ${selected?.sessionId === session.sessionId ? 'bg-surface-2' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={() => setSelected({ ...session })}>{session.name}{!session.canWrite ? ' · 只读' : ''}</button>)}</div>}
+    {sessions.length > 1 && <div className="flex shrink-0 gap-2 overflow-x-auto border-b border-border/30 p-2">{sessions.map(session => <button key={`${client.targetPeerId}:${session.sessionId}`} aria-pressed={selected?.sessionId === session.sessionId} className={`inline-flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-3 text-xs ${selected?.sessionId === session.sessionId ? 'bg-surface-2' : 'text-muted-foreground hover:bg-surface-2'}`} onClick={() => setSelected({ ...session })}><SessionIcon icon={session.icon} size={15} />{session.name}{!session.canWrite ? ' · 只读' : ''}</button>)}</div>}
     <div className="flex min-h-0 flex-1"><main className="flex min-h-0 min-w-0 flex-1 flex-col">
 
       <div ref={element} className={`min-h-0 flex-1 overflow-auto p-2 ${mode !== 'terminal' ? 'hidden' : ''}`} />

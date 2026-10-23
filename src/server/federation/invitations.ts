@@ -3,8 +3,9 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AuthorizationScope, GrantInput } from './authorization.js';
+import { validSessionAppearances, restrictSessionAppearances, type SessionAppearances } from '../shared/sessionAppearance.js';
 
-export interface InvitationInput { resources?: ShareResources; scope: AuthorizationScope; actions: string[]; label?: string; expiresAt?: number }
+export interface InvitationInput { resources?: ShareResources; sessionAppearance?: SessionAppearances; scope: AuthorizationScope; actions: string[]; label?: string; expiresAt?: number }
 export interface PendingInvitation extends InvitationInput { id: string; createdAt: number; invitationExpiresAt: number }
 interface Invitation extends InvitationInput {
   hash: string; issuerId: string; createdAt: number; invitationExpiresAt: number;
@@ -16,9 +17,10 @@ const identity = (v: unknown): v is string => typeof v === 'string' && v.length 
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 function requireValid(ok: unknown): asserts ok { if (!ok) throw new Error('INVALID_INVITATION'); }
 export function validateInvitation(input: unknown): asserts input is InvitationInput {
-  requireValid(record(input) && Object.keys(input).every(k => ['scope', 'actions', 'label', 'expiresAt', 'resources'].includes(k)));
+  requireValid(record(input) && Object.keys(input).every(k => ['scope', 'actions', 'label', 'expiresAt', 'resources', 'sessionAppearance'].includes(k)));
   requireValid(record(input.scope) && Array.isArray(input.actions) && input.actions.length > 0 && new Set(input.actions).size === input.actions.length);
   requireValid(input.resources === undefined || validShareResources(input.resources));
+  requireValid(input.sessionAppearance === undefined || validSessionAppearances(input.sessionAppearance, input.scope));
   const scope = input.scope;
   if (scope.kind === 'service') {
     requireValid(Object.keys(scope).length === 1 && ((input.actions.length === 1 && input.actions[0] === 'service:*') || input.actions.every(a => typeof a === 'string' && actions.has(a))));
@@ -47,9 +49,9 @@ export class InvitationStore {
     requireValid(record(data) && data.version === 1 && data.serviceId === this.options.serviceId && Array.isArray(data.invitations) && data.invitations.length <= 2048);
     const seen = new Set<string>();
     for (const item of data.invitations) {
-      requireValid(record(item) && Object.keys(item).every(k => ['scope', 'actions', 'label', 'expiresAt', 'hash', 'issuerId', 'createdAt', 'invitationExpiresAt', 'consumedAt', 'consumedBy', 'resources'].includes(k)));
-      const { scope, actions, resources, label, expiresAt, hash, issuerId, createdAt, invitationExpiresAt, consumedAt, consumedBy } = item;
-      validateInvitation({ scope, actions, ...(resources === undefined ? {} : { resources }), ...(label === undefined ? {} : { label }), ...(expiresAt === undefined ? {} : { expiresAt }) });
+      requireValid(record(item) && Object.keys(item).every(k => ['scope', 'actions', 'label', 'expiresAt', 'hash', 'issuerId', 'createdAt', 'invitationExpiresAt', 'consumedAt', 'consumedBy', 'resources', 'sessionAppearance'].includes(k)));
+      const { scope, actions, resources, sessionAppearance, label, expiresAt, hash, issuerId, createdAt, invitationExpiresAt, consumedAt, consumedBy } = item;
+      validateInvitation({ scope, actions, ...(resources === undefined ? {} : { resources }), ...(sessionAppearance === undefined ? {} : { sessionAppearance }), ...(label === undefined ? {} : { label }), ...(expiresAt === undefined ? {} : { expiresAt }) });
       requireValid(typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash) && !seen.has(hash) && identity(issuerId)); seen.add(hash);
       requireValid(Number.isSafeInteger(createdAt) && Number.isSafeInteger(invitationExpiresAt) && Number(invitationExpiresAt) === Number(createdAt) + TTL);
       requireValid((consumedAt === undefined && consumedBy === undefined) || (Number.isSafeInteger(consumedAt) && identity(consumedBy)));
@@ -68,7 +70,7 @@ export class InvitationStore {
   listPending(): PendingInvitation[] {
     const now = this.now();
     return this.read().filter(i => i.consumedAt === undefined && i.invitationExpiresAt > now && (i.expiresAt === undefined || i.expiresAt > now))
-      .map(({ hash, scope, actions, resources, label, expiresAt, createdAt, invitationExpiresAt }) => ({ id: hash, scope, actions, ...(resources === undefined ? {} : { resources }), ...(label ? { label } : {}), ...(expiresAt === undefined ? {} : { expiresAt }), createdAt, invitationExpiresAt }));
+      .map(({ hash, scope, actions, resources, sessionAppearance, label, expiresAt, createdAt, invitationExpiresAt }) => ({ id: hash, scope, actions, ...(resources === undefined ? {} : { resources }), ...(sessionAppearance === undefined ? {} : { sessionAppearance }), ...(label ? { label } : {}), ...(expiresAt === undefined ? {} : { expiresAt }), createdAt, invitationExpiresAt }));
   }
   revoke(id: string): boolean {
     const current = this.read();
@@ -83,7 +85,7 @@ export class InvitationStore {
       const remaining = invitation.scope.sessionIds.filter(id => normalize(id) !== sessionId);
       if (remaining.length === invitation.scope.sessionIds.length) return true;
       changed++; if (!remaining.length) return false;
-      invitation.scope = { kind: 'sessions', sessionIds: remaining }; return true;
+      invitation.scope = { kind: 'sessions', sessionIds: remaining }; invitation.sessionAppearance = restrictSessionAppearances(invitation.sessionAppearance, remaining); return true;
     });
     if (changed) this.save(next); return changed;
   }
@@ -104,7 +106,7 @@ export class InvitationStore {
     const invite = current.find(i => i.hash === hash);
     if (!invite || invite.consumedAt !== undefined || invite.invitationExpiresAt <= now || (invite.expiresAt !== undefined && invite.expiresAt <= now) || !issuerAllowed(invite.issuerId)) throw new Error('PAIRING_DENIED');
     invite.consumedAt = now; invite.consumedBy = subjectId; this.save(current);
-    return { subjectId, ...(invite.resources ? { resources: structuredClone(invite.resources) } : {}), scope: structuredClone(invite.scope), actions: [...invite.actions], ...(invite.expiresAt === undefined ? {} : { expiresAt: invite.expiresAt }), canDelegate: false };
+    return { subjectId, ...(invite.resources ? { resources: structuredClone(invite.resources) } : {}), ...(invite.sessionAppearance ? { sessionAppearance: structuredClone(invite.sessionAppearance) } : {}), scope: structuredClone(invite.scope), actions: [...invite.actions], ...(invite.expiresAt === undefined ? {} : { expiresAt: invite.expiresAt }), canDelegate: false };
   }
   subjectLabels(): Record<string, string> {
     return Object.fromEntries(this.read().filter(i => i.consumedBy && i.label).map(i => [i.consumedBy!, i.label!]));

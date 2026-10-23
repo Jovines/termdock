@@ -37,7 +37,6 @@ export function SessionChatView({ sessionId, name = '当前会话', canWrite = t
   const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null);
   const nearBottom = useRef(true), busy = useRef(false), generation = useRef(0), messageStamp = useRef(''), refreshSequence = useRef(0);
   const content = useRef<HTMLDivElement>(null), section = useRef<HTMLElement>(null), filePicker = useRef<HTMLInputElement>(null), dragDepth = useRef(0);
-  const draftState = useRef({ draft, reference }); draftState.current = { draft, reference };
   const inputScope = useRef({ active, canWrite, sessionId }); inputScope.current = { active, canWrite, sessionId };
   const access = useShareAccess();
   const insertText = useCallback((text: string, focus = true) => {
@@ -68,7 +67,7 @@ export function SessionChatView({ sessionId, name = '当前会话', canWrite = t
       const from = element(selection?.anchorNode)?.closest<HTMLElement>('[data-chat-message]');
       const to = element(selection?.focusNode)?.closest<HTMLElement>('[data-chat-message]');
       const value = text && from === to && from && section.current?.contains(from) ? { id: from.dataset.chatMessage!, text } : null;
-      if (value) setSelectedReference(previous => previous?.id === value.id && previous?.text === value.text ? previous : value);
+      setSelectedReference(previous => previous?.id === value?.id && previous?.text === value?.text ? previous : value);
     };
     document.addEventListener('selectionchange', changed); return () => document.removeEventListener('selectionchange', changed);
   }, [active, canWrite]);
@@ -109,21 +108,25 @@ export function SessionChatView({ sessionId, name = '当前会话', canWrite = t
   useLayoutEffect(() => { if (nearBottom.current) bottom(); }, [messages, pending, bottom]);
   useLayoutEffect(() => { const el = input.current; if (el) { el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 176)}px`; } }, [draft, active]);
   useEffect(() => { const node = input.current; if (!node || typeof ResizeObserver === 'undefined') return; let previousWidth = 0; const observer = new ResizeObserver(() => { if (node.clientWidth === previousWidth) return; previousWidth = node.clientWidth; node.style.height = 'auto'; node.style.height = `${Math.min(node.scrollHeight, 176)}px`; }); observer.observe(node); return () => observer.disconnect(); }, []);
-  const send = async (retry?: Pending) => {
-    if (busy.current || transfer.busy || !canWrite || agentAvailable !== true) return;
-    const item = retry || { content: composeChatContent(draft, reference), requestId: crypto.randomUUID(), createdAt: Date.now() };
-    if (!item.content || new TextEncoder().encode(item.content).byteLength > 32000) return;
+  const send = async (retry?: Pending, actionContent?: string): Promise<boolean> => {
+    if (busy.current || transfer.busy || !inputScope.current.active || !inputScope.current.canWrite || agentAvailable !== true) return false;
+    const item = retry || { content: actionContent ?? composeChatContent(draft, reference), requestId: crypto.randomUUID(), createdAt: Date.now() };
+    if (!item.content || new TextEncoder().encode(item.content).byteLength > 32000) return false;
     busy.current = true; setSending(true); setError(''); setPending(item); nearBottom.current = true;
+    // The pending message owns this content now. Acknowledgements must never
+    // clear the next draft, including one with the same text as this message.
+    if (!retry && actionContent === undefined) { setDraft(''); setReference(null); }
     const attempt = generation.current;
     try {
       const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: item.content, requestId: item.requestId }), signal: AbortSignal.timeout(20000) });
       const payload = await response.json();
       if (!response.ok) throw new Error('发送失败，请重试。');
-      if (attempt !== generation.current) return;
-      if (composeChatContent(draftState.current.draft, draftState.current.reference) === item.content) { setDraft(''); setReference(null); } setPending(null);
+      if (attempt !== generation.current) return false;
+      setPending(null);
       setMessages(current => current.some(m => m.id === payload.id) ? current : [...current, { ...item, id: payload.id, role: 'user', status: payload.status }]);
       try { await refresh(); } catch { setError('消息已发送，暂时无法获取回复。'); }
-    } catch (failure) { if (attempt === generation.current) setError(failure instanceof Error && failure.name === 'TimeoutError' ? '发送状态待确认，请重试。' : '发送失败，请重试。'); }
+      return true;
+    } catch (failure) { if (attempt === generation.current) setError(failure instanceof Error && failure.name === 'TimeoutError' ? '发送状态待确认，请重试。' : '发送失败，请重试。'); return false; }
     finally { busy.current = false; if (attempt === generation.current) setSending(false); }
   };
   useEffect(() => { const insert = (event: Event) => { const detail = (event as CustomEvent<{ sessionId: string; text: string }>).detail; if (active && canWrite && detail.sessionId === sessionId) { insertText(detail.text); } }; window.addEventListener('termdock:chat-insert', insert); return () => window.removeEventListener('termdock:chat-insert', insert); }, [sessionId, active, canWrite, insertText]);
@@ -145,9 +148,9 @@ export function SessionChatView({ sessionId, name = '当前会话', canWrite = t
   return <section ref={section} data-session-chat onDragEnter={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); dragDepth.current++; if (canWrite) setDragging(true); } }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = canWrite ? 'copy' : 'none'; } }} onDragLeave={event => { if (event.dataTransfer.types.includes('Files')) { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); } }} onDrop={event => { let draggedReference: string | null; try { draggedReference = readFileReferenceDrag(event.dataTransfer); } catch (error) { event.preventDefault(); setError(error instanceof Error ? error.message : '文件引用无效'); return; } if (draggedReference && canWrite) { event.preventDefault(); event.stopPropagation(); insertText(draggedReference); return; } const files = Array.from(event.dataTransfer.files); if (files.length) { event.preventDefault(); event.stopPropagation(); setDragging(false); dragDepth.current = 0; transfer.addFiles(files); } else if (canWrite && (event.target as Element).closest('[data-chat-composer]')) { const text = event.dataTransfer.getData('text/plain'); if (text) { event.preventDefault(); insertText(text); } } }} onKeyDown={e => e.stopPropagation()} className="session-chat relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chrome-bg)] text-foreground" aria-label={`${name}对话`}>
     <div ref={scroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 [overflow-anchor:none] sm:px-8" onScroll={() => { const el = scroll.current!; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96; if (nearBottom.current) setUnseen(false); }}>
       <div ref={content} className="mx-auto flex min-h-full w-full max-w-screen-2xl flex-col py-5 sm:py-8">
-        {loading && !messages.length ? <div role="status" className="space-y-4 py-8"><p className="text-sm text-muted-foreground">正在读取对话…</p>{[0, 1, 2].map(i => <div key={i} className="h-3 animate-pulse rounded bg-surface-2" style={{ width: `${75 - i * 15}%` }} />)}</div> : !messages.length && !pending ? <div className="my-auto py-6"><MessageCircle size={27} strokeWidth={1.5} className="mb-4 text-primary" /><h2 className="text-xl font-semibold tracking-tight sm:text-2xl">想一起完成什么？</h2><p className="mt-2 max-w-md text-[15px] leading-7 text-muted-foreground">直接描述你的目标，或从一个问题开始。</p>{!keyboardOpen && <div className="mt-5 flex flex-wrap gap-2">{['帮我梳理一下当前工作', '请解释一下刚才的结果', '我们继续下一步'].map(text => <button type="button" key={text} className={`${button} border border-border/60 text-left text-xs text-muted-foreground`} disabled={!canWrite} onClick={() => { setDraft(text); input.current?.focus({ preventScroll: true }); }}>{text}</button>)}</div>}</div> : <ChatTimeline messages={messages} agentName={agentName} agentSlug={agentSlug} canWrite={canWrite} copied={copied} onReference={message => quoteMessage(message)} onCopy={(text, id) => { void writeTerminalClipboardText(text, () => section.current?.isConnected === true).then(ok => { if (ok) setCopied(id); else setError('复制失败，请选择正文复制'); }); }} />}
+        {loading && !messages.length ? <div role="status" className="space-y-4 py-8"><p className="text-sm text-muted-foreground">正在读取对话…</p>{[0, 1, 2].map(i => <div key={i} className="h-3 animate-pulse rounded bg-surface-2" style={{ width: `${75 - i * 15}%` }} />)}</div> : !messages.length && !pending ? <div className="my-auto py-6"><MessageCircle size={27} strokeWidth={1.5} className="mb-4 text-primary" /><h2 className="text-xl font-semibold tracking-tight sm:text-2xl">想一起完成什么？</h2><p className="mt-2 max-w-md text-[15px] leading-7 text-muted-foreground">直接描述你的目标，或从一个问题开始。</p>{!keyboardOpen && <div className="mt-5 flex flex-wrap gap-2">{['帮我梳理一下当前工作', '请解释一下刚才的结果', '我们继续下一步'].map(text => <button type="button" key={text} className={`${button} border border-border/60 text-left text-xs text-muted-foreground`} disabled={!canWrite} onClick={() => { setDraft(text); input.current?.focus({ preventScroll: true }); }}>{text}</button>)}</div>}</div> : <ChatTimeline sessionId={sessionId} uiWritable={active && canWrite && !pending && !sending && agentAvailable === true} onAction={content => send(undefined, content)} messages={messages} agentName={agentName} agentSlug={agentSlug} canWrite={canWrite} copied={copied} onReference={message => quoteMessage(message)} onCopy={(text, id) => { void writeTerminalClipboardText(text, () => section.current?.isConnected === true).then(ok => { if (ok) setCopied(id); else setError('复制失败，请选择正文复制'); }); }} />}
         {pending && <div className="mt-5 ml-auto w-fit max-w-[88%] rounded-2xl bg-surface-2 px-4 py-3"><ChatUserContent content={pending.content} /><div className="mt-1 flex flex-wrap items-center justify-end gap-2 text-[11px] text-muted-foreground"><span>{sending ? '发送中…' : '待重试'}</span>{!sending && <><button type="button" className="min-h-9 rounded-lg px-2 hover:bg-surface-2" onClick={() => { const parsed = parseChatContent(pending.content); setDraft(parsed.text); setReference(parsed.reference); setPending(null); setError(''); input.current?.focus({ preventScroll: true }); }}>修改草稿</button><button type="button" className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-primary hover:bg-surface-2" disabled={!canWrite || agentAvailable !== true} onClick={() => void send(pending)}><RefreshCw size={12} />重试发送</button></>}</div></div>}
-        {waitingForReply && !error && <div data-chat-reply-status role="status" aria-label={`${agentName}思考中`} aria-live="polite" className="mt-6 space-y-2 py-2 text-xs text-muted-foreground"><ChatAgentLabel name={agentName} slug={agentSlug} /><div className="flex items-center gap-2"><LoaderCircle size={14} className="animate-spin text-primary" /><span>思考中…</span></div></div>}
+        {waitingForReply && !error && <div data-chat-reply-status role="status" aria-label={`${agentName}工作中`} aria-live="polite" className="mt-6 inline-flex w-fit max-w-full items-center gap-3 self-start rounded-lg border border-border/50 bg-[color-mix(in_srgb,var(--surface)_35%,var(--chrome-bg))] px-3 py-2 text-xs text-muted-foreground"><ChatAgentLabel name={agentName} slug={agentSlug} /><span className="inline-flex shrink-0 items-center gap-1.5"><LoaderCircle size={14} className="animate-spin text-primary motion-reduce:animate-none" /><span>工作中…</span></span></div>}
       </div>
     </div>
     {dragging && <div className="pointer-events-none absolute inset-3 z-20 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-surface/95 text-sm text-primary"><Paperclip size={18} className="mr-2" />松开以添加文件</div>}

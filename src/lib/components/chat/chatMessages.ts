@@ -1,6 +1,8 @@
+import type { ChatUI, ChatUIState } from '../../../server/shared/chatPresentation';
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant'; content: string; createdAt: number; status: string;
   replyTo?: string; requestId?: string; responseKind?: string;
+  ui?: ChatUI; uiState?: ChatUIState;
 }
 export interface ChatTurn { id: string; role: ChatMessage['role']; messages: ChatMessage[] }
 /** Adjacent assistant updates read as one turn, with a shared author and separate message actions. */

@@ -2,12 +2,14 @@ import { validShareResources, resourceSubset, type ShareResources } from '../sha
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { validSessionAppearances, restrictSessionAppearances, type SessionAppearances } from '../shared/sessionAppearance.js';
 
 export type AuthorizationScope = { kind: 'service' } | { kind: 'sessions'; sessionIds: string[] };
 export interface GrantConditions { entryServiceIds?: string[]; relayIds?: string[] }
 export interface GrantInput {
   subjectId: string;
   resources?: ShareResources;
+  sessionAppearance?: SessionAppearances;
   scope: AuthorizationScope;
   actions: string[];
   expiresAt?: number;
@@ -44,6 +46,7 @@ function validateInput(v: unknown): asserts v is GrantInput {
   if (v.scope.kind === 'service') keys(v.scope, ['kind']);
   else { assert(v.scope.kind === 'sessions' && ids(v.scope.sessionIds), 'session scope'); keys(v.scope, ['kind', 'sessionIds']); }
   assert(v.resources === undefined || validShareResources(v.resources), 'shared resources');
+  assert(v.sessionAppearance === undefined || validSessionAppearances(v.sessionAppearance, v.scope), 'session appearance');
   assert(Array.isArray(v.actions) && v.actions.length > 0 && v.actions.length <= 256 && v.actions.every(action) && new Set(v.actions).size === v.actions.length, 'actions');
   if (v.scope.kind === 'sessions') assert(v.actions.every(a => a.startsWith('session.')), 'session scope cannot grant service or file capabilities');
   assert(v.expiresAt === undefined || (Number.isSafeInteger(v.expiresAt) && Number(v.expiresAt) > 0), 'expiry');
@@ -92,7 +95,7 @@ export class AuthorizationStore {
     const grants: AuthorizationGrant[] = [];
     for (const value of data.grants) {
       validateInput(value); const g = value as AuthorizationGrant;
-      keys(g as unknown as Record<string, unknown>, ['id', 'serviceId', 'createdAt', 'parentGrantId', 'revokedAt', 'subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions', 'passwordCredential', 'resources']);
+      keys(g as unknown as Record<string, unknown>, ['id', 'serviceId', 'createdAt', 'parentGrantId', 'revokedAt', 'subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions', 'passwordCredential', 'resources', 'sessionAppearance']);
       assert(id(g.id) && g.serviceId === this.options.serviceId && Number.isSafeInteger(g.createdAt) && g.createdAt >= 0, 'grant metadata');
       assert(g.parentGrantId === undefined || id(g.parentGrantId), 'parent identity');
       assert(g.revokedAt === undefined || (Number.isSafeInteger(g.revokedAt) && g.revokedAt >= 0), 'revocation');
@@ -116,7 +119,7 @@ export class AuthorizationStore {
   }
   private create(input: GrantInput): AuthorizationGrant {
     validateInput(input);
-    keys(input as unknown as Record<string, unknown>, ['subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions', 'resources']);
+    keys(input as unknown as Record<string, unknown>, ['subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions', 'resources', 'sessionAppearance']);
     const now = this.now(); assert(input.expiresAt === undefined || input.expiresAt > now, 'already expired');
     return { ...structuredClone(input), id: randomUUID(), serviceId: this.options.serviceId, createdAt: now };
   }
@@ -154,7 +157,7 @@ export class AuthorizationStore {
       if (grant.revokedAt !== undefined || grant.scope.kind !== 'sessions') continue;
       const remaining = grant.scope.sessionIds.filter(id => normalize(id) !== sessionId);
       if (remaining.length === grant.scope.sessionIds.length) continue;
-      changed++; if (!remaining.length) grant.revokedAt = this.now(); else grant.scope = { kind: 'sessions', sessionIds: remaining };
+      changed++; if (!remaining.length) grant.revokedAt = this.now(); else { grant.scope = { kind: 'sessions', sessionIds: remaining }; grant.sessionAppearance = restrictSessionAppearances(grant.sessionAppearance, remaining); }
     }
     if (changed) this.save(grants); return changed;
   }

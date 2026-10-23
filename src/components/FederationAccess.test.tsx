@@ -9,6 +9,22 @@ const code = 'secret-invite-code'.repeat(3);
 const inviteUrl = createInviteLink({ v: 1, serviceId, code, entryUrl: 'https://c.example', name: '工作电脑' });
 afterEach(() => { cleanup(); localStorage.clear(); });
 describe('FederationAccess invitation flow', () => {
+  it('previews custom sharing appearance, retains it when editing and resets to the Session defaults', async () => {
+    const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
+    render(<FederationAccess paired initialShareSessionId="stable" sessions={[{ sessionId: 'backend', sourceSessionId: 'stable', name: '原会话' }]} onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} />);
+    fireEvent.change(screen.getByRole('textbox', { name: '分享显示名称' }), { target: { value: '研究工作台' } });
+    fireEvent.click(screen.getByRole('button', { name: '更改原会话的分享图标' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '原会话的自定义Emoji' }), { target: { value: '🎙️' } });
+    fireEvent.click(screen.getByRole('button', { name: '生成邀请' }));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ sessionAppearance: { stable: { name: '研究工作台', icon: '🎙️' } } })));
+    expect(await screen.findByText('研究工作台')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '调整分享内容 / 重新生成' }));
+    expect((screen.getByRole('textbox', { name: '分享显示名称' }) as HTMLInputElement).value).toBe('研究工作台');
+    fireEvent.click(screen.getByRole('button', { name: '重置原会话的分享外观' }));
+    fireEvent.click(screen.getByRole('button', { name: '生成邀请' }));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledTimes(2));
+    expect(onCreateInvite.mock.calls[1][0].sessionAppearance).toBeUndefined();
+  });
   it('confirms revoking the generated invitation and removes its QR and link only on success', async () => {
     const onCreateInvite = vi.fn().mockResolvedValue({ id: 'pending-one', url: inviteUrl, expiresAt: Date.now() + 600000 });
     const onRevokeInvitation = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);

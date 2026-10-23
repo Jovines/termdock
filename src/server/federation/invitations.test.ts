@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { InvitationStore } from './invitations.js';
+import { AuthorizationStore } from './authorization.js';
 const directories: string[] = [];
 afterEach(() => directories.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
 function fixture() {
@@ -11,6 +12,21 @@ function fixture() {
   const options = { filePath, serviceId: 'service-C', now: () => now };
   return { filePath, store: new InvitationStore(options), reload: () => new InvitationStore(options), advance: (ms: number) => { now += ms; } };
 }
+it('persists scoped display names and icons through redemption and prunes revoked siblings', () => {
+  const f = fixture(), scope = { kind: 'sessions' as const, sessionIds: ['one', 'two'] };
+  const sessionAppearance = { one: { name: '研究工作台', icon: '🎙️' }, two: { icon: 'code' } };
+  const pending = f.store.create('admin', { scope, actions: ['session.view'], sessionAppearance });
+  expect(f.reload().listPending()[0].sessionAppearance).toEqual(sessionAppearance);
+  const grant = f.reload().consume(pending.code, 'phone', () => true);
+  const options = { filePath: f.filePath + '.grants', serviceId: 'service-C', now: () => 1000 };
+  const store = new AuthorizationStore(options); store.grant(grant);
+  expect(new AuthorizationStore(options).listEffective({ subjectId: 'phone', serviceId: 'service-C' })[0].sessionAppearance).toEqual(sessionAppearance);
+  store.revokeSession('one');
+  expect(new AuthorizationStore(options).list()[0].sessionAppearance).toEqual({ two: { icon: 'code' } });
+  const next = f.store.create('admin', { scope, actions: ['session.view'], sessionAppearance });
+  f.store.revokeSession('one');
+  expect(f.reload().consume(next.code, 'other', () => true).sessionAppearance).toEqual({ two: { icon: 'code' } });
+});
 describe('single-use device invitations', () => {
   it('lists pending metadata and persists revocation without disclosing a usable code', () => {
     const f = fixture();

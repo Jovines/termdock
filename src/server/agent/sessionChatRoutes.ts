@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { Router } from 'express';
 import type { CollaborationMessage, CollaborationStore } from './collaborationStore.js';
 import { encryptedRequestSubject } from '../federation/requestContext.js';
+import { chatPresentation } from '../shared/chatPresentation.js';
+import { CollaborationError } from './collaborationProtocol.js';
 /** Clients authorized to view this Session share its durable chat history.
  * Per-device delivery addresses remain stable for retries and explicit replies. */
 export function sessionChatRoutes(options: {
@@ -27,8 +29,15 @@ export function sessionChatRoutes(options: {
       if (canSeeRequest(message)) return true;
       const original = message.toPrincipalId && message.replyTo ? options.store.getMessage(message.replyTo) : null;
       return original?.groupId === group.id && message.toPrincipalId === original.integrationOrigin?.integrationId && canSeeRequest(original);
-    }).map(m => ({ id: m.id, role: m.toPrincipalId ? 'assistant' : 'user', content: m.content, createdAt: m.createdAt, status: m.status === 'read' ? 'delivered' : m.status, replyTo: m.replyTo, requestId: m.idempotencyKey, responseKind: m.responseKind })) : [];
+    }).map(m => ({ id: m.id, role: m.toPrincipalId ? 'assistant' : 'user', ...(m.toPrincipalId ? chatPresentation(m.content, m.metadata) : { content: m.content }), ...(m.uiState ? { uiState: m.uiState } : {}), createdAt: m.createdAt, status: m.status === 'read' ? 'delivered' : m.status, replyTo: m.replyTo, requestId: m.idempotencyKey, responseKind: m.responseKind })) : [];
     res.setHeader('Cache-Control', 'no-store'); res.json({ messages, agentAvailable: !!ctx.session.agent, agent: ctx.session.agent ? { slug: ctx.session.agent.slug, displayName: ctx.session.agent.displayName || ctx.session.agent.slug } : null });
+  });
+  router.put('/:sessionId/chat/:messageId/state', (req, res) => {
+    const ctx = context(req), body = req.body;
+    if (!ctx) { res.status(404).json({ error: '会话不可用' }); return; }
+    if (!body || typeof body !== 'object' || Object.keys(body).some(key => !['revision', 'values'].includes(key))) { res.status(400).json({ error: '填写内容无效' }); return; }
+    try { res.json(options.store.saveChatUIState(String(req.params.messageId), ctx.session.sessionId, body.values, body.revision)); }
+    catch (error) { if (error instanceof CollaborationError) res.status(error.httpStatus).json({ error: error.message, ...error.details }); else res.status(500).json({ error: '暂时无法保存，填写内容已保留' }); }
   });
   router.post('/:sessionId/chat', (req, res) => {
     const ctx = context(req);

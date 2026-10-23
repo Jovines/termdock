@@ -326,13 +326,17 @@ export async function createFederationRuntime(app: express.Express, directory: s
             send({ type: 'result', id: packet.id, subjectId, serviceId, fullService: full(subjectId), grants, httpWindow: MAX_TRANSFER_WINDOW, binaryChunks: true, relayAuthorizationErrors: true, relaySelfTargetGuard: true, webTransport: options.webTransport?.() });
           } else if (packet.type === 'session-list') {
             const inventory = await sessionInventory();
+            const displayGrants = store.listEffective({ subjectId, serviceId }).filter(grant => grant.actions.includes('session.view')).reverse().sort((a, b) => b.createdAt - a.createdAt);
             const seen = new Set<string>();
             const items = inventory.flatMap(session => {
               const sessionId = session.backendSessionId;
               if (typeof sessionId !== 'string' || !sessionId || seen.has(sessionId) || !allowed(subjectId, 'session.view', sessionId)) return [];
               seen.add(sessionId);
+              const matches = (id: string) => id === session.sessionId || id === sessionId || stableSessionId(id) === session.sessionId;
+              const displayGrant = displayGrants.find(grant => grant.scope.kind === 'service' || grant.scope.sessionIds.some(matches));
+              const appearance = Object.entries(displayGrant?.sessionAppearance || {}).find(([id]) => matches(id))?.[1];
               return [{ sessionId, ...(typeof session.sessionId === 'string' ? { sourceSessionId: session.sessionId } : {}),
-                name: collaborationSessionDisplayName({ ...session, name: typeof session.name === 'string' ? session.name : sessionId } as Parameters<typeof collaborationSessionDisplayName>[0]), live: session.live === true,
+                name: appearance?.name || collaborationSessionDisplayName({ ...session, name: typeof session.name === 'string' ? session.name : sessionId } as Parameters<typeof collaborationSessionDisplayName>[0]), ...(appearance?.icon ? { icon: appearance.icon } : {}), live: session.live === true,
                 canWrite: allowed(subjectId, 'session.input', sessionId), canResize: allowed(subjectId, 'session.resize', sessionId) }];
             });
             send({ type: 'result', id: packet.id, items });
@@ -386,6 +390,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
           } else if (packet.type === 'invite-create') {
             check('authorization.manage');
             const invitation = { scope: packet.scope, actions: packet.actions, ...(packet.resources === undefined ? {} : { resources: packet.resources }),
+              ...(packet.sessionAppearance === undefined ? {} : { sessionAppearance: packet.sessionAppearance }),
               ...(packet.label === undefined ? {} : { label: packet.label }),
               ...(packet.expiresAt === undefined ? {} : { expiresAt: packet.expiresAt }) };
             validateInvitation(invitation);
@@ -404,6 +409,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
               }
               const sessionIds = invitation.scope.sessionIds.map(id => stable.get(id)).filter((id): id is string => typeof id === 'string');
               if (sessionIds.length !== invitation.scope.sessionIds.length || new Set(sessionIds).size !== sessionIds.length) throw new Error('UNKNOWN_SESSION');
+              if (invitation.sessionAppearance) invitation.sessionAppearance = Object.fromEntries(Object.entries(invitation.sessionAppearance).map(([id, appearance]) => [stable.get(id)!, appearance]));
               invitation.scope = { kind: 'sessions', sessionIds };
             }
             check('authorization.manage');

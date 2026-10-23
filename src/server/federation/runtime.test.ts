@@ -456,6 +456,22 @@ describe('federation runtime over real encrypted WebSocket', () => {
     phone.channel.send({ type: 'session-list', id: 'sessions' });
     expect(await phone.take('sessions')).toMatchObject({ items: [{ sessionId: 'one', sourceSessionId: 'source-one' }] });
   });
+  it('binds shared appearance to the target Session and preserves it across reconnects and backend replacement', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    owner.channel.send({ type: 'invite-create', id: 'branded', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'], sessionAppearance: { one: { name: '研究工作台', icon: '🎙️' } } });
+    const invite = await owner.take('branded'), guest = await f.connect();
+    guest.channel.send({ type: 'pair', id: 'accept', code: invite.code }); await guest.take('accept');
+    const reconnected = await f.connect(guest.identity);
+    reconnected.channel.send({ type: 'session-list', id: 'branded-list' });
+    expect(await reconnected.take('branded-list')).toMatchObject({ items: [{ sessionId: 'one', sourceSessionId: 'source-one', name: '研究工作台', icon: '🎙️', canWrite: false }] });
+    f.inventory.clientSessions[0].backendSessionId = 'one-new';
+    reconnected.channel.send({ type: 'session-list', id: 'replaced-list' });
+    expect(await reconnected.take('replaced-list')).toMatchObject({ items: [{ sessionId: 'one-new', name: '研究工作台', icon: '🎙️' }] });
+    owner.channel.send({ type: 'session-list', id: 'original-list' });
+    expect(JSON.stringify(await owner.take('original-list'))).not.toContain('研究工作台');
+    owner.channel.send({ type: 'invite-create', id: 'bad-appearance', scope: { kind: 'sessions', sessionIds: ['source-one'] }, actions: ['session.view'], sessionAppearance: { two: { name: '越界' } } });
+    expect(await owner.take('bad-appearance')).toMatchObject({ type: 'error', error: 'INVALID_INVITATION' });
+  });
   it('dispatches a mutating HTTP upload only once when upload-end is repeated', async () => {
     const f = await fixture(), client = await f.connect(); await client.pair();
     client.channel.send({ type: 'http', id: 'write', method: 'POST', path: '/api/terminal/one/input', headers: { 'content-type': 'application/json' } });
@@ -675,7 +691,7 @@ it('enforces individual shared devices, computer view-only mode, directory bound
   for (const [id, method, path] of [
     ['outside', 'GET', '/api/terminal/fs/read?path=/etc/passwd'], ['delete', 'DELETE', `/api/terminal/fs/file?path=${encodeURIComponent(shared)}`],
     ['connect', 'POST', '/api/android/connect'], ['password', 'POST', '/api/computer/credentials/use'], ['settings', 'GET', '/api/terminal/settings'],
-    ['chat-write', 'POST', '/api/terminal/one/chat'], ['other-chat', 'GET', '/api/terminal/two/chat'],
+    ['chat-write', 'POST', '/api/terminal/one/chat'], ['other-chat', 'GET', '/api/terminal/two/chat'], ['chat-form-write', 'PUT', '/api/terminal/one/chat/message/state'],
   ]) expect((await guest.http(id, method, path))[0]).toMatchObject({ type: 'error' });
   guest.channel.send({ type: 'ws-open', id: 'phone', path: '/api/android/pixel/ws' }); expect(await guest.take('phone')).toMatchObject({ type: 'ws-ready' });
   guest.channel.send({ type: 'ws-data', id: 'phone', data: JSON.stringify({ type: 'control', data: 'AAAA' }) }); expect(await guest.take('phone')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });

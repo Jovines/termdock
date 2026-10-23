@@ -8,6 +8,15 @@ function fixture(responses: Record<string, unknown>[]) {
   return { output, calls, io };
 }
 describe('collaboration CLI contract', () => {
+  it('exposes the versioned OpenUI contract without making a service request', async () => {
+    const f = fixture([]);
+    expect(await executeCollaborationCommand(parseCollaborationCommand(['ui', '--text']), {}, f.io)).toBe(0);
+    expect(f.calls).toEqual([]);
+    expect(f.output.join('\n')).toContain('Form(');
+    expect(f.output.join('\n')).toContain('其他协作组');
+    expect(f.output.join('\n')).toContain('"openui":{"version":1}');
+    expect(() => parseCollaborationCommand(['ui', '--group', 'private'])).toThrow();
+  });
   it('passes a selected group launch profile through spawn and renders its usage guidance in status', async () => {
     const p = { id: 'fast', name: '快速排查', agentSlug: 'codex', command: 'codex --model example-fast', notes: '只用于简单查询' };
     const f = fixture([{ ok: true }]);

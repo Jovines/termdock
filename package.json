@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.354",
+  "version": "1.4.355",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -66,6 +66,8 @@
     "@libp2p/utils": "7.0.7",
     "@noble/hashes": "2.4.0",
     "@novnc/novnc": "^1.7.0",
+    "@openuidev/lang-core": "1.0.1",
+    "@openuidev/react-lang": "1.0.1",
     "@peculiar/x509": "2.2.0",
     "@serenity-kit/opaque": "1.1.0",
     "@types/cookie-parser": "^1.4.10",
@@ -111,6 +113,7 @@
     "web-push": "^3.6.7",
     "ws": "^8.21.0",
     "yaml": "^2.9.1",
+    "zod": "4.6.7",
     "zustand": "^4.5.0"
   },
   "devDependencies": {
