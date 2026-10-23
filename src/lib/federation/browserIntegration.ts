@@ -437,6 +437,9 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
       return previous || next;
     }
     saveSelectedTarget(saved);
+    // This client has just returned valid target permissions. An explicit new
+    // invitation/login must not inherit the previous connection's denial.
+    accessBlocks.delete(intent.targetPeerId);
     active = next; activePath = path; entryClient = nextEntry;
     // Finish the replacement before closing old streams so their reconnects use
     // the new authenticated path, without remounting the terminal interface.

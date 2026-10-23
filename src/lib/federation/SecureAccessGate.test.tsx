@@ -31,6 +31,27 @@ import { writeBrowserServices } from '../services/serviceDirectory';
 import { openRemoteSession } from './remoteSession';
 import { ConnectionAccessError } from './accessFailure';
 const permitted = { type: 'result', id: 'permissions', fullService: true, grants: [{ actions: ['service:*'] }] };
+it('keeps an incoming invitation ahead of an expired saved login and enters the scoped Session after acceptance', async () => {
+  vi.resetModules();
+  const peer = '12D3KooW' + 'a'.repeat(44), code = 'i'.repeat(32);
+  history.replaceState(null, '', createInviteLink({ v: 1, serviceId: peer, code, entryUrl: location.origin, viewMode: 'chat' }));
+  mocks.request.mockResolvedValue({ type: 'result', fullService: false, grants: [] });
+  const { SecureAccessGate: Gate } = await import('./SecureAccessGate');
+  render(<Gate><div>Full terminal</div></Gate>);
+  await screen.findByText('Service management');
+  fireEvent.focus(window); fireEvent(window, new Event('online')); await act(async () => {});
+  expect(screen.queryByRole('button', { name: '登录目标服务' })).toBeNull();
+  expect(mocks.accessProps.initialInvite).toMatchObject({ targetPeerId: peer, pairingCode: code });
+  expect(mocks.request.mock.calls.some(([packet]) => packet.type === 'permissions')).toBe(false);
+  expect(location.hash).toBe('');
+  mocks.connect.mockImplementation(async () => {
+    mocks.saved.mockReturnValue({ url: location.origin, targetPeerId: peer }); mocks.client.targetPeerId = peer;
+    mocks.request.mockResolvedValue({ type: 'result', fullService: false, grants: [{ actions: ['session.view'] }] });
+  });
+  await act(async () => mocks.accessProps.onConnect(mocks.accessProps.initialInvite));
+  await screen.findByText('Shared terminal');
+  expect(screen.queryByText('Full terminal')).toBeNull(); expect(mocks.authenticate).not.toHaveBeenCalled();
+});
 it('keeps direct recovery available after relay denial, keeps terminal mounted and writes no permissions on cancel', async () => {
   const unmounted = vi.fn();
   function Terminal() { useEffect(() => () => unmounted(), []); return <textarea aria-label="terminal draft" defaultValue="retain draft" />; }

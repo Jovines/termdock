@@ -36,6 +36,21 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it('clears an old login denial only after an explicit new invitation returns valid target permissions', async () => {
+    const selected = { url: 'https://b.example', targetPeerId: 'B' }; mocks.saved.mockReturnValue(selected);
+    const integration = await import('./browserIntegration');
+    integration.pauseConnectionAccess(new ConnectionAccessError('TARGET_AUTHORIZATION_REQUIRED', { targetServiceId: 'B' }));
+    await expect(integration.getActiveClient()).rejects.toMatchObject({ code: 'TARGET_AUTHORIZATION_REQUIRED' });
+    const base = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async args => { const client = await base(args); client.request.mockImplementation(async (packet: { type: string }) => packet.type === 'permissions' ? { type: 'result', fullService: false, grants: [{ actions: ['session.view'] }] } : {}); return client; });
+    const client = await integration.connectDevice({ ...selected, pairingCode: 'explicit-invitation' });
+    expect(await integration.getActiveClient()).toBe(client);
+    expect((await client.request({ type: 'permissions' })).fullService).toBe(false);
+    integration.pauseConnectionAccess(new ConnectionAccessError('TARGET_AUTHORIZATION_REQUIRED', { targetServiceId: 'B' }));
+    mocks.connect.mockRejectedValue(new Error('PAIRING_DENIED'));
+    await expect(integration.connectDevice({ ...selected, pairingCode: 'invalid-invitation' })).rejects.toThrow('PAIRING_DENIED');
+    await expect(integration.getActiveClient()).rejects.toMatchObject({ code: 'TARGET_AUTHORIZATION_REQUIRED' });
+  });
   it('pauses an access-blocked target without network retries, retaining saved metadata until explicit recovery', async () => {
     const selected = { url: 'https://b.example', targetPeerId: 'B', routes: [] };
     mocks.saved.mockReturnValue(selected);

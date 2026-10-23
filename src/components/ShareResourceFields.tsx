@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { Folder, Monitor, RefreshCw, Smartphone, X } from 'lucide-react';
 import type { ShareResources } from '../server/shared/shareResources';
 import { listAndroidDevices, type AndroidDevice } from '../lib/android/api';
+import { sharedAndroidDeviceOptions, selectSharedAndroidDevice } from '../lib/android/sharedDeviceOptions';
 import { computerPreferences, type ComputerProfile } from '../lib/computer/preferences';
 import { FileTree } from '../lib/components/sidebar/FileTree';
 import { useSidebarStore } from '../lib/stores/useSidebarStore';
@@ -21,6 +22,8 @@ export function ShareResourceFields({ value, onChange }: { value: ShareResources
   useKeyboardLayer(browserPanel, browse, () => setBrowse(false));
   const [browseRoot, setBrowseRoot] = useState(() => useSidebarStore.getState().rootPath || '/');
   const [retry, setRetry] = useState(0);
+  const phoneOptions = sharedAndroidDeviceOptions(phones, value.android);
+  const selectedPhoneCount = phoneOptions.filter(option => option.access).length;
   useEffect(() => {
     let active = true; setLoading(true); setError('');
     void Promise.allSettled([listAndroidDevices(), fetch('/api/computer/preferences').then(async response => { if (!response.ok) throw new Error(); return response.json(); })]).then(([android, desktop]) => {
@@ -41,10 +44,10 @@ export function ShareResourceFields({ value, onChange }: { value: ShareResources
   if (browse) return createPortal(<div className="fixed inset-0 z-popover flex items-end justify-center bg-[var(--app-backdrop)] p-3 backdrop-blur-sm sm:items-center" onMouseDown={e => { if (e.target === e.currentTarget) setBrowse(false); }}><div ref={browserPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="选择共享目录" className="flex max-h-[min(80dvh,640px)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-border bg-surface text-foreground shadow-xl outline-none"><div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2"><span className="text-sm font-medium">选择共享目录</span><button type="button" className={action} onClick={() => setBrowse(false)}>取消</button></div><p className="shrink-0 break-all px-4 py-3 text-xs text-muted-foreground">{browseRoot}</p><div className="min-h-0 flex-1 overflow-auto"><FileTree rootPath={browseRoot} directoriesOnly selectedFilePath={null} onFileSelect={() => {}} onDirectoryRoot={setBrowseRoot} /></div><div className="shrink-0 border-t border-border p-3 pb-[max(12px,env(safe-area-inset-bottom))]"><button type="button" className={`${action} w-full bg-primary text-primary-foreground`} onClick={() => { if (!value.directories?.some(d => d.path === browseRoot)) onChange({ ...value, directories: [...value.directories ?? [], { path: browseRoot, access: 'read' }] }); setBrowse(false); }}>共享此目录及其子目录</button></div></div></div>, document.body);
 
   return <fieldset className="space-y-2"><legend className="mb-2 text-sm font-medium">附带侧栏功能 <span className="text-xs font-normal text-muted-foreground">可选</span></legend>
-    <details className="rounded-xl border border-border px-3"><summary className="min-h-11 cursor-pointer py-3 text-sm"><Smartphone size={15} className="mr-2 inline" />手机设备 <span className="text-muted-foreground">{value.android?.length ? `已选 ${value.android.length} 台` : '未分享'}</span></summary><div className="space-y-2 pb-3">{phones.map(phone => {
-      const selected = value.android?.find(p => p.serial === phone.serial);
-      return <div key={phone.serial} className="flex flex-wrap items-center gap-2"><label className="flex min-h-11 min-w-0 flex-1 items-center gap-2 text-sm"><input type="checkbox" className="h-4 w-4 accent-primary" checked={!!selected} onChange={e => onChange({ ...value, android: e.target.checked ? [...value.android ?? [], { serial: phone.serial, access: 'view' }] : value.android?.filter(p => p.serial !== phone.serial) })} /><span className="min-w-0 break-all">{phone.model || phone.serial}<span className="block text-xs text-muted-foreground">{phone.state === 'device' ? '已连接' : '离线或尚未授权'}</span></span></label>{selected && <select className={select} aria-label={`${phone.model || phone.serial}权限`} value={selected.access} onChange={e => onChange({ ...value, android: value.android?.map(p => p.serial === phone.serial ? { ...p, access: e.target.value as 'view' | 'control' } : p) })}><option value="view">仅查看</option><option value="control">查看并操作</option></select>}</div>;
-    })}{!phones.length && <p className="py-2 text-xs text-muted-foreground">{loading ? '正在查找设备…' : '暂无手机设备，请先在手机侧栏连接设备。'}</p>}</div></details>
+    <details className="rounded-xl border border-border px-3"><summary className="min-h-11 cursor-pointer py-3 text-sm"><Smartphone size={15} className="mr-2 inline" />手机设备 <span className="text-muted-foreground">{selectedPhoneCount ? `已选 ${selectedPhoneCount} 台` : '未分享'}</span></summary><div className="space-y-2 pb-3">{phoneOptions.map(({ device: phone, serials, access }) => {
+      const selected = !!access;
+      return <div key={phone.serial} className="flex flex-wrap items-center gap-2"><label className="flex min-h-11 min-w-0 flex-1 items-center gap-2 text-sm"><input type="checkbox" className="h-4 w-4 accent-primary" checked={selected} onChange={e => onChange({ ...value, android: selectSharedAndroidDevice(value.android, serials, e.target.checked ? 'view' : undefined) })} /><span className="min-w-0 break-all">{phone.model || phone.serial}<span className="block text-xs text-muted-foreground">{phone.state === 'device' ? '已连接' : '离线或尚未授权'}{serials.length > 1 ? ` · ${serials.length} 个连接地址` : ''}</span></span></label>{selected && <select className={select} aria-label={`${phone.model || phone.serial}权限`} value={access} onChange={e => onChange({ ...value, android: selectSharedAndroidDevice(value.android, serials, e.target.value as 'view' | 'control') })}><option value="view">仅查看</option><option value="control">查看并操作</option></select>}</div>;
+    })}{!phoneOptions.length && <p className="py-2 text-xs text-muted-foreground">{loading ? '正在查找设备…' : '暂无手机设备，请先在手机侧栏连接设备。'}</p>}</div></details>
     <details className="rounded-xl border border-border px-3"><summary className="min-h-11 cursor-pointer py-3 text-sm"><Monitor size={15} className="mr-2 inline" />电脑 <span className="text-muted-foreground">{value.computers?.length ? `已选 ${value.computers.length} 台` : '未分享'}</span></summary><div className="space-y-2 pb-3">{computers.map(profile => {
       const port = profile.protocol === 'vnc' ? 5900 : Number(profile.port || 3389), key = `${profile.host}:${port}`;
       const selected = value.computers?.find(c => c.host === profile.host && c.protocol === profile.protocol && c.port === port);
@@ -55,6 +58,10 @@ export function ShareResourceFields({ value, onChange }: { value: ShareResources
   </fieldset>;
 }
 export function ShareResourceSummary({ resources }: { resources?: ShareResources }) {
+  const [phones, setPhones] = useState<AndroidDevice[]>([]);
+  const hasPhones = !!resources?.android?.length;
+  useEffect(() => { if (!hasPhones) return; let active = true; void listAndroidDevices().then(result => { if (active) setPhones(result.devices); }).catch(() => {}); return () => { active = false; }; }, [hasPhones]);
   if (!resources) return null;
-  return <ul className="space-y-1 text-xs leading-5 text-muted-foreground">{resources.android?.map((d, i) => <li key={`a${i}`}>手机 · {d.serial} · {d.access === 'control' ? '可操作' : '仅查看'}</li>)}{resources.computers?.map((d, i) => <li key={`c${i}`}>电脑 · {d.host}:{d.port} · {d.access === 'control' ? '可操作' : '仅查看'}</li>)}{resources.directories?.map((d, i) => <li key={`f${i}`} className="break-all">文件 · {d.path} · {d.access === 'write' ? '可修改' : '仅查看'}</li>)}</ul>;
+  const phoneOptions = sharedAndroidDeviceOptions(phones, resources.android).filter(option => option.access);
+  return <ul className="space-y-1 text-xs leading-5 text-muted-foreground">{phoneOptions.map(({ device, serials, access }) => <li key={`a${device.serial}`} title={serials.join('\n')}>手机 · {device.model || device.serial} · {access === 'control' ? '可操作' : '仅查看'}</li>)}{resources.computers?.map((d, i) => <li key={`c${i}`}>电脑 · {d.host}:{d.port} · {d.access === 'control' ? '可操作' : '仅查看'}</li>)}{resources.directories?.map((d, i) => <li key={`f${i}`} className="break-all">文件 · {d.path} · {d.access === 'write' ? '可修改' : '仅查看'}</li>)}</ul>;
 }

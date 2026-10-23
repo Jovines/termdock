@@ -59,6 +59,7 @@ jobs:
           src/lib/components/chat
           src/components/services
           src/components/FederationAccess.test.tsx
+          src/components/ShareResourceFields.test.tsx
           src/lib/services
           src/lib/zIndexTokens.test.ts
           src/server/federation
@@ -72,6 +73,7 @@ jobs:
           src/server/routes/sharedFiles.test.ts
           src/server/routes/vncReadOnly.test.ts
           src/lib/android/deviceOptions.test.ts
+          src/lib/android/sharedDeviceOptions.test.ts
           src/server/android/liveBitrateTransport.test.ts
           src/server/android/liveBitrate.test.ts
           src/server/utils/tmuxCopySelection.test.ts

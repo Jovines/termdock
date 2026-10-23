@@ -48,6 +48,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
   const [incomingInvitation, setIncomingInvitation] = useState(initialInvitation);
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(!!initialInvitation);
+  const invitationPending = useRef(!!initialInvitation), connectInFlight = useRef(0);
+  invitationPending.current = !!incomingInvitation && open;
   const [checking, setChecking] = useState(!initialInvitation);
   const [error, setError] = useState(false);
   const [accessFailure, setAccessFailure] = useState<ConnectionAccessError>();
@@ -133,9 +135,16 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     const generation=pageGeneration.current,selection=savedConnection();
     const selectionIdentity = (value: ConnectionIntent | null) => value ? JSON.stringify([value.targetPeerId, value.serviceOrigin || value.url]) : '';
     const selectionStamp = selectionIdentity(selection);
-    const client = await getActiveClient();
-    const permissions = await readDeviceAuthorization(client, { timeoutMs });
-    if (generation !== pageGeneration.current || selectionStamp !== selectionIdentity(savedConnection()) || client !== currentSecureClient()) throw new Error('SERVICE_SELECTION_CHANGED');
+    const previousClient = currentSecureClient();
+    const client = await getActiveClient().catch(failure => {
+      if (generation !== pageGeneration.current || selectionStamp !== selectionIdentity(savedConnection()) || previousClient !== currentSecureClient()) throw new Error('SERVICE_SELECTION_CHANGED');
+      throw failure;
+    });
+    const current = () => generation === pageGeneration.current && selectionStamp === selectionIdentity(savedConnection()) && client === currentSecureClient();
+    let permissions: Awaited<ReturnType<typeof readDeviceAuthorization>>;
+    try { permissions = await readDeviceAuthorization(client, { timeoutMs }); }
+    catch (failure) { if (!current()) throw new Error('SERVICE_SELECTION_CHANGED'); throw failure; }
+    if (!current()) throw new Error('SERVICE_SELECTION_CHANGED');
     const acknowledge=window.termdockDesktop?.acknowledgeServiceInvitation,stamp=nativeConnectionRef.current;
     if(acknowledge&&stamp){
       const native=await stamp;
@@ -170,7 +179,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     let accessPaused: ConnectionAccessError | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const verify = async () => {
-      if (stopped || pending) return;
+      if (stopped || pending || invitationPending.current || connectInFlight.current) return;
       const selected = savedConnection();
       if (accessPaused && (accessPaused.code !== 'RELAY_AUTHORIZATION_REQUIRED' || !selected || !connectionAddresses(selected).length)) return;
       if (failures && (document.hidden || !isWorkspaceActive())) return;
@@ -213,7 +222,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
         failures = 0;
         performance.measure('termdock:connection-ready', { start: started, end: performance.now() });
       } catch (failure) {
-        if (stopped) return;
+        if (stopped || invitationPending.current || connectInFlight.current || failure instanceof Error && failure.message === 'SERVICE_SELECTION_CHANGED') return;
         const access = connectionAccessError(failure, { targetServiceId: savedConnection()?.targetPeerId });
         if (access?.context.targetServiceId && access.context.targetServiceId !== savedConnection()?.targetPeerId) return;
         if (access) {
@@ -336,6 +345,8 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     return () => { canceled = true; };
   }, [open, canManage, inviteAddresses.length]);
   const connect = async (intent: ConnectionIntent) => {
+    connectInFlight.current++;
+    try {
     if (!intent.pairingCode && !intent.routeCode && savedConnection()?.targetPeerId !== intent.targetPeerId && getWorkspaceHost()) {
       const service = { ...intent, id: intent.targetPeerId, label: intent.serviceName || new URL(intent.serviceOrigin || intent.url).host };
       await saveServiceConnection(service);
@@ -349,6 +360,7 @@ export function SecureAccessGate({ children }: { children: ReactNode }) {
     setAccessFailure(undefined); resumeVerification.current?.();
     if (nativeConnectionRef.current) nativeConnectionRef.current = nativeConnectionRef.current.then(value => value ? { ...value, invitation: undefined } : null);
     setIncomingInvitation(undefined);setOpen(false); setError(false);
+    } finally { connectInFlight.current--; }
   };
   const openService = async (service: ServiceConnection) => {
     const desktop = window.termdockDesktop;
