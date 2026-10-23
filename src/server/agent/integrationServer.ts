@@ -14,7 +14,15 @@ import { IntegrationStore, INTEGRATION_PROTOCOL, INTEGRATION_OPERATIONS, atomicJ
 import { IntegrationSessions, publicIntegrationSession, type IntegrationSessionAdapter } from './integrationSessions.js';
 import { getTermdockVersion } from '../utils/version.js';
 
-export function integrationSocketPath(port: number): string { return path.join(homedir(), '.termdock', `integration-${port}.sock`); }
+export function integrationSocketPath(port: number, home = homedir()): string {
+  const preferred = path.join(home, '.termdock', `integration-${port}.sock`);
+  // Darwin's sockaddr_un is shorter than Linux's. Node can truncate a long
+  // pathname while binding, leaving chmod and clients looking at another name.
+  if (Buffer.byteLength(preferred) < 100) return preferred;
+  const owner = process.getuid?.() ?? 'user';
+  const key = createHash('sha256').update(home).digest('hex').slice(0, 16);
+  return path.join('/tmp', `td-integration-${owner}-${key}`, `${port}.sock`);
+}
 export interface IntegrationRuntimeOptions {
   directory: string; socketPath: string; adminToken?: string;
   messages: CollaborationStore; taskStore: CollaborationTaskStore;
@@ -479,6 +487,14 @@ export class IntegrationRuntime {
   }
   async listen(): Promise<void> {
     fs.mkdirSync(path.dirname(this.options.socketPath), { recursive: true, mode: 0o700 });
+    const directory = path.dirname(this.options.socketPath);
+    if (directory.startsWith('/tmp/td-integration-')) {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || (process.getuid && stat.uid !== process.getuid())) {
+        integrationError('INTEGRATION_SOCKET_DIRECTORY_INVALID', 'Socket directory must be private and owned by this user');
+      }
+      fs.chmodSync(directory, 0o700);
+    }
     // A stale socket may be removed only after proving no listener exists.
     if (fs.existsSync(this.options.socketPath)) {
       const { createConnection } = await import('node:net');
@@ -490,7 +506,14 @@ export class IntegrationRuntime {
       if (!fs.lstatSync(this.options.socketPath).isSocket()) integrationError('INTEGRATION_SOCKET_INVALID', 'Refusing to replace a non-socket file');
       fs.unlinkSync(this.options.socketPath);
     }
-    await new Promise<void>((resolve, reject) => { this.server.once('error', reject); this.server.listen(this.options.socketPath, () => { this.server.removeListener('error', reject); fs.chmodSync(this.options.socketPath, 0o600); resolve(); }); });
+    await new Promise<void>((resolve, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(this.options.socketPath, () => {
+        this.server.removeListener('error', reject);
+        try { fs.chmodSync(this.options.socketPath, 0o600); resolve(); }
+        catch (error) { reject(error); }
+      });
+    });
     this.sync(); await this.sessions.refreshAll(); void this.pumpReleaseBatches();
   }
   async close(): Promise<void> {

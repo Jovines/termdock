@@ -107,7 +107,8 @@ after-id 不在本组保留记录中返回 MESSAGE_NOT_FOUND；前缀不唯一�
 
 ## 管理员配置身份
 
-接口只监听本机 Unix socket `~/.termdock/integration-<port>.sock`（0600），
+接口只监听本机 Unix socket `~/.termdock/integration-<port>.sock`（0600）。
+用户目录过长时自动使用 `/tmp` 下按用户与目录摘要隔离的私有短路径（目录 0700）；CLI 会自动解析同一路径。
 不暴露 HTTP 业务接口，不使用网页转发。首版身份绑定**一个本机协作组**，
 不支持跨服务组。先在 TD 建立本机组，再查询其 ID：
 
