@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } f
 import { createPortal } from 'react-dom';
 import { Archive, ChevronRight, LayoutGrid, MessageCircle, MoreHorizontal, Pencil, RefreshCw, Trash2, X } from 'lucide-react';
 import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
+import { interruptActiveDrag } from '../../hooks/useDragInterruptionSensor';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import { removeCollaborationGroup, saveCollaborationGroup, setCollaborationGroupArchived, type CollaborationGroup } from '../../terminal/api';
 
@@ -30,6 +31,7 @@ export function CollaborationGroupActions({ group, collapsed, onOpen, onMessages
   useKeyboardLayer(menu, !!anchor, () => setAnchor(null), restoreFocus);
   useKeyboardLayer(modal, !!dialog, dismiss, restoreFocus);
   const open = (point?: { x: number; y: number }) => {
+    interruptActiveDrag();
     returnFocus.current = document.activeElement instanceof HTMLElement && root.current?.contains(document.activeElement) ? document.activeElement : trigger.current;
     const rect = trigger.current?.getBoundingClientRect();
     setAnchor(point ?? { x: rect?.left ?? 8, y: rect?.bottom ?? 8 });

@@ -2,7 +2,9 @@ import { confirmPageAction, runConfirmedPageAction, showPageFeedback } from './l
 import { readBrowserServices } from './lib/services/serviceDirectory';
 import { parseArchitectureLink, consumeArchitectureLink, queueArchitectureLink } from './lib/architecture/link';
 import { sessionCreationErrorKey, type NewSessionCreationResult, type NewSessionRequestOptions } from './lib/terminal/newSessionRequest';
-import { isKeyboardLayerOpen } from './lib/hooks/useKeyboardLayer';
+import { interruptActiveDrag, interruptibleDragSensors } from './lib/hooks/useDragInterruptionSensor';
+import { SessionCollaborationActions } from './lib/components/sidebar/SessionCollaborationActions';
+import { isKeyboardLayerOpen, useKeyboardLayer } from './lib/hooks/useKeyboardLayer';
 import { CollaborationWorkspaceFrame } from './lib/components/CollaborationWorkspaceFrame';
 import { useCollaborationNavigation } from './lib/stores/useCollaborationNavigation';
 import { LoadingSpinner as RiLoaderLine, LoadingSpinner as RiLoaderCircle } from './lib/components/ui/Loading';
@@ -976,10 +978,15 @@ function App() {
   const renameSheetFocusedRef = React.useRef(false);
   const activeSessionTabRef = React.useRef<HTMLDivElement | null>(null);
   const hasPositionedInitialActiveTabRef = React.useRef(false);
+  const tabMenuPanelRef = useRef<HTMLDivElement>(null);
   const closeTabMenu = useCallback(() => {
     setTabMenuSessionId(null);
     setTabMenuAnchor(null);
   }, []);
+  useKeyboardLayer(tabMenuPanelRef, !!tabMenuSessionId, closeTabMenu);
+  useEffect(() => {
+    if (tabMenuSessionId && !sessions.some(session => session.id === tabMenuSessionId)) closeTabMenu();
+  }, [sessions, tabMenuSessionId, closeTabMenu]);
   // 通知点击 / SW postMessage 请求聚焦的目标 session。会话列表可能还没恢复完，
   // 先记在 ref 里，等对应 session 出现在列表里再 dispatch 切换。
   const initialConnectionPriorityRef = React.useRef<string | null>(
@@ -1822,7 +1829,7 @@ function App() {
   );
 
   const handleDragEnd = useCallback((result: DropResult) => {
-    if (finishSessionDrag(result)) return;
+    if (finishSessionDrag(result) || result.reason === 'CANCEL') return;
     if (!result.destination || result.source.index === result.destination.index) return;
     window.dispatchEvent(new CustomEvent('reorder-navigation-session', { detail: {
       sourceId: arrangedSessions[result.source.index]?.id,
@@ -2258,7 +2265,7 @@ function App() {
   //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序保持不变。
   //  - type 'session'：组内排序；禁止跨组拖动（分组依据是 cwd，跨组无意义）。
   const handleGroupedDragEnd = useCallback((result: DropResult) => {
-    if (finishSessionDrag(result)) return;
+    if (finishSessionDrag(result) || result.reason === 'CANCEL') return;
     if (!result.destination) return;
     if (result.type === 'group') {
       if (result.source.index === result.destination.index) return;
@@ -2369,6 +2376,7 @@ function App() {
   // （按住不动 ~550ms）是唯一不与「点按切换 / 按住拖动排序」冲突的手势，
   // 用它打开 tab 操作菜单；左侧边栏会话行复用同一手势（见 LeftSidebar）。
   const openTabMenu = useCallback((sessionId: string, anchor?: { x: number; y: number }) => {
+    interruptActiveDrag();
     setTabMenuAnchor(anchor ?? null);
     setTabMenuSessionId(sessionId);
   }, []);
@@ -3100,8 +3108,14 @@ function App() {
         ref={isActive ? activeSessionTabRef : null}
         onContextMenu={(e) => {
           e.preventDefault();
-          setTabMenuAnchor({ x: e.clientX, y: e.clientY });
-          setTabMenuSessionId(session.id);
+          e.stopPropagation();
+          openTabMenu(session.id, { x: e.clientX, y: e.clientY });
+        }}
+        onKeyDown={(event) => {
+          if (!(event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10')) return;
+          event.preventDefault(); event.stopPropagation();
+          const rect = event.currentTarget.getBoundingClientRect();
+          openTabMenu(session.id, { x: rect.left, y: rect.bottom });
         }}
         {...bindTabLongPress(() => openTabMenu(session.id))}
         className={
@@ -3310,7 +3324,7 @@ function App() {
                 )}
               </div>
             ) : groupByFolder ? (
-            <DragDropContext onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleGroupedDragEnd}>
+            <DragDropContext sensors={interruptibleDragSensors} onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleGroupedDragEnd}>
             {renderMobileSessionDestroyTarget()}
             <Droppable droppableId="groups" type="group" direction="horizontal">
               {(groupsProvided) => (
@@ -3425,7 +3439,7 @@ function App() {
             </Droppable>
             </DragDropContext>
             ) : (
-            <DragDropContext onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleDragEnd}>
+            <DragDropContext sensors={interruptibleDragSensors} onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleDragEnd}>
             {renderMobileSessionDestroyTarget()}
             <Droppable droppableId="tabs" type="session" direction="horizontal">
               {(provided) => (
@@ -4319,10 +4333,10 @@ function App() {
         const isDesktopTabMenu = isDesktopViewport;
         const menuPanelStyle = isDesktopTabMenu
           ? getDesktopTabMenuPosition(tabMenuAnchor)
-          : { paddingBottom: safeBottomInset };
+          : { paddingBottom: safeBottomInset, maxHeight: 'calc(100dvh - 3rem)' };
         const menuPanelClassName = isDesktopTabMenu
           ? 'fixed z-menu-panel overflow-y-auto overflow-x-hidden rounded-lg bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in'
-          : 'fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in sm:bottom-auto sm:top-[15%]';
+          : 'fixed inset-x-3 bottom-6 z-menu-panel mx-auto flex max-w-sm flex-col overflow-hidden rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in';
         const menuHeaderClassName = isDesktopTabMenu
           ? 'border-b border-border/15 px-3 py-2'
           : 'border-b border-border/15 px-4 py-3';
@@ -4340,20 +4354,25 @@ function App() {
                 isDesktopTabMenu ? 'bg-transparent' : 'bg-[var(--app-backdrop-soft)] backdrop-blur-sm'
               }`}
               onClick={closeTabMenu}
-              aria-label="Close menu"
+              aria-label={t('tab.closeMenu')}
             />
             <div
+              ref={tabMenuPanelRef}
+              role="dialog"
+              aria-modal="true"
+              aria-label={`${t('tab.session')}: ${menuName}`}
+              tabIndex={-1}
               className={menuPanelClassName}
               style={menuPanelStyle}
             >
-              <div className={menuHeaderClassName}>
+              <div className={`${menuHeaderClassName} shrink-0`}>
                 <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.session')}</div>
                 <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{menuName}</div>
                 {ts?.cwd && (
                   <div className="mt-0.5 truncate text-[11px] text-muted-foreground/80">{ts.cwd}</div>
                 )}
               </div>
-              <div className="flex flex-col py-1">
+              <div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain py-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -4472,6 +4491,13 @@ function App() {
                     </span>
                   </button>
                 )}
+                <SessionCollaborationActions key={menuSession.id} sessionId={menuSession.id} backendSessionId={ts?.terminalSessionId}
+                  itemClassName={menuItemClassName} iconClassName={menuIconClassName} onDone={closeTabMenu}
+                  onOpen={(groupId) => {
+                    closeTabMenu();
+                    useCollaborationNavigation.getState().open(groupId);
+                    if (!showPinnedLeft) useSidebarStore.getState().closeLeft();
+                  }} />
                 <div className="my-1 border-t border-border/15" />
                 {menuSession.mode === 'tmux' ? (
                   <button
@@ -4509,25 +4535,19 @@ function App() {
                   </button>
                 )}
                 {!isDesktopTabMenu && (
-                  <button
-                    type="button"
-                    className="flex items-center justify-center px-4 py-2 text-[11px] text-muted-foreground/80 transition hover:text-foreground"
-                    onClick={() => {
-                      closeTabMenu();
-                    }}
-                  >
+                  <p className="px-4 py-2 text-[11px] leading-5 text-muted-foreground/80">
                     {t('tab.longPressTip')}
-                  </button>
+                  </p>
                 )}
               </div>
               {!isDesktopTabMenu && (
-                <div className="border-t border-border/15 px-3 py-2">
+                <div className="shrink-0 border-t border-border/15 px-3 py-2">
                   <button
                     type="button"
                     onClick={closeTabMenu}
                     className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
                   >
-                    {t('common.cancel')}
+                    {t('tab.closeMenu')}
                   </button>
                 </div>
               )}

@@ -44,6 +44,7 @@ import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndi
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
+import { interruptActiveDrag, interruptibleDragSensors } from '../../hooks/useDragInterruptionSensor';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import {
   archiveExecutionSession,
@@ -899,10 +900,21 @@ export function LeftSidebar(
           {...(dragHandleProps ?? {})}
           onContextMenu={(event) => {
             // 桌面右键 = 打开会话操作菜单；触屏超长按由 pointer 手势触发，
-            // 与 dnd 的 120ms 拖拽抬起共存（松手无移动不会排序）。
+            // 打开浮层前取消可能已激活的拖拽。
             if (!onSessionMenu) return;
             event.preventDefault();
+            event.stopPropagation();
+            interruptActiveDrag();
+            setSwipedSessionId(null);
             onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
+          }}
+          onKeyDown={(event) => {
+            if (!onSessionMenu || !(event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10')) return;
+            event.preventDefault();
+            event.stopPropagation();
+            interruptActiveDrag();
+            const rect = event.currentTarget.getBoundingClientRect();
+            onSessionMenu(session.id, { x: rect.left, y: rect.bottom });
           }}
           onClick={() => {
             setNewSessionComposerOpen(false);
@@ -1729,6 +1741,7 @@ export function LeftSidebar(
     folderKey?: string,
   ): React.ReactNode => (
     <DragDropContext
+      sensors={interruptibleDragSensors}
       onBeforeCapture={captureSidebarDropGeometry}
       onDragStart={handleSidebarDragStart}
       onDragEnd={(result) => finishSidebarDrag(
@@ -1856,6 +1869,7 @@ export function LeftSidebar(
         ) : groupByFolder ? (
           <div className="flex flex-1 flex-col">
             <DragDropContext
+              sensors={interruptibleDragSensors}
               onBeforeCapture={captureSidebarDropGeometry}
               onDragStart={handleSidebarDragStart}
               onDragEnd={(result) => finishSidebarDrag(handleGroupedDragEnd, result)}

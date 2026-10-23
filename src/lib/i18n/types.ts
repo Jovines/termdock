@@ -1286,6 +1286,15 @@ export type TranslationDictionary = {
     renamePlaceholder: string;
     copyCwd: string;
     copyCwdHint: string;
+    closeMenu: string;
+    openGroup: string;
+    leaveGroup: string;
+    leaveGroupShortHint: string;
+    leaveGroupConfirm: string;
+    leaveGroupQuestion: (params: TranslatorParams) => string;
+    leaveGroupHint: string;
+    leavingGroup: string;
+    leaveGroupFailed: string;
     fontSize: string;
     fontSizeHint: string;
     fontSizeReset: string;

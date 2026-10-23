@@ -1,9 +1,10 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
+import { interruptActiveDrag } from './useDragInterruptionSensor';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 
 // 「超长按」阈值：必须明显长于 @hello-pangea/dnd 触屏拖拽的 120ms 抬起，
 // 让「按住并拖动排序」和「按住不动出菜单」两个手势可区分。期间 tab 会先
-// 进入 dnd 抬起态（正好作为按压反馈），松手无移动时 dnd 自动取消、不排序。
+// 进入 dnd 抬起态；菜单触发时必须主动释放拖拽，停止移动和自动滚动。
 const SUPER_LONG_PRESS_MS = 550;
 const MOVE_TOLERANCE_PX = 10;
 
@@ -20,7 +21,7 @@ export interface SuperLongPressHandlers {
  * 触屏/手写笔「超长按」手势。系统 contextmenu 在移动端不可靠（全局禁用了
  * -webkit-touch-callout / user-select，iOS PWA 完全不触发），长按手势只能
  * 自己实现。触发后吞掉随后的 click，避免误触发元素本身的点击行为
- * （如切换会话）。dnd 拖拽抬起（120ms）后无移动松手不会产生排序，双方共存。
+ * （如切换会话）。菜单触发前主动取消 dnd 拖拽，避免浮层下的行继续移动。
  *
  * 用法：const bindSuperLongPress = useSuperLongPress();
  *      <div {...bindSuperLongPress(() => openMenu(id))} />
@@ -45,8 +46,28 @@ export function useSuperLongPress() {
     pointerRef.current = null;
   }, [clearTimer]);
 
+  useEffect(() => {
+    const cancel = () => { reset(); firedRef.current = false; };
+    const visibility = () => { if (document.hidden) cancel(); };
+    window.addEventListener('blur', cancel);
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      reset();
+      if (suppressClearTimerRef.current != null) window.clearTimeout(suppressClearTimerRef.current);
+      window.removeEventListener('blur', cancel);
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [reset]);
+
   const bind = useCallback((onFire: () => void): SuperLongPressHandlers => ({
     onPointerDown: (event) => {
+      // A new physical press must not inherit suppression from a release whose
+      // compatibility click landed on the overlay instead of the original row.
+      suppressClickRef.current = false;
+      if (suppressClearTimerRef.current != null) {
+        window.clearTimeout(suppressClearTimerRef.current);
+        suppressClearTimerRef.current = null;
+      }
       if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
       reset();
       firedRef.current = false;
@@ -59,6 +80,7 @@ export function useSuperLongPress() {
         timerRef.current = null;
         if (!pointerRef.current) return;
         firedRef.current = true;
+        interruptActiveDrag();
         onFire();
       }, SUPER_LONG_PRESS_MS);
     },
