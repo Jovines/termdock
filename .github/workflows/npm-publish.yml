@@ -56,6 +56,10 @@ jobs:
         run: >-
           npx vitest run --maxWorkers=2
           src/lib/federation
+          src/components/services
+          src/components/FederationAccess.test.tsx
+          src/lib/services
+          src/lib/zIndexTokens.test.ts
           src/server/federation
           src/server/android/adb.test.ts
           src/server/android/scrcpyForward.test.ts

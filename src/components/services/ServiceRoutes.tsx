@@ -5,7 +5,10 @@ import { addServiceAddress, authorizeEntryRoute, connectionAddresses, connection
 import { createInviteLink } from '../../lib/federation/inviteLink';
 import { listServiceConnections, type ServiceConnection, type ServiceRoute } from '../../lib/services/serviceDirectory';
 
-export function ServiceRoutes({ service, onBusyChange }: { service: ServiceConnection; onBusyChange: (busy: boolean) => void }) {
+export function ServiceRoutes({ service, onBusyChange, recoverEntry, onRecovered, onCancelRecovery }: {
+  service: ServiceConnection; onBusyChange: (busy: boolean) => void;
+  recoverEntry?: ServiceRoute; onRecovered?: () => Promise<void>; onCancelRecovery?: () => void;
+}) {
   const target = { ...service, targetPeerId: service.targetPeerId!, serviceName: service.label };
   const [routes, setRoutes] = useState(() => service.routes ?? connectionRoutes(target));
   const [entries, setEntries] = useState<ServiceConnection[]>([]);
@@ -14,6 +17,20 @@ export function ServiceRoutes({ service, onBusyChange }: { service: ServiceConne
   const [passwordEntry, setPasswordEntry] = useState<ServiceConnection>(), [password, setPassword] = useState('');
   const [address, setAddress] = useState(''), [notice, setNotice] = useState('');
   const [addingAddress, setAddingAddress] = useState(false);
+  const [recoveryAccess, setRecoveryAccess] = useState<{ canManage: boolean; active: boolean }>();
+  const checkRecovery = async () => {
+    const access = await inspectEntryRoute(recoverEntry!, target.targetPeerId);
+    const result = { canManage: access.canManage, active: access.grants.some(grant => grant.active) };
+    setRecoveryAccess(result); return result;
+  };
+  useEffect(() => {
+    if (!recoverEntry) return;
+    let stopped = false;
+    void inspectEntryRoute(recoverEntry, target.targetPeerId).then(access => {
+      if (!stopped) setRecoveryAccess({ canManage: access.canManage, active: access.grants.some(grant => grant.active) });
+    }).catch(() => { if (!stopped) setError('无法核对入口授权，请检查连接或联系入口管理员。'); });
+    return () => { stopped = true; };
+  }, [recoverEntry?.targetPeerId, recoverEntry?.url, target.targetPeerId]);
   const [removing, setRemoving] = useState<ServiceRoute>(), [sharing, setSharing] = useState<string>(), [copied, setCopied] = useState(false);
   useEffect(() => { let done = false; void listServiceConnections().then(items => { if (!done) setEntries(items.filter(item => item.targetPeerId && item.targetPeerId !== service.targetPeerId)); }).catch(() => { if (!done) setError('暂时无法读取可用服务。'); }).finally(() => { if (!done) setLoading(false); }); return () => { done = true; }; }, [service.targetPeerId]);
   const name = (route: ServiceRoute) => entries.find(item => item.targetPeerId === route.targetPeerId)?.label || new URL(route.url).host;
@@ -30,6 +47,22 @@ export function ServiceRoutes({ service, onBusyChange }: { service: ServiceConne
       await saveServiceRoutes(service, next); setRoutes(next); setPasswordEntry(undefined); setPassword('');
     });
   };
+  if (recoverEntry) return <div className="service-form">
+    <p className="service-help">仅恢复此设备通过“{name(recoverEntry)}”连接“{service.label}”的中转权限。目标服务会单独验证访问权限。</p>
+    {!recoveryAccess && !error && <p role="status">正在核对入口授权…</p>}
+    {recoveryAccess && !recoveryAccess.active && !recoveryAccess.canManage && <p role="status" className="service-help">当前设备没有此入口的授权管理权限。请让入口管理员授予此设备到“{service.label}”的中转权限或分享对应的备用连接邀请。</p>}
+    {recoveryAccess && (recoveryAccess.active || recoveryAccess.canManage) && <button className="service-button service-primary" disabled={busy} onClick={() => void run(async () => {
+      const before = await checkRecovery();
+      if (!before.active) {
+        if (!before.canManage) throw new Error('AUTHORIZATION_DENIED');
+        await authorizeEntryRoute(target, recoverEntry);
+      }
+      if (!(await checkRecovery()).active) throw new Error('AUTHORIZATION_DENIED');
+      await onRecovered?.();
+    })}>{busy ? '正在核对并连接…' : recoveryAccess.active ? '核对授权并重新连接' : '授权此设备并重新连接'}</button>}
+    {error && <p role="alert" className="service-error">{error}</p>}
+    <button className="service-button service-secondary" disabled={busy} onClick={onCancelRecovery}>取消</button>
+  </div>;
   if (sharing) return <div className="service-form"><p className="service-help">把链接发给需要使用此备用连接的人。它只允许通过入口连接“{service.label}”，对方仍需获得目标服务的访问权限。</p><label className="service-field"><span>备用连接邀请</span><input readOnly value={sharing} onFocus={event => event.target.select()} /></label><button type="button" className="service-button service-primary" onClick={() => { void navigator.clipboard.writeText(sharing).then(() => setCopied(true)).catch(() => setError('无法自动复制，请长按链接复制。')); }}><Copy size={16} />{copied ? '已复制' : '复制邀请链接'}</button><button type="button" className="service-button service-secondary" onClick={() => { setSharing(undefined); setCopied(false); }}>返回备用连接</button>{error && <p role="alert" className="service-error">{error}</p>}</div>;
   if (passwordEntry) return <form className="service-form" onSubmit={event => { event.preventDefault(); void enable(passwordEntry, password).finally(() => setPassword('')); }}><p className="service-help">需要“{passwordEntry.label}”的管理员授权。若这是你的服务，可以使用它的密码；否则请管理员分享备用连接邀请。</p><label className="service-field"><span>入口服务密码</span><input type="password" required value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" disabled={busy} autoFocus /></label><button type="submit" className="service-button service-primary" disabled={busy || !password}>{busy ? '正在授权…' : '授权并启用'}</button><button type="button" className="service-button service-secondary" disabled={busy} onClick={() => { setPasswordEntry(undefined); setPassword(''); }}>取消</button>{error && <p role="alert" className="service-error">{error}</p>}</form>;
   const directRoutes = routes.filter(route => route.targetPeerId === target.targetPeerId);

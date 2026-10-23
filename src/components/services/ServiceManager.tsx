@@ -8,6 +8,7 @@ import { parseInviteLink } from '../../lib/federation/inviteLink';
 
 export interface ServiceNavigation { title?: string; back?: () => void }
 export interface ServiceManagerProps {
+  initialServicePage?: { kind: 'edit' | 'routes'; service: ServiceConnection };
   current?: ServiceConnection;
   renderRelayServices?: (service: ServiceConnection, onBusy: (busy: boolean) => void) => ReactNode;
   renderRoutes?: (service: ServiceConnection, onBusy: (busy: boolean) => void) => ReactNode;
@@ -28,7 +29,7 @@ export interface ServiceManagerProps {
 }
 type Page = { kind: 'list' } | { kind: 'add'; input?: string; passwordRequired?: boolean } | { kind: 'edit'; service: ServiceConnection } | { kind: 'routes' | 'relay-services'; service: ServiceConnection };
 type CertificateReview = { origin: string; fingerprint: string; trustedFingerprint?: string; receipt: string; retry: () => Promise<{ passwordRequired?: boolean } | void>; changed: boolean; confirmed: boolean; generation: number; retryInput: string };
-export function ServiceManager({ current, renderRoutes, renderRelayServices, onOpen, onAdd, onInvite, hideHeader, onNavigation, onBusyChange, initiallyAdding = false, certificateTrust }: ServiceManagerProps) {
+export function ServiceManager({ current, renderRoutes, renderRelayServices, onOpen, onAdd, onInvite, hideHeader, onNavigation, onBusyChange, initiallyAdding = false, initialServicePage, certificateTrust }: ServiceManagerProps) {
   const { t } = useI18n();
   const validateInput = (input: string) => {
     try {
@@ -44,7 +45,7 @@ export function ServiceManager({ current, renderRoutes, renderRelayServices, onO
   };
   const [services, setServices] = useState<ServiceConnection[]>([]);
   const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState<Page>(initiallyAdding ? { kind: 'add' } : { kind: 'list' });
+  const [page, setPage] = useState<Page>(initialServicePage || (initiallyAdding ? { kind: 'add' } : { kind: 'list' }));
   const [busy, setBusyState] = useState(false);
   const setBusy = useCallback((value: boolean) => { setBusyState(value); onBusyChange?.(value); }, [onBusyChange]);
   const [error, setError] = useState('');

@@ -27,6 +27,27 @@ async function setup(ttl = 60000) {
   return { router, a, phone };
 }
 describe('RelayRouter and RelayClient', () => {
+  it('rejects entry-to-itself opens independently of grants without blocking other services publishing themselves', async () => {
+    const router = new RelayRouter<string>({ authenticate: () => 'phone', allowRegister: () => true, allowRoute: () => true, isLocalTarget: id => id === 'entry' });
+    cleanups.push(() => router.close());
+    const phone = await pair(), provider = await pair();
+    await router.attach(phone.server, null); await router.attach(provider.server, null);
+    const registered = once(provider.server, 'message');
+    provider.client.send(JSON.stringify({ type: 'register', serviceIds: ['other-service'], ttlMs: 10000 })); await registered;
+    expect(router.hasRoute('other-service')).toBe(true);
+    const rejected = next(phone.client); phone.client.send(JSON.stringify({ type: 'open', streamId: 'self', serviceId: 'entry' }));
+    expect(await rejected).toMatchObject({ type: 'close', code: 'RELAY_SELF_TARGET' });
+    expect(router.hasRoute('other-service')).toBe(true);
+  });
+  it('marks an authenticated route denial but does not classify a missing provider as authorization loss', async () => {
+    let permitted = false;
+    const router = new RelayRouter<string>({ authenticate: () => 'phone', allowRegister: () => false, allowRoute: () => permitted });
+    cleanups.push(() => router.close()); const phone = await pair(); await router.attach(phone.server, null);
+    let reply = next(phone.client); phone.client.send(JSON.stringify({ type: 'open', streamId: 'denied', serviceId: 'target' }));
+    expect(await reply).toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED' });
+    permitted = true; reply = next(phone.client); phone.client.send(JSON.stringify({ type: 'open', streamId: 'offline', serviceId: 'target' }));
+    expect((await reply).code).toBeUndefined();
+  });
   it('routes opaque ciphertext phone → B → A → C without a B-to-C dialer', async () => {
     const { a, phone } = await setup();
     const c = await pair();

@@ -165,6 +165,8 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, di
     }
   };
   router.get('/capabilities', run((_req, res) => { res.json({ protocol_version: 2, server_version: getTermdockVersion(), limits: COLLAB_LIMITS,
+    relay_authorization_errors: true, relay_authorization_errors_min_version: '1.4.351',
+    relay_self_target_guard: true, relay_self_target_guard_min_version: '1.4.351',
     route_diagnostics: !!diagnoseRoute, route_identity_recovery: !!diagnoseRoute, route_identity_recovery_min_version: '1.4.321',
     agent_launch_generation_consistency: true, agent_launch_generation_consistency_min_version: '1.4.322',
     terminal_input_check_diagnostics: true,

@@ -30,6 +30,7 @@ export interface FederationInviteInput {
   expiresAt?: number;
 }
 export interface FederationAccessProps {
+  initialServicePage?: { kind: 'edit' | 'routes'; service: ServiceConnection };
   onConnect: (connection: FederationConnection) => void | Promise<void>;
   onClose: () => void;
   onConnectWithPassword?: (connection: FederationConnection, password: string) => Promise<void>;
@@ -81,7 +82,7 @@ function qrColors() {
   return brightness(background) < brightness(foreground) ? { dark: background, light: foreground } : { dark: foreground, light: background };
 }
 /** Pairing codes remain in component memory only and are cleared after successful use. */
-export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, sessions = [], grants = [], invitations = [], onCreateInvite, onRevokeInvitation, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
+export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, initialServicePage, sessions = [], grants = [], invitations = [], onCreateInvite, onRevokeInvitation, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
   const [initialNeedsPassword, setInitialNeedsPassword] = useState(false);
   const [initialPassword, setInitialPassword] = useState('');
   const [serviceNavigation, setServiceNavigation] = useState<ServiceNavigation>({});
@@ -192,7 +193,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
         {overview && !serviceNavigation.title && <div className="flex gap-6" role="tablist" aria-label="管理内容">{([['services', '服务'], ['devices', '设备']] as const).map(([value, name]) => <button type="button" key={value} role="tab" aria-selected={tab === value} aria-controls={`federation-${value}`} id={`federation-tab-${value}`} className={`min-h-11 border-b-2 px-1 text-sm transition ${tab === value ? 'border-primary font-medium text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => { setTab(value); setAdvanced(false); setPendingRevoke(undefined); setError(''); setNotice(''); }}>{name}{value === 'devices' && devices.length > 0 && <span className="ml-1.5 text-xs text-muted-foreground">{devices.length}</span>}</button>)}</div>}
       </header>
       <div className="min-h-0 overflow-y-auto overscroll-contain px-5 py-4 pb-[max(20px,env(safe-area-inset-bottom))]">
-        {((overview && tab === 'services') || (adding && !inviting && !initialInvite)) && <ServiceManager renderRelayServices={(service, onBusyChange) => <RelayServices service={service} onBusyChange={onBusyChange} onConnect={onConnect} onConnectWithPassword={onConnectWithPassword} />} renderRoutes={(service, onBusyChange) => <ServiceRoutes service={service} onBusyChange={onBusyChange} />} hideHeader initiallyAdding={adding} current={currentServiceId ? { id: currentServiceId, targetPeerId: currentServiceId, url: currentServiceOrigin || location.origin, label: currentServiceName || '当前服务' } : undefined} onNavigation={setServiceNavigation} onBusyChange={setBusy} onInvite={onCreateInvite ? beginInvite : undefined}
+        {((overview && tab === 'services') || (adding && !inviting && !initialInvite)) && <ServiceManager initialServicePage={initialServicePage} renderRelayServices={(service, onBusyChange) => <RelayServices service={service} onBusyChange={onBusyChange} onConnect={onConnect} onConnectWithPassword={onConnectWithPassword} />} renderRoutes={(service, onBusyChange) => <ServiceRoutes service={service} onBusyChange={onBusyChange} />} hideHeader initiallyAdding={adding} current={currentServiceId ? { id: currentServiceId, targetPeerId: currentServiceId, url: currentServiceOrigin || location.origin, label: currentServiceName || '当前服务' } : undefined} onNavigation={setServiceNavigation} onBusyChange={setBusy} onInvite={onCreateInvite ? beginInvite : undefined}
           onOpen={async service => { if (onOpenService) return onOpenService(service); else if (service.targetPeerId) await connect({ ...service, targetPeerId: service.targetPeerId, serviceName: service.label }); else if (onAddService) await onAddService(service.url); }}
           onAdd={async (input, password) => {
             if (onAddService) return onAddService(input, password);

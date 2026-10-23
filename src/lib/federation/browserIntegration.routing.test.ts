@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConnectionAccessError } from './accessFailure';
 const mocks = vi.hoisted(() => ({ connect: vi.fn(), relay: vi.fn(), saved: vi.fn(), save: vi.fn(), boot: 'B' }));
 vi.mock('./secureClient', () => ({ connect: mocks.connect, SecureSocket: class {} }));
 vi.mock('./relaySocket', () => ({ createRelaySocketFactory: mocks.relay }));
@@ -35,6 +36,40 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('browser federation entry routing', () => {
+  it('pauses an access-blocked target without network retries, retaining saved metadata until explicit recovery', async () => {
+    const selected = { url: 'https://b.example', targetPeerId: 'B', routes: [] };
+    mocks.saved.mockReturnValue(selected);
+    const integration = await import('./browserIntegration');
+    const denied = new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { targetServiceId: 'B', entryServiceId: 'A', entryUrl: 'https://a.example' });
+    integration.pauseConnectionAccess(denied);
+    for (let i = 0; i < 3; i++) await expect(integration.getActiveClient()).rejects.toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED' });
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.saved()).toBe(selected);
+    integration.resumeConnectionAccess(); await integration.getActiveClient();
+    expect(integration.currentSecureClient()?.targetPeerId).toBe('B');
+  });
+  it('filters and deduplicates directory targets by the authenticated entry identity, preserving same-name different services', async () => {
+    const integration = await import('./browserIntegration');
+    await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B' });
+    clients.get('B')!.request.mockResolvedValue({ canManage: true, items: [
+      { serviceId: 'B', label: 'Work', url: 'https://other-address.example', available: true, authorized: true },
+      { serviceId: 'C', label: 'Work', available: true, authorized: true },
+      { serviceId: 'C', label: 'Duplicate', available: true, authorized: true },
+    ] });
+    expect((await integration.listRelayTargets({ id: 'B', url: 'https://alias.example', targetPeerId: 'B', label: 'Alias' })).items).toEqual([
+      { serviceId: 'C', label: 'Work', available: true, authorized: true },
+    ]);
+  });
+  it('rejects self relay preparation, inspection, grants, invitations and dirty saved intents before any connection or writes', async () => {
+    const integration = await import('./browserIntegration');
+    const target = { url: 'https://alias.example', targetPeerId: 'B' }, route = { url: 'https://other.example', targetPeerId: 'B' };
+    for (const work of [() => integration.prepareRelayConnection(route, 'B'), () => integration.inspectEntryRoute(route, 'B'),
+      () => integration.authorizeEntryRoute(target, route, 'must-not-submit'), () => integration.createEntryInvitation(target, route),
+      () => integration.connectDevice({ ...target, entryServiceId: 'B' })]) {
+      await expect(work()).rejects.toMatchObject({ code: 'RELAY_SELF_TARGET' });
+    }
+    expect(mocks.connect).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled(); expect(nativeFetch).not.toHaveBeenCalled();
+  });
   it.each(['identity-first', 'identity-last'] as const)('retains an observed pin mismatch when every address fails (%s)', async order => {
     mocks.saved.mockReturnValue({ url: location.origin, targetPeerId: 'B', routes: [{ url: 'https://alternate.example', targetPeerId: 'B' }] });
     const mismatch = Object.assign(new Error('private-mismatched-identities'), { name: 'UnexpectedPeerError' });
@@ -694,6 +729,8 @@ describe('browser federation entry routing', () => {
         client.request.mockImplementation(async (packet: { type: string }) => {
           if (packet.type === 'route-targets') return { items: [{ serviceId: 'A', available: mode !== 'offline-tunnel', authorized: mode === 'authorized' || mode === 'directory-discovery' || mode === 'revoked-target' }], canManage: mode !== 'unprivileged' };
           if (packet.type === 'route-access') return { grants: mode === 'revoked-route' ? [{ subjectId: 'phone', targetServiceId: 'A', revokedAt: 1 }] : [] };
+          if (packet.type === 'route-ticket' && ['admin', 'unprivileged', 'revoked-route'].includes(mode)) throw new Error('AUTHORIZATION_DENIED');
+          if (packet.type === 'route-ticket' && mode === 'offline-tunnel') throw new Error('ROUTE_UNAVAILABLE');
           return { routeToken: 'B-ticket' };
         });
         entryRequests.push(client.request);
@@ -702,12 +739,11 @@ describe('browser federation entry routing', () => {
       return client;
     });
     const integration = await import('./browserIntegration');
-    if (mode === 'authorized' || mode === 'admin' || mode === 'directory-discovery') {
+    if (mode === 'authorized' || mode === 'directory-discovery') {
       await integration.connectDevice(a);
       expect(integration.currentSecureClient()?.targetPeerId).toBe('A');
       expect(integration.currentConnectionPath()).toBe('relay');
       expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ targetPeerId: 'A', routes: [{ url: 'https://b.internal', targetPeerId: 'B' }] }));
-      if (mode === 'admin') expect(entryRequests[0]).toHaveBeenCalledWith({ type: 'route-grant', serviceId: 'A', subjectId: 'phone' });
     } else {
       await expect(integration.connectDevice(a)).rejects.toThrow();
       expect(mocks.save).not.toHaveBeenCalled();

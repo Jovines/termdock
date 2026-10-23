@@ -101,6 +101,7 @@ export async function listServiceConnections(): Promise<ServiceConnection[]> {
   try { return await importing; } finally { importing = undefined; }
 }
 export async function saveServiceConnection(input: ServiceConnection): Promise<ServiceConnection[]> {
+  if (input.entryServiceId && input.entryServiceId === input.targetPeerId) throw new Error('不能保存服务到自身的中转；请将其它地址添加为备用地址。');
   const item = parseSavedService(input);
   if (!item) throw new Error('服务地址无效。');
   const bridge = nativeBridge();
@@ -115,6 +116,7 @@ export async function saveServiceConnection(input: ServiceConnection): Promise<S
 /** Background reconnects may update metadata but cannot undo an explicit removal
  * from another workspace. Native and browser directories honor the same rule. */
 export async function rememberServiceConnection(input: ServiceConnection): Promise<ServiceConnection[]> {
+  if (input.entryServiceId && input.entryServiceId === input.targetPeerId) throw new Error('不能保存服务到自身的中转；请将其它地址添加为备用地址。');
   const item = parseSavedService(input);
   if (!item) throw new Error('服务地址无效。');
   const bridge = nativeBridge();

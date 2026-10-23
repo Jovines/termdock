@@ -97,6 +97,16 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
 }
 
 describe('federation runtime over real encrypted WebSocket', () => {
+  it('rejects self target grant, ticket and invitation before invoking configuration or authorization writers', async () => {
+    const grant = vi.fn(), invite = vi.fn();
+    const f = await fixture({ grantRouteAccess: grant, createRouteInvitation: invite, hasRouteGrant: () => true });
+    const owner = await f.connect(); await owner.pair();
+    for (const type of ['route-grant', 'route-ticket', 'route-invite-create']) {
+      owner.channel.send({ id: type, type, serviceId: f.runtime.serviceId, subjectId: owner.identity.peerId });
+      expect(await owner.take(type)).toMatchObject({ type: 'error', error: 'RELAY_SELF_TARGET' });
+    }
+    expect(grant).not.toHaveBeenCalled(); expect(invite).not.toHaveBeenCalled(); expect(f.issueRouteTicket).not.toHaveBeenCalled();
+  });
   it('lets administrators revoke pending session invitations and denies their redemption', async () => {
     const f = await fixture(), owner = await f.connect(); await owner.pair();
     owner.channel.send({ type: 'invite-create', id: 'invite', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view', 'session.input'] });

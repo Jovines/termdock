@@ -1,7 +1,8 @@
 import type { Packet } from '../../server/federation/packets';
+import { ConnectionAccessError } from './accessFailure';
 
-export class DeviceAuthorizationRequired extends Error {
-  constructor() { super('Device authorization expired or revoked'); }
+export class DeviceAuthorizationRequired extends ConnectionAccessError {
+  constructor() { super('TARGET_AUTHORIZATION_REQUIRED'); }
 }
 
 /** Only an authenticated target's permission response can invalidate a login.

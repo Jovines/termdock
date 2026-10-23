@@ -311,7 +311,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             send({ type: 'result', id: packet.id, ok: true });
           } else if (packet.type === 'permissions') {
             const grants = store.listEffective({ subjectId, serviceId });
-            send({ type: 'result', id: packet.id, subjectId, serviceId, fullService: full(subjectId), grants, httpWindow: MAX_TRANSFER_WINDOW, binaryChunks: true, webTransport: options.webTransport?.() });
+            send({ type: 'result', id: packet.id, subjectId, serviceId, fullService: full(subjectId), grants, httpWindow: MAX_TRANSFER_WINDOW, binaryChunks: true, relayAuthorizationErrors: true, relaySelfTargetGuard: true, webTransport: options.webTransport?.() });
           } else if (packet.type === 'session-list') {
             const inventory = await sessionInventory();
             const seen = new Set<string>();
@@ -328,6 +328,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             if (!options.issueSelfRelayTicket) throw new Error('SELF_RELAY_UNAVAILABLE');
             send({ type: 'result', id: packet.id, serviceId: subjectId, ...options.issueSelfRelayTicket(subjectId) });
           } else if (packet.type === 'route-invite-create') {
+            if (packet.serviceId === serviceId) throw new Error('RELAY_SELF_TARGET');
             check('authorization.manage');
             if (!options.createRouteInvitation || typeof packet.serviceId !== 'string' || !packet.serviceId || packet.serviceId.length > 512) throw new Error('ROUTE_NOT_AVAILABLE');
             send({ type: 'result', id: packet.id, ...options.createRouteInvitation(subjectId, packet.serviceId) });
@@ -344,6 +345,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             const canManage = allowed(subjectId, 'authorization.manage');
             send({ type: 'result', id: packet.id, canManage, grants: canManage ? all : all.filter(grant => grant.subjectId === subjectId) });
           } else if (packet.type === 'route-grant') {
+            if (packet.serviceId === serviceId) throw new Error('RELAY_SELF_TARGET');
             check('authorization.manage');
             if (!options.grantRouteAccess || typeof packet.serviceId !== 'string' || typeof packet.subjectId !== 'string') throw new Error('ROUTE_NOT_AVAILABLE');
             send({ type: 'result', id: packet.id, grant: await options.grantRouteAccess(subjectId, packet.serviceId, packet.subjectId, typeof packet.url === 'string' ? packet.url : undefined) });
@@ -353,6 +355,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
             if (!options.revokeRouteAccess || typeof packet.grantId !== 'string') throw new Error('ROUTE_NOT_AVAILABLE');
             send({ type: 'result', id: packet.id, revoked: options.revokeRouteAccess(packet.grantId) });
           } else if (packet.type === 'route-ticket') {
+            if (packet.serviceId === serviceId) throw new Error('RELAY_SELF_TARGET');
             if (typeof packet.serviceId !== 'string' || !options.hasRouteGrant?.(subjectId, packet.serviceId)) throw new Error('AUTHORIZATION_DENIED');
             if (!options.issueRouteTicket || typeof packet.serviceId !== 'string' || !packet.serviceId || packet.serviceId.length > 512) throw new Error('ROUTE_NOT_AVAILABLE');
             send({ type: 'result', id: packet.id, ...options.issueRouteTicket(subjectId, packet.serviceId) });

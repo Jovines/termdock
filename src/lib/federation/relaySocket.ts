@@ -1,5 +1,6 @@
 import { RELAY_CLIENT_CONNECT_TIMEOUT_MS } from '../../server/federation/streamLimits.js';
 import { fromBase64, toBase64 } from '../../server/federation/packets.js';
+import { ConnectionAccessError, type AccessFailureContext } from './accessFailure';
 
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_BUFFER_BYTES = 1024 * 1024;
@@ -9,6 +10,7 @@ export class RelaySocket extends EventTarget {
   readonly protocol = ''; readonly extensions = '';
   binaryType: BinaryType = 'arraybuffer';
   readyState = 0;
+  transportFailure?: Error;
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
@@ -19,7 +21,7 @@ export class RelaySocket extends EventTarget {
   private requested = false;
   private deadline: ReturnType<typeof setTimeout>;
   get bufferedAmount() { return this.upstream.bufferedAmount; }
-  constructor(readonly url: string, targetServiceId: string, socketFactory: (url: string) => WebSocket = url => new WebSocket(url)) {
+  constructor(readonly url: string, targetServiceId: string, socketFactory: (url: string) => WebSocket = url => new WebSocket(url), context: AccessFailureContext = {}) {
     super();
     if (!/^[a-zA-Z0-9_.:-]{1,160}$/.test(targetServiceId)) throw new Error('Invalid target identity');
     const started = performance.now();
@@ -45,7 +47,13 @@ export class RelaySocket extends EventTarget {
           clearTimeout(this.deadline); this.readyState = 1;
           const e = new Event('open'); this.dispatchEvent(e); this.onopen?.(e); return;
         }
-        if (frame.type === 'close') { this.finish(1001, 'Relay route closed'); this.upstream.close(); return; }
+        if (frame.type === 'close') {
+          if (frame.code === 'RELAY_AUTHORIZATION_REQUIRED' || frame.reason === 'Authorization revoked') {
+            this.transportFailure = new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { ...context, targetServiceId });
+          }
+          if (frame.code === 'RELAY_SELF_TARGET') this.transportFailure = new ConnectionAccessError('RELAY_SELF_TARGET', { ...context, targetServiceId });
+          this.finish(1001, this.transportFailure?.message || 'Relay route closed'); this.upstream.close(); return;
+        }
         if (frame.type !== 'data' || this.readyState !== 1 || frame.encoding !== 'base64' || typeof frame.payload !== 'string'
           || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(frame.payload)) throw new Error('Invalid ciphertext relay frame');
         const bytes = fromBase64(frame.payload);
@@ -87,6 +95,6 @@ export class RelaySocket extends EventTarget {
   }
 }
 
-export function createRelaySocketFactory(targetServiceId: string): (url: string) => WebSocket {
-  return url => new RelaySocket(url, targetServiceId) as unknown as WebSocket;
+export function createRelaySocketFactory(targetServiceId: string, context: AccessFailureContext = {}): (url: string) => WebSocket {
+  return url => new RelaySocket(url, targetServiceId, undefined, context) as unknown as WebSocket;
 }

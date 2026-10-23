@@ -14,7 +14,7 @@ vi.mock('./browserIntegration', () => ({
   authenticateKnownConnection:mocks.authenticate,connectDevice: mocks.connect, connectOpenService: vi.fn(), getIdentity: async () => ({ peerId: 'phone' }),
   currentSecureClient: () => mocks.client, currentEntryClient: () => undefined,
   getActiveClient: async () => mocks.client, savedConnection: mocks.saved,
-  invalidateSecureTransport: mocks.invalidate,
+  invalidateSecureTransport: mocks.invalidate, pauseConnectionAccess: vi.fn(), resumeConnectionAccess: vi.fn(),
 }));
 vi.mock('./deviceAuthorization', async importOriginal => {
   const original = await importOriginal<typeof import('./deviceAuthorization')>();
@@ -28,7 +28,23 @@ import { setConnectionRecovery, useConnectionRecovery } from './connectionRecove
 import { consumeWorkspaceSession, installWorkspaceHost } from '../services/workspaceHost';
 import { writeBrowserServices } from '../services/serviceDirectory';
 import { openRemoteSession } from './remoteSession';
+import { ConnectionAccessError } from './accessFailure';
 const permitted = { type: 'result', id: 'permissions', fullService: true, grants: [{ actions: ['service:*'] }] };
+it('stops automatic foreground checks on a confirmed relay denial, keeps terminal mounted and writes no permissions on cancel', async () => {
+  const unmounted = vi.fn();
+  function Terminal() { useEffect(() => () => unmounted(), []); return <textarea aria-label="terminal draft" defaultValue="retain draft" />; }
+  render(<SecureAccessGate><Terminal /></SecureAccessGate>);
+  await screen.findByLabelText('terminal draft');
+  mocks.request.mockRejectedValue(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { entryServiceId: 'entry', entryUrl: 'https://entry.example', targetServiceId: 'service' }));
+  fireEvent.focus(window); await screen.findByRole('button', { name: '重新授权' });
+  const calls = mocks.request.mock.calls.length;
+  for (let i = 0; i < 3; i++) { fireEvent.focus(window); fireEvent(window, new Event('online')); }
+  await act(async () => {});
+  expect(mocks.request).toHaveBeenCalledTimes(calls); expect(unmounted).not.toHaveBeenCalled();
+  expect((screen.getByLabelText('terminal draft') as HTMLTextAreaElement).value).toBe('retain draft');
+  fireEvent.click(screen.getByRole('button', { name: '取消' }));
+  expect(mocks.authenticate).not.toHaveBeenCalled(); expect(unmounted).not.toHaveBeenCalled();
+});
 beforeEach(() => {
   localStorage.clear(); sessionStorage.clear(); delete window.__termdockWorkspaceHost;
   setConnectionRecovery('ready');
@@ -201,7 +217,11 @@ describe('device authorization lifecycle', () => {
     await screen.findByText('Active terminal');
     mocks.request.mockResolvedValue({ type: 'result', id: 'permissions', fullService: false, grants: [] });
     fireEvent.focus(window);
-    await screen.findByText('Password login'); expect(screen.queryByText('Active terminal')).toBeNull();
+    await screen.findByText('“目标服务”需要重新登录');
+    expect(screen.queryByText('Password login')).toBeNull();
+    expect(screen.getByText('Active terminal').closest('[inert]')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '登录目标服务' }));
+    await screen.findByText('Password login');
   });
 });
 
@@ -313,6 +333,8 @@ describe('native target display without authorization side effects', () => {
     const newer = { url: 'https://new.example', serviceOrigin: 'https://new.example', serviceName: 'Newer target', ...(pinned ? { targetPeerId: 'new-target' } : {}) };
     mocks.saved.mockReturnValue(newer); mocks.request.mockResolvedValue({ type: 'result', fullService: false, grants: [] });
     await act(async () => finish({ url: 'https://stale.example', serviceOrigin: 'https://stale.example', label: 'Stale target', ...(pinned ? { targetPeerId: 'stale-target' } : {}) }));
+    await screen.findByText('“Newer target”需要重新登录');
+    fireEvent.click(screen.getByRole('button', { name: '登录目标服务' }));
     await screen.findByText('Password login');
     expect(screen.getByText(newer.url)).toBeTruthy(); expect(screen.queryByText('https://stale.example')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Manage before login' }));
@@ -358,6 +380,6 @@ describe('actual Preview bridge invitation receipt after real Gate permission su
   render(<SecureAccessGate><div>Owned terminal</div></SecureAccessGate>);await screen.findByText('Service management');let finish!:(value:typeof permitted)=>void;
   mocks.request.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));const pending=mocks.accessProps.onConnectWithPassword({},'controlled');await waitFor(()=>expect(finish).toBeTypeOf('function'));
   if(change==='client')mocks.client={...mocks.client,closed:true};else if(change==='target')mocks.saved.mockReturnValue({url:'https://other.example',targetPeerId:entry});else fireEvent(window,new Event('pagehide'));
-  await act(async()=>{finish(permitted);await pending;});expect(sessionStorage.getItem('termdock-secure-preview-invitation-v1')).toBeNull();
+  await act(async()=>{finish(permitted);await expect(pending).rejects.toThrow('SERVICE_SELECTION_CHANGED');});expect(sessionStorage.getItem('termdock-secure-preview-invitation-v1')).toBeNull();
  });
 });

@@ -1,5 +1,6 @@
 import { DeviceAuthorizationRequired } from './deviceAuthorization';
 import { isConnectionInterruption } from './connectionRecovery';
+import { ConnectionAccessError } from './accessFailure';
 
 const failures = {
   CONNECTION_FAILED: { reason: 'connectionFailed', status: 503, message: '暂时连不上这台服务，请检查地址和网络后重试。' },
@@ -27,6 +28,7 @@ export class PasswordLoginFailure extends Error {
 export function passwordLoginFailure(error: unknown): PasswordLoginFailure {
   if (error instanceof PasswordLoginFailure) return error;
   if (error instanceof DeviceAuthorizationRequired) return new PasswordLoginFailure('DEVICE_AUTHORIZATION_REQUIRED');
+  if (error instanceof ConnectionAccessError) return new PasswordLoginFailure(error.code === 'TARGET_IDENTITY_MISMATCH' ? 'IDENTITY_MISMATCH' : 'DEVICE_AUTHORIZATION_REQUIRED');
   if (error instanceof Error) {
     if (error.name === 'UnexpectedPeerError' || error.message === 'PEER_IDENTITY_MISMATCH') return new PasswordLoginFailure('IDENTITY_MISMATCH');
     if (error.message === 'LOGIN_RATE_LIMIT' || error.message === 'Too many password login attempts') return new PasswordLoginFailure('RATE_LIMITED');

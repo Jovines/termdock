@@ -9,6 +9,7 @@ import { expandRecord } from '../../server/federation/recordCompression.js';
 import { readWebTransportDescriptor, type WebTransportDescriptor } from '../../server/federation/webTransportProtocol.js';
 import { connectWebTransport, nativeWebTransportFactory, type SecureStreamPool, type WebTransportFactory, type StreamConnection } from './webTransportClient.js';
 import { DeviceAuthorizationRequired } from './deviceAuthorization.js';
+import { ConnectionAccessError } from './accessFailure';
 
 export interface SecureClientOptions {
   url: string;
@@ -294,7 +295,8 @@ export class SecureClient {
           if (packet.type === 'end' || packet.type === 'error') { pending.cancelUpload?.(); this.release(packet.id); }
         }
       }
-    } finally { this.sharedConnectionFailed(new Error('Secure connection closed')); }
+    } catch (error) { this.sharedConnectionFailed(failure(error)); }
+    finally { this.sharedConnectionFailed(new Error('Secure connection closed')); }
   }
   private release(id: string) { this.pending.get(id)?.queue.end(); this.pending.delete(id); this.dispatchWaiting(); this.idleHook?.(); }
   async request(packet: Omit<Packet, 'id'>, options?: { timeoutMs?: number }): Promise<Packet> {
@@ -311,7 +313,10 @@ export class SecureClient {
       this.channel.send({ ...packet, id } as Packet);
       const response = (await queue[Symbol.asyncIterator]().next()).value;
       if (!response) throw new Error('Secure request closed');
-      if (response.type === 'error') throw failure(response.error);
+      if (response.type === 'error') {
+        if (response.error === 'AUTHORIZATION_DENIED') throw new ConnectionAccessError('PERMISSION_DENIED', { targetServiceId: this.targetPeerId });
+        throw failure(response.error);
+      }
       // Piggyback on the permission check already required at connection time.
       // Missing capabilities keep new clients compatible with older servers.
       if (packet.type === 'permissions' && response.type === 'result') {
@@ -509,7 +514,7 @@ export async function connect(options: SecureClientOptions): Promise<SecureClien
       if (signal.aborted) { reject(signal.reason); return; }
       const cleanup = () => { signal.removeEventListener('abort', abort); socket.removeEventListener('open', opened); socket.removeEventListener('error', failed); socket.removeEventListener('close', failed); };
       const opened = () => { cleanup(); resolve(); };
-      const failed = () => { cleanup(); reject(new Error('Secure transport unavailable')); };
+      const failed = () => { cleanup(); reject((socket as WebSocket & { transportFailure?: Error }).transportFailure || new Error('Secure transport unavailable')); };
       const abort = () => { cleanup(); reject(signal.reason); };
       signal.addEventListener('abort', abort, { once: true });
       socket.addEventListener('open', opened); socket.addEventListener('error', failed); socket.addEventListener('close', failed);

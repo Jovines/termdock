@@ -9,7 +9,7 @@ export type RelayFrame =
   | { type: 'open'; streamId: string; serviceId: string }
   | { type: 'opened'; streamId: string }
   | { type: 'data'; streamId: string; payload: string; encoding?: 'base64' }
-  | { type: 'close'; streamId: string; reason?: string };
+  | { type: 'close'; streamId: string; reason?: string; code?: 'RELAY_AUTHORIZATION_REQUIRED' | 'RELAY_SELF_TARGET' };
 export interface RelayLimits {
   maxFrameBytes?: number; maxBufferedBytes?: number; maxStreams?: number;
   heartbeatMs?: number; maxRouteTtlMs?: number; connectTimeoutMs?: number; routeTimeoutMs?: number;
@@ -79,6 +79,7 @@ interface Stream<P> {
   opened: boolean; expires: number; attempted: Set<Peer<P>>; deadline?: ReturnType<typeof setTimeout>;
 }
 export interface RelayRouterOptions<P> extends RelayLimits {
+  isLocalTarget?: (serviceId: string) => boolean;
   /** Authenticate every incoming connection, before accepting registrations or opens. */
   authenticate: (context: unknown) => Promise<P | null> | P | null;
   /** Explicit permission to advertise a target, distinct from permission to use it. */
@@ -179,7 +180,8 @@ export class RelayRouter<P = string> {
       s.provider.streams.delete(s.providerId);
       send(s.provider.ws, { type: 'close', streamId: s.providerId, reason }, this.limits);
     }
-    send(s.owner.ws, { type: 'close', streamId: s.ownerId, reason }, this.limits);
+    send(s.owner.ws, { type: 'close', streamId: s.ownerId, reason,
+      ...(!this.canRoute(s.owner, s.serviceId) ? { code: 'RELAY_AUTHORIZATION_REQUIRED' as const } : {}) }, this.limits);
   }
   private providerFailed(s: Stream<P>, reason: string) {
     if (s.owner.streams.get(s.ownerId) !== s) return;
@@ -200,7 +202,15 @@ export class RelayRouter<P = string> {
       if (!send(provider.ws, { type: 'open', streamId: s.providerId, serviceId: s.serviceId }, this.limits)) {
         provider.streams.delete(s.providerId); continue;
       }
-      s.deadline = setTimeout(() => this.providerFailed(s, 'Target timeout'), Math.min(this.limits.connectTimeoutMs, s.expires - Date.now()));
+      const deadline = Math.min(Date.now() + this.limits.connectTimeoutMs, s.expires);
+      const expire = () => {
+        // Timers can fire just before their absolute deadline. Do not fail a
+        // provider early and start a backup beyond the original route budget.
+        const remaining = deadline - Date.now();
+        if (remaining > 0) { s.deadline = setTimeout(expire, remaining); s.deadline.unref?.(); return; }
+        this.providerFailed(s, 'Target timeout');
+      };
+      s.deadline = setTimeout(expire, Math.max(0, deadline - Date.now()));
       s.deadline.unref?.();
       return true;
     }
@@ -218,9 +228,13 @@ export class RelayRouter<P = string> {
       return;
     }
     if (f.type === 'open') {
+      if (this.options.isLocalTarget?.(f.serviceId)) {
+        send(peer.ws, { type: 'close', streamId: f.streamId, reason: 'Cannot relay to the entry itself', code: 'RELAY_SELF_TARGET' }, this.limits); return;
+      }
       if (peer.streams.has(f.streamId)) throw new Error('Duplicate stream');
       if (!this.canRoute(peer, f.serviceId) || !this.hasRoute(f.serviceId)) {
-        send(peer.ws, { type: 'close', streamId: f.streamId, reason: 'Route unavailable or denied' }, this.limits); return;
+        send(peer.ws, { type: 'close', streamId: f.streamId, reason: 'Route unavailable or denied',
+          ...(!this.canRoute(peer, f.serviceId) ? { code: 'RELAY_AUTHORIZATION_REQUIRED' as const } : {}) }, this.limits); return;
       }
       if (peer.streams.size >= this.limits.maxStreams) throw new Error('Stream budget exceeded');
       const s: Stream<P> = { owner: peer, ownerId: f.streamId, provider: peer, providerId: '', serviceId: f.serviceId, opened: false, expires: Date.now() + this.limits.routeTimeoutMs, attempted: new Set() };

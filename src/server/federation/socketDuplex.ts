@@ -2,6 +2,7 @@ import type { ByteDuplex } from './secureProtocol.js';
 import { AsyncQueue } from './packets.js';
 
 export interface WireSocket {
+  transportFailure?: Error;
   readyState: number;
   bufferedAmount: number;
   binaryType: string;
@@ -19,8 +20,8 @@ export function socketDuplex(socket: WireSocket): ByteDuplex {
       input.push(new Uint8Array(event.data));
     } catch { close(new Error('Encrypted transport rejected frame')); }
   });
-  socket.addEventListener('close', () => input.end());
-  socket.addEventListener('error', () => input.end(new Error('Encrypted transport disconnected')));
+  socket.addEventListener('close', () => input.end(socket.transportFailure));
+  socket.addEventListener('error', () => input.end(socket.transportFailure || new Error('Encrypted transport disconnected')));
   return {
     source: input, close,
     async sink(source) {
@@ -32,7 +33,7 @@ export function socketDuplex(socket: WireSocket): ByteDuplex {
               if (socket.readyState !== 1 || Date.now() - started > 15000) throw new Error('Encrypted transport congested');
               await new Promise(resolve => setTimeout(resolve, 10));
             }
-            if (socket.readyState !== 1) throw new Error('Encrypted transport closed');
+            if (socket.readyState !== 1) throw socket.transportFailure || new Error('Encrypted transport closed');
             socket.send(chunk.subarray(offset, offset + 64 * 1024));
           }
         }

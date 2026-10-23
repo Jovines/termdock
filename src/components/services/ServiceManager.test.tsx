@@ -6,6 +6,20 @@ import { readBrowserServices, saveServiceConnection } from '../../lib/services/s
 import { createInviteLink } from '../../lib/federation/inviteLink';
 afterEach(() => { cleanup(); localStorage.clear(); });
 describe('shared service manager', () => {
+  it('opens the original target route settings without connecting or granting access', async () => {
+    const service = { id: 'target', targetPeerId: 'target', url: 'https://devbox.example', label: 'Devbox', routes: [{ targetPeerId: 'entry', url: 'https://work.example' }] };
+    const open = vi.fn(), add = vi.fn();
+    render(<ServiceManager initialServicePage={{ kind: 'routes', service }} onAdd={add} onOpen={open} renderRoutes={item => <div>Routes for {item.targetPeerId} via {item.routes?.[0].targetPeerId}</div>} />);
+    await screen.findByText('Routes for target via entry');
+    expect(open).not.toHaveBeenCalled(); expect(add).not.toHaveBeenCalled(); expect(readBrowserServices()).toEqual([]);
+  });
+  it('refuses a self-relay save while preserving a direct alternate address for the same service', async () => {
+    const service = { id: 'target', targetPeerId: 'target', url: 'https://devbox.example', label: 'Devbox' };
+    await expect(saveServiceConnection({ ...service, entryServiceId: 'target' })).rejects.toThrow('自身');
+    expect(readBrowserServices()).toEqual([]);
+    await saveServiceConnection({ ...service, routes: [{ targetPeerId: 'target', url: 'https://alternate.example' }] });
+    expect(readBrowserServices()[0].routes).toEqual([{ targetPeerId: 'target', url: 'https://alternate.example' }]);
+  });
   it.each(['://', 'ftp://computer.example', 'https://computer.example?secret=value', 'https://computer.example/#termdock-invite=broken'])('keeps invalid input %s editable without attempting a connection or saving it', async input => {
     const onAdd = vi.fn(), onBusyChange = vi.fn();
     render(<ServiceManager onBusyChange={onBusyChange} initiallyAdding onAdd={onAdd} onOpen={async () => {}} />);

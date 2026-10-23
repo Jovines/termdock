@@ -557,6 +557,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true || collaborationTransport?.canRoute(subjectId, targetServiceId) === true,
     desktopTargets, () => activeRouteIds());
   const relayRouter = new RelayRouter<RoutePrincipal>({
+    isLocalTarget: id => id === federationServiceId,
     authenticate: context => context as RoutePrincipal,
     allowRegister: (principal, serviceId) => routeAccess.allowRegister(principal, serviceId),
     allowRoute: (principal, serviceId) => routeAccess.allowRoute(principal, serviceId),

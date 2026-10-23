@@ -17,6 +17,30 @@ async function endpoint() {
 }
 async function dial(url: string) { const ws = new WebSocket(url); cleanups.push(() => ws.terminate()); await once(ws, 'open'); return ws; }
 describe('RelaySocket', () => {
+  it('propagates confirmed loss of an established relay authorization through real Noise and pending requests', async () => {
+    vi.stubGlobal('CloseEvent', class extends Event { code: number; reason: string; constructor(type: string, init: { code: number; reason: string }) { super(type); this.code = init.code; this.reason = init.reason; } });
+    const identity = await createIdentity(), target = await endpoint(), entry = await endpoint();
+    let authorized = true;
+    target.server.on('connection', socket => { void (async () => {
+      const secure = await secureConnection({ identity, initiator: false, duplex: socketDuplex(socket) });
+      const channel = new PacketChannel(secure.duplex);
+      for await (const packet of channel.read()) if (packet.type === 'probe') channel.send({ id: packet.id, type: 'result' });
+    })().catch(() => {}); });
+    const router = new RelayRouter({ authenticate: context => String(context), allowRegister: p => p === 'provider', allowRoute: p => p === 'phone' && authorized, heartbeatMs: 20 });
+    cleanups.push(() => router.close());
+    entry.server.on('connection', (socket, request) => { void router.attach(socket, request.url === '/provider' ? 'provider' : 'phone').then(ok => { if (ok) socket.send(JSON.stringify({ type: 'ready' })); }); });
+    const provider = await dial(entry.url + '/provider');
+    const relay = new RelayClient(provider, { targets: new Map([[identity.peerId, () => dial(target.url)]]) }); cleanups.push(() => relay.close());
+    const registered = once(provider, 'pong'); provider.ping(); await registered;
+    const client = await connect({ url: entry.url + '/phone', targetPeerId: identity.peerId,
+      socketFactory: url => new RelaySocket(url, identity.peerId, address => new WebSocket(address) as unknown as globalThis.WebSocket, { entryServiceId: 'entry', entryUrl: 'https://entry.example' }) as unknown as globalThis.WebSocket });
+    cleanups.push(() => client.close());
+    await expect(client.request({ type: 'probe' })).resolves.toMatchObject({ type: 'result' });
+    const pending = client.request({ type: 'hold' });
+    const failure = expect(pending).rejects.toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED', context: { targetServiceId: identity.peerId, entryServiceId: 'entry' } });
+    authorized = false; await failure;
+    expect(client.closed).toBe(true);
+  });
   it('authenticates target Noise identity across an opaque relay and transfers private packets', async () => {
     vi.stubGlobal('CloseEvent', class extends Event { code: number; reason: string; constructor(type: string, init: { code: number; reason: string }) { super(type); this.code = init.code; this.reason = init.reason; } });
     const targetIdentity = await createIdentity();

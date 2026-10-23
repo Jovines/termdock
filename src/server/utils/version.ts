@@ -12,6 +12,8 @@ export const TERMDOCK_CAPABILITIES = [
   'desktop-service-discovery',
   'filesystem',
   'local-api',
+  'relay-access-recovery-v1',
+  'relay-self-target-guard-v1',
   'terminal-ws',
   'tmux',
 ] as const;
