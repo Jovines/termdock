@@ -42,7 +42,7 @@ describe('minimal entry route invitations', () => {
     expect(restarted.allows('phone', 'C')).toBe(true);
     expect(restarted.allows('phone', 'B')).toBe(false);
     expect(restarted.allows('other-phone', 'C')).toBe(false);
-    expect(() => restarted.consume(invitation.routeCode, 'other-phone')).toThrow('ROUTE_PAIRING_DENIED');
+    expect(() => restarted.consume(invitation.routeCode, 'other-phone')).toThrow('ROUTE_INVITATION_USED');
     f.now(invitation.expiresAt + 1);
     expect(restarted.allows('phone', 'C')).toBe(true); // Only the invitation expires, not the redeemed device grant.
   });
@@ -57,7 +57,7 @@ describe('minimal entry route invitations', () => {
   });
   it('rejects expired codes and revokes redeemed and outstanding descendants with the issuer', () => {
     const f = fixture(), expired = f.store.create('owner-B', 'C'); f.now(expired.expiresAt);
-    expect(() => f.store.consume(expired.routeCode, 'phone')).toThrow('ROUTE_PAIRING_DENIED');
+    expect(() => f.store.consume(expired.routeCode, 'phone')).toThrow('ROUTE_INVITATION_EXPIRED');
     const pending = f.store.create('owner-B', 'C'), consumed = f.store.create('owner-B', 'C');
     f.store.consume(consumed.routeCode, 'phone'); f.revoke();
     expect(f.store.allows('phone', 'C')).toBe(false);

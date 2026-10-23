@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   closeTerminal: vi.fn(), killTmuxSession: vi.fn(), sendTerminalInput: vi.fn(),
   updateSessionInventoryEntry: vi.fn(), reorderSessionInventoryEntries: vi.fn(),
 }));
+const terminalReadiness = vi.hoisted(() => ({ withheld: new Set<string>(), release: new Map<string, () => void>() }));
 const control = vi.hoisted(() => ({ subscribeClientState: vi.fn() }));
 vi.mock('../terminal', () => api);
 vi.mock('../terminal/api', async (original) => ({
@@ -31,13 +32,14 @@ vi.mock('./views/TerminalView', () => ({
     onContentReadyChange: (id: string, ready: boolean) => void;
   }) => {
     useEffect(() => {
-      props.onStreamReadyChange(props.sessionId, true);
-      props.onViewportReadyChange(props.sessionId, true);
-      props.onContentReadyChange(props.sessionId, true);
+      const ready = () => { props.onStreamReadyChange(props.sessionId, true); props.onViewportReadyChange(props.sessionId, true); props.onContentReadyChange(props.sessionId, true); };
+      terminalReadiness.release.set(props.sessionId, ready);
+      if (!terminalReadiness.withheld.has(props.sessionId)) ready();
     }, [props.sessionId]);
     return <div className="terminal-viewport-container"><textarea data-terminal-input-anchor="true" aria-label={`Terminal ${props.sessionId}`} data-active={props.isActive} data-focus-suspended={props.focusSuspended} /></div>;
   },
 }));
+vi.mock('./chat/SessionChatView', () => ({ SessionChatView: (props: { sessionId: string; onReadyChange?: (ready: boolean) => void }) => <button onClick={() => props.onReadyChange?.(true)}>Chat ready {props.sessionId}</button> }));
 vi.mock('./FreeSplitLayout', () => ({
   FreeSplitLayout: ({ panes }: { panes: { id: string; content: React.ReactNode }[] }) => <>{panes.map(pane => <div key={pane.id}>{pane.content}</div>)}</>,
 }));
@@ -71,7 +73,7 @@ function dispatch(name: string, detail: unknown) {
 
 describe('MultiTerminalView session recovery and keyboard ownership', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.clearAllMocks(); terminalReadiness.withheld.clear(); terminalReadiness.release.clear();
     window.localStorage.clear();
     window.localStorage.setItem('termdock:locale', 'en');
     window.localStorage.setItem('termdock-sessions-cache', JSON.stringify(sessions));
@@ -97,6 +99,31 @@ describe('MultiTerminalView session recovery and keyboard ownership', () => {
   });
 
   afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  it.each(['chat', 'terminal'])('releases startup using the restored %s view readiness', async mode => {
+    const id = `startup-${mode}`, item = { ...sessions[0], frontendSessionId: id, sessionId: id };
+    api.getSessionInventory.mockResolvedValue({ ...inventory, clientSessions: [item] });
+    localStorage.setItem('termdock-sessions-cache', JSON.stringify([item]));
+    localStorage.setItem('termdock-active-session', id);
+    localStorage.setItem(`termdock:session-view:${location.origin}:${id}`, mode);
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ mode, updatedAt: 1 })));
+    terminalReadiness.withheld.add(id);
+    const ready = vi.fn();
+    render(<MultiTerminalView onInitialViewportReady={ready} />);
+    if (mode === 'chat') {
+      const chat = await screen.findByRole('button', { name: `Chat ready ${id}` });
+      expect(ready).not.toHaveBeenCalled();
+      fireEvent.click(chat);
+      await waitFor(() => expect(ready).toHaveBeenCalled());
+      // No terminal handshake or queued startup input was needed for chat.
+      expect(api.sendTerminalInput).not.toHaveBeenCalled();
+    } else {
+      await screen.findByRole('textbox', { name: `Terminal ${id}` });
+      expect(ready).not.toHaveBeenCalled();
+      act(() => terminalReadiness.release.get(id)!());
+      await waitFor(() => expect(ready).toHaveBeenCalled());
+    }
+  });
 
   it('suspends actual terminal callers for a close chooser and restores the remaining active session after close', async () => {
     const updates=vi.fn();

@@ -1,5 +1,6 @@
 import { DeviceAuthorizationRequired } from './deviceAuthorization';
 import { ConnectionAccessError } from './accessFailure';
+import { invitationDenial } from './invitationFailure';
 
 export interface ConnectionAttempt<T> {
   key: string;
@@ -59,7 +60,7 @@ export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], disp
         if (error instanceof Error && error.name === 'UnexpectedPeerError') identityError = error;
         if (error instanceof ConnectionAccessError && ['TARGET_IDENTITY_MISMATCH', 'RELAY_SELF_TARGET'].includes(error.code)) identityError = error;
         if (error instanceof ConnectionAccessError && error.code === 'RELAY_AUTHORIZATION_REQUIRED') relayAccessError = error;
-        if (error instanceof DeviceAuthorizationRequired || error instanceof ConnectionAccessError && error.code === 'TARGET_AUTHORIZATION_REQUIRED') { settled = true; finish(); reject(error); return; }
+        if (invitationDenial(error) || error instanceof DeviceAuthorizationRequired || error instanceof ConnectionAccessError && error.code === 'TARGET_AUTHORIZATION_REQUIRED') { settled = true; finish(); reject(error); return; }
         start();
       });
       clearTimeout(hedge);

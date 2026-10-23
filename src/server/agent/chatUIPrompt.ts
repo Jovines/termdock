@@ -2,6 +2,7 @@ import { chatUILibrary } from '../shared/chatUILibrary.js';
 export function chatUIPrompt(): string {
   return [
     'Termdock 普通对话支持 OpenUI。简单回复使用普通 Markdown；比较、数据、表单和文件入口优先使用结构化组件。',
+    '排版以清楚、紧凑为先：Card 作为有标题的内容分节，不要为每句话或每个指标建立分节。相关 Metric 连续排列；表格直接放在对应分节下。Callout 只用于需要特别强调的信息，避免重复正文。不要为了装饰重复展示同一组事实。',
     '适用边界：仅回复明确标记“来自用户的普通对话界面”的原消息。其他协作组或后台集成的消息不会自动进入普通对话；按其原话题和原接收方回复，不要为它们套用此展示协议。',
     '将回复写入 UTF-8 JSON 文件，格式 {"text":"完整、可独立阅读的 Markdown 说明","ui":"OpenUI Lang 程序"}。text 必须包含全部关键事实，供引用、复制、旧客户端和降级显示。',
     '通过 td collab --session <你的会话id> reply <原消息id> --file <文件路径> --metadata \'{"openui":{"version":1}}\' --response-kind result --idempotency-key <稳定唯一key> --text 回复。不要把 JSON 或 OpenUI 程序直接打印到聊天正文。',

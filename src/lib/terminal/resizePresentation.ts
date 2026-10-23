@@ -9,6 +9,7 @@ interface Renderer {
 type RenderInternals = {
   _core?: { _renderService?: { _renderer?: { value?: Renderer } } };
 };
+export const RESIZE_PRESENTATION_TIMEOUT_MS = 500;
 
 /**
  * xterm's synchronized output protects row painting, but not handleResize:
@@ -24,12 +25,14 @@ export function createResizePresentation(terminal: Terminal) {
   let geometry: [number, number] | undefined;
   let frameEnded = false;
   let generation = 0;
+  let fallback: ReturnType<typeof setTimeout> | undefined;
   const endFrame = terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
     if (restore && params.some(value => value === 2026)) frameEnded = true;
     return false;
   });
 
   const finish = (paint: boolean) => {
+    if (fallback !== undefined) { clearTimeout(fallback); fallback = undefined; }
     const undo = restore;
     if (!undo) return;
     const size = geometry;
@@ -66,6 +69,9 @@ export function createResizePresentation(terminal: Terminal) {
         renderer.renderRows = render;
         renderer.clear = clear;
       };
+      // A passive client, older tmux, or a lost frame may never send ?2026l.
+      // Keep the fence bounded, including during continuous resize bursts.
+      fallback = setTimeout(() => finish(true), RESIZE_PRESENTATION_TIMEOUT_MS);
     },
     get generation() { return generation; },
     written(writeGeneration: number) {

@@ -49,7 +49,7 @@ describe('decideFitHysteresis', () => {
   });
 
   describe('real-resize reasons (resize, dpr-change, mount, …)', () => {
-    const realReasons = ['mount', 'init-fit', 'resize', 'dpr-change', 'session-key-change', 'session-reset', 'tmux-layout'];
+    const realReasons = ['mount', 'init-fit', 'resize', 'layout-visible', 'dpr-change', 'session-key-change', 'session-reset', 'tmux-layout'];
 
     for (const reason of realReasons) {
       it(`rejects ±0 (no change) for ${reason} (没变就不必动)`, () => {

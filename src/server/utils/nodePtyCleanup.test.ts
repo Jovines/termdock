@@ -35,7 +35,11 @@ it('rebuilds replaced binaries, survives skipped install scripts, and fails clos
       const script = ${JSON.stringify(path.resolve('scripts/ensure-node-pty.cjs'))};
       const binary = path.join(root, 'build/Release/pty.node');
       let builds=0, fail=false;
-      require('node:child_process').spawnSync = () => {
+      process.env.npm_config_global = 'true';
+      require('node:child_process').spawnSync = (command, args, options) => {
+        assert.equal(command, 'npx');
+        assert.deepEqual(args, ['--global=false', '--yes', 'node-gyp', 'rebuild']);
+        assert.equal(options.cwd, root);
         builds++;
         if (fail) return {status:1};
         fs.mkdirSync(path.dirname(binary), {recursive:true});
@@ -50,7 +54,7 @@ it('rebuilds replaced binaries, survives skipped install scripts, and fails clos
       start(); assert.equal(builds,2); // A success-only spawn probe would miss this.
       fs.writeFileSync(binary,'old prebuild');
       fail=true;
-      assert.throws(start, /rebuild failed/);
+      assert.throws(start, /Patched node-pty rebuild failed.*exit status=1/);
       assert.equal(fs.existsSync(path.join(root,'.termdock-fd-fix.json')),false);
       console.log('install gate passed');
     `;

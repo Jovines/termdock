@@ -5500,7 +5500,7 @@ function App() {
   // MultiTerminalView restores the active terminal. Cached chrome may render
   // behind it, but must not expose the empty/history-replay/first-fit frames.
   const initialSessionRestoreOverlay = !hasRestoredSessionChrome ? (
-    <StartupScreen className="z-modal-panel" status="正在恢复终端…" />
+    <StartupScreen className="z-modal-panel" status="正在恢复会话…" />
   ) : null;
 
   // Keep the terminal tree mounted when sessions have different pin states.

@@ -95,8 +95,10 @@ export class RouteInvitationStore {
     const hash = this.hash(routeCode), current = this.read(), now = this.now();
     const invitation = current.find(item => item.hash === hash);
     if (invitation?.subjectId === actualSubjectId && invitation.revokedAt === undefined && this.available(invitation.issuerId, invitation.targetServiceId)) return { serviceId: invitation.targetServiceId };
-    if (!invitation || invitation.revokedAt !== undefined || invitation.subjectId !== undefined || invitation.createdAt > now || invitation.expiresAt <= now
+    if (!invitation || invitation.revokedAt !== undefined || invitation.createdAt > now
       || !this.available(invitation.issuerId, invitation.targetServiceId)) throw new Error('ROUTE_PAIRING_DENIED');
+    if (invitation.subjectId !== undefined) throw new Error('ROUTE_INVITATION_USED');
+    if (invitation.expiresAt <= now) throw new Error('ROUTE_INVITATION_EXPIRED');
     invitation.subjectId = actualSubjectId; invitation.consumedAt = now;
     this.save(current);
     return { serviceId: invitation.targetServiceId };

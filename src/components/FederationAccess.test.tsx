@@ -138,6 +138,50 @@ describe('FederationAccess invitation flow', () => {
     expect(screen.queryByLabelText('手动连接 JSON')).toBeNull();
     expect(screen.queryByText('邀请设备')).toBeNull();
   });
+  it.each([
+    ['INVITATION_EXPIRED', '邀请已过期'], ['INVITATION_USED', '邀请已被使用'],
+    ['PAIRING_DENIED', '邀请已失效'], ['ROUTE_INVITATION_EXPIRED', '邀请已过期'],
+    ['ROUTE_INVITATION_USED', '邀请已被使用'], ['ROUTE_PAIRING_DENIED', '邀请已失效'],
+  ])('explains %s and replaces the failed invitation without submitting it again', async (failure, title) => {
+    const onConnect = vi.fn().mockRejectedValueOnce(new Error(failure)).mockResolvedValue(undefined);
+    render(<FederationAccess onConnect={onConnect} onClose={() => {}} initialInvite={{ url: 'https://c.example', targetPeerId: serviceId, pairingCode: code, serviceName: '工作电脑' }} />);
+    fireEvent.click(screen.getByRole('button', { name: '接受邀请' }));
+    expect(await screen.findByRole('heading', { name: title })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '接受邀请' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '重试连接' })).toBeNull();
+    expect(screen.queryByText(/请检查网络/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '输入新的邀请链接' }));
+    expect(onConnect).toHaveBeenCalledTimes(1);
+    const fresh = 'n'.repeat(43);
+    fireEvent.change(await screen.findByRole('textbox', { name: '新的邀请链接' }), { target: { value: createInviteLink({ v: 1, serviceId, code: fresh, entryUrl: 'https://c.example' }) } });
+    fireEvent.click(screen.getByRole('button', { name: '接受新邀请' }));
+    await waitFor(() => expect(onConnect).toHaveBeenLastCalledWith(expect.objectContaining({ pairingCode: fresh })));
+    expect(JSON.stringify(localStorage)).not.toContain(code);
+    expect(JSON.stringify(localStorage)).not.toContain(fresh);
+  });
+  it('validates and cancels a replacement link without redeeming or retaining its draft', async () => {
+    const onConnect = vi.fn().mockRejectedValue(new Error('INVITATION_EXPIRED'));
+    render(<FederationAccess onConnect={onConnect} onClose={() => {}} initialInvite={{ url: 'https://c.example', targetPeerId: serviceId, pairingCode: code }} />);
+    fireEvent.click(screen.getByRole('button', { name: '接受邀请' }));
+    fireEvent.click(await screen.findByRole('button', { name: '输入新的邀请链接' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '新的邀请链接' }), { target: { value: '不完整的链接' } });
+    fireEvent.click(screen.getByRole('button', { name: '接受新邀请' }));
+    expect(await screen.findByText('请输入完整的 Termdock 邀请链接。')).toBeTruthy();
+    expect(onConnect).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: '返回邀请' }));
+    expect(screen.getByRole('heading', { name: '邀请已过期' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '输入新的邀请链接' }));
+    expect((screen.getByRole('textbox', { name: '新的邀请链接' }) as HTMLInputElement).value).toBe('');
+  });
+  it('keeps connection failures retryable without claiming the invitation expired', async () => {
+    const onConnect = vi.fn().mockRejectedValue(new Error('Secure transport unavailable'));
+    render(<FederationAccess onConnect={onConnect} onClose={() => {}} initialInvite={{ url: 'https://c.example', targetPeerId: serviceId, pairingCode: code }} />);
+    fireEvent.click(screen.getByRole('button', { name: '接受邀请' }));
+    expect(await screen.findByRole('heading', { name: '暂时无法连接' })).toBeTruthy();
+    expect(screen.queryByText('邀请已过期')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重试连接' }));
+    await waitFor(() => expect(onConnect).toHaveBeenCalledTimes(2));
+  });
   it('accepts a named invitation with one button and no input', async () => {
     const onConnect = vi.fn().mockResolvedValue(undefined);
     const invitation = { url: 'https://c.example', targetPeerId: serviceId, pairingCode: code, serviceName: '工作电脑' };

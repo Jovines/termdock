@@ -554,6 +554,20 @@ describe('federation runtime over real encrypted WebSocket', () => {
     client.channel.send({ type: 'http', id: 'global', method: 'GET', path: '/api/terminal/operations/unregistered' });
     expect(await client.take('global')).toMatchObject({ type: 'error', error: 'API_NOT_ALLOWED' });
   });
+  it('reports confirmed expiry over the encrypted channel without granting access', async () => {
+    const f = await fixture(), owner = await f.connect(); await owner.pair();
+    owner.channel.send({ type: 'invite-create', id: 'expiring', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'] });
+    const invitation = await owner.take('expiring');
+    const path = join(f.directory, 'invitations.json'), data = JSON.parse(readFileSync(path, 'utf8'));
+    const item = data.invitations.find((entry: { hash: string }) => entry.hash === invitation.invitationId);
+    item.createdAt = Date.now() - 600001; item.invitationExpiresAt = item.createdAt + 600000;
+    writeFileSync(path, JSON.stringify(data));
+    const guest = await f.connect(); guest.channel.send({ type: 'pair', id: 'expired', code: invitation.code });
+    expect(await guest.take('expired')).toMatchObject({ type: 'error', error: 'INVITATION_EXPIRED' });
+    guest.channel.send({ type: 'permissions', id: 'permissions' });
+    expect(await guest.take('permissions')).toMatchObject({ fullService: false, grants: [] });
+    expect((await guest.http('denied', 'GET', '/api/terminal/one/health'))[0]).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  });
   it('redeems administrator-created session invitations once for the real Noise subject', async () => {
     const f = await fixture(), owner = await f.connect(); await owner.pair();
     owner.channel.send({ type: 'invite-create', id: 'invite', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'], label: '手机' });
@@ -567,7 +581,7 @@ describe('federation runtime over real encrypted WebSocket', () => {
     phone.channel.send({ type: 'invite-create', id: 'escalate', scope: { kind: 'service' }, actions: ['service:*'] });
     expect(await phone.take('escalate')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
     const second = await f.connect(); second.channel.send({ type: 'pair', id: 'reuse', code: invitation.code });
-    expect(await second.take('reuse')).toMatchObject({ type: 'error', error: 'PAIRING_DENIED' });
+    expect(await second.take('reuse')).toMatchObject({ type: 'error', error: 'INVITATION_USED' });
     owner.channel.send({ type: 'grants-list', id: 'labels' });
     expect(await owner.take('labels')).toMatchObject({ subjectLabels: { [phone.identity.peerId]: '手机' } });
   });

@@ -467,6 +467,15 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [releasedResumeToken, setReleasedResumeToken] = useState(0);
   const [viewportReadySessionIds, setViewportReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [contentReadySessionIds, setContentReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [chatReadiness, setChatReadiness] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const handleChatReadyChange = useCallback((id: string, ready: boolean | null) => {
+    setChatReadiness(current => {
+      if (ready === null ? !current.has(id) : current.get(id) === ready) return current;
+      const next = new Map(current);
+      if (ready === null) next.delete(id); else next.set(id, ready);
+      return next;
+    });
+  }, []);
   const pendingStartupCommandsRef = useRef(new Map<string, { backendSessionId: string; command: string }>());
   const [deferredViewportSessionIds, setDeferredViewportSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const restoredRef = useRef(false);
@@ -805,18 +814,23 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (foregroundContentReady) markStartupMilestone('foreground-content-ready');
   }, [foregroundContentReady]);
 
+  const isPresentationReady = useCallback((id: string) => chatReadiness.has(id)
+    ? chatReadiness.get(id) === true
+    : viewportReadySessionIds.has(id) && readySessionIds.has(id) && contentReadySessionIds.has(id),
+  [chatReadiness, viewportReadySessionIds, readySessionIds, contentReadySessionIds]);
+  const foregroundPresentationReady = foregroundSessionId !== null && isPresentationReady(foregroundSessionId);
+
   useEffect(() => {
     if (!onInitialViewportReady) return;
     if (!isRestoring && sessions.length === 0) {
       onInitialViewportReady();
       return;
     }
-    if (!foregroundViewportReady || !foregroundConnectionReady || !foregroundContentReady) return;
+    if (!foregroundPresentationReady) return;
 
     // A split workspace is one visible destination. Releasing for just the
     // focused pane exposes the other panes' history replay and first resize.
-    const allVisibleReady = [...visibleSessionIds].every(id =>
-      viewportReadySessionIds.has(id) && readySessionIds.has(id) && contentReadySessionIds.has(id));
+    const allVisibleReady = [...visibleSessionIds].every(isPresentationReady);
     let frame = 0;
     let secondFrame = 0;
     const present = () => {
@@ -836,6 +850,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       clearTimeout(timeout);
     };
   }, [
+    foregroundPresentationReady,
+    isPresentationReady,
     foregroundConnectionReady,
     foregroundContentReady,
     foregroundViewportReady,
@@ -891,11 +907,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setPendingSwitchSessionId(null);
       return;
     }
-    if (
-      !viewportReadySessionIds.has(pendingSwitchSessionId)
-      || !readySessionIds.has(pendingSwitchSessionId)
-      || !contentReadySessionIds.has(pendingSwitchSessionId)
-    ) return;
+    if (!isPresentationReady(pendingSwitchSessionId)) return;
 
     // The target slide is already active so the selection takes effect as soon
     // as the sidebar closes. Keep focus/cursor presentation suspended for a
@@ -909,7 +921,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       }
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [contentReadySessionIds, pendingSwitchSessionId, readySessionIds, sessions, viewportReadySessionIds]);
+  }, [isPresentationReady, pendingSwitchSessionId, sessions]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -2246,7 +2258,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           />
         )}
         <div className="min-h-0 flex-1 app-chrome-bg">
-          <SessionWorkspace sessionId={session.id} name={session.name} active={isActive && isLayoutVisible} onKeyboardChange={open => handleKeyboardVisibilityChange(session.id, open)}>{terminalVisible => shouldMountViewport && <TerminalView
+          <SessionWorkspace sessionId={session.id} name={session.name} active={isActive && isLayoutVisible} onChatReadyChange={handleChatReadyChange} onKeyboardChange={open => handleKeyboardVisibilityChange(session.id, open)}>{terminalVisible => shouldMountViewport && <TerminalView
             sessionId={session.id}
             mode={session.mode}
             tmuxSessionName={session.tmuxSessionName}

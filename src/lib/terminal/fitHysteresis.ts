@@ -35,6 +35,7 @@ const REAL_RESIZE_REASONS: ReadonlySet<string> = new Set<string>([
   'mount',
   'init-fit',
   'resize',
+  'layout-visible',
   'dpr-change',
   'session-key-change',
   'session-reset',

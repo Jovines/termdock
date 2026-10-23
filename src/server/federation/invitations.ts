@@ -104,7 +104,9 @@ export class InvitationStore {
     if (!/^[A-Za-z0-9_-]{43}$/.test(code) || !identity(subjectId)) throw new Error('PAIRING_DENIED');
     const current = this.read(), hash = this.hash(code), now = this.now();
     const invite = current.find(i => i.hash === hash);
-    if (!invite || invite.consumedAt !== undefined || invite.invitationExpiresAt <= now || (invite.expiresAt !== undefined && invite.expiresAt <= now) || !issuerAllowed(invite.issuerId)) throw new Error('PAIRING_DENIED');
+    if (!invite || !issuerAllowed(invite.issuerId)) throw new Error('PAIRING_DENIED');
+    if (invite.consumedAt !== undefined) throw new Error('INVITATION_USED');
+    if (invite.invitationExpiresAt <= now || (invite.expiresAt !== undefined && invite.expiresAt <= now)) throw new Error('INVITATION_EXPIRED');
     invite.consumedAt = now; invite.consumedBy = subjectId; this.save(current);
     return { subjectId, ...(invite.resources ? { resources: structuredClone(invite.resources) } : {}), ...(invite.sessionAppearance ? { sessionAppearance: structuredClone(invite.sessionAppearance) } : {}), scope: structuredClone(invite.scope), actions: [...invite.actions], ...(invite.expiresAt === undefined ? {} : { expiresAt: invite.expiresAt }), canDelegate: false };
   }

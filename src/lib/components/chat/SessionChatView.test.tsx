@@ -4,6 +4,16 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { SessionChatView } from './SessionChatView';
 vi.mock('../markdown/MarkdownPreview', () => ({ MarkdownPreview: ({ content }: { content: string }) => <p data-testid="chat-markdown">{content}</p> }));
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
+it('presents its loading UI without waiting for a hidden terminal or stalled history request', () => {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+  const ready = vi.fn();
+  const view = render(<SessionChatView sessionId="startup-history" onReadyChange={ready} onTerminal={() => {}} />);
+  expect(screen.getByRole('textbox')).toBeTruthy();
+  expect(ready).toHaveBeenLastCalledWith(true);
+  view.unmount();
+  expect(ready).toHaveBeenLastCalledWith(false);
+});
+
 it('dismisses the selection toolbar when the selection collapses, clears, moves outside or spans messages', async () => {
   const messages = ['第一条消息', '第二条消息'].map((content, index) => ({ id: `a${index}`, role: 'assistant', content, createdAt: index + 1, status: 'stored' }));
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, messages })));

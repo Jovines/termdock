@@ -6,6 +6,26 @@ const { spawnSync } = require('node:child_process');
 const hash = data => createHash('sha256').update(data).digest('hex');
 const upstreamHash = '5e1005d6bdcfbe97b486ee415419fe7adae99035047f07340fbad36419e0bae6';
 
+function rebuildNodePty(ptyRoot, { timeout = 180_000, patched = false } = {}) {
+  // npm install -g passes npm_config_global=true to lifecycle scripts. Do not
+  // let it turn npx's temporary dependency installation into a global install.
+  const result = spawnSync('npx', ['--global=false', '--yes', 'node-gyp', 'rebuild'], {
+    cwd: ptyRoot, stdio: 'inherit', timeout,
+  });
+  if (result.error || result.status !== 0) {
+    const context = [
+      `cwd=${ptyRoot}`,
+      `exit status=${result.status ?? 'none'}`,
+      ...(result.signal ? [`signal=${result.signal}`] : []),
+      ...(result.error ? [`${result.error.code || 'spawn error'}: ${result.error.message}`] : []),
+    ].join('; ');
+    throw new Error(`${patched ? 'Patched node-pty' : 'node-pty'} rebuild failed (${context}). `
+      + 'See the npx/node-gyp output above for the cause. Check npm/cache errors before changing build tools; '
+      + 'on macOS, compiler/linker errors may require matching Xcode Command Line Tools and SDK versions.',
+    result.error ? { cause: result.error } : undefined);
+  }
+}
+
 function patchSource(source) {
   if (hash(source) !== upstreamHash) throw new Error('Unrecognized node-pty source; review the macOS FD patch before upgrading');
   const start = source.indexOf('static void\npty_posix_spawn(char** argv', source.indexOf('pty_getproc(int fd)'));
@@ -49,15 +69,10 @@ function ensureNodePty(ptyRoot = path.dirname(require.resolve('node-pty/package.
   fs.rmSync(path.join(ptyRoot, 'prebuilds', `darwin-${process.arch}`), { recursive: true, force: true });
   fs.rmSync(path.join(ptyRoot, 'build/Debug'), { recursive: true, force: true });
   console.log('Rebuilding node-pty with the Termdock macOS FD cleanup fix...');
-  const result = spawnSync('npx', ['--yes', 'node-gyp', 'rebuild'], {
-    cwd: ptyRoot, stdio: 'inherit', timeout: 180_000,
-  });
-  if (result.error || result.status !== 0) {
-    throw new Error('Patched node-pty rebuild failed; install Xcode Command Line Tools and retry. ' + (result.error?.message || ''));
-  }
+  rebuildNodePty(ptyRoot, { patched: true });
   fs.chmodSync(helperPath, fs.statSync(helperPath).mode | 0o111);
   fs.writeFileSync(markerPath, JSON.stringify({ source: sourceHash, binary: hash(fs.readFileSync(binaryPath)) }));
   checked.add(ptyRoot);
 }
-module.exports = { ensureNodePty, patchSource };
+module.exports = { ensureNodePty, patchSource, rebuildNodePty };
 if (require.main === module) ensureNodePty(process.argv[2]);

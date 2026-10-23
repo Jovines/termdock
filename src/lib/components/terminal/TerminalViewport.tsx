@@ -191,6 +191,7 @@ export type RefreshReason =
   | 'bfcache'                // 从 BFCache 恢复
   | 'online'                 // 网络恢复
   | 'page-flip'              // swiper 翻到本页（isActive 从 false→true）
+  | 'layout-visible'         // 保留的终端从对话或隐藏面板恢复显示
   | 'resize'                 // ResizeObserver / 视口高度变化
   | 'dpr-change'             // devicePixelRatio 变化
   | 'tmux-layout'            // tmux 服务端报上来的布局
@@ -3047,7 +3048,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const fitAddon = fitAddonRef.current;
       const terminal = terminalRef.current;
       const container = containerRef.current;
-      if (!fitAddon || !terminal || !container) {
+      if (!fitAddon || !terminal || !container || !isLayoutVisibleRef.current) {
         return;
       }
       // Check if terminal element is attached and has dimensions
@@ -3088,7 +3089,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         });
         let repairedAfterResize = 0;
         if (hysteresis.accept) {
-          if (sessionReadyRef.current && onTmuxScrollRef.current
+          if (sessionReadyRef.current && ownsResizeRef.current && onTmuxScrollRef.current
             && (before.cols !== proposed.cols || before.rows !== proposed.rows)) {
             resizePresentationRef.current?.begin();
           }
@@ -3474,7 +3475,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       (reason: RefreshReason, options: RefreshOptions) => {
         const terminal = terminalRef.current;
         const fitAddon = fitAddonRef.current;
-        if (!terminal || !fitAddon) {
+        if (!terminal || !fitAddon || !isLayoutVisibleRef.current) {
           return;
         }
 
@@ -3524,13 +3525,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             rendererAlreadyRecovered = true;
           }
         }
-        if (shouldRefreshTerminalBuffer(
+        const redrawAfterFit = shouldRefreshTerminalBuffer(
           options.forceRedraw === true,
           reason === 'dpr-change',
           rendererAlreadyRecovered,
-        )) {
-          refreshTextureAtlasNow(`refresh:${reason}`);
-        } else if (!rendererAlreadyRecovered) {
+        );
+        if (!redrawAfterFit && !rendererAlreadyRecovered) {
           debugTerminal('terminal redraw skipped: fit/write already repaints', { reason });
         }
 
@@ -3538,6 +3538,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const before = { cols: terminal.cols, rows: terminal.rows };
         fitTerminal(`refresh:${reason}`);
         const after = { cols: terminal.cols, rows: terminal.rows };
+        // A retained renderer can have lost its backing surface while hidden,
+        // even when the grid is unchanged. Paint only after fitting real DOM.
+        if (redrawAfterFit) refreshTextureAtlasNow(`refresh:${reason}`);
 
         // 3) Resize push
         if (!options.skipResizePush) {
@@ -3640,6 +3643,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         runRefreshSequence,
       ]
     );
+
+    const wasLayoutVisibleRef = React.useRef(isLayoutVisible);
+    React.useEffect(() => {
+      const revealed = isLayoutVisible && !wasLayoutVisibleRef.current;
+      wasLayoutVisibleRef.current = isLayoutVisible;
+      if (!isLayoutVisible) {
+        clearResizePushTimer();
+        resizePresentationRef.current?.cancel();
+      } else if (revealed) {
+        requestRefresh('layout-visible', {
+          forceRedraw: true,
+          reconcileServerSize: true,
+          skipScrollToBottom: true,
+        });
+      }
+    }, [isLayoutVisible, requestRefresh, clearResizePushTimer]);
 
     const flushPendingRefresh = React.useCallback(
       (reason: RefreshReason) => {

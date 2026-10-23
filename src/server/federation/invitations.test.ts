@@ -64,7 +64,7 @@ describe('single-use device invitations', () => {
     expect(statSync(f.filePath).mode & 0o777).toBe(0o600);
     expect(f.store.consume(invitation.code, 'real-phone', issuer => issuer === 'admin')).toEqual({ subjectId: 'real-phone', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'], canDelegate: false, expiresAt: 900000 });
     expect(f.store.subjectLabels()).toEqual({ 'real-phone': '工作手机' });
-    expect(() => f.reload().consume(invitation.code, 'other-phone', () => true)).toThrow('PAIRING_DENIED');
+    expect(() => f.reload().consume(invitation.code, 'other-phone', () => true)).toThrow('INVITATION_USED');
   });
   it('supports all-session custom read access without administrator wildcard', () => {
     const f = fixture();
@@ -76,7 +76,7 @@ describe('single-use device invitations', () => {
     const invitation = f.store.create('admin', { scope: { kind: 'service' }, actions: ['service:*'] });
     expect(() => f.store.consume(invitation.code, 'phone', () => false)).toThrow('PAIRING_DENIED');
     f.advance(600000);
-    expect(() => f.store.consume(invitation.code, 'phone', () => true)).toThrow('PAIRING_DENIED');
+    expect(() => f.store.consume(invitation.code, 'phone', () => true)).toThrow('INVITATION_EXPIRED');
   });
   it('rejects privilege injection and invalid scope/action combinations', () => {
     const f = fixture();

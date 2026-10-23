@@ -9,6 +9,7 @@ import type { DeviceProfile } from '../server/federation/deviceProfile';
 import type { PendingInvitation } from '../server/federation/invitations';
 import { RelayServices } from './services/RelayServices';
 import { DeviceAuthorizationRequired } from '../lib/federation/deviceAuthorization';
+import { describeInvitationFailure } from '../lib/federation/invitationFailure';
 import { ServiceRoutes } from './services/ServiceRoutes';
 import { ServiceManager, type ServiceNavigation } from './services/ServiceManager';
 import { normalizeServiceAddress, saveServiceConnection, type ServiceConnection } from '../lib/services/serviceDirectory';
@@ -16,7 +17,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 're
 import { createPortal } from 'react-dom';
 import { toDataURL } from 'qrcode';
 import { parseInviteLink } from '../lib/federation/inviteLink';
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, MessageCircle, Monitor, Plus, Pencil, Server, Smartphone, TerminalSquare, X } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Clock3, Copy, Link2Off, MessageCircle, Monitor, Plus, Pencil, Server, Smartphone, TerminalSquare, WifiOff, X } from 'lucide-react';
 
 export interface FederationConnection { url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean }
 export interface FederationGrantInput {
@@ -97,6 +98,17 @@ function qrColors() {
 export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, initialServicePage, initialShareSessionId, initialViewMode, sessions = [], grants = [], invitations = [], onCreateInvite, onRevokeInvitation, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
   const [initialNeedsPassword, setInitialNeedsPassword] = useState(false);
   const [initialPassword, setInitialPassword] = useState('');
+  const [inviteDismissed, setInviteDismissed] = useState(false);
+  const [failedInvite, setFailedInvite] = useState<FederationConnection>();
+  const [inviteFailure, setInviteFailure] = useState<ReturnType<typeof describeInvitationFailure>>();
+  const [replacingInvite, setReplacingInvite] = useState(false);
+  const [replacementLink, setReplacementLink] = useState('');
+  const displayedInvite = failedInvite || (inviteDismissed ? undefined : initialInvite);
+  useEffect(() => {
+    setInviteDismissed(false); setFailedInvite(undefined); setInviteFailure(undefined);
+    setInitialNeedsPassword(false); setInitialPassword('');
+    setReplacingInvite(false); setReplacementLink('');
+  }, [initialInvite?.url, initialInvite?.targetPeerId, initialInvite?.pairingCode, initialInvite?.routeCode]);
   const [serviceNavigation, setServiceNavigation] = useState<ServiceNavigation>({});
   const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false);
   const [inviting, setInviting] = useState(!!initialShareSessionId); const [adding, setAdding] = useState(!paired);
@@ -133,11 +145,11 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     const own = activeGrants.filter(grant => grant.subjectId === subjectId);
     return { subjectId, grants: own, name: subjectId === currentIdentity ? '此设备' : own.find(grant => grant.label)?.label || '未命名设备' };
   }).sort((a, b) => Number(b.subjectId === currentIdentity) - Number(a.subjectId === currentIdentity));
-  const overview = !editingDevice && !showDetails && paired && !adding && !inviting && !initialInvite;
+  const overview = !editingDevice && !showDetails && paired && !adding && !inviting && !displayedInvite;
   const back = () => { setEditingDevice(undefined); setShowDetails(false); setAdding(false); setInviting(false); setInvitation(undefined); setAdvanced(false); setError(''); setNotice(''); setPendingRevoke(undefined); setPendingInvitationRevoke(undefined); setPendingGrantRevoke(undefined); setEntryAddress(''); setCustomAddress(''); };
   const beginInvite = () => { setInvitation(undefined); setInvitationSummary(undefined); setInviting(true); setAdding(false); setAdvanced(false); setError(''); setNotice(''); };
   const deviceName = (grant: FederationGrant) => grant.subjectId === currentIdentity ? '此设备' : grant.label || '未命名设备';
-  const dismiss = () => { if (selectingSessions) setSelectingSessions(false); else onClose(); };
+  const dismiss = () => { if (selectingSessions) setSelectingSessions(false); else if (replacingInvite) { setReplacingInvite(false); setReplacementLink(''); setError(''); } else onClose(); };
   const panel = useRef<HTMLDivElement>(null);
   useKeyboardLayer(panel, true, () => { if (!busy) dismiss(); });
   useLayoutEffect(() => { panel.current?.focus({ preventScroll: true }); }, []);
@@ -149,13 +161,17 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     return () => { canceled = true; };
   }, [invitation]);
   async function connect(connection: FederationConnection) {
-    setBusy(true); setError(''); setNotice('');
+    setBusy(true); setError(''); setNotice(''); setInviteFailure(undefined);
     try {
       await onConnect(connection);
       const { url, targetPeerId, serviceName, serviceOrigin } = connection;
       await saveServiceConnection({ id: targetPeerId, url, targetPeerId, label: serviceName || new URL(url).host, serviceOrigin, entryServiceId: connection.entryServiceId });
-      setAdding(false); setNotice('已连接。');
-    } catch (failure) { if (connection.routeOnly && failure instanceof DeviceAuthorizationRequired) setInitialNeedsPassword(true); else setError('暂时无法连接，请检查网络，或确认邀请是否仍然有效。'); }
+      setFailedInvite(undefined); setInviteDismissed(true); setAdding(false); setNotice('已连接。');
+    } catch (failure) {
+      if (connection.routeOnly && failure instanceof DeviceAuthorizationRequired) { setFailedInvite(connection); setInitialNeedsPassword(true); }
+      else if (connection.pairingCode || connection.routeCode) { setFailedInvite(connection); setInviteFailure(describeInvitationFailure(failure)); }
+      else setError('暂时无法连接，请检查网络后重试。');
+    }
     finally { setBusy(false); }
   }
   async function createInvitation(event: FormEvent) {
@@ -209,22 +225,22 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
       finally { setBusy(false); }
     }}>确认撤销邀请</button></div>
   </div> : <button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={() => { setPendingInvitationRevoke(id); setNotice(''); }}>撤销邀请</button>;
-  const title = serviceNavigation.title || (editingDevice ? '设备名称' : showDetails ? (tab === 'devices' ? '授权详情' : '连接详情') : selectingSessions ? '选择终端' : inviting ? '分享与邀请' : adding && paired ? '添加服务' : paired ? '服务与设备' : '连接 Termdock');
-  const showBack = !!serviceNavigation.back || !!editingDevice || showDetails || selectingSessions || (paired && (adding || inviting));
-  const returnToOverview = () => { if (serviceNavigation.back) { serviceNavigation.back(); return; } if (selectingSessions) setSelectingSessions(false); else back(); };
+  const title = replacingInvite ? '输入新的邀请链接' : serviceNavigation.title || (editingDevice ? '设备名称' : showDetails ? (tab === 'devices' ? '授权详情' : '连接详情') : selectingSessions ? '选择终端' : inviting ? '分享与邀请' : adding && paired ? '添加服务' : paired ? '服务与设备' : '连接 Termdock');
+  const showBack = replacingInvite || !!serviceNavigation.back || !!editingDevice || showDetails || selectingSessions || (paired && (adding || inviting));
+  const returnToOverview = () => { if (replacingInvite) { setReplacingInvite(false); setReplacementLink(''); setError(''); return; } if (serviceNavigation.back) { serviceNavigation.back(); return; } if (selectingSessions) setSelectingSessions(false); else back(); };
   const scopeName = (deviceGrants: FederationGrant[]) => deviceGrants.every(grant => grant.routeTargetServiceId) ? `${new Set(deviceGrants.map(grant => grant.routeTargetServiceId)).size} 台服务` : deviceGrants.some(grant => grant.scope.kind === 'service') ? '全部终端' : `${new Set(deviceGrants.flatMap(grant => grant.scope.kind === 'sessions' ? grant.scope.sessionIds : [])).size} 个终端`;
   return createPortal(<div className="fixed inset-0 z-modal-backdrop flex items-end justify-center bg-[var(--app-backdrop)] backdrop-blur-sm sm:items-center sm:p-6" data-sidebar-gesture-ignore onMouseDown={event => { if (event.target === event.currentTarget && !busy) dismiss(); }}>
     <div ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="federation-title" className="z-modal-panel flex max-h-[calc(100dvh-env(safe-area-inset-top)-12px)] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl border border-border bg-surface font-sans text-foreground shadow-xl outline-none sm:max-h-[min(800px,92dvh)] sm:rounded-2xl">
       <header className="shrink-0 border-b border-border px-5 pt-3">
         <div className="flex min-h-12 items-center gap-2 pb-2">
-          {showBack && <button type="button" className={`${button} -ml-3 inline-flex w-11 items-center justify-center text-muted-foreground`} disabled={busy} onClick={returnToOverview} aria-label={selectingSessions ? '取消选择终端' : tab === 'devices' ? '返回设备' : '返回服务'}><ArrowLeft size={20} /></button>}
+          {showBack && <button type="button" className={`${button} -ml-3 inline-flex w-11 items-center justify-center text-muted-foreground`} disabled={busy} onClick={returnToOverview} aria-label={replacingInvite ? '返回邀请' : selectingSessions ? '取消选择终端' : tab === 'devices' ? '返回设备' : '返回服务'}><ArrowLeft size={20} /></button>}
           <h2 id="federation-title" className="min-w-0 flex-1 text-base font-semibold">{title}</h2>
           <button type="button" className={`${button} -mr-3 inline-flex w-11 items-center justify-center text-muted-foreground`} disabled={busy} onClick={dismiss} aria-label="关闭"><X size={20} /></button>
         </div>
         {overview && !serviceNavigation.title && <div className="flex gap-6" role="tablist" aria-label="管理内容">{([['services', '服务'], ['devices', '设备']] as const).map(([value, name]) => <button type="button" key={value} role="tab" aria-selected={tab === value} aria-controls={`federation-${value}`} id={`federation-tab-${value}`} className={`min-h-11 border-b-2 px-1 text-sm transition ${tab === value ? 'border-primary font-medium text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => { setTab(value); setAdvanced(false); setPendingRevoke(undefined); setError(''); setNotice(''); }}>{name}{value === 'devices' && devices.length > 0 && <span className="ml-1.5 text-xs text-muted-foreground">{devices.length}</span>}</button>)}</div>}
       </header>
       <div className="min-h-0 overflow-y-auto overscroll-contain px-5 py-4 pb-[max(20px,env(safe-area-inset-bottom))]">
-        {((overview && tab === 'services') || (adding && !inviting && !initialInvite)) && <ServiceManager initialServicePage={initialServicePage} renderRelayServices={(service, onBusyChange) => <RelayServices service={service} onBusyChange={onBusyChange} onConnect={onConnect} onConnectWithPassword={onConnectWithPassword} />} renderRoutes={(service, onBusyChange) => <ServiceRoutes service={service} onBusyChange={onBusyChange} />} hideHeader initiallyAdding={adding} current={currentServiceId ? { id: currentServiceId, targetPeerId: currentServiceId, url: currentServiceOrigin || location.origin, label: currentServiceName || '当前服务' } : undefined} onNavigation={setServiceNavigation} onBusyChange={setBusy} onInvite={onCreateInvite ? beginInvite : undefined}
+        {((overview && tab === 'services') || (adding && !inviting && !displayedInvite)) && <ServiceManager initialServicePage={initialServicePage} renderRelayServices={(service, onBusyChange) => <RelayServices service={service} onBusyChange={onBusyChange} onConnect={onConnect} onConnectWithPassword={onConnectWithPassword} />} renderRoutes={(service, onBusyChange) => <ServiceRoutes service={service} onBusyChange={onBusyChange} />} hideHeader initiallyAdding={adding} current={currentServiceId ? { id: currentServiceId, targetPeerId: currentServiceId, url: currentServiceOrigin || location.origin, label: currentServiceName || '当前服务' } : undefined} onNavigation={setServiceNavigation} onBusyChange={setBusy} onInvite={onCreateInvite ? beginInvite : undefined}
           onOpen={async service => { if (onOpenService) return onOpenService(service); else if (service.targetPeerId) await connect({ ...service, targetPeerId: service.targetPeerId, serviceName: service.label }); else if (onAddService) await onAddService(service.url); }}
           onAdd={async (input, password) => {
             if (onAddService) return onAddService(input, password);
@@ -256,10 +272,25 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             </dl>
           </div>) : <dl className="space-y-4 text-xs"><div><dt className="text-muted-foreground">当前服务</dt><dd className="mt-1 text-sm">{currentServiceName || '当前服务'}</dd></div><div><dt className="text-muted-foreground">服务标识</dt><dd className="mt-1 break-all font-mono leading-relaxed select-text">{currentServiceId}</dd></div><div><dt className="text-muted-foreground">本设备标识</dt><dd className="mt-1 break-all font-mono leading-relaxed select-text">{currentIdentity}</dd></div></dl>}
         </section>}
-        {initialInvite && !inviting && <section className="space-y-5 py-1">
-          <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2 text-muted-foreground"><Server size={22} /></span><div className="min-w-0"><p className="text-xs text-muted-foreground">你受邀连接</p><p className="mt-1 break-words text-base font-medium">{connectionName(initialInvite)}</p></div></div>
-          {initialInvite.routeOnly && <p className="text-xs leading-relaxed text-muted-foreground">此邀请提供备用连接，目标服务仍会验证你的访问权限。</p>}
-          {initialNeedsPassword ? <form className="space-y-3" onSubmit={async event => { event.preventDefault(); setBusy(true); setError(''); try { await onConnectWithPassword?.(initialInvite, initialPassword); } catch (failure) { setError(failure instanceof Error ? failure.message : '暂时无法登录，请重试。'); } finally { setInitialPassword(''); setBusy(false); } }}><label className="block space-y-2 text-sm"><span>目标服务密码</span><input className={field} type="password" required autoFocus autoComplete="current-password" value={initialPassword} onChange={event => setInitialPassword(event.target.value)} /></label><button className={`${primaryButton} w-full`} disabled={busy || !initialPassword}>{busy ? '正在登录…' : '登录并连接'}</button></form> : <button type="button" className={`${primaryButton} w-full text-sm`} disabled={busy} onClick={() => void connect(initialInvite)}>{busy ? '正在连接…' : '接受邀请'}</button>}
+        {replacingInvite && <form className="space-y-4 py-1" onSubmit={async event => {
+          event.preventDefault(); setError('');
+          let connection: FederationConnection;
+          try { connection = parseInviteLink(replacementLink.trim()); }
+          catch { setError('请输入完整的 Termdock 邀请链接。'); return; }
+          setReplacingInvite(false); setReplacementLink(''); await connect(connection);
+        }}>
+          <p className="text-sm leading-6 text-muted-foreground">请粘贴分享者重新生成的邀请链接。</p>
+          <label className="block space-y-2 text-sm"><span>新的邀请链接</span><input className={field} type="text" required autoFocus autoComplete="off" spellCheck={false} placeholder="粘贴完整链接" value={replacementLink} onChange={event => { setReplacementLink(event.target.value); setError(''); }} /></label>
+          <button type="submit" className={`${primaryButton} w-full text-sm`} disabled={busy || !replacementLink.trim()}>接受新邀请</button>
+        </form>}
+        {displayedInvite && !inviting && !replacingInvite && <section className="space-y-5 py-1">
+          <div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2 text-muted-foreground"><Server size={22} /></span><div className="min-w-0"><p className="text-xs text-muted-foreground">受邀连接的服务</p><p className="mt-1 break-words text-base font-medium">{connectionName(displayedInvite)}</p></div></div>
+          {inviteFailure && <div role="alert" className="flex gap-3 rounded-xl border border-border bg-surface-2 p-4">
+            {inviteFailure.kind === 'connection' ? <WifiOff size={20} className="mt-0.5 shrink-0 text-muted-foreground" /> : inviteFailure.kind === 'expired' ? <Clock3 size={20} className="mt-0.5 shrink-0 text-warning" /> : <Link2Off size={20} className="mt-0.5 shrink-0 text-warning" />}
+            <div className="min-w-0"><h3 className="text-sm font-medium">{inviteFailure.title}</h3><p className="mt-1.5 text-sm leading-6 text-muted-foreground">{inviteFailure.description}</p></div>
+          </div>}
+          {displayedInvite.routeOnly && !inviteFailure && <p className="text-xs leading-relaxed text-muted-foreground">此邀请提供备用连接，目标服务仍会验证你的访问权限。</p>}
+          {initialNeedsPassword ? <form className="space-y-3" onSubmit={async event => { event.preventDefault(); setBusy(true); setError(''); try { await onConnectWithPassword?.(displayedInvite, initialPassword); } catch (failure) { setError(failure instanceof Error ? failure.message : '暂时无法登录，请重试。'); } finally { setInitialPassword(''); setBusy(false); } }}><label className="block space-y-2 text-sm"><span>目标服务密码</span><input className={field} type="password" required autoFocus autoComplete="current-password" value={initialPassword} onChange={event => setInitialPassword(event.target.value)} /></label><button className={`${primaryButton} w-full`} disabled={busy || !initialPassword}>{busy ? '正在登录…' : '登录并连接'}</button></form> : inviteFailure && !inviteFailure.retryable ? <button type="button" className={`${primaryButton} w-full text-sm`} onClick={() => { setReplacingInvite(true); setError(''); }}>输入新的邀请链接</button> : <button type="button" className={`${primaryButton} w-full text-sm`} disabled={busy} onClick={() => void connect(displayedInvite)}>{busy ? '正在连接…' : inviteFailure ? '重试连接' : '接受邀请'}</button>}
         </section>}
         {inviting && !selectingSessions && <section>
           {invitation ? <div className="space-y-4 text-center">
@@ -311,7 +342,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
         </section>}
         {selectingSessions && <section><p className="mb-3 text-xs text-muted-foreground">仅允许访问勾选的终端。</p><div className="space-y-1">{sessions.map(session => <label key={session.sessionId} className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-sm hover:bg-surface-2"><input type="checkbox" className="h-4 w-4 accent-primary" checked={draftSessionIds.includes(session.sessionId)} onChange={event => setDraftSessionIds(event.target.checked ? [...draftSessionIds, session.sessionId] : draftSessionIds.filter(id => id !== session.sessionId))} /><span className="min-w-0 break-words">{session.name}</span></label>)}{!sessions.length && <p className="py-4 text-sm text-muted-foreground">当前没有可共享的终端。</p>}</div></section>}
         {loadError && <p role="alert" className="mt-4 text-sm text-destructive">{loadError}{onRetry && <button type="button" className={`${button} ml-1 text-sm underline`} onClick={onRetry}>重试</button>}</p>}
-        {!serviceNavigation.title && !adding && !editingDevice && !showDetails && !selectingSessions && !invitation && !inviting && <div className="mt-4 border-t border-border pt-2"><button type="button" className={`${button} -ml-3 inline-flex items-center gap-1 bg-transparent text-xs text-muted-foreground`} aria-expanded={overview ? undefined : advanced} onClick={() => overview ? setShowDetails(true) : setAdvanced(value => !value)}>{inviting ? '有效期与备注' : adding ? '手动连接' : tab === 'devices' ? '授权详情' : '连接详情'}{overview ? <ChevronRight size={14} /> : <ChevronDown size={13} className={advanced ? 'rotate-180' : ''} />}</button>
+        {!displayedInvite && !serviceNavigation.title && !adding && !editingDevice && !showDetails && !selectingSessions && !invitation && !inviting && <div className="mt-4 border-t border-border pt-2"><button type="button" className={`${button} -ml-3 inline-flex items-center gap-1 bg-transparent text-xs text-muted-foreground`} aria-expanded={overview ? undefined : advanced} onClick={() => overview ? setShowDetails(true) : setAdvanced(value => !value)}>{inviting ? '有效期与备注' : adding ? '手动连接' : tab === 'devices' ? '授权详情' : '连接详情'}{overview ? <ChevronRight size={14} /> : <ChevronDown size={13} className={advanced ? 'rotate-180' : ''} />}</button>
           {advanced && <section className="space-y-3 pb-1 pt-2">
             {inviting && <><label className="block space-y-1 text-sm"><span>设备备注（可选）</span><input className={field} value={label} onChange={event => setLabel(event.target.value)} placeholder="例如：工作电脑" /></label><label className="block space-y-1 text-sm"><span>授权到期时间</span><input type="datetime-local" className={field} value={grantExpiry} onChange={event => setGrantExpiry(event.target.value)} /></label></>}
             {!inviting && currentIdentity && <p className="break-all text-xs leading-relaxed text-muted-foreground">本设备身份：{currentIdentity}</p>}

@@ -13,9 +13,10 @@ import { createRequire } from 'module';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 
 const require_ = createRequire(import.meta.url);
-const pkgRoot = new URL('..', import.meta.url).pathname;
+const pkgRoot = fileURLToPath(new URL('..', import.meta.url));
 
 function run(cmd, opts = {}) {
   console.log(`  $ ${cmd}`);
@@ -48,7 +49,7 @@ function which(bin) {
 // —— native modules: 实际 spawn 测试，不只是 require ——
 console.log('\n=== Rebuilding native modules ===');
 
-const { ensureNodePty } = require_('./ensure-node-pty.cjs');
+const { ensureNodePty, rebuildNodePty } = require_('./ensure-node-pty.cjs');
 const PTY_PATH = require_.resolve('node-pty/package.json', { paths: [pkgRoot] }).replace('/package.json', '');
 
 ensureNodePty(PTY_PATH);
@@ -91,8 +92,8 @@ if (testPty()) {
   console.log('  node-pty OK');
 } else {
   console.log('  node-pty needs rebuild (prebuilt binary incompatible with this OS/Node version)...');
-  runOk(`rm -rf ${PTY_PATH}/prebuilds/*`);
-  run(`cd ${PTY_PATH} && npx --yes node-gyp rebuild`, { timeout: 120_000 });
+  fs.rmSync(path.join(PTY_PATH, 'prebuilds'), { recursive: true, force: true });
+  rebuildNodePty(PTY_PATH, { timeout: 120_000 });
   if (testPty()) {
     console.log('  ✓ node-pty rebuilt successfully');
   } else {

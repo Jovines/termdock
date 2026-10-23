@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRef } from 'react';
 import type { TerminalController } from './TerminalViewport';
 
+const presentation = vi.hoisted(() => ({ begin: vi.fn(), cancel: vi.fn(), dispose: vi.fn(), written: vi.fn() }));
 const terminalModel=vi.hoisted(()=>({instance:null as any,selection:'', dimensions: { cols: 80, rows: 24 }}));
 const clipboard = vi.hoisted(() => ({
   uploadTerminalClipboardFiles: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock('../../desktop/nativeBridge', () => ({ getTermdockDesktopBridge: () => d
 vi.mock('../../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../hooks/useTouchScroll', () => ({ useTouchScroll: () => ({ setupTouchScroll: vi.fn(), stopAllScroll: vi.fn() }) }));
 vi.mock('../../hooks/useGesture', () => ({ useGesture: vi.fn() }));
-vi.mock('../../terminal/resizePresentation', () => ({ createResizePresentation: () => ({ begin() {}, cancel() {}, dispose() {}, written() {} }) }));
+vi.mock('../../terminal/resizePresentation', () => ({ createResizePresentation: () => presentation }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
   constructor(options:Record<string,unknown>){this.options=options;terminalModel.instance=this;}
   _core={coreService:{isCursorInitialized:false}};
@@ -92,6 +93,45 @@ describe('TerminalViewport async paste ownership', () => {
     if ('termdockDesktop' in window) delete (window as Window & { termdockDesktop?: unknown }).termdockDesktop;
     desktop.bridge = undefined;
     vi.unstubAllGlobals();
+  });
+
+  it('refits and repaints the retained terminal on reveal, including unchanged dimensions', async () => {
+    const ref = createRef<TerminalController>();
+    const props = { sessionKey: 'reveal', sessionId: 'reveal', chunks: [], onInput: vi.fn(), onResize: vi.fn(), terminalSettings: { rendererMode: 'dom' } as never, theme: {} as never, autoFocus: false };
+    const view = render(<TerminalViewport {...props} ref={ref} isLayoutVisible />);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    vi.spyOn(view.container.querySelector('.terminal-viewport-container')!, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    const refresh = vi.spyOn(terminalModel.instance, 'refresh');
+    vi.useFakeTimers();
+    act(() => vi.advanceTimersByTime(1000));
+    view.rerender(<TerminalViewport {...props} ref={ref} isLayoutVisible={false} />);
+    terminalModel.dimensions = { cols: 81, rows: 25 };
+    act(() => { ref.current!.requestRefresh('resize'); vi.advanceTimersByTime(1000); });
+    // Hidden DOM must never change the model or publish a stale grid.
+    expect(terminalModel.instance.cols).toBe(80);
+    expect(props.onResize).not.toHaveBeenCalled();
+    view.rerender(<TerminalViewport {...props} ref={ref} isLayoutVisible />);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(terminalModel.instance.cols).toBe(81);
+    expect(terminalModel.instance.rows).toBe(25);
+    refresh.mockClear();
+    view.rerender(<TerminalViewport {...props} ref={ref} isLayoutVisible={false} />);
+    view.rerender(<TerminalViewport {...props} ref={ref} isLayoutVisible />);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(refresh).toHaveBeenCalledWith(0, 24);
+  });
+
+  it('does not fence passive local reflow waiting for a tmux frame it cannot request', async () => {
+    const ref = createRef<TerminalController>();
+    const view = render(<TerminalViewport ref={ref} sessionKey="passive-paint" sessionId="passive-paint" chunks={[]} onInput={vi.fn()} onResize={vi.fn()} onTmuxScroll={vi.fn()} terminalSettings={{ rendererMode: 'dom' } as never} theme={{} as never} autoFocus={false} />);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    vi.spyOn(view.container.querySelector('.terminal-viewport-container')!, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    vi.useFakeTimers();
+    act(() => { ref.current!.setSessionReady(true); ref.current!.notifyServerSize(50, 20, 'ws-resize:phone'); vi.advanceTimersByTime(1000); });
+    presentation.begin.mockClear();
+    act(() => { terminalModel.dimensions = { cols: 120, rows: 32 }; ref.current!.requestRefresh('resize'); vi.advanceTimersByTime(1000); });
+    expect(terminalModel.instance.cols).toBe(120);
+    expect(presentation.begin).not.toHaveBeenCalled();
   });
 
   it('waits for interaction after a remote resize and cancels superseded retries', async () => {

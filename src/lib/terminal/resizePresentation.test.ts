@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import type { Terminal } from '@xterm/xterm';
 import { Terminal as HeadlessTerminal } from '@xterm/headless';
-import { describe, expect, it, vi } from 'vitest';
-import { createResizePresentation } from './resizePresentation';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createResizePresentation, RESIZE_PRESENTATION_TIMEOUT_MS } from './resizePresentation';
+afterEach(() => vi.useRealTimers());
 
 function setup() {
   const model = new HeadlessTerminal({ cols: 20, rows: 4, allowProposedApi: true });
@@ -32,6 +33,28 @@ function setup() {
 }
 
 describe('resize presentation', () => {
+  it('releases the latest geometry when no synchronized frame arrives, without postponing forever', () => {
+    vi.useFakeTimers();
+    const { model, renderer, events, gate } = setup();
+    gate.begin(); renderer.handleResize(30, 3);
+    vi.advanceTimersByTime(RESIZE_PRESENTATION_TIMEOUT_MS / 2);
+    gate.begin(); renderer.handleResize(40, 4);
+    expect(events).toEqual([]);
+    vi.advanceTimersByTime(RESIZE_PRESENTATION_TIMEOUT_MS / 2);
+    expect(events[0]).toBe('size:40x4');
+    gate.dispose(); model.dispose();
+  });
+
+  it('does not paint a disposed terminal when the fallback deadline passes', () => {
+    vi.useFakeTimers();
+    const { model, renderer, events, gate } = setup();
+    gate.begin(); renderer.handleResize(30, 3);
+    gate.dispose();
+    vi.advanceTimersByTime(RESIZE_PRESENTATION_TIMEOUT_MS * 2);
+    expect(events).toEqual([]);
+    model.dispose();
+  });
+
   it('keeps geometry and pixels until a complete frame has been parsed across chunks', async () => {
     const { model, renderer, events, gate, write } = setup();
     await write('OLD');
