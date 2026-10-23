@@ -11,7 +11,9 @@ const require = createRequire(import.meta.url);
 const { rebuildNodePty } = require('../scripts/ensure-node-pty.cjs');
 
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock install '));
+  // macOS exposes /var through /private/var; child process.cwd() resolves that
+  // alias. Compare the same real directory while retaining the spaces fixture.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'termdock install ')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, 'bin');
   fs.mkdirSync(bin);
