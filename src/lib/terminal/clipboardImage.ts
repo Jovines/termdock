@@ -7,13 +7,14 @@ export class TerminalClipboardVideoError extends Error {}
 
 /** Keep uploads in the renderer, where fetch is bound to the active encrypted
  * service. The desktop preload's isolated-world fetch cannot use that channel. */
-export async function uploadTerminalClipboardImage(image: File, signal?: AbortSignal): Promise<string> {
+export function prepareTerminalClipboardImage(image: File): File {
   if (!image.type.startsWith('image/') || image.size === 0) throw new Error('Clipboard image is empty');
-  // System paste events commonly name every screenshot image.png. Keep earlier
-  // references intact when several screenshots are pasted in succession.
   const extension = image.type === 'image/jpeg' ? 'jpg' : image.type.split('/')[1].replace(/[^a-z0-9]/gi, '') || 'png';
-  const file = new File([image], `termdock-clipboard-${Date.now()}-${crypto.randomUUID()}.${extension}`, { type: image.type });
-  const { files } = await uploadFiles('/tmp', [file], signal);
+  return new File([image], `termdock-clipboard-${Date.now()}-${crypto.randomUUID()}.${extension}`, { type: image.type });
+}
+
+export async function uploadTerminalClipboardImage(image: File, signal?: AbortSignal): Promise<string> {
+  const { files } = await uploadFiles('/tmp', [prepareTerminalClipboardImage(image)], signal);
   if (!files[0]?.path) throw new Error('Upload did not return an image path');
   return files[0].path;
 }

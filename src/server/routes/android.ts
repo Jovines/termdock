@@ -1,3 +1,4 @@
+import { encryptedRequestResources, hasEncryptedServiceAccess } from '../federation/requestContext.js';
 import { Router } from 'express';
 import type { WebSocket } from 'ws';
 import { connectDevice, disconnectDevice, listDevices, resolveAdbBinary } from '../android/adb.js';
@@ -16,13 +17,14 @@ export function isValidAndroidSerial(serial: string): boolean {
   return serial.length <= 128 && SERIAL_PATTERN.test(serial);
 }
 
-router.get('/devices', async (_req, res) => {
+router.get('/devices', async (req, res) => {
   try {
     const devices = await listDevices();
     let scrcpyVersion: string | null = null;
     const adbAvailable = resolveAdbBinary() !== null;
     try { scrcpyVersion = (await resolveScrcpyBinaries()).version; } catch { scrcpyVersion = null; }
-    res.json({ adbAvailable, scrcpyVersion, devices });
+    const shared = encryptedRequestResources(req);
+    res.json({ adbAvailable, scrcpyVersion, devices: shared && !hasEncryptedServiceAccess(req) ? devices.filter(d => shared.android?.some(a => a.serial === d.serial)) : devices });
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'ADB_UNAVAILABLE', code: 'ADB_UNAVAILABLE' });
   }

@@ -155,3 +155,12 @@ describe('mirror failure diagnostics', () => {
     } finally { controller.disconnect(); }
   });
 });
+
+it('keeps view-only phones on the encrypted stream while suppressing device input', () => {
+  const socket = { readyState: 1, send: vi.fn(), close: vi.fn(), onmessage: null };
+  vi.mocked(secureSocket).mockReturnValue(socket as unknown as WebSocket);
+  const controller = new AndroidMirrorController(document.createElement('canvas'), { onState: vi.fn(), onHeader: vi.fn(), onWarning: vi.fn(), onStats: vi.fn() });
+  controller.setReadOnly(true); controller.connect('pixel'); controller.sendText('must not be typed'); controller.back(); controller.rotate();
+  expect(socket.send.mock.calls.filter(call => JSON.parse(call[0]).type === 'control')).toHaveLength(0);
+  controller.setReadOnly(false); controller.back(); expect(socket.send.mock.calls.filter(call => JSON.parse(call[0]).type === 'control')).toHaveLength(2); controller.disconnect();
+});

@@ -6,8 +6,8 @@ import { useSessionOrderStore } from '../../stores/useSessionOrderStore';
 import { saveCollaborationGroup, type CollaborationGroup } from '../../terminal/api';
 
 /** Session menus edit membership only; the terminal and group history survive. */
-export function SessionCollaborationActions({ sessionId, backendSessionId, itemClassName, iconClassName, onOpen, onDone }: {
-  sessionId: string; backendSessionId?: string | null;
+export function SessionCollaborationActions({ sessionId, backendSessionId, groupId, itemClassName, iconClassName, onOpen, onDone }: {
+  sessionId: string; backendSessionId?: string | null; groupId?: string;
   itemClassName: string; iconClassName: string;
   onOpen: (groupId: string) => void; onDone: () => void;
 }) {
@@ -21,7 +21,7 @@ export function SessionCollaborationActions({ sessionId, backendSessionId, itemC
   const confirmRef = useRef<HTMLDivElement>(null);
   const leaveButtons = useRef(new Map<string, HTMLButtonElement>());
   const isMember = (id: string) => id === sessionId || id === backendSessionId;
-  const memberships = groups.filter(group => group.sessionIds.some(isMember));
+  const memberships = groups.filter(group => (!groupId || group.id === groupId) && group.sessionIds.some(isMember));
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     if (confirmation) confirmRef.current?.querySelector('button')?.focus({ preventScroll: true });

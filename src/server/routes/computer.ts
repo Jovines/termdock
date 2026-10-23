@@ -1,3 +1,4 @@
+import { VncReadOnlyFilter } from './vncReadOnly.js';
 import { Router } from 'express';
 import { isDeepStrictEqual } from 'node:util';
 import { hostname } from 'node:os';
@@ -72,11 +73,12 @@ export function stopComputerBridges(): void {
 
 /** RFB bytes are base64 records inside the existing authenticated Noise tunnel.
  * The eight-record receive window applies TCP backpressure without dropping bytes. */
-export function handleComputerWebSocket(socket: WebSocket, host: string, options?: { protocol?: string; port?: string }): void {
+export function handleComputerWebSocket(socket: WebSocket, host: string, options?: { protocol?: string; port?: string; readOnly?: boolean }): void {
   if (options?.protocol === 'rdp') {
-    handleRdpWebSocket(socket, host, Number(options.port ?? 3389)); return;
+    handleRdpWebSocket(socket, host, Number(options.port ?? 3389), options.readOnly); return;
   }
   if (options?.protocol && options.protocol !== 'vnc') { socket.close(4400, 'COMPUTER_INVALID_PROTOCOL'); return; }
+  const filter = options?.readOnly ? new VncReadOnlyFilter() : undefined;
   let closed = false;
   let tcp: Socket | undefined;
   let sent = 0;
@@ -101,6 +103,7 @@ export function handleComputerWebSocket(socket: WebSocket, host: string, options
       const bytes = tcp.read(Math.min(tcp.readableLength, 32 * 1024)) as Buffer | null;
       if (!bytes) break;
       if (sent === acked) lastAckAt = Date.now();
+      try { filter?.serverData(bytes); } catch { finish(4403, 'COMPUTER_READ_ONLY_PROTOCOL'); return; }
       socket.send(JSON.stringify({ type: 'data', seq: ++sent, data: bytes.toString('base64') }));
       if (closed) break;
     }
@@ -121,9 +124,9 @@ export function handleComputerWebSocket(socket: WebSocket, host: string, options
           || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(message.data)) throw new Error('INVALID_DATA');
         const bytes = Buffer.from(message.data, 'base64');
         if (!bytes.length || bytes.length > 64 * 1024 || tcp.writableLength + bytes.length > 1024 * 1024) throw new Error('INPUT_LIMIT');
-        tcp.write(bytes);
+        for (const permitted of filter ? filter.clientData(bytes) : [bytes]) tcp.write(permitted);
       } else throw new Error('INVALID_MESSAGE');
-    } catch { finish(4400, 'COMPUTER_INVALID_MESSAGE'); }
+    } catch (error) { finish(4400, error instanceof Error && error.message === 'COMPUTER_READ_ONLY_PROTOCOL' ? error.message : 'COMPUTER_INVALID_MESSAGE'); }
   });
   void (async () => {
     try {

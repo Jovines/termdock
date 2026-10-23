@@ -781,9 +781,14 @@ export class CollaborationStore {
       ? { ...group, updatedAt: Math.max(group.updatedAt, existing.updatedAt + 1) } : group);
     if (existing) this.applyContext(incoming, this.context(group.id));
     if (existing && stableJson(existing) === stableJson(incoming)) return;
+    // Remote directory snapshots contain output/observation timestamps that
+    // change on every poll. Keep them current for readers without rewriting
+    // the complete message journal or notifying durable-change subscribers.
+    const metadataChanged = !existing
+      || stableJson({ ...existing, remoteSessions: undefined }) !== stableJson({ ...incoming, remoteSessions: undefined });
     this.document.groups = [...this.document.groups.filter((item) => item.id !== group.id), incoming];
     if (group.deleted) this.document.messages = this.document.messages.filter((item) => item.groupId !== group.id);
-    this.persist();
+    if (metadataChanged) this.persist();
   }
 
   /** Promote the source group and its complete history in one atomic file replacement. */

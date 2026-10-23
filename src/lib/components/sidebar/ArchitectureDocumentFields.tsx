@@ -2,7 +2,7 @@ import { lazy, Suspense } from 'react';
 import { ARCHITECTURE_FIELDS, type ArchitectureField, type ArchitectureFields, type ArchitectureMeta } from '../../architecture/model';
 import { useI18n } from '../../i18n';
 
-const Markdown = lazy(() => import('./RightSidebar').then(module => ({ default: module.MarkdownPreview })));
+const Markdown = lazy(() => import('../markdown/MarkdownPreview').then(module => ({ default: module.MarkdownPreview })));
 export function architectureFieldLabel(field: ArchitectureField, zh: boolean): string {
   return zh ? ({ description: '说明', diagram: '关系图源码', context: '上下文', constraint: '约束', concern: '问题与风险', todo: '待办', note: '备注' })[field] : ({ description: 'Description', diagram: 'Diagram source', context: 'Context', constraint: 'Constraints', concern: 'Concerns', todo: 'To do', note: 'Notes' })[field];
 }

@@ -1,3 +1,6 @@
+import { SessionSharingBadge, useSessionSharingStatus } from './SessionSharingBadge';
+import { TodoNavigationButton } from '../todos/TodoNavigationButton';
+import { getAgentLaunchCommand } from '../../terminal/launchCommands';
 import { sessionCreationErrorKey, type NewSessionRequestOptions, type NewSessionCreationError } from '../../terminal/newSessionRequest';
 import { Archive, RefreshCw, MessageCircle } from 'lucide-react';
 import { CollaborationExecutionArchives } from './CollaborationExecutionArchives';
@@ -68,6 +71,7 @@ import { AgentOperationsPanel } from './AgentOperationsPanel';
 import { SwipeToCloseSession } from './SwipeToCloseSession';
 import { RecoverableSessions } from './RecoverableSessions';
 import { CollaborationGroupActions } from './CollaborationGroupActions';
+import { CollaborationSessionMenu } from './CollaborationSessionMenu';
 
 
 interface LeftSidebarProps {
@@ -282,6 +286,7 @@ export function LeftSidebar(
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
+  const sharing = useSessionSharingStatus(isOpen || !!pinned);
   const [, requestAttentionScroll] = useState(0);
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpenState] = useState(false);
@@ -294,7 +299,7 @@ export function LeftSidebar(
     setNewSessionComposerOpenState(open);
   }, []);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
-  const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
+  const mainCollaborationGroup = useCollaborationNavigation(state => state.todoOpen ? "__todos__" : state.groupId);
   const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
   const agentOperationsOpen = workbenchOpen || Object.keys(groupPanels).length > 0;
   const panelIntent = useRef(false);
@@ -773,7 +778,7 @@ export function LeftSidebar(
   };
   const handleQuickLaunchDefaultAgent = () => {
     if (!newSessionAgent) return;
-    launchSession({ mode: quickLaunchMode, command: newSessionAgent.command });
+    launchSession({ mode: quickLaunchMode, command: getAgentLaunchCommand(newSessionAgent.slug, newSessionAgent.command) });
   };
 
   const handleRestoreTmuxSession = (session: TmuxSessionSummary) => {
@@ -966,6 +971,7 @@ export function LeftSidebar(
           </span>
           <SessionNoticeUnreadBadge sessionIds={[session.id]} />
         </button>
+        <SessionSharingBadge status={sharing.items[session.id]} onChanged={() => void sharing.refresh()} />
         {beforeActions}
         <button
           type="button"
@@ -1005,7 +1011,7 @@ export function LeftSidebar(
         </button>)}
       </SwipeToCloseSession>
     );
-  }, [activeSessionId, mainCollaborationGroup, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId]);
+  }, [activeSessionId, mainCollaborationGroup, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId, sharing.items, sharing.refresh]);
 
   // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
   // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
@@ -1713,8 +1719,10 @@ export function LeftSidebar(
           const connection = collaborationRemoteConnection(remote);
           const connected = connection === 'connected';
           const connectionLabel = connection === 'unknown' ? '连接状态未知' : '连接已断开';
-          return <button
-          key={remote.sessionId} type="button" title={`${collaborationServiceLabel(remote)} · ${connected ? '服务已连接' : connectionLabel}`}
+          return <CollaborationSessionMenu key={remote.sessionId} sessionId={remote.sessionId} groupId={collaboration.id}
+            label={remote.name} detail={`${collaborationServiceLabel(remote)} · ${connected ? '服务已连接' : connectionLabel}`}
+            onOpen={() => { void openAgentOperations(collaboration.id); }}><button
+          type="button" title={`${collaborationServiceLabel(remote)} · ${connected ? '服务已连接' : connectionLabel}`}
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
           onClick={() => {
             setNewSessionComposerOpen(false);
@@ -1726,7 +1734,7 @@ export function LeftSidebar(
           <span className="min-w-0 flex-1 truncate">{remote.name}</span>
           <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{collaborationServiceLabel(remote)}</span>
           {!connected && <span className="shrink-0 text-[9px]">{connectionLabel}</span>}
-        </button>; })}
+        </button></CollaborationSessionMenu>; })}
         </>}
         </div>
         {/* Keep the workgroup drop area below the rows, never over a sortable member. */}
@@ -1828,6 +1836,8 @@ export function LeftSidebar(
           { label: t('sidebar.settings'), icon: RiSettingsLine, onSelect: () => { setNewSessionComposerOpen(false); onOpenSettings(); } },
         ]}
       />
+
+      <TodoNavigationButton onOpen={() => { setNewSessionComposerOpen(false); useCollaborationNavigation.getState().openTodos(); closeIfOverlay(); }} />
 
       {collaborationActionError && <div role="alert" className="mx-2 mt-2 flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
         <span className="min-w-0 flex-1">{collaborationActionError}</span>

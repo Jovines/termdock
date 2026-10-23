@@ -1,3 +1,4 @@
+import { useShareAccess } from '../../federation/ShareAccessContext';
 import { captureReferenceInsertionScope } from '../sidebar/requestReferenceInsertion';
 import { LoadingSpinner as Loader2 } from '../ui/Loading';
 import {
@@ -124,6 +125,8 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   onRecordingComplete?: (file: AndroidRecording) => void;
   onCloseTab?: () => void;
 }) {
+  const shared = useShareAccess();
+  const sharedRef = useRef(shared); sharedRef.current = shared;
   const { t } = useI18n();
   const overlay = useAndroidMirrorStore(state => state.overlay);
   const setOverlay = useAndroidMirrorStore(state => state.setOverlay);
@@ -316,6 +319,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       onStats: next => { if (controllerRef.current === controller) setStats(next); },
       onWarning: message => { if (controllerRef.current === controller) setWarning(message); },
     });
+    controller.setReadOnly(!!sharedRef.current && !sharedRef.current.android?.some(d => d.serial === serial && d.access === 'control'));
     controllerRef.current = controller;
     let quality = qualityRef.current;
     if (quality.id === 'auto') {
@@ -353,6 +357,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     docked?: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
     deviceSerial?: string | null;
   }) => {
+    if (sharedRef.current) return;
     const payload = {
       ...(patch.quality ? { quality: { id: patch.quality.id, maxSize: patch.quality.maxSize, bitRate: patch.quality.bitRate, maxFps: patch.quality.maxFps } } : {}),
       ...(patch.activePresetId !== undefined ? { activePresetId: patch.activePresetId } : {}),
@@ -365,6 +370,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
 
   useEffect(() => {
     let cancelled = false;
+    if (sharedRef.current) return;
     void getSettings().then(settings => {
       if (cancelled) return;
       const panel = settings.androidPanel;
@@ -978,9 +984,11 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     } finally { recordingRequest.current = false; setRecordingBusy(false); }
   };
 
+  const readOnly = !!shared && !shared.android?.some(d => d.serial === selectedSerial && d.access === 'control');
   // 服务端拥有录制生命周期；刷新、切换面板和预览重连都不会停止录像。
   useEffect(() => {
     let cancelled = false;
+    if (sharedRef.current) return;
     let polling = false;
     recordingRef.current = null;
     setRecording(false);
@@ -1181,7 +1189,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           <button
             type="button"
             onClick={() => { if (recording) void stopRecording('manual'); else void startRecording(); }}
-            disabled={recordingBusy || (!recording && !onRecordingComplete)}
+            disabled={!!shared || recordingBusy || (!recording && !onRecordingComplete)}
             className={`${iconButtonClass} ${recording ? 'text-destructive' : 'text-muted-foreground'}`}
             title={recording ? t('android.recordingStop') : (onRecordingComplete ? t('android.recordingStart') : t('android.captureUnavailable'))}
             aria-label={recording ? t('android.recordingStop') : t('android.recordingStart')}
@@ -1198,6 +1206,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
           className={`${iconButtonClass} ${moreActive ? 'text-primary' : 'text-muted-foreground'}`}
           title={t('android.more')}
           aria-label={t('android.more')}
+          disabled={!!shared}
         >
           <MoreHorizontal size={compact ? 13 : 14} />
         </button>
@@ -1218,7 +1227,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         )}
       </div>
 
-      {moreOpen && moreAnchor && createPortal(
+      {!shared && moreOpen && moreAnchor && createPortal(
         <div
           ref={moreMenuRef}
           role="menu"
@@ -1349,7 +1358,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
         </div>
       )}
 
-      {showAddress && (
+      {!shared && showAddress && (
         <div className="flex items-center gap-1.5 border-b border-border px-2 py-2">
           <input
             value={address}
@@ -1506,15 +1515,15 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       </div>
 
       <div className={`flex flex-wrap items-center gap-1 border-t border-border ${compact ? 'px-1.5 py-0.5' : 'px-2 py-1.5'}`}>
-        <ToolButton compact={compact} label={t('android.back')} onClick={() => controllerRef.current?.back()} disabled={!streaming}><ArrowLeft size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.home')} onClick={() => controllerRef.current?.home()} disabled={!streaming}><Home size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.recents')} onClick={() => controllerRef.current?.recents()} disabled={!streaming}><Layers size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.notifications')} onClick={() => controllerRef.current?.expandNotifications()} disabled={!streaming}><Bell size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.rotate')} onClick={() => controllerRef.current?.rotate()} disabled={!streaming}><RotateCw size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.volumeDown')} onClick={() => controllerRef.current?.volumeDown()} disabled={!streaming}><Volume1 size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.volumeUp')} onClick={() => controllerRef.current?.volumeUp()} disabled={!streaming}><Volume2 size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.power')} onClick={() => controllerRef.current?.power()} disabled={!streaming}><Power size={14} /></ToolButton>
-        <ToolButton compact={compact} label={t('android.inputText')} active={textMode} onClick={() => setTextMode(value => !value)} disabled={!streaming}><Keyboard size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.back')} onClick={() => controllerRef.current?.back()} disabled={!streaming || readOnly}><ArrowLeft size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.home')} onClick={() => controllerRef.current?.home()} disabled={!streaming || readOnly}><Home size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.recents')} onClick={() => controllerRef.current?.recents()} disabled={!streaming || readOnly}><Layers size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.notifications')} onClick={() => controllerRef.current?.expandNotifications()} disabled={!streaming || readOnly}><Bell size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.rotate')} onClick={() => controllerRef.current?.rotate()} disabled={!streaming || readOnly}><RotateCw size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.volumeDown')} onClick={() => controllerRef.current?.volumeDown()} disabled={!streaming || readOnly}><Volume1 size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.volumeUp')} onClick={() => controllerRef.current?.volumeUp()} disabled={!streaming || readOnly}><Volume2 size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.power')} onClick={() => controllerRef.current?.power()} disabled={!streaming || readOnly}><Power size={14} /></ToolButton>
+        <ToolButton compact={compact} label={t('android.inputText')} active={textMode} onClick={() => setTextMode(value => !value)} disabled={!streaming || readOnly}><Keyboard size={14} /></ToolButton>
         {/* 缩放改的是本地视图，不往设备注入任何东西。 */}
         <ToolButton compact={compact} label={t('android.zoomIn')} onClick={() => zoomByStep('in')} disabled={!streaming || zoom >= ZOOM_MAX - 0.01}><Plus size={14} /></ToolButton>
         <ToolButton compact={compact} label={t('android.zoomOut')} onClick={() => zoomByStep('out')} disabled={!streaming || zoom <= ZOOM_MIN + 0.01}><Minus size={14} /></ToolButton>

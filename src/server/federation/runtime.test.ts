@@ -39,13 +39,15 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
   app.get('/api/terminal/session-inventory', (_req, res) => res.json(inventory));
   app.get('/api/terminal/:session/health', (req, res) => res.json({ output: 'private-terminal-output', session: req.params.session }));
   app.post('/api/terminal/:session/input', (req, res) => { input(req.body); res.json({ success: true }); });
-  let terminal: WebSocket | undefined, computer: WebSocket | undefined;
+  let terminal: WebSocket | undefined, computer: WebSocket | undefined, android: WebSocket | undefined;
+  const computerOptions = vi.fn();
   const terminalOptions = vi.fn();
   const issueRouteTicket = vi.fn(() => ({ routeToken: 'test-route-ticket', expiresAt: Date.now() + 30_000 }));
   const runtime = await createFederationRuntime(app, directory, {
     terminal(socket, _session, _client, options, dimensions) { terminal = socket; terminalOptions(options, dimensions); socket.on('message', data => received(JSON.parse(String(data)))); socket.send(JSON.stringify({ type: 'output', data: 'private-terminal-output' })); },
     control(socket) { socket.on('message', data => received(JSON.parse(String(data)))); },
-    computer(socket) { computer = socket; onComputer?.(socket); },
+    android(socket) { android = socket; socket.on('message', data => received(JSON.parse(String(data)))); },
+    computer(socket, _host, options) { computerOptions(options); computer = socket; onComputer?.(socket); },
   }, { resolveSessionId: id => id === 'one' || id === 'one-new' ? 'source-one' : id, issueRouteTicket, ...runtimeOptions });
   cleanup.push(() => runtime.close());
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -93,7 +95,7 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
       pauseReads() { (socket as unknown as { _socket?: { pause(): void } })._socket?.pause(); },
       resumeReads() { (socket as unknown as { _socket?: { resume(): void } })._socket?.resume(); } };
   }
-  return { app, directory, connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, terminal: () => terminal, computer: () => computer, inventory };
+  return { app, directory, connect, runtime, input, received, uploads, issueRouteTicket, terminalOptions, computerOptions, android: () => android, terminal: () => terminal, computer: () => computer, inventory };
 }
 
 describe('federation runtime over real encrypted WebSocket', () => {
@@ -659,4 +661,50 @@ describe('federation runtime over real encrypted WebSocket', () => {
     owner.channel.send({ type: 'ws-open', id: 'own', path }); await owner.take('own', 'ws-ready');
     expect(f.terminalOptions).toHaveBeenLastCalledWith(expect.objectContaining({ independentTmux: true, outputActive: false }), { cols: 120, rows: 40 });
   });
+});
+
+
+it('enforces individual shared devices, computer view-only mode, directory boundaries and revocation over Noise', async () => {
+  const f = await fixture(), guest = await f.connect();
+  const shared = join(f.directory, 'visible.txt'); writeFileSync(shared, 'visible');
+  const grant = f.runtime.store.grant({ subjectId: guest.identity.peerId, scope: { kind: 'sessions', sessionIds: ['source-one'] }, actions: ['session.view'], resources: {
+    android: [{ serial: 'pixel', access: 'view' }], computers: [{ host: '127.0.0.1', protocol: 'rdp', port: 3389, access: 'view' }], directories: [{ path: f.directory, access: 'read' }],
+  } });
+  f.app.get('/api/terminal/fs/read', (_req, res) => res.json({ content: 'visible' }));
+  expect((await guest.http('file-ok', 'GET', `/api/terminal/fs/read?path=${encodeURIComponent(shared)}`))[0]).toMatchObject({ type: 'head', status: 200 });
+  for (const [id, method, path] of [
+    ['outside', 'GET', '/api/terminal/fs/read?path=/etc/passwd'], ['delete', 'DELETE', `/api/terminal/fs/file?path=${encodeURIComponent(shared)}`],
+    ['connect', 'POST', '/api/android/connect'], ['password', 'POST', '/api/computer/credentials/use'], ['settings', 'GET', '/api/terminal/settings'],
+    ['chat-write', 'POST', '/api/terminal/one/chat'], ['other-chat', 'GET', '/api/terminal/two/chat'],
+  ]) expect((await guest.http(id, method, path))[0]).toMatchObject({ type: 'error' });
+  guest.channel.send({ type: 'ws-open', id: 'phone', path: '/api/android/pixel/ws' }); expect(await guest.take('phone')).toMatchObject({ type: 'ws-ready' });
+  guest.channel.send({ type: 'ws-data', id: 'phone', data: JSON.stringify({ type: 'control', data: 'AAAA' }) }); expect(await guest.take('phone')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  guest.channel.send({ type: 'ws-data', id: 'phone', data: JSON.stringify({ type: 'control', data: 'EQ==' }) });
+  guest.channel.send({ type: 'ws-open', id: 'other-phone', path: '/api/android/other/ws' }); expect(await guest.take('other-phone')).toMatchObject({ type: 'error' });
+  guest.channel.send({ type: 'ws-open', id: 'pc', path: '/api/computer/ws?host=127.0.0.1&protocol=rdp&port=3389' }); expect(await guest.take('pc')).toMatchObject({ type: 'ws-ready' }); expect(f.computerOptions).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true }));
+  guest.channel.send({ type: 'ws-open', id: 'pc-other', path: '/api/computer/ws?host=127.0.0.1&protocol=rdp&port=3390' }); expect(await guest.take('pc-other')).toMatchObject({ type: 'error' });
+  f.runtime.store.revoke(grant.id); f.android()!.send(JSON.stringify({ type: 'frame', data: 'secret' })); expect(await guest.take('phone')).toMatchObject({ type: 'ws-close', code: 4003 });
+});
+
+it('reports actual scoped connections and stops one shared Session without revoking a sibling Session', async () => {
+  const f = await fixture(), owner = await f.connect(); await owner.pair();
+  const guest = await f.connect();
+  f.runtime.store.grant({ subjectId: guest.identity.peerId, scope: { kind: 'sessions', sessionIds: ['one', 'two'] }, actions: ['session.view'] });
+  await guest.http('visit-one', 'GET', '/api/terminal/one/health');
+  owner.channel.send({ type: 'session-sharing-status', id: 'sharing' });
+  expect(await owner.take('sharing')).toMatchObject({ items: expect.arrayContaining([{ sessionId: 'source-one', devices: 1, connectedDevices: 1, invitations: 0 }]) });
+  guest.channel.send({ type: 'session-sharing-stop', id: 'forbidden-stop', sessionId: 'one' });
+  expect(await guest.take('forbidden-stop')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  guest.channel.send({ type: 'session-sharing-status', id: 'forbidden-status' });
+  expect(await guest.take('forbidden-status')).toMatchObject({ type: 'error', error: 'AUTHORIZATION_DENIED' });
+  f.inventory.clientSessions[1].sessionId = 'two';
+  owner.channel.send({ type: 'invite-create', id: 'shared-invite', scope: { kind: 'sessions', sessionIds: ['one', 'two'] }, actions: ['session.view'] });
+  expect(await owner.take('shared-invite')).toMatchObject({ type: 'result', code: expect.any(String) });
+  owner.channel.send({ type: 'session-sharing-stop', id: 'stop-one', sessionId: 'source-one' });
+  expect(await owner.take('stop-one')).toMatchObject({ revoked: 1 });
+  expect((await guest.http('blocked-one', 'GET', '/api/terminal/one/health')).slice(-1)[0]).toMatchObject({ type: 'error' });
+  expect((await guest.http('still-two', 'GET', '/api/terminal/two/health')).some(packet => packet.type === 'head' && packet.status === 200)).toBe(true);
+  owner.channel.send({ type: 'grants-list', id: 'remaining-invites' });
+  const pending = await owner.take('remaining-invites');
+  expect(JSON.stringify(pending.invitations)).not.toContain('"one"'); expect(JSON.stringify(pending.invitations)).toContain('"two"');
 });

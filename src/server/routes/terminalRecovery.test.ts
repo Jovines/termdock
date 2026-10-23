@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { expect, it, vi } from 'vitest';
 import { detectTmuxRecoveryIncident, retainDismissedTmuxSessions } from '../utils/tmuxRecovery.js';
+import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 
 // Exercise the actual route functions without boot-time tmux configuration or
 // access to the developer's persisted sessions.
@@ -17,6 +18,86 @@ function routeFunctions(names: string[], setup: string, dependencies: Record<str
   }).outputText, context);
   return context;
 }
+
+function closeFixture(path = '/:sessionId', backendLive = true) {
+  const route = ast.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
+    && node.expression.expression.getText(ast) === 'router.delete'
+    && node.expression.arguments[0]?.getText(ast) === `'${path}'`) as ts.ExpressionStatement;
+  const handler = (route.expression as ts.CallExpression).arguments[1].getText(ast);
+  const record = { sessionId: 'frontend', backendSessionId: 'backend', mode: 'tmux', tmuxSessionName: 'task' };
+  const state = { sessions: [record], updatedAt: 1 };
+  let closedAt: number | null = null;
+  const run = vi.fn(async () => { closedAt = Date.now(); });
+  const cleanup = vi.fn(() => { expect(closedAt).not.toBeNull(); });
+  const persist = vi.fn();
+  const context = routeFunctions(['markTmuxSessionClosed'], `
+    const TERMDOCK_GUI_DETACHED_AT_OPTION = '@termdock-gui-detached-at';
+    globalThis.close = ${handler};
+  `, {
+    terminalSessions: new Map(backendLive ? [['backend', record]] : []), globalSessionState: state,
+    runTmux: run, getErrorMessage: String,
+    isTmuxSessionMissingMessage: (message: string) => message.includes("can't find session"),
+    isTmuxServerMissingMessage: (message: string) => message.includes('no server running'),
+    cleanupSession: cleanup, archiveAgentResumeRecord: vi.fn(),
+    removeGlobalSessionRecord: vi.fn((id: string) => {
+      expect(closedAt).not.toBeNull();
+      state.sessions = state.sessions.filter(item => item.sessionId !== id);
+      return true;
+    }),
+    persistGlobalStateNow: persist, broadcastClientState: vi.fn(),
+  });
+  const response = { status: vi.fn().mockReturnThis(), send: vi.fn(), json: vi.fn() };
+  const request = { params: { sessionId: 'backend', frontendSessionId: 'frontend' } };
+  return { context, response, request, run, cleanup, persist, state, closedAt: () => closedAt };
+}
+
+it('completes ordinary close without depending on a second request from the page', async () => {
+  const fixture = closeFixture();
+  await fixture.context.close(fixture.request, fixture.response);
+  expect(fixture.state.sessions).toEqual([]);
+  expect(fixture.cleanup).toHaveBeenCalledOnce();
+  expect(fixture.persist).toHaveBeenCalledOnce();
+  expect(isTmuxRecoveryCandidate({ managedByTermdock: true, sourceFrontendSessionId: 'frontend',
+    boundFrontendSessionId: null, guiDetachedAt: fixture.closedAt() })).toBe(false);
+});
+
+it('also closes persisted records when their backend wrapper is already missing', async () => {
+  const fixture = closeFixture('/:sessionId', false);
+  await fixture.context.close(fixture.request, fixture.response);
+  expect(fixture.state.sessions).toEqual([]);
+  expect(fixture.cleanup).not.toHaveBeenCalled();
+  expect(fixture.run).toHaveBeenCalledWith(['set-option', '-t', 'task', '@termdock-gui-detached-at', expect.any(String)]);
+  expect(fixture.response.json).toHaveBeenCalledWith({ success: true, alreadyGone: true });
+});
+
+it('keeps the session when its intentional-close marker cannot be saved', async () => {
+  const fixture = closeFixture();
+  fixture.run.mockRejectedValueOnce(new Error('tmux timed out'));
+  await fixture.context.close(fixture.request, fixture.response);
+  expect(fixture.response.status).toHaveBeenCalledWith(500);
+  expect(fixture.cleanup).not.toHaveBeenCalled();
+  expect(fixture.state.sessions).toHaveLength(1);
+  expect(fixture.persist).not.toHaveBeenCalled();
+});
+
+it('records frontend-only removal before forgetting its inventory entry', async () => {
+  const fixture = closeFixture('/session-inventory/sessions/:frontendSessionId');
+  await fixture.context.close(fixture.request, fixture.response);
+  expect(fixture.state.sessions).toEqual([]);
+  expect(fixture.response.status).toHaveBeenCalledWith(204);
+  const failed = closeFixture('/session-inventory/sessions/:frontendSessionId');
+  failed.run.mockRejectedValueOnce(new Error('tmux timed out'));
+  await expect(failed.context.close(failed.request, failed.response)).rejects.toThrow('timed out');
+  expect(failed.state.sessions).toHaveLength(1);
+});
+
+it('allows confirmed missing tmux sessions to close, but preserves unexpected-loss recovery', async () => {
+  const fixture = closeFixture();
+  fixture.run.mockRejectedValueOnce(new Error("can't find session: task"));
+  await expect(fixture.context.markTmuxSessionClosed('task')).resolves.toBeUndefined();
+  expect(isTmuxRecoveryCandidate({ managedByTermdock: true, sourceFrontendSessionId: 'frontend',
+    boundFrontendSessionId: null, guiDetachedAt: null })).toBe(true);
+});
 
 it('passes failed and unavailable inventory scans as unknown to recovery detection', async () => {
   const list = vi.fn().mockRejectedValue(new Error('tmux query timed out'));

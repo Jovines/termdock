@@ -31,6 +31,8 @@ export interface TermdockUpdateState {
 
 type UpdateRunner = typeof updateTermdockFromOfficialRegistry;
 
+export class TermdockUpdateStateChangedError extends Error {}
+
 interface AutoUpdateDependencies {
   currentVersion: string;
   stateFilePath?: string | null;
@@ -118,9 +120,12 @@ export class TermdockAutoUpdateManager {
     return this.checkPromise;
   }
 
-  confirmRestart(): TermdockUpdateState {
+  confirmRestart(expectedVersion?: string): TermdockUpdateState {
     if (this.state.status !== 'ready' || !hasPendingTermdockUpdate(this.state)) {
-      throw new Error('No installed Termdock update is waiting for restart.');
+      throw new TermdockUpdateStateChangedError('No installed Termdock update is waiting for restart.');
+    }
+    if (expectedVersion !== undefined && expectedVersion !== this.state.latestVersion) {
+      throw new TermdockUpdateStateChangedError('The pending Termdock update has changed. Please confirm the new version.');
     }
     try {
       this.verifyInstalled(this.state.latestVersion!);

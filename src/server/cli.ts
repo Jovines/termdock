@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { parseTodoCommand, executeTodoCommand, TODO_HELP, type TodoCommand } from './todos/cli.js';
 
 // libuv 线程池默认只有 4 个线程，慢/挂起的异步 IO（fs.promises、crypto 等）
 // 会把池耗尽，表现为整个服务的 IO 全部卡死。必须在任何异步 fs 调用之前
@@ -201,6 +202,7 @@ interface CliOptions {
   integration?: string[];
   collab?: CollaborationCommand;
   automation?: AutomationCommand;
+  todo?: TodoCommand;
   notify?: NotifyCommand;
 }
 
@@ -306,6 +308,7 @@ Short commands:
   pi                 Same as agent-plugin
   n [message]       Progress reminder; run td n for help and Agent instructions
   notify [message]  Same as n (see td n --prompt)
+  todo               Manage todos (see td todo --help)
   automation         Manage scheduled tasks (see td automation --help)
   integration       Manage local scoped integrations (see integration help)
   collab status      Show this Session's collaboration groups and peers
@@ -772,6 +775,7 @@ function parseArgs(argv: string[]): CliOptions {
   let integration: string[] | undefined;
   let collab: CliOptions['collab'];
   let automation: AutomationCommand | undefined;
+  let todo: TodoCommand | undefined;
   let notify: NotifyCommand | undefined;
 
   // Short command aliases for the common path. Keep these positional-only so
@@ -868,6 +872,10 @@ function parseArgs(argv: string[]): CliOptions {
     } else if (command === 'notify' || command === 'n') {
       try { notify = parseNotifyCommand(argv.slice(1)); }
       catch (error) { console.error(JSON.stringify({ ok: false, code: 'INVALID_ARGUMENT', error: getMessage(error) })); process.exit(1); }
+      argv = [];
+    } else if (command === 'todo') {
+      try { todo = parseTodoCommand(argv.slice(1)); }
+      catch (error) { console.error(JSON.stringify({ ok: false, error: getMessage(error) })); process.exit(1); }
       argv = [];
     } else if (command === 'automation') {
       try { automation = parseAutomationCommand(argv.slice(1)); }
@@ -1267,6 +1275,7 @@ function parseArgs(argv: string[]): CliOptions {
     integration,
     collab,
     automation,
+    todo,
     notify,
   };
 }
@@ -3726,6 +3735,20 @@ async function main(): Promise<void> {
 
   if (options.notify) {
     await runNotify(options.notify);
+    return;
+  }
+
+  if (options.todo) {
+    if (options.todo.action === 'help') { console.log(TODO_HELP); return; }
+    const state = getRunningState();
+    if (!state?.localApiToken) { console.error(JSON.stringify({ ok: false, error: 'Termdock is not running' })); process.exitCode = 1; return; }
+    const baseUrl = state.localUrl ?? `${state.scheme ?? 'http'}://${state.host === '0.0.0.0' ? 'localhost' : state.host}:${state.port}`;
+    process.exitCode = await executeTodoCommand(options.todo, {
+      request: (method, endpoint, body) => method === 'POST'
+        ? postLocalJson(baseUrl, state.localApiToken!, endpoint, body)
+        : getLocalJson(baseUrl, state.localApiToken!, endpoint),
+      stdin: readStdinText, write: line => console.log(line),
+    });
     return;
   }
 

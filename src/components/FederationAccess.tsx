@@ -1,3 +1,5 @@
+import { ShareResourceFields, ShareResourceSummary } from './ShareResourceFields';
+import type { ShareResources } from '../server/shared/shareResources';
 import { useKeyboardLayer } from '../lib/hooks/useKeyboardLayer';
 import { LoadingSpinner as Loader2 } from '../lib/components/ui/Loading';
 import type { DeviceProfile } from '../server/federation/deviceProfile';
@@ -16,12 +18,15 @@ import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Monitor, Plus, Penci
 export interface FederationConnection { url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean }
 export interface FederationGrantInput {
   subjectId: string;
+  resources?: ShareResources;
   scope: { kind: 'service' } | { kind: 'sessions'; sessionIds: string[] };
   actions: string[];
   expiresAt?: number;
 }
 export interface FederationGrant extends FederationGrantInput { id: string; revokedAt?: number; label?: string; deviceProfile?: DeviceProfile; routeTargetServiceId?: string; routeTargetName?: string }
 export interface FederationInviteInput {
+  viewMode?: 'terminal' | 'chat';
+  resources?: ShareResources;
   includeBackup?: boolean;
   entryAddress?: string;
   scope: FederationGrantInput['scope'];
@@ -47,6 +52,8 @@ export interface FederationAccessProps {
   hasBackup?: boolean;
   inviteAddresses?: { url: string; label: string }[];
   initialInvite?: FederationConnection;
+  initialShareSessionId?: string;
+  initialViewMode?: 'terminal' | 'chat';
   sessions?: { sessionId: string; name: string; sourceSessionId?: string }[];
   grants?: FederationGrant[];
   invitations?: PendingInvitation[];
@@ -82,16 +89,21 @@ function qrColors() {
   return brightness(background) < brightness(foreground) ? { dark: background, light: foreground } : { dark: foreground, light: background };
 }
 /** Pairing codes remain in component memory only and are cleared after successful use. */
-export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, initialServicePage, sessions = [], grants = [], invitations = [], onCreateInvite, onRevokeInvitation, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
+export function FederationAccess({ onConnect, onClose, onConnectWithPassword, onAddService, onOpenService, currentIdentity, currentServiceName, currentServiceId, currentServiceOrigin, hasBackup = false, inviteAddresses = [], paired = false, initialInvite, initialServicePage, initialShareSessionId, initialViewMode, sessions = [], grants = [], invitations = [], onCreateInvite, onRevokeInvitation, onRevoke, onRename, loading = false, loadError, onRetry }: FederationAccessProps) {
   const [initialNeedsPassword, setInitialNeedsPassword] = useState(false);
   const [initialPassword, setInitialPassword] = useState('');
   const [serviceNavigation, setServiceNavigation] = useState<ServiceNavigation>({});
   const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false);
-  const [inviting, setInviting] = useState(false); const [adding, setAdding] = useState(!paired);
+  const [inviting, setInviting] = useState(!!initialShareSessionId); const [adding, setAdding] = useState(!paired);
   const [includeBackup, setIncludeBackup] = useState(true);
   const [entryAddress, setEntryAddress] = useState(''); const [customAddress, setCustomAddress] = useState('');
   const [preset, setPreset] = useState<'read' | 'write' | 'full'>('read');
-  const [resource, setResource] = useState<'all' | 'selected'>('all'); const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [resource, setResource] = useState<'all' | 'selected'>('selected'); const [selectedIds, setSelectedIds] = useState<string[]>(() => { const match = sessions.find(s => s.sessionId === initialShareSessionId || s.sourceSessionId === initialShareSessionId); return match ? [match.sessionId] : sessions.length === 1 ? [sessions[0].sessionId] : []; });
+  const [viewMode, setViewMode] = useState<'terminal' | 'chat'>(initialViewMode || 'chat');
+  const [resources, setResources] = useState<ShareResources>({});
+  const [invitationSummary, setInvitationSummary] = useState<{ scope: FederationGrantInput['scope']; actions: string[]; resources?: ShareResources }>();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const [advanced, setAdvanced] = useState(false);
   const [label, setLabel] = useState(''); const [grantExpiry, setGrantExpiry] = useState('');
   const [invitation, setInvitation] = useState<{ id?: string; url: string; expiresAt: number }>(); const [qr, setQr] = useState('');
@@ -104,6 +116,8 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
   const [pendingRevoke, setPendingRevoke] = useState<string>();
   const [selectingSessions, setSelectingSessions] = useState(false);
   const [draftSessionIds, setDraftSessionIds] = useState<string[]>([]);
+  const appliedShare = useRef<string>();
+  useEffect(() => { if (!initialShareSessionId || appliedShare.current === initialShareSessionId) return; const selected = sessions.find(s => s.sessionId === initialShareSessionId || s.sourceSessionId === initialShareSessionId); if (!selected) return; appliedShare.current = initialShareSessionId; setSelectedIds([selected.sessionId]); setResource('selected'); setInviting(true); setAdding(false); }, [initialShareSessionId, sessions]);
   let inviteHostname: string | undefined;
   try { inviteHostname = new URL(entryAddress === 'custom' ? normalizeServiceAddress(customAddress) : entryAddress || currentServiceOrigin || location.origin).hostname; } catch { /* Keep an incomplete custom address editable. */ }
   const localInviteAddress = !!inviteHostname && ['localhost', '127.0.0.1', '[::1]'].includes(inviteHostname);
@@ -115,7 +129,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
   }).sort((a, b) => Number(b.subjectId === currentIdentity) - Number(a.subjectId === currentIdentity));
   const overview = !editingDevice && !showDetails && paired && !adding && !inviting && !initialInvite;
   const back = () => { setEditingDevice(undefined); setShowDetails(false); setAdding(false); setInviting(false); setInvitation(undefined); setAdvanced(false); setError(''); setNotice(''); setPendingRevoke(undefined); setPendingInvitationRevoke(undefined); setPendingGrantRevoke(undefined); setEntryAddress(''); setCustomAddress(''); };
-  const beginInvite = () => { setInviting(true); setAdding(false); setAdvanced(false); setError(''); setNotice(''); };
+  const beginInvite = () => { setInvitation(undefined); setInvitationSummary(undefined); setInviting(true); setAdding(false); setAdvanced(false); setError(''); setNotice(''); };
   const deviceName = (grant: FederationGrant) => grant.subjectId === currentIdentity ? '此设备' : grant.label || '未命名设备';
   const dismiss = () => { if (selectingSessions) setSelectingSessions(false); else onClose(); };
   const panel = useRef<HTMLDivElement>(null);
@@ -152,19 +166,21 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
     } else if (entryAddress) address = entryAddress;
     setBusy(true);
     try {
-      const result = await onCreateInvite({
+      const input: FederationInviteInput = { viewMode,
+        ...(preset !== 'full' && (resources.android?.length || resources.computers?.length || resources.directories?.length) ? { resources } : {}),
         ...(hasBackup ? { includeBackup } : {}),
         ...(address ? { entryAddress: address } : {}),
         scope: preset === 'full' || resource === 'all' ? { kind: 'service' } : { kind: 'sessions', sessionIds: stableSelected },
         actions: preset === 'full' ? ['service:*'] : preset === 'write' ? ['session.view', 'session.input', 'session.resize'] : ['session.view'],
         ...(label.trim() ? { label: label.trim() } : {}), ...(expiresAt === undefined ? {} : { expiresAt }),
-      });
-      setInvitation(result);
+      };
+      const result = await onCreateInvite(input);
+      setInvitationSummary(input); setInvitation(result);
     } catch (failure) { setError(failure instanceof Error && failure.message.startsWith('无法分享备用连接：') ? '无法分享备用连接：需要入口管理员授权。你也可以关闭“包含备用连接”，生成直连邀请。' : '暂时无法生成邀请，请确认当前设备有授权管理权限。'); }
     finally { setBusy(false); }
   }
   async function copyInvite() {
-    if (!invitation) return;
+    if (!invitation || invitation.expiresAt <= Date.now()) return;
     try { await navigator.clipboard.writeText(invitation.url); setNotice('邀请链接已复制。'); }
     catch { setError('浏览器未允许复制，请长按下方链接复制。'); }
   }
@@ -178,7 +194,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
       finally { setBusy(false); }
     }}>确认撤销邀请</button></div>
   </div> : <button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={() => { setPendingInvitationRevoke(id); setNotice(''); }}>撤销邀请</button>;
-  const title = serviceNavigation.title || (editingDevice ? '设备名称' : showDetails ? (tab === 'devices' ? '授权详情' : '连接详情') : selectingSessions ? '选择终端' : inviting ? '邀请设备' : adding && paired ? '添加服务' : paired ? '服务与设备' : '连接 Termdock');
+  const title = serviceNavigation.title || (editingDevice ? '设备名称' : showDetails ? (tab === 'devices' ? '授权详情' : '连接详情') : selectingSessions ? '选择终端' : inviting ? '分享与邀请' : adding && paired ? '添加服务' : paired ? '服务与设备' : '连接 Termdock');
   const showBack = !!serviceNavigation.back || !!editingDevice || showDetails || selectingSessions || (paired && (adding || inviting));
   const returnToOverview = () => { if (serviceNavigation.back) { serviceNavigation.back(); return; } if (selectingSessions) setSelectingSessions(false); else back(); };
   const scopeName = (deviceGrants: FederationGrant[]) => deviceGrants.every(grant => grant.routeTargetServiceId) ? `${new Set(deviceGrants.map(grant => grant.routeTargetServiceId)).size} 台服务` : deviceGrants.some(grant => grant.scope.kind === 'service') ? '全部终端' : `${new Set(deviceGrants.flatMap(grant => grant.scope.kind === 'sessions' ? grant.scope.sessionIds : [])).size} 个终端`;
@@ -207,7 +223,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             {pendingRevoke === device.subjectId && <div className="mt-3 rounded-lg border border-border bg-background p-3"><p className="text-xs leading-relaxed">撤销后，这台设备将断开连接，需重新邀请才能访问。</p><div className="mt-2 flex justify-end gap-2"><button type="button" className={`${button} text-xs text-muted-foreground`} disabled={busy} onClick={() => setPendingRevoke(undefined)}>取消</button><button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={async () => { setBusy(true); setError(''); try { for (const grant of device.grants) await onRevoke?.(grant.id); setPendingRevoke(undefined); setNotice('设备访问权限已撤销。'); } catch { setError('暂时无法撤销，请重试。'); } finally { setBusy(false); } }}>确认撤销</button></div></div>}
           </div>)}{devices.length === 0 && !loadError && <p className="py-5 text-sm text-muted-foreground">暂无设备授权。{onCreateInvite ? '可通过邀请添加设备。' : ''}</p>}</div>}
           {onCreateInvite && <button type="button" className={`${button} mt-4 inline-flex w-full items-center justify-center gap-2 border border-border text-sm`} disabled={busy} onClick={beginInvite}><Plus size={16} />邀请设备</button>}
-          {invitations.length > 0 && <section className="mt-5 border-t border-border pt-4" aria-label="待接受的邀请"><h3 className="text-sm font-medium">待接受的邀请</h3><div className="divide-y divide-border">{invitations.map(item => <div key={item.id} className="py-3"><p className="text-sm">{item.label || '设备邀请'}</p><p className="mt-1 break-words text-xs text-muted-foreground">{permissionName(item.actions)} · {scopeDescription(item.scope)}</p><p className="mt-1 text-xs text-muted-foreground">{new Date(item.invitationExpiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 前有效</p>{invitationRevokeControl(item.id)}</div>)}</div></section>}
+          {invitations.length > 0 && <section className="mt-5 border-t border-border pt-4" aria-label="待接受的邀请"><h3 className="text-sm font-medium">待接受的邀请</h3><div className="divide-y divide-border">{invitations.map(item => <div key={item.id} className="py-3"><p className="text-sm">{item.label || '设备邀请'}</p><p className="mt-1 break-words text-xs text-muted-foreground">{permissionName(item.actions)} · {scopeDescription(item.scope)}</p><p className="mt-1 text-xs text-muted-foreground">{new Date(item.invitationExpiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 前有效</p><ShareResourceSummary resources={item.resources} />{invitationRevokeControl(item.id)}</div>)}</div></section>}
           {inactiveGrants.length > 0 && <details className="mt-4 text-xs text-muted-foreground"><summary className="cursor-pointer py-2">已失效的授权（{inactiveGrants.length}）</summary><div className="mt-1 space-y-2 border-l border-border pl-3">{inactiveGrants.map(grant => <p key={grant.id} className="flex gap-3"><span className="min-w-0 flex-1 truncate">{deviceName(grant)}</span><span className="shrink-0">{grant.revokedAt !== undefined ? '已撤销' : '已到期'}</span></p>)}</div></details>}
         </section>}
         {editingDevice && <form className="space-y-4" onSubmit={async event => { event.preventDefault(); setBusy(true); setError(''); try { await onRename?.(editingDevice, deviceLabel.trim()); setEditingDevice(undefined); } catch { setError('暂时无法保存设备名称，请重试。'); } finally { setBusy(false); } }}>
@@ -220,7 +236,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
             <h3 className="text-sm font-medium">{device.name}</h3>
             <dl className="space-y-3 rounded-xl bg-surface-2 p-3 text-xs">
               <div><dt className="text-muted-foreground">访问权限</dt><dd className="mt-1">{permissionName(device.grants.flatMap(grant => grant.actions))} · {scopeName(device.grants)}</dd></div>
-              {device.grants.map(grant => <div key={grant.id}><dt className="text-muted-foreground">{grant.routeTargetServiceId ? '允许经此入口访问' : permissionName(grant.actions)}</dt><dd className="mt-1 leading-relaxed">{grant.routeTargetServiceId ? grant.routeTargetName || '指定服务' : scopeDescription(grant.scope)}{!grant.routeTargetServiceId && <span className="mt-1 block text-muted-foreground">{grant.expiresAt ? new Date(grant.expiresAt).toLocaleString() : '保留至撤销'}</span>}</dd>{onRevoke && (grant.routeTargetServiceId || device.subjectId !== currentIdentity) && (pendingGrantRevoke === grant.id ? <div className="mt-2"><p className="leading-relaxed">确认撤销此项授权？此设备的其他授权将保留。</p><div className="mt-1 flex justify-end gap-2"><button type="button" className={`${button} text-xs text-muted-foreground`} disabled={busy} onClick={() => setPendingGrantRevoke(undefined)}>取消</button><button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={async () => { setBusy(true); setError(''); try { await onRevoke(grant.id); setPendingGrantRevoke(undefined); setNotice('此项授权已撤销。'); } catch { setError('暂时无法撤销，请重试。'); } finally { setBusy(false); } }}>确认撤销此项授权</button></div></div> : <button type="button" className={`${button} mt-1 -ml-3 text-xs text-destructive`} disabled={busy} onClick={() => setPendingGrantRevoke(grant.id)}>{grant.routeTargetServiceId ? '撤销此中转权限' : '撤销此项授权'}</button>)}</div>)}
+              {device.grants.map(grant => <div key={grant.id}><dt className="text-muted-foreground">{grant.routeTargetServiceId ? '允许经此入口访问' : permissionName(grant.actions)}</dt><dd className="mt-1 leading-relaxed">{grant.routeTargetServiceId ? grant.routeTargetName || '指定服务' : scopeDescription(grant.scope)}{!grant.routeTargetServiceId && <span className="mt-1 block text-muted-foreground">{grant.expiresAt ? new Date(grant.expiresAt).toLocaleString() : '保留至撤销'}</span>}<ShareResourceSummary resources={grant.resources} /></dd>{onRevoke && (grant.routeTargetServiceId || device.subjectId !== currentIdentity) && (pendingGrantRevoke === grant.id ? <div className="mt-2"><p className="leading-relaxed">确认撤销此项授权？此设备的其他授权将保留。</p><div className="mt-1 flex justify-end gap-2"><button type="button" className={`${button} text-xs text-muted-foreground`} disabled={busy} onClick={() => setPendingGrantRevoke(undefined)}>取消</button><button type="button" className={`${button} text-xs text-destructive`} disabled={busy} onClick={async () => { setBusy(true); setError(''); try { await onRevoke(grant.id); setPendingGrantRevoke(undefined); setNotice('此项授权已撤销。'); } catch { setError('暂时无法撤销，请重试。'); } finally { setBusy(false); } }}>确认撤销此项授权</button></div></div> : <button type="button" className={`${button} mt-1 -ml-3 text-xs text-destructive`} disabled={busy} onClick={() => setPendingGrantRevoke(grant.id)}>{grant.routeTargetServiceId ? '撤销此中转权限' : '撤销此项授权'}</button>)}</div>)}
               <div><dt className="text-muted-foreground">设备标识</dt><dd className="mt-1 break-all font-mono leading-relaxed text-muted-foreground select-text">{device.subjectId}</dd></div>
             </dl>
           </div>) : <dl className="space-y-4 text-xs"><div><dt className="text-muted-foreground">当前服务</dt><dd className="mt-1 text-sm">{currentServiceName || '当前服务'}</dd></div><div><dt className="text-muted-foreground">服务标识</dt><dd className="mt-1 break-all font-mono leading-relaxed select-text">{currentServiceId}</dd></div><div><dt className="text-muted-foreground">本设备标识</dt><dd className="mt-1 break-all font-mono leading-relaxed select-text">{currentIdentity}</dd></div></dl>}
@@ -232,26 +248,30 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
         </section>}
         {inviting && !selectingSessions && <section>
           {invitation ? <div className="space-y-4 text-center">
-            <p className="text-sm font-medium">用另一台设备扫描二维码</p>
-            {qr ? <img src={qr} width={220} height={220} className="mx-auto max-w-full rounded-xl" alt="设备邀请二维码" /> : <div className="mx-auto flex h-48 w-48 items-center justify-center"><Loader2 size={22} className="animate-spin text-muted-foreground" /></div>}
+            <p className="text-sm font-medium">{invitation.expiresAt <= now ? '邀请链接已过期' : '邀请已准备好'}</p>
+            {invitationSummary && <div className="space-y-2 rounded-xl border border-border p-3 text-left"><p className="text-sm font-medium">{scopeDescription(invitationSummary.scope)} · {permissionName(invitationSummary.actions)}</p><ShareResourceSummary resources={invitationSummary.resources} /><p className="text-xs text-muted-foreground">访问权限{grantExpiry ? `至 ${new Date(grantExpiry).toLocaleString()}` : '保留至撤销'}</p></div>}
+            {invitation.expiresAt <= now ? <p className="py-3 text-sm text-muted-foreground">重新生成后，将得到新的链接和二维码。</p> : qr ? <img src={qr} width={220} height={220} className="mx-auto max-w-full rounded-xl" alt="设备邀请二维码" /> : <div className="mx-auto flex h-48 w-48 items-center justify-center"><Loader2 size={22} className="animate-spin text-muted-foreground" /></div>}
             <p className="text-xs leading-relaxed text-muted-foreground">仅限一台设备使用 · {new Date(invitation.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 前有效</p>
-            <button type="button" className={`${primaryButton} inline-flex w-full items-center justify-center gap-2 text-sm`} onClick={() => void copyInvite()}><Copy size={16} />复制邀请链接</button>
+            <button type="button" className={`${primaryButton} inline-flex w-full items-center justify-center gap-2 text-sm`} disabled={invitation.expiresAt <= now} onClick={() => void copyInvite()}><Copy size={16} />复制邀请链接</button>
             <details className="text-left text-xs text-muted-foreground"><summary className="cursor-pointer py-2">查看链接</summary><p className="mt-2 select-all break-all">{invitation.url}</p></details>
+            <button type="button" className={`${button} w-full`} onClick={() => { setInvitation(undefined); setNotice(''); setError(''); }}>调整分享内容 / 重新生成</button>
             {invitation.id && invitationRevokeControl(invitation.id)}
-          </div> : <form className="space-y-5" onSubmit={createInvitation}>
-            <fieldset><legend className="mb-2 text-sm font-medium">访问权限</legend><div className="space-y-2">{([
-              ['read', '仅查看', '查看终端画面，不可输入命令'],
-              ['write', '可操作', '查看终端画面，并输入命令'],
-              ['full', '完整访问', '包括文件、设置和权限管理'],
+          </div> : <form id="federation-invite-form" className="space-y-4" onSubmit={createInvitation}>
+            <p className="text-xs leading-5 text-muted-foreground">选择终端与侧栏内容，接收者将在同一页面使用已授权的功能。</p>
+            <fieldset><legend className="mb-2 text-sm font-medium">访问权限</legend><div className="grid grid-cols-2 gap-2">{([
+              ['read', '仅查看', '查看会话与回复，不可发送消息'],
+              ['write', '可操作', '与 Agent 对话，也可操作终端'],
             ] as const).map(([value, name, description]) => <label key={value} className={`flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 transition focus-within:ring-2 focus-within:ring-ring ${preset === value ? 'border-primary bg-primary/10' : 'border-border hover:bg-surface-2'}`}>
               <input type="radio" name="federation-permission" value={value} checked={preset === value} onChange={() => setPreset(value)} className="sr-only" />
               <span aria-hidden="true" className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${preset === value ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background'}`}>{preset === value && <Check size={13} strokeWidth={3} />}</span>
               <span className="min-w-0"><span className="block text-sm font-medium text-foreground">{name}</span><span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">{description}</span></span>
             </label>)}</div></fieldset>
-            {preset !== 'full' && <fieldset><legend className="mb-2 text-sm font-medium">可访问的终端</legend><div className="flex gap-2"><button type="button" aria-pressed={resource === 'all'} className={`${button} flex-1 appearance-none border text-sm ${resource === 'all' ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground'}`} onClick={() => setResource('all')}>全部终端</button><button type="button" aria-pressed={resource === 'selected'} className={`${button} inline-flex flex-1 appearance-none items-center justify-center gap-1 border text-sm ${resource === 'selected' ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground'}`} onClick={() => { setDraftSessionIds(selectedIds); setSelectingSessions(true); }}>{resource === 'selected' ? `已选 ${selectedIds.length} 个` : '选择终端'}<ChevronRight size={14} /></button></div>{resource === 'all' && <p className="mt-2 text-xs text-muted-foreground">包括之后新建的终端。</p>}</fieldset>}
+            {preset !== 'full' && <><fieldset><legend className="mb-2 text-sm font-medium">可访问的终端</legend><div className="flex gap-2"><button type="button" aria-pressed={resource === 'all'} className={`${button} flex-1 appearance-none border text-sm ${resource === 'all' ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground'}`} onClick={() => setResource('all')}>全部终端</button><button type="button" aria-pressed={resource === 'selected'} className={`${button} inline-flex flex-1 appearance-none items-center justify-center gap-1 border text-sm ${resource === 'selected' ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground'}`} onClick={() => { setDraftSessionIds(selectedIds); setSelectingSessions(true); }}>{resource === 'selected' ? `已选 ${selectedIds.length} 个` : '选择终端'}<ChevronRight size={14} /></button></div>{resource === 'all' && <p className="mt-2 text-xs text-muted-foreground">包括之后新建的终端。</p>}{resource === 'selected' && selectedIds.length > 0 && <p className="mt-2 break-words text-xs text-muted-foreground">{sessions.filter(s => selectedIds.includes(s.sessionId)).map(s => s.name).join('、')}</p>}</fieldset><ShareResourceFields value={resources} onChange={setResources} /></>}
+            <label className="flex min-h-11 items-center justify-between gap-3 text-sm"><span>打开后的默认视图</span><select className="min-h-11 rounded-lg border border-border bg-background px-3 text-sm" value={viewMode} onChange={e => setViewMode(e.target.value as 'terminal' | 'chat')}><option value="chat">普通对话</option><option value="terminal">终端</option></select></label>
             {preset === 'write' && <p className="text-xs leading-relaxed text-muted-foreground">终端命令可读写该系统用户有权访问的文件。</p>}
             {preset === 'full' && <p className="text-xs leading-relaxed text-muted-foreground">拥有此服务的全部当前及未来权限。仅授予你完全信任的设备。</p>}
             {hasBackup && <label className="flex items-start gap-3 text-sm"><input type="checkbox" className="mt-0.5 h-4 w-4 accent-primary" checked={includeBackup} onChange={event => setIncludeBackup(event.target.checked)} /><span>让新设备也能使用备用连接<span className="mt-1 block text-xs leading-relaxed text-muted-foreground">需要入口管理员授权；关闭后生成直接连接邀请。</span></span></label>}
+            <details className="rounded-xl border border-border px-3 py-2"><summary className="min-h-9 cursor-pointer py-2 text-sm">有效期与备注</summary><div className="space-y-3 py-2"><label className="block space-y-1 text-sm"><span>设备备注（可选）</span><input className={field} value={label} onChange={event => setLabel(event.target.value)} placeholder="例如：项目协作" /></label><label className="block space-y-1 text-sm"><span>授权到期时间</span><input type="datetime-local" className={field} value={grantExpiry} onChange={event => setGrantExpiry(event.target.value)} /></label><label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={preset === 'full'} onChange={e => setPreset(e.target.checked ? 'full' : 'read')} />授予完整服务权限</label><p className="text-xs leading-5 text-muted-foreground">完整权限包含所有终端、文件、设备、设置和权限管理。</p></div></details>
             <details className="rounded-xl border border-border px-3 py-2 text-left">
               <summary className="cursor-pointer text-sm font-medium text-foreground">接入地址<span className="ml-2 text-xs font-normal text-muted-foreground">{entryAddress === 'custom' ? customAddress || '请输入地址' : new URL(entryAddress || currentServiceOrigin || location.origin).host}</span></summary>
               <fieldset className="mt-2 space-y-2"><legend className="sr-only">受邀设备打开的地址</legend>
@@ -268,12 +288,12 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
                 {entryAddress === 'custom' && <input type="text" className={field} inputMode="url" placeholder="例如：https://192.168.1.23:9834" value={customAddress} onChange={event => setCustomAddress(event.target.value)} />}
               </fieldset>
             </details>
-            <div><button className={`${primaryButton} inline-flex w-full items-center justify-center gap-2 text-sm`} type="submit" disabled={busy || loading}>{busy && <Loader2 size={16} className="animate-spin" />}{busy ? '正在生成…' : '生成邀请'}</button><p className="mt-2 text-center text-xs leading-relaxed text-muted-foreground">链接 10 分钟内有效 · 访问权限{grantExpiry ? '按设定时间到期' : '保留至撤销'}</p></div>
+
           </form>}
         </section>}
         {selectingSessions && <section><p className="mb-3 text-xs text-muted-foreground">仅允许访问勾选的终端。</p><div className="space-y-1">{sessions.map(session => <label key={session.sessionId} className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-sm hover:bg-surface-2"><input type="checkbox" className="h-4 w-4 accent-primary" checked={draftSessionIds.includes(session.sessionId)} onChange={event => setDraftSessionIds(event.target.checked ? [...draftSessionIds, session.sessionId] : draftSessionIds.filter(id => id !== session.sessionId))} /><span className="min-w-0 break-words">{session.name}</span></label>)}{!sessions.length && <p className="py-4 text-sm text-muted-foreground">当前没有可共享的终端。</p>}</div></section>}
         {loadError && <p role="alert" className="mt-4 text-sm text-destructive">{loadError}{onRetry && <button type="button" className={`${button} ml-1 text-sm underline`} onClick={onRetry}>重试</button>}</p>}
-        {!serviceNavigation.title && !adding && !editingDevice && !showDetails && !selectingSessions && !invitation && <div className="mt-4 border-t border-border pt-2"><button type="button" className={`${button} -ml-3 inline-flex items-center gap-1 bg-transparent text-xs text-muted-foreground`} aria-expanded={overview ? undefined : advanced} onClick={() => overview ? setShowDetails(true) : setAdvanced(value => !value)}>{inviting ? '有效期与备注' : adding ? '手动连接' : tab === 'devices' ? '授权详情' : '连接详情'}{overview ? <ChevronRight size={14} /> : <ChevronDown size={13} className={advanced ? 'rotate-180' : ''} />}</button>
+        {!serviceNavigation.title && !adding && !editingDevice && !showDetails && !selectingSessions && !invitation && !inviting && <div className="mt-4 border-t border-border pt-2"><button type="button" className={`${button} -ml-3 inline-flex items-center gap-1 bg-transparent text-xs text-muted-foreground`} aria-expanded={overview ? undefined : advanced} onClick={() => overview ? setShowDetails(true) : setAdvanced(value => !value)}>{inviting ? '有效期与备注' : adding ? '手动连接' : tab === 'devices' ? '授权详情' : '连接详情'}{overview ? <ChevronRight size={14} /> : <ChevronDown size={13} className={advanced ? 'rotate-180' : ''} />}</button>
           {advanced && <section className="space-y-3 pb-1 pt-2">
             {inviting && <><label className="block space-y-1 text-sm"><span>设备备注（可选）</span><input className={field} value={label} onChange={event => setLabel(event.target.value)} placeholder="例如：工作电脑" /></label><label className="block space-y-1 text-sm"><span>授权到期时间</span><input type="datetime-local" className={field} value={grantExpiry} onChange={event => setGrantExpiry(event.target.value)} /></label></>}
             {!inviting && currentIdentity && <p className="break-all text-xs leading-relaxed text-muted-foreground">本设备身份：{currentIdentity}</p>}
@@ -283,6 +303,7 @@ export function FederationAccess({ onConnect, onClose, onConnectWithPassword, on
         </div>}
         {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}{notice && <p role="status" className="mt-3 text-sm text-muted-foreground">{notice}</p>}
       </div>
+      {inviting && !invitation && !selectingSessions && <footer className="shrink-0 border-t border-border bg-surface px-5 pt-3 pb-[max(16px,env(safe-area-inset-bottom))]"><button type="submit" form="federation-invite-form" className={`${primaryButton} inline-flex w-full items-center justify-center gap-2`} disabled={busy || loading}>{busy && <Loader2 size={16} className="animate-spin" />}{busy ? '正在生成…' : '生成邀请'}</button><p className="mt-2 text-center text-xs text-muted-foreground">单次使用 · 链接 10 分钟内有效 · 权限{grantExpiry ? '按设定时间到期' : '保留至撤销'}</p></footer>}
       {selectingSessions && <footer className="shrink-0 border-t border-border px-5 pt-3 pb-[max(16px,env(safe-area-inset-bottom))]"><button type="button" className={`${primaryButton} w-full text-sm`} disabled={!draftSessionIds.length} onClick={() => { setSelectedIds(draftSessionIds); setResource('selected'); setSelectingSessions(false); }}>使用所选终端（{draftSessionIds.length}）</button></footer>}
     </div>
   </div>, document.body);

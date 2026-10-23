@@ -85,6 +85,24 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Agent workgroup split navigation', () => {
+  it('opens membership actions for an offline remote row absent from the terminal list', async () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const remoteId = 'remote:https%3A%2F%2Foffline.example:n2w8lg8d';
+    const remoteGroup = { ...baseGroup, sessionIds: ['a', remoteId], remoteSessions: [{ sessionId: remoteId, name: 'n2w8lg8d', status: 'offline', serviceConnected: false }] };
+    mocks.list.mockResolvedValue({ groups: [remoteGroup] });
+    mocks.save.mockResolvedValue({ group: { ...remoteGroup, sessionIds: ['a'], remoteSessions: [], updatedAt: 2 } });
+    const handlers = callbacks();
+    render(<I18nProvider><LeftSidebar {...handlers} isOpen pinned drawerWidthPx={300}
+      sessions={[{ id: 'a', name: 'A', mode: 'shell' }]} activeSessionId="a" sessionStates={new Map()} splitWorkspaces={[]} /></I18nProvider>);
+    fireEvent.contextMenu(await screen.findByText('n2w8lg8d'), { clientX: 100, clientY: 200 });
+    const menu = screen.getByRole('dialog', { name: 'n2w8lg8d' });
+    fireEvent.click(within(menu).getByRole('button', { name: /Leave collaboration group/ }));
+    fireEvent.click(within(menu).getByRole('button', { name: 'Confirm leave' }));
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ id: 'team', name: 'Release team', sessionIds: ['a'], expectedUpdatedAt: 1 }));
+    expect(handlers.onCloseSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
   it('omits archived groups from default sidebar data while retaining active groups', () => {
     const groups = normalizeSidebarCollaborationGroups([
       { id: 'active', name: 'Active', sessionIds: ['one'], createdAt: 1, updatedAt: 1 },

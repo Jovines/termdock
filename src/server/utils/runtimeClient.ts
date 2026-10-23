@@ -31,6 +31,25 @@ function isCompleteSnapshot(
     && fs.existsSync(path.join(clientDist, 'index.html'));
 }
 
+function hasExactClientContents(directory: string, expected: string): boolean {
+  try {
+    const hash = crypto.createHash('sha256');
+    let entries = 0;
+    const visit = (current: string, relative = '') => {
+      if (!fs.lstatSync(current).isDirectory()) throw new Error('Linked snapshot');
+      for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        if (++entries > 10_000) throw new Error('Snapshot entry limit');
+        const file = path.join(current, entry.name), name = path.join(relative, entry.name);
+        if (entry.isDirectory()) visit(file, name);
+        else if (entry.isFile()) hash.update(name.split(path.sep).join('/')).update('\0').update(fs.readFileSync(file)).update('\0');
+        else throw new Error('Linked snapshot');
+      }
+    };
+    visit(directory);
+    return `sha256-${hash.digest('base64')}` === expected;
+  } catch { return false; }
+}
+
 /**
  * Keep the browser bundle served by this process immutable for its lifetime.
  *
@@ -66,8 +85,24 @@ export function pinBundledRuntimeClientDist(
     const snapshotRoot = path.join(snapshotsRoot, snapshotKey);
     const snapshotClientDist = path.join(snapshotRoot, 'dist', 'client');
     if (isCompleteSnapshot(snapshotClientDist, manifest.serverBundleHash, manifest.clientBundleHash)) {
+      try { fs.utimesSync(snapshotRoot, new Date(), new Date()); } catch { /* Read-only caches remain usable. */ }
       return snapshotClientDist;
     }
+
+    // Server-only upgrades do not need another full copy of the same client.
+    try {
+      for (const entry of fs.readdirSync(snapshotsRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^[a-f0-9]{24}$/.test(entry.name)) continue;
+        const candidate = path.join(snapshotsRoot, entry.name, 'dist', 'client');
+        const marker = readManifest(path.join(snapshotsRoot, entry.name, 'snapshot-manifest.json'));
+        if (typeof marker?.serverBundleHash === 'string' && marker.clientBundleHash === manifest.clientBundleHash
+          && isCompleteSnapshot(candidate, marker.serverBundleHash, manifest.clientBundleHash)
+          && hasExactClientContents(candidate, manifest.clientBundleHash)) {
+          try { fs.utimesSync(path.join(snapshotsRoot, entry.name), new Date(), new Date()); } catch { /* Read-only caches remain usable. */ }
+          return candidate;
+        }
+      }
+    } catch { /* First run or an unavailable cache; copy the installed bundle. */ }
 
     fs.mkdirSync(snapshotsRoot, { recursive: true, mode: 0o700 });
     const temporaryRoot = fs.mkdtempSync(path.join(snapshotsRoot, `.${snapshotKey}-`));
@@ -134,4 +169,28 @@ export function indexRetainedClientModules(homeDir = os.homedir()): Map<string, 
     }
   } catch { /* No retained snapshots on first install. */ }
   return modules;
+}
+
+const touchedSnapshots = new Map<string, number>();
+/** Refresh expired index entries without losing a module kept by another build. */
+export function resolveRetainedClientModule(modules: Map<string, string>, url: string, homeDir = os.homedir()): string | undefined {
+  let retainedPath = modules.get(url);
+  if (retainedPath && !fs.existsSync(retainedPath)) {
+    modules.clear();
+    for (const [key, file] of indexRetainedClientModules(homeDir)) modules.set(key, file);
+    retainedPath = modules.get(url);
+  }
+  if (retainedPath) touchRetainedClientModule(retainedPath);
+  return retainedPath;
+}
+
+/** A page that still loads an older module renews that snapshot's grace period. */
+export function touchRetainedClientModule(modulePath: string): void {
+  const directory = path.resolve(modulePath, '..', '..', '..', '..');
+  if (path.basename(path.dirname(directory)) !== 'client-snapshots' || !/^[a-f0-9]{24}$/.test(path.basename(directory))) return;
+  const now = Date.now();
+  if (now - (touchedSnapshots.get(directory) ?? 0) < 60_000) return;
+  touchedSnapshots.set(directory, now);
+  if (touchedSnapshots.size > 1024) touchedSnapshots.delete(touchedSnapshots.keys().next().value!);
+  try { fs.utimesSync(directory, new Date(now), new Date(now)); } catch { /* Already expired or read-only. */ }
 }

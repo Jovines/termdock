@@ -1,8 +1,12 @@
+import { useShareAccess } from '../federation/ShareAccessContext';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { computerLoginKey, computerPreferences, defaultComputerPreferences, type ComputerPreferences, type ComputerProfile } from './preferences';
 
 /** Service-owned settings. Passwords never enter this state or its requests. */
 export function useComputerPreferences(serviceId: string) {
+  const shared = useShareAccess();
+  const sharedComputer = shared?.computers?.[0];
+  const sharedKey = JSON.stringify(sharedComputer);
   const [preferences, setPreferences] = useState(defaultComputerPreferences);
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState<'loading' | 'saving' | 'saved' | 'error'>('loading');
@@ -25,6 +29,12 @@ export function useComputerPreferences(serviceId: string) {
     current.current = defaultComputerPreferences(); setPreferences(current.current); setLoaded(false); setSaveState('loading');
     setCredentialKeys([]); setLoginState('idle');
     const abort = new AbortController();
+    if (shared) {
+      const value = defaultComputerPreferences();
+      if (sharedComputer) { value.target = 'remote'; value.remote = { ...value.remote, ...sharedComputer, port: String(sharedComputer.port), platform: sharedComputer.protocol === 'vnc' ? 'mac' : 'windows', rememberLogin: false }; value.viewOnly = sharedComputer.access !== 'control'; }
+      current.current = value; acknowledged.current = JSON.stringify(value); setPreferences(value); setLoaded(true); setSaveState('saved');
+      return () => { ++session.current; };
+    }
     void fetch('/api/computer/preferences', { signal: abort.signal }).then(async response => {
       if (!response.ok) throw new Error('PREFERENCES_LOAD_FAILED');
       return await response.json() as { preferences: ComputerPreferences; configured: boolean; credentialKeys?: string[]; credentialError?: boolean };
@@ -56,8 +66,9 @@ export function useComputerPreferences(serviceId: string) {
       for (const controller of controllers.current) controller.abort();
       controllers.current.clear();
     };
-  }, [serviceId, reload]);
+  }, [serviceId, reload, sharedKey, !!shared]);
   const flush = useCallback((): Promise<boolean> => {
+    if (shared) { acknowledged.current = JSON.stringify(current.current); setSaveState('saved'); return Promise.resolve(true); }
     if (pending.current) return pending.current;
     if (!loaded) return Promise.resolve(false);
     const attempt = session.current;
@@ -81,7 +92,7 @@ export function useComputerPreferences(serviceId: string) {
     pending.current = request;
     void request.finally(() => { if (pending.current === request) pending.current = null; });
     return request;
-  }, [loaded]);
+  }, [loaded, !!shared]);
   useEffect(() => {
     if (!loaded || acknowledged.current === JSON.stringify(preferences)) return;
     const timer = setTimeout(() => { void flush(); }, 300);

@@ -6,7 +6,7 @@ import {webcrypto} from 'node:crypto';
 import {createInviteLink} from './inviteLink';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); return { request, fetch, connect: vi.fn(), authenticate:vi.fn(), invalidate: vi.fn(), saved: vi.fn(), accessProps: {} as Record<string, any>, client: { request, fetch, targetPeerId: 'service',closed:false } }; });
+const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); return { request, fetch, connect: vi.fn(), retryDirect: vi.fn(), authenticate:vi.fn(), invalidate: vi.fn(), saved: vi.fn(), accessProps: {} as Record<string, any>, client: { request, fetch, targetPeerId: 'service',closed:false } }; });
 vi.mock('./browserIntegration', () => ({
   SECURE_STATE_EVENT: 'termdock:secure-state',
   preferDirectConnection: vi.fn(), currentConnectionPath: () => 'direct', connectionRoutes: () => [],
@@ -15,6 +15,7 @@ vi.mock('./browserIntegration', () => ({
   currentSecureClient: () => mocks.client, currentEntryClient: () => undefined,
   getActiveClient: async () => mocks.client, savedConnection: mocks.saved,
   invalidateSecureTransport: mocks.invalidate, pauseConnectionAccess: vi.fn(), resumeConnectionAccess: vi.fn(),
+  retryDirectConnection: mocks.retryDirect,
 }));
 vi.mock('./deviceAuthorization', async importOriginal => {
   const original = await importOriginal<typeof import('./deviceAuthorization')>();
@@ -30,7 +31,7 @@ import { writeBrowserServices } from '../services/serviceDirectory';
 import { openRemoteSession } from './remoteSession';
 import { ConnectionAccessError } from './accessFailure';
 const permitted = { type: 'result', id: 'permissions', fullService: true, grants: [{ actions: ['service:*'] }] };
-it('stops automatic foreground checks on a confirmed relay denial, keeps terminal mounted and writes no permissions on cancel', async () => {
+it('keeps direct recovery available after relay denial, keeps terminal mounted and writes no permissions on cancel', async () => {
   const unmounted = vi.fn();
   function Terminal() { useEffect(() => () => unmounted(), []); return <textarea aria-label="terminal draft" defaultValue="retain draft" />; }
   render(<SecureAccessGate><Terminal /></SecureAccessGate>);
@@ -41,14 +42,65 @@ it('stops automatic foreground checks on a confirmed relay denial, keeps termina
   for (let i = 0; i < 3; i++) { fireEvent.focus(window); fireEvent(window, new Event('online')); }
   await act(async () => {});
   expect(mocks.request).toHaveBeenCalledTimes(calls); expect(unmounted).not.toHaveBeenCalled();
+  expect(mocks.retryDirect).toHaveBeenCalled();
   expect((screen.getByLabelText('terminal draft') as HTMLTextAreaElement).value).toBe('retain draft');
   fireEvent.click(screen.getByRole('button', { name: '取消' }));
   expect(mocks.authenticate).not.toHaveBeenCalled(); expect(unmounted).not.toHaveBeenCalled();
+});
+it.each([false, true])('dismisses a relay failure after foreground direct recovery, including cancelled authorization (%s)', async cancel => {
+  const unmounted = vi.fn();
+  function Terminal() { useEffect(() => () => unmounted(), []); return <textarea aria-label="terminal draft" defaultValue="retain draft" />; }
+  render(<SecureAccessGate><Terminal /></SecureAccessGate>);
+  await screen.findByLabelText('terminal draft');
+  mocks.request.mockRejectedValue(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { entryServiceId: 'entry', entryUrl: 'https://entry.example', targetServiceId: 'service' }));
+  fireEvent.focus(window);
+  await screen.findByRole('button', { name: '重新授权' });
+  if (cancel) fireEvent.click(screen.getByRole('button', { name: '取消' }));
+  mocks.retryDirect.mockImplementation(async () => { mocks.request.mockResolvedValue(permitted); return mocks.client; });
+  fireEvent(window, new Event('online'));
+  await waitFor(() => expect(screen.queryByLabelText('恢复服务访问')).toBeNull());
+  expect(mocks.retryDirect).toHaveBeenCalled();
+  expect(screen.getByLabelText('terminal draft').closest('[aria-hidden]')).toBeNull();
+  expect((screen.getByLabelText('terminal draft') as HTMLTextAreaElement).value).toBe('retain draft');
+  expect(unmounted).not.toHaveBeenCalled(); expect(mocks.authenticate).not.toHaveBeenCalled();
+});
+it('retries direct access after a relay failure without needing a foreground event or a PWA restart', async () => {
+  mocks.request.mockRejectedValue(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { targetServiceId: 'service' }));
+  mocks.retryDirect.mockImplementation(async () => { mocks.request.mockResolvedValue(permitted); return mocks.client; });
+  render(<SecureAccessGate><div>Recovered terminal</div></SecureAccessGate>);
+  await screen.findByLabelText('恢复服务访问');
+  await screen.findByText('Recovered terminal');
+  await waitFor(() => expect(screen.queryByLabelText('恢复服务访问')).toBeNull());
+  expect(mocks.retryDirect).toHaveBeenCalledTimes(1); expect(mocks.authenticate).not.toHaveBeenCalled();
+});
+it('stops direct retries when the target confirms a login failure during relay recovery', async () => {
+  mocks.request.mockRejectedValue(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { targetServiceId: 'service' }));
+  mocks.retryDirect.mockRejectedValue(new ConnectionAccessError('TARGET_AUTHORIZATION_REQUIRED', { targetServiceId: 'service' }));
+  render(<SecureAccessGate><div>Terminal</div></SecureAccessGate>);
+  await screen.findByLabelText('恢复服务访问');
+  fireEvent.focus(window);
+  await screen.findByRole('button', { name: '登录目标服务' });
+  const calls = mocks.retryDirect.mock.calls.length;
+  fireEvent.focus(window); fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(mocks.retryDirect).toHaveBeenCalledTimes(calls);
+});
+it.each(['TARGET_AUTHORIZATION_REQUIRED', 'TARGET_IDENTITY_MISMATCH'] as const)('keeps automatic recovery paused for %s', async code => {
+  render(<SecureAccessGate><div>Terminal</div></SecureAccessGate>);
+  await screen.findByText('Terminal');
+  mocks.request.mockRejectedValue(new ConnectionAccessError(code, { targetServiceId: 'service' }));
+  fireEvent.focus(window);
+  await screen.findByLabelText('恢复服务访问');
+  const calls = mocks.request.mock.calls.length;
+  fireEvent.focus(window); fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(mocks.request).toHaveBeenCalledTimes(calls); expect(mocks.retryDirect).not.toHaveBeenCalled();
 });
 beforeEach(() => {
   localStorage.clear(); sessionStorage.clear(); delete window.__termdockWorkspaceHost;
   setConnectionRecovery('ready');
   mocks.request.mockReset().mockResolvedValue(permitted); mocks.invalidate.mockReset(); mocks.connect.mockReset().mockResolvedValue(undefined);
+  mocks.retryDirect.mockReset().mockRejectedValue(new Error('Secure connection closed'));
   mocks.authenticate.mockReset().mockResolvedValue(undefined);mocks.fetch.mockReset(); mocks.client = { request: mocks.request, fetch: mocks.fetch, targetPeerId: 'service',closed:false };
   mocks.saved.mockReturnValue({ url: 'https://service.example', targetPeerId: 'service',closed:false });
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');

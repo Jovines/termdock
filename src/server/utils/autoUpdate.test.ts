@@ -4,12 +4,29 @@ import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { resolveRunningTermdockInstallation, verifyRunningTermdockInstallation } from './npmUpdate.js';
-import { TermdockAutoUpdateManager, hasPendingTermdockUpdate } from './autoUpdate.js';
+import { TermdockAutoUpdateManager, TermdockUpdateStateChangedError, hasPendingTermdockUpdate } from './autoUpdate.js';
 
 const previousConnected = Object.getOwnPropertyDescriptor(process, 'connected');
 beforeEach(() => { vi.stubEnv('TERMDOCK_SUPERVISED', '1'); Object.defineProperty(process,'connected',{value:true,configurable:true}); });
 afterEach(() => { vi.unstubAllEnvs(); if(previousConnected) Object.defineProperty(process,'connected',previousConnected); else Reflect.deleteProperty(process,'connected'); });
 describe('TermdockAutoUpdateManager', () => {
+  it('rejects stale reminders and confirmations for a different version without restarting', async () => {
+    const requestRestart = vi.fn();
+    const manager = new TermdockAutoUpdateManager({
+      currentVersion: '1.4.350', stateFilePath: null, broadcast: vi.fn(), requestRestart,
+      verifyInstalled: () => {},
+      updateRunner: async () => ({ status: 'updated', currentVersion: '1.4.350', latestVersion: '1.4.351', source: 'official' }),
+    });
+    expect(() => manager.confirmRestart('1.4.351')).toThrow(TermdockUpdateStateChangedError);
+    await manager.checkNow();
+    expect(() => manager.confirmRestart('1.4.349')).toThrow(TermdockUpdateStateChangedError);
+    expect(manager.getState().status).toBe('ready');
+    expect(requestRestart).not.toHaveBeenCalled();
+    manager.confirmRestart('1.4.351');
+    expect(() => manager.confirmRestart('1.4.351')).toThrow(TermdockUpdateStateChangedError);
+    expect(manager.getState().status).toBe('restarting');
+    expect(requestRestart).toHaveBeenCalledOnce();
+  });
   it('installs automatically but waits for confirmation while a web client is active', async () => {
     const broadcast = vi.fn();
     const requestRestart = vi.fn();

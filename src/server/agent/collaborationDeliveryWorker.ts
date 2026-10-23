@@ -131,6 +131,17 @@ export class CollaborationDeliveryWorker {
     // message, or its TTL may have elapsed while tmux was being inspected.
     const pending = store.inbox(id, { pendingOnly: true, limit: 1 });
     if (!pending.length) return;
+    // Removal is an observed inventory fact, so this recipient cannot recover
+    // through a network retry. Preserve the message as a failed delivery.
+    if (route.state === 'offline' && (route.reason === 'SESSION_REMOVED' || route.reason === 'SESSION_REMOVED_DURING_RECOVERY')) {
+      const message = pending[0]!;
+      store.recordTransport(message.id, { ...store.diagnostic(message.id), relay_online: null, peer_reachable: false,
+        attempt_count: store.diagnostic(message.id)?.attempt_count ?? 0, next_retry_at: null,
+        last_error: route.reason, checked_at: Date.now(), route_state: route.state, route_diagnostics: route.diagnostics });
+      store.fail(message.id, route.reason);
+      this.failures.delete(id);
+      return;
+    }
     if (route.state !== 'ready' || !route.write) {
       this.retry(id, pending, route.reason ?? route.state, false, route);
       return;

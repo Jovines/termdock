@@ -42,6 +42,35 @@ it('merges independent context once and treats repeated stale context as no chan
   expect(store.getGroup(group().id)?.deleted).toBe(true);
 });
 
+it('keeps live directory observations in memory without rewriting message history', () => {
+  const file = path.join(directory, 'groups.json');
+  const store = new CollaborationStore(file);
+  const remoteId = 'remote:https%3A%2F%2Fpeer.test:two';
+  const liveGroup = { ...group(), sessionIds: ['one', remoteId] };
+  store.mergeFederatedGroup(liveGroup);
+  const message = store.send({ groupId: group().id, fromSessionId: 'one', toSessionIds: [remoteId], kind: 'message', content: 'Keep this history' })[0]!;
+  store.markDelivered([message.id]);
+  const committed = fs.readFileSync(file, 'utf8');
+  const changed = vi.fn(); store.subscribe(changed);
+  const write = vi.spyOn(fs, 'renameSync');
+  for (let updatedAt = 1; updatedAt <= 100; updatedAt++) {
+    store.mergeFederatedGroup({ ...liveGroup, remoteSessions: [{ sessionId: remoteId, serviceOrigin: 'https://peer.test', serviceLabel: 'Peer',
+      name: 'Worker', cwd: '/work', status: 'offline', capability: '', currentTask: '', updatedAt,
+      backendSessionId: null, agentNativeSessionId: null, agent: null }] });
+  }
+  expect(store.getGroup(group().id)?.remoteSessions?.[0]?.updatedAt).toBe(100);
+  expect(write).not.toHaveBeenCalled(); expect(changed).not.toHaveBeenCalled();
+  expect(fs.readFileSync(file, 'utf8')).toBe(committed);
+  const reloaded = new CollaborationStore(file);
+  expect(reloaded.getMessage(message.id)).toMatchObject({ content: 'Keep this history', status: 'delivered' });
+  // A real edit at the same group timestamp still commits and notifies once.
+  store.mergeFederatedGroup({ ...store.getGroup(group().id)!, name: 'Renamed team' });
+  expect(write).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledTimes(1);
+  const renamed = new CollaborationStore(file);
+  expect(renamed.getGroup(group().id)?.name).toBe('Renamed team');
+  expect(renamed.getMessage(message.id)?.content).toBe('Keep this history');
+});
+
 const update = (version: string) => ({ sourceKey: 'source', sourceVersion: version,
   event: { group_id: 'group', kind: 'message.delivery', created_at: 1, payload: { version } } });
 

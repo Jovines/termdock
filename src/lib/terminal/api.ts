@@ -140,16 +140,33 @@ export async function checkTermdockUpdate(): Promise<TermdockUpdateState> {
   return response.json() as Promise<TermdockUpdateState>;
 }
 
-export async function confirmTermdockUpdateRestart(isCurrent?: () => boolean): Promise<TermdockUpdateState> {
+export async function confirmTermdockUpdateRestart(isCurrent?: () => boolean, expectedVersion?: string): Promise<TermdockUpdateState> {
   if (isCurrent && !isCurrent()) throw new TerminalApiError('Update confirmation expired');
   const csrfTokenHeader = await getCsrfToken();
   if (isCurrent && !isCurrent()) throw new TerminalApiError('Update confirmation expired');
   const response = await fetch('/api/terminal/update/restart', {
     method: 'POST',
-    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader, ...(expectedVersion === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    ...(expectedVersion === undefined ? {} : { body: JSON.stringify({ version: expectedVersion }) }),
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: 'Failed to restart Termdock' }));
+    // Another client or a manual restart can consume a pending update while
+    // this page still shows its reminder. Reconcile without replaying the POST.
+    if (response.status === 409) {
+      if (isCurrent && !isCurrent()) throw new TerminalApiError('Update confirmation expired');
+      if (body.code === 'UPDATE_STATE_CHANGED' && body.state) {
+        if (body.state.status === 'error') throw new TerminalApiError(body.state.error || body.error, response.status);
+        return body.state;
+      }
+      if (!body.code) {
+        // Older services only send error text. Read their authoritative state;
+        // installation/supervision errors must remain visible and never retry.
+        const state = await getTermdockUpdateState().catch(() => null);
+        if (isCurrent && !isCurrent()) throw new TerminalApiError('Update confirmation expired');
+        if (state && state.status !== 'error' && (state.status !== 'ready' || expectedVersion !== undefined && state.latestVersion !== expectedVersion)) return state;
+      }
+    }
     throw new TerminalApiError(body.error || 'Failed to restart Termdock', response.status);
   }
   return response.json() as Promise<TermdockUpdateState>;
@@ -4089,7 +4106,7 @@ export interface SessionSearchResponse {
   index?: { total: number; indexed: number; building: boolean; failed: number; warning: string | null };
 }
 
-async function operationsRequest<T>(path: string, init?: RequestInit): Promise<T> {
+export async function operationsRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method?.toUpperCase() ?? 'GET';
   const headers = new Headers(init?.headers);
   if (method !== 'GET' && method !== 'HEAD') headers.set('X-XSRF-TOKEN', await getCsrfToken());

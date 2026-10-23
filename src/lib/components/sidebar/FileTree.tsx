@@ -1,3 +1,6 @@
+import { writeFileReferenceDrag } from '../chat/fileReferenceTransfer';
+import { buildReferenceInputText } from './referencePaths';
+import { useShareAccess } from '../../federation/ShareAccessContext';
 import { confirmPageAction, runConfirmedPageAction, showPageFeedback } from '../../desktop/pageFeedback';
 import { savedConnection, currentSecureClient, SECURE_STATE_EVENT } from '../../federation/browserIntegration';
 import { FileTreeLoadingSkeleton } from './FileTreeLoadingSkeleton';
@@ -324,6 +327,8 @@ const FileTreeItem = memo(function FileTreeItem({
   revealedDirectoryPath,
   gitIgnoreRoot,
 }: FileTreeItemProps) {
+  const shared = useShareAccess();
+  const canDeleteShared = !shared || shared.directories?.some(d => d.access === 'write' && (node.path === d.path || node.path.startsWith(d.path.replace(/\/+$/, '') + '/')));
   const { t } = useI18n();
   // 精确订阅：每个节点只关心和自己相关的字段
   const isExpanded = useSidebarStore((s) => s.expandedPaths.has(node.path));
@@ -547,6 +552,12 @@ const FileTreeItem = memo(function FileTreeItem({
         {getReferenceLongPressHandlers.popoverNode}
         <div
         data-file-tree-path={node.path}
+        draggable={!!onPathReference && !directoriesOnly}
+        onDragStart={event => {
+          if (!onPathReference || directoriesOnly || (event.target as Element).closest('button')) { event.preventDefault(); return; }
+          event.dataTransfer.effectAllowed = 'copy';
+          writeFileReferenceDrag(event.dataTransfer, getReferenceText?.(node.path) || buildReferenceInputText(node.path, null));
+        }}
         data-sort-mode={sortMode}
         role="button"
         tabIndex={0}
@@ -746,6 +757,7 @@ const FileTreeItem = memo(function FileTreeItem({
           )}
           <button
             type="button"
+            hidden={!canDeleteShared}
             onClick={handleFileDelete}
             disabled={isDeleting}
             className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-destructive transition hover:bg-destructive/10 active:scale-[0.99] disabled:opacity-50"
@@ -836,6 +848,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   onFileDeleteRequest,
   deletingFilePath,
 }: FileSearchResultItemProps) {
+  const shared = useShareAccess();
+  const canDeleteShared = !shared || shared.directories?.some(d => d.access === 'write' && (node.path === d.path || node.path.startsWith(d.path.replace(/\/+$/, '') + '/')));
   const { t } = useI18n();
   const isSelected = node.path === selectedFilePath;
   const isDirectory = node.type === 'directory';
@@ -1077,6 +1091,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           )}
           <button
             type="button"
+            hidden={!canDeleteShared}
             onClick={handleFileDelete}
             disabled={isDeleting}
             className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-destructive transition hover:bg-destructive/10 active:scale-[0.99] disabled:opacity-50"

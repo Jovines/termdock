@@ -75,23 +75,33 @@ export function resolveTerminalPath(text: string, cwd: string | null | undefined
 }
 
 // TUI renderers can wrap with CRLF and indentation instead of xterm's
-// isWrapped flag. Only join a colored directory prefix to a same-colored
-// relative path continuation near the right edge; ordinary output stays separate.
-function hardWrapIndent(terminal: Terminal, index: number): number | null {
+// isWrapped flag. Join matching colored path fragments near the right edge;
+// underline is additional evidence when a filename splits into plain words.
+function hardWrapIndent(terminal: Terminal, index: number, remainingRows = 8): number | null {
   const previous = terminal.buffer.active.getLine(index - 1);
   const next = terminal.buffer.active.getLine(index);
   if (!previous || !next || next.isWrapped) return null;
   const before = previous.translateToString(true).trimEnd();
   const after = next.translateToString(true);
-  const tail = findTerminalPathMatches(before).at(-1);
+  let tail = findTerminalPathMatches(before).at(-1);
   const continuation = after.match(PATH_CONTINUATION_PATTERN);
-  if (!tail || tail.endIndex !== before.length || !tail.text.endsWith('/') || !continuation
-    || /^[~./]/u.test(continuation[2])) return null;
+  if (!continuation) return null;
+  if (!tail) {
+    // A middle row can contain only a filename fragment. Require a proven
+    // connection back to a path, with bounded lookbehind for long output.
+    const previousIndent = remainingRows > 0 ? hardWrapIndent(terminal, index - 1, remainingRows - 1) : null;
+    if (previousIndent === null) return null;
+    const fragment = before.slice(previousIndent).match(PATH_CONTINUATION_PATTERN);
+    if (!fragment || fragment[1] || fragment[2].length !== before.length - previousIndent) return null;
+    tail = { text: fragment[2], startIndex: previousIndent, endIndex: before.length };
+  }
+  if (tail.endIndex !== before.length || tail.line !== undefined
+    || /^[~/]/u.test(continuation[2]) || /^\.\.?\//u.test(continuation[2])
+    || (tail.text.endsWith('/') && continuation[2].startsWith('.'))) return null;
   // Share the path tokenizer so line/column suffixes and prose punctuation
   // terminate filenames identically on the first row and on continuation rows.
   // Keep plain prose out of hard-wrap joins even when it shares the path color.
   const continuationPath = continuation[2];
-  if (!continuationPath.includes('/') && !/^[^/:]+\.[\p{L}\p{N}_-]+$/u.test(continuationPath)) return null;
   let lastColumn = previous.length - 1;
   while (lastColumn >= 0 && !(previous.getCell(lastColumn)?.getChars() || '').trim()) lastColumn -= 1;
   const indent = continuation[1].length;
@@ -111,6 +121,8 @@ function hardWrapIndent(terminal: Terminal, index: number): number | null {
   if (!left || !right || left.isFgDefault() || right.isFgDefault()
     || left.getFgColorMode() !== right.getFgColorMode()
     || left.getFgColor() !== right.getFgColor()) return null;
+  if (!continuationPath.includes('/') && !/^[^/:]+\.[\p{L}\p{N}_-]+$/u.test(continuationPath)
+    && (tail.text.endsWith('/') || !left.isUnderline() || !right.isUnderline())) return null;
   return indent;
 }
 

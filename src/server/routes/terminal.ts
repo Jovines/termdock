@@ -1,3 +1,6 @@
+import { sessionViewModeRoutes, SessionViewModeStore } from '../agent/sessionViewModeRoutes.js';
+import { TodoStore, TodoError } from '../todos/store.js';
+import { TodoRunner, todoRoutes, type TodoRuntime } from '../todos/routes.js';
 import { TerminalInputQueue } from '../utils/terminalInputQueue.js';
 import { copyTmuxSelection, type TmuxCopySelectionResult } from '../utils/tmuxCopySelection.js';
 import { isConfirmedEmptyTmuxServer } from '../utils/tmuxEmptyServerProbe.js';
@@ -153,6 +156,7 @@ import { prepareSupervisionEnable } from '../utils/enableSupervision.js';
 import { buildServerHealthState, dismissServerHealth } from '../utils/serverHealth.js';
 import { collaborationRoutes } from '../agent/collaborationRoutes.js';
 import { extrasFromBody } from '../agent/collaborationProtocol.js';
+import { sessionChatRoutes } from '../agent/sessionChatRoutes.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind, type CollaborationMessage } from '../agent/collaborationStore.js';
 import { COLLAB_NAME_FORBIDDEN, formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { ambiguousIdMessage } from '../agent/collaborationProtocol.js';
@@ -216,7 +220,7 @@ import {
   startQuotaManager,
 } from '../quota/QuotaManager.js';
 import type { QuotaStatusWirePayload } from '../quota/types.js';
-import { TermdockAutoUpdateManager } from '../utils/autoUpdate.js';
+import { TermdockAutoUpdateManager, TermdockUpdateStateChangedError } from '../utils/autoUpdate.js';
 import {
   AUTO_TITLE_LONG_RUNNING_DELAY_MS,
   AUTO_TITLE_MIN_CONTEXT_CHARS,
@@ -241,6 +245,7 @@ const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
 const TERMDOCK_DIR = `${os.homedir()}/.termdock`;
 const automationStore = new AutomationStore(`${TERMDOCK_DIR}/automations.json`);
+const todoStore = new TodoStore(`${TERMDOCK_DIR}/todos.json`);
 export const collaborationTaskStore = new CollaborationTaskStore(`${TERMDOCK_DIR}/collaboration-tasks.json`);
 export const collaborationStore = new CollaborationStore(`${TERMDOCK_DIR}/collaboration-groups.json`);
 const collaborationRouting = new CollaborationRoutingStore(`${TERMDOCK_DIR}/collaboration-routing.json`);
@@ -1669,8 +1674,20 @@ async function markAllPersistedTmuxSessionsDetached(): Promise<void> {
     }
   }
   await Promise.all(Array.from(tmuxSessionNames).map((tmuxSessionName) =>
-    setTmuxOption(tmuxSessionName, TERMDOCK_GUI_DETACHED_AT_OPTION, detachedAt),
+    markTmuxSessionClosed(tmuxSessionName, detachedAt),
   ));
+}
+
+// Record user intent before removing either the backend or its inventory entry.
+// Unlike display metadata, failure here must stop the close: otherwise a later
+// scan mistakes the surviving tmux process for an unexpectedly lost GUI session.
+async function markTmuxSessionClosed(name: string, closedAt = String(Date.now())): Promise<void> {
+  try {
+    await runTmux(['set-option', '-t', name, TERMDOCK_GUI_DETACHED_AT_OPTION, closedAt]);
+  } catch (error) {
+    const message = getErrorMessage(error);
+    if (!isTmuxSessionMissingMessage(message) && !isTmuxServerMissingMessage(message)) throw error;
+  }
 }
 
 function getClientSessionView(inventory: SessionInventory, frontendSessionId: string): SessionInventoryClientSession {
@@ -7282,6 +7299,28 @@ router.get('/session-inventory', async (_req, res) => {
   }
 });
 
+const todoRuntime: TodoRuntime = {
+  async validate(config, req) {
+    const launcher = (await listDetectedAgentLaunchers()).find(agent => agent.slug === config.agentSlug);
+    if (!launcher) throw new TodoError('请选择当前服务可用的 Agent');
+    const command = config.command || launcher.command;
+    const cwd = await resolveWorkingDirectory(req ?? ({} as express.Request), config.cwd || os.homedir());
+    return { ...config, command, cwd };
+  },
+  async launch(run, prompt, onSession, req) {
+    const opened = await openInventorySession(req ?? ({} as express.Request), {
+      name: `${run.kind === 'collect' ? '收集' : '待办'} · ${run.name}`.slice(0, 120), customName: true, mode: 'tmux', cwd: run.config.cwd,
+    });
+    const sessionId = opened.session.sessionId;
+    onSession(sessionId);
+    const launchGuard = await beginAgentLaunchCheck(sessionId, run.config.agentSlug);
+    await writeAutomaticTerminalPrompt(sessionId, run.config.command, undefined, launchGuard);
+    await deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, prompt);
+  },
+};
+const todoRunner = new TodoRunner(todoStore, todoRuntime);
+router.use('/operations/todos', todoRoutes(todoStore, todoRunner, todoRuntime));
+
 router.get('/operations/automations', (_req, res) => {
   res.json({ automations: automationStore.list(), runs: automationStore.listRuns() });
 });
@@ -7394,6 +7433,13 @@ export function collaborationLocalActivity() {
   });
 }
 export function deliverPeerCollaboration(sessionId: string): void { void tryDeliverCollaborationInbox(sessionId); }
+
+router.use(sessionViewModeRoutes(new SessionViewModeStore(`${TERMDOCK_DIR}/session-view-modes.json`), resolveStableFederationSessionId));
+
+router.use(sessionChatRoutes({ store: collaborationStore, resolve: id => {
+  const stable = resolveStableFederationSessionId(id);
+  return stable ? collaborationDirectorySessions().find(s => s.sessionId === stable) : undefined;
+}, deliver: deliverPeerCollaboration }));
 
 router.use('/operations/collaboration-tasks', collaborationTaskRoutes({ agent: false, store: collaborationStore, resolveSession: resolveFrontendSessionId }));
 router.use('/operations/orchestration/tasks', collaborationTaskRoutes({ agent: true, store: collaborationStore, resolveSession: resolveFrontendSessionId }));
@@ -8110,16 +8156,12 @@ router.delete('/session-inventory/sessions/:frontendSessionId', async (req, res)
     return res.status(400).json({ error: 'frontendSessionId is required' });
   }
   const removedSession = globalSessionState.sessions.find((session) => session.sessionId === frontendSessionId) ?? null;
+  if (removedSession?.mode === 'tmux' && removedSession.tmuxSessionName) {
+    await markTmuxSessionClosed(removedSession.tmuxSessionName);
+  }
   archiveAgentResumeRecord(removedSession, 'closed');
   const changed = removeGlobalSessionRecord(frontendSessionId);
   if (changed) {
-    if (removedSession?.mode === 'tmux' && removedSession.tmuxSessionName) {
-      await setTmuxOption(
-        removedSession.tmuxSessionName,
-        TERMDOCK_GUI_DETACHED_AT_OPTION,
-        String(Date.now()),
-      );
-    }
     await persistGlobalStateNow();
     broadcastClientState();
   }
@@ -8255,12 +8297,18 @@ router.post('/update/check', async (_req, res) => {
   }
 });
 
-router.post('/update/restart', async (_req, res) => {
+router.post('/update/restart', async (req, res) => {
   try {
-    const state = npmAutoUpdateManager.confirmRestart();
+    const version = req.body?.version;
+    if (version !== undefined && typeof version !== 'string') return res.status(400).json({ error: 'Invalid update version' });
+    const state = npmAutoUpdateManager.confirmRestart(version);
     res.status(202).json(state);
   } catch (error) {
-    res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+    res.status(409).json({
+      error: error instanceof Error ? error.message : String(error),
+      code: error instanceof TermdockUpdateStateChangedError ? 'UPDATE_STATE_CHANGED' : 'UPDATE_RESTART_FAILED',
+      state: npmAutoUpdateManager.getState(),
+    });
   }
 });
 
@@ -9434,18 +9482,29 @@ router.post('/:sessionId/tmux', async (req, res) => {
   }
 });
 
-router.delete('/:sessionId', (req, res) => {
+router.delete('/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
-
-  if (!session) {
-    return res.json({ success: true, alreadyGone: true });
-  }
+  const records = globalSessionState.sessions.filter(record => record.backendSessionId === sessionId);
 
   try {
-    cleanupSession(sessionId, { killProcess: true });
+    const tmuxNames = new Set(records.flatMap(record =>
+      record.mode === 'tmux' && record.tmuxSessionName ? [record.tmuxSessionName] : []));
+    if (session?.mode === 'tmux' && session.tmuxSessionName) tmuxNames.add(session.tmuxSessionName);
+    for (const name of tmuxNames) await markTmuxSessionClosed(name);
+    if (session) cleanupSession(sessionId, { killProcess: true });
+    // Complete the close on the server even if the page exits before its second
+    // DELETE (inventory removal). A stale/missing wrapper can still own a record.
+    for (const record of records) {
+      archiveAgentResumeRecord(record, 'closed');
+      removeGlobalSessionRecord(record.sessionId);
+    }
+    if (records.length) {
+      await persistGlobalStateNow();
+      broadcastClientState();
+    }
     console.log(`Closed terminal session: ${sessionId}`);
-    res.json({ success: true });
+    res.json({ success: true, ...(!session ? { alreadyGone: true } : {}) });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to close terminal:', errorMessage);
@@ -10275,6 +10334,7 @@ const reconcileTimer: ReturnType<typeof setInterval> = setInterval(() => {
 reconcileTimer.unref?.();
 
 const automationTimer: ReturnType<typeof setInterval> = setInterval(() => {
+  void todoRunner.tick().catch(error => console.warn('[todo-collector]', getErrorMessage(error)));
   for (const automation of automationStore.due()) {
     void runAgentAutomation(automation).catch((error) => {
       console.warn(`[automation] ${automation.id} failed:`, getErrorMessage(error));

@@ -1,0 +1,22 @@
+.session-chat-markdown { font-size: 15px; line-height: 1.85; }
+.session-chat-markdown p, .session-chat-markdown li, .session-chat-markdown blockquote { font-size: 15px; line-height: 1.85; color: var(--foreground); }
+.session-chat-markdown [data-markdown-preview-block-start] { padding-block: 0; }
+.session-chat-markdown h1 { font-size: 1.5rem; line-height: 1.5; }
+.session-chat-markdown h2 { font-size: 1.25rem; line-height: 1.6; }
+.session-chat-markdown h3, .session-chat-markdown h4 { font-size: 1.05rem; line-height: 1.7; }
+.session-chat-markdown pre, .session-chat-markdown pre code, .session-chat-markdown pre span { font-size: 13px; line-height: 1.7; }
+.session-chat-markdown table { font-size: 14px; line-height: 1.7; }
+.session-chat-markdown a { text-underline-offset: 3px; }
+
+/* Native scrolling needs both the page and the session swiper to permit x pans. */
+.swiper.session-chat-swiper { touch-action: pan-x pan-y; }
+.session-chat-input { min-height: 44px; max-height: min(176px, calc(var(--app-visual-vh, 100dvh) * 0.35)); }
+/* Fit the application once. Do not resize the body or repeatedly scroll it to
+   zero during Safari's focus animation: that fights its visual-viewport pan. */
+html[data-termdock-touch-viewport='true'][data-termdock-chat-viewport='true'] #root {
+  height: var(--app-visual-vh, var(--app-vh, 100dvh));
+  top: max(0px, var(--app-vv-offset-top, 0px));
+}
+html[data-termdock-touch-viewport='true'][data-termdock-chat-keyboard='true'] #root { padding-bottom: 0; }
+html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display: none; }
+html[data-termdock-chat-keyboard='true'] .session-chat-composer { padding-bottom: 8px; }

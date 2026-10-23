@@ -31,7 +31,7 @@ export function resumeConnectionAccess(): void {
   const id = savedConnection()?.targetPeerId; if (id) accessBlocks.delete(id);
 }
 const nativeFetch = globalThis.fetch.bind(globalThis);
-export interface ConnectionIntent { url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean; routes?: ServiceRoute[] }
+export interface ConnectionIntent { viewMode?: 'terminal' | 'chat'; url: string; targetPeerId: string; pairingCode?: string; serviceName?: string; serviceOrigin?: string; entryServiceId?: string; routeCode?: string; routeOnly?: boolean; routes?: ServiceRoute[] }
 
 export function savedConnection(): ConnectionIntent | null {
   return selectedTarget();
@@ -314,15 +314,15 @@ export async function openAuthorizedServiceClient(intent: ConnectionIntent, sign
   } catch (error) { client.close(); throw error; }
   finally { signal.removeEventListener('abort', abort); }
 }
-export async function connectDevice(intent: ConnectionIntent, options: { rememberOnly?: boolean; renewIfCurrent?: SecureClient } = {}): Promise<SecureClient> {
+export async function connectDevice(intent: ConnectionIntent, options: { rememberOnly?: boolean; renewIfCurrent?: SecureClient; directOnly?: boolean } = {}): Promise<SecureClient> {
   if (intent.entryServiceId) assertRelayTarget(intent.entryServiceId, intent.targetPeerId);
   const previous = active, previousEntry = entryClient;
   const identity = await getIdentity();
   const serviceOrigin = normalizeServiceAddress(intent.serviceOrigin || intent.url);
   const known = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId);
   const savedIntent = { ...intent, routes: intent.routes ?? known?.routes };
-  const reverseRoutes = await reverseConnectionRoutes(savedIntent);
-  const routes = [...connectionRoutes(savedIntent), ...reverseRoutes];
+  const reverseRoutes = options.directOnly ? [] : await reverseConnectionRoutes(savedIntent);
+  const routes = options.directOnly ? [] : [...connectionRoutes(savedIntent), ...reverseRoutes];
   const addresses = connectionAddresses(savedIntent);
   let next: SecureClient | undefined, nextEntry: SecureClient | undefined;
   let pairingCode = intent.pairingCode;
@@ -524,6 +524,27 @@ export async function getActiveClient(): Promise<SecureClient> {
   connecting = connectDevice(saved, { rememberOnly: true }).catch(error => {
     if (active && !active.closed && active.targetPeerId === saved.targetPeerId) return active;
     const access = connectionAccessError(error, { targetServiceId: saved.targetPeerId });
+    if (access) { pauseConnectionAccess(access); throw access; }
+    throw error;
+  }).finally(() => { connecting = undefined; });
+  return connecting;
+}
+/** A denied entry cannot revoke the target's independent direct authorization.
+ * Only the recovery gate retries here; ordinary callers remain paused. Never
+ * request another route ticket or recreate a grant as part of this recovery. */
+export async function retryDirectConnection(): Promise<SecureClient> {
+  const selected = savedConnection();
+  const blocked = accessBlocks.get(selected?.targetPeerId || '');
+  if (!selected || blocked?.code !== 'RELAY_AUTHORIZATION_REQUIRED' || !connectionAddresses(selected).length) {
+    throw blocked || new Error('没有可用的直连地址。');
+  }
+  if (connecting) return connecting;
+  connecting = connectDevice(selected, { rememberOnly: true, directOnly: true }).then(client => {
+    if (savedConnection()?.targetPeerId !== selected.targetPeerId || active !== client || activePath !== 'direct') throw blocked;
+    accessBlocks.delete(selected.targetPeerId);
+    return client;
+  }).catch(error => {
+    const access = connectionAccessError(error, { targetServiceId: selected.targetPeerId });
     if (access) { pauseConnectionAccess(access); throw access; }
     throw error;
   }).finally(() => { connecting = undefined; });

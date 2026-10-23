@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { MarkdownImageLightbox } from './RightSidebar';
+import { MarkdownImageLightbox } from '../markdown/MarkdownPreview';
 import { clearPreviewResourceCache } from '../../utils/previewResourceCache';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 

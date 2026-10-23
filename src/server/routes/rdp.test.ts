@@ -35,7 +35,7 @@ async function wsServer() {
 async function dial(url: string) {
   const socket = new WebSocket(url); cleanups.push(() => socket.terminate()); await once(socket, 'open'); return socket;
 }
-async function fixture(mode: 'direct' | 'relay', full = true) {
+async function fixture(mode: 'direct' | 'relay', full = true, sharedView = false) {
   vi.stubGlobal('CloseEvent', class extends Event {
     code: number; reason: string;
     constructor(type: string, options: { code?: number; reason?: string } = {}) { super(type); this.code = options.code ?? 1000; this.reason = options.reason ?? ''; }
@@ -44,7 +44,7 @@ async function fixture(mode: 'direct' | 'relay', full = true) {
   const connections = new Set<Socket>();
   const guacd = createServer(socket => {
     connections.add(socket); socket.once('close', () => connections.delete(socket)); socket.setEncoding('utf8');
-    const names = ['VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'domain', 'security', 'ignore-cert', 'enable-drive', 'resize-method', 'client-name', 'disable-copy', 'disable-paste'];
+    const names = ['VERSION_1_5_0', 'hostname', 'port', 'username', 'password', 'domain', 'security', 'ignore-cert', 'enable-drive', 'resize-method', 'client-name', 'disable-copy', 'disable-paste', 'read-only'];
     const parser = new GuacamoleParser(values => {
       const [op, ...args] = values;
       if (op === 'select') { expect(args).toEqual(['rdp']); socket.write(guacamoleInstruction('args', ...names)); }
@@ -71,7 +71,7 @@ async function fixture(mode: 'direct' | 'relay', full = true) {
   cleanups.push(() => runtime.close());
   const target = await wsServer(); target.server.on('connection', socket => { void runtime.accept(socket); });
   const identity = await createIdentity();
-  runtime.store.grant({ subjectId: identity.peerId, scope: { kind: 'service' }, actions: [full ? 'service:*' : 'service.view'] });
+  runtime.store.grant({ subjectId: identity.peerId, scope: { kind: 'service' }, actions: [full ? 'service:*' : 'service.view'], ...(sharedView ? { resources: { computers: [{ host: '127.0.0.1', protocol: 'rdp', port: 3390, access: 'view' }] } } : {}) });
   const wire: string[] = [];
   let socket: WebSocket | RelaySocket;
   if (mode === 'relay') {
@@ -106,7 +106,7 @@ async function fixture(mode: 'direct' | 'relay', full = true) {
   };
   const open = async (host = '127.0.0.1', id = 'rdp') => {
     channel.send({ type: 'ws-open', id, path: `/api/computer/ws?host=${encodeURIComponent(host)}&protocol=rdp&port=3390` });
-    return take(id, full ? 'ws-ready' : 'error');
+    return take(id, full || sharedView ? 'ws-ready' : 'error');
   };
   const send = (data: unknown, id = 'rdp') => channel.send({ type: 'ws-data', id, data: JSON.stringify(data) });
   const start = { type: 'start', verifyLogin: true, username: 'test-rdp-user', password: 'private-rdp-password-unique', domain: '', ignoreCert: false, width: 1280, height: 800 };
@@ -332,4 +332,17 @@ it.each(['direct', 'relay'] as const)('allows bidirectional Unicode text clipboa
   for (const [opcode, ...args] of records) f.send({ type: 'instruction', opcode, args });
   await vi.waitFor(() => expect(f.inputs.filter(([opcode]) => ['clipboard', 'blob', 'end', 'key'].includes(opcode))).toEqual(records));
   expect(f.wire.every(chunk => ![remote, encodedRemote, local, encodedLocal].some(value => chunk.includes(value)))).toBe(true);
+});
+
+
+it.each(['direct', 'relay'] as const)('blocks input for an individually shared read-only RDP computer over %s', async mode => {
+  const f = await fixture(mode, false, true); await f.open();
+  const { verifyLogin: _capability, ...start } = f.start; f.send(start); await f.take('rdp', 'ws-data');
+  expect(f.configurations[0]).toMatchObject({ 'read-only': 'true', 'disable-copy': 'true', 'disable-paste': 'true' });
+  f.send({ type: 'instruction', opcode: 'key', args: ['97', '1'] });
+  f.send({ type: 'instruction', opcode: 'mouse', args: ['20', '20', '1'] });
+  f.send({ type: 'instruction', opcode: 'sync', args: ['42'] });
+  await vi.waitFor(() => expect(f.inputs).toContainEqual(['sync', '42']));
+  expect(f.inputs.some(input => ['key', 'mouse', 'clipboard'].includes(input[0]))).toBe(false);
+  expect(f.wire.every(chunk => !chunk.includes(f.start.password))).toBe(true);
 });

@@ -1,3 +1,4 @@
+import { sharedFileBoundary } from './sharedFiles.js';
 import { getHideGitIgnoredRootsSetting, getGitIgnoreExceptionsSetting } from '../utils/settings.js';
 import { readRecentCommitHistory } from '../utils/recentCommitHistory.js';
 import { AUTH_COOKIE, isSessionValid } from '../utils/authProtection.js';
@@ -39,6 +40,7 @@ import {
 import { isResponseWritable, writeResponseChunk } from '../utils/httpResponse.js';
 
 const router = Router();
+router.use(sharedFileBoundary);
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB

@@ -98,6 +98,21 @@ describe('background collaboration delivery', () => {
     expect(store.receipt(message.id)).toMatchObject({ status: 'delivered', attempt_count: 2 });
   });
 
+  it.each(['SESSION_REMOVED', 'SESSION_REMOVED_DURING_RECOVERY'])('stops retrying a removed terminal (%s) and preserves its failed message', async reason => {
+    const message = send();
+    resolve.mockResolvedValue({ state: 'offline', reason });
+    await worker.run('b');
+    expect(store.receipt(message.id)).toMatchObject({ status: 'failed', last_error: reason, next_retry_at: null, attempt_count: 0 });
+    expect(write).not.toHaveBeenCalled();
+    store = new CollaborationStore(file); worker = makeWorker();
+    expect(store.getMessage(message.id)).toMatchObject({ content: 'Please verify', status: 'failed', failureReason: reason });
+    const persist = vi.spyOn(fs, 'renameSync');
+    worker.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(persist).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('does not send messages read or expired during asynchronous attachment', async () => {
     const message = send();
     resolve.mockImplementationOnce(async () => { store.markRead([message.id]); return { state: 'ready', write }; });

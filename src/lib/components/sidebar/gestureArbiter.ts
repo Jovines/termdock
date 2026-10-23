@@ -59,7 +59,7 @@ export interface ManagedScrollerGesture {
 }
 
 const SWIPER_CONTAINER_CLASS = 'swiper';
-const MANAGED_CODE_SCROLLER_SELECTOR = 'pre.termdock-file-preview-horizontal-scroll';
+const MANAGED_MARKDOWN_SCROLLER_SELECTOR = 'pre.termdock-file-preview-horizontal-scroll, [data-markdown-native-scroll]';
 
 /**
  * 手势密集的内层控件（视频进度条、3D 画布等）需要同时排除两类外层横向手势：
@@ -90,7 +90,7 @@ export function canNativeScrollX(element: HTMLElement, direction: 1 | -1): boole
 /**
  * iOS WebKit can permanently cancel a nested native x-scroll when the
  * enclosing drawer's drag recognizer axis-locks, even if the drawer then
- * cancels and yields. Markdown code blocks opt into a deterministic path:
+ * cancels and yields. Shared Markdown tables and code blocks use a deterministic path:
  * their CSS reserves horizontal drags for JavaScript (`touch-action: pan-y`)
  * and the drawer recognizer drives scrollLeft for the winning scroller.
  *
@@ -98,7 +98,7 @@ export function canNativeScrollX(element: HTMLElement, direction: 1 | -1): boole
  * fall-through behavior.
  */
 export function beginManagedScrollerGesture(element: HTMLElement): ManagedScrollerGesture | null {
-  if (!element.matches(MANAGED_CODE_SCROLLER_SELECTOR)) return null;
+  if (!element.matches(MANAGED_MARKDOWN_SCROLLER_SELECTOR)) return null;
   return { element, startScrollLeft: element.scrollLeft };
 }
 

@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { buildMarkdownPreviewBlocks } from './RightSidebar';
+import { buildMarkdownPreviewBlocks } from '../markdown/MarkdownPreview';
 
 /** Reuse the file reader's safe Markdown renderer without its file navigation chrome. */
 export default function CollaborationTaskContent({ content }: { content: string }) {

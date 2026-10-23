@@ -1,11 +1,15 @@
+import type { ShareResources } from '../shared/shareResources.js';
 import type { Request } from 'express';
 
 // Object identity is deliberately used instead of a remotely forgeable header.
+const resources = new WeakMap<object, ShareResources>();
+export function encryptedRequestResources(request: object): ShareResources | undefined { return resources.get(request); }
 const verified = new WeakSet<object>();
 const subjects = new WeakMap<object, string>();
 const serviceAccess = new WeakSet<object>();
-export function markEncryptedRequest(request: object, subjectId?: string, fullService = false): void {
+export function markEncryptedRequest(request: object, subjectId?: string, fullService = false, shared?: ShareResources): void {
   verified.add(request);
+  if (shared) resources.set(request, shared);
   if (subjectId) subjects.set(request, subjectId);
   if (fullService) serviceAccess.add(request);
 }

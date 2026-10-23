@@ -1,3 +1,4 @@
+import { validShareResources, resourceSubset, type ShareResources } from '../shared/shareResources.js';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -6,6 +7,7 @@ export type AuthorizationScope = { kind: 'service' } | { kind: 'sessions'; sessi
 export interface GrantConditions { entryServiceIds?: string[]; relayIds?: string[] }
 export interface GrantInput {
   subjectId: string;
+  resources?: ShareResources;
   scope: AuthorizationScope;
   actions: string[];
   expiresAt?: number;
@@ -41,6 +43,7 @@ function validateInput(v: unknown): asserts v is GrantInput {
   assert(object(v.scope), 'scope');
   if (v.scope.kind === 'service') keys(v.scope, ['kind']);
   else { assert(v.scope.kind === 'sessions' && ids(v.scope.sessionIds), 'session scope'); keys(v.scope, ['kind', 'sessionIds']); }
+  assert(v.resources === undefined || validShareResources(v.resources), 'shared resources');
   assert(Array.isArray(v.actions) && v.actions.length > 0 && v.actions.length <= 256 && v.actions.every(action) && new Set(v.actions).size === v.actions.length, 'actions');
   if (v.scope.kind === 'sessions') assert(v.actions.every(a => a.startsWith('session.')), 'session scope cannot grant service or file capabilities');
   assert(v.expiresAt === undefined || (Number.isSafeInteger(v.expiresAt) && Number(v.expiresAt) > 0), 'expiry');
@@ -54,7 +57,7 @@ function isSubset(child: AuthorizationGrant, parent: AuthorizationGrant): boolea
   if (child.serviceId !== parent.serviceId || !parent.canDelegate) return false;
   if (parent.expiresAt !== undefined && (child.expiresAt === undefined || child.expiresAt > parent.expiresAt)) return false;
   if (parent.scope.kind === 'sessions' && (child.scope.kind !== 'sessions' || !child.scope.sessionIds.every(s => parent.scope.kind === 'sessions' && parent.scope.sessionIds.includes(s)))) return false;
-  if (!parent.actions.includes('service:*') && !child.actions.every(a => parent.actions.includes(a))) return false;
+  if (!parent.actions.includes('service:*') && (!child.actions.every(a => parent.actions.includes(a)) || !resourceSubset(child.resources, parent.resources))) return false;
   for (const key of ['entryServiceIds', 'relayIds'] as const) {
     const limit = parent.conditions?.[key];
     if (limit && (!child.conditions?.[key] || !child.conditions[key]!.every(x => limit.includes(x)))) return false;
@@ -89,7 +92,7 @@ export class AuthorizationStore {
     const grants: AuthorizationGrant[] = [];
     for (const value of data.grants) {
       validateInput(value); const g = value as AuthorizationGrant;
-      keys(g as unknown as Record<string, unknown>, ['id', 'serviceId', 'createdAt', 'parentGrantId', 'revokedAt', 'subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions', 'passwordCredential']);
+      keys(g as unknown as Record<string, unknown>, ['id', 'serviceId', 'createdAt', 'parentGrantId', 'revokedAt', 'subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions', 'passwordCredential', 'resources']);
       assert(id(g.id) && g.serviceId === this.options.serviceId && Number.isSafeInteger(g.createdAt) && g.createdAt >= 0, 'grant metadata');
       assert(g.parentGrantId === undefined || id(g.parentGrantId), 'parent identity');
       assert(g.revokedAt === undefined || (Number.isSafeInteger(g.revokedAt) && g.revokedAt >= 0), 'revocation');
@@ -113,7 +116,7 @@ export class AuthorizationStore {
   }
   private create(input: GrantInput): AuthorizationGrant {
     validateInput(input);
-    keys(input as unknown as Record<string, unknown>, ['subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions']);
+    keys(input as unknown as Record<string, unknown>, ['subjectId', 'scope', 'actions', 'expiresAt', 'canDelegate', 'conditions', 'resources']);
     const now = this.now(); assert(input.expiresAt === undefined || input.expiresAt > now, 'already expired');
     return { ...structuredClone(input), id: randomUUID(), serviceId: this.options.serviceId, createdAt: now };
   }
@@ -143,6 +146,18 @@ export class AuthorizationStore {
     grant.revokedAt = this.now(); this.save(grants); return true;
   }
   list(): AuthorizationGrant[] { return this.read(); }
+  listActive(): AuthorizationGrant[] { const grants = this.read(); return grants.filter(grant => active(grant, grants, this.now(), new Set(), this.options.passwordCredential?.())); }
+  /** Narrow only this Session, preserving sibling Session grants and descendant checks. */
+  revokeSession(sessionId: string, normalize: (id: string) => string = id => id): number {
+    const grants = this.read(); let changed = 0;
+    for (const grant of grants) {
+      if (grant.revokedAt !== undefined || grant.scope.kind !== 'sessions') continue;
+      const remaining = grant.scope.sessionIds.filter(id => normalize(id) !== sessionId);
+      if (remaining.length === grant.scope.sessionIds.length) continue;
+      changed++; if (!remaining.length) grant.revokedAt = this.now(); else grant.scope = { kind: 'sessions', sessionIds: remaining };
+    }
+    if (changed) this.save(grants); return changed;
+  }
   listEffective(request: Omit<AuthorizationRequest, 'action' | 'sessionId'>): AuthorizationGrant[] {
     if (!request || !id(request.subjectId) || request.serviceId !== this.options.serviceId) return [];
     let grants: AuthorizationGrant[];

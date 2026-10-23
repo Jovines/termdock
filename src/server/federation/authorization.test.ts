@@ -94,3 +94,14 @@ describe('target authorization authority', () => {
     data.grants[0].parentGrantId = 'missing'; writeFileSync(filePath, JSON.stringify(data)); expect(allowed('session.view')).toBe(false);
   });
 });
+
+it('persists resource grants and prevents delegation from widening devices or write access', () => {
+  const { store } = fixture();
+  const resources = { android: [{ serial: 'phone-one', access: 'view' as const }], directories: [{ path: '/tmp/shared', access: 'read' as const }] };
+  const parent = store.grant({ ...read, resources, canDelegate: true });
+  const child = store.delegate(parent.id, 'phone', { ...read, subjectId: 'guest', resources });
+  expect(store.listEffective({ serviceId: 'C', subjectId: 'guest' })[0].resources).toEqual(resources);
+  expect(() => store.delegate(parent.id, 'phone', { ...read, resources: { android: [{ serial: 'phone-two', access: 'view' }] } })).toThrow();
+  expect(() => store.delegate(parent.id, 'phone', { ...read, resources: { directories: [{ path: '/tmp/shared', access: 'write' }] } })).toThrow();
+  store.revoke(parent.id); expect(store.listEffective({ serviceId: 'C', subjectId: child.subjectId })).toEqual([]);
+});

@@ -1,0 +1,22 @@
+import { afterEach, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { directoryResource, resourceHttpAllowed } from './resourceAccess';
+const root = mkdtempSync(join(tmpdir(), 'td-shared-boundary-'));
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+it('contains shared directories across traversal, symlinks, duplicate inputs, native and Git APIs', () => {
+  const shared = join(root, 'shared'); mkdirSync(shared); mkdirSync(join(root, 'shared-sibling')); writeFileSync(join(root, 'secret'), 'private'); writeFileSync(join(shared, 'visible'), 'ok'); symlinkSync(join(root, 'secret'), join(shared, 'escape'));
+  const resources = { directories: [{ path: shared, access: 'read' as const }] };
+  const api = (op: string, path: string) => `/api/terminal/fs/${op}?${new URLSearchParams({ path })}`;
+  expect(directoryResource(resources, join(shared, 'visible'))).toBe(true);
+  for (const path of [join(shared, 'escape'), join(shared, '../secret'), join(root, 'shared-sibling')]) expect(resourceHttpAllowed(resources, 'GET', api('read', path))).toBe(false);
+  expect(resourceHttpAllowed(resources, 'GET', api('read', join(shared, 'visible')) + '&path=/etc/passwd')).toBe(false);
+  expect(resourceHttpAllowed(resources, 'DELETE', api('file', join(shared, 'visible')))).toBe(false);
+  expect(resourceHttpAllowed(resources, 'GET', api('list', shared) + '&gitIgnoreRoot=/etc')).toBe(false);
+  expect(resourceHttpAllowed(resources, 'GET', api('git-bundle', shared))).toBe(false);
+  expect(resourceHttpAllowed(resources, 'POST', api('open-in-file-browser', shared))).toBe(false);
+  const writable = { directories: [{ path: shared, access: 'write' as const }] };
+  expect(resourceHttpAllowed(writable, 'PUT', api('write', join(shared, 'visible')))).toBe(true);
+  expect(resourceHttpAllowed(writable, 'POST', `/api/terminal/fs/upload?dir=${encodeURIComponent(shared)}`)).toBe(true);
+});

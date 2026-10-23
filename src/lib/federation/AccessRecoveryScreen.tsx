@@ -41,7 +41,7 @@ export function AccessRecoveryScreen({ failure, target, onSettings, onRecovered,
   </div> :
     <section className="w-full max-w-sm" aria-label="恢复服务访问">
       <h1 className="text-base font-medium" role="alert">{title}</h1>
-      <p className="mt-3 text-sm leading-6 text-muted-foreground">{mode === 'cancelled' ? '连接已暂停。保存的服务、终端和草稿保持不变。' : relay ? '当前没有有效中转授权，已暂停无效重试。不会自动重新授权。' : login ? '目标服务没有返回有效访问授权。登录目标服务后会重新核对。' : '连接已暂停。请核对保存的身份或联系管理员确认具体权限；不会替换身份或扩大授权。'}</p>
+      <p className="mt-3 text-sm leading-6 text-muted-foreground">{mode === 'cancelled' ? relay ? '已取消中转授权操作。直连恢复后会自动连接；保存的服务、终端和草稿保持不变。' : '连接已暂停。保存的服务、终端和草稿保持不变。' : relay ? '此中转路线没有有效授权，已暂停中转重试。直连恢复后会自动连接，不会自动重新授权。' : login ? '目标服务没有返回有效访问授权。登录目标服务后会重新核对。' : '连接已暂停。请核对保存的身份或联系管理员确认具体权限；不会替换身份或扩大授权。'}</p>
       {mode === 'route' && target && failure.context.entryServiceId && failure.context.entryUrl ? <div className="mt-5"><ServiceRoutes
         service={{ ...target, id: target.targetPeerId, label: name }} onBusyChange={setBusy}
         recoverEntry={{ targetPeerId: failure.context.entryServiceId, url: failure.context.entryUrl }} onRecovered={applyRecovery} onCancelRecovery={() => setMode('notice')} /></div>

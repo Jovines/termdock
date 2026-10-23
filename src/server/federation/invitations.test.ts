@@ -73,3 +73,12 @@ describe('single-use device invitations', () => {
     ]) expect(() => f.store.create('admin', value as Parameters<InvitationStore['create']>[1])).toThrow('INVALID_INVITATION');
   });
 });
+
+it('carries device and directory capabilities through single-use redemption and restart', () => {
+  const f = fixture();
+  const resources = { android: [{ serial: 'pixel', access: 'view' as const }], computers: [{ host: '127.0.0.1', protocol: 'rdp' as const, port: 3389, access: 'control' as const }], directories: [{ path: '/tmp/project', access: 'write' as const }] };
+  const invite = f.store.create('admin', { scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view'], resources });
+  expect(f.reload().listPending()[0].resources).toEqual(resources);
+  expect(f.reload().consume(invite.code, 'guest', () => true).resources).toEqual(resources);
+  expect(() => f.reload().consume(invite.code, 'other', () => true)).toThrow();
+});

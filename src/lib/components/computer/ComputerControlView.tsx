@@ -1,3 +1,4 @@
+import { useShareAccess } from '../../federation/ShareAccessContext';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { Monitor, Maximize2, Unplug, Loader2, MousePointer2, Settings2, Keyboard, Clipboard, X, ChevronLeft, ZoomIn, ZoomOut } from 'lucide-react';
@@ -28,6 +29,7 @@ const inputClass = 'min-h-11 w-full rounded-md border border-border bg-backgroun
 
 function errorKey(reason: string): TranslationKey {
   if (/API_NOT_ALLOWED|AUTHORIZATION|revoked|PAIRING/.test(reason)) return 'computer.permission';
+  if (reason.includes('READ_ONLY_PROTOCOL')) return 'computer.sharedViewUnsupported';
   if (reason.includes('RDP_BACKEND_UNAVAILABLE')) return 'computer.rdpBackendUnavailable';
   if (reason.includes('RDP_CERTIFICATE')) return 'computer.rdpCertificate';
   if (reason.includes('CREDENTIALS_MISSING')) return 'computer.loginExpired';
@@ -46,6 +48,8 @@ function errorKey(reason: string): TranslationKey {
 export const COMPUTER_BACKGROUND_RETENTION_MS = 30 * 60_000;
 
 export default function ComputerControlView({ active = true }: { active?: boolean }) {
+  const shared = useShareAccess();
+  const forcedViewOnly = !!shared && shared.computers?.[0]?.access !== 'control';
   const { t } = useI18n();
   const motionTrace = useMemo(() => createComputerMotionTraceIfEnabled(), []);
   useEffect(() => {
@@ -60,14 +64,15 @@ export default function ComputerControlView({ active = true }: { active?: boolea
   const profile = preferences[preferences.target];
   const { host, platform, protocol, port, domain, ignoreCert, username } = profile;
   const rdpBackendUnavailable = protocol === 'rdp' && service?.rdpAvailable === false;
-  const { viewOnly, fit } = preferences;
+  const { fit } = preferences;
+  const viewOnly = forcedViewOnly || preferences.viewOnly;
   const hasSavedLogin = profile.rememberLogin && credentialKeys.includes(computerLoginKey(profile));
   const updateProfile = (patch: Partial<ComputerProfile>) => change(value => ({ ...value, [value.target]: { ...value[value.target], ...patch } }));
   const setUsername = (username: string) => updateProfile({ username });
   const setDomain = (domain: string) => updateProfile({ domain });
   const setIgnoreCert = (ignoreCert: boolean) => { updateProfile({ ignoreCert }); void flush(); };
   const setPort = (port: string) => updateProfile({ port });
-  const setViewOnly = (viewOnly: boolean) => { if (viewOnly) { releaseTouchpad.current(); keyQueue.clear(); setPanel(null); } change(value => ({ ...value, viewOnly })); void flush(); };
+  const setViewOnly = (viewOnly: boolean) => { if (forcedViewOnly && !viewOnly) return; if (viewOnly) { releaseTouchpad.current(); keyQueue.clear(); setPanel(null); } change(value => ({ ...value, viewOnly })); void flush(); };
   const [advanced, setAdvanced] = useState(false);
   const shortcuts = computerShortcuts(platform);
   const pasteLabel = platform === 'mac' ? '⌘V' : 'Ctrl+V';
@@ -434,17 +439,17 @@ export default function ComputerControlView({ active = true }: { active?: boolea
       {!showDesktop && <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
         <div className="mx-auto w-full max-w-md">
         <form className="space-y-3" onSubmit={event => { void connect(event); }}>
-          <div className="grid grid-cols-2 gap-1 rounded-lg bg-background p-1" role="group" aria-label={t('computer.target')}>
+          <div hidden={!!shared} className="grid grid-cols-2 gap-1 rounded-lg bg-background p-1" role="group" aria-label={t('computer.target')}>
             <button type="button" className={`min-h-11 rounded-md px-3 text-sm font-medium ${localTarget ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface'}`} aria-pressed={localTarget} disabled={busy || !service || !loaded} onClick={() => chooseTarget(true)}>{t('computer.thisComputer')}</button>
             <button type="button" className={`min-h-11 rounded-md px-3 text-sm font-medium ${!localTarget ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface'}`} aria-pressed={!localTarget} disabled={busy || !loaded} onClick={() => chooseTarget(false)}>{t('computer.otherComputer')}</button>
           </div>
-          {localTarget ? <p className="text-xs leading-relaxed text-muted-foreground" role="status">{service ? t('computer.localService', { name: savedConnection()?.serviceName || service.hostname }) : t('computer.loading')}</p> : <label className="block space-y-1 text-xs"><span>{t('computer.host')}</span><input className={inputClass} value={host} disabled={busy || !loaded} onChange={event => { updateProfile({ host: event.target.value, domain: '', ignoreCert: false }); setPassword(''); setError(null); }} placeholder={t('computer.hostPlaceholder')} onBlur={() => { void flush(); }} autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={253} /></label>}
+          {localTarget ? <p className="text-xs leading-relaxed text-muted-foreground" role="status">{service ? t('computer.localService', { name: savedConnection()?.serviceName || service.hostname }) : t('computer.loading')}</p> : <label className="block space-y-1 text-xs"><span>{t('computer.host')}</span><input className={inputClass} value={host} disabled={!!shared || busy || !loaded} onChange={event => { updateProfile({ host: event.target.value, domain: '', ignoreCert: false }); setPassword(''); setError(null); }} placeholder={t('computer.hostPlaceholder')} onBlur={() => { void flush(); }} autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={253} /></label>}
           <p className="text-xs text-muted-foreground">{platform === 'mac' ? 'macOS' : platform === 'linux' ? 'Ubuntu / Linux' : 'Windows'} · {protocol.toUpperCase()} · {protocol === 'rdp' ? port || '3389' : '5900'}{viewOnly ? ` · ${t('computer.viewOnly')}` : ''}</p>
           <label className="block space-y-1 text-xs"><span>{t(protocol === 'rdp' ? 'computer.rdpUsername' : 'computer.username')}</span><input className={inputClass} value={username} disabled={!loaded} onChange={event => setUsername(event.target.value)} onBlur={() => { void flush(); }} autoCapitalize="none" autoCorrect="off" autoComplete="off" required={protocol === 'rdp' || (state === 'credentials' && authNeedsUsername)} maxLength={255} /></label>
           <label className="block space-y-1 text-xs"><span>{t('computer.password')}</span><input className={inputClass} type="password" value={password} disabled={!loaded} onChange={event => setPassword(event.target.value)} placeholder={hasSavedLogin && state !== 'credentials' ? t('computer.savedPassword') : undefined} autoComplete="new-password" required={!hasSavedLogin || state === 'credentials'} maxLength={1024} /></label>
           <p className="text-[11px] leading-relaxed text-muted-foreground">{t(protocol === 'rdp' ? 'computer.rdpLoginHint' : 'computer.vncLoginHint')}</p>
-          <div className="flex min-h-11 items-center justify-between gap-2 text-xs">
-            <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={profile.rememberLogin} disabled={busy || !loaded || loginState === 'saving'} onChange={event => {
+          <div hidden={!!shared} className="flex min-h-11 items-center justify-between gap-2 text-xs">
+            <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={profile.rememberLogin} disabled={!!shared || busy || !loaded || loginState === 'saving'} onChange={event => {
               const rememberLogin = event.target.checked; updateProfile({ rememberLogin });
               if (!rememberLogin && hasSavedLogin) void credentialRequest('forget', { ...profile, rememberLogin }).catch(() => {});
               else void flush();
@@ -461,7 +466,7 @@ export default function ComputerControlView({ active = true }: { active?: boolea
           <button type="submit" className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground disabled:opacity-40" disabled={!loaded || rdpBackendUnavailable || loginState === 'saving' || (localTarget && !service) || !host.trim() || (!password && (!hasSavedLogin || state === 'credentials')) || (protocol === 'rdp' && (!username.trim() || !Number.isInteger(Number(port)) || Number(port) < 1 || Number(port) > 65535))}>
             {t(state === 'credentials' ? 'computer.authenticate' : state === 'error' ? 'computer.retryConnect' : 'computer.connect')}
           </button>
-          <details ref={advancedRef} className="border-b border-border text-xs" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
+          <details hidden={!!shared} ref={advancedRef} className="border-b border-border text-xs" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between text-muted-foreground"><span>{t('computer.advanced')}</span><span aria-hidden="true">{advanced ? '−' : '+'}</span></summary>
             <div className="space-y-3 pb-4">
               <div className="grid grid-cols-2 gap-3">
@@ -477,7 +482,7 @@ export default function ComputerControlView({ active = true }: { active?: boolea
                 <label className="block space-y-1"><span>{t('computer.domain')}</span><input className={inputClass} value={domain} disabled={busy || !loaded} onBlur={() => { void flush(); }} onChange={event => setDomain(event.target.value)} autoComplete="off" maxLength={255} /></label>
                 <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={ignoreCert} disabled={busy || !loaded} onChange={event => setIgnoreCert(event.target.checked)} />{t('computer.trustCertificate')}</label>
               </>}
-              <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={viewOnly} disabled={busy || !loaded} onChange={event => setViewOnly(event.target.checked)} />{t('computer.viewOnly')}</label>
+              <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={viewOnly} disabled={forcedViewOnly || busy || !loaded} onChange={event => setViewOnly(event.target.checked)} />{t('computer.viewOnly')}</label>
               <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={preferences.autoConnect} disabled={busy || !loaded} onChange={event => { change(value => ({ ...value, autoConnect: event.target.checked })); void flush(); }} />{t('computer.autoConnect')}</label>
             </div>
           </details>
@@ -509,7 +514,7 @@ export default function ComputerControlView({ active = true }: { active?: boolea
           {zoomControls}
           <button type="button" className={buttonClass} disabled={viewOnly} onClick={() => togglePanel('keyboard')}><Keyboard size={14} />{t('computer.keyboard')}</button>
         </>}
-        <label className="flex min-h-9 items-center gap-1.5"><input type="checkbox" checked={viewOnly} onChange={event => setViewOnly(event.target.checked)} />{t('computer.viewOnly')}</label>
+        <label className="flex min-h-9 items-center gap-1.5"><input type="checkbox" checked={viewOnly} disabled={forcedViewOnly} onChange={event => setViewOnly(event.target.checked)} />{t('computer.viewOnly')}</label>
         <button type="button" className={buttonClass} onClick={() => { zoomRef.current?.set(1); change(value => ({ ...value, fit: !value.fit })); void flush(); }}>{t(fit ? 'computer.actualSize' : 'computer.fit')}</button>
         <select className={`${buttonClass} min-w-0 bg-surface`} aria-label={t('computer.shortcuts')} value="" disabled={viewOnly} onChange={event => {
           sendKeys(shortcuts[event.target.value] ?? []);

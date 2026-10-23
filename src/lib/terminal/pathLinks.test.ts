@@ -145,6 +145,43 @@ describe('real terminal path layout', () => {
     }
   });
 
+  it.each(['', '   '])('joins the Chinese filename split in the screenshot with padding %j', async padding => {
+    const first = 'specs/券条三期地址筛选样式Mock配置/doc/尾部固';
+    const last = '定筛选配置清单.lark.md';
+    for (const row of [1, 2]) {
+      const { links, activate } = await linksFor(
+        `• 已更新配置清单 (\x1b[34;4m${first}${padding}\r\n  ${last}\x1b[0m)。`, 70, row,
+      );
+      expect(links?.map(link => link.text)).toEqual([first + last]);
+      expect(links?.[0].range.end).toEqual({ x: 24, y: 2 });
+      links?.[0].activate({} as MouseEvent, links[0].text);
+      expect(activate).toHaveBeenCalledWith(first + last);
+    }
+  });
+
+  it('joins underlined filename fragments across three hard rows from every row', async () => {
+    const parts = ['/tmp/一个很长的配置文件', '名继续延伸到下一行还在这里', '.lark.md'];
+    for (const row of [1, 2, 3]) {
+      const { links, activate } = await linksFor(
+        `       \x1b[34;4m${parts.join('\r\n  ')}:42:7\x1b[0m)。`, 32, row,
+      );
+      expect(links?.map(link => link.text)).toEqual([parts.join('')]);
+      expect(links?.[0].range).toEqual({ start: { x: 8, y: 1 }, end: { x: 15, y: 3 } });
+      links?.[0].activate({} as MouseEvent, links[0].text);
+      expect(activate).toHaveBeenCalledWith(parts.join(''), 42);
+    }
+  });
+
+  it.each([
+    '                          \x1b[34m/tmp/file\r\n  ordinary prose',
+    '                          \x1b[34;4m/tmp/file\r\n  \x1b[31mother.md',
+    '                          \x1b[34;4m/tmp/file\r\n  /other/report.md',
+    '                          \x1b[34;4m/tmp/file:42\r\n  other.md',
+  ])('does not append unrelated lines to a filename: %s', async output => {
+    const { links } = await linksFor(output, 48, 1);
+    expect(links?.map(link => link.text)).toEqual(['/tmp/file']);
+  });
+
   it.each([':113:', ':113:7:', '：'])('joins unindented four-row paths with suffix %s', async (suffix) => {
     const parts = [
       'business_modules/Search/',

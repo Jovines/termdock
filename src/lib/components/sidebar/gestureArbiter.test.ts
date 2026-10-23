@@ -62,7 +62,7 @@ describe('canNativeScrollX', () => {
   });
 });
 
-describe('managed code scroller gestures', () => {
+describe('managed Markdown scroller gestures', () => {
   it('drives Markdown code scrollLeft directly from finger movement', () => {
     const code = makeScroller({ scrollWidth: 300, clientWidth: 100, scrollLeft: 40 });
     code.className = 'termdock-file-preview-horizontal-scroll';
@@ -78,6 +78,17 @@ describe('managed code scroller gestures', () => {
     expect(pre.scrollLeft).toBe(65);
     updateManagedScrollerGesture(gesture!, 15);
     expect(pre.scrollLeft).toBe(25);
+  });
+
+  it('moves shared Markdown tables inside the drawer without relying on a cancelled native pan', () => {
+    const table = makeScroller({ scrollWidth: 500, clientWidth: 200, scrollLeft: 30 });
+    table.dataset.markdownNativeScroll = '';
+    const gesture = beginManagedScrollerGesture(table);
+    expect(gesture).not.toBeNull();
+    updateManagedScrollerGesture(gesture!, -90);
+    expect(table.scrollLeft).toBe(120);
+    updateManagedScrollerGesture(gesture!, 15);
+    expect(table.scrollLeft).toBe(15);
   });
 
   it('leaves other native horizontal scrollers on the browser path', () => {

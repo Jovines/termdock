@@ -7,6 +7,7 @@ import { SessionCollaborationActions } from './lib/components/sidebar/SessionCol
 import { isKeyboardLayerOpen, useKeyboardLayer } from './lib/hooks/useKeyboardLayer';
 import { CollaborationWorkspaceFrame } from './lib/components/CollaborationWorkspaceFrame';
 import { useCollaborationNavigation } from './lib/stores/useCollaborationNavigation';
+import { TodoNavigationButton } from './lib/components/todos/TodoNavigationButton';
 import { LoadingSpinner as RiLoaderLine, LoadingSpinner as RiLoaderCircle } from './lib/components/ui/Loading';
 import { MobileSetupGuide } from './lib/components/settings/MobileSetupGuide';
 import { useSessionOrderStore } from './lib/stores/useSessionOrderStore';
@@ -16,6 +17,8 @@ import { consumeWorkspaceSession, getWorkspaceHost, reportWorkspace, activateSer
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
+import { SessionViewActions } from './lib/components/chat/SessionViewActions';
+import { SessionModeSwitch } from './lib/components/chat/SessionModeSwitch';
 import { Switch } from './lib/components/ui/Switch';
 import {
   Plus as RiAddLine,
@@ -60,7 +63,8 @@ import { SessionCloseConfirmationKeyboard } from './lib/components/SessionCloseC
 import { getSessionFontSize, setSessionFontSize } from './lib/terminal/sessionFontSize';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, getTermdockUpdateState, checkTermdockUpdate, confirmTermdockUpdateRestart, getServerHealth, dismissServerHealthIncident } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, checkTermdockUpdate, confirmTermdockUpdateRestart, getServerHealth, dismissServerHealthIncident } from './lib/terminal/api';
+import { useTermdockUpdateState } from './lib/terminal/useTermdockUpdateState';
 import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState, TermdockUpdateState, ServerHealthState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
@@ -535,6 +539,7 @@ function reorderSessionsByIds<T extends { id: string }>(items: T[], orderedIds: 
 }
 
 const CollaborationMainWorkspace = React.lazy(() => import('./lib/components/sidebar/CollaborationMainWorkspace'));
+const TodoWorkspace = React.lazy(() => import('./lib/components/todos/TodoWorkspace'));
 
 /** One confirmation belongs to one live service/page, including the CSRF await. */
 export async function runServiceUpdateConfirmation(lock: { busy: boolean }, action: {
@@ -578,7 +583,7 @@ function App() {
   const [localAccessSaving, setLocalAccessSaving] = React.useState(false);
   const [localAccessError, setLocalAccessError] = React.useState<string | null>(null);
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
-  const [termdockUpdateState, setTermdockUpdateState] = React.useState<TermdockUpdateState | null>(null);
+  const { state: termdockUpdateState, apply: setTermdockUpdateState, refresh: refreshTermdockUpdateState } = useTermdockUpdateState();
   const [updateActionPending, setUpdateActionPending] = React.useState(false);
   const updateActionLock = useRef({ busy: false });
   const updatePageEpoch = useRef(0);
@@ -629,6 +634,7 @@ function App() {
     tmuxSessionName: session.tmuxSessionName,
   })));
   const mainCollaborationGroup = useCollaborationNavigation(state => state.groupId);
+  const todoWorkspaceOpen = useCollaborationNavigation(state => state.todoOpen);
   React.useEffect(() => {
     const showTerminal = () => useCollaborationNavigation.getState().terminal();
     window.addEventListener("switch-terminal-session", showTerminal);
@@ -761,9 +767,6 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    void getTermdockUpdateState()
-      .then((state) => { if (!cancelled) setTermdockUpdateState(state); })
-      .catch(() => undefined);
     // 服务健康同理：首屏拉一次，之后靠控制 WS 的推送。注意推送只在连上时发一次快照，
     // 服务自己崩掉时当然没人推——重连拿到的那份才是关键。
     void getServerHealth()
@@ -771,8 +774,7 @@ function App() {
       .catch(() => undefined);
     const unsubscribe = subscribeClientState((event) => {
       if (cancelled) return;
-      if (event.type === 'update-state') setTermdockUpdateState(event.state);
-      else if (event.type === 'server-health') setServerHealthState(event.state);
+      if (event.type === 'server-health') setServerHealthState(event.state);
     });
     return () => {
       cancelled = true;
@@ -797,26 +799,30 @@ function App() {
     const pageConfirmation = desktopBridge?.confirmationUI === 'page-v1' && typeof desktopBridge.confirm === 'function';
     setUpdateActionError(null);
     await runServiceUpdateConfirmation(updateActionLock.current, {
-      current, submit: confirmTermdockUpdateRestart, apply: setTermdockUpdateState, pending: setUpdateActionPending,
+      current, submit: guard => confirmTermdockUpdateRestart(guard, latestVersion), apply: setTermdockUpdateState, pending: setUpdateActionPending,
       expiredMessage: locale === 'zh' ? '连接已变化，请重新确认。' : 'Connection changed. Please confirm again.',
       confirm: () => pageConfirmation ? desktopBridge.confirm!({ title: t('sidebar.updateRestart'),
         message: t('sidebar.updateRestartConfirm', { version: latestVersion }), confirmLabel: t('sidebar.updateRestart'), cancelLabel: t('common.cancel') })
         : window.confirm(t('sidebar.updateRestartConfirm', { version: latestVersion })),
       failure: message => { if (pageConfirmation) setUpdateActionError(message); else window.alert(message); },
     });
-  }, [termdockUpdateState?.latestVersion, t, updateActionPending, desktopBridge, locale]);
+    if (current()) void refreshTermdockUpdateState();
+  }, [termdockUpdateState?.latestVersion, t, updateActionPending, desktopBridge, locale, setTermdockUpdateState, refreshTermdockUpdateState]);
 
   const handleRetryUpdate = useCallback(async () => {
     if (updateActionPending) return;
+    const epoch = updatePageEpoch.current, target = savedConnection();
+    const current = () => epoch === updatePageEpoch.current && target === savedConnection();
     setUpdateActionPending(true);
     try {
-      setTermdockUpdateState(await checkTermdockUpdate());
+      await checkTermdockUpdate();
+      if (current()) void refreshTermdockUpdateState();
     } catch (error) {
-      showPageFeedback(error instanceof Error ? error.message : String(error));
+      if (current()) showPageFeedback(error instanceof Error ? error.message : String(error));
     } finally {
       setUpdateActionPending(false);
     }
-  }, [updateActionPending]);
+  }, [updateActionPending, refreshTermdockUpdateState]);
 
   const handleCheckDesktopUpdate = useCallback(async () => {
     if (!desktopBridge?.checkDesktopUpdate || desktopUpdatePending) return;
@@ -1899,7 +1905,7 @@ function App() {
   const [programRules, setProgramRules] = React.useState<ProgramLabelRule[]>(cachedProgramRules ?? []);
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
-  const terminalReferenceAvailable = !mainCollaborationGroup
+  const terminalReferenceAvailable = !mainCollaborationGroup && !todoWorkspaceOpen
     && (!activeHistoryOverlay || activeHistoryOverlay === 'right-sidebar' || activeHistoryOverlay === 'right-sidebar-file-preview' || activeHistoryOverlay === 'left-sidebar')
     && !isLocalAccessOpen
     && !isNotificationsOpen
@@ -3263,16 +3269,14 @@ function App() {
       {updateActionError && <div role="alert" data-update-restart-error className="fixed right-3 top-3 z-toast flex max-w-md items-start gap-3 rounded-xl border border-border bg-surface p-3 text-sm text-foreground shadow-xl"><p className="break-words">{updateActionError}</p><button type="button" className="shrink-0 text-primary" aria-label={t('common.close')} onClick={() => setUpdateActionError(null)}>{t('common.close')}</button></div>}
       {architectureLinkError && <div role="alert" className="flex shrink-0 items-center gap-2 bg-surface-2 px-3 py-2 text-xs"><p className="min-w-0 flex-1 break-words">{architectureLinkError}</p><button type="button" className="min-h-11 px-2 text-primary" onClick={() => setArchitectureLinkError('')}>{t('common.close')}</button></div>}
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
-        <CollaborationWorkspaceFrame rightInset={pinnedRightSidebarInset} workspace={mainCollaborationGroup && <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开协作工作区…</div>}><CollaborationMainWorkspace key={mainCollaborationGroup} groupId={mainCollaborationGroup} activeSessionId={activeSessionId} defaultSessionMode={newSessionMode} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} onToggleRightSidebar={handleToggleRightSidebar} rightSidebarOpen={sidebarRightOpen || showPinnedRight} /></React.Suspense>}>
+        <CollaborationWorkspaceFrame rightInset={pinnedRightSidebarInset} workspace={todoWorkspaceOpen ? <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开待办…</div>}><TodoWorkspace activeSessionId={activeSessionId} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} /></React.Suspense> : mainCollaborationGroup && <React.Suspense fallback={<div className="absolute inset-0 flex items-center justify-center bg-[var(--chrome-bg)] text-sm text-muted-foreground">正在打开协作工作区…</div>}><CollaborationMainWorkspace key={mainCollaborationGroup} groupId={mainCollaborationGroup} activeSessionId={activeSessionId} defaultSessionMode={newSessionMode} onOpenSidebar={handleToggleLeftSidebar} leftSidebarVisible={sidebarLeftOpen || showPinnedLeft} onToggleRightSidebar={handleToggleRightSidebar} rightSidebarOpen={sidebarRightOpen || showPinnedRight} /></React.Suspense>}>
           <div
             data-termdock-window-header="true"
             className={`${isDesktopViewport ? 'absolute inset-x-0 top-0 z-20' : 'relative'} shrink-0 items-center gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
               showPinnedLeft
                 ? 'flex justify-end'
                 : 'flex justify-between'
-            } ${
-              groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
-            } ${topBarAgentBg}`}
+            } ${groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'} ${topBarAgentBg}`}
             style={{
               // Older desktop shells inject position: relative for this bar.
               // Keep it floating: each terminal slide already reserves its height.
@@ -3515,6 +3519,8 @@ function App() {
                 {activeSessionPositionLabel}
               </span>
               )}
+              {activeSessionId && <SessionModeSwitch sessionId={activeSessionId} />}
+              {!showPinnedLeft && <TodoNavigationButton placement="toolbar" onOpen={() => useCollaborationNavigation.getState().openTodos()} />}
               {!showPinnedRight && <button
                 type="button"
                 onClick={handleToggleRightSidebar}
@@ -3603,7 +3609,7 @@ function App() {
         </CollaborationWorkspaceFrame>
       </main>
 
-      {!mainCollaborationGroup && <AgentFloatingSessionButtons
+      {!mainCollaborationGroup && !todoWorkspaceOpen && <AgentFloatingSessionButtons
         reviewCount={agentTabCounts.review}
         runningSessions={runningSessionShortcuts}
         activeSessionId={activeSessionId}
@@ -4373,6 +4379,7 @@ function App() {
                 )}
               </div>
               <div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain py-1">
+                <SessionViewActions sessionId={menuSession.id} onDone={closeTabMenu} />
                 <button
                   type="button"
                   onClick={() => {

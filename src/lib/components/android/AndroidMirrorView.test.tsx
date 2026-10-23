@@ -29,6 +29,7 @@ vi.mock('../../android/mirrorController', () => {
         this.callbacks.onHeader?.({ deviceName: 'Test', codec: 'h264', width: 544, height: 1080 });
         this.callbacks.onState?.('streaming');
       }
+      setReadOnly(value: boolean) { (globalThis as Record<string, unknown>).__mirrorReadOnly = value; }
       supportsLiveBitrate = true;
       canSetBitrate = true;
       async setBitrate(value: number) { (globalThis as Record<string, unknown>).__mirrorBitrate = value; return true; }

@@ -13,7 +13,8 @@ describe('FederationAccess invitation flow', () => {
     const onCreateInvite = vi.fn().mockResolvedValue({ id: 'pending-one', url: inviteUrl, expiresAt: Date.now() + 600000 });
     const onRevokeInvitation = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
     render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} onRevokeInvitation={onRevokeInvitation} />);
-    fireEvent.click(screen.getByText('邀请设备')); fireEvent.click(screen.getByText('生成邀请'));
+    fireEvent.click(screen.getByText('邀请设备')); if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
+    fireEvent.click(screen.getByText('生成邀请'));
     fireEvent.click(await screen.findByRole('button', { name: '撤销邀请' }));
     expect(onRevokeInvitation).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
@@ -104,13 +105,14 @@ describe('FederationAccess invitation flow', () => {
     render(<FederationAccess paired onConnect={() => {}} onClose={onClose} onCreateInvite={onCreateInvite} sessions={[{ sessionId: 'one', name: '构建任务' }]} />);
     fireEvent.click(screen.getByText('邀请设备'));
     fireEvent.click(screen.getByRole('radio', { name: /可操作/ }));
-    fireEvent.click(screen.getByRole('button', { name: '选择终端' }));
+    fireEvent.click(screen.getByRole('button', { name: /选择终端|已选/ }));
     fireEvent.click(screen.getByLabelText('构建任务'));
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     expect((screen.getByRole('radio', { name: /可操作/ }) as HTMLInputElement).checked).toBe(true);
+    if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
     fireEvent.click(screen.getByText('生成邀请'));
-    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ scope: { kind: 'service' }, actions: ['session.view', 'session.input', 'session.resize'] }));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ viewMode: 'chat', scope: { kind: 'sessions', sessionIds: ['one'] }, actions: ['session.view', 'session.input', 'session.resize'] }));
   });
   it('shows one input and keeps identity, JSON and authorization forms out of first use', () => {
     render(<FederationAccess onConnect={() => {}} onClose={() => {}} currentIdentity="private-peer-id" onGrant={() => {}} />);
@@ -152,8 +154,9 @@ describe('FederationAccess invitation flow', () => {
     render(<FederationAccess paired currentServiceName="工作电脑" onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} />);
     expect(screen.queryByRole('textbox')).toBeNull();
     fireEvent.click(screen.getByText('邀请设备'));
+    if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
     fireEvent.click(screen.getByText('生成邀请'));
-    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ scope: { kind: 'service' }, actions: ['session.view'] }));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ viewMode: 'chat', scope: { kind: 'service' }, actions: ['session.view'] }));
     await waitFor(() => expect(screen.getByText('复制邀请链接')).toBeTruthy());
     expect(localStorage.getItem('termdock.federation.connections.v1')).toBeNull();
   });
@@ -161,24 +164,27 @@ describe('FederationAccess invitation flow', () => {
     const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
     render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} sessions={[{ sessionId: 'backend-1', name: '构建任务' }, { sessionId: 'backend-2', name: '代码审查' }]} />);
     fireEvent.click(screen.getByText('邀请设备')); fireEvent.click(screen.getByRole('radio', { name: /可操作/ }));
-    fireEvent.click(screen.getByRole('button', { name: '选择终端' }));
-    fireEvent.click(screen.getByLabelText('构建任务')); fireEvent.click(screen.getByRole('button', { name: '使用所选终端（1）' })); fireEvent.click(screen.getByText('生成邀请'));
-    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ scope: { kind: 'sessions', sessionIds: ['backend-1'] }, actions: ['session.view', 'session.input', 'session.resize'] }));
+    fireEvent.click(screen.getByRole('button', { name: /选择终端|已选/ }));
+    if (!(screen.getByLabelText('构建任务') as HTMLInputElement).checked) fireEvent.click(screen.getByLabelText('构建任务')); fireEvent.click(screen.getByRole('button', { name: '使用所选终端（1）' })); if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
+    fireEvent.click(screen.getByText('生成邀请'));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ viewMode: 'chat', scope: { kind: 'sessions', sessionIds: ['backend-1'] }, actions: ['session.view', 'session.input', 'session.resize'] }));
   });
   it('uses service wildcard only when explicitly selected', async () => {
     const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
     render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} />);
-    fireEvent.click(screen.getByText('邀请设备')); fireEvent.click(screen.getByRole('radio', { name: /完整访问/ })); fireEvent.click(screen.getByText('生成邀请'));
-    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ scope: { kind: 'service' }, actions: ['service:*'] }));
+    fireEvent.click(screen.getByText('邀请设备')); fireEvent.click(screen.getByText('有效期与备注')); fireEvent.click(screen.getByRole('checkbox', { name: '授予完整服务权限' })); if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
+    fireEvent.click(screen.getByText('生成邀请'));
+    await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ viewMode: 'chat', scope: { kind: 'service' }, actions: ['service:*'] }));
   });
   it('grants the stable client session id for a selected session so a backend replacement keeps it valid', async () => {
     const onCreateInvite = vi.fn().mockResolvedValue({ url: inviteUrl, expiresAt: Date.now() + 600000 });
     render(<FederationAccess paired onConnect={() => {}} onClose={() => {}} onCreateInvite={onCreateInvite} sessions={[{ sessionId: 'backend-1', sourceSessionId: 'stable-1', name: '构建任务' }]} />);
     fireEvent.click(screen.getByText('邀请设备'));
     fireEvent.click(screen.getByRole('radio', { name: /可操作/ }));
-    fireEvent.click(screen.getByRole('button', { name: '选择终端' }));
-    fireEvent.click(screen.getByLabelText('构建任务'));
+    fireEvent.click(screen.getByRole('button', { name: /选择终端|已选/ }));
+    expect((screen.getByLabelText('构建任务') as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '使用所选终端（1）' }));
+    if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
     fireEvent.click(screen.getByText('生成邀请'));
     await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ scope: { kind: 'sessions', sessionIds: ['stable-1'] } })));
   });
@@ -189,6 +195,7 @@ describe('FederationAccess invitation flow', () => {
     fireEvent.click(screen.getByText('接入地址'));
     expect(screen.getByRole('radio', { name: /当前地址/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('radio', { name: /Wi-Fi/ }));
+    if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
     fireEvent.click(screen.getByText('生成邀请'));
     await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ entryAddress: 'https://192.168.1.23:9834' })));
   });
@@ -199,10 +206,12 @@ describe('FederationAccess invitation flow', () => {
     fireEvent.click(screen.getByText('接入地址'));
     fireEvent.click(screen.getByRole('radio', { name: /自定义地址/ }));
     fireEvent.change(screen.getByPlaceholderText('例如：https://192.168.1.23:9834'), { target: { value: 'ftp://192.168.1.23' } });
+    if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
     fireEvent.click(screen.getByText('生成邀请'));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('接入地址'));
     expect(onCreateInvite).not.toHaveBeenCalled();
     fireEvent.change(screen.getByPlaceholderText('例如：https://192.168.1.23:9834'), { target: { value: 'https://10.0.0.8:9834' } });
+    if (screen.queryByRole('button', { name: '全部终端' }) && !screen.queryByRole('button', { name: /已选 [1-9]/ })) fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
     fireEvent.click(screen.getByText('生成邀请'));
     await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith(expect.objectContaining({ entryAddress: 'https://10.0.0.8:9834' })));
   });
@@ -217,6 +226,7 @@ it('always offers a custom invite address and warns that localhost is local to o
   expect(disclosure.textContent).toContain('当前地址仅供这台电脑使用');
   fireEvent.click(screen.getByRole('radio', { name: /自定义地址/ }));
   fireEvent.change(screen.getByPlaceholderText('例如：https://192.168.1.23:9834'), { target: { value: 'https://[::1]:9881' } });
+  fireEvent.click(screen.getByRole('button', { name: '全部终端' }));
   fireEvent.click(screen.getByRole('button', { name: '生成邀请' }));
-  await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ entryAddress: 'https://[::1]:9881', scope: { kind: 'service' }, actions: ['session.view'] }));
+  await waitFor(() => expect(onCreateInvite).toHaveBeenCalledWith({ viewMode: 'chat', entryAddress: 'https://[::1]:9881', scope: { kind: 'service' }, actions: ['session.view'] }));
 });

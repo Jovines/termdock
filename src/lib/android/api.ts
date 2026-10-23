@@ -94,7 +94,7 @@ export function androidErrorText(code: string): string {
     SCRCPY_CONNECT_TIMEOUT: '设备连接超时，请确认已授权 USB 调试并保持解锁。',
     SCRCPY_UNSUPPORTED_CODEC: '设备返回了不支持的视频编码。',
     INVALID_ADDRESS: '地址格式不正确，应为 ip:port。',
-    API_NOT_ALLOWED: '当前设备权限不足：投屏需要全权服务授权。',
+    API_NOT_ALLOWED: '当前邀请未授权这台手机或此项操作。',
   };
   for (const [key, text] of Object.entries(known)) if (code.includes(key)) return text;
   return code;

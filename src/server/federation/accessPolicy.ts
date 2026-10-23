@@ -75,11 +75,12 @@ export function resolveAccessRequest(method: string, path: string): ResolvedAcce
   if (read && serviceReads.has(route)) return { action: 'service.view' };
   if (read && route === 'directory-suggestions') return { action: 'file.read' };
   if (method === 'POST' && route === 'create') return { action: 'service.create-session' };
-  const session = /^([^/]+)(?:\/(health|attach|stream|input|resize|tmux|restart|agent-resume))?$/.exec(route);
+  const session = /^([^/]+)(?:\/(health|attach|stream|input|resize|tmux|restart|agent-resume|chat|view-mode))?$/.exec(route);
   if (session && !reservedSessionIds.has(session[1].toLowerCase())) {
     const sessionId = session[1]; const op = session[2];
-    if (read && ['health', 'attach', 'stream', 'agent-resume'].includes(op)) return { action: 'session.view', sessionId };
-    if (method === 'POST' && op === 'input') return { action: 'session.input', sessionId };
+    if (read && ['health', 'attach', 'stream', 'agent-resume', 'chat', 'view-mode'].includes(op)) return { action: 'session.view', sessionId };
+    if (method === 'PUT' && op === 'view-mode') return { action: 'session.view', sessionId };
+    if (method === 'POST' && (op === 'input' || op === 'chat')) return { action: 'session.input', sessionId };
     if (method === 'POST' && op === 'resize') return { action: 'session.resize', sessionId };
     if (method === 'DELETE' && !op) return { action: 'session.terminate', sessionId };
     // tmux switch-session can reach other backends; restart/agent-resume accept

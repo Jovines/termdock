@@ -48,6 +48,53 @@ describe('browser federation entry routing', () => {
     integration.resumeConnectionAccess(); await integration.getActiveClient();
     expect(integration.currentSecureClient()?.targetPeerId).toBe('B');
   });
+  it('recovers direct access after a transient outage and relay denial without retrying or authorizing the entry', async () => {
+    const selected = { url: 'https://b.example', targetPeerId: 'B', routes: [{ url: 'https://a.example', targetPeerId: 'A' }] };
+    mocks.saved.mockReturnValue(selected);
+    const connect = mocks.connect.getMockImplementation()!;
+    let reachable = false;
+    const ticket = vi.fn(async () => { throw new Error('AUTHORIZATION_DENIED'); });
+    mocks.connect.mockImplementation(async args => {
+      if (args.targetPeerId === 'B' && !reachable) throw new TypeError('network changed');
+      const client = await connect(args);
+      if (args.targetPeerId === 'A') client.request = ticket;
+      return client;
+    });
+    const integration = await import('./browserIntegration');
+    await expect(integration.getActiveClient()).rejects.toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED' });
+    expect(ticket).toHaveBeenCalledTimes(1);
+    mocks.connect.mockClear();
+    await expect(integration.retryDirectConnection()).rejects.toThrow('network changed');
+    await expect(integration.getActiveClient()).rejects.toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED' });
+    expect(ticket).toHaveBeenCalledTimes(1);
+    reachable = true;
+    const recovered = await integration.retryDirectConnection();
+    expect(await integration.getActiveClient()).toBe(recovered);
+    expect(integration.currentConnectionPath()).toBe('direct');
+    expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId === 'B' && !args.socketFactory)).toBe(true);
+    expect(ticket).toHaveBeenCalledTimes(1);
+    expect(mocks.saved()).toBe(selected);
+    expect(mocks.save).toHaveBeenLastCalledWith(expect.objectContaining({ targetPeerId: 'B', routes: selected.routes }));
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+  it.each(['TARGET_AUTHORIZATION_REQUIRED', 'TARGET_IDENTITY_MISMATCH'] as const)('stops direct recovery on confirmed %s', async code => {
+    mocks.saved.mockReturnValue({ url: 'https://b.example', targetPeerId: 'B', routes: [{ url: 'https://a.example', targetPeerId: 'A' }] });
+    const integration = await import('./browserIntegration');
+    integration.pauseConnectionAccess(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { targetServiceId: 'B' }));
+    mocks.connect.mockRejectedValue(new ConnectionAccessError(code));
+    await expect(integration.retryDirectConnection()).rejects.toMatchObject({ code });
+    const calls = mocks.connect.mock.calls.length;
+    await expect(integration.retryDirectConnection()).rejects.toMatchObject({ code });
+    await expect(integration.getActiveClient()).rejects.toMatchObject({ code });
+    expect(mocks.connect).toHaveBeenCalledTimes(calls);
+  });
+  it('does not retry a denied relay when no independent direct address is saved', async () => {
+    mocks.saved.mockReturnValue({ url: 'https://a.example', targetPeerId: 'B', routes: [{ url: 'https://a.example', targetPeerId: 'A' }] });
+    const integration = await import('./browserIntegration');
+    integration.pauseConnectionAccess(new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { targetServiceId: 'B' }));
+    await expect(integration.retryDirectConnection()).rejects.toMatchObject({ code: 'RELAY_AUTHORIZATION_REQUIRED' });
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
   it('filters and deduplicates directory targets by the authenticated entry identity, preserving same-name different services', async () => {
     const integration = await import('./browserIntegration');
     await integration.connectDevice({ url: 'https://b.example', targetPeerId: 'B' });

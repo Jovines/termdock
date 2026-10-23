@@ -1,0 +1,28 @@
+import { afterEach, expect, it } from 'vitest';
+import express from 'express';
+import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SessionViewModeStore, sessionViewModeRoutes } from './sessionViewModeRoutes';
+import { markEncryptedRequest } from '../federation/requestContext';
+import { resolveAccessRequest } from '../federation/accessPolicy';
+const clean: (() => void)[] = [];
+afterEach(() => clean.splice(0).reverse().forEach(fn => fn()));
+it('shares a canonical Session preference across clients and reloads, without affecting another Session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'td-mode-')); clean.push(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'modes.json'), store = new SessionViewModeStore(path);
+  const app = express(); app.use(express.json()); app.use((req, _res, next) => { markEncryptedRequest(req, String(req.headers['test-device'] || 'first')); next(); });
+  app.use(sessionViewModeRoutes(store, id => ['frontend', 'backend'].includes(id) ? 'stable' : undefined));
+  const server = app.listen(0, '127.0.0.1'); await once(server, 'listening'); clean.push(() => { server.closeAllConnections(); server.close(); });
+  const address = server.address(); if (!address || typeof address === 'string') throw new Error(); const base = `http://127.0.0.1:${address.port}`;
+  expect((await fetch(`${base}/frontend/view-mode`).then(r => r.json())).mode).toBeNull();
+  const save = (mode: string) => fetch(`${base}/frontend/view-mode`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
+  expect((await save('chat')).status).toBe(200);
+  expect((await fetch(`${base}/backend/view-mode`, { headers: { 'test-device': 'second' } }).then(r => r.json())).mode).toBe('chat');
+  expect(new SessionViewModeStore(path).get('stable')?.mode).toBe('chat'); expect(store.get('another')).toBeNull();
+  await save('terminal'); expect(new SessionViewModeStore(path).get('stable')?.mode).toBe('terminal');
+  expect((await save('invalid')).status).toBe(400); expect((await fetch(`${base}/unknown/view-mode`)).status).toBe(404);
+  expect(resolveAccessRequest('GET', '/api/terminal/frontend/view-mode')).toEqual({ action: 'session.view', sessionId: 'frontend' });
+  expect(resolveAccessRequest('PUT', '/api/terminal/frontend/view-mode')).toEqual({ action: 'session.view', sessionId: 'frontend' });
+});

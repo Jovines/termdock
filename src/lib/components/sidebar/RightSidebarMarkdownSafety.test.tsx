@@ -3,7 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { MarkdownParseBudget, MarkdownParseError } from './markdownParseBudget';
-import { FilePreview, MarkdownPreview, buildMarkdownPreviewRenderResult } from './RightSidebar';
+import { FilePreview } from './RightSidebar';
+import { MarkdownPreview, buildMarkdownPreviewRenderResult } from '../markdown/MarkdownPreview';
 import { readFileContent } from '../../terminal/api';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 

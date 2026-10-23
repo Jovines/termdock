@@ -1,0 +1,41 @@
+import express from 'express';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import type { Server } from 'node:http';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { TodoStore } from './store.js';
+import { todoRoutes, TodoRunner, type TodoRuntime } from './routes.js';
+let directory: string, store: TodoStore, server: Server, base: string;
+const config = { agentSlug: 'fixture', command: 'fixture', cwd: '/tmp', prompt: '收集需要跟进的事项' };
+beforeEach(async () => {
+  directory = fs.mkdtempSync(path.join(os.tmpdir(), 'td-todo-routes-')); store = new TodoStore(path.join(directory, 'todos.json'));
+  const runtime: TodoRuntime = { validate: async c => { if (!c.agentSlug) throw new Error('请选择 Agent'); return c; }, launch: vi.fn(async (_r, _p, session) => { session('actual-terminal'); }) };
+  const app = express(); app.use(express.json()); app.use('/todos', todoRoutes(store, new TodoRunner(store, runtime), runtime));
+  server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.on('listening', resolve)); base = `http://127.0.0.1:${(server.address() as { port: number }).port}/todos`;
+});
+afterEach(async () => { await new Promise<void>(resolve => server.close(() => resolve())); fs.rmSync(directory, { recursive: true, force: true }); });
+const post = async (suffix: string, body: unknown) => { const response = await fetch(base + suffix, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return { status: response.status, data: await response.json() }; };
+it('supports injection → independent execution → result report → explicit completion over real HTTP', async () => {
+  const { todo } = (await post('', { title: '待办链路', source: '外部测试', externalId: 'one' })).data;
+  expect((await post('', { title: '重复注入', source: '外部测试', externalId: 'one' })).data.todo.id).toBe(todo.id);
+  const launched = await post(`/${todo.id}/run`, { config, idempotencyKey: 'execute' });
+  expect(launched.status).toBe(200);
+  await vi.waitFor(() => expect(store.run(launched.data.run.id).status).toBe('delivered'));
+  expect(store.run(launched.data.run.id).sessionId).toBe('actual-terminal');
+  expect((await post(`/runs/${launched.data.run.id}/report`, { status: 'complete', content: '完成了指定检查' })).status).toBe(200);
+  expect(store.get(todo.id).status).toBe('open');
+  expect((await post(`/${todo.id}`, { revision: 1, status: 'completed' })).data.todo.status).toBe('completed');
+  expect((await post(`/${todo.id}`, { revision: 1, status: 'ignored' })).status).toBe(409);
+  expect((await fetch(base + '/summary')).status).toBe(200);
+});
+it('validates configuration and persists two independently runnable directions', async () => {
+  expect((await post('/collectors', { name: 'missing', config: {} })).status).toBe(400);
+  const first = await post('/collectors', { name: '代码', config, schedule: null });
+  const second = await post('/collectors', { name: '资讯', config, schedule: null });
+  expect(first.status).toBe(200); expect(second.status).toBe(200);
+  const runs = await Promise.all([first, second].map(c => post(`/collectors/${c.data.collector.id}/run`, { idempotencyKey: c.data.collector.id })));
+  expect(runs.map(r => r.status)).toEqual([200, 200]);
+  expect(store.snapshot().runs).toHaveLength(2);
+  expect((await post('/runs/missing/report', { status: 'complete', content: 'x' })).status).toBe(404);
+});

@@ -8,8 +8,10 @@ import type { NewSessionAgentPreference } from '../../hooks/useNewSessionAgentPr
 import { AgentBrandAvatar } from '../AgentIndicators';
 import { DirectoryPickerDialog } from './DirectoryPickerDialog';
 import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
+import { AgentCommandPicker } from '../AgentCommandPicker';
+import { getAgentLaunchCommand, LEGACY_COMMANDS_KEY, readLegacyLaunchCommands, rememberAgentCommand } from '../../terminal/launchCommands';
 
-const COMMANDS_STORAGE_KEY = 'termdock:new-session-commands:v1';
+const COMMANDS_STORAGE_KEY = LEGACY_COMMANDS_KEY;
 const SAVED_COMMAND_PREFIX = '__saved_command__:';
 
 function getSavedCommands(commands: Record<string, string>): string[] {
@@ -19,13 +21,7 @@ function getSavedCommands(commands: Record<string, string>): string[] {
 }
 
 function readLaunchCommands(): Record<string, string> {
-  try {
-    const stored: unknown = JSON.parse(localStorage.getItem(COMMANDS_STORAGE_KEY) || '{}');
-    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
-    return Object.fromEntries(Object.entries(stored).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-  } catch {
-    return {};
-  }
+  return readLegacyLaunchCommands();
 }
 
 export function NewSessionComposer({
@@ -88,12 +84,17 @@ export function NewSessionComposer({
   const defaultCommand = launchAgent?.command ?? '';
   const launchCommand = customCommandSelected
     ? launchCommands.__custom__ ?? launchCommands.__terminal__ ?? ''
-    : launchAgent ? launchCommands[commandKey] ?? defaultCommand : '';
+    : launchAgent ? launchCommands[commandKey] ?? getAgentLaunchCommand(launchAgent.slug, defaultCommand) : '';
 
   const saveCommand = () => {
     const command = launchCommand.trim() || defaultCommand;
     if (customCommandSelected && !command) return;
     try {
+      if (launchAgent && !customCommandSelected) {
+        rememberAgentCommand(launchAgent.slug, defaultCommand, command);
+        setSaveStatus('saved');
+        return;
+      }
       const next = { ...readLaunchCommands(), [commandKey]: command };
       if (customCommandSelected) {
         // Preserve legacy saved commands before replacing the custom draft.
@@ -255,7 +256,8 @@ export function NewSessionComposer({
         )}
 
         {saveStatus === 'error' && <p role="alert" className="text-[10px] text-destructive">{t('sidebar.saveStartupCommandFailed')}</p>}
-        {(launchAgent || customCommandSelected) && (
+        {launchAgent && !customCommandSelected && <div className="mt-2"><AgentCommandPicker key={launchAgent.slug} agent={launchAgent} value={launchCommand} onChange={command => { setLaunchCommands(current => ({ ...current, [commandKey]: command })); setSaveStatus('idle'); }} /></div>}
+        {customCommandSelected && (
           <details key={selectedSavedCommand ?? commandKey} open={(customCommandSelected && !selectedSavedCommand) || undefined} className="group/command mt-0.5">
             <summary className="ml-auto flex min-h-8 w-fit cursor-pointer list-none items-center gap-1 rounded-md px-1 text-[10px] text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/50 [&::-webkit-details-marker]:hidden">
               {t(customCommandSelected && !selectedSavedCommand ? 'sidebar.customStartupCommand' : 'sidebar.changeStartupCommand')}

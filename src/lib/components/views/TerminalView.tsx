@@ -1044,7 +1044,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [terminalSessionId]);
 
   React.useEffect(() => {
-    const visible = isActive && isMobile && isViewportKeyboardOpen;
+    const visible = !suppressKeyboard && isLayoutVisible && isActive && isMobile && isViewportKeyboardOpen;
 
     debugKeyboard('visibility signal', {
       sessionId,
@@ -1058,6 +1058,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     onKeyboardVisibilityChange?.(sessionId, visible);
   }, [
     onKeyboardVisibilityChange,
+    suppressKeyboard,
+    isLayoutVisible,
     sessionId,
     isActive,
     isMobile,

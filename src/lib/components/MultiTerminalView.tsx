@@ -1,3 +1,5 @@
+import { useSessionViewMode } from './chat/sessionViewMode';
+import { SessionWorkspace } from './chat/SessionWorkspace';
 import { canDismissTmuxRecoveryOperation } from '../../server/utils/tmuxRecoveryDismissal';
 import { classifySessionCreationError, type NewSessionRequestOptions } from '../terminal/newSessionRequest';
 import { useCollaborationPanelDock } from '../stores/useCollaborationPanelDock';
@@ -2175,6 +2177,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     );
   };
 
+  const [activeViewMode] = useSessionViewMode(activeSessionId || '');
   const renderTerminal = (
     session: TerminalSession,
     options: {
@@ -2243,7 +2246,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           />
         )}
         <div className="min-h-0 flex-1 app-chrome-bg">
-          {shouldMountViewport && <TerminalView
+          <SessionWorkspace sessionId={session.id} name={session.name} active={isActive && isLayoutVisible} onKeyboardChange={open => handleKeyboardVisibilityChange(session.id, open)}>{terminalVisible => shouldMountViewport && <TerminalView
             sessionId={session.id}
             mode={session.mode}
             tmuxSessionName={session.tmuxSessionName}
@@ -2251,16 +2254,16 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             colorTheme={colorTheme}
             toolbarPresets={toolbarPresets}
             isActive={isActive}
-            focusSuspended={!terminalFocusAvailable || pendingSwitchSessionId !== null}
+            focusSuspended={!terminalVisible || !terminalFocusAvailable || pendingSwitchSessionId !== null}
             allowOwnedPasteWhileFocusSuspended={terminalReferenceAvailable && pendingSwitchSessionId === null}
             deferCursorUntilPositioned={
               pendingSwitchSessionId === session.id
               || (session.mode === 'tmux' && !contentReadySessionIds.has(session.id))
             }
-            isLayoutVisible={isLayoutVisible}
+            isLayoutVisible={isLayoutVisible && terminalVisible}
             initialConnectEnabled={initialConnectEnabled && resumeRequestEnabled}
             resumeRequestEnabled={resumeRequestEnabled}
-            suppressKeyboard={options.suppressKeyboard}
+            suppressKeyboard={options.suppressKeyboard || !terminalVisible}
             keyboardPortalTarget={options.keyboardPortalTarget}
             sharedMobileKeyboardLayout={options.sharedMobileKeyboardLayout}
             suppressPageFlipRefresh={options.suppressPageFlipRefresh}
@@ -2278,10 +2281,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             onStreamConnected={handleStreamConnected}
             onViewportReadyChange={handleViewportReadyChange}
             onContentReadyChange={handleContentReadyChange}
-            onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
+            onKeyboardVisibilityChange={terminalVisible ? handleKeyboardVisibilityChange : undefined}
             showDebug={showDebug}
             onStatusChange={isActive ? onStatusChange : undefined}
-          />}
+          />}</SessionWorkspace>
         </div>
       </div>
     );
@@ -2444,8 +2447,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           touchStartPreventDefault={false}
           simulateTouch={false}
           noSwiping
-          noSwipingSelector="[data-mobile-keyboard='true']"
-          className="terminal-session-swiper h-full"
+          noSwipingSelector="[data-mobile-keyboard='true'], [data-session-chat]"
+          className={`terminal-session-swiper h-full ${activeViewMode === 'chat' ? 'session-chat-swiper' : ''}`}
         >
           {workspaceSlides.map((slide) => {
             const workspace = slide.workspace;
@@ -2479,7 +2482,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                   {isSplit ? (
                     <div
                       className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--chrome-bg)]"
-                      style={isMobileLayout
+                      style={isMobileLayout && activeViewMode !== 'chat'
                         ? {
                             transform: 'translateY(var(--kb-translate-y, 0px))',
                             transition: 'none',

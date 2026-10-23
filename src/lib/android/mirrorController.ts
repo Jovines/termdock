@@ -83,6 +83,8 @@ function hevcCodecString(config: Uint8Array | null): string {
 }
 
 export class AndroidMirrorController {
+  private readOnly = false;
+  setReadOnly(value: boolean): void { this.readOnly = value; }
   private liveBitrate = false;
   private bitrateFailureDetail: string | undefined;
   get lastBitrateFailure(): string | undefined { return this.bitrateFailureDetail; }
@@ -269,7 +271,7 @@ export class AndroidMirrorController {
   }
 
   private sendControl(bytes: Uint8Array | null): void {
-    if (!bytes) return;
+    if (!bytes || (this.readOnly && !(bytes.length === 1 && bytes[0] === CONTROL_TYPE_RESET_VIDEO))) return;
     this.controlsSent++;
     this.send({ type: 'control', data: toBase64(bytes) });
   }

@@ -180,6 +180,7 @@ export function syncInitialViewportCssVars(cssVarName = '--app-vh'): void {
   style.setProperty(cssVarName, `${Math.max(visibleHeight, MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)}px`);
   style.setProperty('--app-base-vh', `${Math.max(baseHeight, MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)}px`);
   style.setProperty('--app-visible-vh', `${Math.max(visibleHeight, MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)}px`);
+  style.setProperty('--app-visual-vh', `${visualViewportHeightUsable ? Math.min(layoutHeight, visualViewportHeight) : layoutHeight}px`);
   style.setProperty('--app-vv-offset-top', `${visualViewportOffsetTop}px`);
   style.setProperty('--kb-translate-y', '0px');
   style.setProperty('--kb-margin-top', '0px');
@@ -366,6 +367,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
       document.documentElement.style.setProperty(cssVarName, `${nextHeight}px`);
       document.documentElement.style.setProperty('--app-vv-offset-top', `${nextOffsetTop}px`);
+      document.documentElement.style.setProperty('--app-visual-vh', `${rawViewportHeight}px`);
 
       // Pre-compute keyboard translateY and marginTop so CSS can reference
       // plain px values (avoids Safari bugs with min()/calc()/env() nested

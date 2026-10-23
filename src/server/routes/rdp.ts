@@ -20,7 +20,7 @@ export function rdpBackendAvailable(): Promise<boolean> {
 
 /** Only this server builds guacd's handshake. Credentials arrive inside the
  * authenticated encrypted logical socket, never query strings or logs. */
-export function handleRdpWebSocket(socket: WebSocket, host: string, port: number): void {
+export function handleRdpWebSocket(socket: WebSocket, host: string, port: number, readOnly = false): void {
   let closed = false;
   let started = false;
   let ready = false;
@@ -94,7 +94,7 @@ export function handleRdpWebSocket(socket: WebSocket, host: string, port: number
           width: String(Math.max(640, Math.min(2560, Number(message.width) || 1280))),
           height: String(Math.max(480, Math.min(1600, Number(message.height) || 800))),
           'color-depth': '32', 'disable-audio': 'true', 'enable-drive': 'false',
-          'disable-copy': 'false', 'disable-paste': 'false', 'server-layout': 'en-us-qwerty', 'resize-method': 'display-update',
+          'read-only': String(readOnly), 'disable-copy': String(readOnly), 'disable-paste': String(readOnly), 'server-layout': 'en-us-qwerty', 'resize-method': 'display-update',
         };
         void resolveComputerHost(host).then(async address => {
           if (closed) return;
@@ -132,7 +132,7 @@ export function handleRdpWebSocket(socket: WebSocket, host: string, port: number
           || tcp.writableLength > 1024 * 1024) throw new Error('INVALID_INSTRUCTION');
         if (message.opcode === 'size' && (message.args.length !== 2 || message.args.some((value: string, index: number) =>
           !/^\d{1,4}$/.test(value) || Number(value) < (index ? 480 : 640) || Number(value) > (index ? 1600 : 2560)))) throw new Error('INVALID_SIZE');
-        tcp.write(guacamoleInstruction(message.opcode, ...message.args));
+        if (!readOnly || ['sync', 'ack', 'nop', 'disconnect'].includes(message.opcode)) tcp.write(guacamoleInstruction(message.opcode, ...message.args));
       } else throw new Error('INVALID_MESSAGE');
     } catch { finish(4400, 'COMPUTER_INVALID_MESSAGE'); }
   });

@@ -3,7 +3,8 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, computeMarkdownImageDisplayBox, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, isSvgImageSrc, resolveMarkdownLocalLinkTarget, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
+import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, computeMarkdownImageDisplayBox, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, isSvgImageSrc, resolveMarkdownLocalLinkTarget, shouldCloseMarkdownImageLightboxDrag } from '../markdown/MarkdownPreview';
+import { getNextMarkdownPreviewLineRange } from './RightSidebar';
 
 const mermaidRender = vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100%" style="max-width: 100%;" viewBox="0 0 96 48"><text>Graph</text></svg>' }));
 const originalWorker = navigator.serviceWorker;

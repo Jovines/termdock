@@ -212,6 +212,7 @@ export type TranslationDictionary = {
     invalidHost: string;
     privateOnly: string;
     permission: string;
+    sharedViewUnsupported: string;
     failed: string;
     clipboard: string;
     clipboardPlaceholder: string;
@@ -455,6 +456,12 @@ export type TranslationDictionary = {
     customStartupCommand: string;
     changeStartupCommand: string;
     saveStartupCommand: string;
+    commandPreset: string;
+    commandPresetName: string;
+    agentDefaultCommand: string;
+    addAgentCommand: string;
+    currentAgentCommand: string;
+    sharedAgentCommandsHint: string;
     startupCommandSaved: string;
     saveStartupCommandFailed: string;
     addStartupCommand: string;

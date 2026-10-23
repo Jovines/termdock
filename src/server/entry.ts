@@ -60,6 +60,7 @@ import {
 import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
 import { requestDeadlineMiddleware } from './utils/requestDeadline.js';
 import { RuntimeMonitor } from './utils/runtimeMonitor.js';
+import { serverCleanup } from './utils/serverCleanup.js';
 import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
 import {
@@ -69,7 +70,8 @@ import {
   writeJsonLog,
   writeTextLog,
 } from './utils/serverLogger.js';
-import { indexRetainedClientModules, pinBundledRuntimeClientDist } from './utils/runtimeClient.js';
+import { indexRetainedClientModules, pinBundledRuntimeClientDist, resolveRetainedClientModule } from './utils/runtimeClient.js';
+import { startGeneratedStorageMaintenance } from './utils/storageMaintenance.js';
 import { installCrashForensics } from './utils/crashForensics.js';
 import {
   getTermdockVersion,
@@ -433,6 +435,7 @@ export function createApp(options: AppOptions = {}): express.Express {
 
   if (fs.existsSync(bundledClientIndexPath)) {
     const clientPath = pinBundledRuntimeClientDist(bundledClientDistPath);
+    app.locals.runtimeClientPath = clientPath;
     const compression = createStaticCompressionMiddleware(clientPath);
     const staticFiles = express.static(clientPath, {
       setHeaders: (res, filePath, stat) => {
@@ -464,7 +467,7 @@ export function createApp(options: AppOptions = {}): express.Express {
     });
     const retainedModules = indexRetainedClientModules();
     app.get(/^\/assets\//, (req, res, next) => {
-      const retainedPath = retainedModules.get(req.path);
+      const retainedPath = resolveRetainedClientModule(retainedModules, req.path);
       if (!retainedPath) {
         // Never cache a missing module or return the SPA HTML as JavaScript.
         res.setHeader('Cache-Control', 'no-store');
@@ -472,7 +475,7 @@ export function createApp(options: AppOptions = {}): express.Express {
         return;
       }
       setStaticCacheHeaders(req, res);
-      res.sendFile(retainedPath, error => {
+      res.sendFile(path.basename(retainedPath), { root: path.dirname(retainedPath) }, error => {
         if (!error) return;
         if (res.headersSent) return next(error);
         res.setHeader('Cache-Control', 'no-store');
@@ -481,7 +484,7 @@ export function createApp(options: AppOptions = {}): express.Express {
     });
     app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (req, res) => {
       setStaticCacheHeaders(req, res);
-      res.sendFile(path.join(clientPath, 'index.html'));
+      res.sendFile('index.html', { root: clientPath });
     });
   }
 
@@ -541,9 +544,13 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     runtimeMonitor,
   });
   const { server, scheme } = createServerForApp(app, options);
+  const onServerClose = serverCleanup(server);
+  if (typeof app.locals.runtimeClientPath === 'string') onServerClose(startGeneratedStorageMaintenance({
+    stateDirectory: path.join(homedir(), '.termdock'), clientDirectory: app.locals.runtimeClientPath,
+  }));
   let webTransport: Awaited<ReturnType<typeof startWebTransportServer>> | undefined;
   const webTransportDescriptor = (): WebTransportDescriptor | undefined => webTransport?.descriptor();
-  server.once('close', () => webTransport?.close());
+  onServerClose(() => webTransport?.close());
   const collaborationChannels = new Map<string, Set<CollaborationRpc>>();
   const reverseCollaboration = (id: string) => [...(collaborationChannels.get(id) ?? [])].find(rpc => !rpc.closed);
   let collaborationService: CollaborationService | undefined;
@@ -580,10 +587,10 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   };
   refreshDirectTargets();
   const desktopRoutesTimer = setInterval(refreshDirectTargets, 2000); desktopRoutesTimer.unref();
-  server.once('close', () => { clearInterval(desktopRoutesTimer); for (const target of dynamicDirectTargets.values()) target.close(); });
-  server.once('close', () => relayRouter.close());
-  server.once('close', () => { void stopAllScrcpySessions(); void androidRecordings.stopAll(); });
-  server.once('close', stopComputerBridges);
+  onServerClose(() => { clearInterval(desktopRoutesTimer); for (const target of dynamicDirectTargets.values()) target.close(); });
+  onServerClose(() => relayRouter.close());
+  onServerClose(() => { void stopAllScrcpySessions(); void androidRecordings.stopAll(); });
+  onServerClose(stopComputerBridges);
   const federation = createFederationRuntime(app, path.join(homedir(), '.termdock', 'federation'), {
     terminal: handleTerminalWebSocket, control: handleControlWebSocket, android: handleAndroidWebSocket, computer: handleComputerWebSocket,
   }, {
@@ -698,15 +705,15 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
         integration = new IntegrationRuntime({ directory: path.join(homedir(), '.termdock', 'integration-state', String(port)), socketPath: integrationSocketPath(port), adminToken: options.localApiToken,
           messages: collaborationStore, taskStore: collaborationTaskStore, tasks: collaborationTasks, peers: collaborationService, sessions: integrationSessionAdapter });
         await integration.listen(); app.locals.integrationRuntime = integration;
-        server.once('close', () => { void integration?.close(); });
+        onServerClose(() => { void integration?.close(); });
       } catch { await integration?.close(); console.error('[integrations] Local integration endpoint could not start; existing terminal service remains available'); }
     }
     collaborationTasks.start();
-    server.once('close', () => collaborationTasks.close());
+    onServerClose(() => collaborationTasks.close());
     collaborationService.start();
-    server.once('close', () => collaborationService?.close());
+    onServerClose(() => collaborationService?.close());
     collaborationTransport.start();
-    server.once('close', () => collaborationTransport?.close());
+    onServerClose(() => collaborationTransport?.close());
     entrySubjectAllowed = subjectId => runtime.store.authorize({ subjectId, serviceId: runtime.serviceId, action: 'authorization.manage' }).allowed;
     routeInvitations = new RouteInvitationStore({
       filePath: path.join(homedir(), '.termdock', 'federation', 'route-invitations.json'), serviceId: runtime.serviceId,
@@ -723,10 +730,10 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       localOrigin: `${scheme}://${localAuthority}:${port}`, ...(localCa ? { localCa } : {}),
     });
     selfRelay.start();
-    server.once('close', () => selfRelay.close());
+    onServerClose(() => selfRelay.close());
   }).catch(() => console.error('Route invitations unavailable; uninitialized route grants remain denied.'));
   void federation.catch(() => console.error('Encrypted access initialization failed; business access remains closed.'));
-  server.once('close', () => { void federation.then(runtime => runtime.close()).catch(() => {}); });
+  onServerClose(() => { void federation.then(runtime => runtime.close()).catch(() => {}); });
   server.headersTimeout = 10_000;
   server.requestTimeout = 120_000;
   server.keepAliveTimeout = 5_000;
@@ -734,7 +741,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   server.maxRequestsPerSocket = 1000;
   server.maxConnections = 1024;
   server.on('connection', (socket) => runtimeMonitor.trackSocket(socket));
-  server.once('close', () => runtimeMonitor.stop());
+  onServerClose(() => runtimeMonitor.stop());
   setSecureCookieMode(scheme === 'https');
   const certWatcher = new CertificateWatcher({
     enabled: scheme === 'https' && Boolean(options.httpsCertPath && options.httpsKeyPath),
@@ -897,7 +904,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     process.exit(1);
   });
 
-  server.on('close', () => {
+  onServerClose(() => {
     stopLogMaintenance();
     crashForensics.dispose();
     certWatcher.stop();
