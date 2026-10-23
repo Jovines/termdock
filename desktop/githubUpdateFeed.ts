@@ -64,15 +64,17 @@ export async function buildGitHubUpdateFeed(
   const assetName = `Termdock-${platform}-${arch}-${version}.zip`;
   const assets = Array.isArray(release.assets) ? release.assets as GitHubReleaseAsset[] : [];
   // Legacy clients select the compatibility ZIP. Once running this bridge,
-  // select the Rust ZIP on macOS 14+; Darwin 23 is macOS 14. Keep the bridge
+  // select the notarized Rust DMG on macOS 14+; Darwin 23 is macOS 14. Keep the bridge
   // operational on 12/13 and explain the new requirement without a download loop.
   const rustName = `Termdock-Rust-${platform}-${arch}-${version}.zip`;
   const rust = assets.find((candidate) => candidate.name === rustName);
+  const rustDmg = assets.find((candidate) => candidate.name === `Termdock_${version}_aarch64.dmg`);
   const darwinMajor = Number(darwinRelease.split('.')[0]);
-  if (rust && platform === 'darwin' && (!Number.isSafeInteger(darwinMajor) || darwinMajor < 23)) {
+  if ((rust || rustDmg) && platform === 'darwin' && (!Number.isSafeInteger(darwinMajor) || darwinMajor < 23)) {
     return { status: 204, minimumSystemVersion: '14' };
   }
-  const asset = rust ?? assets.find((candidate) => candidate.name === assetName);
+  if (rust && !rustDmg) throw new Error(`GitHub release ${tag} is missing the notarized Rust DMG`);
+  const asset = rustDmg ?? assets.find((candidate) => candidate.name === assetName);
   const url = typeof asset?.browser_download_url === 'string' ? asset.browser_download_url : '';
   const digest = typeof asset?.digest === 'string' ? asset.digest : '';
   const size = typeof asset?.size === 'number' ? asset.size : 0;
@@ -93,6 +95,8 @@ export async function buildGitHubUpdateFeed(
       pub_date: typeof release.published_at === 'string' ? release.published_at : undefined,
       sha256,
       size,
+      version,
+      rustMigration: Boolean(rustDmg),
     }),
   };
 }

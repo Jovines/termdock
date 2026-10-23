@@ -22,6 +22,7 @@ it('uses the application viewport measurements through keyboard animation, panni
     act(() => { viewport.height = height; viewport.offsetTop = offsetTop; viewport.dispatchEvent(new Event('resize')); }); flush();
     expect(root.style.getPropertyValue('--app-visual-vh')).toBe(`${height}px`);
     expect(root.style.getPropertyValue('--app-vv-offset-top')).toBe(`${offsetTop}px`);
+    expect(root.style.getPropertyValue('--kb-translate-y')).toBe(`${-Math.max(0, 844 - height)}px`);
     expect(result.current).toBe(844 - height >= 80);
   }
   expect(scrollTo).not.toHaveBeenCalled();

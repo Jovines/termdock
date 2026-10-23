@@ -9,6 +9,8 @@ import {
   startGitHubUpdateFeedServer,
   type UpdateFeedResponse,
 } from './githubUpdateFeed.js';
+import path from 'node:path';
+import { prepareRustMigration, launchRustMigration, type PreparedRustMigration } from './rustMigration.js';
 import type { DesktopAppUpdateState } from './types.js';
 
 const AUTOMATIC_CHECK_DELAY_MS = 15_000;
@@ -32,6 +34,8 @@ let selectedFeed: UpdateFeedResponse | null = null;
 let nativeCheckInFlight = false;
 let requiredMacOS: string | null = null;
 let minimumOSDialogShown = false;
+let pendingRustMigration: PreparedRustMigration | null = null;
+let rustInstallerRunning = false;
 const stateListeners = new Set<UpdateStateListener>();
 let updateState: DesktopAppUpdateState = {
   status: 'idle',
@@ -290,6 +294,29 @@ export async function checkForDesktopUpdates(options: {
         reportCurrentVersion();
         return undefined;
       }
+      const metadata = JSON.parse(feed.body ?? '{}');
+      if (metadata.rustMigration) {
+        if (checkTimeout) clearTimeout(checkTimeout);
+        checkTimeout = setTimeout(() => {
+          active = false;
+          void reportUpdateError(new Error('Rust 正式版下载或公证校验超时，原客户端保持不变'));
+        }, 5 * 60_000);
+        checkTimeout.unref?.();
+        publishUpdateState({status:'downloading',latestVersion:metadata.version,releaseName:metadata.name,error:null});
+        return prepareRustMigration(metadata, path.resolve(path.dirname(process.execPath), '../..')).then(prepared => {
+          if (!active) return undefined;
+          pendingRustMigration = prepared;
+          finishPendingCheck(publishUpdateState({status:'ready',checkedAt:Date.now(),error:null}));
+          nativeCheckDialogPending = false;
+          if (showMessageBox) void showMessageBox({
+            type:'info', title:'迁移到 Termdock Rust 正式版', message:`Termdock ${metadata.version} 已下载并通过签名与公证校验`,
+            detail:'将备份当前应用、安装 Rust 正式版并重新打开。连接与偏好会迁移；服务和终端会话继续运行。',
+            buttons:['退出并安装正式版','稍后'],defaultId:0,cancelId:1,
+          }).then(answer=>{if(answer.response===0&&updateState.status==='ready')installDownloadedDesktopUpdate();})
+            .catch(error=>console.error('[desktop-updater] migration dialog failed',error));
+          return undefined;
+        });
+      }
       selectedFeed = feed;
       return ensureUpdateFeedConfigured();
     }).then((feedUrl) => {
@@ -321,7 +348,16 @@ export function installDownloadedDesktopUpdate(): DesktopAppUpdateState {
   }, UPDATE_INSTALL_TIMEOUT_MS);
   installTimeout.unref?.();
   try {
-    autoUpdater.quitAndInstall();
+    if (pendingRustMigration) {
+      if (rustInstallerRunning) app.quit();
+      else {
+        rustInstallerRunning = true;
+        void launchRustMigration(pendingRustMigration).then(()=>app.quit()).catch(error=>{
+          rustInstallerRunning = false;
+          void reportUpdateError(error);
+        });
+      }
+    } else autoUpdater.quitAndInstall();
   } catch (error) {
     void reportUpdateError(error);
   }

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Publish a notarized Rust draft, then move the stable updater pointer.
 
-The legacy ZIP contains the fixed macOS 12 bridge; the Rust ZIP is consumed by
-that bridge on macOS 14+. Preview's final bridge uses the same signed Tauri feed.
+The legacy ZIP contains the fixed macOS 12 bridge; the notarized Rust DMG is
+installed by that bridge on macOS 14+. Preview uses the same signed Tauri feed.
 """
 import hashlib
 import json
@@ -40,7 +40,7 @@ def validate(base, release, version, revision):
     for key in ['appNotarySubmission','dmgNotarySubmission']:
         require(re.fullmatch(r'[a-f0-9-]{36}',metadata.get(key,'')), 'Missing App/DMG notary receipt')
     for app in [metadata['verification'],metadata['verification']['dmgApp'],metadata['verification']['rustZipApp']]:
-        require(app['version']==version and app['bundle']=='com.jovines.termdock' and app['minimumMacOS']=='14.0' and app['architecture']=='arm64', 'Wrong verified identity/platform')
+        require(app['version']==version and app['bundle']=='com.jovines.termdock' and app['minimumMacOS']=='14.0' and app['architecture']=='arm64' and app['executable']=='Termdock', 'Wrong verified identity/platform')
         require(all(app[k] is True for k in ['gatekeeperAccepted','notaryTicketValidated','updateTrustPinned']), 'Missing Mac verification')
     bridge=metadata['verification']['legacyBridge']
     require(bridge['version']=='1.4.357' and bridge['minimumMacOS']=='12.0' and bridge['gatekeeperAccepted'] and bridge['notaryTicketValidated'], 'Missing compatibility bridge verification')

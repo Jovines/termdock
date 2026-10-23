@@ -756,7 +756,7 @@ async fn preview_dispatch(
             Ok(Value::Null)
         }
         "notificationSettings" => {
-            open::that("x-apple.systempreferences:com.apple.Notifications-Settings.extension?bundleId=com.jovines.termdock.preview").map_err(|e|e.to_string())?;
+            open::that(format!("x-apple.systempreferences:com.apple.Notifications-Settings.extension?bundleId={}",crate::product::identifier())).map_err(|e|e.to_string())?;
             Ok(Value::Null)
         }
         "notificationTest" => {

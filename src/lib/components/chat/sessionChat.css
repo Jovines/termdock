@@ -1,15 +1,22 @@
 /* Native scrolling needs both the page and the session swiper to permit x pans. */
 .swiper.session-chat-swiper { touch-action: pan-x pan-y; }
-.session-chat-input { min-height: 44px; max-height: min(176px, calc(var(--app-visual-vh, 100dvh) * 0.35)); }
-/* Fit the application once. Do not resize the body or repeatedly scroll it to
-   zero during Safari's focus animation: that fights its visual-viewport pan. */
-html[data-termdock-touch-viewport='true'][data-termdock-chat-viewport='true'] #root {
-  height: var(--app-visual-vh, var(--app-vh, 100dvh));
-  top: max(0px, var(--app-vv-offset-top, 0px));
+.session-chat-input { min-height: 44px; max-height: min(176px, calc(var(--app-visual-vh, 100dvh) * 0.35)); transition: none; }
+/* The shell and conversation retain their layout throughout keyboard animation.
+   Move the composer over the conversation, following the visible bottom edge. */
+html[data-termdock-touch-viewport='true'] .session-chat-composer {
+  /* Match TerminalView's keyboard toolbar. Safari's offsetTop does not give a
+     fixed-root composer extra room above the keyboard accessory. */
+  transform: translateY(var(--kb-translate-y, 0px));
+  /* visualViewport already supplies animation frames. A second CSS transition
+     would trail the keyboard and leave the editor covered on every reversal. */
+  transition: none;
+  background: var(--chrome-bg);
+  z-index: 20;
 }
-html[data-termdock-touch-viewport='true'][data-termdock-chat-keyboard='true'] #root { padding-bottom: 0; }
 html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display: none; }
-html[data-termdock-chat-keyboard='true'] .session-chat-composer { padding-bottom: 8px; }
+/* Add scroll range without resizing/recentring the conversation or changing the
+   reading position. The last message can still be scrolled above the editor. */
+html[data-termdock-touch-viewport='true'] .session-chat-keyboard-spacer { height: var(--kb-height, 0px); }
 
 /* Move only the highlight; keep skeleton geometry stable while loading. */
 .chat-loading-skeleton { position: relative; overflow: hidden; }

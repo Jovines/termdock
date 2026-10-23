@@ -6,11 +6,14 @@ CLI/npm 版本独立。最后一个 Preview 版本取 `desktop-rust/package.json
 
 ## 一次性迁移
 
-- 正式 Rust：`Termdock.app`、`com.jovines.termdock`，首版 `1.4.358`。
+- 正式 Rust：`Termdock.app`、`com.jovines.termdock`，首版 `1.4.358`；正式可执行文件固定为 `Termdock`。
 - Electron 兼容桥：固定 `1.4.357`，继续支持 macOS 12；新正式 Release 的旧式
   `Termdock-darwin-arm64-VERSION.zip` 始终携带这份已签名、公证的桥接 App。
-  老客户端只认这种文件名，先更新为桥。桥在 macOS 14+ 选取正式 Rust ZIP；
+  老客户端只认这种文件名，先更新为桥。桥在 macOS 14+ 下载并核验正式 Rust DMG；
   macOS 12/13 保留可运行客户端并提示升级系统，不重复下载桥接包。
+  桥核对 DMG 的 SHA-256、签名团队、公证票据和应用身份后，由独立安装进程备份、
+  原子替换并启动 Rust；失败恢复旧应用。Squirrel 会按可执行文件名重命名 App，
+  且重启依赖新包中的 ShipIt，因此只用于第一跳兼容 ZIP，不直接安装 Rust 包。
 - 最后一个 Preview：`0.1.14`，保留 Preview 身份，让已发布的 Preview 通过原公钥
   与 `preview-channel/preview.json` 正常验签更新。过渡版随后检查固定正式渠道，
   验证正式更新包及 Developer ID 团队，退出旧正式 GUI、备份旧 App，再安装并启动
@@ -66,7 +69,7 @@ Preview 渠道永久保留最后过渡版，不能删除，也不继续发布常
 | 资产 | 消费者 |
 | --- | --- |
 | `Termdock_VERSION_aarch64.dmg` | macOS 14+ 首次安装 |
-| `Termdock-Rust-darwin-arm64-VERSION.zip` | Electron 桥在 macOS 14+ 继续升级 |
+| `Termdock-Rust-darwin-arm64-VERSION.zip` | macOS 14+ 手动解压安装（不交给 Squirrel） |
 | `Termdock-darwin-arm64-VERSION.zip` | 未迁移的旧 Electron，内容固定为兼容桥 |
 | `Termdock_VERSION_aarch64.app.tar.gz` / `.sig` | Rust 正式版与最后 Preview 桥 |
 | `latest.json` | 同时复制到 `stable-channel` 的正式 Tauri feed |

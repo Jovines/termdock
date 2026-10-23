@@ -27,7 +27,7 @@ export function releasePlan(version, publicKey) {
   const plan = previewPlan(version, publicKey);
   return { ...plan, tag: `v${version}`, prerelease: false, endpoint: stableEndpoint,
     environment: { TERMDOCK_DESKTOP_CHANNEL: 'stable', TERMDOCK_STABLE_UPDATE_ENDPOINT: stableEndpoint, TERMDOCK_STABLE_UPDATE_PUBLIC_KEY: publicKey },
-    config: { ...plan.config, productName: 'Termdock', identifier: 'com.jovines.termdock' },
+    config: { ...plan.config, productName: 'Termdock', mainBinaryName: 'Termdock', identifier: 'com.jovines.termdock' },
   };
 }
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {

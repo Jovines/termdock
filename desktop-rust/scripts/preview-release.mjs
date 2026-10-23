@@ -23,7 +23,7 @@ export function releasePlan(version, publicKey) {
     endpoint: previewEndpoint,
     environment: { TERMDOCK_DESKTOP_CHANNEL: 'preview', TERMDOCK_PREVIEW_UPDATE_ENDPOINT: previewEndpoint, TERMDOCK_PREVIEW_UPDATE_PUBLIC_KEY: publicKey,
       TERMDOCK_STABLE_UPDATE_ENDPOINT: stableEndpoint, TERMDOCK_STABLE_UPDATE_PUBLIC_KEY: publicKey },
-    config: { productName: 'Termdock Preview', identifier: 'com.jovines.termdock.preview', version,
+    config: { productName: 'Termdock Preview', mainBinaryName: 'termdock-preview', identifier: 'com.jovines.termdock.preview', version,
       bundle: { createUpdaterArtifacts: true },
       plugins: { updater: { pubkey: publicKey, endpoints: [], requireSignedVersion: true } } },
   };

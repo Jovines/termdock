@@ -7,6 +7,7 @@ test('stable and final Preview pin one stable trust chain while retaining distin
   const stable=releasePlan('1.4.358',key), preview=previewPlan('0.1.14',key);
   assert.equal(stable.tag,'v1.4.358');assert.equal(stable.prerelease,false);
   assert.equal(stable.config.productName,'Termdock');assert.equal(stable.config.identifier,'com.jovines.termdock');
+  assert.equal(stable.config.mainBinaryName,'Termdock');assert.equal(preview.config.mainBinaryName,'termdock-preview');
   assert.equal(stable.environment.TERMDOCK_STABLE_UPDATE_ENDPOINT,stableEndpoint);
   assert.equal(preview.environment.TERMDOCK_STABLE_UPDATE_ENDPOINT,stableEndpoint);
   assert.equal(stable.environment.TERMDOCK_STABLE_UPDATE_PUBLIC_KEY,preview.environment.TERMDOCK_STABLE_UPDATE_PUBLIC_KEY);

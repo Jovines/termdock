@@ -1,7 +1,7 @@
 import { useLayoutEffect, useState } from 'react';
 import { VIEWPORT_LAYOUT_CHANGE_EVENT } from '../../hooks/useViewportHeight';
 const owners = new Set<symbol>();
-/** Lease the chat layout; the application's viewport controller owns all geometry. */
+/** Read the shared viewport measurements; only the chat composer avoids the keyboard. */
 export function useChatViewport(active: boolean): boolean {
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   useLayoutEffect(() => {

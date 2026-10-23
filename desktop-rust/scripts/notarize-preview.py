@@ -28,6 +28,7 @@ def verify_app(app, metadata, public_key):
     info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
     require(info['CFBundleIdentifier'] == metadata['config']['identifier']
             and info['CFBundleShortVersionString'] == metadata['version']
+            and info['CFBundleExecutable'] == metadata['config']['mainBinaryName']
             and info['LSMinimumSystemVersion'] == '14.0', 'Wrong App identity/version/minimum OS')
     binary = app/'Contents/MacOS'/info['CFBundleExecutable']
     require(run('lipo', '-archs', str(binary)).strip() == 'arm64', 'Expected arm64 App')
@@ -46,7 +47,7 @@ def verify_app(app, metadata, public_key):
     run('xcrun', 'stapler', 'validate', str(app))
     require('accepted' in run('spctl', '-a', '-vv', '-t', 'exec', str(app)), 'App Gatekeeper rejection')
     return dict(bundle=info['CFBundleIdentifier'], version=metadata['version'], architecture='arm64',
-                minimumMacOS='14.0', resourceCount=len(manifest['files']), gatekeeperAccepted=True,
+                minimumMacOS='14.0', executable=info['CFBundleExecutable'], resourceCount=len(manifest['files']), gatekeeperAccepted=True,
                 notaryTicketValidated=True, updateTrustPinned=True)
 
 

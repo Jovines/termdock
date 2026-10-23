@@ -50,6 +50,32 @@ afterEach(() => {
 });
 
 describe('active sidebar session visibility', () => {
+  it('keeps manual folder expansion and collapse in place, then follows an actual session change', () => {
+    useSidebarStore.setState({groupByFolder:true,collapsedGroups:new Set(['/manual/other'])});
+    const sessions=[{id:'two',name:'Other session',mode:'shell' as const},...props.sessions];
+    const sessionStates=new Map([['two',{cwd:'/manual/other',activeProgram:null,agentStatus:null}],['one',{cwd:'/active',activeProgram:null,agentStatus:null}]]);
+    const {rerender}=render(view({sessions,sessionStates}));
+    list().scrollTop=0;
+    rowTop=1000;
+    fireEvent.click(document.querySelector('button[title="/manual/other"]')!);
+    expect(list().scrollTop).toBe(0);
+    rowTop=700;
+    fireEvent.click(document.querySelector('button[title="/manual/other"]')!);
+    expect(list().scrollTop).toBe(0);
+    rerender(view({sessions,sessionStates,activeSessionId:'two'}));
+    expect(list().scrollTop).toBeGreaterThan(0);
+  });
+  it('does not jump when a manually hidden active row is expanded again', () => {
+    useSidebarStore.setState({groupByFolder:true,collapsedGroups:new Set()});
+    const sessions=[{id:'two',name:'Other session',mode:'shell' as const},...props.sessions];
+    const sessionStates=new Map([['two',{cwd:'/manual/other',activeProgram:null,agentStatus:null}],['one',{cwd:'/active',activeProgram:null,agentStatus:null}]]);
+    render(view({sessions,sessionStates}));
+    list().scrollTop=0;
+    fireEvent.click(document.querySelector('button[title="/active"]')!);
+    rowTop=1000;
+    fireEvent.click(document.querySelector('button[title="/active"]')!);
+    expect(list().scrollTop).toBe(0);
+  });
   it('reveals the full row and follows late layout changes with unchanged session ID/count', () => {
     const { rerender } = render(view());
     expect(list().scrollTop).toBe(344);

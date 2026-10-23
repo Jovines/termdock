@@ -405,7 +405,12 @@ export function LeftSidebar(
   ].filter(Boolean).join(': ');
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
-  const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
+  const setGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
+  const manualGroupLayoutSessionRef = useRef<string | null | undefined>(undefined);
+  const toggleGroupCollapsed = useCallback((key: string) => {
+    manualGroupLayoutSessionRef.current = activeSessionId;
+    setGroupCollapsed(key);
+  }, [activeSessionId, setGroupCollapsed]);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
   const sessionListRef = useRef<HTMLDivElement | null>(null);
   useSidebarScrollPosition(sessionListRef, isOpen || !!pinned, sessions.length > 0);
@@ -644,6 +649,9 @@ export function LeftSidebar(
   // separate commits. Follow the final row geometry, even when the session ID
   // and count stay the same. Ignore status-only renders and manual scrolling.
   useLayoutEffect(() => {
+    const preserveManualPosition = manualGroupLayoutSessionRef.current !== undefined
+      && manualGroupLayoutSessionRef.current === activeSessionId;
+    manualGroupLayoutSessionRef.current = undefined;
     const item = activeItemRef.current;
     const list = sessionListRef.current;
     if (!(isOpen || pinned) || !item || !list) {
@@ -662,7 +670,7 @@ export function LeftSidebar(
     activeItemLayoutRef.current = layout;
     if (previous?.item === layout.item && previous.top === layout.top
       && previous.height === layout.height && previous.viewportHeight === layout.viewportHeight) return;
-    if (sidebarMemberDragActiveRef.current || list.clientHeight === 0) return;
+    if (preserveManualPosition || sidebarMemberDragActiveRef.current || list.clientHeight === 0) return;
     // Scroll only this list, synchronously: an in-flight smooth scroll can keep
     // targeting the old position after grouping moves the row on iOS.
     const padding = 8;

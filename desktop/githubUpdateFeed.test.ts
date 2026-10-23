@@ -6,9 +6,10 @@ const digest = `sha256:${'a'.repeat(64)}`;
 describe('GitHub desktop update feed', () => {
   it('bridges supported Macs to Rust while retaining the client on macOS 12/13', async () => {
     const rustName = 'Termdock-Rust-darwin-arm64-1.4.358.zip';
+    const dmgName = 'Termdock_1.4.358_aarch64.dmg';
     const legacyName = 'Termdock-darwin-arm64-1.4.358.zip';
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
-      tag_name: 'v1.4.358', assets: [rustName, legacyName].map(name => ({
+      tag_name: 'v1.4.358', assets: [rustName, dmgName, legacyName].map(name => ({
         name, browser_download_url: `https://github.com/Jovines/termdock/releases/download/v1.4.358/${name}`, digest, size: 123456,
       })),
     }))) as typeof fetch;
@@ -17,7 +18,7 @@ describe('GitHub desktop update feed', () => {
         .resolves.toEqual({status:204,minimumSystemVersion:'14'});
     }
     const feed=await buildGitHubUpdateFeed('1.4.357','darwin','arm64',fetchImpl,'23.0.0');
-    expect(JSON.parse(feed.body ?? '{}').url).toContain(rustName);
+    expect(JSON.parse(feed.body ?? '{}')).toMatchObject({url:expect.stringContaining(dmgName),rustMigration:true,version:'1.4.358'});
   });
   it('compares stable release versions', () => {
     expect(isNewerRelease('1.4.90', 'v1.4.91')).toBe(true);

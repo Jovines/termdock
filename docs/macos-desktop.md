@@ -99,8 +99,10 @@ The Rust application requires macOS 14+ on Apple Silicon. Download the versioned
 `stable-channel/latest.json` and are installed after the user accepts.
 
 Old Electron clients select `Termdock-darwin-arm64-VERSION.zip`, which contains
-one fixed compatibility bridge (1.4.357, macOS 12+). The bridge selects
-`Termdock-Rust-darwin-arm64-VERSION.zip` on macOS 14+. On macOS 12/13 it keeps the
+one fixed compatibility bridge (1.4.357, macOS 12+). On macOS 14+ the bridge verifies the SHA-256, Developer ID team, notarization
+tickets, application identity and version of the Rust DMG, then uses a detached
+installer to back up, replace and relaunch the application. It does not pass the
+Rust bundle to Squirrel, whose relaunch protocol requires an Electron helper. On macOS 12/13 it keeps the
 working client and explains that the new application requires a system upgrade.
 The final Preview (0.1.14) installs the same Rust stable bundle, backs up existing
 applications, and retires its own Preview bundle to Trash after handoff.

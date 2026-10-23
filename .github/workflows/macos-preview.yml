@@ -85,7 +85,7 @@ jobs:
         run: |
           APP='desktop-rust/src-tauri/target/release/bundle/macos/Termdock.app'
           codesign --verify --deep --strict "$APP"
-          test "$(lipo -archs "$APP/Contents/MacOS/termdock-preview")" = arm64
+          test "$(lipo -archs "$APP/Contents/MacOS/Termdock")" = arm64
           test ! -e "$APP/Contents/Resources/native-terminal"
           node --input-type=module <<'JS'
           import fs from 'node:fs';

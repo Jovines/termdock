@@ -17,6 +17,7 @@ const electronMock = vi.hoisted(() => {
     app: {
       isPackaged: true,
       getVersion: vi.fn(() => '1.4.81'),
+      quit: vi.fn(),
     },
     autoUpdater,
     emit(event: string, ...args: any[]) {
@@ -46,6 +47,8 @@ const feedMock = vi.hoisted(() => ({
     close: vi.fn(),
   })),
 }));
+const migrationMock=vi.hoisted(()=>({prepareRustMigration:vi.fn(),launchRustMigration:vi.fn().mockResolvedValue(undefined)}));
+vi.mock('./rustMigration.js',()=>migrationMock);
 
 vi.mock('electron', () => ({
   app: electronMock.app,
@@ -59,6 +62,7 @@ beforeEach(() => {
   electronMock.reset();
   feedMock.buildGitHubUpdateFeed.mockClear();
   feedMock.startGitHubUpdateFeedServer.mockClear();
+  migrationMock.prepareRustMigration.mockReset();migrationMock.launchRustMigration.mockClear();electronMock.app.quit.mockClear();
   vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
 });
 
@@ -68,6 +72,17 @@ afterEach(() => {
 });
 
 describe('desktop updater', () => {
+  it('prepares a notarized Rust migration and quits through the dedicated installer without Squirrel',async()=>{
+    const updater=await import('./updater.js');
+    updater.configureDesktopUpdater(vi.fn(async()=>({response:1,checkboxChecked:false})));
+    feedMock.buildGitHubUpdateFeed.mockResolvedValueOnce({status:200,body:JSON.stringify({rustMigration:true,version:'1.4.358',name:'Termdock 1.4.358'})});
+    migrationMock.prepareRustMigration.mockResolvedValue({root:'/owned',target:'/Applications/Termdock.app',staged:'/owned/Termdock.app'});
+    expect(await updater.checkForDesktopUpdates()).toMatchObject({status:'ready',latestVersion:'1.4.358'});
+    expect(electronMock.autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+    updater.installDownloadedDesktopUpdate();await Promise.resolve();
+    expect(migrationMock.launchRustMigration).toHaveBeenCalledOnce();expect(electronMock.app.quit).toHaveBeenCalledOnce();
+    expect(electronMock.autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
   it('explains the macOS requirement once automatically and again on manual request without installing', async () => {
     const updater=await import('./updater.js');
     const dialog=vi.fn(async(_options:{message?:string})=>({response:0,checkboxChecked:false}));

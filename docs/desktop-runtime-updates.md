@@ -8,7 +8,7 @@ service through its encrypted page transport.
 The Rust macOS application (macOS 14+, Apple Silicon) uses a build-pinned
 Tauri updater manifest and signing key. Legacy Electron clients first install a
 fixed compatibility bridge through their existing Squirrel.Mac ZIP feed. On
-macOS 14+ that bridge selects the Rust ZIP; macOS 12/13 keeps the bridge and
+macOS 14+ that bridge verifies and installs the notarized Rust DMG; macOS 12/13 keeps the bridge and
 explains the system upgrade requirement. The final Preview migrates to the same
 Rust stable application through the signed Tauri feed. Application updates are
 independent of the connected service version and require the user to accept
