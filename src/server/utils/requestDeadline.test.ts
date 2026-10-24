@@ -1,9 +1,14 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { requestDeadlineMiddleware } from './requestDeadline.js';
+import { writeErrorLog } from './serverLogger.js';
+
+// These tests deliberately trigger errors on a real HTTP server. Keep the
+// simulated incidents out of the running service's ~/.termdock/errors.log.
+vi.mock('./serverLogger.js', () => ({ writeErrorLog: vi.fn() }));
 
 const DEADLINE_MS = 60;
 
@@ -22,6 +27,7 @@ let server: Server | null = null;
 
 beforeEach(() => {
   server = null;
+  vi.clearAllMocks();
 });
 
 afterEach(async () => {
@@ -44,6 +50,9 @@ describe('requestDeadlineMiddleware', () => {
     expect(response.status).toBe(503);
     const body = await response.json();
     expect(body.code).toBe('REQUEST_DEADLINE');
+    expect(writeErrorLog).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'request-deadline', method: 'GET', path: '/api/slow',
+    }));
   });
 
   it('does not touch exempt long-lived endpoints (fs/watch)', async () => {
@@ -115,5 +124,37 @@ describe('requestDeadlineMiddleware', () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/fast`);
 
     expect(response.status).toBe(200);
+  });
+
+  it.each([
+    '/api/terminal/fs/upload?dir=%2Ftmp&fileCount=1',
+    '/api/terminal/terminal-one/chat/attachments?fileCount=1',
+    '/api/terminal/terminal%2Fone/chat/attachments?fileCount=1',
+  ])('gives multipart uploads the extended deadline: %s', async pathname => {
+    ({ server } = await startServer((app) => {
+      app.post(/.*/, (_req, res) => {
+        const timer = setTimeout(() => res.json({ files: [] }), DEADLINE_MS * 2);
+        res.once('close', () => clearTimeout(timer));
+      });
+    }));
+    const port = (server!.address() as AddressInfo).port;
+    const body = new FormData();
+    body.append('files', new Blob(['attachment']), 'file.txt');
+    const response = await fetch(`http://127.0.0.1:${port}${pathname}`, { method: 'POST', body });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ files: [] });
+    expect(writeErrorLog).not.toHaveBeenCalled();
+  });
+
+  it('keeps the default deadline for neighboring chat operations', async () => {
+    ({ server } = await startServer((app) => {
+      app.post('/api/terminal/one/chat', () => { /* never responds */ });
+    }));
+    const port = (server!.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/api/terminal/one/chat`, { method: 'POST' });
+
+    expect(response.status).toBe(503);
+    expect((await response.json()).code).toBe('REQUEST_DEADLINE');
   });
 });

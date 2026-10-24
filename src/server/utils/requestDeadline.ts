@@ -38,6 +38,7 @@ const DEADLINE_RULES: DeadlineRule[] = [
   // 回 408，所以这里必须低于 300s——让我们的 503+日志先出手，而不是被
   // Node 的裸 408 抢先。
   { method: 'POST', pattern: /^\/api\/terminal\/fs\/upload$/, deadlineMs: 280_000 },
+  { method: 'POST', pattern: /^\/api\/terminal\/[^/]+\/chat\/attachments$/, deadlineMs: 280_000 },
   // 会话打开/创建/重启内部串了多段 tmux 命令（各有 5s 超时），tmux 退化时
   // 合法完成也可能要 20-40s——给 60s，超过才算真挂起。
   { method: 'POST', pattern: /^\/api\/terminal\/session-inventory\/open$/, deadlineMs: 60_000 },
