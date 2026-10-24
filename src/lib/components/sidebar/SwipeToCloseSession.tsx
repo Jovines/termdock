@@ -15,10 +15,11 @@ interface Props {
   closeLabel: string;
   closeTitle: string;
   compact?: boolean;
+  disabled?: boolean;
 }
 
 /** Right swipes reveal a close action, dispatched through the supplied session close handler. */
-export function SwipeToCloseSession({ children, open, onOpenChange, onClose, closeLabel, closeTitle, compact }: Props) {
+export function SwipeToCloseSession({ children, open, onOpenChange, onClose, closeLabel, closeTitle, compact, disabled = false }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const gestureRef = useRef<{
     pointerId: number; x: number; y: number; startedAt: number;
@@ -30,16 +31,20 @@ export function SwipeToCloseSession({ children, open, onOpenChange, onClose, clo
     gestureRef.current = null; setDragOffset(null);
   });
   const [dragOffset, setDragOffset] = useState<number | null>(null);
-  const offset = dragOffset ?? (open ? ACTION_WIDTH : 0);
+  const offset = disabled ? 0 : dragOffset ?? (open ? ACTION_WIDTH : 0);
 
   useEffect(() => {
-    if (!open) return;
+    if (disabled) { gestureRef.current = null; setDragOffset(null); }
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!open || disabled) return;
     const dismiss = (event: PointerEvent) => {
       if (event.target instanceof Node && !rootRef.current?.contains(event.target)) onOpenChange(false);
     };
     document.addEventListener('pointerdown', dismiss, true);
     return () => document.removeEventListener('pointerdown', dismiss, true);
-  }, [open, onOpenChange]);
+  }, [open, onOpenChange, disabled]);
 
   return (
     <div
@@ -49,6 +54,7 @@ export function SwipeToCloseSession({ children, open, onOpenChange, onClose, clo
       className={`relative flex min-w-0 flex-1 items-center ${compact ? '' : 'gap-1'}`}
       style={{ touchAction: 'pan-y' }}
       onPointerDown={(event) => {
+        if (disabled) return;
         suppressClickUntilRef.current = 0;
         if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
         if (event.isPrimary === false) {
@@ -100,6 +106,7 @@ export function SwipeToCloseSession({ children, open, onOpenChange, onClose, clo
         setDragOffset(null);
       }}
       onClickCapture={(event) => {
+        if (disabled) return;
         if (Date.now() < suppressClickUntilRef.current) {
           suppressClickUntilRef.current = 0;
           event.preventDefault();
@@ -113,7 +120,7 @@ export function SwipeToCloseSession({ children, open, onOpenChange, onClose, clo
         }
       }}
       onKeyDown={(event) => {
-        if (open && event.key === 'Escape') {
+        if (!disabled && open && event.key === 'Escape') {
           event.stopPropagation();
           onOpenChange(false);
         }

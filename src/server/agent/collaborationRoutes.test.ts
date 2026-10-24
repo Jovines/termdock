@@ -50,6 +50,18 @@ describe('collaboration API with arbitrary pull consumers', () => {
     store.markDelivered([result.body.message_id]);
     expect(store.getMessage(result.body.message_id)?.status).toBe('stored');
   });
+  it('accepts UI stream updates through the CLI route only for the original recipient', async () => {
+    const group = store.list()[0];
+    const original = store.send({ groupId: group.id, fromSessionId: null, toSessionIds: ['b'], kind: 'ask', content: '展示', integrationOrigin: { integrationId: 'webchat-test', source: 'session-chat' } })[0];
+    const content = (text: string) => JSON.stringify({ text, ui: `root = Stack([TextContent("${text}")])` });
+    const first = await post('/reply', { session: 'b', messageId: original.id, content: content('开始'), metadata: { openui: { version: 2, streaming: true } }, idempotency_key: 'start' });
+    const body = { session: 'b', messageId: original.id, content: content('完成'), revision: 0, metadata: { openui: { version: 2, streaming: false } }, idempotency_key: 'final' };
+    expect((await post(`/reply/${first.body.message_id}`, { ...body, session: 'a' })).status).toBe(404);
+    const final = await post(`/reply/${first.body.message_id}`, body);
+    expect(final).toMatchObject({ status: 200, body: { message_id: first.body.message_id, ui_revision: 1 } });
+    expect((await post(`/reply/${first.body.message_id}`, body)).body.message_id).toBe(first.body.message_id);
+    expect(store.listGroupMessages(group.id)).toHaveLength(2);
+  });
   afterEach(async () => { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); fs.rmSync(directory, { recursive: true, force: true }); });
   const post = async (route: string, body: Record<string, unknown>) => {
     const response = await fetch(url + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

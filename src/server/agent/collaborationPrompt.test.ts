@@ -428,3 +428,9 @@ it('always identifies nonterminal principals and teaches correlated stored repli
   const large = render([{ ...incoming, content: 'x'.repeat(5000) }], { showRoutingHelp: false });
   expect(large).toContain('message get message-1 --text'); expect(large).toContain('reply message-1');
 });
+
+it('describes varied answer formats to chat agents without announcing the rendering implementation', () => {
+  const prompt = render([message({ kind: 'ask', integrationOrigin: { integrationId: 'webchat-user', source: 'session-chat' } })]);
+  expect(prompt).toContain('方案比较用表格'); expect(prompt).toContain('趋势和分布用图表');
+  expect(prompt).toContain('td collab ui --text'); expect(prompt).not.toContain('支持 OpenUI');
+});

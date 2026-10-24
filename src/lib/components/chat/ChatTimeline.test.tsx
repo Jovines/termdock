@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { ChatTimeline, ChatUserMessage } from './ChatTimeline';
+import { ChatTimeline, ChatUserContent, ChatUserMessage } from './ChatTimeline';
+import { composeChatDraft } from './chatComposerContent';
 import type { ChatMessage } from './chatMessages';
 vi.mock('./ChatMarkdown', () => ({ ChatMarkdown: ({ content }: { content: string }) => <p>{content}<a href="#details">资料链接</a></p> }));
 vi.mock('./chatRenderers', () => ({ getChatRichContent: () => null }));
@@ -82,4 +83,22 @@ it('keeps existing reply nodes mounted when earlier or later messages join the s
   expect(screen.getByText('第一条进展')).toBe(first);
   view.rerender(<ChatTimeline {...props} messages={[earlier, ...messages.slice(1), { ...earlier, id: 'a3', content: '新的进展', createdAt: 4 }]} />);
   expect(screen.getByText('第一条进展')).toBe(first);
+});
+
+it('keeps attachments and mentions inline in prose without duplicate cards or raw reference markers', () => {
+  const file = { path: '/tmp/one.png', name: '截图.png', reference: '图片1' };
+  const member = { sessionId: 'worker', groupId: 'team', groupName: '协作', name: '助手' };
+  const view = render(<ChatUserContent content={composeChatDraft('比较【图片1】与【图片1】\n请@「助手 · 协作」说明【图片9】', [file], [member])} />);
+  expect(screen.queryByRole('list', { name: '消息附件' })).toBeNull();
+  expect(screen.getAllByRole('group', { name: '附件 图片1 · 截图.png' })).toHaveLength(2);
+  expect(screen.getByRole('group', { name: '提及 @助手' })).toBeTruthy();
+  expect(view.container.textContent).toBe('比较图片1与图片1\n请@助手说明【图片9】');
+});
+it('retains cards for older attachments without inline references and attachment-only messages', () => {
+  const files = [{ path: '/tmp/old.png', name: '旧图.png' }, { path: '/tmp/new.png', name: '新图.png', reference: '图片2' }];
+  const view = render(<ChatUserContent content={composeChatDraft('看【图片2】', files, [])} />);
+  expect(within(screen.getByRole('list', { name: '消息附件' })).getByText('旧图.png')).toBeTruthy();
+  expect(within(screen.getByRole('list', { name: '消息附件' })).queryByText('新图.png')).toBeNull();
+  view.rerender(<ChatUserContent content={composeChatDraft('', files, [])} />);
+  expect(within(screen.getByRole('list', { name: '消息附件' })).getByText('新图.png')).toBeTruthy();
 });

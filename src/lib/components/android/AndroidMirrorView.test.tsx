@@ -158,8 +158,11 @@ describe('AndroidMirrorView 截图/录屏插入', () => {
     const original = vi.fn(), replacement = vi.fn();
     const view = await streamingView(async () => {}, original);
     await userEvent.click(screen.getByLabelText('Start recording'));
+    vi.mocked(listAndroidRecordings).mockResolvedValueOnce({ recordings: [{
+      id: 'rec-1', serial: 'emulator-5554', name: 'recording.mp4', size: 0, startedAt: Date.now(), status: 'recording',
+    }] });
     view.rerender(<AndroidMirrorView sessionId="different-terminal" onInsertFile={async () => {}} onRecordingComplete={replacement} />);
-    await userEvent.click(screen.getByLabelText('Stop recording'));
+    await userEvent.click(await screen.findByLabelText('Stop recording'));
     await waitFor(() => expect(original).toHaveBeenCalledOnce());
     expect(replacement).not.toHaveBeenCalled();
   });
@@ -767,6 +770,7 @@ describe('shared physical device selection across refresh and restore', () => {
   const v6 = { ...v4, serial: '[fd00::2]:5555' };
   beforeEach(() => {
     cleanup(); localStorage.clear(); vi.clearAllMocks();
+    vi.mocked(updateSettings).mockResolvedValue({} as Awaited<ReturnType<typeof updateSettings>>);
     vi.mocked(getSettings).mockResolvedValue({ androidPanel: undefined } as Awaited<ReturnType<typeof getSettings>>);
     vi.mocked(listAndroidDevices).mockResolvedValue({ adbAvailable: true, scrcpyVersion: '4.0', devices: [v4, v6] });
     (globalThis as Record<string, unknown>).__mirrorConnection = undefined;
@@ -781,7 +785,7 @@ describe('shared physical device selection across refresh and restore', () => {
     await waitFor(() => expect(choice.value).toBe(v6.serial));
     expect(choice.options).toHaveLength(2);
     expect((globalThis as any).__mirrorConnection.serial).toBe(v6.serial);
-    expect(updateSettings).toHaveBeenCalledWith({ androidPanel: { deviceSerial: v6.serial, devicePhysicalId: id } });
+    expect(updateSettings).toHaveBeenCalledWith({ androidPanel: { sessionDevices: { s1: { deviceSerial: v6.serial, devicePhysicalId: id } } } });
   });
   it('waits for saved preferences before auto-selecting and preserves an explicit restored IPv6 route', async () => {
     let finish!: (settings: Awaited<ReturnType<typeof getSettings>>) => void;
@@ -789,7 +793,7 @@ describe('shared physical device selection across refresh and restore', () => {
     render(<AndroidMirrorView sessionId="s1" />);
     const choice = await screen.findByRole('combobox', { name: 'Device' }) as HTMLSelectElement;
     expect(choice.value).toBe(''); expect(updateSettings).not.toHaveBeenCalled();
-    await act(async () => finish({ androidPanel: { deviceSerial: v6.serial, devicePhysicalId: id } } as Awaited<ReturnType<typeof getSettings>>));
+    await act(async () => finish({ androidPanel: { sessionDevices: { s1: { deviceSerial: v6.serial, devicePhysicalId: id } } } } as unknown as Awaited<ReturnType<typeof getSettings>>));
     await waitFor(() => expect(choice.value).toBe(v6.serial));
     expect((globalThis as any).__mirrorConnection.serial).toBe(v6.serial);
   });
@@ -804,6 +808,80 @@ describe('shared physical device selection across refresh and restore', () => {
     await waitFor(() => expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe(v6.serial));
     await waitFor(() => expect(listAndroidRecordings).toHaveBeenCalledWith(v4.serial));
     expect(screen.getByRole('button', { name: 'Stop recording' })).toBeTruthy();
+  });
+
+  it('keeps different choices when switching sessions before settings writes finish', async () => {
+    const other = { ...v4, serial: 'other-phone', physicalId: 'b'.repeat(64), model: 'Other' };
+    vi.mocked(listAndroidDevices).mockResolvedValue({ adbAvailable: true, scrcpyVersion: '4.0', devices: [v4, other] });
+    vi.mocked(updateSettings).mockImplementation(() => new Promise(() => {}));
+    const view = render(<AndroidMirrorView sessionId="s1" />);
+    const choice = await screen.findByRole('combobox', { name: 'Device' }) as HTMLSelectElement;
+    await waitFor(() => expect(getSettings).toHaveBeenCalled());
+    await userEvent.selectOptions(choice, v4.serial);
+    expect((globalThis as any).__mirrorConnection.serial).toBe(v4.serial);
+
+    view.rerender(<AndroidMirrorView sessionId="s2" />);
+    expect(choice.value).toBe('');
+    await userEvent.selectOptions(choice, other.serial);
+    expect((globalThis as any).__mirrorConnection.serial).toBe(other.serial);
+    expect(updateSettings).toHaveBeenCalledWith({ androidPanel: { sessionDevices: { s2: {
+      deviceSerial: other.serial, devicePhysicalId: other.physicalId,
+    } } } });
+
+    view.rerender(<AndroidMirrorView sessionId="s1" />);
+    await waitFor(() => expect(choice.value).toBe(v4.serial));
+    expect((globalThis as any).__mirrorConnection.serial).toBe(v4.serial);
+    view.rerender(<AndroidMirrorView sessionId="s2" />);
+    await waitFor(() => expect(choice.value).toBe(other.serial));
+    expect((globalThis as any).__mirrorConnection.serial).toBe(other.serial);
+  });
+
+  it('restores the matching saved device after remount and ignores legacy global choices for new sessions', async () => {
+    const other = { ...v4, serial: 'other-phone', physicalId: 'b'.repeat(64), model: 'Other' };
+    vi.mocked(listAndroidDevices).mockResolvedValue({ adbAvailable: true, scrcpyVersion: '4.0', devices: [v4, other] });
+    vi.mocked(getSettings).mockResolvedValue({ androidPanel: {
+      deviceSerial: v4.serial, devicePhysicalId: id,
+      sessionDevices: { s2: { deviceSerial: other.serial, devicePhysicalId: other.physicalId } },
+    } } as unknown as Awaited<ReturnType<typeof getSettings>>);
+    const view = render(<AndroidMirrorView sessionId="s2" />);
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe(other.serial));
+    view.unmount();
+    const remounted = render(<AndroidMirrorView sessionId="s2" />);
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe(other.serial));
+    remounted.rerender(<AndroidMirrorView sessionId="new-session" />);
+    await waitFor(() => expect(getSettings).toHaveBeenCalledTimes(3));
+    expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe('');
+  });
+
+  it('ignores a late settings response from the session that was left', async () => {
+    const other = { ...v4, serial: 'other-phone', physicalId: 'b'.repeat(64), model: 'Other' };
+    vi.mocked(listAndroidDevices).mockResolvedValue({ adbAvailable: true, scrcpyVersion: '4.0', devices: [v4, other] });
+    let finish!: (settings: Awaited<ReturnType<typeof getSettings>>) => void;
+    vi.mocked(getSettings).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const view = render(<AndroidMirrorView sessionId="s1" />);
+    await screen.findByRole('combobox', { name: 'Device' });
+    view.rerender(<AndroidMirrorView sessionId="s2" />);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Device' }), other.serial);
+    await act(async () => finish({ androidPanel: { sessionDevices: { s1: {
+      deviceSerial: v4.serial, devicePhysicalId: id,
+    } } } } as unknown as Awaited<ReturnType<typeof getSettings>>));
+    expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe(other.serial);
+    expect((globalThis as any).__mirrorConnection.serial).toBe(other.serial);
+    expect(updateSettings).not.toHaveBeenCalledWith({ androidPanel: { sessionDevices: { s2: {
+      deviceSerial: v4.serial, devicePhysicalId: id,
+    } } } });
+  });
+
+  it('reconnects when returning between two sessions that selected the same phone', async () => {
+    const view = render(<AndroidMirrorView sessionId="s1" />);
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe(v4.serial));
+    view.rerender(<AndroidMirrorView sessionId="s2" />);
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Device' }) as HTMLSelectElement).value).toBe(v4.serial));
+    const previous = (globalThis as any).__mirrorConnection;
+    view.rerender(<AndroidMirrorView sessionId="s1" />);
+    await waitFor(() => expect((globalThis as any).__mirrorConnection).not.toBe(previous));
+    expect((globalThis as any).__mirrorConnection.serial).toBe(v4.serial);
+    expect(screen.getByLabelText('Screenshot and insert')).toBeTruthy();
   });
 
 });

@@ -1,7 +1,7 @@
 /** TD reply body stays readable to old clients; rich content is an explicit,
  * versioned opt-in, never guessed from terminal output or ordinary code fences. */
-export const CHAT_UI_VERSION = 1;
-export interface ChatUI { version: 1; code: string }
+export const CHAT_UI_VERSION = 2;
+export interface ChatUI { version: 1 | 2; code: string; streaming?: boolean; revision?: number }
 export interface ChatUIState { revision: number; values: Record<string, unknown> }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 export function chatPresentation(content: string, metadata?: Record<string, unknown>): { content: string; ui?: ChatUI } {
@@ -9,8 +9,9 @@ export function chatPresentation(content: string, metadata?: Record<string, unkn
   try {
     const body: unknown = JSON.parse(content);
     if (!record(body) || typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000) return { content: '这条回复暂时无法显示，请让对方重新发送文字说明。' };
-    if (metadata.openui.version !== CHAT_UI_VERSION || typeof body.ui !== 'string' || !body.ui.trim() || body.ui.length > 64000) return { content: body.text };
-    return { content: body.text, ui: { version: CHAT_UI_VERSION, code: body.ui } };
+    if ((metadata.openui.version !== 1 && metadata.openui.version !== CHAT_UI_VERSION) || typeof body.ui !== 'string' || !body.ui.trim() || body.ui.length > 64000) return { content: body.text };
+    return { content: body.text, ui: metadata.openui.version === 1 ? { version: 1, code: body.ui }
+      : { version: 2, code: body.ui, streaming: metadata.openui.streaming === true, revision: Number.isSafeInteger(metadata.openui.revision) ? Number(metadata.openui.revision) : 0 } };
   } catch { return { content: '这条回复暂时无法显示，请让对方重新发送文字说明。' }; }
 }
 export function validChatUIValues(value: unknown): value is Record<string, unknown> {

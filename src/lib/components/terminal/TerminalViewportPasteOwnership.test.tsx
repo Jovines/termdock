@@ -288,6 +288,37 @@ describe('TerminalViewport async paste ownership', () => {
     return { ...view, props };
   }
 
+  it.each([false, true])('keeps Shift+Enter separate from submission and flushes pending text (touch=%s)', async (touch) => {
+    const onInput = vi.fn();
+    const view = mount(onInput);
+    view.rerender(<TerminalViewport {...view.props} enableTouchScroll={touch} />);
+    await waitFor(() => expect(screen.getByRole('textbox')).toBeTruthy());
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    // Model a mobile bulk-input debounce, or a DOM edit not yet synced to PTY.
+    input.value = 'first line';
+    expect(fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })).toBe(false);
+    expect(onInput.mock.calls.map(call => call[0])).toEqual(['first line', '\n']);
+    expect(input.value).toBe('');
+    fireEvent.input(input, { target: { value: 'second' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onInput.mock.calls.map(call => call[0])).toEqual(['first line', '\n', 'second', '\r']);
+  });
+
+  it('suppresses modified Enter during IME confirmation, including the post-composition Enter', async () => {
+    const onInput = vi.fn(); mount(onInput);
+    await waitFor(() => expect(screen.getByRole('textbox')).toBeTruthy());
+    const input = screen.getByRole('textbox');
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    fireEvent.keyDown(input, { key: 'Enter', altKey: true, isComposing: true });
+    expect(onInput).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(input, { data: '中', target: { value: '中' } });
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    expect(onInput.mock.calls.map(call => call[0])).toEqual(['中']);
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    expect(onInput.mock.calls.map(call => call[0])).toEqual(['中', '\n']);
+  });
+
   it('keeps the native toolbar input wired to the same terminal paste owner', async () => {
     const host = document.createElement('div'); document.body.append(host);
     const onInput = vi.fn().mockResolvedValue(true), controller = createRef<TerminalController>();

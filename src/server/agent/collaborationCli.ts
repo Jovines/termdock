@@ -143,7 +143,8 @@ export const COLLAB_HELP = `td collab — durable messages; no agent-specific ho
       --wait-until queued|delivered --timeout 30s --expect-reply ack|result|any
       --response-kind ack|progress|result --metadata '<JSON object>'
       --expires-at <ISO timestamp or epoch milliseconds>
-    reply also: --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
+    reply also: --update <reply-id> --revision <current-ui-revision> (update an unfinished UI reply)
+      --task-envelope '<JSON: task_id,status,progress?,evidence?,blocker?>'
       (status reporting happens only via reply; send/handoff dispatch carries no task state)
   message get <id> [--receipt-only] [--raw] [--no-rules] [--text]
     (delivery status, retries and the full body of large messages)
@@ -255,7 +256,7 @@ interface RoleGroupView {
 }
 
 const BOOLEAN_OPTIONS = new Set(['json', 'jsonl', 'text', 'follow', 'stdin', 'receipt-only', 'confirm', 'raw', 'help', 'no-rules', 'managed', 'shared-directory', 'integration']);
-const VALUE_OPTIONS = new Set(['generation', 'purpose', 'principal', 'source', 'external-actor', 'external-message-id', 'launch-profile', 'to-event', 'decision', 'work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
+const VALUE_OPTIONS = new Set(['generation', 'purpose', 'principal', 'source', 'external-actor', 'external-message-id', 'launch-profile', 'to-event', 'decision', 'work-type', 'summary', 'verdict', 'reviewers', 'title', 'content', 'constraints', 'acceptance', 'assignee', 'coordinator', 'parent', 'depends-on', 'attempt', 'status', 'artifact', 'options', 'revision', 'update', 'evidence', 'session', 'group', 'thread', 'idempotency-key', 'file', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'kind', 'name', 'cwd', 'task', 'pane', 'lines', 'if-version', 'origin']);
 export function parseCollaborationCommand(argv: string[]): CollaborationCommand {
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
@@ -312,6 +313,8 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     if (!command.target || (!command.message && !options.file && !options.stdin)) throw new Error(`${action} requires a target and message`);
     if ([Boolean(command.message), Boolean(options.file), Boolean(options.stdin)].filter(Boolean).length !== 1) throw new Error('Choose inline body, --file, or --stdin');
     if (options.principal && !options['idempotency-key']) throw new Error('Integration message mutation requires an explicit --idempotency-key');
+    if (options.update && (action !== 'reply' || options.revision === undefined || !/^\d+$/.test(String(options.revision)) || !Number.isSafeInteger(Number(options.revision)))) throw new Error('--update requires reply and a nonnegative --revision');
+    if (options.revision !== undefined && !options.update) throw new Error('--revision requires --update');
   } else if (action === 'rules') {
     command.operation = positional.shift(); command.groupId = positional.shift(); command.message = positional.join(' ');
     if (!command.groupId || !['get', 'set', 'clear'].includes(command.operation ?? '')) throw new Error('Usage: td collab rules get|set|clear <group-id>');
@@ -384,7 +387,7 @@ export function parseCollaborationCommand(argv: string[]): CollaborationCommand 
     rules: ['file', 'stdin', 'if-version'], transport: ['file', 'origin'], group: ['file'], status: [], capabilities: [], ui: [], route: [], rebind: ['pane'], help: [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS],
     send: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at', 'kind'],
     handoff: ['group', 'thread', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'expires-at'],
-    reply: ['idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
+    reply: ['update', 'revision', 'idempotency-key', 'file', 'stdin', 'wait-until', 'timeout', 'expect-reply', 'response-kind', 'metadata', 'task-envelope', 'expires-at'],
     inbox: ['raw', 'since', 'after-id', 'cursor', 'consumer', 'limit', 'from', 'group', 'thread', 'kind', 'response-kind', 'follow', 'timeout'],
     message: ['raw', 'receipt-only', 'no-rules', 'follow', 'wait-until', 'timeout', 'expect-reply', 'group', 'thread', 'after-id', 'limit'], cursor: ['consumer'],
     add: [], remove: [], spawn: ['launch-profile', 'name', 'cwd', 'task'], role: [], rename: [], cleanup: ['confirm'], drive: ['lines', 'raw'],
@@ -482,7 +485,7 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
         }
       }
       else if (value.message_id) {
-        io.write(`${value.status} ${canonicalShortId(String(value.message_id))}${value.thread_id ? ` thread=${canonicalShortId(String(value.thread_id))}` : ''}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
+        io.write(`${value.status} ${canonicalShortId(String(value.message_id))}${value.thread_id ? ` thread=${canonicalShortId(String(value.thread_id))}` : ''}${value.ui_revision !== undefined ? ` ui_revision=${value.ui_revision}` : ''}${value.code ? ` ${value.code}` : ''}${value.failure_reason ? ` ${value.failure_reason}` : ''}`);
         // A timeout after the wait stage itself was reached means delivery
         // completed — only the expected reply/result is late.
         if (value.code === 'WAIT_TIMEOUT' && value.stage_reached && value.expect_reply) {
@@ -665,8 +668,8 @@ export async function executeCollaborationCommand(command: CollaborationCommand,
       if (command.action !== 'reply' && !targets.length) throw new Error(`${command.action} requires a target session id`);
       if (fanOut && (o['wait-until'] || o['expect-reply'])) throw new Error('--wait-until/--expect-reply need a single recipient; fan-out confirms queued delivery only');
       deadline = now() + duration(String(o.timeout ?? '30s'));
-      receipt = await request('POST', command.action === 'reply' ? '/reply' : '/send', command.action === 'reply'
-        ? { ...extras, messageId: command.target, content }
+      receipt = await request('POST', command.action === 'reply' ? o.update ? `/reply/${encodeURIComponent(String(o.update))}` : '/reply' : '/send', command.action === 'reply'
+        ? { ...extras, messageId: command.target, content, ...(o.update ? { revision: Number(o.revision) } : {}) }
         : { ...extras, ...(fanOut ? { toSessionIds: targets } : { targetSessionId: targets[0] }), message: content, kind: command.action === 'handoff' ? 'handoff' : o.kind ?? 'message' });
       // CLI receipts stay small even when the message is a large evidence package.
       delete receipt.messages;

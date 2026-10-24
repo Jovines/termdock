@@ -2265,7 +2265,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           />
         )}
         <div className="min-h-0 flex-1 app-chrome-bg">
-          <SessionWorkspace sessionId={session.id} terminalReady={readySessionIds.has(session.id) && viewportReadySessionIds.has(session.id)} name={getSessionLabel(session).primary} active={isActive && isLayoutVisible} onChatReadyChange={handleChatReadyChange} onKeyboardChange={open => handleKeyboardVisibilityChange(session.id, open)}>{terminalVisible => shouldMountViewport && <TerminalView
+          <SessionWorkspace sessionId={session.id} terminalReady={readySessionIds.has(session.id) && viewportReadySessionIds.has(session.id)} name={getSessionLabel(session).primary} active={isActive && isLayoutVisible} onChatReadyChange={handleChatReadyChange} onKeyboardChange={open => handleKeyboardVisibilityChange(session.id, open)}>{(terminalVisible, terminalInteractive) => shouldMountViewport && <TerminalView
             sessionId={session.id}
             mode={session.mode}
             tmuxSessionName={session.tmuxSessionName}
@@ -2273,7 +2273,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             colorTheme={colorTheme}
             toolbarPresets={toolbarPresets}
             isActive={isActive}
-            focusSuspended={!terminalVisible || !terminalFocusAvailable || pendingSwitchSessionId !== null}
+            focusSuspended={!terminalInteractive || !terminalFocusAvailable || pendingSwitchSessionId !== null}
             allowOwnedPasteWhileFocusSuspended={terminalReferenceAvailable && pendingSwitchSessionId === null}
             deferCursorUntilPositioned={
               pendingSwitchSessionId === session.id

@@ -52,7 +52,7 @@ export function sessionChatRoutes(options: {
     const page = paged ? { hasOlder: start > 0, hasNewer: end < visible.length, mode: before !== undefined ? 'before' : after !== undefined ? 'after' : 'latest' } : undefined;
     let lastRequest: CollaborationMessage | undefined;
     for (let index = visible.length - 1; index >= 0; index--) if (!visible[index].toPrincipalId) { lastRequest = visible[index]; break; }
-    const replyPending = !!lastRequest && !['failed', 'expired'].includes(lastRequest.status) && !visible.some(message => message.toPrincipalId && message.replyTo === lastRequest!.id && !['ack', 'progress'].includes(message.responseKind || ''));
+    const replyPending = !!lastRequest && !['failed', 'expired'].includes(lastRequest.status) && !visible.some(message => message.toPrincipalId && message.replyTo === lastRequest!.id && !chatPresentation(message.content, message.metadata).ui?.streaming && !['ack', 'progress'].includes(message.responseKind || ''));
     const confirmedRequestId = paged && typeof requestId === 'string' && visible.some(message => !message.toPrincipalId && message.idempotencyKey === requestId) ? requestId : undefined;
     const payload = { messages, ...(updates ? { updates } : {}), ...(page ? { page, replyPending, ...(confirmedRequestId ? { confirmedRequestId } : {}) } : {}), agentAvailable: !!ctx.session.agent, agent: ctx.session.agent ? { slug: ctx.session.agent.slug, displayName: ctx.session.agent.displayName || ctx.session.agent.slug } : null };
     const revision = createHash('sha256').update(JSON.stringify(payload)).digest('base64url');

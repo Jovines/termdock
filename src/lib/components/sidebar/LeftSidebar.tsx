@@ -1,10 +1,12 @@
 import { DragDropContext } from '../DragDropContext';
 import { useAppFeedback } from '../ui/AppFeedback';
 import { SessionSharingBadge, useSessionSharingStatus } from './SessionSharingBadge';
+import { TodoSessionDropTarget, useTodoRecipientSelection } from '../todos/TodoSessionDropTarget';
+import { useTodoWorkspace } from '../../todos/workspace';
 import { TodoNavigationButton } from '../todos/TodoNavigationButton';
 import { getAgentLaunchCommand } from '../../terminal/launchCommands';
 import { sessionCreationErrorKey, type NewSessionRequestOptions, type NewSessionCreationError } from '../../terminal/newSessionRequest';
-import { Archive, RefreshCw, MessageCircle } from 'lucide-react';
+import { Archive, RefreshCw, MessageCircle, Send } from 'lucide-react';
 import { CollaborationExecutionArchives } from './CollaborationExecutionArchives';
 import { completedTaskSessions } from '../../collaboration/completedSessions';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
@@ -318,6 +320,22 @@ export function LeftSidebar(
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const mainCollaborationGroup = useCollaborationNavigation(state => state.todoOpen ? "__todos__" : state.groupId);
   const sessionDirectory = useSessionDirectory();
+  const recipientSelection = useTodoRecipientSelection();
+  const todoEligibleIds = useMemo(() => new Set(sessionDirectory.filter(session => session.agent?.slug).map(session => session.sessionId)), [sessionDirectory]);
+  const cancelRecipientSelection = () => { if (recipientSelection) useTodoWorkspace.getState().patch(recipientSelection.workspace, { modal: null }); };
+  useEffect(() => {
+    if (!recipientSelection) return;
+    setNewSessionComposerOpen(false); setSwipedSessionId(null);
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      useTodoWorkspace.getState().patch(recipientSelection.workspace, { modal: null });
+      if (!pinned) onClose();
+    };
+    window.addEventListener('keydown', cancel);
+    return () => window.removeEventListener('keydown', cancel);
+  }, [recipientSelection?.workspace, pinned, onClose]);
+
   const sessionLabels = useMemo(() => new Map(sessionDirectory.map(session => [session.sessionId, session.displayName])), [sessionDirectory]);
   const [groupPanels, setGroupPanels] = useState<Record<string, boolean>>({});
   const agentOperationsOpen = workbenchOpen || Object.keys(groupPanels).length > 0;
@@ -918,16 +936,20 @@ export function LeftSidebar(
       <SwipeToCloseSession
         open={swipedSessionId === session.id}
         onOpenChange={(open) => setSwipedSessionId(current => open ? session.id : current === session.id ? null : current)}
-        onClose={(event) => onCloseSession(session.id, event, { skipConfirmation: true })}
+        onClose={(event) => { if (!recipientSelection) onCloseSession(session.id, event, { skipConfirmation: true }); }}
         closeLabel={t('common.close')}
         closeTitle={t('sidebar.closeSession', { name: displayName })}
         compact={compact}
+        disabled={!!recipientSelection}
       >
+        <TodoSessionDropTarget sessionId={session.id} selecting={!!recipientSelection} onChosen={closeIfOverlay}>
         <button
           ref={isActive ? activeItemRef : null}
-          aria-current={isActive ? 'page' : undefined}
+          aria-current={!recipientSelection && isActive ? 'page' : undefined}
+          aria-label={recipientSelection ? `${todoEligibleIds.has(session.id) ? '交给' : '不可交接：普通终端'} ${displayName}` : undefined}
+          disabled={!!recipientSelection && !todoEligibleIds.has(session.id)}
           type="button"
-          {...(dragHandleProps ?? {})}
+          {...(!recipientSelection ? dragHandleProps ?? {} : {})}
           onContextMenu={(event) => {
             // 桌面右键 = 打开会话操作菜单；触屏超长按由 pointer 手势触发，
             // 打开浮层前取消可能已激活的拖拽。
@@ -952,7 +974,7 @@ export function LeftSidebar(
             window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
             closeIfOverlay();
           }}
-          className={`sidebar-session-primary relative min-w-0 flex flex-1 items-center overflow-hidden text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing ' : ''}${
+          className={`sidebar-session-primary relative min-w-0 flex flex-1 items-center overflow-hidden text-left ${recipientSelection ? 'cursor-pointer disabled:cursor-default disabled:opacity-40 ' : dragHandleProps ? 'cursor-grab active:cursor-grabbing ' : ''}${
             compact ? 'min-h-7 gap-1.5 py-0.5 pl-2 pr-0.5' : 'min-h-[30px] gap-1.5 py-1 pl-2 pr-1'
           }`}
           title={ts?.cwd ?? session.name}
@@ -995,8 +1017,10 @@ export function LeftSidebar(
             } ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>
             {displayName}
           </span>
-          <SessionNoticeUnreadBadge sessionIds={[session.id]} />
+          {recipientSelection && todoEligibleIds.has(session.id) ? <Send size={12} className="shrink-0 text-primary" /> : <SessionNoticeUnreadBadge sessionIds={[session.id]} />}
         </button>
+        </TodoSessionDropTarget>
+        {!recipientSelection && <>
         <SessionSharingBadge status={sharing.items[session.id]} onChanged={() => void sharing.refresh()} />
         {beforeActions}
         <button
@@ -1035,9 +1059,10 @@ export function LeftSidebar(
         >
           <RiCloseLine size={compact ? 11 : 12} />
         </button>)}
+        </>}
       </SwipeToCloseSession>
     );
-  }, [activeSessionId, mainCollaborationGroup, splitSessionIds, sessionStates, sessionLabels, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId, sharing.items, sharing.refresh]);
+  }, [activeSessionId, mainCollaborationGroup, splitSessionIds, sessionStates, sessionLabels, recipientSelection, todoEligibleIds, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t, swipedSessionId, sharing.items, sharing.refresh]);
 
   // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
   // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
@@ -1556,7 +1581,7 @@ export function LeftSidebar(
               className={membersSnapshot.isDraggingOver ? 'rounded-sm bg-primary/10 ring-1 ring-primary/40' : ''}
             >
               {members.map((session, memberIndex) => (
-                <Draggable key={session.id} draggableId={`split-member:${session.id}`} index={memberIndex} disableInteractiveElementBlocking>
+                <Draggable isDragDisabled={!!recipientSelection} key={session.id} draggableId={`split-member:${session.id}`} index={memberIndex} disableInteractiveElementBlocking>
                   {(memberProvided, memberSnapshot) => (
                     <div
                       ref={memberProvided.innerRef}
@@ -1698,6 +1723,7 @@ export function LeftSidebar(
                     if (!session) return null;
                     return (
                 <Draggable
+                  isDragDisabled={!!recipientSelection}
                   key={session.id}
                   draggableId={`collaboration-member:${session.id}`}
                   index={orderedIds.indexOf(session.id)}
@@ -1791,7 +1817,7 @@ export function LeftSidebar(
             className="flex-1 space-y-0.5"
           >
             {entities.map((entity, index) => (
-              <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
+              <Draggable isDragDisabled={!!recipientSelection} key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
                 {(dragProvided, snapshot) => (
                   <div
                     ref={dragProvided.innerRef}
@@ -1850,7 +1876,7 @@ export function LeftSidebar(
         count={sessions.length}
         badge={runningCount > 0 ? <AgentCountBadge count={runningCount} tone="running" title={t('agent.aiRunning')} /> : null}
         pinned={!!pinned}
-        onClose={onClose}
+        onClose={() => { cancelRecipientSelection(); onClose(); }}
         onTogglePinned={onTogglePinned ? () => { setNewSessionComposerOpen(false); onTogglePinned(); } : undefined}
         serverAttention={serverAttention}
         onOpenSettings={() => { setNewSessionComposerOpen(false); onOpenSettings(); }}
@@ -1932,7 +1958,7 @@ export function LeftSidebar(
                           key={group.key || '__ungrouped__'}
                           draggableId={`sidebar-group:${group.key || '__ungrouped__'}`}
                           index={groupIndex}
-                          isDragDisabled={groupDragDisabled}
+                          isDragDisabled={groupDragDisabled || !!recipientSelection}
                           disableInteractiveElementBlocking
                         >
                           {(groupDragProvided, groupSnapshot) => (
@@ -1980,7 +2006,7 @@ export function LeftSidebar(
                                         className={`${fillRemainingSpace ? 'flex-1 ' : ''}space-y-0.5`}
                                       >
                                         {folderEntities.map((entity, index) => (
-                                          <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
+                                          <Draggable isDragDisabled={!!recipientSelection} key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
                                             {(dragProvided, snapshot) => (
                                               <div
                                                 ref={dragProvided.innerRef}
@@ -2048,14 +2074,14 @@ export function LeftSidebar(
         )}
       </div>
 
-      <ServiceSwitcher onReselect={() => {
+      {!recipientSelection && <ServiceSwitcher onReselect={() => {
         if (!onJumpToNextAttention) return;
         // Also reveal an unread row that is already selected but was manually
         // scrolled out of view; its identity and layout need not change.
         activeItemLayoutRef.current = null;
         requestAttentionScroll((request) => request + 1);
         onJumpToNextAttention();
-      }} />
+      }} />}
 
       {newSessionComposerOpen && (
         <NewSessionComposer
@@ -2143,7 +2169,7 @@ export function LeftSidebar(
         onNewSession={options => onNewSession(options)} />)}
 
       {/* The composer owns the single primary action while it is open. */}
-      {!newSessionComposerOpen && (
+      {!newSessionComposerOpen && !recipientSelection && (
         <div className="relative z-10 shrink-0 bg-[var(--chrome-bg)] px-3 pb-3 pt-1 md:border-t md:border-border md:p-2">
           <div className={`grid gap-1.5 [&>button]:min-h-11 [&>button]:shadow-none [&>button]:ring-0 md:[&>button]:min-h-0 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
             <button
@@ -2202,7 +2228,7 @@ export function LeftSidebar(
       side="left"
       isOpen={isOpen}
       drawerWidthPx={drawerWidthPx}
-      onClose={onClose}
+      onClose={() => { cancelRecipientSelection(); onClose(); }}
       onOpen={onOpen}
       push={push}
     >

@@ -355,6 +355,15 @@ body {
   }
 }
 
+/* Portalled previews bypass #root's padding; keep their controls inside all
+   four insets, including the desktop title bar and landscape display cutouts. */
+.preview-safe-area {
+  padding-top: max(var(--preview-safe-area-gap, 0px), var(--safe-top-inset, env(safe-area-inset-top, 0px)));
+  padding-right: max(var(--preview-safe-area-gap, 0px), var(--safe-right-inset, env(safe-area-inset-right, 0px)));
+  padding-bottom: max(var(--preview-safe-area-gap, 0px), var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px)));
+  padding-left: max(var(--preview-safe-area-gap, 0px), var(--safe-left-inset, env(safe-area-inset-left, 0px)));
+}
+
 #root {
   height: var(--app-vh, 100vh);
   width: 100vw;
@@ -1945,4 +1954,85 @@ html[data-theme='light'] .termdock-code .token.important {
 
 @media (prefers-reduced-motion: reduce) {
   .termdock-tap-fade { animation-duration: 1ms; }
+}
+
+/* Complete generative UI library: color aliases stay in the Flexoki token file.
+   Extra specificity keeps lazily loaded vendor defaults below these aliases. */
+html:root:root {
+  --openui-alert-background: var(--chrome-bg);
+  --openui-background: var(--chrome-bg);
+  --openui-border-accent: var(--primary);
+  --openui-border-accent-emphasis: var(--primary);
+  --openui-border-alert: var(--border);
+  --openui-border-alert-emphasis: var(--primary);
+  --openui-border-danger: var(--border);
+  --openui-border-danger-emphasis: var(--primary);
+  --openui-border-default: var(--border);
+  --openui-border-info: var(--border);
+  --openui-border-info-emphasis: var(--primary);
+  --openui-border-interactive: var(--border);
+  --openui-border-interactive-emphasis: var(--primary);
+  --openui-border-interactive-selected: var(--primary);
+  --openui-border-success: var(--border);
+  --openui-border-success-emphasis: var(--primary);
+  --openui-chat-user-response-bg: var(--foreground);
+  --openui-chat-user-response-text: var(--foreground);
+  --openui-danger-background: var(--chrome-bg);
+  --openui-elevated: var(--surface);
+  --openui-elevated-intense: var(--surface);
+  --openui-elevated-light: var(--surface);
+  --openui-elevated-strong: var(--surface);
+  --openui-foreground: var(--surface);
+  --openui-highlight: var(--surface);
+  --openui-highlight-intense: var(--surface);
+  --openui-highlight-strong: var(--surface);
+  --openui-highlight-subtle: var(--surface);
+  --openui-info-background: var(--chrome-bg);
+  --openui-interactive-accent-default: var(--primary);
+  --openui-interactive-accent-disabled: var(--primary);
+  --openui-interactive-accent-hover: var(--primary);
+  --openui-interactive-accent-pressed: var(--primary);
+  --openui-interactive-destructive-accent-default: var(--destructive);
+  --openui-interactive-destructive-accent-disabled: var(--destructive);
+  --openui-interactive-destructive-accent-hover: var(--destructive);
+  --openui-interactive-destructive-accent-pressed: var(--destructive);
+  --openui-interactive-destructive-default: var(--destructive);
+  --openui-interactive-destructive-disabled: var(--destructive);
+  --openui-interactive-destructive-hover: var(--destructive);
+  --openui-interactive-destructive-pressed: var(--destructive);
+  --openui-inverted-background: var(--foreground);
+  --openui-overlay: var(--app-backdrop);
+  --openui-pink-background: var(--chrome-bg);
+  --openui-popover-background: var(--chrome-bg);
+  --openui-purple-background: var(--chrome-bg);
+  --openui-success-background: var(--surface-2);
+  --openui-sunk: var(--surface);
+  --openui-sunk-deep: var(--surface);
+  --openui-sunk-light: var(--surface);
+  --openui-text-accent-primary: var(--primary-foreground);
+  --openui-text-accent-secondary: var(--muted-foreground);
+  --openui-text-accent-tertiary: var(--muted-foreground);
+  --openui-text-alert-inverted: var(--warning);
+  --openui-text-alert-primary: var(--warning);
+  --openui-text-black: var(--background);
+  --openui-text-brand: var(--primary);
+  --openui-text-danger-inverted-primary: var(--destructive);
+  --openui-text-danger-inverted-secondary: var(--destructive);
+  --openui-text-danger-inverted-tertiary: var(--destructive);
+  --openui-text-danger-primary: var(--destructive);
+  --openui-text-danger-secondary: var(--destructive);
+  --openui-text-danger-tertiary: var(--destructive);
+  --openui-text-info-inverted: var(--accent);
+  --openui-text-info-primary: var(--accent);
+  --openui-text-neutral-link: var(--primary);
+  --openui-text-neutral-primary: var(--foreground);
+  --openui-text-neutral-secondary: var(--muted-foreground);
+  --openui-text-neutral-tertiary: var(--muted-foreground);
+  --openui-text-pink-inverted: var(--accent);
+  --openui-text-pink-primary: var(--accent);
+  --openui-text-purple-inverted: var(--tmux);
+  --openui-text-purple-primary: var(--tmux);
+  --openui-text-success-inverted: var(--primary);
+  --openui-text-success-primary: var(--primary);
+  --openui-text-white: var(--foreground);
 }

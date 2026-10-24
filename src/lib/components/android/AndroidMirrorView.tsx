@@ -17,6 +17,7 @@ import { useMultiSessionStore } from '../../stores/useMultiSessionStore';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { AutoQuality } from '../../android/autoQuality';
 import { androidDeviceOptions, resolveAndroidSelection } from '../../android/deviceOptions';
+import { useSessionDeviceSelection } from '../../android/useSessionDeviceSelection';
 import { AndroidMirrorController, type MirrorHeader, type MirrorState, type MirrorStats } from '../../android/mirrorController';
 import {
   captureMirrorScreenshot, formatRecordingElapsed,
@@ -128,15 +129,17 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
 }) {
   const shared = useShareAccess();
   const sharedRef = useRef(shared); sharedRef.current = shared;
+  // The sidebar and dock must resolve the same session-specific choice.
+  const storeSessionId = useMultiSessionStore(state => state.activeSessionId ?? (state.sessions.keys().next().value as string | undefined) ?? null);
+  const activeSessionId = sessionId ?? storeSessionId;
+  const { selectedSerial, setSelectedSerial, selectedPhysicalId, selectionEdited, preferencesLoaded, setPreferencesLoaded }
+    = useSessionDeviceSelection(activeSessionId, !!shared);
   const { t } = useI18n();
   const overlay = useAndroidMirrorStore(state => state.overlay);
   const setOverlay = useAndroidMirrorStore(state => state.setOverlay);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<AndroidMirrorController | null>(null);
   const connectedSerial = useRef<string | null>(null);
-  const selectedPhysicalId = useRef<string | null>(null);
-  const selectionEdited = useRef(false);
-  const [preferencesLoaded, setPreferencesLoaded] = useState(!!shared);
   const initialQuality = useMemo<AndroidQuality>(readStoredQuality, []);
   const qualityRef = useRef<AndroidQuality>(initialQuality);
   const adaptive = useRef<{ serial: string; policy: AutoQuality } | null>(null);
@@ -164,7 +167,6 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const [listing, setListing] = useState<AndroidDeviceList | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [loadingList, setLoadingList] = useState(true);
-  const [selectedSerial, setSelectedSerial] = useState<string>('');
   const [qualityId, setQualityId] = useState<AndroidQualityId>(initialQuality.id);
   const [presets, setPresets] = useState<AndroidSavedPresetState[]>([]);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
@@ -218,9 +220,6 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
 
-  // 优先用 App 传入的当前会话 id；遗留 store 仅作兜底。
-  const storeSessionId = useMultiSessionStore(state => state.activeSessionId ?? (state.sessions.keys().next().value as string | undefined) ?? null);
-  const activeSessionId = sessionId ?? storeSessionId;
   const docked = useCollaborationPanelDock(state => Boolean(state.docks[DOCK_GROUP]));
   const dockHost = useCollaborationPanelDock(state => state.hosts[DOCK_GROUP]);
   const setDock = useCollaborationPanelDock(state => state.setDock);
@@ -302,6 +301,14 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     setHeader(null);
   }, [cancelPointerGesture]);
 
+  useLayoutEffect(() => {
+    disconnect();
+    connectedSerial.current = null;
+    // Never leave the previous session's phone visible while restoring a choice.
+    const canvas = canvasRef.current;
+    if (canvas) canvas.width = canvas.width;
+  }, [activeSessionId, disconnect]);
+
   const connect = useCallback((serial: string, preserveFrame = false) => {
     const canvas = canvasRef.current;
     if (!canvas || !serial) return;
@@ -374,11 +381,14 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       ...(patch.activePresetId !== undefined ? { activePresetId: patch.activePresetId } : {}),
       ...(patch.presets !== undefined ? { presets: patch.presets } : {}),
       ...(patch.docked !== undefined ? { docked: patch.docked } : {}),
-      ...(patch.deviceSerial !== undefined ? { deviceSerial: patch.deviceSerial } : {}),
-      ...(patch.devicePhysicalId !== undefined ? { devicePhysicalId: patch.devicePhysicalId } : {}),
+      ...(patch.deviceSerial !== undefined || patch.devicePhysicalId !== undefined
+        ? activeSessionId
+          ? { sessionDevices: { [activeSessionId]: { deviceSerial: patch.deviceSerial ?? null, devicePhysicalId: patch.devicePhysicalId ?? null } } }
+          : { deviceSerial: patch.deviceSerial ?? null, devicePhysicalId: patch.devicePhysicalId ?? null }
+        : {}),
     };
     void updateSettings({ androidPanel: payload }).catch(() => { /* keep local choice */ });
-  }, []);
+  }, [activeSessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -396,14 +406,15 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
       }
       setPresets(panel?.presets ?? []);
       setActivePresetId(panel?.activePresetId ?? null);
-      if (panel?.deviceSerial && !selectionEdited.current) {
-        selectedPhysicalId.current = panel.devicePhysicalId || null;
-        autoConnected.current = panel.deviceSerial;
-        setSelectedSerial(panel.deviceSerial);
+      const device = activeSessionId ? panel?.sessionDevices?.[activeSessionId] : panel;
+      if (device && !selectionEdited.current) {
+        selectedPhysicalId.current = device.devicePhysicalId || null;
+        autoConnected.current = device.deviceSerial;
+        setSelectedSerial(device.deviceSerial || '');
       }
     }).catch(() => { /* 设置读取失败时用本地初值 */ }).finally(() => { if (!cancelled) setPreferencesLoaded(true); });
     return () => { cancelled = true; };
-  }, []);
+  }, [activeSessionId, selectedPhysicalId, selectionEdited, setPreferencesLoaded, setSelectedSerial]);
 
   const addFadingDot = useCallback((point: { left: number; top: number }) => {
     const id = ++rippleId.current;
@@ -535,7 +546,7 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
   useEffect(() => {
     if (!selectedSerial || !selectedRouteReady) { controllerRef.current?.disconnect(); return; }
     connect(selectedSerial);
-  }, [selectedSerial, selectedRouteReady, connect]);
+  }, [activeSessionId, selectedSerial, selectedRouteReady, connect]);
 
   // When all known routes disappear, keep discovering in the foreground so
   // recovery does not require manually reselecting the saved physical device.
@@ -1037,10 +1048,14 @@ export function AndroidMirrorView({ sessionId, dockOnly = false, onInsertPrompt,
     device.serial === selectedSerial || selectedPhysicalId.current && device.physicalId === selectedPhysicalId.current,
   ).map(device => device.serial).sort());
   useEffect(() => {
+    // Restoring another session can temporarily have no selected route. Keep
+    // the existing recording until a concrete device is selected again.
+    if (!selectedSerial) return;
     let cancelled = false;
     let polling = false;
     const previous = recordingRef.current;
-    const retained = previous && recordingPhysicalId.current && recordingPhysicalId.current === selectedPhysicalId.current
+    const retained = previous && (!recordingPhysicalId.current && previous.serial === selectedSerial
+      || recordingPhysicalId.current && recordingPhysicalId.current === selectedPhysicalId.current)
       && (!sharedRef.current || androidRouteAccess(sharedRef.current.android, previous.serial)) ? previous : null;
     recordingRef.current = retained;
     setRecording(Boolean(retained));

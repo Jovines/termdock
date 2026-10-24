@@ -222,6 +222,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isDocumentVisible, setIsDocumentVisible] = React.useState(() => typeof document === 'undefined' ? true : !document.hidden && isWorkspaceActive());
   const [isWindowFocused, setIsWindowFocused] = React.useState(() => typeof document === 'undefined' ? true : document.hasFocus());
   const [isStreamReady, setIsStreamReady] = React.useState(false);
+  const [tmuxScreenSessionId, setTmuxScreenSessionId] = React.useState<string | null>(null);
   const isStreamReadyRef = React.useRef(isStreamReady);
   isStreamReadyRef.current = isStreamReady;
   const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
@@ -304,6 +305,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const toolbarPresets = React.useMemo(() => sanitizeToolbarPresets(configuredToolbarPresets), [configuredToolbarPresets]);
   const isTmuxMode = sessionMode === 'tmux';
   const bufferChunks = terminalState?.bufferChunks ?? [];
+  // A new viewport must not replay the retained PTY transcript before attach.
+  // It can contain many old redraws (and no longer contain its initial grid).
+  // tmux sends the authoritative visible screen in connected.replayChunks.
+  // Keep this latch through reconnects so an existing viewport keeps its frame.
+  const viewportChunks = React.useMemo(
+    () => isTmuxMode && tmuxScreenSessionId !== sessionId ? [] : bufferChunks,
+    [bufferChunks, isTmuxMode, sessionId, tmuxScreenSessionId],
+  );
   const isConnecting = terminalState?.isConnecting ?? false;
   const terminalSessionId = terminalSessionRef;
   const handleDirectoryLinkActivate = React.useCallback(async (pathText: string, line?: number) => {
@@ -1391,6 +1400,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     markInitialContentReadyAfterPaint();
                   }
                 }
+                if (event.mode === 'tmux') setTmuxScreenSessionId(storeSessionId);
                 break;
               }
               case 'reconnecting': {
@@ -2806,7 +2816,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               getPasteOwnerKey={getPasteOwnerKey}
               backendSessionId={terminalSessionId}
               isLayoutVisible={isLayoutVisible}
-              chunks={bufferChunks}
+              chunks={viewportChunks}
               onInput={handleViewportInput}
               onResize={handleViewportResize}
               onFlowControl={handleFlowControl}

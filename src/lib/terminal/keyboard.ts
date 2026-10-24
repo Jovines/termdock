@@ -32,7 +32,9 @@ export function encodeTerminalKey(event: TerminalKey, applicationCursor = false)
   if (tilde) return `\x1b[${tilde}${suffix}~`;
   if (key === 'Tab') return alt ? `\x1b${shift ? '\x1b[Z' : '\t'}` : shift ? '\x1b[Z' : '\t';
   if (key === 'Escape') return alt ? '\x1b\x1b' : '\x1b';
-  if (key === 'Enter') return alt ? '\x1b\r' : null;
+  // LF is the legacy Ctrl+J newline used by agent composers. Keep it distinct
+  // from the CR that submits, without requiring Kitty/CSI-u negotiation.
+  if (key === 'Enter') return alt ? '\x1b\r' : shift && !ctrl ? '\n' : null;
   // Unmodified Backspace must retain textarea cursor/diff handling.
   if (key === 'Backspace') return ctrl || alt ? `${alt ? '\x1b' : ''}${ctrl ? '\x08' : '\x7f'}` : null;
   if (key.length !== 1) return null;

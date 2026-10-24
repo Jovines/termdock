@@ -20,7 +20,7 @@ export function chatTurns(messages: ChatMessage[]): ChatTurn[] {
 export function hasUnansweredMessage(messages: ChatMessage[]): boolean {
   const last = messages.slice().reverse().find(message => message.role === 'user');
   if (!last || ['failed', 'expired'].includes(last.status)) return false;
-  return !messages.some(message => message.role === 'assistant' && message.replyTo === last.id && !['ack', 'progress'].includes(message.responseKind || ''));
+  return !messages.some(message => message.role === 'assistant' && message.replyTo === last.id && !message.ui?.streaming && !['ack', 'progress'].includes(message.responseKind || ''));
 }
 export function chatSendStatus(status: string): string {
   return ({ pending: '已发送', delivered: '已发送', stored: '已发送', failed: '发送失败', expired: '发送失败' }[status] || '待确认');

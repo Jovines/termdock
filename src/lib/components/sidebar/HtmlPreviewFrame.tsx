@@ -97,7 +97,7 @@ export const HtmlPreviewFrame = forwardRef<HtmlPreviewFrameHandle, HtmlPreviewFr
       ref={rootRef}
       data-html-preview-frame
       className={expanded
-        ? 'fixed inset-0 z-modal-panel flex min-h-0 flex-col overflow-hidden bg-surface pt-[env(safe-area-inset-top,0px)] text-foreground'
+        ? 'fixed inset-0 z-modal-panel flex min-h-0 flex-col overflow-hidden bg-surface preview-safe-area text-foreground'
         : 'flex h-full min-h-0 flex-col overflow-hidden bg-surface'}
     >
       {expanded && (

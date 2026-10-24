@@ -52,6 +52,8 @@ export interface AndroidPanelSettings {
   docked: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
   deviceSerial: string | null;
   devicePhysicalId?: string | null;
+  /** Device choices are shared across clients, independently for each session. */
+  sessionDevices?: Record<string, { deviceSerial: string | null; devicePhysicalId?: string | null }>;
 }
 
 export interface SettingsDoc {
@@ -277,7 +279,19 @@ export function normalizeAndroidPanel(value: unknown): AndroidPanelSettings {
   }
   const deviceSerial = typeof raw.deviceSerial === 'string' && isValidAndroidSerial(raw.deviceSerial) ? raw.deviceSerial : null;
   const devicePhysicalId = typeof raw.devicePhysicalId === 'string' && /^[a-f0-9]{64}$/.test(raw.devicePhysicalId) ? raw.devicePhysicalId : null;
-  return { enabled, quality, activePresetId, presets, docked, deviceSerial, devicePhysicalId };
+  const sessionDevices: NonNullable<AndroidPanelSettings['sessionDevices']> = {};
+  if (raw.sessionDevices && typeof raw.sessionDevices === 'object' && !Array.isArray(raw.sessionDevices)) {
+    for (const [sessionId, entry] of Object.entries(raw.sessionDevices).slice(-500)) {
+      if (!/^[0-9a-zA-Z_.:\-]{1,128}$/.test(sessionId) || ['__proto__', 'constructor', 'prototype'].includes(sessionId)
+        || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const item = entry as Record<string, unknown>;
+      sessionDevices[sessionId] = {
+        deviceSerial: typeof item.deviceSerial === 'string' && isValidAndroidSerial(item.deviceSerial) ? item.deviceSerial : null,
+        devicePhysicalId: typeof item.devicePhysicalId === 'string' && /^[a-f0-9]{64}$/.test(item.devicePhysicalId) ? item.devicePhysicalId : null,
+      };
+    }
+  }
+  return { enabled, quality, activePresetId, presets, docked, deviceSerial, devicePhysicalId, sessionDevices };
 }
 
 export function normalizePinnedExplorerRoots(value: unknown): PinnedExplorerRoots {
@@ -944,7 +958,10 @@ export function getAndroidPanelSetting(): AndroidPanelSettings { return loadSett
 export function setAndroidPanelSetting(patch: Partial<AndroidPanelSettings>): SettingsDoc {
   return updateSettings((settings) => {
     const resetIdentity = patch.deviceSerial !== undefined && patch.deviceSerial !== settings.androidPanel.deviceSerial && patch.devicePhysicalId === undefined;
-    settings.androidPanel = normalizeAndroidPanel({ ...settings.androidPanel, ...(resetIdentity ? { devicePhysicalId: null } : {}), ...patch });
+    settings.androidPanel = normalizeAndroidPanel({
+      ...settings.androidPanel, ...(resetIdentity ? { devicePhysicalId: null } : {}), ...patch,
+      sessionDevices: { ...settings.androidPanel.sessionDevices, ...patch.sessionDevices },
+    });
   });
 }
 

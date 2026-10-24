@@ -13,9 +13,20 @@ describe('collaboration CLI contract', () => {
     expect(await executeCollaborationCommand(parseCollaborationCommand(['ui', '--text']), {}, f.io)).toBe(0);
     expect(f.calls).toEqual([]);
     expect(f.output.join('\n')).toContain('Form(');
+    expect(f.output.join('\n')).toContain('DatePicker(');
+    expect(f.output.join('\n')).toContain('Slider(');
+    expect(f.output.join('\n')).not.toContain('支持 OpenUI');
     expect(f.output.join('\n')).toContain('其他协作组');
-    expect(f.output.join('\n')).toContain('"openui":{"version":1}');
+    expect(f.output.join('\n')).toContain('"openui":{"version":2}');
     expect(() => parseCollaborationCommand(['ui', '--group', 'private'])).toThrow();
+  });
+  it('updates an unfinished UI reply with an explicit revision and preserves sender context', async () => {
+    const f = fixture([{ status: 'stored', integration_recorded: true, message_id: 'reply', ui_revision: 1 }]);
+    const command = parseCollaborationCommand(['reply', 'original', '{"text":"ok","ui":"root = Stack([])"}', '--update', 'reply', '--revision', '0', '--metadata', '{"openui":{"version":2,"streaming":false}}', '--idempotency-key', 'update-1']);
+    expect(await executeCollaborationCommand(command, { sessionId: 'agent' }, f.io)).toBe(0);
+    expect(f.calls[0]).toEqual(expect.arrayContaining(['POST', expect.stringContaining('/reply/reply'), expect.objectContaining({ sessionId: 'agent', messageId: 'original', revision: 0 })]));
+    expect(() => parseCollaborationCommand(['reply', 'original', 'body', '--update', 'reply'])).toThrow();
+    expect(() => parseCollaborationCommand(['reply', 'original', 'body', '--revision', '0'])).toThrow();
   });
   it('passes a selected group launch profile through spawn and renders its usage guidance in status', async () => {
     const p = { id: 'fast', name: '快速排查', agentSlug: 'codex', command: 'codex --model example-fast', notes: '只用于简单查询' };

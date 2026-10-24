@@ -1,7 +1,7 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { createRef, useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { commands, page } from 'vitest/browser';
+import { commands, page, userEvent } from 'vitest/browser';
 import { Swiper, SwiperSlide } from 'swiper/react';
 import 'swiper/css';
 import '@xterm/xterm/css/xterm.css';
@@ -151,4 +151,15 @@ it.each([[0, true], [34, false]] as const)('lets the browser move the real termi
   expect(document.activeElement).toBe(input);
   expect(blur).not.toHaveBeenCalled(); expect(focus).not.toHaveBeenCalled();
   expect(focusEvent).not.toHaveBeenCalled();
+  onInput.mockClear();
+  // The preceding gesture can still emit inertial tmux mouse-wheel reports.
+  const keyboardInput = () => onInput.mock.calls.map(call => call[0] as string)
+    .filter(data => !/^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data));
+  await userEvent.keyboard('{Shift>}{Enter}{/Shift}');
+  expect(keyboardInput()).toEqual(['\n']);
+  expect(input.value).toBe('');
+  expect(document.activeElement).toBe(input);
+  await page.elementLocator(input).fill('next line');
+  await userEvent.keyboard('{Enter}');
+  expect(keyboardInput()).toEqual(['\n', 'next line', '\r']);
 });

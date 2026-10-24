@@ -5195,9 +5195,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   }
 
                   // Text/IME stays in the textarea; only encoded keys bypass it.
-                  // Keep regular Enter on flushAndSendEnter (including IME suppression).
+                  // All Enter variants must pass the shared IME suppression below.
                   const seq = encodeTerminalKey(event, term?.modes?.applicationCursorKeysMode === true);
-                  if (seq !== null) {
+                  if (seq !== null && key !== 'Enter') {
                     event.preventDefault();
                     sendTerminalSeq(seq, event.currentTarget);
                     return;
@@ -5238,7 +5238,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     return;
                   }
                   event.preventDefault();
-                  flushAndSendEnter(event.currentTarget);
+                  const enterSeq = encodeTerminalKey(event);
+                  if (enterSeq !== null) {
+                    // Flush pending mobile text before clearing the local input
+                    // and sending the non-submitting newline (Shift+Enter).
+                    syncTextareaToPty(event.currentTarget, { immediate: true });
+                    sendTerminalSeq(enterSeq, event.currentTarget);
+                  } else {
+                    flushAndSendEnter(event.currentTarget);
+                  }
                   return;
                 }
 

@@ -11,6 +11,9 @@ import { I18nProvider } from '../../i18n';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDock';
 import { useSidebarStore } from '../../stores/useSidebarStore';
+import { useTodoWorkspace } from '../../todos/workspace';
+import { useSessionDirectoryStore } from '../../stores/useSessionDirectory';
+import { todoWorkspaceKey } from '../todos/TodoSessionDropTarget';
 import { LeftSidebar, buildCollaborationSections, normalizeSidebarCollaborationGroups } from './LeftSidebar';
 
 const mocks = vi.hoisted(() => ({
@@ -72,6 +75,8 @@ function point(element: Element | null) {
 }
 beforeEach(async () => {
   localStorage.clear();
+  useTodoWorkspace.setState({ views: {}, snapshots: {}, options: {} });
+  useSessionDirectoryStore.getState().replace([]);
   useCollaborationPanelDock.setState({ docks: {}, hosts: {} });
   useCollaborationTaskInbox.setState({ tasks: [], allTasks: [], error: null });
   vi.clearAllMocks(); useCollaborationNavigation.setState({ groupId: null });
@@ -462,4 +467,35 @@ it('offers the same context actions for an empty group and preserves another ope
   await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith('team', 1));
   expect(useCollaborationNavigation.getState().groupId).toBe('other');
   expect(handlers.onCloseSession).not.toHaveBeenCalled();
+});
+
+function prepareTodoRecipientSelection() {
+  const scope = todoWorkspaceKey();
+  const config = { agentSlug: 'codex', command: 'codex', cwd: '/repo', prompt: '' };
+  useSessionDirectoryStore.getState().replace(['a', 'c', 'd'].map(id => ({ sessionId: id, name: id.toUpperCase(), customName: true, lastActivity: 1, agent: { slug: 'codex', displayName: 'Codex', accentColor: 'var(--primary)', icon: null } })));
+  useTodoWorkspace.getState().cache(scope, { todos: [{ id: 'todo', title: '待交接事项', description: '', source: '手动添加', sourceUrl: '', externalId: '', collectorId: null, status: 'open', revision: 1, createdAt: 1, updatedAt: 1 }], runs: [], collectors: [], defaults: config });
+  useTodoWorkspace.getState().patch(scope, { modal: { kind: 'recipient', ids: ['todo'] } });
+  return scope;
+}
+it.each(['a', 'c', 'd'])('selects the existing sidebar row %s, including workgroup and split members, without navigation', async id => {
+  const scope = prepareTodoRecipientSelection();
+  const navigate = vi.fn(); window.addEventListener('switch-terminal-session', navigate);
+  const handlers = await setup();
+  expect(screen.queryByRole('region', { name: '选择待办接收会话' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '新建会话接收待办' })).toBeNull();
+  expect((screen.getByRole('button', { name: '不可交接：普通终端 B' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: `交给 ${id.toUpperCase()}` }));
+  expect(useTodoWorkspace.getState().views[scope].modal).toEqual({ kind: 'handoff', ids: ['todo'], sessionId: id });
+  expect(navigate).not.toHaveBeenCalled(); expect(handlers.onCloseSession).not.toHaveBeenCalled(); expect(handlers.onSplitSession).not.toHaveBeenCalled();
+  expect(screen.queryByRole('region', { name: '选择待办接收会话' })).toBeNull();
+  window.removeEventListener('switch-terminal-session', navigate);
+});
+it('cancels recipient selection with Escape and restores normal sidebar navigation', async () => {
+  const scope = prepareTodoRecipientSelection(); await setup();
+  const navigate = vi.fn(); window.addEventListener('switch-terminal-session', navigate);
+  fireEvent.keyDown(window, { key: 'Escape' });
+  expect(useTodoWorkspace.getState().views[scope].modal).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'A' })); expect(navigate).toHaveBeenCalledOnce();
+  expect(screen.getByRole('region', { name: 'Agent 工作组：Release team' })).toBeTruthy();
+  window.removeEventListener('switch-terminal-session', navigate);
 });

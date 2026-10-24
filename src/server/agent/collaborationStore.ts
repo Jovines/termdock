@@ -1,3 +1,4 @@
+import { mergeStatements, parseMessage } from '@openuidev/lang-core';
 import { plainCollaborationSnapshot } from './collaborationText.js';
 import { validateLaunchProfiles, type CollaborationLaunchProfile, type CollaborationLaunchSettings } from './collaborationLaunchProfiles.js';
 import fs from 'node:fs';
@@ -646,6 +647,11 @@ export class CollaborationStore {
     if (!original?.integrationOrigin || original.fromSessionId !== null || original.toSessionId !== sessionId
       || !group || group.deleted || group.federated || !group.sessionIds.includes(sessionId)) throw new CollaborationError('NOT_MESSAGE_RECIPIENT', 'Only the original local recipient can reply to this integration message', 403);
     const extras = validateExtras(input);
+    const initialUI = chatPresentation(content, extras.metadata).ui;
+    if (initialUI?.version === 2) {
+      extras.metadata = { ...extras.metadata, openui: { ...(extras.metadata?.openui as object), revision: 0 } };
+      extras.responseKind = initialUI.streaming ? 'progress' : extras.responseKind ?? 'result';
+    }
     if (extras.task || extras.metadata?.termdockTask) throw new CollaborationError('INVALID_INTEGRATION_REPLY', 'Ordinary integration replies cannot carry task envelopes');
     if (!extras.idempotencyKey) throw new CollaborationError('INVALID_IDEMPOTENCY_KEY', 'Integration replies require an idempotency key');
     if (typeof content !== 'string' || !content.trim()) throw new CollaborationError('INVALID_MESSAGE', 'Reply content must not be empty');
@@ -668,6 +674,40 @@ export class CollaborationStore {
     if (Buffer.byteLength(JSON.stringify(reply)) > COLLAB_LIMITS.wire_bytes) throw new CollaborationError('MESSAGE_WIRE_TOO_LARGE', 'Encoded reply exceeds the wire limit', 413);
     this.document.messages.push(reply);
     (this.document.idempotency ??= {})[key] = { hash, ids: [reply.id], expiresAt: now + COLLAB_LIMITS.idempotency_retention_ms };
+    this.persist(true); return reply;
+  }
+
+  /** Update only an explicitly streaming ordinary-chat reply. Stable identity
+   * lets clients merge partial snapshots without duplicating conversation rows. */
+  updateIntegrationUIReply(originalId: string, replyId: string, sessionId: string, content: string, input: MessageExtras, revision: unknown): CollaborationMessage {
+    const original = this.getMessage(originalId), reply = this.getMessage(replyId), group = original && this.getGroup(original.groupId);
+    if (!original || original.integrationOrigin?.source !== 'session-chat' || original.toSessionId !== sessionId
+      || !group || group.deleted || group.federated || !group.sessionIds.includes(sessionId)
+      || !reply || reply.replyTo !== originalId || reply.groupId !== original.groupId || reply.fromSessionId !== sessionId
+      || reply.toPrincipalId !== original.integrationOrigin.integrationId) throw new CollaborationError('NOT_MESSAGE_RECIPIENT', 'Only the original recipient can update this chat reply', 403);
+    const extras = validateExtras(input), previous = chatPresentation(reply.content, reply.metadata).ui;
+    const next = typeof content === 'string' ? chatPresentation(content, extras.metadata).ui : null;
+    if (!extras.idempotencyKey || extras.task || extras.metadata?.termdockTask || extras.expiresAt != null || !Number.isSafeInteger(revision) || Number(revision) < 0
+      || !next || next.version !== 2 || Buffer.byteLength(content) > COLLAB_LIMITS.message_bytes) throw new CollaborationError('INVALID_UI_UPDATE', 'A UI update requires version 2 content, revision and an idempotency key');
+    const key = JSON.stringify([original.groupId, `chat-ui-update:${sessionId}:${replyId}`, extras.idempotencyKey]);
+    const hash = crypto.createHash('sha256').update(stableJson([originalId, replyId, revision, content, extras.metadata])).digest('hex');
+    const prior = this.document.idempotency?.[key];
+    if (prior && prior.expiresAt > Date.now()) {
+      if (prior.hash !== hash) throw new CollaborationError('IDEMPOTENCY_CONFLICT', 'UI update key was already used with different content', 409);
+      return reply;
+    }
+    if (!previous || previous.version !== 2 || !previous.streaming) throw new CollaborationError('UI_STREAM_CLOSED', 'Only an unfinished UI reply may be updated', 409);
+    if (revision !== (previous.revision ?? 0)) throw new CollaborationError('UI_REVISION_CHANGED', 'The UI reply has already changed', 409);
+    if ((extras.metadata?.openui as { patch?: boolean })?.patch) {
+      const body = JSON.parse(content);
+      body.ui = mergeStatements(parseMessage(previous.code).content, parseMessage(next.code).content);
+      content = JSON.stringify(body);
+      if (!chatPresentation(content, extras.metadata).ui) throw new CollaborationError('INVALID_UI_UPDATE', 'Merged UI exceeds the content limit');
+    }
+    reply.content = content;
+    reply.metadata = { ...reply.metadata, ...extras.metadata, openui: { ...(extras.metadata?.openui as object), version: 2, patch: false, revision: Number(revision) + 1 } };
+    reply.responseKind = next.streaming ? 'progress' : 'result';
+    (this.document.idempotency ??= {})[key] = { hash, ids: [reply.id], expiresAt: Date.now() + COLLAB_LIMITS.idempotency_retention_ms };
     this.persist(true); return reply;
   }
 
@@ -947,7 +987,7 @@ export class CollaborationStore {
       && (message.integrationOrigin ? reply.toPrincipalId === message.integrationOrigin.integrationId : reply.toSessionId === message.fromSessionId));
     const diagnostic = this.diagnostic(id);
     const facts = terminalMessage(includeSnapshot ? message : { ...message, snapshot: null }, raw);
-    return { message_id: id, thread_id: message.threadId, status: facts.status, queued_at: message.status === 'stored' ? null : message.createdAt, stored_at: message.storedAt ?? null,
+    return { message_id: id, thread_id: message.threadId, status: facts.status, ...(chatPresentation(message.content, message.metadata).ui?.version === 2 ? { ui_revision: chatPresentation(message.content, message.metadata).ui?.revision ?? 0 } : {}), queued_at: message.status === 'stored' ? null : message.createdAt, stored_at: message.storedAt ?? null,
       from_principal_id: message.integrationOrigin?.integrationId ?? null, to_principal_id: message.toPrincipalId ?? null,
       delivered_at: facts.deliveredAt, expires_at: message.expiresAt ?? null,
       failure_reason: message.failureReason ?? null, delivery_semantics: message.status === 'stored' ? 'durable_storage' : facts.deliverySource ?? (facts.deliveredAt === null ? 'not_delivered' : 'legacy_or_unspecified'),

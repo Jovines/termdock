@@ -1,0 +1,24 @@
+/* The vendor sheet is imported once beside the lazy renderer. Keep app layout,
+   layer tokens and safe-area overrides above its generic defaults. */
+.termdock-rich-ui { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.termdock-rich-ui [role='region'],
+.termdock-rich-ui .openui-table-container { max-width: 100%; overflow-x: auto; }
+.termdock-rich-ui input, .termdock-rich-ui textarea, .termdock-rich-ui select { font-size: 16px; }
+.termdock-rich-ui [inert] { opacity: 0.65; }
+html .openui-select-content, html .openui-popover-content, html .openui-tooltip-content,
+html .openui-chart-tooltip { z-index: var(--z-popover); }
+html .openui-select-content, html .openui-popover-content {
+  min-width: min(var(--radix-select-trigger-width, 0px), calc(100vw - var(--safe-left-inset, 0px) - var(--safe-right-inset, 0px) - 1rem));
+  max-width: calc(100vw - var(--safe-left-inset, 0px) - var(--safe-right-inset, 0px) - 1rem);
+  max-height: min(var(--radix-select-content-available-height, 24rem), calc(100dvh - var(--safe-top-inset, 0px) - var(--safe-bottom-inset, 0px) - 1rem));
+}
+html .openui-gallery__modal {
+  z-index: var(--z-modal-panel);
+  box-sizing: border-box;
+  padding-top: var(--safe-top-inset, env(safe-area-inset-top, 0px));
+  padding-right: var(--safe-right-inset, env(safe-area-inset-right, 0px));
+  padding-bottom: var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px));
+  padding-left: var(--safe-left-inset, env(safe-area-inset-left, 0px));
+}
+html .openui-gallery__modal-content { min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; }
+html .openui-gallery__modal-main { min-height: 0; }

@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.361",
+  "version": "1.4.362",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -35,6 +35,7 @@
     "build:client": "vite build && node scripts/precompress-client.mjs",
     "build:server": "tsc -p tsconfig.server.json && node -e \"require('fs').chmodSync('dist/server/cli.js', 0o755)\"",
     "build:runtime-manifest": "node scripts/generate-runtime-manifest.mjs",
+    "generate:chat-ui-catalog": "node scripts/generate-chat-ui-catalog.mjs",
     "generate:pwa-assets": "pwa-assets-generator --config pwa-assets.config.ts",
     "preview": "vite preview",
     "start": "node dist/server/cli.js",
@@ -73,6 +74,7 @@
     "@novnc/novnc": "^1.7.0",
     "@openuidev/lang-core": "1.0.1",
     "@openuidev/react-lang": "1.0.1",
+    "@openuidev/react-ui": "0.18.1",
     "@peculiar/x509": "2.2.0",
     "@serenity-kit/opaque": "1.1.0",
     "@types/cookie-parser": "^1.4.10",

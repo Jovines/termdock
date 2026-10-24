@@ -2,15 +2,16 @@ import { create } from 'zustand';
 import type { AgentLauncherInfo } from '../terminal/api';
 import type { TodoItem, TodoSnapshot } from './api';
 
-export type TodoFilter = 'open' | 'review' | 'completed' | 'ignored';
-export type TodoModal = { kind: 'edit'; todo?: TodoItem } | { kind: 'handoff'; ids: string[] } | { kind: 'collector'; id?: string } | { kind: 'integration' } | null;
+export type TodoFilter = 'all' | 'open' | 'review' | 'completed' | 'ignored';
+export type TodoModal = { kind: 'edit'; todo?: TodoItem } | { kind: 'recipient'; ids: string[] } | { kind: 'handoff'; ids: string[]; sessionId: string } | { kind: 'collector'; id?: string } | { kind: 'integration' } | null;
 export interface TodoView {
   tab: 'todos' | 'collectors'; filter: TodoFilter; source: string; query: string;
   selectedId: string | null; mobileDetail: boolean; selecting: boolean; checked: string[];
   toolsOpen: boolean;
+  column: 'open' | 'completed';
   modal: TodoModal; drafts: Record<string, unknown>; requests: Record<string, string>;
 }
-export const emptyTodoView: TodoView = { tab: 'todos', filter: 'open', source: '', query: '', selectedId: null, mobileDetail: false, selecting: false, checked: [], toolsOpen: false, modal: null, drafts: {}, requests: {} };
+export const emptyTodoView: TodoView = { tab: 'todos', filter: 'all', column: 'open', source: '', query: '', selectedId: null, mobileDetail: false, selecting: false, checked: [], toolsOpen: false, modal: null, drafts: {}, requests: {} };
 export const launchDraftId = (ids: string[]) => `launch:${JSON.stringify(ids.slice().sort())}`;
 /** A workspace outlives responsive remounts and trips to its Agent terminal. */
 export const useTodoWorkspace = create<{
@@ -44,6 +45,7 @@ export function useTodoDraft<T>(key: string, id: string, initial: T): [T, (value
 }
 export function latestTodoRun(data: TodoSnapshot, id: string) { return data.runs.filter(run => run.todoId === id || run.handoff?.todoIds.includes(id)).at(-1); }
 export function matchesTodo(data: TodoSnapshot, todo: TodoItem, filter: TodoFilter): boolean {
+  if (filter === 'all') return todo.status === 'open' || todo.status === 'completed';
   if (filter === 'review') return todo.status === 'open' && latestTodoRun(data, todo.id)?.status === 'complete';
   return todo.status === (filter === 'completed' ? 'completed' : filter === 'ignored' ? 'ignored' : 'open');
 }

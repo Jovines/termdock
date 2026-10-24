@@ -1429,6 +1429,10 @@ function scrollDiffAnchorIntoView(anchor: ChangeWalkthroughAnchor): void {
 }
 
 interface FilePreviewProps {
+  /** Standalone previews keep their root and navigation separate from the sidebar. */
+  rootPath?: string | null;
+  onFileSelect?: (path: string) => void;
+  initialMarkdownFragment?: string | null;
   onReviewReference?: ReviewReferenceHandler;
   filePath: string | null;
   active?: boolean;
@@ -1532,6 +1536,9 @@ function getNativePointerLogData(event: globalThis.PointerEvent | globalThis.Mou
 }
 
 export function FilePreview({
+  rootPath: previewRootPath,
+  onFileSelect,
+  initialMarkdownFragment = null,
   onReviewReference,
   filePath,
   active = true,
@@ -1567,8 +1574,10 @@ export function FilePreview({
     // Markdown can also contain videos. Leaving the tab must stop playback.
     previewContainerRef.current?.querySelectorAll('video').forEach((video) => video.pause());
   }, [active]);
-  const rootPath = useSidebarStore((s) => s.rootPath);
-  const selectFile = useSidebarStore((s) => s.selectFile);
+  const sidebarRootPath = useSidebarStore((s) => s.rootPath);
+  const sidebarSelectFile = useSidebarStore((s) => s.selectFile);
+  const rootPath = previewRootPath === undefined ? sidebarRootPath : previewRootPath;
+  const selectFile = onFileSelect ?? sidebarSelectFile;
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
   const [edaView, setEdaView] = useState<EdaPreviewView>('schematic');
   const [cachedEda3dPreview, setCachedEda3dPreview] = useState<Extract<FilePreviewState, { kind: 'eda' }> | null>(null);
@@ -1586,7 +1595,7 @@ export function FilePreview({
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
   const [markdownPreviewScrollTop, setMarkdownPreviewScrollTop] = useState(0);
   const [previewHistory, setPreviewHistory] = useState<string[]>([]);
-  const [pendingMarkdownFragment, setPendingMarkdownFragment] = useState<string | null>(null);
+  const [pendingMarkdownFragment, setPendingMarkdownFragment] = useState<string | null>(initialMarkdownFragment);
   const expectedNavigationPathRef = useRef<string | null>(null);
   const previousFilePathRef = useRef<string | null>(filePath);
   // Per-line highlighted React nodes, keyed implicitly by the current text

@@ -1,14 +1,22 @@
+import { generateSystemPrompt } from '@openuidev/lang-core';
 import { chatUILibrary } from '../shared/chatUILibrary.js';
+import { chatFullUISpec, chatFullUIOptions } from '../shared/chatFullUICatalog.js';
 export function chatUIPrompt(): string {
+  const legacy = chatUILibrary.toSpec();
   return [
-    'Termdock 普通对话支持 OpenUI。简单回复使用普通 Markdown；比较、数据、表单和文件入口优先使用结构化组件。',
-    '排版以清楚、紧凑为先：Card 作为有标题的内容分节，不要为每句话或每个指标建立分节。相关 Metric 连续排列；表格直接放在对应分节下。Callout 只用于需要特别强调的信息，避免重复正文。不要为了装饰重复展示同一组事实。',
-    '适用边界：仅回复明确标记“来自用户的普通对话界面”的原消息。其他协作组或后台集成的消息不会自动进入普通对话；按其原话题和原接收方回复，不要为它们套用此展示协议。',
-    '将回复写入 UTF-8 JSON 文件，格式 {"text":"完整、可独立阅读的 Markdown 说明","ui":"OpenUI Lang 程序"}。text 必须包含全部关键事实，供引用、复制、旧客户端和降级显示。',
-    '通过 td collab --session <你的会话id> reply <原消息id> --file <文件路径> --metadata \'{"openui":{"version":1}}\' --response-kind result --idempotency-key <稳定唯一key> --text 回复。不要把 JSON 或 OpenUI 程序直接打印到聊天正文。',
-    '表单使用 Form + Input/Select/Checkbox + Button(@ToAssistant("用户可读的提交说明"))。用户提交会成为同一会话的新消息，附带填写内容。每个字段名称唯一；不要嵌套 Form。',
-    'Resource 文件仅使用已授权绝对路径；链接仅使用 http/https。所有操作由用户明确点击，权限由服务端检查。禁止生成 Query/Mutation、脚本、任意 HTML 或自己调用业务接口。',
-    '只展示原始数据和明确报告。Checklist 不代表推测的 Agent 忙闲或内部进度。ui 最长 64000 字符，text 最长 32000 字符。',
-    chatUILibrary.prompt({ toolCalls: false, bindings: false, builtinFunctions: false, examples: ['root = Stack([summary, options])\nsummary = Card("比较结果", [Text("两种方案各有取舍。"), Table(["方案", "内存"], [["A", "4 GB"], ["B", "8 GB"]])])\noptions = Form("choice", "选择下一步", [Select("plan", "采用哪个方案", ["A", "B"], true), Input("notes", "补充要求"), Button("确认选择", @ToAssistant("采用所选方案，按补充要求继续"))])'] }),
+    '请按信息特点选择清楚、多样的表达：比较用表格，趋势、占比和分布用图表；多组内容用卡片、标签页或折叠区；步骤用步骤条；需要用户填写或选择时用表单、日期、滑块、单选或多选；文件和链接提供可点击入口。简单说明用 Markdown。',
+    '排版紧凑，优先保证内容完整、可读和方便操作。不要为每句话套卡片，不为装饰重复同一组事实；图表只使用实际数据。',
+    '适用边界：仅回复明确标记“来自用户的普通对话界面”的原消息。其他协作组或后台集成按原话题和接收方回复。',
+    '将回复写入 UTF-8 JSON 文件，格式 {"text":"完整、可独立阅读的 Markdown 说明","ui":"界面表达程序"}。text 包含全部关键事实，供引用、复制、旧客户端和降级显示。',
+    '通过 td collab --session <你的会话id> reply <原消息id> --file <文件路径> --metadata \'{"openui":{"version":2}}\' --response-kind result --idempotency-key <稳定唯一key> --text 回复。不要把 JSON 或程序打印到聊天正文。',
+    '逐步交付界面时，首次 metadata 使用 {"openui":{"version":2,"streaming":true}}，保存回执 message_id；后续仍 reply 原消息，用 --update <回执message_id> --revision <从0起的当前版本>，默认每次提交完整的当前 text/ui 快照；可在 metadata.openui 中设 patch:true 提交按语句替换的界面补丁，text 仍须完整。最后将 streaming 设为 false。完成前禁用交互，不从终端画面推测生成进度。',
+    'Form(name, buttons, fields) 必须提供 Buttons 和独立 FormControl 引用；字段名唯一，不嵌套 Form。@ToAssistant 会把用户填写作为同一会话的新消息；$变量、@Set、@Reset 和内置数据函数用于本地交互。',
+    'Resource(label, kind, target, description?) 提供文件预览或外部链接；文件使用当前服务已授权绝对路径，链接仅 http/https。本地图片沿用页面加密读取，勿自行构造业务接口。',
+    'Query 可调用 read_file({path})、list_directory({path}) 读取获准文件和目录。Mutation 可调用 continue_conversation({message})，只在用户点击的 @Run 中执行；查询不能发送消息。未知工具会明确报错，勿编造工具。',
+    '只展示实际数据和明确报告，不推断 Agent 内部进度。ui 最长64000字符，text 最长32000字符。',
+    generateSystemPrompt({ ...chatFullUISpec, components: { ...chatFullUISpec.components, Resource: legacy.components.Resource },
+      ...chatFullUIOptions, bindings: true, builtinFunctions: true, toolCalls: true,
+      tools: ['read_file({path: string}) -> {path, content, size, binary}', 'list_directory({path: string}) -> {path, entries}', 'continue_conversation({message: string}) -> {submitted: boolean}; Mutation only, never Query'],
+      preamble: '使用下列组件和表达式把答案组织成可阅读、可操作的界面。' }),
   ].join('\n\n');
 }

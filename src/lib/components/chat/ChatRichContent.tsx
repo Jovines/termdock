@@ -1,23 +1,20 @@
 import './openuiRuntime';
-import { createContext, lazy, memo, Suspense, useContext, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { createContext, lazy, memo, Suspense, useContext, useMemo, useState } from 'react';
 import { createLibrary, createParser, FormNameContext, Renderer, useFormName, useStateField, useTriggerAction, type ActionEvent, type ComponentRenderProps } from '@openuidev/react-lang';
-import { ArrowDownUp, Check, Circle, ExternalLink, FileText, Search, X } from 'lucide-react';
+import { ArrowDownUp, Check, Circle, ExternalLink, FileText, Search } from 'lucide-react';
 import { chatUILibrary, chatUISchemas } from '../../../server/shared/chatUILibrary';
-import { requestReferenceInsertion } from '../sidebar/requestReferenceInsertion';
-import { buildReferenceInputText } from '../sidebar/referencePaths';
-import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { ChatMarkdown } from './ChatMarkdown';
+import { ChatFilePreview } from './ChatFilePreview';
 import { useChatUIState } from './useChatUIState';
 import { chatUIActionText } from './chatUIActions';
 import type { ChatMessage } from './chatMessages';
+const ChatFullContent = lazy(() => import('./ChatFullContent').then(module => ({ default: module.ChatFullContent })));
 const field = 'min-h-11 w-full min-w-0 rounded-xl border border-border bg-background px-3 py-2 text-base outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 sm:text-sm';
 const button = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-border px-4 py-2 text-sm hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40';
 // Metrics share a compact row; prose, tables and sections keep the full width.
 // Apply this to rendered blocks so saved OpenUI replies benefit as well.
 const contentLayout = 'grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-x-6 gap-y-4 [&>*:not([data-chat-metric])]:col-span-full';
-const Preview = lazy(() => import('../sidebar/RightSidebar').then(module => ({ default: module.FilePreview })));
 const context = createContext({ canWrite: false, resource: (_path: string) => {} });
 function RichTable({ columns, rows, caption }: { columns: string[]; rows: (string | number | boolean | null)[][]; caption?: string }) {
   const [query, setQuery] = useState(''), [sort, setSort] = useState<{ column: number; direction: number }>();
@@ -78,18 +75,7 @@ function Block({ name, props, renderNode }: ComponentRenderProps & { name: strin
 }
 const library = createLibrary({ id: chatUILibrary.id, root: chatUILibrary.root, components: Object.values(chatUILibrary.components).map(component => ({ ...component, component: (props: ComponentRenderProps) => <Block {...props} name={component.name} /> })) });
 const parser = createParser(chatUILibrary.toJSONSchema());
-function FileDialog({ path, close, sessionId, canWrite }: { path: string; close: () => void; sessionId: string; canWrite: boolean }) {
-  const panel = useRef<HTMLDivElement>(null), [range, setRange] = useState<{ start: number; end: number } | null>(null);
-  const [error, setError] = useState(''), [copied, setCopied] = useState<string | null>(null);
-  useKeyboardLayer(panel, true, close);
-  const insert = async (text: string, source?: HTMLElement) => {
-    if (!canWrite) { setError('此会话仅允许查看'); return; }
-    const accepted = await requestReferenceInsertion(text, sessionId, () => panel.current?.isConnected === true, source);
-    if (accepted) close(); else setError('暂时无法添加到输入框，请稍后重试。');
-  };
-  return createPortal(<div data-sidebar-gesture-ignore className="fixed inset-0 z-modal-backdrop flex items-center justify-center bg-[var(--app-backdrop)] p-2 sm:p-6" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}><div ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="文件预览" className="z-modal-panel flex h-[90dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-surface text-foreground"><header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border px-4"><span className="min-w-0 flex-1 truncate text-sm" title={path}>{path.split(/[\\/]/).pop()}</span><button type="button" aria-label="关闭文件预览" className={button} onClick={close}><X size={17} /></button></header><div className="min-h-0 flex-1 overflow-auto">{error && <p role="alert" className="px-4 py-2 text-xs text-destructive">{error}</p>}<Suspense fallback={<p className="p-4 text-sm text-muted-foreground">正在读取文件…</p>}><Preview filePath={path} onInsertReference={(path, _key, source) => { void insert(buildReferenceInputText(path, null), source); }} onInsertText={(text, _key, source) => { void insert(text, source); }} onReferenceCopied={setCopied} isMobile={window.innerWidth < 640} markdownOutlineOpen={false} markdownImageLightboxOpen={false} lineRange={range} onLineRangeChange={setRange} insertedReferenceKey={null} copiedReferenceKey={copied} /></Suspense></div></div></div>, document.body);
-}
-export const ChatRichContent = memo(function ChatRichContent({ message, sessionId, canWrite, onAction }: { message: ChatMessage; sessionId: string; canWrite: boolean; onAction: (content: string) => Promise<boolean> }) {
+const LegacyChatRichContent = memo(function LegacyChatRichContent({ message, sessionId, canWrite, onAction }: { message: ChatMessage; sessionId: string; canWrite: boolean; onAction: (content: string) => Promise<boolean> }) {
   const ui = message.ui!, [invalid, setInvalid] = useState(false), [actionError, setActionError] = useState(''), [acting, setActing] = useState(false), [file, setFile] = useState<string>();
   const parsed = useMemo(() => { try { return parser.parse(ui.code); } catch { return null; } }, [ui.code]);
   const valid = ui.version === 1 && parsed?.root && !parsed.meta.incomplete && !parsed.meta.errors.length && !parsed.meta.unresolved.length && parsed.meta.statementCount <= 256 && !parsed.queryStatements.length && !parsed.mutationStatements.length;
@@ -108,5 +94,10 @@ export const ChatRichContent = memo(function ChatRichContent({ message, sessionI
     finally { setActing(false); }
   };
   if (!valid || invalid) return <div className="space-y-2"><ChatMarkdown content={message.content} /><p className="text-xs text-muted-foreground">已显示文字说明</p></div>;
-  return <ErrorBoundary fallback={<ChatMarkdown content={message.content} />}><context.Provider value={{ canWrite: canWrite && !acting, resource: setFile }}><div data-chat-rich-content className="min-w-0 space-y-3"><Renderer library={library} response={ui.code} initialState={state.hydration} onStateUpdate={state.update} onAction={event => { void action(event); }} onError={errors => { if (errors.some(error => error.severity !== 'warning')) setInvalid(true); }} toolProvider={null} publishObservability={false} />{state.error ? <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive"><span>{state.error}</span><button type="button" className={`${button} min-h-9 text-foreground`} disabled={!canWrite} onClick={state.retry}>重新保存</button></div> : state.status && <p role="status" className="text-xs text-muted-foreground">{state.status}</p>}{actionError && <p role="alert" className="text-xs text-destructive">{actionError}</p>}{acting && <p role="status" className="text-xs text-muted-foreground">正在提交…</p>}{file && <FileDialog path={file} sessionId={sessionId} canWrite={canWrite} close={() => setFile(undefined)} />}</div></context.Provider></ErrorBoundary>;
+  return <ErrorBoundary fallback={<ChatMarkdown content={message.content} />}><context.Provider value={{ canWrite: canWrite && !acting, resource: setFile }}><div data-chat-rich-content className="min-w-0 space-y-3"><Renderer library={library} response={ui.code} initialState={state.hydration} onStateUpdate={state.update} onAction={event => { void action(event); }} onError={errors => { if (errors.some(error => error.severity !== 'warning')) setInvalid(true); }} toolProvider={null} publishObservability={false} />{state.error ? <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive"><span>{state.error}</span><button type="button" className={`${button} min-h-9 text-foreground`} disabled={!canWrite} onClick={state.retry}>重新保存</button></div> : state.status && <p role="status" className="text-xs text-muted-foreground">{state.status}</p>}{actionError && <p role="alert" className="text-xs text-destructive">{actionError}</p>}{acting && <p role="status" className="text-xs text-muted-foreground">正在提交…</p>}{file && <ChatFilePreview path={file} sessionId={sessionId} canWrite={canWrite} close={() => setFile(undefined)} />}</div></context.Provider></ErrorBoundary>;
 });
+
+/** Version one retains the original signatures for saved replies. */
+export function ChatRichContent(props: Parameters<typeof LegacyChatRichContent>[0]) {
+  return props.message.ui?.version === 2 ? <Suspense fallback={<ChatMarkdown content={props.message.content} />}><ChatFullContent {...props} /></Suspense> : <LegacyChatRichContent {...props} />;
+}

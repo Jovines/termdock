@@ -172,3 +172,35 @@ it('confirms a retained pending request and reports its unanswered state without
   f.store.storeIntegrationReply(sent.id, 'agent', 'completed', { idempotencyKey: 'last-paged-result', responseKind: 'result' });
   expect((await read()).replyPending).toBe(false);
 });
+
+it('updates a version-two UI stream in place, keeps revisions idempotent and closes it after the final snapshot', async () => {
+  const f = await fixture();
+  const original = await f.post('展示界面').then(r => r.json());
+  const body = (text: string) => JSON.stringify({ text, ui: `root = Stack([TextContent("${text}")])` });
+  const reply = f.store.storeIntegrationReply(original.id, 'agent', body('开始'), { idempotencyKey: 'stream-start', metadata: { openui: { version: 2, streaming: true } } });
+  expect((await f.read()).messages[1].ui).toMatchObject({ version: 2, streaming: true, revision: 0 });
+  const pageBefore = await fetch(`${f.base}/agent/chat?limit=10`).then(r => r.json());
+  expect(pageBefore.replyPending).toBe(true);
+  const update = { idempotencyKey: 'stream-middle', metadata: { openui: { version: 2, streaming: true } } };
+  expect(f.store.updateIntegrationUIReply(original.id, reply.id, 'agent', body('中间'), update, 0).id).toBe(reply.id);
+  f.store.updateIntegrationUIReply(original.id, reply.id, 'agent', body('中间'), update, 0);
+  expect((await f.read()).messages).toHaveLength(2);
+  expect((await f.read()).messages[1].ui).toMatchObject({ streaming: true, revision: 1 });
+  expect(() => f.store.updateIntegrationUIReply(original.id, reply.id, 'agent', body('旧版本'), { ...update, idempotencyKey: 'stale' }, 0)).toThrow(/already changed/);
+  expect(() => f.store.updateIntegrationUIReply(original.id, reply.id, 'other', body('越权'), update, 1)).toThrow();
+  f.store.updateIntegrationUIReply(original.id, reply.id, 'agent', body('完成'), { idempotencyKey: 'stream-final', metadata: { openui: { version: 2, streaming: false } } }, 1);
+  const page = await fetch(`${f.base}/agent/chat?limit=10`).then(r => r.json());
+  expect(page.messages[1]).toMatchObject({ id: reply.id, content: '完成', ui: { streaming: false, revision: 2 } });
+  expect(page.replyPending).toBe(false); expect(page.revision).not.toBe(pageBefore.revision);
+  expect(() => f.store.updateIntegrationUIReply(original.id, reply.id, 'agent', body('再次修改'), { ...update, idempotencyKey: 'closed' }, 2)).toThrow(/unfinished/);
+});
+
+it('merges statement patches before exposing the next durable UI snapshot', async () => {
+  const f = await fixture(), original = await f.post('逐步补全').then(r => r.json());
+  const reply = f.store.storeIntegrationReply(original.id, 'agent', JSON.stringify({ text: '开始', ui: 'root = Stack([detail])\ndetail = TextContent("开始")' }), { idempotencyKey: 'patch-start', metadata: { openui: { version: 2, streaming: true } } });
+  expect(f.store.receipt(original.id).result_ids).toEqual([]);
+  f.store.updateIntegrationUIReply(original.id, reply.id, 'agent', JSON.stringify({ text: '更新后正文', ui: 'detail = TextContent("更新后正文")' }), { idempotencyKey: 'patch-1', metadata: { openui: { version: 2, streaming: true, patch: true } } }, 0);
+  const message = (await f.read()).messages[1];
+  expect(message.ui.code).toContain('root = Stack([detail])'); expect(message.ui.code).toContain('更新后正文');
+  expect(message.ui.revision).toBe(1); expect(message.id).toBe(reply.id);
+});

@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { chatUIAdapter } from './scripts/chat-ui-adapter';
 import { build as bundleWorker } from 'esbuild';
 import react from '@vitejs/plugin-react';
 import path from 'path';
@@ -10,6 +11,7 @@ loadDotenv();
 
 export default defineConfig({
   plugins: [
+    chatUIAdapter(),
     react(),
     {
       name: 'encrypted-background-worker',

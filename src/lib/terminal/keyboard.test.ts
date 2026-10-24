@@ -45,6 +45,8 @@ describe('terminal hardware keyboard encoding', () => {
 
   it('handles Alt and modified editing keys without stealing ordinary textarea edits', () => {
     expect(encodeTerminalKey(key('Enter'))).toBeNull();
+    expect(encodeTerminalKey(key('Enter', { shiftKey: true }))).toBe('\n');
+    expect(encodeTerminalKey(key('Enter', { shiftKey: true, ctrlKey: true }))).toBeNull();
     expect(encodeTerminalKey(key('Backspace'))).toBeNull();
     expect(encodeTerminalKey(key('Enter', { altKey: true }))).toBe('\x1b\r');
     expect(encodeTerminalKey(key('Backspace', { ctrlKey: true }))).toBe('\x08');
@@ -59,6 +61,7 @@ describe('terminal hardware keyboard encoding', () => {
     }
     expect(encodeTerminalKey(key('ArrowUp', { isComposing: true }))).toBeNull();
     expect(encodeTerminalKey(key('Tab', { keyCode: 229 }))).toBeNull();
+    expect(encodeTerminalKey(key('Enter', { shiftKey: true, isComposing: true }))).toBeNull();
     expect(encodeTerminalKey(key('@', { ctrlKey: true, altKey: true, getModifierState: name => name === 'AltGraph' }))).toBeNull();
     expect(encodeTerminalKey(key('ArrowLeft', { metaKey: true }))).toBeNull();
     expect(encodeTerminalKey(key('Insert', { shiftKey: true }))).toBeNull();

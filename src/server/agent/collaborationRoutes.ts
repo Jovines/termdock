@@ -219,6 +219,11 @@ export function collaborationRoutes({ store, resolveSession, deliver, rebind, di
     }));
     sent(res, messages.map((message) => message.id));
   }));
+  router.post('/reply/:replyId', run((req, res, sessionId) => {
+    const original = ownMessage(String(req.body.messageId ?? ''), sessionId, true);
+    const reply = store.updateIntegrationUIReply(original.id, String(req.params.replyId), sessionId, req.body.content, extrasFromBody(req.body), req.body.revision);
+    res.json({ ok: true, ...store.receipt(reply.id), integration_recorded: true });
+  }));
   router.post('/reply', run(async (req, res, sessionId) => {
     const original = ownMessage(String(req.body.messageId ?? ''), sessionId, true);
     if (original.integrationOrigin) {

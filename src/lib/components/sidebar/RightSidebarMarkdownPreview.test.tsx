@@ -992,7 +992,7 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(stage).toBeTruthy();
     expect(lightbox?.parentElement).toBe(document.body);
     expect(lightbox?.className).toContain(
-      'pt-[var(--safe-top-inset,env(safe-area-inset-top,0px))]',
+      'preview-safe-area',
     );
     const image = screen.getByRole('img', { name: 'One' });
     const viewport = image.closest('[data-image-zoom-viewport]') as HTMLElement;

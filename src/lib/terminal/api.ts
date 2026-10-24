@@ -1862,6 +1862,7 @@ export interface AndroidPanelSettingsState {
   docked: { sessionId: string; side: 'left' | 'right' | 'top' | 'bottom' } | null;
   deviceSerial: string | null;
   devicePhysicalId?: string | null;
+  sessionDevices?: Record<string, { deviceSerial: string | null; devicePhysicalId?: string | null }>;
 }
 
 export interface SettingsState {

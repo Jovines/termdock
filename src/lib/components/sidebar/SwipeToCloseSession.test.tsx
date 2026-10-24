@@ -122,3 +122,11 @@ describe('session swipe to close', () => {
     expect(screen.queryByRole('button', { name: 'Close One' })).toBeNull();
   });
 });
+
+it('does not expose close actions while the existing row is being used to pick a recipient', () => {
+  const close = vi.fn(), choose = vi.fn();
+  render(<SwipeToCloseSession open disabled onOpenChange={vi.fn()} onClose={close} closeLabel="Close" closeTitle="Close target"><button className="sidebar-session-primary" onClick={choose}>Target</button></SwipeToCloseSession>);
+  swipe('Target', 65);
+  expect(screen.queryByRole('button', { name: 'Close target' })).toBeNull();
+  expect(close).not.toHaveBeenCalled(); expect(choose).toHaveBeenCalledOnce();
+});

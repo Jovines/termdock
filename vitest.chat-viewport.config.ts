@@ -1,8 +1,10 @@
 import { defineConfig } from 'vitest/config';
+import { chatUIAdapter } from './scripts/chat-ui-adapter';
 import { playwright } from '@vitest/browser-playwright';
 import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
+  plugins: [chatUIAdapter()],
   cacheDir: 'node_modules/.vite/keyboard-layout-tests',
   resolve: { alias: { 'node:diagnostics_channel': fileURLToPath(new URL('./src/lib/shims/diagnosticsChannel.ts', import.meta.url)) } },
   optimizeDeps: {
@@ -12,7 +14,7 @@ export default defineConfig({
       '@xterm/addon-ligatures', '@xterm/addon-progress', 'browser-haptic', 'qrcode'],
   },
   test: {
-    include: ['src/lib/components/chat/chatViewport.browser.tsx', 'src/lib/components/chat/nativeChatViewport.browser.tsx', 'src/lib/components/terminal/nativeTerminalInput.browser.tsx', 'src/lib/components/layout/keyboardPanelLayout.browser.tsx'],
+    include: ['src/lib/components/chat/chatFullUI.browser.tsx', 'src/lib/components/chat/previewSafeArea.browser.tsx', 'src/lib/components/chat/chatViewport.browser.tsx', 'src/lib/components/chat/nativeChatViewport.browser.tsx', 'src/lib/components/terminal/nativeTerminalInput.browser.tsx', 'src/lib/components/layout/keyboardPanelLayout.browser.tsx'],
     browser: {
       enabled: true,
       headless: true,

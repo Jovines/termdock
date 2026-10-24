@@ -5,9 +5,11 @@ import { parseChatContent, type ChatReference } from './chatReferences';
 import { ChatMessageViewport } from './ChatMessageViewport';
 import { ChatMarkdown } from './ChatMarkdown';
 import { getChatRichContent } from './chatRenderers';
-import { parseChatDraft } from './chatComposerContent';
+import { attachmentToken } from './chatComposerContent';
+import { parseChatDisplayDraft } from './chatDisplayContent';
 import { ChatAttachmentCards } from './ChatAttachmentCards';
-import { ChatDraftText } from './ChatDraftText';
+import { useChatAttachmentPreview } from './useChatAttachmentPreview';
+import { ChatInlineContent } from './ChatInlineContent';
 export const chatTime = (at: number) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const builtInIcons = new Set(['amp', 'claude', 'codex', 'copilot', 'cursor', 'droid', 'gemini', 'goose', 'grok', 'kimi', 'opencode']);
 export function ChatAgentLabel({ name, slug }: { name: string; slug?: string }) {
@@ -22,8 +24,10 @@ export function ChatReferenceCard({ reference, onRemove }: { reference: ChatRefe
 }
 export function ChatUserContent({ content }: { content: string }) {
   const parsed = parseChatContent(content);
-  const draft = parseChatDraft(parsed.text);
-  return <>{parsed.reference && <ChatReferenceCard reference={parsed.reference} />}<ChatAttachmentCards files={draft.attachments} />{draft.text && <p className="whitespace-pre-wrap break-words text-[15px] leading-7 sm:text-base"><ChatDraftText text={draft.text} files={draft.attachments} mentions={draft.mentions} /></p>}</>;
+  const draft = parseChatDisplayDraft(parsed.text);
+  const { onPreview, preview } = useChatAttachmentPreview(draft.attachments);
+  const separateFiles = draft.attachments.filter(file => !file.reference || !draft.text.includes(attachmentToken(file)));
+  return <>{parsed.reference && <ChatReferenceCard reference={parsed.reference} />}<ChatAttachmentCards files={separateFiles} onPreview={onPreview} />{draft.text && <p className="whitespace-pre-wrap break-words text-base leading-7"><ChatInlineContent text={draft.text} files={draft.attachments} mentions={draft.mentions} onPreview={onPreview} /></p>}{preview}</>;
 }
 export function ChatUserMessage({ content, createdAt, status, messageId, actionsOpen, children }: { content: string; createdAt: number; status: string; messageId?: string; actionsOpen?: boolean; children?: ReactNode }) {
   return <article data-chat-turn="user" data-chat-message={messageId} data-actions-open={actionsOpen || undefined} className="ml-auto flex w-fit max-w-[88%] flex-col items-end sm:max-w-[85%]">

@@ -2620,7 +2620,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
     <>
       <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={onClose} />
       <div
-        className="fixed inset-0 z-modal-panel flex flex-col bg-background-subtle/95 pt-[var(--safe-top-inset,env(safe-area-inset-top,0px))] text-foreground"
+        className="fixed inset-0 z-modal-panel flex flex-col bg-background-subtle/95 preview-safe-area text-foreground"
         data-markdown-image-lightbox
         data-sidebar-gesture-ignore
       >
@@ -3113,11 +3113,11 @@ export function MarkdownRenderer({
           <>
             <div className="fixed inset-0 z-menu-backdrop bg-[rgb(var(--background-rgb)_/_0.18)] sm:hidden" onClick={onOutlineClose} />
             <div
-              className="hidden fixed z-menu-panel w-80 max-w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border/20 bg-surface p-2 shadow-xl sm:block"
-              style={outlineDesktopPos ? { top: `${outlineDesktopPos.top}px`, right: `${outlineDesktopPos.right}px` } : { top: -9999, right: -9999 }}
+              className="hidden fixed z-menu-panel min-h-0 flex-col w-80 max-w-[min(20rem,calc(100vw-var(--safe-left-inset,0px)-var(--safe-right-inset,0px)-1rem))] rounded-lg border border-border/20 bg-surface p-2 shadow-xl sm:flex"
+              style={outlineDesktopPos ? { top: `max(var(--safe-top-inset, 0px), ${outlineDesktopPos.top}px)`, right: `max(var(--safe-right-inset, 0px), ${outlineDesktopPos.right}px)`, maxHeight: `calc(100dvh - max(var(--safe-top-inset, 0px), ${outlineDesktopPos.top}px) - var(--safe-bottom-inset, 0px) - 8px)` } : { top: -9999, right: -9999 }}
               data-markdown-heading-outline-desktop
             >
-              <div className="max-h-72 overflow-auto pr-1">
+              <div className="min-h-0 max-h-72 overflow-auto pr-1">
                 {headingOutline.map((heading) => {
                   const active = activeHeadingPath[activeHeadingPath.length - 1]?.startLine === heading.startLine;
                   return (
@@ -3138,10 +3138,10 @@ export function MarkdownRenderer({
               </div>
             </div>
             <div
-              className="fixed inset-x-0 bottom-0 z-drawer-panel max-h-[min(74vh,34rem)] rounded-t-xl border border-border/20 bg-surface p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] shadow-[0_-18px_48px_var(--app-shadow-strong)] sm:hidden"
+              className="fixed inset-x-0 bottom-0 z-drawer-panel flex min-h-0 max-h-[min(74dvh,34rem,calc(100dvh-var(--safe-top-inset,0px)))] flex-col rounded-t-xl border border-border/20 bg-surface p-2 pl-[max(0.5rem,var(--safe-left-inset,env(safe-area-inset-left,0px)))] pr-[max(0.5rem,var(--safe-right-inset,env(safe-area-inset-right,0px)))] pb-[calc(0.5rem+var(--safe-bottom-inset,env(safe-area-inset-bottom,0px)))] shadow-[0_-18px_48px_var(--app-shadow-strong)] sm:hidden"
               data-markdown-heading-outline-mobile
             >
-              <div className="mb-1 flex items-center justify-between gap-2 px-1.5 py-1 sm:hidden">
+              <div className="mb-1 flex shrink-0 items-center justify-between gap-2 px-1.5 py-1 sm:hidden">
                 <div className="text-[12px] font-semibold text-foreground">{t('rightSidebar.markdownOutlineShort')}</div>
                 <button
                   type="button"
@@ -3153,7 +3153,7 @@ export function MarkdownRenderer({
                   <RiCloseLine size={14} />
                 </button>
               </div>
-              <div className="max-h-[calc(min(74vh,34rem)-3.25rem-env(safe-area-inset-bottom,0px))] overflow-auto overscroll-contain pr-1 sm:max-h-72">
+              <div className="min-h-0 overflow-auto overscroll-contain pr-1">
                 {headingOutline.map((heading) => {
                   const active = activeHeadingPath[activeHeadingPath.length - 1]?.startLine === heading.startLine;
                   return (
