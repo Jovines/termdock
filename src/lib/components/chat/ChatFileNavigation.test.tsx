@@ -38,7 +38,8 @@ it('opens relative Markdown links in a modal, keeps further navigation there, an
   render(chat('[下发配置](docs/guide.md)'));
   expect(fireEvent.click(screen.getByRole('link', { name: '下发配置' }))).toBe(false);
   const dialog = await screen.findByRole('dialog', { name: '文件预览' });
-  expect(await within(dialog).findByRole('heading', { name: '指南' })).toBeTruthy();
+  // The first preview lazily transforms the full sidebar; cold CI runners can exceed the default DOM wait.
+  expect(await within(dialog).findByRole('heading', { name: '指南' }, { timeout: 4000 })).toBeTruthy();
   expect(readFileContent).toHaveBeenCalledWith('/repo/docs/guide.md', expect.any(AbortSignal), 'view_file', expect.any(String));
   fireEvent.click(within(dialog).getByRole('link', { name: '下一份' }));
   expect(await within(dialog).findByRole('heading', { name: '下一份文档' })).toBeTruthy();
