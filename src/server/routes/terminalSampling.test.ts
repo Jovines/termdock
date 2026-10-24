@@ -119,7 +119,7 @@ it('keeps the real WS handler PTYs through flow pauses, while unsubscribe/reconn
     ptys.push(pty); return pty;
   });
   const outputActivity = new TerminalOutputActivity(() => {});
-  outputActivity.record(); vi.advanceTimersByTime(1800); outputActivity.record(); vi.advanceTimersByTime(200);
+  outputActivity.record(); vi.advanceTimersByTime(200); outputActivity.record(); vi.advanceTimersByTime(400);
   const session = { outputActivity, mode: 'tmux', tmuxSessionName: 'task', ptyProcess: { pid: 1 },
     clients: new Map(), cols: 80, rows: 24, cwd: '/work', activeProgram: null, agentLeftAt: null, lastPromptState: 'idle' };
   const pane = { command: 'codex', currentPath: '/work', title: 'task' };

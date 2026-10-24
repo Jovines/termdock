@@ -14,7 +14,7 @@ export default defineConfig({
       '@xterm/addon-ligatures', '@xterm/addon-progress', 'browser-haptic', 'qrcode'],
   },
   test: {
-    include: ['src/lib/components/chat/chatFullUI.browser.tsx', 'src/lib/components/chat/previewSafeArea.browser.tsx', 'src/lib/components/chat/chatViewport.browser.tsx', 'src/lib/components/chat/nativeChatViewport.browser.tsx', 'src/lib/components/terminal/nativeTerminalInput.browser.tsx', 'src/lib/components/layout/keyboardPanelLayout.browser.tsx'],
+    include: ['src/lib/components/chat/chatFullUI.browser.tsx', 'src/lib/components/chat/previewSafeArea.browser.tsx', 'src/lib/components/chat/chatViewport.browser.tsx', 'src/lib/components/chat/nativeChatViewport.browser.tsx', 'src/lib/components/terminal/nativeTerminalInput.browser.tsx', 'src/lib/components/terminal/desktopTerminalInput.browser.tsx', 'src/lib/components/layout/keyboardPanelLayout.browser.tsx'],
     browser: {
       enabled: true,
       headless: true,
@@ -22,6 +22,27 @@ export default defineConfig({
       viewport: { width: 390, height: 844 },
       instances: [{ browser: 'chromium', provider: playwright({ launchOptions: { channel: 'chrome' }, contextOptions: { hasTouch: true } }) }],
       commands: {
+        async desktopTerminalPointer(context, action: 'click' | 'right-click' | 'drag' | 'wheel') {
+          const box = await context.iframe.locator('.xterm-screen').boundingBox();
+          if (!box) throw new Error('Missing terminal screen');
+          const x = box.x + 10, y = box.y + 10;
+          await context.page.mouse.move(x, y);
+          if (action === 'click') await context.page.mouse.click(x, y);
+          if (action === 'right-click') await context.page.mouse.click(x, y, { button: 'right' });
+          if (action === 'wheel') await context.page.mouse.wheel(0, -120);
+          if (action === 'drag') {
+            await context.page.mouse.down();
+            await context.page.mouse.move(x + 100, y, { steps: 8 });
+            await context.page.mouse.up();
+          }
+        },
+        async desktopTerminalComposition(context, text: string, commit = false) {
+          const session = await context.context.newCDPSession(context.page);
+          try {
+            if (commit) await session.send('Input.insertText', { text });
+            else await session.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length });
+          } finally { await session.detach(); }
+        },
         async inputPanelDrag(context, selector: string, dy: number) {
           const box = await context.iframe.locator(selector).boundingBox();
           if (!box) throw new Error(`Missing touch target: ${selector}`);

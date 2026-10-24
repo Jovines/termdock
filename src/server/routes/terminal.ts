@@ -1,3 +1,4 @@
+import { TmuxPaneOutputObserver } from '../utils/tmuxPaneOutput.js';
 import { TerminalOutputActivity } from '../utils/terminalOutputActivity.js';
 import { createTodoWebhookRouter } from '../todos/webhook.js';
 import { readCollectionOutputTime } from '../todos/tmuxOutput.js';
@@ -382,6 +383,8 @@ interface TerminalSession {
   lastActivity: number;
   lastOutputAt: number;
   outputActivity?: TerminalOutputActivity;
+  paneOutputObserver?: TmuxPaneOutputObserver;
+  tmuxClientFeatures?: boolean;
   clients: Map<string, express.Response>;
   createdAt: number;
   hasWrittenData: boolean;
@@ -5989,6 +5992,7 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   const sampler = terminalSamplers.get(sessionId);
   sampler?.sampler.stop();
   terminalSamplers.delete(sessionId);
+  session.paneOutputObserver?.dispose();
   session.outputActivity?.dispose();
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
@@ -6283,6 +6287,16 @@ function updateFocusTrackingFromOutput(sessionId: string, session: TerminalSessi
   }
 }
 
+/** Update actual program-output observations, independently of display redraw. */
+function recordSessionOutputActivity(sessionId: string, session: TerminalSession): void {
+  if (terminalSessions.get(sessionId) !== session) return;
+  session.lastOutputAt = Date.now();
+  session.outputActivity ??= new TerminalOutputActivity(active => {
+    if (terminalSessions.get(sessionId) === session) broadcastEvent(sessionId, { type: 'terminal-output-activity', active });
+  });
+  session.outputActivity.record();
+}
+
 /**
  * The PTY output pipeline: history append + OSC sniffing + push. Live output
  * runs with broadcast on; pty-host *replay* (adoption after a server restart)
@@ -6293,15 +6307,10 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
   const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
   if (opts.broadcast) {
     session.lastActivity = Date.now();
-    session.lastOutputAt = Date.now();
     session.hasWrittenData = true;
-    // Observe the persistent session PTY once, never each display client or replay.
-    if (data.length > 0 && terminalSessions.get(sessionId) === session) {
-      session.outputActivity ??= new TerminalOutputActivity(active => {
-        if (terminalSessions.get(sessionId) === session) broadcastEvent(sessionId, { type: 'terminal-output-activity', active });
-      });
-      session.outputActivity.record();
-    }
+    // tmux display bytes also include attach/resize repaint. Only a shell PTY
+    // is a direct program-output source; tmux activity comes from %output.
+    if (session.mode === 'shell' && data.length > 0) recordSessionOutputActivity(sessionId, session);
   }
   let seq: number | undefined;
   if (session.mode === 'shell') {
@@ -6380,7 +6389,27 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
   }
 }
 
+function startTmuxPaneOutputActivity(sessionId: string, session: TerminalSession): void {
+  session.paneOutputObserver?.dispose();
+  session.paneOutputObserver = undefined;
+  session.outputActivity?.dispose(true);
+  session.outputActivity = undefined;
+  if (session.mode === 'tmux' && session.tmuxSessionName && session.tmuxClientFeatures === true) {
+    session.paneOutputObserver = new TmuxPaneOutputObserver(
+      getTmuxBinary(), `=${session.tmuxSessionName}`,
+      () => recordSessionOutputActivity(sessionId, session),
+      () => {
+        if (terminalSessions.get(sessionId) !== session) return;
+        session.outputActivity?.dispose(true);
+        session.outputActivity = undefined;
+      },
+    );
+    session.paneOutputObserver.start();
+  }
+}
+
 function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
+  if (session.mode === 'tmux' && !session.paneOutputObserver) startTmuxPaneOutputActivity(sessionId, session);
   session.dataDisposable = session.ptyProcess.onData((data: string) => {
     processSessionOutput(sessionId, session, data, { broadcast: true });
   });
@@ -6592,6 +6621,7 @@ async function spawnTerminalSessionUnlocked(req: express.Request, input: SpawnTe
     cwd,
     mode,
     tmuxSessionName,
+    tmuxClientFeatures: supportsFeatures,
     cols,
     rows,
     lastActivity: Date.now(),
@@ -9582,6 +9612,8 @@ async function switchTmuxBackendSession(sessionId: string, session: TerminalSess
   await prepareManagedTmuxSession(target, session.cwd);
   await sendTmuxCommand(session.tmuxSessionName!, session.tmuxControl, ['switch-client', '-c', clientTty, '-t', target]);
   session.tmuxSessionName = target;
+  session.lastOutputAt = 0;
+  startTmuxPaneOutputActivity(sessionId, session);
   session.lastActivity = Date.now();
   if (updateGlobalBindingForBackendSession(sessionId, {
     mode: 'tmux', tmuxSessionName: target, cwd: session.cwd, lastActivity: session.lastActivity,

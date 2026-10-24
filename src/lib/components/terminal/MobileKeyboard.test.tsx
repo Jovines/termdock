@@ -105,8 +105,10 @@ describe('MobileKeyboard interaction state', () => {
     expect(onKeyPress).toHaveBeenCalledWith('ctrl-u');
   });
 
-  it.each(['mobile', 'desktop-actions'] as const)('sends Shift+Left immediately from the Codex %s toolbar', (presentation) => {
-    const codex = createDefaultToolbarPresets().find(preset => preset.id === 'codex')!;
+  it.each([
+    ['codex', 'mobile'], ['codex', 'desktop-actions'], ['traex', 'mobile'], ['traex', 'desktop-actions'],
+  ] as const)('sends Shift+Left immediately from the %s %s toolbar', (presetId, presentation) => {
+    const codex = createDefaultToolbarPresets().find(preset => preset.id === presetId)!;
     const onTextPress = vi.fn();
     const { rerender } = render(<MobileKeyboard {...baseProps} presentation={presentation} extraActions={codex.actions} presetRowLayout={codex.rowLayout} onTextPress={onTextPress} />);
 

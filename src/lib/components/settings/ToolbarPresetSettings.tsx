@@ -21,6 +21,8 @@ import {
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from '../terminal/PresetModeButton';
 import { useI18n } from '../../i18n';
 import { Switch } from '../ui/Switch';
+import { ToolbarKeyComboPicker } from './ToolbarKeyComboPicker';
+import { escapeToolbarSequence } from '../../terminal/toolbarKeyCombo';
 
 interface ToolbarPresetSettingsProps {
   presets: ToolbarPresetDefinition[];
@@ -580,9 +582,9 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       {getToolbarActionLabel(action, index)}
                     </div>
                     <div className="truncate text-[11px] text-muted-foreground">
-                      {action.sequence ? action.sequence : t('toolbarPresets.noSequence')}
+                      {action.sequence ? escapeToolbarSequence(action.sequence) : t('toolbarPresets.noSequence')}
                       {action.doubleTapSequence && (
-                        <span className="ml-1 text-accent/70">· 2× {action.doubleTapSequence}</span>
+                        <span className="ml-1 text-accent/70">· 2× {escapeToolbarSequence(action.doubleTapSequence)}</span>
                       )}
                     </div>
                   </button>
@@ -627,7 +629,8 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       <span className="text-[11px] uppercase tracking-wider text-muted-foreground">{t('toolbarPresets.sequence')}</span>
                       <input
                         type="text"
-                        value={action.sequence}
+                        value={escapeToolbarSequence(action.sequence)}
+                        aria-label={t('toolbarPresets.sequence')}
                         onChange={(event) =>
                           onUpdatePreset(selectedPreset.id, (preset) => ({
                             ...preset,
@@ -661,6 +664,16 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                           </button>
                         ))}
                       </div>
+                      <ToolbarKeyComboPicker onInsert={(sequence, label) =>
+                        onUpdatePreset(selectedPreset.id, preset => ({
+                          ...preset,
+                          actions: preset.actions.map(item => item.id === action.id ? {
+                            ...item,
+                            label: !item.sequence && (!item.label.trim() || /^Key \d+$/.test(item.label)) ? label : item.label,
+                            sequence: escapeToolbarSequence(item.sequence) + sequence,
+                          } : item),
+                        }))
+                      } />
                     </div>
 
                     <div className="space-y-1.5">
@@ -687,7 +700,8 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                         <>
                           <input
                             type="text"
-                            value={action.doubleTapSequence}
+                            value={escapeToolbarSequence(action.doubleTapSequence)}
+                            aria-label={t('toolbarPresets.doubleTap')}
                             onChange={(event) =>
                               onUpdatePreset(selectedPreset.id, (preset) => ({
                                 ...preset,
@@ -739,6 +753,15 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                               {t('toolbarPresets.remove')}
                             </button>
                           </div>
+                          <ToolbarKeyComboPicker onInsert={sequence =>
+                            onUpdatePreset(selectedPreset.id, preset => ({
+                              ...preset,
+                              actions: preset.actions.map(item => item.id === action.id ? {
+                                ...item,
+                                doubleTapSequence: escapeToolbarSequence(item.doubleTapSequence ?? '') + sequence,
+                              } : item),
+                            }))
+                          } />
                         </>
                       )}
                     </div>

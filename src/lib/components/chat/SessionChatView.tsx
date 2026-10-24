@@ -19,7 +19,7 @@ import { useKeyboardFocusGuard } from '../../hooks/useKeyboardFocusGuard';
 import './sessionChat.css';
 import { authorizeOwnedTerminalPaste } from '../../terminal/ownedPaste';
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { AtSign, ArrowDown, ArrowUp, LoaderCircle, MessageCircle, Paperclip, Quote, RefreshCw, TerminalSquare, X } from 'lucide-react';
+import { AtSign, ArrowDown, ArrowUp, Clock3, LoaderCircle, MessageCircle, Paperclip, Quote, RefreshCw, TerminalSquare, X } from 'lucide-react';
 import { currentSecureClient, savedConnection } from '../../federation/browserIntegration';
 import { ChatTimeline, ChatReferenceCard, ChatUserMessage, ChatAgentHeader, chatTime } from './ChatTimeline';
 import { composeChatContent, parseChatContent, type ChatReference } from './chatReferences';
@@ -367,9 +367,13 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
   const waitingForReply = agentAvailable === true && !pending && (replyPending ?? hasUnansweredMessage(messages));
   const sendingReply = sending && !!pending;
   const replyHasHeader = !pending && messages.at(-1)?.role === 'assistant';
-  const replyStatus = (terminalOutputActive || (sendingReply && !error)) && <div data-chat-reply-status data-chat-reply-inline={!replyHasHeader || undefined} role="status" aria-label={`${agentName}${terminalOutputActive ? '工作中' : '发送中'}`} aria-live="polite" className="w-fit max-w-full">
-    <TerminalPeekTrigger className={`inline-flex max-w-full items-center gap-1.5 text-muted-foreground ${replyHasHeader ? 'rounded-lg border border-border/50 bg-[color-mix(in_srgb,var(--surface)_35%,var(--chrome-bg))] px-3 py-2 text-xs' : 'rounded-md px-1.5 py-0.5 text-[11px] leading-4'}`}>
-      <LoaderCircle size={replyHasHeader ? 14 : 12} className="animate-spin text-primary motion-reduce:animate-none" /><span>{terminalOutputActive ? '工作中…' : '发送中…'}</span>
+  // Reply delivery and terminal byte activity are independent observations.
+  // Keep the reply affordance mounted across quiet tool/response intervals.
+  const replyPhase = terminalOutputActive ? 'working' : !error && sendingReply ? 'sending' : !error && waitingForReply ? 'waiting' : null;
+  const replyStatusLabel = replyPhase === 'working' ? '工作中' : replyPhase === 'sending' ? '发送中' : '等待回复';
+  const replyStatus = replyPhase && <div data-chat-reply-status data-chat-reply-phase={replyPhase} data-chat-reply-inline={!replyHasHeader || undefined} role="status" aria-label={`${agentName}${replyStatusLabel}`} aria-live="polite" className="w-fit max-w-full">
+    <TerminalPeekTrigger className={`inline-flex min-w-20 max-w-full items-center gap-1.5 whitespace-nowrap text-muted-foreground ${replyHasHeader ? 'rounded-lg border border-border/50 bg-[color-mix(in_srgb,var(--surface)_35%,var(--chrome-bg))] px-3 py-2 text-xs' : 'rounded-md px-1.5 py-0.5 text-[11px] leading-4'}`}>
+      {replyPhase === 'waiting' ? <Clock3 size={replyHasHeader ? 14 : 12} className="shrink-0" /> : <LoaderCircle size={replyHasHeader ? 14 : 12} className="shrink-0 animate-spin text-primary motion-reduce:animate-none" />}<span>{replyStatusLabel}…</span>
     </TerminalPeekTrigger>
   </div>;
   const tooLong = new TextEncoder().encode(composeChatContent(composeChatDraft(draft, attachments, mentions), reference)).byteLength > 32000;
@@ -379,7 +383,7 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
         {hasOlder && <div ref={olderEdge} data-chat-older-edge aria-hidden="true" className="h-12 shrink-0">{olderLoading && <div className="space-y-2 py-2"><div className="chat-loading-skeleton h-3 w-3/4 rounded bg-surface-2" /><div className="chat-loading-skeleton h-3 w-1/2 rounded bg-surface-2" /></div>}</div>}
         {(loading || !historyReady) && !messages.length && !pending ? <ChatLoading /> : !messages.length && !pending ? <div className={`session-chat-welcome mx-auto flex shrink-0 flex-col items-center py-6 text-center ${touchLayout ? '' : 'my-auto'}`}><MessageCircle size={27} strokeWidth={1.5} className="mb-4 text-primary" /><h2 className="text-xl font-semibold tracking-tight sm:text-2xl">想一起完成什么？</h2><p className="mt-2 max-w-md text-[15px] leading-7 text-muted-foreground">直接描述你的目标，或从一个问题开始。</p><div className="mt-5 flex flex-wrap justify-center gap-2">{['帮我梳理一下当前工作', '请解释一下刚才的结果', '我们继续下一步'].map(text => <button type="button" key={text} className={`${button} border border-border/60 text-left text-xs text-muted-foreground`} disabled={!canWrite} onClick={() => { writeEditorDraft(text, text.length, true); }}>{text}</button>)}</div></div> : <ChatTimeline pendingMessage={pending && <ChatUserMessage content={pending.content} createdAt={pending.createdAt} status={sending ? '发送中…' : '待重试'}>{!sending && <><button type="button" className="min-h-9 rounded-lg px-2 hover:bg-surface-2" onClick={() => { const parsed = parseChatContent(pending.content); const restored = parseChatDraft(parsed.text); writeEditorDraft(restored.text, restored.text.length, true); setExtras(restored); setReference(parsed.reference); setPending(null); setError(''); focusKeyboardInput(input.current); }}>修改草稿</button><button type="button" className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-primary hover:bg-surface-2" disabled={!canWrite || agentAvailable !== true} onClick={() => void send(pending)}><RefreshCw size={12} />重试发送</button></>}</ChatUserMessage>} sessionId={sessionId} uiWritable={active && canWrite && !pending && !sending && agentAvailable === true} onAction={onAction} messages={messages} scrollRoot={scroll} rowHeights={rowHeights} nearbyIds={nearbyIds} initialVisibleIds={snapshot?.visibleMessageIds} agentName={agentName} agentSlug={agentSlug} canWrite={canWrite} copied={copied} onReference={quoteMessage} onCopy={onCopy} />}
 
-        {(terminalOutputActive || ((sendingReply || (!replyHasHeader && waitingForReply)) && !error)) && <section data-chat-reply-feedback className="mt-6 w-full">
+        {replyPhase && <section data-chat-reply-feedback className="mt-6 w-full">
           {!replyHasHeader && <ChatAgentHeader name={agentName} slug={agentSlug}>{replyStatus}</ChatAgentHeader>}
           {replyHasHeader && replyStatus}
         </section>}

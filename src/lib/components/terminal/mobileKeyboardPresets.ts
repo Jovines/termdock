@@ -29,9 +29,9 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // Bump this whenever the built-in DEFAULT_PRESETS change in a way that should
 // be force-pushed to existing clients (new preset added, removed, or default
 // actions/programs changed). The App reads this on startup and, when the
-// stored version differs, overwrites all built-in preset ids with the latest
-// definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 18;
+// stored version differs, applies the migration below. Version 19 adds only
+// the TraeX shortcut; older migrations replace built-ins while preserving custom presets.
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 19;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -128,8 +128,9 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'TraeX',
     programs: ['traex', 'traecli'],
     includeAlt: false,
-    rowLayout: [6],
+    rowLayout: [7],
     actions: [
+      { id: 'traex-shift-left', label: '⇧←', sequence: '\u001b[1;2D' },
       { id: 'traex-undo', label: '/undo', sequence: '/||undo ', doubleTapSequence: '/||undo ||\r' },
       { id: 'traex-clear', label: '/clear', sequence: '/||clear ', doubleTapSequence: '/||clear ||\r' },
       { id: 'traex-compact', label: '/compact', sequence: '/||compact ', doubleTapSequence: '/||compact ||\r' },
@@ -363,4 +364,61 @@ export function splitButtonsIntoRows<T>(items: T[], rowLayout: number[]): Array<
   }
 
   return rows;
+}
+
+export function materializeToolbarPresets(rawPresets: unknown[], storedVersion: number): ToolbarPresetDefinition[] {
+  const defaults = createDefaultToolbarPresets();
+  const builtinIds = new Set(getBuiltinToolbarPresetIds());
+  const rawStoredPresets = Array.isArray(rawPresets) ? (rawPresets as Partial<ToolbarPresetDefinition>[]) : [];
+  const stored = sanitizeToolbarPresets(rawStoredPresets);
+  const versionMismatch = storedVersion < BUILTIN_TOOLBAR_PRESETS_VERSION;
+
+  if (stored.length === 0) {
+    return defaults;
+  }
+
+  if (storedVersion === 18) {
+    // Add the new shortcut without resetting any existing preset customization.
+    const shortcut = defaults.find(preset => preset.id === 'traex')!.actions[0];
+    const migrated = stored.map(preset => {
+      if (preset.id !== 'traex' || preset.actions.some(action =>
+        action.id === shortcut.id || decodeToolbarSequence(action.sequence) === shortcut.sequence)) return preset;
+      return {
+        ...preset,
+        rowLayout: preset.rowLayout.length === 1 && preset.rowLayout[0] === 6 ? [7] : preset.rowLayout,
+        actions: [{ ...shortcut }, ...preset.actions],
+      };
+    });
+    const storedIds = new Set(stored.map(preset => preset.id));
+    return [...migrated, ...defaults.filter(preset => !storedIds.has(preset.id))];
+  }
+
+  if (versionMismatch) {
+    // Replace built-in presets with the latest definitions, but preserve user-customized rowLayout.
+    const storedMap = new Map(stored.map((preset) => [preset.id, preset]));
+    const rawStoredMap = new Map(rawStoredPresets.map((preset) => [
+      typeof preset.id === 'string' ? preset.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-') : '',
+      preset,
+    ]));
+    const customPresets = stored.filter((preset) => !builtinIds.has(preset.id));
+    const updatedDefaults = defaults.map((preset) => {
+      const existing = storedMap.get(preset.id);
+      const rawExisting = rawStoredMap.get(preset.id);
+      if (!existing) return preset;
+      return {
+        ...preset,
+        rowLayout: existing.rowLayout,
+        showOnDesktop: typeof rawExisting?.showOnDesktop === 'boolean'
+          ? rawExisting.showOnDesktop
+          : preset.showOnDesktop,
+      };
+    });
+    return [...updatedDefaults, ...customPresets];
+  }
+
+  const storedIds = new Set(stored.map((preset) => preset.id));
+  return [
+    ...stored,
+    ...defaults.filter((preset) => !storedIds.has(preset.id)),
+  ];
 }

@@ -415,3 +415,30 @@ it('does not let a failed chat submission hide actual terminal output', async ()
   await screen.findByRole('button', { name: '重试发送' });
   expect(screen.getByText('工作中…')).toBeTruthy();
 });
+
+it('keeps one stable reply affordance through quiet output intervals and removes it only after a final reply', async () => {
+  let messages: ChatMessage[] = [{ id: 'u-stable', role: 'user', content: '跑完整验证再回复', createdAt: 1, status: 'delivered' }];
+  let replyPending = true;
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, agent: { displayName: 'Codex' }, messages, replyPending })));
+  const view = render(<SessionChatView sessionId="stable-reply" onTerminal={() => {}} />);
+  const status = await screen.findByRole('status', { name: 'Codex等待回复' });
+  expect(view.container.querySelector('[data-chat-agent-header]')?.contains(status)).toBe(true);
+  expect(status.querySelector('.animate-spin')).toBeNull();
+  liveOutput('stable-reply'); expect(screen.getByRole('status', { name: 'Codex工作中' })).toBe(status);
+  act(() => useTerminalStore.getState().setTerminalOutputActivity('stable-reply', false));
+  expect(screen.getByRole('status', { name: 'Codex等待回复' })).toBe(status);
+  messages.push({ id: 'a-stable', role: 'assistant', content: '验证仍在继续', createdAt: 2, status: 'stored', responseKind: 'progress' });
+  fireEvent(window, new Event('online')); await screen.findByText('验证仍在继续');
+  const tailStatus = screen.getByRole('status', { name: 'Codex等待回复' });
+  expect(view.container.querySelector('[data-chat-agent-header]')?.contains(tailStatus)).toBe(false);
+  for (let cycle = 0; cycle < 3; cycle++) {
+    act(() => useTerminalStore.getState().setTerminalOutputActivity('stable-reply', true));
+    expect(screen.getByRole('status', { name: 'Codex工作中' })).toBe(tailStatus);
+    act(() => useTerminalStore.getState().setTerminalOutputActivity('stable-reply', false));
+    expect(screen.getByRole('status', { name: 'Codex等待回复' })).toBe(tailStatus);
+  }
+  replyPending = false;
+  messages = [...messages, { id: 'a-final', role: 'assistant', content: '验证已结束', createdAt: 3, status: 'stored', responseKind: 'result' }];
+  fireEvent(window, new Event('online')); await screen.findByText('验证已结束');
+  expect(view.container.querySelector('[data-chat-reply-status]')).toBeNull();
+});

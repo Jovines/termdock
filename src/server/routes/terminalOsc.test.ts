@@ -11,7 +11,7 @@ import { buildHookSequence, parseAgentEvent } from '../agent/session.js';
 const source = fs.readFileSync(new URL('./terminal.ts', import.meta.url), 'utf8');
 const ast = ts.createSourceFile('terminal.ts', source, ts.ScriptTarget.Latest, true);
 function sniffer() {
-  const names = ['sniffOsc', 'parseConEmuProgressReport', 'parseOsc777NotificationBody', 'processSessionOutput', 'scheduleNativeStatusRecovery', 'cancelNativeStatusRecovery'];
+  const names = ['sniffOsc', 'parseConEmuProgressReport', 'parseOsc777NotificationBody', 'processSessionOutput', 'recordSessionOutputActivity', 'scheduleNativeStatusRecovery', 'cancelNativeStatusRecovery'];
   const code = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.includes(node.name?.text ?? '')).map(node => node.getText(ast)).join('\n');
   const context = vm.createContext({
     OSC_ANY_PATTERN: /\x1b\](\d+);([^\x07\x1b]*)(\x07|\x1b\\)/g,

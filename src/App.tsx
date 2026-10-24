@@ -119,7 +119,7 @@ import { ServerHealthSettings } from './lib/components/settings/ServerHealthSett
 import { NewSessionShortcut } from './lib/components/NewSessionShortcut';
 import { WorkspaceRetentionSettings } from './lib/components/settings/WorkspaceRetentionSettings';
 import { useServiceWorkspaceActivity } from './lib/components/ServiceSwitcher';
-import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
+import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, materializeToolbarPresets, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
 import { getTermdockDesktopBridge, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
 import { StartupScreen } from './lib/components/StartupScreen';
@@ -207,47 +207,6 @@ function isToolbarPresetsCacheDoc(v: unknown): v is ToolbarPresetsCacheDoc {
   return typeof v === 'object' && v !== null &&
     typeof (v as { version?: unknown }).version === 'number' &&
     Array.isArray((v as { presets?: unknown }).presets);
-}
-
-function materializeToolbarPresets(rawPresets: unknown[], storedVersion: number): ToolbarPresetDefinition[] {
-  const defaults = createDefaultToolbarPresets();
-  const builtinIds = new Set(getBuiltinToolbarPresetIds());
-  const rawStoredPresets = Array.isArray(rawPresets) ? (rawPresets as Partial<ToolbarPresetDefinition>[]) : [];
-  const stored = sanitizeToolbarPresets(rawStoredPresets);
-  const versionMismatch = storedVersion < BUILTIN_TOOLBAR_PRESETS_VERSION;
-
-  if (stored.length === 0) {
-    return defaults;
-  }
-
-  if (versionMismatch) {
-    // Replace built-in presets with the latest definitions, but preserve user-customized rowLayout.
-    const storedMap = new Map(stored.map((preset) => [preset.id, preset]));
-    const rawStoredMap = new Map(rawStoredPresets.map((preset) => [
-      typeof preset.id === 'string' ? preset.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-') : '',
-      preset,
-    ]));
-    const customPresets = stored.filter((preset) => !builtinIds.has(preset.id));
-    const updatedDefaults = defaults.map((preset) => {
-      const existing = storedMap.get(preset.id);
-      const rawExisting = rawStoredMap.get(preset.id);
-      if (!existing) return preset;
-      return {
-        ...preset,
-        rowLayout: existing.rowLayout,
-        showOnDesktop: typeof rawExisting?.showOnDesktop === 'boolean'
-          ? rawExisting.showOnDesktop
-          : preset.showOnDesktop,
-      };
-    });
-    return [...updatedDefaults, ...customPresets];
-  }
-
-  const storedIds = new Set(stored.map((preset) => preset.id));
-  return [
-    ...stored,
-    ...defaults.filter((preset) => !storedIds.has(preset.id)),
-  ];
 }
 
 interface SettingsCacheDoc {
@@ -2105,9 +2064,8 @@ function App() {
     });
   }, [applyToolbarPresetsDoc, refreshProgramDetectionFromServer]);
 
-  // Initial load from server: merge any stored custom presets with the latest
-  // built-ins, force-overwriting built-in ids when the server's stored version
-  // is older than BUILTIN_TOOLBAR_PRESETS_VERSION.
+  // Initial load from server: apply versioned built-in migrations and preserve
+  // user presets. Version 19 only adds the missing TraeX shortcut.
   useEffect(() => {
     let cancelled = false;
     (async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDesktopToolbarPresetOptions,
   createDefaultToolbarPresets,
+  materializeToolbarPresets,
   sanitizeToolbarPresets,
   type ToolbarPresetDefinition,
 } from './mobileKeyboardPresets';
@@ -79,5 +80,48 @@ describe('toolbar preset desktop visibility', () => {
       { id: 'default', label: 'Base' },
       { id: 'claude', label: 'Claude' },
     ]);
+  });
+});
+
+describe('TraeX Shift+Left preset migration', () => {
+  it('includes the shortcut and enough default slots', () => {
+    const traex = createDefaultToolbarPresets().find(preset => preset.id === 'traex')!;
+    expect(traex.actions[0]).toEqual({ id: 'traex-shift-left', label: '⇧←', sequence: '\x1b[1;2D' });
+    expect(traex.rowLayout).toEqual([traex.actions.length + 1]);
+  });
+
+  it('adds only the missing shortcut to version 18, keeping customized presets intact', () => {
+    const stored = createDefaultToolbarPresets();
+    const traex = stored.find(preset => preset.id === 'traex')!;
+    traex.actions = [{ id: 'mine', label: 'My command', sequence: '/mine' }];
+    traex.label = 'My Trae';
+    traex.programs = ['my-trae'];
+    traex.rowLayout = [4, 4];
+    traex.showOnDesktop = false;
+    stored.find(preset => preset.id === 'codex')!.actions = [{ id: 'custom', label: 'Keep me', sequence: 'hello' }];
+    const migrated = materializeToolbarPresets(stored, 18);
+    expect(migrated.find(preset => preset.id === 'traex')).toEqual({
+      ...traex,
+      actions: [{ id: 'traex-shift-left', label: '⇧←', sequence: '\x1b[1;2D' }, ...traex.actions],
+    });
+    expect(migrated.filter(preset => preset.id !== 'traex')).toEqual(stored.filter(preset => preset.id !== 'traex'));
+    expect(materializeToolbarPresets(migrated, 18)).toEqual(migrated);
+  });
+
+  it('fits the previous default row and preserves an equivalent user shortcut', () => {
+    const stored = createDefaultToolbarPresets();
+    const traex = stored.find(preset => preset.id === 'traex')!;
+    traex.rowLayout = [6];
+    traex.actions.shift();
+    expect(materializeToolbarPresets(stored, 18).find(preset => preset.id === 'traex')?.rowLayout).toEqual([7]);
+    traex.actions.unshift({ id: 'my-shift-left', label: 'Select', sequence: '\\u001b[1;2D' });
+    expect(materializeToolbarPresets(stored, 18).find(preset => preset.id === 'traex')).toEqual(traex);
+  });
+
+  it('keeps a deliberate deletion after upgrading and preserves older migration behavior', () => {
+    const stored = createDefaultToolbarPresets();
+    stored.find(preset => preset.id === 'traex')!.actions.shift();
+    expect(materializeToolbarPresets(stored, 19)).toEqual(stored);
+    expect(materializeToolbarPresets(stored, 17).find(preset => preset.id === 'traex')?.actions[0].id).toBe('traex-shift-left');
   });
 });

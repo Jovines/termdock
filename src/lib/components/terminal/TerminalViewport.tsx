@@ -740,7 +740,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const nativeInputHostRef = React.useRef(nativeInputHost);
     nativeInputHostRef.current = nativeInputHost;
     const imeFixedContainingBlockRef = React.useRef<HTMLElement | null | undefined>(undefined);
-    const desktopMouseFocusTimerRef = React.useRef<number | null>(null);
     const imageAddonLoadedRef = React.useRef(false);
     const remainderPxRef = React.useRef(0);
     const webglAddonRef = React.useRef<WebglAddon | null>(null);
@@ -3583,10 +3582,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     React.useEffect(() => {
       return () => {
         cancelAllPendingReasonRafs();
-        if (desktopMouseFocusTimerRef.current !== null) {
-          window.clearTimeout(desktopMouseFocusTimerRef.current);
-          desktopMouseFocusTimerRef.current = null;
-        }
       };
     }, [sessionKey, cancelAllPendingReasonRafs]);
 
@@ -4044,24 +4039,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               if (xtermTextarea) {
                 xtermTextarea.tabIndex = -1;
                 xtermTextarea.setAttribute('aria-hidden', 'true');
-                // 兜底：xterm 内部仍可能用 .focus() 主动拿焦点（比如鼠标点击
-                // 时 SelectionService → Terminal.focus()）。这里挂一个 focus
-                // 监听器，xterm.textarea 一拿到焦点就立即把它转给覆盖层；
-                // 同时让它彻底不参与输入：readonly + 清空 value，确保即使
-                // 某些 IME 抢先把候选词写进去，也不会被 xterm 的 input
-                // handler 捕获并通过 onData 发出。
+                // xterm focuses this helper on mouse down/context menu. A
+                // focus listener redirects too late: the native text-input
+                // context has already visited a readonly field and our real
+                // input has blurred, cancelling composition. Make only the
+                // helper inert; the xterm screen still owns selection/mouse/
+                // wheel events, and the container focuses our editable input
+                // synchronously in the same mouse gesture.
+                xtermTextarea.inert = true;
                 xtermTextarea.setAttribute('readonly', '');
                 xtermTextarea.value = '';
-                const handleXtermTextareaFocus = () => {
-                  focusKeyboardInput(hiddenInputRef.current);
-                };
-                xtermTextarea.addEventListener('focus', handleXtermTextareaFocus);
-                localDisposables.push({
-                  dispose: () => xtermTextarea.removeEventListener('focus', handleXtermTextareaFocus),
-                });
-                // ⚠️ 不设 pointer-events:none：xterm 内部 wheel/mouse 上报
-                // （SGR mouse wheel → tmux copy-mode）会路由到 textarea 上，
-                // 屏蔽 hit-test 会导致触控板两指滚动收不到事件。
               }
             } catch { /* ignored */ }
 
@@ -4664,34 +4651,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         onTouchMoveCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
         onTouchEndCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
         onTouchCancelCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
-        onMouseDown={(event) => {
-          // 桌面：让 xterm 先收到 mousedown 走选择 / 拖拽，rAF 后再把焦点
-          // 转给覆盖 textarea。textarea 自身 pointer-events:none，鼠标事件
-          // 直接落到 xterm canvas，不需要再额外转发。
+        onMouseDownCapture={(event) => {
           if (enableTouchScroll) return;
-          if (event.button !== 0) return;
-          if (desktopMouseFocusTimerRef.current !== null) {
-            window.clearTimeout(desktopMouseFocusTimerRef.current);
-            desktopMouseFocusTimerRef.current = null;
-          }
-          requestAnimationFrame(() => {
-            try {
-              focusKeyboardInput(hiddenInputRef.current);
-            } catch { /* ignored */ }
-          });
-        }}
-        onMouseUp={(event) => {
-          if (enableTouchScroll) return;
-          if (event.button !== 0) return;
-          if (desktopMouseFocusTimerRef.current !== null) {
-            window.clearTimeout(desktopMouseFocusTimerRef.current);
-          }
-          desktopMouseFocusTimerRef.current = window.setTimeout(() => {
-            desktopMouseFocusTimerRef.current = null;
-            try {
-              focusKeyboardInput(hiddenInputRef.current);
-            } catch { /* ignored */ }
-          }, 0);
+          const target = event.target;
+          // Leave overlay buttons/editors to their own focus behavior. Capture
+          // also runs before xterm's forced selection can stop propagation;
+          // its selection/mouse protocol listeners still receive the gesture.
+          if (target !== event.currentTarget && !(target instanceof Element && target.closest('.xterm'))) return;
+          event.preventDefault();
+          const input = hiddenInputRef.current;
+          if (document.activeElement !== input) focusKeyboardInput(input);
         }}
       >
         <TerminalFileDropStatus target={containerRef} />

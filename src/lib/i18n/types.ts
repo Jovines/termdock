@@ -1270,6 +1270,14 @@ export type TranslationDictionary = {
     labelField: string;
     labelPlaceholder: string;
     sequence: string;
+    keyCombo: string;
+    comboKey: string;
+    namedKeys: string;
+    functionKeys: string;
+    characterKeys: string;
+    insertCombo: string;
+    keyComboHint: string;
+    unsupportedCombo: string;
     sequencePlaceholder: string;
     sequenceHint: string;
     doubleTap: string;
