@@ -1,9 +1,10 @@
+import { useSessionPresentations } from '../../stores/useSessionDirectory';
 import { useState } from 'react';
 import { LayoutDashboard, MessageCircle, Pencil, Plus, Search } from 'lucide-react';
 import { collaborationMemberLabel } from '../../collaboration/display';
 import type { CollaborationGroup, OrchestrationSession } from '../../terminal/api';
 
-export function CollaborationGroupLauncher({ groups, sessions, busy, onOpen, onSettings, onCreate }: {
+export function CollaborationGroupLauncher({ groups, sessions: sessionFacts, busy, onOpen, onSettings, onCreate }: {
   groups: CollaborationGroup[];
   sessions: OrchestrationSession[];
   busy: boolean;
@@ -11,8 +12,9 @@ export function CollaborationGroupLauncher({ groups, sessions, busy, onOpen, onS
   onSettings: (id: string, trigger: HTMLButtonElement) => void;
   onCreate: () => void;
 }) {
+  const sessions = useSessionPresentations(sessionFacts);
   const [query, setQuery] = useState('');
-  const rows = groups.filter(group => !query.trim() || `${group.name} ${group.sessionIds.map(id => sessions.find(session => session.sessionId === id)?.name ?? '').join(' ')}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const rows = groups.filter(group => !query.trim() || `${group.name} ${group.sessionIds.map(id => sessions.find(session => session.sessionId === id)?.displayName ?? '').join(' ')}`.toLowerCase().includes(query.trim().toLowerCase()));
   return <section aria-label="协作组列表" className="space-y-3">
     <div className="flex items-start justify-between gap-3">
       <p className="text-xs leading-6 text-muted-foreground">成员消息用于日常交流；看板用于目标、交付与验收。</p>

@@ -1,3 +1,4 @@
+import { focusKeyboardInput } from '../../hooks/nativeKeyboardLayout';
 import { clipboardEventContent, readClipboardContent } from '../../terminal/clipboardContent';
 import { TerminalFileDropStatus } from './TerminalFileDropStatus';
 import {writeTerminalClipboardText as writeClipboardText, copyTmuxTerminalSelection} from '../../terminal/clipboardText';
@@ -8,6 +9,7 @@ import { isWorkspaceActive } from '../../services/workspaceHost';
 import { selectedTarget } from '../../federation/clientScope';
 import { currentSecureClient } from '../../federation/browserIntegration';
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
 import { uploadTerminalClipboardFiles, uploadTerminalClipboardImage } from '../../terminal/clipboardImage';
@@ -334,6 +336,8 @@ export interface TerminalViewportProps {
   theme: TerminalTheme;
   className?: string;
   enableTouchScroll?: boolean;
+  /** Real native focus target at the toolbar edge; the canvas keeps its own touch surface. */
+  nativeInputHost?: HTMLElement | null;
   mobileLongPressMode?: 'arrows' | 'copy';
   autoFocus?: boolean;
   /** Current session active and not focus-suspended; distinct from autofocus preference. */
@@ -341,6 +345,10 @@ export interface TerminalViewportProps {
   cursorVisible?: boolean;
   /** Disable animated viewport settling while an initial buffer is restored off-screen. */
   suppressSmoothScroll?: boolean;
+}
+
+function NativeInputPortal({ host, children }: { host: HTMLElement | null; children: React.ReactElement }) {
+  return host ? createPortal(children, host) : children;
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
@@ -671,6 +679,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       theme,
       className,
       enableTouchScroll,
+      nativeInputHost = null,
       mobileLongPressMode = 'arrows',
       autoFocus = true,
       cursorVisible = true,
@@ -729,6 +738,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const flushWritesRef = React.useRef<() => void>(() => {});
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
+    const nativeInputHostRef = React.useRef(nativeInputHost);
+    nativeInputHostRef.current = nativeInputHost;
     const imeFixedContainingBlockRef = React.useRef<HTMLElement | null | undefined>(undefined);
     const desktopMouseFocusTimerRef = React.useRef<number | null>(null);
     const imageAddonLoadedRef = React.useRef(false);
@@ -1509,7 +1520,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         .join(' ');
       sendTerminalSeq(`${escapedPaths} `);
       try {
-        hiddenInputRef.current?.focus({ preventScroll: true });
+        focusKeyboardInput(hiddenInputRef.current);
       } catch {
         // The terminal still receives the paths if focus restoration is denied.
       }
@@ -1637,7 +1648,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     /**
      * 根据 xterm 当前光标位置计算 IME 组合文本锚点。桌面 textarea 会缩成
-     * 1 cell 来定位系统候选窗；移动端 textarea 保持全屏，只复用坐标给独立
+     * 1 cell 来定位系统候选窗；移动端输入可停靠工具栏，只复用坐标给独立
      * composition 可视层。
      */
     const updateImeAnchor = React.useCallback((options?: { repositionFrozen?: boolean }): ImeAnchorState | null => {
@@ -1861,10 +1872,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
 
       try {
-        input.removeAttribute('readonly');
-
+        // A tap is an input request even when DOM focus survived a native
+        // keyboard dismissal. WebKit handles same-element focus without blur.
+        if (nativeInputHostRef.current) {
+          focusKeyboardInput(input);
+          return;
+        }
         const alreadyFocused = typeof document !== 'undefined' && document.activeElement === input;
+        input.removeAttribute('readonly');
         const keyboardGone = alreadyFocused && !isViewportKeyboardLikelyOpen();
+        if (alreadyFocused && !keyboardGone) return;
         const now = nowMs();
         const cooldownMs = now - lastFocusHiddenInputAtRef.current;
         lastFocusHiddenInputAtRef.current = now;
@@ -1891,18 +1908,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       return nowMs() <= keepInputFocusUntilRef.current;
     }, [enableTouchScroll, nowMs]);
 
-    // With the full-size textarea covering the entire terminal, touch events
-    // naturally target the textarea.  touch-action:none on the textarea prevents
+    // Touch events target the canvas touch surface (or the legacy full-size
+    // textarea). touch-action:none on that surface prevents
     // browser scroll/pinch — all custom scroll is handled by useTouchScroll.
-    // We only extend the blur guard so transient touch interactions don't
-    // prematurely report focus loss to the parent component.
+    // Legacy inputs retain their blur guard; native inputs report actual focus
+    // directly and only track touch time to suppress compatibility mousedown.
     const extendBlurGuard = React.useCallback((durationMs: number) => {
-      markInputBlurGuard(durationMs);
+      if (!nativeInputHostRef.current) markInputBlurGuard(durationMs);
       lastTouchInteractionAtRef.current = nowMs();
     }, [markInputBlurGuard, nowMs]);
 
     const prepareMobileInputForTouch = React.useCallback(() => {
-      if (!enableTouchScroll) return;
+      if (!enableTouchScroll || nativeInputHostRef.current) return;
       hiddenInputRef.current?.removeAttribute('readonly');
     }, [enableTouchScroll]);
 
@@ -1917,6 +1934,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, []);
 
     const handleMobilePointerDownCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.pointerType === 'touch' && nativeInputHostRef.current && isHiddenInputFocused() && event.cancelable) event.preventDefault();
       prepareMobileInputForTouch();
       extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
       if (!enableTouchScroll || event.pointerType !== 'touch') {
@@ -1937,7 +1955,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         startY: event.clientY,
         moved: false,
       };
-    }, [dismissMobileCopyPopover, enableTouchScroll, extendBlurGuard, isClipboardUiTarget, mobileCopyPopover, prepareMobileInputForTouch, suppressMobileTapFocus]);
+    }, [dismissMobileCopyPopover, enableTouchScroll, extendBlurGuard, isClipboardUiTarget, isHiddenInputFocused, mobileCopyPopover, prepareMobileInputForTouch, suppressMobileTapFocus]);
 
     const handleMobilePointerMoveCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
       extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
@@ -1989,6 +2007,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const onTapRef = React.useRef(focusHiddenInput);
     onTapRef.current = focusHiddenInput;
     const stableOnTap = React.useCallback((x: number, y: number) => {
+      // Docked native input uses the pointer-up tap owner above in both normal
+      // and tmux modes. Keep the old scroll-hook fallback for legacy inputs.
+      if (nativeInputHostRef.current) return;
       if (shouldSuppressMobileTapFocus()) return;
       onTapRef.current(x, y);
     }, [shouldSuppressMobileTapFocus]);
@@ -2037,13 +2058,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     });
 
     React.useEffect(() => {
-      if (!enableTouchScroll) return;
+      if (!enableTouchScroll || nativeInputHost) return;
       // Prevent iOS magnifying glass on long-press by starting in readonly.
-      // Removed synchronously in focusHiddenInput, restored on blur.
-      hiddenInputRef.current?.setAttribute('readonly', '');
-      const cleanup = setupTouchScroll();
-      return () => { cleanup(); };
-    }, [enableTouchScroll, setupTouchScroll]);
+      // Only the legacy full-canvas input needs this. Gesture listeners have
+      // one lifecycle below, independent of keyboard focus/readonly state.
+      if (!isHiddenInputFocused()) hiddenInputRef.current?.setAttribute('readonly', '');
+    }, [enableTouchScroll, nativeInputHost, isHiddenInputFocused]);
 
     // When the soft keyboard closes, iOS keeps the textarea focused but
     // with the keyboard gone.  A focused textarea — even with keyboard
@@ -2054,7 +2074,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // textarea on keyboard close drops iOS out of that mode so
     // subsequent gestures reach Swiper unmodified.
     React.useEffect(() => {
-      if (!enableTouchScroll) return;
+      // The docked native input is not the canvas touch surface. Its focus
+      // must not be cleared using viewport-height guesses during a scroll.
+      if (!enableTouchScroll || nativeInputHost) return;
 
       let wasOpen = isViewportKeyboardLikelyOpen();
 
@@ -2078,7 +2100,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         window.visualViewport?.removeEventListener('scroll', handleViewportChange);
         document.removeEventListener('termdock:viewport-keyboard-change', handleViewportChange);
       };
-    }, [enableTouchScroll, isViewportKeyboardLikelyOpen]);
+    }, [enableTouchScroll, nativeInputHost, isViewportKeyboardLikelyOpen]);
 
     // Compat mouse event blocking (shared by both modes).
     React.useEffect(() => {
@@ -2098,22 +2120,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const handleCompatMouseCapture = (event: MouseEvent) => {
         if (!shouldBlockCompatMouseEvent(event)) return;
         if (event.cancelable) event.preventDefault();
+        if (nativeInputHostRef.current) return;
         event.stopImmediatePropagation();
         event.stopPropagation();
       };
 
-      container.addEventListener('mousedown', handleCompatMouseCapture, { capture: true, passive: false });
-      container.addEventListener('mouseup', handleCompatMouseCapture, { capture: true, passive: false });
-      container.addEventListener('click', handleCompatMouseCapture, { capture: true, passive: false });
-      document.addEventListener('mouseup', handleCompatMouseCapture, { capture: true, passive: false });
+      const events = nativeInputHost ? ['mousedown'] : ['mousedown', 'mouseup', 'click'];
+      for (const type of events) container.addEventListener(type, handleCompatMouseCapture as EventListener, { capture: true, passive: false });
+      if (!nativeInputHost) document.addEventListener('mouseup', handleCompatMouseCapture, { capture: true, passive: false });
 
       return () => {
-        container.removeEventListener('mousedown', handleCompatMouseCapture, true);
-        container.removeEventListener('mouseup', handleCompatMouseCapture, true);
-        container.removeEventListener('click', handleCompatMouseCapture, true);
-        document.removeEventListener('mouseup', handleCompatMouseCapture, true);
+        for (const type of events) container.removeEventListener(type, handleCompatMouseCapture as EventListener, true);
+        if (!nativeInputHost) document.removeEventListener('mouseup', handleCompatMouseCapture, true);
       };
-    }, [enableTouchScroll, nowMs]);
+    }, [enableTouchScroll, nativeInputHost, nowMs]);
 
     // ---- Tmux-mode touch scroll (registered via GestureManager) ----
     // Priority PRIORITY_TMUX_SCROLL (80) fires AFTER long-press (90) but
@@ -2585,7 +2605,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             s.mode = 'adjust';
             longPressGestureBlocksScrollRef.current = true;
             suppressMobileTapFocus(1800);
-            hiddenInputRef.current?.setAttribute('readonly', '');
+            if (!nativeInputHostRef.current) hiddenInputRef.current?.setAttribute('readonly', '');
             stopAllScroll();
             tmuxStopRaf();
             hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
@@ -2670,10 +2690,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             s.mode = 'copy';
             longPressGestureBlocksScrollRef.current = true;
             suppressMobileTapFocus(1800);
-            // pointerdown capture 里 prepareMobileInputForTouch 已摘掉
-            // readonly，长按期间 textarea 处于可编辑态，iOS 会弹放大镜。
-            // 进入框选即恢复 readonly 屏蔽 loupe（下一次正常点按会重新摘掉）。
-            hiddenInputRef.current?.setAttribute('readonly', '');
+            // Only the legacy full-canvas textarea needs loupe suppression.
+            // The docked input is outside the gesture and must stay editable.
+            if (!nativeInputHostRef.current) hiddenInputRef.current?.setAttribute('readonly', '');
             s.copyStart = start;
             s.copyDidSelect = false;
             stopAllScroll();
@@ -3991,7 +4010,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             // 直接 set 进 xterm.textarea.value，xterm 通过 input 事件读取再
             // 调 onData 发给 PTY，完全绕开我们的 diff-sync 路径。
             if (!enableTouchScroll) {
-              hiddenInputRef.current?.focus({ preventScroll: true });
+              focusKeyboardInput(hiddenInputRef.current);
             } else {
               terminal.focus();
             }
@@ -4034,7 +4053,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 xtermTextarea.setAttribute('readonly', '');
                 xtermTextarea.value = '';
                 const handleXtermTextareaFocus = () => {
-                  hiddenInputRef.current?.focus({ preventScroll: true });
+                  focusKeyboardInput(hiddenInputRef.current);
                 };
                 xtermTextarea.addEventListener('focus', handleXtermTextareaFocus);
                 localDisposables.push({
@@ -4305,7 +4324,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (autoFocusRef.current) {
         const touchEnabled = enableTouchScrollRef.current;
         if (!touchEnabled) {
-          hiddenInputRef.current?.focus({ preventScroll: true });
+          focusKeyboardInput(hiddenInputRef.current);
         } else {
           terminal.focus();
         }
@@ -4446,7 +4465,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           // 桌面 xterm：与 init / session-reset 一致，焦点统一交给覆盖层 textarea，
           // 否则 IME 会抢到 xterm.textarea 上绕开 diff-sync。
-          hiddenInputRef.current?.focus({ preventScroll: true });
+          focusKeyboardInput(hiddenInputRef.current);
         },
         blur: () => {
           const input = hiddenInputRef.current;
@@ -4454,7 +4473,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (input && typeof document !== 'undefined' && document.activeElement === input) {
             input.blur();
           }
-          if (enableTouchScrollRef.current) {
+          if (enableTouchScrollRef.current && !nativeInputHostRef.current) {
             input?.setAttribute('readonly', '');
           }
           inputFocusHandlerRef.current?.(false);
@@ -4647,7 +4666,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           requestAnimationFrame(() => {
             try {
-              hiddenInputRef.current?.focus({ preventScroll: true });
+              focusKeyboardInput(hiddenInputRef.current);
             } catch { /* ignored */ }
           });
         }}
@@ -4660,7 +4679,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           desktopMouseFocusTimerRef.current = window.setTimeout(() => {
             desktopMouseFocusTimerRef.current = null;
             try {
-              hiddenInputRef.current?.focus({ preventScroll: true });
+              focusKeyboardInput(hiddenInputRef.current);
             } catch { /* ignored */ }
           }, 0);
         }}
@@ -4773,7 +4792,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         {/* Terminal content - only show when ready */}
         {loadingState === 'ready' && (
           <>
-            <textarea
+            {enableTouchScroll && nativeInputHost && <button type="button" tabIndex={-1} aria-label={t('terminal.input')}
+              data-terminal-touch-surface="true"
+              // A real form control also avoids WebKit's native large-area
+              // tap-to-dismiss path, which runs outside DOM preventDefault.
+              className="absolute inset-0 z-20 touch-none select-none border-0 bg-transparent p-0 outline-none" />}
+            <NativeInputPortal host={enableTouchScroll ? nativeInputHost : null}><textarea
               ref={hiddenInputRef}
               onCopy={event=>{event.preventDefault();void copySelection(event.clipboardData);}}
               aria-label={t('terminal.input')}
@@ -4798,7 +4822,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 padding: 0,
                 margin: 0,
                 outline: 'none',
-                ...(enableTouchScroll
+                ...(enableTouchScroll && nativeInputHost
+                  ? {
+                      // Stay visually transparent without opacity:0: WebKit
+                      // must perform its native keyboard/accessory avoidance.
+                      left: 2, right: 2, bottom: 0, height: 16,
+                      opacity: 1, pointerEvents: 'none', fontSize: '16px',
+                      lineHeight: '16px', WebkitTextFillColor: 'transparent',
+                    } as React.CSSProperties
+                  : enableTouchScroll
                   ? {
                       // 移动端：覆盖整个终端，触控走 textarea，键盘走 textarea。
                       inset: 0,
@@ -4882,6 +4914,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 inputFocusHandlerRef.current?.(true);
               }}
               onBlur={(event) => {
+                if (nativeInputHostRef.current) {
+                  cancelImeComposition(event.currentTarget);
+                  inputFocusHandlerRef.current?.(false);
+                  return;
+                }
                 if (!enableTouchScroll) {
                   cancelImeComposition(event.currentTarget);
                 }
@@ -4910,6 +4947,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
 
                 window.setTimeout(() => {
+                  if (nativeInputHostRef.current) return;
                   if (isHiddenInputFocused()) {
                     return;
                   }
@@ -5259,7 +5297,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 syncTextareaToPty(event.currentTarget);
                 releaseImeAnchor();
               }}
-            />
+            /></NativeInputPortal>
 
             {imeComposition.active && (() => {
               const metrics = getImeOverlayMetrics(imeComposition.text);

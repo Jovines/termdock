@@ -2,13 +2,13 @@ import type { ShareResources } from '../../server/shared/shareResources';
 
 export type SessionCapability = 'session.view' | 'session.input' | 'session.resize'
   | 'session.owner-menu' | 'session.share' | 'todo.guidance'
-  | 'resource.android' | 'resource.computer' | 'resource.files';
+  | 'resource.android' | 'resource.computer' | 'resource.files' | 'collaboration.mention';
 export type SessionCapabilities = ReadonlySet<SessionCapability>;
 export const NO_SESSION_CAPABILITIES: SessionCapabilities = new Set();
 /** Only the full service UI receives owner capabilities. Never use in a shared view. */
 export const SERVICE_SESSION_CAPABILITIES: SessionCapabilities = new Set<SessionCapability>([
   'session.view', 'session.input', 'session.resize', 'session.owner-menu', 'session.share', 'todo.guidance',
-  'resource.android', 'resource.computer', 'resource.files',
+  'resource.android', 'resource.computer', 'resource.files', 'collaboration.mention',
 ]);
 export function sharedResourceTabs(resources: ShareResources): Array<'android' | 'computer' | 'files'> {
   const tabs: Array<'android' | 'computer' | 'files'> = [];

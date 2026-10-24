@@ -23,7 +23,7 @@ vi.mock('../../federation/clientScope', () => federation);
 vi.mock('../../collaboration/inputTarget', () => ({ routeCollaborationInput: vi.fn(() => false) }));
 vi.mock('../../desktop/nativeBridge', () => ({ getTermdockDesktopBridge: () => desktop.bridge, subscribeNativeFileDrops: vi.fn(() => () => {}) }));
 vi.mock('../../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
-vi.mock('../../hooks/useTouchScroll', () => ({ useTouchScroll: () => ({ setupTouchScroll: vi.fn(), stopAllScroll: vi.fn() }) }));
+vi.mock('../../hooks/useTouchScroll', () => ({ useTouchScroll: () => ({ setupTouchScroll: vi.fn(() => () => {}), stopAllScroll: vi.fn() }) }));
 vi.mock('../../hooks/useGesture', () => ({ useGesture: vi.fn() }));
 vi.mock('../../terminal/resizePresentation', () => ({ createResizePresentation: () => presentation }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
@@ -287,6 +287,60 @@ describe('TerminalViewport async paste ownership', () => {
     const view = render(<TerminalViewport {...props} />);
     return { ...view, props };
   }
+
+  it('keeps the native toolbar input wired to the same terminal paste owner', async () => {
+    const host = document.createElement('div'); document.body.append(host);
+    const onInput = vi.fn().mockResolvedValue(true), controller = createRef<TerminalController>();
+    const props = { sessionKey: 'native-dock', sessionId: 'native-dock', getPasteOwnerKey: () => 'backend-native', chunks: [], onInput, onResize: vi.fn(), terminalSettings: { rendererMode: 'dom' } as never, theme: {} as never, autoFocus: false };
+    const view = render(<TerminalViewport {...props} ref={controller} enableTouchScroll nativeInputHost={host} />);
+    await waitFor(() => expect(host.querySelector('textarea')).not.toBeNull());
+    const input = host.querySelector('textarea')!;
+    expect(input.style.opacity).toBe('1');
+    expect(input.readOnly).toBe(false);
+    expect(view.container.querySelector('[data-terminal-touch-surface]')).not.toBeNull();
+    act(() => controller.current!.focus());
+    expect(document.activeElement).toBe(input);
+    fireEvent.paste(input, { clipboardData: { files: [], items: [], getData: () => 'native paste' } });
+    await waitFor(() => expect(onInput).toHaveBeenCalledWith('native paste', expect.anything()));
+    act(() => controller.current!.blur());
+    expect(document.activeElement).not.toBe(input);
+    expect(input.readOnly).toBe(false);
+    view.unmount(); expect(host.querySelector('textarea')).toBeNull(); host.remove();
+  });
+
+  it('does not blur a native input when viewport data claims the keyboard closed', async () => {
+    const previousStyle = document.documentElement.getAttribute('style');
+    const viewport = Object.assign(new EventTarget(), { height: 500, offsetTop: 0 });
+    vi.stubGlobal('visualViewport', viewport);
+    document.documentElement.style.setProperty('--kb-height', '344px');
+    document.documentElement.style.setProperty('--app-base-vh', '844px');
+    const host = document.createElement('div'); document.body.append(host);
+    const controller = createRef<TerminalController>();
+    const props = { sessionKey: 'native-keep-focus', sessionId: 'native-keep-focus', chunks: [], onInput: vi.fn(), onResize: vi.fn(), terminalSettings: { rendererMode: 'dom' } as never, theme: {} as never, autoFocus: false };
+    const view = render(<TerminalViewport {...props} ref={controller} enableTouchScroll nativeInputHost={host} />);
+    try {
+      await waitFor(() => expect(host.querySelector('textarea')).not.toBeNull());
+      const input = host.querySelector('textarea')!;
+      act(() => controller.current!.focus());
+      const blur = vi.spyOn(input, 'blur'), focus = vi.spyOn(input, 'focus');
+      act(() => {
+        document.documentElement.style.setProperty('--kb-height', '0px');
+        viewport.height = 844;
+        viewport.dispatchEvent(new Event('scroll'));
+      });
+      expect(document.activeElement).toBe(input);
+      expect(blur).not.toHaveBeenCalled(); expect(focus).not.toHaveBeenCalled();
+      expect(input.readOnly).toBe(false);
+      view.rerender(<TerminalViewport {...props} ref={controller} enableTouchScroll nativeInputHost={host} onMobilePasteResult={() => {}} />);
+      expect(document.activeElement).toBe(input);
+      expect(input.readOnly).toBe(false);
+      expect(blur).not.toHaveBeenCalled(); expect(focus).not.toHaveBeenCalled();
+    } finally {
+      view.unmount(); host.remove();
+      if (previousStyle === null) document.documentElement.removeAttribute('style');
+      else document.documentElement.setAttribute('style', previousStyle);
+    }
+  });
 
   it('Web CmdC copies a remote terminal selection to the client without sending CtrlC',async()=>{
     const writeClipboardText=vi.fn(async()=>{}),onInput=vi.fn();desktop.bridge={writeClipboardText};

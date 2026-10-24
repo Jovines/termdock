@@ -7,6 +7,18 @@ export interface SessionDisplaySource {
   promptState?: 'idle' | 'running' | null; agent?: { displayName?: string; slug?: string } | null;
 }
 export interface SessionPresentation { displayName: string; displaySubtitle: string | null }
+/** Inventory/peer payloads carry an already resolved title; legacy payloads used `name`. */
+export interface SessionPresentationSnapshot {
+  sessionId?: string | null; name: string; displayName?: string; displaySubtitle?: string | null;
+  agent?: SessionDisplaySource['agent'];
+}
+
+export function getSessionSnapshotPresentation(session: SessionPresentationSnapshot): SessionPresentation {
+  if (session.displayName?.trim()) return { displayName: session.displayName, displaySubtitle: session.displaySubtitle ?? null };
+  // Do not re-project a legacy display name against cwd/program metadata. Those
+  // fields are context, not a replacement for a title resolved by its owner.
+  return getSessionPresentation({ name: session.name, sessionId: session.sessionId, agent: session.agent });
+}
 
 export const DEFAULT_SESSION_DISPLAY_SHELL_NAMES = new Set([
   'bash',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collaborationSessionDisplayName, getSessionDisplayName } from './sessionDisplayName';
+import { collaborationSessionDisplayName, getSessionDisplayName, getSessionSnapshotPresentation } from './sessionDisplayName';
 
 describe('collaboration directory display names', () => {
   it('retains user and generated titles even when an Agent is running', () => {
@@ -18,5 +18,11 @@ describe('collaboration directory display names', () => {
     expect(collaborationSessionDisplayName({ name: '审查登录体验', customName: true })).toBe('审查登录体验');
     expect(collaborationSessionDisplayName({ name: 'tmux:wt-abc', agent: { displayName: 'Codex' } })).toBe('Codex');
     expect(collaborationSessionDisplayName({ name: 'tmux:wt-abc', cwd: '/home/qiao/project', activeProgram: 'zsh' })).toBe('project');
+  });
+  it('reads projected snapshots without treating the compatibility name or directory as a new title source', () => {
+    const snapshot = { sessionId: 'one', name: 'repo', cwd: '/repo', displayName: '完整任务标题', displaySubtitle: 'repo' };
+    expect(getSessionSnapshotPresentation(snapshot)).toEqual({ displayName: '完整任务标题', displaySubtitle: 'repo' });
+    expect(getSessionSnapshotPresentation({ ...snapshot, displayName: undefined, name: '旧版完整任务标题' }).displayName).toBe('旧版完整任务标题');
+    expect(getSessionSnapshotPresentation({ name: 'remote:node:one', sessionId: 'remote:node:one' }).displayName).toBe('终端会话');
   });
 });

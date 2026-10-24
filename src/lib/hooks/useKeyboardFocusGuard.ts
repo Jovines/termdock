@@ -1,7 +1,8 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { isIOSDevice } from '../utils/touchTerminalLayout';
 
-/** Terminal focuses a transparent textarea, avoiding WebKit's native page pan.
+/** Legacy focus guard: do not enable in the native iOS keyboard layout.
+ * It intentionally suppresses WebKit's native page pan.
  * Keep this editor transparent until that same keyboard layout has settled;
  * a visual mirror preserves the draft without changing the real input/IME.
  * Opt in only for visible editors in the shared keyboard panel layout. Render

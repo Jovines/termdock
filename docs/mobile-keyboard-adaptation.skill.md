@@ -1,16 +1,11 @@
-# Mobile Keyboard Adaptation — 仓库开发检查表
+# Mobile Keyboard Adaptation — 开发检查表
 
-本文件是仓库开发说明。当前权威设计与示例见 [移动端软键盘布局](soft-keyboard-adaptation.md)，不要沿用旧版“根节点随键盘缩高 / 强制 scrollTo / resizes-content”的建议。
+权威规则与示例见 [移动端软键盘布局](soft-keyboard-adaptation.md)。
 
-新增或修改移动输入工作区时：
-
-1. 确认属于全高工作区；普通弹窗先保持系统默认行为。
-2. 使用 `getKeyboardPanelStyles`，导航在外，内容和底部栏处于同一 flex 流。
-3. rootStyle 与 contentStyle 配对，内容 `min-h-0 flex-1`，底部栏 `shrink-0`。
-4. 确认只有一层负责补偿；共享分屏遵循文档的现有 portal 例外。
-5. 只消费应用已有视口变量与键盘状态，不添加业务页面高度监听。
-6. 同类 iOS 可见编辑器需要时使用 `useKeyboardFocusGuard`，配无障碍隐藏的草稿镜像。
-7. 运行 `npm run test:keyboard-layout`，涉及终端再跑两组终端 geometry 测试。
-8. 检查桌面、移动端、重复开合、草稿/选区/中文输入、阅读位置。浏览器模拟不作为实机通过。
-
-几何机制、适用边界和排障入口统一维护在上述设计文档中。
+1. iOS 的输入位置由原生 focus 决定；不要加键盘高度平移，也不要启用透明焦点保护或 preventScroll。
+2. root/内容/工具栏使用共享布局；系统缩小布局时自然收缩，系统平移时只补偿顶部与内容。
+3. 位置来源是 DOM 实际位移，不是 visualViewport.height；业务组件不另建高度监听。
+4. 同一祖先链只补偿一次；分屏在父内容层补偿，子终端退出。原生输入宿主保持挂载。
+5. grid 副本撑高输入框，避免重置真实高度。空态顶部锚定，旧消息阅读位置稳定。
+6. 保留内部原生滚动，用触摸边界阻止拖动页面，不在事后 scrollTo 纠偏。
+7. 跑 test:keyboard-layout；涉及终端再跑两组 geometry 检查。浏览器测试不代表实机验收。

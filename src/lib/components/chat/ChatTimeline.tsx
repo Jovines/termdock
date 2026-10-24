@@ -5,6 +5,9 @@ import { parseChatContent, type ChatReference } from './chatReferences';
 import { ChatMessageViewport } from './ChatMessageViewport';
 import { ChatMarkdown } from './ChatMarkdown';
 import { getChatRichContent } from './chatRenderers';
+import { parseChatDraft } from './chatComposerContent';
+import { ChatAttachmentCards } from './ChatAttachmentCards';
+import { ChatDraftText } from './ChatDraftText';
 export const chatTime = (at: number) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const builtInIcons = new Set(['amp', 'claude', 'codex', 'copilot', 'cursor', 'droid', 'gemini', 'goose', 'grok', 'kimi', 'opencode']);
 export function ChatAgentLabel({ name, slug }: { name: string; slug?: string }) {
@@ -19,7 +22,8 @@ export function ChatReferenceCard({ reference, onRemove }: { reference: ChatRefe
 }
 export function ChatUserContent({ content }: { content: string }) {
   const parsed = parseChatContent(content);
-  return <>{parsed.reference && <ChatReferenceCard reference={parsed.reference} />}<p className="whitespace-pre-wrap break-words text-[15px] leading-7 sm:text-base">{parsed.text}</p></>;
+  const draft = parseChatDraft(parsed.text);
+  return <>{parsed.reference && <ChatReferenceCard reference={parsed.reference} />}<ChatAttachmentCards files={draft.attachments} />{draft.text && <p className="whitespace-pre-wrap break-words text-[15px] leading-7 sm:text-base"><ChatDraftText text={draft.text} files={draft.attachments} mentions={draft.mentions} /></p>}</>;
 }
 export function ChatUserMessage({ content, createdAt, status, messageId, actionsOpen, children }: { content: string; createdAt: number; status: string; messageId?: string; actionsOpen?: boolean; children?: ReactNode }) {
   return <article data-chat-turn="user" data-chat-message={messageId} data-actions-open={actionsOpen || undefined} className="ml-auto flex w-fit max-w-[88%] flex-col items-end sm:max-w-[85%]">

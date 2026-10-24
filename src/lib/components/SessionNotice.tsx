@@ -4,9 +4,9 @@ import { ArrowUpRight, BellDot, X } from 'lucide-react';
 import { subscribeClientState, type ControlSessionNoticeEvent } from '../utils/clientStateSync';
 import { savedConnection } from '../federation/browserIntegration';
 import { useSessionNoticeStore } from '../stores/useSessionNoticeStore';
-import { readCachedSessionPersistenceSnapshot } from '../hooks/useSessionPersistence';
-import { getSessionPresentation } from '../terminal/display';
-import { useTerminalStore, getCachedShellTitle } from '../stores/useTerminalStore';
+import { getSessionDirectorySnapshot } from '../stores/useSessionDirectory';
+import { getSessionSnapshotPresentation } from '../terminal/display';
+import { useTerminalStore } from '../stores/useTerminalStore';
 import { getWorkspaceHost, isWorkspaceActive, WORKSPACE_VISIBILITY_EVENT } from '../services/workspaceHost';
 import { useI18n } from '../i18n';
 
@@ -38,12 +38,8 @@ export function SessionNoticeBridge() {
     const targetPeerId = savedConnection()?.targetPeerId;
     const host = getWorkspaceHost();
     const root = window.parent;
-    const session = readCachedSessionPersistenceSnapshot().sessions.find(item => item.sessionId === event.sessionId);
-    const terminal = useTerminalStore.getState().sessions.get(event.sessionId);
-    const shellTitle = terminal?.shellTitle ?? session?.shellTitle ?? getCachedShellTitle(event.sessionId);
-    const sessionName = getSessionPresentation({ ...(session ?? { name: event.sessionName }),
-      activeProgram: terminal?.activeProgram ?? session?.activeProgram, cwd: terminal?.cwd ?? session?.cwd, shellTitle,
-      promptState: terminal?.promptState, agent: terminal?.agent ?? session?.agent }).displayName;
+    const sessionName = getSessionDirectorySnapshot().find(session => session.sessionId === event.sessionId)?.displayName
+      ?? getSessionSnapshotPresentation({ sessionId: event.sessionId, name: event.sessionName }).displayName;
     const detail: Notice = { ...event, sessionName, key: `${targetPeerId ?? 'local'}:${event.id}`, open: () => {
       if (targetPeerId && host) return host.focusSession(targetPeerId, event.sessionId);
       window.dispatchEvent(new CustomEvent('termdock:focus-session', { detail: event.sessionId }));

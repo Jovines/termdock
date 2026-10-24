@@ -23,5 +23,10 @@ it('keeps chat and terminal on the shared layout and focus implementation', () =
   const chat = readFileSync(`${components}/chat/SessionChatView.tsx`, 'utf8');
   expect(chat).toContain('style={keyboardLayout.contentStyle}');
   expect(chat).toContain('useKeyboardFocusGuard(input,');
-  expect(chat).toContain('inputMasked &&');
+  expect(chat).toContain('!usesNativeKeyboardLayout()');
+  expect(chat).toContain('session-chat-input-sizer');
+  expect(chat).toContain("inputMasked ? '' : 'invisible'");
+  const terminal = readFileSync(`${components}/views/TerminalView.tsx`, 'utf8');
+  expect(terminal).toContain('nativeInputHost={');
+  expect(terminal).toContain('data-native-terminal-input-host');
 });

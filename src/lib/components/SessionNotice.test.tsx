@@ -11,8 +11,17 @@ import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSessionNoticeStore } from '../stores/useSessionNoticeStore';
 import { SessionNoticeUnreadBadge } from './SessionNoticeUnreadBadge';
 import { SessionNoticeBridge, SessionNoticeCenter } from './SessionNotice';
-afterEach(() => { cleanup(); useSessionNoticeStore.setState({ unread: {}, viewing: null }); state.active = true; vi.clearAllMocks(); state.focus.mockReturnValue(true); });
+import { getSessionDirectorySnapshot, useSessionDirectoryStore } from '../stores/useSessionDirectory';
+afterEach(() => { cleanup(); useSessionDirectoryStore.getState().replace([]); useSessionNoticeStore.setState({ unread: {}, viewing: null }); state.active = true; vi.clearAllMocks(); state.focus.mockReturnValue(true); });
 const event = { type: 'session-notice' as const, id: 'notice-1', sessionId: 'source-session', sessionName: '编译任务', message: '<script>progress</script>', createdAt: 1 };
+
+it('takes the same current title as the sidebar even when the notification snapshot is stale', () => {
+  useSessionDirectoryStore.getState().replace([{ sessionId: event.sessionId, name: '侧栏当前完整标题', customName: true, cwd: '/repo', lastActivity: 1 }]);
+  render(<><SessionNoticeCenter /><SessionNoticeBridge /></>);
+  act(() => { state.listener!({ ...event, sessionName: 'repo' }); });
+  expect(screen.getByText(getSessionDirectorySnapshot()[0].displayName)).toBeTruthy();
+  expect(screen.queryByText('repo')).toBeNull();
+});
 
 it('shows progress without changing the active session, deduplicates, then focuses its source on click', () => {
   render(<><SessionNoticeCenter /><SessionNoticeBridge /></>);

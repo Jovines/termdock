@@ -109,17 +109,36 @@
 
 ## 移动端软键盘布局
 
-- 全高输入工作区复用 `src/lib/components/layout/keyboardPanelLayout.ts` 的
-  `getKeyboardPanelStyles`：导航在补偿容器外，rootStyle 给 flex-col 外层，
-  contentStyle 给 `min-h-0 flex-1` 内容层，输入/工具栏为 `shrink-0` 兄弟。
-- 唯一视口计算源是 `useViewportHeight`；业务组件禁止复制键盘高度监听、CSS
-  补偿公式、根高度模式切换、viewport meta 切换或键盘动画期间 scrollTo 复位。
-- 同一条祖先链只补偿一次。现有共享分屏保留父级平移与工具栏 portal 的特殊
-  布局，子终端必须禁用自身补偿；不要将该特殊用法用于新页面。
-- 同类 iOS 可见输入框按需用 `useKeyboardFocusGuard`，遮罩期间必须配
-  `aria-hidden` / `pointer-events-none` 草稿镜像。普通弹窗优先使用原生布局。
+- iOS 的输入位置交给原生 focus 避让；用 `focusKeyboardInput` 聚焦，不对真实
+  输入框启用透明焦点保护、preventScroll 或按键盘高度平移。非 iOS 保留共享兼容路径。
+- 工作区复用 `getKeyboardPanelStyles`：原生模式只给 `min-h-0 flex-1` 内容层
+  应用实际页面位移补偿，输入栏保持正常布局。顶部 chrome 按同一位移固定。
+  根布局使用 CSS viewport 单位，不由 visualViewport.height 决定原生输入位置。
+- `useViewportHeight` 是共享控制器；`measureNativePagePan` 只测 DOM 实际位移，
+  包含同源保留工作区的 frame 位移。业务组件不得另算键盘高度/复制补偿公式。
+- Terminal 的原生输入节点留在底部工具栏宿主，文字透明但 opacity 保持 1；
+  画布触摸层与输入节点分离。分屏只在父内容层补偿一次，子终端禁用自身补偿。
+  切换工具栏所有者时保留输入宿主，不因隐藏按钮而销毁其 DOM。
+- 增高编辑器使用 grid 文本副本撑高，不反复重置真实 textarea 高度。空态按
+  顶部定位，不跟随消息末尾滚动；用 `useTouchScrollBoundary` 保留内部原生
+  滚动并阻止向页面传递边界手势。不得在手势后强制 scrollTo 复位。
+- 键盘打开时滚动内容须保留原聚焦节点，禁止失焦后重新 focus 补救。聊天列表
+  使用 `usePreserveInputFocus` 拦截兼容鼠标事件的默认抢焦点动作，不取消原生
+  touchmove；终端画布采用自定义滚动，原生触摸层用真实 button，按工具栏
+  的 pointerdown 方式阻止默认抢焦点。大 div 即使 preventDefault，仍可能被
+  WebKit 原生的大区域点击手势收键盘。原生终端不因视口变化主动 blur、
+  点击已聚焦输入时重试 blur/focus，或将已聚焦输入改成 readonly。
+- 会话 Swiper 复用 `SESSION_SWIPER_FOCUSABLE_ELEMENTS`，将 Terminal 和聊天
+  输入排除出它的主动 blur 策略。`touchStartPreventDefault={false}` 和内层
+  preventDefault 都不能阻止 Swiper 在触摸开始/移动时直接调用 blur；保焦
+  浏览器回归必须包含真实 Swiper 外层，不能只挂载 Terminal/聊天组件。
+- 原生 Terminal 输入不使用旧全屏 textarea 的 readonly、失焦延迟和双 tap
+  回调；滚动手势只初始化一次。点击同步对同一输入调用 focus，不依据
+  activeElement/键盘高度跳过，不先 blur，不切换节点；WebKit 会处理同节点
+  focus 与已关闭的输入视图。系统菜单不另加手动失焦/恢复流程。测试区分
+  focus 方法请求与真正的 focus/blur 事件，不能断言“已聚焦就不得调用 focus”。
 - 修改后运行 `npm run test:keyboard-layout`；涉及终端入口再运行下述两组
-  geometry 检查。自动化不替代 iOS 实机验收。设计与示例见
+  geometry 检查。浏览器模拟不替代 iOS 实机验收。示例与边界见
   [docs/soft-keyboard-adaptation.md](docs/soft-keyboard-adaptation.md)。
 
 ## 终端尺寸架构

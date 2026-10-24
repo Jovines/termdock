@@ -2,6 +2,7 @@ import { viewportWindow } from '../services/workspaceViewport';
 import React from 'react';
 import { createDebugLogger } from '../utils/debug';
 import { isIOSDevice, usesTouchTerminalLayout } from '../utils/touchTerminalLayout';
+import { measureNativePagePan, usesNativeKeyboardLayout } from './nativeKeyboardLayout';
 
 interface UseViewportHeightOptions {
   cssVarName?: string;
@@ -163,6 +164,8 @@ export function syncInitialViewportCssVars(cssVarName = '--app-vh'): void {
   document.documentElement.dataset.termdockTouchViewport = String(
     usesTouchTerminalLayout() || viewportWindow().innerWidth <= 768,
   );
+  document.documentElement.dataset.termdockNativeKeyboard = String(usesNativeKeyboardLayout());
+  document.documentElement.dataset.termdockNativePan = 'false';
   document.documentElement.dataset.termdockIpadPwa = String(
     document.documentElement.dataset.termdockPwaStatusBar === 'default' && isStandaloneDisplay(),
   );
@@ -174,7 +177,9 @@ export function syncInitialViewportCssVars(cssVarName = '--app-vh'): void {
   const visibleHeight = visualViewportHeightUsable
     ? Math.min(layoutHeight, visualViewportHeight + visualViewportOffsetTop)
     : layoutHeight;
-  const baseHeight = Math.max(layoutHeight, visibleHeight);
+  // offsetTop describes a pan, not additional layout height. Persisting it in
+  // the base would carry that displacement into later keyboard sessions.
+  const baseHeight = Math.max(layoutHeight, visualViewportHeightUsable ? visualViewportHeight : layoutHeight);
   const style = document.documentElement.style;
 
   style.setProperty(cssVarName, `${Math.max(visibleHeight, MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)}px`);
@@ -185,6 +190,7 @@ export function syncInitialViewportCssVars(cssVarName = '--app-vh'): void {
   style.setProperty('--kb-translate-y', '0px');
   style.setProperty('--kb-margin-top', '0px');
   style.setProperty('--kb-height', '0px');
+  style.setProperty('--app-native-pan', '0px');
 
   const safeAreaFallback = getIOSStandaloneSafeAreaFallback();
   if (safeAreaFallback.top > 0) style.setProperty('--safe-top-inset', `${safeAreaFallback.top}px`);
@@ -318,10 +324,10 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     const updateBaseHeight = (
       currentWidth: number,
       currentInnerHeight: number,
-      currentVisualBottom: number,
+      currentVisualHeight: number,
       previousKeyboardHeight: number,
     ) => {
-      const candidateBaseHeight = Math.max(currentInnerHeight, currentVisualBottom);
+      const candidateBaseHeight = Math.max(currentInnerHeight, currentVisualHeight);
       if (baseHeightRef.current === 0) {
         baseHeightRef.current = candidateBaseHeight;
         lastWidthRef.current = currentWidth;
@@ -340,6 +346,10 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     const syncViewportHeight = (source = 'event') => {
       rafId = null;
+      document.documentElement.dataset.termdockNativeKeyboard = String(usesNativeKeyboardLayout());
+      const nativePan = usesNativeKeyboardLayout() ? measureNativePagePan() : 0;
+      document.documentElement.style.setProperty('--app-native-pan', `${nativePan}px`);
+      document.documentElement.dataset.termdockNativePan = String(nativePan > 0);
       document.documentElement.dataset.termdockTouchViewport = String(
         usesTouchTerminalLayout() || viewportWindow().innerWidth <= 768,
       );
@@ -354,9 +364,12 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       const visualBottom = Math.max(0, rawViewportHeight + nextOffsetTop);
       const safeAreaInsets = syncSafeAreaInsets();
       const safeBottom = safeAreaInsets.bottom;
-      const previousKeyboardHeight = Math.max(0, baseHeightRef.current - visualBottom - safeBottom);
+      // Native focus can pan almost to the old viewport bottom while the
+      // keyboard is still open. Adding offsetTop here misclassifies that as
+      // closed and overwrites the stable base with a panned keyboard viewport.
+      const previousKeyboardHeight = Math.max(0, baseHeightRef.current - rawViewportHeight - safeBottom);
 
-      updateBaseHeight(currentWidth, innerHeight, visualBottom, previousKeyboardHeight);
+      updateBaseHeight(currentWidth, innerHeight, rawViewportHeight, previousKeyboardHeight);
 
       setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
 
@@ -462,7 +475,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
         const viewport = owner.visualViewport;
         const measurement = [owner.innerWidth, owner.innerHeight, viewport?.width,
           viewport?.height, viewport?.offsetTop, viewport?.offsetLeft,
-          document.visibilityState, hasFocusedEditableElement()].join(':');
+          document.visibilityState, hasFocusedEditableElement(),
+          usesNativeKeyboardLayout() ? measureNativePagePan() : 0].join(':');
         const source = pendingSource;
         pendingSource = null;
         if (source || measurement !== lastMeasurement) {
@@ -492,6 +506,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     scheduleSync('mount');
 
     const handleResize = () => scheduleSync('resize');
+    const handleNativeScroll = () => scheduleSync('native.scroll');
     const handleOrientationChange = () => scheduleSync('orientationchange');
     const handleVisualViewportResize = () => scheduleSync('visualViewport.resize');
     const handleVisualViewportScroll = () => scheduleSync('visualViewport.scroll');
@@ -525,6 +540,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     };
 
     window.addEventListener('resize', handleResize);
+    window.addEventListener('scroll', handleNativeScroll, { passive: true });
+    if (viewportWindow() !== window) viewportWindow().addEventListener('scroll', handleNativeScroll, { passive: true });
     window.addEventListener('orientationchange', handleOrientationChange);
     viewportWindow().visualViewport?.addEventListener('resize', handleVisualViewportResize);
     viewportWindow().visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
@@ -566,6 +583,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('scroll', handleNativeScroll);
+      if (viewportWindow() !== window) viewportWindow().removeEventListener('scroll', handleNativeScroll);
       window.removeEventListener('orientationchange', handleOrientationChange);
       viewportWindow().visualViewport?.removeEventListener('resize', handleVisualViewportResize);
       viewportWindow().visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);

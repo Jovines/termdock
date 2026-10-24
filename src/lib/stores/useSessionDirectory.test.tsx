@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { getSessionDirectorySnapshot, sessionOption, useSessionDirectory, useSessionDirectoryStore } from './useSessionDirectory';
+import { getSessionDirectorySnapshot, sessionOption, useSessionDirectory, useSessionDirectoryStore, useSessionPresentations } from './useSessionDirectory';
 import { useTerminalStore } from './useTerminalStore';
 import type { TerminalSessionState } from '../terminal/types';
 import { getSessionDisplayName } from '../terminal/display';
@@ -43,4 +43,32 @@ it('uses the main program-detection configuration instead of a separate shell-na
   const custom = { ...record, activeProgram: 'customsh', shellTitle: null };
   expect(sessionOption(custom, undefined, new Set(['customsh'])).displayName).toBe('repo');
   expect(sessionOption(custom).displayName).toBe('customsh');
+});
+it('joins feature facts to the canonical title and updates all subscribers without overwriting facts', () => {
+  useSessionDirectoryStore.getState().replace([record]);
+  const facts = [{ sessionId: 'one', name: 'repo', displayName: '旧服务快照', cwd: '/repo', status: 'ready', backendSessionId: 'backend' }];
+  const first = renderHook(() => useSessionPresentations(facts));
+  const second = renderHook(() => useSessionPresentations(facts));
+  const check = (title: string) => {
+    expect(first.result.current[0].displayName).toBe(title);
+    expect(second.result.current[0].displayName).toBe(title);
+    expect(first.result.current[0].displayName).toBe(getSessionDirectorySnapshot()[0].displayName);
+    expect(first.result.current[0]).toMatchObject({ status: 'ready', cwd: '/repo', backendSessionId: 'backend' });
+  };
+  check('项目审查');
+  act(() => useTerminalStore.setState({ sessions: new Map([['one', { terminalSessionId: 'backend', shellTitle: '实时生成的完整标题' } as TerminalSessionState]]) }));
+  check('实时生成的完整标题');
+  act(() => useSessionDirectoryStore.getState().replace([{ ...record, name: '手动新名称', customName: true }]));
+  check('手动新名称');
+  expect(facts[0].displayName).toBe('旧服务快照');
+});
+it('keeps remote and offline titles owned by their source, including legacy peer snapshots', () => {
+  useSessionDirectoryStore.getState().replace([record]);
+  const facts = [
+    { sessionId: 'remote:service:one', name: 'tmux:wt-peer', displayName: '远端完整标题', displaySubtitle: 'repo', cwd: '/repo', serviceConnected: false },
+    { sessionId: 'remote:service:two', name: '旧客户端完整标题', cwd: '/repo', serviceConnected: true },
+  ];
+  const { result } = renderHook(() => useSessionPresentations(facts));
+  expect(result.current.map(session => session.displayName)).toEqual(['远端完整标题', '旧客户端完整标题']);
+  expect(result.current[0]).toMatchObject({ displaySubtitle: 'repo', serviceConnected: false });
 });

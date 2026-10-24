@@ -1,6 +1,9 @@
+import { usesNativeKeyboardLayout } from '../hooks/nativeKeyboardLayout';
+import { sessionOption, useSessionDirectory, useSessionDirectoryStore } from '../stores/useSessionDirectory';
 import { getKeyboardPanelStyles } from './layout/keyboardPanelLayout';
 import { useSessionViewMode } from './chat/sessionViewMode';
 import { SessionWorkspace } from './chat/SessionWorkspace';
+import { SESSION_NO_SWIPE, SESSION_SWIPER_FOCUSABLE_ELEMENTS } from './chat/sessionSwipe';
 import { canDismissTmuxRecoveryOperation } from '../../server/utils/tmuxRecoveryDismissal';
 import { classifySessionCreationError, openSessionWithRecovery, type NewSessionRequestOptions } from '../terminal/newSessionRequest';
 import { useAppFeedback } from './ui/AppFeedback';
@@ -57,7 +60,7 @@ import {
   readRightSidebarWidthForContext,
   useSidebarStore,
 } from '../stores/useSidebarStore';
-import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../terminal/display';
+import { deriveGroupedOrder, getCwdLeafName } from '../terminal/display';
 import { createDebugLogger } from '../utils/debug';
 import { usesTouchTerminalLayout } from '../utils/touchTerminalLayout';
 import { clientLog } from '../utils/clientLog';
@@ -2184,16 +2187,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // 瞬间 false，UI 直接渲染；缓存未命中且服务端确实没有会话时，restore 阶段
   // 只走一次 createIfEmpty，由服务端保证多客户端并发时只创建同一条默认会话。
 
+  const sessionDirectory = useSessionDirectory();
+  const sessionPresentations = new Map(sessionDirectory.map(session => [session.sessionId, session]));
   const getSessionLabel = (session: TerminalSession): { primary: string; secondary: string | null } => {
-    const state = useTerminalStore.getState().sessions.get(session.id);
-    return getSessionDisplayLines(
-      session,
-      state?.activeProgram ?? null,
-      state?.cwd ?? null,
-      undefined,
-      state?.shellTitle ?? null,
-      state?.promptState ?? null,
-    );
+    const presentation = sessionPresentations.get(session.id) ?? sessionOption({ ...session,
+      sessionId: session.id, backendSessionId: session.sessionId, lastActivity: 0 },
+      useTerminalStore.getState().sessions.get(session.id), useSessionDirectoryStore.getState().shellNames);
+    return { primary: presentation.displayName, secondary: presentation.displaySubtitle };
   };
 
   const [activeViewMode] = useSessionViewMode(activeSessionId || '');
@@ -2313,7 +2313,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     <div className="relative h-full flex flex-col">
       {closeFailure && sessions.some(session => session.id === closeFailure.sessionId) && (
         <div role="alert" className="fixed inset-x-3 top-[calc(var(--safe-top-inset)+0.75rem)] z-toast mx-auto flex max-w-lg items-center gap-3 rounded-xl border border-destructive/30 bg-surface-elevated px-4 py-3 text-[12px] text-foreground shadow-lg">
-          <span className="min-w-0 flex-1">{t('tab.closeFailed', { name: sessions.find(session => session.id === closeFailure.sessionId)!.name })}</span>
+          <span className="min-w-0 flex-1">{t('tab.closeFailed', { name: getSessionLabel(sessions.find(session => session.id === closeFailure.sessionId)!).primary })}</span>
           <button type="button" className="shrink-0 rounded-lg px-2 py-1 text-primary hover:bg-surface-2" onClick={() => void handleCloseSession(closeFailure)}>{t('common.retry')}</button>
           <button type="button" className="shrink-0 rounded-lg p-1 hover:bg-surface-2" aria-label={t('common.close')} onClick={() => setCloseFailure(null)}><X size={16} /></button>
         </div>
@@ -2464,9 +2464,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           longSwipesRatio={0.2}
           touchAngle={45}
           touchStartPreventDefault={false}
+          focusableElements={SESSION_SWIPER_FOCUSABLE_ELEMENTS}
           simulateTouch={false}
           noSwiping
-          noSwipingSelector="[data-mobile-keyboard='true'], [data-session-chat]"
+          noSwipingSelector={SESSION_NO_SWIPE}
           className={`terminal-session-swiper h-full ${activeViewMode === 'chat' ? 'session-chat-swiper' : ''}`}
         >
           {workspaceSlides.map((slide) => {
@@ -2511,6 +2512,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                       data-split-window-header="true"
                       className="flex h-[46px] min-h-[46px] shrink-0 items-center app-chrome-bg pl-[88px] pr-3 text-[12px] text-muted-foreground"
                     ><span className="min-w-0 truncate">{workspace?.name || t('tab.splitWorkspace')}</span></header>}
+                    <div className="min-h-0 min-w-0 flex-1" style={getKeyboardPanelStyles(isMobileLayout && activeViewMode !== 'chat' && usesNativeKeyboardLayout()).contentStyle}>
                     <FreeSplitLayout layoutId={slide.key} preset={workspace?.layout ?? 'horizontal'} initialTree={legacySplitTree(slide.sessions.map(session => session.id), effectiveLayout, workspace?.ratios, workspace?.gridColumnRatios, workspace?.gridRowRatios)} mobile={isMobileLayout}
                       focusId={mobileKeyboardFocusMode ? mobileKeyboardOpenSessionId : null}
                       panes={slide.sessions.map(session => ({ id: session.id, content: renderTerminal(session, {
@@ -2520,6 +2522,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                         sharedMobileKeyboardLayout: isMobileLayout,
                         suppressPageFlipRefresh: true,
                       }) }))} />
+                    </div>
                     {isMobileLayout && (
                       <div
                         ref={setSplitKeyboardPortalTarget}
@@ -2652,7 +2655,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12px] font-medium text-foreground">{label.primary}</span>
                       <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
-                        {sessionCwd ? (getCwdLeafName(sessionCwd) ?? sessionCwd) : session.name}
+                        {label.secondary ?? (sessionCwd ? (getCwdLeafName(sessionCwd) ?? sessionCwd) : '')}
                       </span>
                     </span>
                     <Check size={14} className="text-primary opacity-0 transition group-hover:opacity-100" />

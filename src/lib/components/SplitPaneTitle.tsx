@@ -1,7 +1,7 @@
 import { GripVertical, PanelRight, Terminal } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { getSessionDisplayLines } from '../terminal/display';
+import { sessionOption, useSessionDirectory, useSessionDirectoryStore } from '../stores/useSessionDirectory';
 import type { TerminalSessionInfo } from './MultiTerminalView';
 
 /** Subscribe per pane so background title changes remain visible without focus. */
@@ -12,13 +12,11 @@ export function SplitPaneTitle({ session, active, onActivate, onToggleRightSideb
   onToggleRightSidebar?: () => void;
 }) {
   const { t } = useI18n();
-  const title = useTerminalStore((store) => {
-    const state = store.sessions.get(session.id);
-    return getSessionDisplayLines(
-      session, state?.activeProgram ?? null, state?.cwd ?? null, undefined,
-      state?.shellTitle ?? null, state?.promptState ?? null,
-    ).primary;
-  });
+  const directory = useSessionDirectory();
+  const shellNames = useSessionDirectoryStore(state => state.shellNames);
+  const fallbackTitle = useTerminalStore(store => sessionOption({ ...session,
+    sessionId: session.id, lastActivity: 0 }, store.sessions.get(session.id), shellNames).displayName);
+  const title = directory.find(record => record.sessionId === session.id)?.displayName ?? fallbackTitle;
 
   return (
     <div data-pane-titlebar="true" className="swiper-no-swiping flex h-6 min-h-6 shrink-0 items-center border-b border-border app-chrome-bg text-foreground">

@@ -6,21 +6,24 @@ import { escapeShellPath } from '../../desktop/shellPath';
 import { selectedTarget } from '../../federation/clientScope';
 import { currentSecureClient } from '../../federation/browserIntegration';
 import { getActiveKeyboardLayer } from '../../hooks/useKeyboardLayer';
+import type { ChatAttachment, ChatInsertionPoint } from './chatComposerContent';
 interface Options {
   sessionId: string; active: boolean; canWrite: boolean; directory?: string; sessionAttachments?: boolean;
   input: RefObject<HTMLTextAreaElement>; insert: (text: string, focus?: boolean) => void; error: (message: string) => void;
+  attach?: (files: ChatAttachment[], focus: boolean, at: ChatInsertionPoint) => void;
 }
 interface Transfer { stage: 'reading' | 'uploading' | 'failed' | 'cancelled'; percent?: number; files?: File[]; paths?: string[] }
 export function useChatInputTransfer(options: Options) {
   const latest = useRef(options); latest.current = options;
   const [transfer, setTransfer] = useState<Transfer | null>(null);
-  const work = useRef<{ controller: AbortController; current: () => boolean; focus: () => boolean } | null>(null);
+  const work = useRef<{ controller: AbortController; current: () => boolean; focus: () => boolean; at: ChatInsertionPoint } | null>(null);
   const mounted = useRef(true);
   const begin = useCallback(() => {
     work.current?.controller.abort();
     const scope = latest.current, target = selectedTarget(), client = currentSecureClient(), layer = getActiveKeyboardLayer(), focused = document.activeElement;
     const controller = new AbortController();
-    const operation = { controller, current: () => mounted.current && !controller.signal.aborted && work.current === operation
+    const node = scope.input.current;
+    const operation = { controller, at: { value: node?.value || '', start: node?.selectionStart ?? 0, end: node?.selectionEnd ?? 0 }, current: () => mounted.current && !controller.signal.aborted && work.current === operation
       && latest.current.active && latest.current.canWrite && latest.current.sessionId === scope.sessionId
       && selectedTarget() === target && currentSecureClient() === client && !client?.closed && getActiveKeyboardLayer() === layer,
       focus: () => document.activeElement === focused || document.activeElement === scope.input.current || document.activeElement === document.body };
@@ -49,7 +52,11 @@ export function useChatInputTransfer(options: Options) {
       if (result.files.length !== files.length || result.files.some(file => !file.path)) throw new Error('部分文件未上传成功，请重试');
       const references = [...paths, ...result.files.map(file => file.path)];
       if (!references.length) throw new Error('没有可添加的文件');
-      latest.current.insert(`${references.map(escapeShellPath).join(' ')} `, operation.focus());
+      if (latest.current.attach) latest.current.attach([
+        ...paths.map(path => ({ path, name: path.split('/').pop() || path })),
+        ...result.files.map((file, index) => ({ path: file.path, name: files[index].name, type: files[index].type, size: files[index].size })),
+      ], operation.focus(), operation.at);
+      else latest.current.insert(`${references.map(escapeShellPath).join(' ')} `, operation.focus());
       setTransfer(null); work.current = null;
     } catch (error) {
       if (!operation.current()) return;

@@ -80,6 +80,14 @@ describe('COLLAB_NAME_FORBIDDEN / sanitizeCollaborationName', () => {
 });
 
 describe('formatCollaborationDelivery', () => {
+  it('explains rich chat attachment paths and explicit mention routing without implying delivery', () => {
+    const context = '\n\n```termdock-context\n{"attachments":[{"path":"/tmp/cover.png","name":"cover.png"}],"mentions":[{"sessionId":"coder-id","groupId":"group-1","name":"开发 Agent","groupName":"发布组"}]}\n```';
+    const prompt = render([message({ content: `请联系开发成员${context}`, integrationOrigin: { integrationId: 'chat-user', source: 'session-chat' } })]);
+    expect(prompt).toContain('/tmp/cover.png');
+    expect(prompt).toContain('td collab --session reviewer-id send <sessionId> "消息内容" --group <groupId> --text');
+    expect(prompt).toContain('不代表已经发送、投递或收到回复');
+    expect(render([message({ content: '普通消息' })])).not.toContain('正文末尾的 termdock-context');
+  });
   it('opens a group-named shell with a fenced user task and routing help outside', () => {
     const prompt = render([message({})]);
     const lines = prompt.split('\n');

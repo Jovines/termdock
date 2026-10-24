@@ -9,6 +9,8 @@ import { useCollaborationPanelDock } from '../../stores/useCollaborationPanelDoc
 import { collaborationPanelClientId } from '../../collaboration/panelPreferences';
 import { routeCollaborationInput } from '../../collaboration/inputTarget';
 import { AgentOperationsPanel, cleanSessionSnippet } from './AgentOperationsPanel';
+import { getSessionDirectorySnapshot, useSessionDirectoryStore } from '../../stores/useSessionDirectory';
+import { useTerminalStore } from '../../stores/useTerminalStore';
 
 vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 
@@ -59,6 +61,8 @@ vi.mock('../../terminal/api', () => ({
 }));
 
 afterEach(() => {
+  useSessionDirectoryStore.getState().replace([]);
+  useTerminalStore.setState({ sessions: new Map() });
   useCollaborationNavigation.setState({ drafts: {}, groupId: null, view: 'tasks' });
   cleanup();
   localStorage.clear();
@@ -79,6 +83,39 @@ afterEach(() => {
     { slug: 'codex', command: 'codex', displayName: 'Codex', accentColor: 'var(--primary)', icon: null, isPlugin: false },
     { slug: 'custom', command: 'custom-agent', displayName: 'Custom Agent', accentColor: 'var(--primary)', icon: null, isPlugin: true },
   ]);
+});
+
+it('uses the sidebar title in the create-group picker and follows renames while retaining selections and the draft', async () => {
+  const record = { sessionId: 'title-session', name: '优化完整会话标题', customName: true, cwd: '/repo/web-terminal', lastActivity: 1 };
+  useSessionDirectoryStore.getState().replace([record]);
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [], sessions: [
+    { sessionId: record.sessionId, name: 'web-terminal', displayName: '过期标题', cwd: record.cwd, agent: null, status: 'ready' },
+  ] });
+  const user = userEvent.setup();
+  render(<AgentOperationsPanel activeSessionId={record.sessionId} onClose={() => {}} onNewSession={() => {}} />);
+  await user.click(await screen.findByText(/复用已有会话（选填）/));
+  await user.type(screen.getByPlaceholderText('例如：发布准备'), '保留组名草稿');
+  const title = getSessionDirectorySnapshot()[0].displayName;
+  const checkbox = await screen.findByRole('checkbox', { name: new RegExp(title) });
+  await user.click(checkbox);
+  act(() => useSessionDirectoryStore.getState().replace([{ ...record, name: '改名后的完整标题' }]));
+  expect(screen.getByRole('checkbox', { name: /改名后的完整标题/ })).toHaveProperty('checked', true);
+  expect(screen.getByPlaceholderText('例如：发布准备')).toHaveProperty('value', '保留组名草稿');
+  expect(screen.queryByText('过期标题')).toBeNull();
+});
+
+it('preserves server and legacy peer titles in recipient chips even when every member shares one directory', async () => {
+  const group = { id: 'title-group', name: '标题一致性', sessionIds: ['title-a', 'title-b'], createdAt: 1, updatedAt: 1 };
+  apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions: [
+    { sessionId: 'title-a', name: 'web-terminal', displayName: '改造 Android 应用', cwd: '/repo/web-terminal', agent: null, status: 'ready' },
+    { sessionId: 'title-b', name: '核对 Codex Session 检索', cwd: '/repo/web-terminal', agent: null, status: 'ready' },
+  ] });
+  render(<AgentOperationsPanel initialCollaborationGroupId={group.id} activeSessionId="title-a" onClose={() => {}} onNewSession={() => {}} />);
+  fireEvent.click(await screen.findByRole('button', { name: '成员与消息' }));
+  const recipients = screen.getByRole('group', { name: '接收人（可多选）' });
+  expect(within(recipients).getByRole('button', { name: '改造 Android 应用' })).toBeTruthy();
+  expect(within(recipients).getByRole('button', { name: '核对 Codex Session 检索' })).toBeTruthy();
+  expect(within(recipients).queryByText(/^web-terminal/)).toBeNull();
 });
 
 describe('AgentOperationsPanel', () => {
@@ -250,7 +287,7 @@ describe('AgentOperationsPanel', () => {
 
   it('retains unavailable original members when adding another session', async () => {
     const group = { id: 'offline-group', name: '原成员保留', sessionIds: ['one', 'offline-member'], createdAt: 1, updatedAt: 7 };
-    const sessions = ['one', 'three'].map((sessionId) => ({ sessionId, name: sessionId, cwd: '/repo', agent: null,
+    const sessions = ['one', 'three'].map((sessionId) => ({ sessionId, name: `${sessionId} 会话`, cwd: '/repo', agent: null,
       backendSessionId: null, status: 'idle', capability: '', currentTask: '', updatedAt: 1 }));
     apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions });
     apiMocks.saveCollaborationGroup.mockResolvedValue({ group });
@@ -259,7 +296,7 @@ describe('AgentOperationsPanel', () => {
     await user.click(await screen.findByRole('button', { name: '成员与消息' }));
     await user.click(screen.getByText(/^管理成员、角色与删除/));
     await user.click(await screen.findByRole('button', { name: /管理成员/ }));
-    expect((screen.getByRole('checkbox', { name: /offline-member/ }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('checkbox', { name: /终端会话/ }) as HTMLInputElement).checked).toBe(true);
     await user.click(screen.getByRole('checkbox', { name: /three/ }));
     await user.click(screen.getByRole('button', { name: /保存成员/ }));
     expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({ id: group.id, name: group.name,
@@ -399,17 +436,17 @@ describe('AgentOperationsPanel', () => {
 
     await user.click(await screen.findByRole('button', { name: '成员与消息' }));
     await user.click(screen.getByText(/^管理成员、角色与删除/));
-    const remove = await screen.findByRole('button', { name: '把 865otlua 移出协作组' });
+    const remove = await screen.findByRole('button', { name: '把 终端会话 2 移出协作组' });
     expect((remove as HTMLButtonElement).disabled).toBe(false);
     await user.click(remove);
-    const confirm = screen.getByRole('group', { name: '确认移除成员 865otlua' });
-    expect(confirm.textContent).toContain('把“865otlua”移出“发布组”');
+    const confirm = screen.getByRole('group', { name: '确认移除成员 终端会话 2' });
+    expect(confirm.textContent).toContain('把“终端会话 2”移出“发布组”');
     expect(confirm.textContent).not.toContain('会一并删除');
     await user.click(within(confirm).getByRole('button', { name: '移出' }));
 
     expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({id:'group-one',name:'发布组',sessionIds:['61y337xa'],expectedUpdatedAt:9});
     expect(apiMocks.removeCollaborationGroup).not.toHaveBeenCalled();
-    expect(await screen.findByText('已把“865otlua”移出“发布组”')).toBeTruthy();
+    expect(await screen.findByText('已把“终端会话 2”移出“发布组”')).toBeTruthy();
   });
 
   it('creates an Agent Session and automatically joins it to the selected group', async () => {
@@ -661,7 +698,7 @@ describe('persistent collaboration composer', () => {
     } });
     const input = await openFloating();
     expect(input.value).toBe('已保存草稿');
-    expect(screen.getByRole('button', { name: 'two（离线）' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: '终端会话 2（离线）' }).getAttribute('aria-pressed')).toBe('true');
     fireEvent.change(input, { target: { value: '更新草稿' } });
     cleanup();
     await waitFor(() => expect(apiMocks.updateSettings).toHaveBeenCalledWith({ collaborationPanel: {
@@ -682,8 +719,8 @@ describe('persistent collaboration composer', () => {
     fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
     await waitFor(() => expect(input.value).toBe(''));
     expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledTimes(2);
-    await userEvent.click(screen.getByRole('button', { name: 'one（离线）' }));
-    await userEvent.click(screen.getByRole('button', { name: 'one（离线）' }));
+    await userEvent.click(screen.getByRole('button', { name: '终端会话 1（离线）' }));
+    await userEvent.click(screen.getByRole('button', { name: '终端会话 1（离线）' }));
     fireEvent.change(input, { target: { value: '没有接收人' } });
     fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
     expect(apiMocks.sendCollaborationMessage).toHaveBeenCalledTimes(2);
@@ -777,8 +814,8 @@ describe('persistent collaboration composer', () => {
   it('sends to multiple recipients, allows deselection, and restores broadcast', async () => {
     const input = await openFloating();
     fireEvent.change(input, { target: { value: '一起检查' } });
-    const one = screen.getByRole('button', { name: 'one（离线）' });
-    const two = screen.getByRole('button', { name: 'two（离线）' });
+    const one = screen.getByRole('button', { name: '终端会话 1（离线）' });
+    const two = screen.getByRole('button', { name: '终端会话 2（离线）' });
     await userEvent.click(one);
     await userEvent.click(two);
     expect(one.getAttribute('aria-pressed')).toBe('true');
@@ -798,7 +835,7 @@ describe('persistent collaboration composer', () => {
     const input = await openFloating();
     fireEvent.drop(input, { dataTransfer: { files: [], getData: (type: string) => type === 'text/plain' ? '/repo/notes.md' : '' } });
     expect(input.value).toBe('/repo/notes.md');
-    await userEvent.click(screen.getByRole('button', { name: 'two（离线）' }));
+    await userEvent.click(screen.getByRole('button', { name: '终端会话 2（离线）' }));
     expect(screen.queryByText('消息类型')).toBeNull();
     apiMocks.sendCollaborationMessage.mockRejectedValueOnce(new Error('连接已断开'));
     await userEvent.click(screen.getByRole('button', { name: '发送' }));

@@ -16,6 +16,14 @@
 
 ## 验证与边界
 
+### 展示快照与新增入口
+
+`getSessionPresentation` 的输入是原始会话记录。服务端已解析的快照由 `getSessionSnapshotPresentation` 读取 `displayName` / `displaySubtitle`；旧服务只返回兼容 `name` 时保留其展示标题，不允许再次按 `cwd` 计算，否则目录会覆盖自定义/自动标题。
+
+新增功能若只有会话选择需求，直接使用 `useSessionDirectory()` 的 `SessionOption`。若还需要协作状态等专用事实，使用 `useSessionPresentations(snapshots)` 关联标题：本机会话取共享目录当前投影，远端或离线快照保留所属服务的投影；该入口不拉库存、不改事实、不写目录。渲染只读 `displayName` / `displaySubtitle`，用 `sessionId` 操作目标。协作成员、创建组、自动任务目标、看板、分屏和通知沿用这条链路，打开的界面随目录标题更新。
+
+边界测试禁止协作组件直接显示 `session.name` 或重新调用原始投影。回归覆盖同目录多个不同标题、旧服务快照、实时标题与重命名同步、保留选择和草稿，以及通知和分屏与目录一致。`.browser.*` 是测试夹具，不计入生产目录写入者扫描。
+
 `sessionDirectoryBoundary.test.ts` 禁止功能组件自行读取库存，并限定共享目录的生产写入者；共享目录测试覆盖实时标题、命名、删除、旧 backend 隔离、缓存及程序检测配置。待办测试验证打开的选择器在名称变化时更新且保留补充要求。
 
 初始恢复遮罩由 `useInitialRestoreGate` 管理，一旦进入前台工作区即释放首次恢复阶段；待办和协作页面使用局部加载，不因后台终端尚未完成首帧而重新覆盖整页。

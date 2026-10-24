@@ -13,6 +13,14 @@ describe('collaboration member names', () => {
     const unnamed = { sessionId: 'remote:node:two', name: 'remote:node:two' };
     expect(collaborationMemberLabel(unnamed, [unnamed])).toBe('终端会话');
   });
+  it('never replaces projected or legacy titles with their shared working directory', () => {
+    const members = [
+      { sessionId: 'one', name: 'lifeservices_dld_csr', displayName: '改造 Android 应用', cwd: '/repo/lifeservices_dld_csr' },
+      { sessionId: 'two', name: '核对 Codex Session 检索', cwd: '/repo/lifeservices_dld_csr' },
+    ];
+    expect(collaborationMemberLabel(members[0], members)).toBe('改造 Android 应用');
+    expect(collaborationMemberLabel(members[1], members)).toBe('核对 Codex Session 检索');
+  });
 });
 
 describe('remote connectivity evidence', () => {

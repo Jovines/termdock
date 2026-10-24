@@ -32,7 +32,7 @@ function WorkspaceFrame({ host, item, visible, active }: { host: WorkspaceHost; 
     className="fixed inset-0 w-full border-0 bg-[var(--chrome-bg)]"
     // Each workspace applies its own safe areas and keyboard layout. Anchor it
     // to the physical viewport, outside the entry root's safe-area padding.
-    style={{ height: 'var(--app-base-vh, 100%)', visibility: visible ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none' }}
+    style={{ height: 'var(--app-native-frame-height, var(--app-base-vh, 100%))', visibility: visible ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none' }}
     // SecureAccessGate attaches after installing its activation listener.
     // iframe load can precede that effect and swallow the pending sidebar intent.
     aria-hidden={!active} tabIndex={active ? 0 : -1} allow="clipboard-read; clipboard-write; fullscreen" />;

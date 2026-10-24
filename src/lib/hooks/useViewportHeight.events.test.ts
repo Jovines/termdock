@@ -11,6 +11,8 @@ afterEach(() => {
   document.documentElement.removeAttribute('style');
   delete document.documentElement.dataset.termdockTouchViewport;
   delete document.documentElement.dataset.termdockPwaStatusBar;
+  delete document.documentElement.dataset.termdockNativeKeyboard;
+  delete document.documentElement.dataset.termdockNativePan;
 });
 
 it('uses no top fallback with a native iPad status bar, while retaining a real inset on old installs', () => {
@@ -268,4 +270,68 @@ it('repairs a silent post-animation iOS measurement without continuously refitti
   unmount();
   expect(frames.size).toBe(0);
   document.removeEventListener('termdock:viewport-layout-change', layout);
+});
+
+it('does not cache a native viewport pan as a new base height for subsequent keyboard openings', () => {
+  const viewport = Object.assign(new EventTarget(), { height: 874, width: 402, offsetTop: 0 });
+  vi.stubGlobal('visualViewport', viewport);
+  vi.stubGlobal('innerHeight', 874); vi.stubGlobal('innerWidth', 402);
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const frames = new Map<number, FrameRequestCallback>(); let id = 0;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++id, callback); return id; });
+  vi.stubGlobal('cancelAnimationFrame', (key: number) => frames.delete(key));
+  const flush = () => act(() => {
+    const pending = [...frames.values()]; frames.clear();
+    pending.forEach(callback => callback(performance.now()));
+  });
+  renderHook(() => useViewportHeight()); flush();
+  const input = document.createElement('textarea'); document.body.append(input);
+  // Native panning can make visualBottom close to the full height even while
+  // both innerHeight and the visual viewport report the open keyboard.
+  act(() => {
+    input.focus(); vi.stubGlobal('innerHeight', 445);
+    Object.assign(viewport, { height: 445, offsetTop: 367 });
+    viewport.dispatchEvent(new Event('resize'));
+  });
+  flush();
+  expect(document.documentElement.style.getPropertyValue('--app-base-vh')).toBe('874px');
+  act(() => {
+    input.blur(); vi.stubGlobal('innerHeight', 874);
+    Object.assign(viewport, { height: 874, offsetTop: 44 });
+    viewport.dispatchEvent(new Event('resize'));
+  });
+  flush();
+  expect(document.documentElement.style.getPropertyValue('--app-base-vh')).toBe('874px');
+  for (const offsetTop of [0, 44, 0]) {
+    act(() => {
+      input.focus(); vi.stubGlobal('innerHeight', 445);
+      Object.assign(viewport, { height: 445, offsetTop });
+      viewport.dispatchEvent(new Event('resize'));
+    });
+    flush();
+    expect(document.documentElement.style.getPropertyValue('--app-base-vh')).toBe('874px');
+    expect(document.documentElement.style.getPropertyValue('--kb-height')).toBe('429px');
+  }
+});
+
+it('updates native compensation from actual page motion without a visual-height change', () => {
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone');
+  vi.stubGlobal('visualViewport', Object.assign(new EventTarget(), { height: 9999, offsetTop: 88 }));
+  const root = document.createElement('div'); root.id = 'root'; document.body.append(root);
+  let top = 0;
+  vi.spyOn(root, 'getBoundingClientRect').mockImplementation(() => ({ top }) as DOMRect);
+  const frames = new Map<number, FrameRequestCallback>(); let id = 0;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++id, callback); return id; });
+  vi.stubGlobal('cancelAnimationFrame', (key: number) => frames.delete(key));
+  const flush = () => act(() => {
+    const pending = [...frames.values()]; frames.clear();
+    pending.forEach(callback => callback(performance.now()));
+  });
+  renderHook(() => useViewportHeight()); flush();
+  for (const position of [-320, -414, 0]) {
+    act(() => { top = position; window.dispatchEvent(new Event('scroll')); });
+    flush();
+    expect(document.documentElement.style.getPropertyValue('--app-native-pan')).toBe(`${-position || 0}px`);
+    expect(document.documentElement.dataset.termdockNativePan).toBe(String(position < 0));
+  }
 });

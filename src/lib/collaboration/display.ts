@@ -1,3 +1,5 @@
+import { getSessionSnapshotPresentation, type SessionPresentationSnapshot } from '../terminal/display';
+
 /** Addresses describe transport routes, not useful names for collaborators. */
 export function collaborationServiceLabel(service: { serviceLabel?: string; serviceOrigin?: string }): string {
   const label = service.serviceLabel?.trim();
@@ -10,10 +12,8 @@ export function collaborationServiceLabel(service: { serviceLabel?: string; serv
 }
 
 /** Repeated Agent names need a stable distinction inside their group. */
-export function collaborationMemberLabel<T extends { sessionId: string; name: string; agent?: { displayName?: string } | null }>(session: T, members: T[]): string {
-  const humanName = (member: T) => {
-    return getSessionPresentation(member).displayName;
-  };
+export function collaborationMemberLabel<T extends SessionPresentationSnapshot & { sessionId: string }>(session: T, members: T[]): string {
+  const humanName = (member: T) => getSessionSnapshotPresentation(member).displayName;
   const name = humanName(session);
   const peers = members.filter(member => humanName(member) === name);
   return peers.length > 1 ? `${name} ${peers.findIndex(member => member.sessionId === session.sessionId) + 1}` : name;
@@ -24,4 +24,3 @@ export function collaborationRemoteConnection(session: { serviceConnected?: bool
   if (session.serviceConnected === false || ['offline', 'disconnected', 'service-unreachable', 'closed', 'exited'].includes(session.status ?? '')) return 'disconnected';
   return session.serviceConnected === true ? 'connected' : 'unknown';
 }
-import { getSessionPresentation } from '../terminal/display';

@@ -820,11 +820,9 @@ body {
   color: var(--foreground);
 }
 
-/* Touch terminal styles include wide iPads and landscape phones. Use fixed base
-   height so keyboard never resizes the terminal.
-   --app-base-vh is set by JS to window.innerHeight at startup / orientation change,
-   and does NOT shrink when the soft-keyboard opens.  The terminal area stays the same
-   pixel height; instead we translate it up via TerminalView.tsx. */
+/* Touch layouts include wide iPads and landscape phones. The compatibility
+   path keeps a base-height root; native iOS focus uses the CSS viewport and
+   normal positioning below. The flexible terminal/list content may shrink. */
 html[data-termdock-touch-viewport='true'] {
   height: var(--app-base-vh, 100lvh);
   width: 100vw;
@@ -850,6 +848,22 @@ html[data-termdock-touch-viewport='true'] #root {
   right: 0;
   height: var(--app-base-vh, 100lvh);
   padding-bottom: var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px));
+}
+
+/* Native focus moves the input. Only chrome and flexible content compensate
+   for the page's measured displacement; no keyboard-height translation. */
+html[data-termdock-native-keyboard='true'] { height: 100lvh; --app-native-frame-height: 100lvh; }
+html[data-termdock-native-keyboard='true'] body { position: relative; height: 100lvh; }
+html[data-termdock-native-keyboard='true'] #root,
+html[data-termdock-native-keyboard='true'] iframe[data-workspace-key] { position: absolute; }
+html[data-termdock-native-keyboard='true'] #root { height: 100lvh; }
+/* During actual native pan, the system owns the bottom edge. Retaining the
+   home-indicator padding here leaves a second, empty inset above its toolbar. */
+html[data-termdock-native-keyboard='true'][data-termdock-native-pan='true'] #root { padding-bottom: 0; }
+html[data-termdock-native-keyboard='true'] [data-termdock-window-header='true'] {
+  transform: translateY(var(--app-native-pan, 0px));
+  /* Local chrome must paint above Swiper's z-index:1 canvas after translation. */
+  z-index: 20;
 }
 
 html[data-termdock-touch-viewport='true'] .terminal-viewport-container {

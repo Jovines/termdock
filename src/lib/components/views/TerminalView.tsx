@@ -1,4 +1,6 @@
+import { useTouchScrollBoundary } from '../../hooks/useTouchScrollBoundary';
 import { getKeyboardPanelStyles } from '../layout/keyboardPanelLayout';
+import { usesNativeKeyboardLayout } from '../../hooks/nativeKeyboardLayout';
 import { InteractiveOutput } from '../../terminal/interactiveOutput';
 import { isKeyboardLayerOpen, useKeyboardLayerOpen } from '../../hooks/useKeyboardLayer';
 import { authorizeOwnedTerminalPaste, consumeOwnedTerminalPaste, isOwnedTerminalPasteCurrent } from '../../terminal/ownedPaste';
@@ -179,6 +181,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 }) => {
   const { t } = useI18n();
   const [sessionId] = React.useState(initialSessionId || uuidv4());
+  const [nativeInputHost, setNativeInputHost] = React.useState<HTMLDivElement | null>(null);
+  const nativeInputHostRef = React.useRef<HTMLDivElement | null>(null);
+  const attachNativeInputHost = React.useCallback((node: HTMLDivElement | null) => {
+    nativeInputHostRef.current = node; setNativeInputHost(node);
+  }, []);
+  useTouchScrollBoundary(nativeInputHostRef, !!nativeInputHost && usesNativeKeyboardLayout());
   // Per-session font size: an override (tab menu / ctrl+wheel pinch) takes
   // precedence; without one the view follows the global setting.
   const [fontSize, setFontSize] = React.useState(
@@ -2675,7 +2683,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const { rootStyle: wrapperStyle, contentStyle: keyboardShrinkStyle } =
     getKeyboardPanelStyles(isMobile && !sharedMobileKeyboardLayout);
 
-  const keyboard = (
+  const keyboardToolbar = (
     <MobileKeyboard
       visible={isKeyboardVisible}
       interactive={isKeyboardInteractive}
@@ -2706,6 +2714,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       onExpandedChange={handleExpandedChange}
     />
   );
+  const keyboard = isMobile && usesNativeKeyboardLayout()
+    ? <div ref={attachNativeInputHost} className={`${keyboardPortalTarget ? 'static' : 'relative'} shrink-0`} data-native-terminal-input-host="true">{keyboardToolbar}</div>
+    : keyboardToolbar;
   const touchCapable = typeof window !== 'undefined' &&
     (navigator.maxTouchPoints > 0 || 'ontouchstart' in window);
 
@@ -2787,6 +2798,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
           >
             <TerminalViewport
+              nativeInputHost={isMobile && usesNativeKeyboardLayout() ? nativeInputHost : null}
               key={terminalSessionKey}
               ref={handleTerminalControllerRef}
               sessionKey={terminalSessionKey}
@@ -2845,7 +2857,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       </div>
 
       {keyboardPortalTarget
-        ? (suppressKeyboard ? null : createPortal(keyboard, keyboardPortalTarget))
+        ? (suppressKeyboard && !usesNativeKeyboardLayout() ? null : createPortal(keyboard, keyboardPortalTarget))
         : keyboard}
     </div>
   );

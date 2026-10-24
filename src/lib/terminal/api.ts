@@ -4085,6 +4085,9 @@ export interface OrchestrationSession {
   agentNativeSessionId?: string | null;
   backendSessionId: string | null;
   name: string;
+  /** Projected by the owning service. `name` is the legacy compatibility label. */
+  displayName?: string;
+  displaySubtitle?: string | null;
   cwd: string;
   agent: { slug: string; displayName: string } | null;
   status: string;

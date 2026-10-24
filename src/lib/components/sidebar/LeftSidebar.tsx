@@ -8,7 +8,7 @@ import { Archive, RefreshCw, MessageCircle } from 'lucide-react';
 import { CollaborationExecutionArchives } from './CollaborationExecutionArchives';
 import { completedTaskSessions } from '../../collaboration/completedSessions';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
-import { useSessionDirectory } from '../../stores/useSessionDirectory';
+import { sessionOption, useSessionDirectory, useSessionDirectoryStore } from '../../stores/useSessionDirectory';
 import { LoadingSpinner as RiLoaderCircle } from '../ui/Loading';
 import { collaborationServiceLabel, collaborationRemoteConnection } from '../../collaboration/display';
 import { openCollaborationMessagesPanel } from '../../collaboration/panelPreferences';
@@ -45,8 +45,8 @@ import { Droppable, Draggable, type DragStart, type DropResult, type DraggablePr
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport, TmuxSessionSummary } from '../../terminal/types';
 import { shouldShowTuiLoading } from '../../utils/agentAttention';
-import { getSessionPresentation, deriveGroupedOrder, normalizeSessionOrderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds } from '../../terminal/display';
-import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
+import { getSessionSnapshotPresentation, deriveGroupedOrder, normalizeSessionOrderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds } from '../../terminal/display';
+import { getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -898,6 +898,8 @@ export function LeftSidebar(
   useEffect(() => {
     if (!isOpen) setSwipedSessionId(null);
   }, [isOpen]);
+  const sessionDisplayName = (session: LeftSidebarProps['sessions'][number]) => sessionLabels.get(session.id)
+    ?? sessionOption({ ...session, sessionId: session.id, lastActivity: 0 }, sessionStates.get(session.id), useSessionDirectoryStore.getState().shellNames).displayName;
   const renderSessionRowBody = useCallback((
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
@@ -909,10 +911,8 @@ export function LeftSidebar(
     const isSplit = splitSessionIds.has(session.id);
     const removeSplitPane = Boolean(compact && isSplit);
     const ts = sessionStates.get(session.id);
-    const displayName = sessionLabels.get(session.id) ?? getSessionPresentation({ ...session,
-      activeProgram: ts?.activeProgram, cwd: ts?.cwd,
-      shellTitle: ts?.shellTitle ?? getCachedShellTitle(session.id), promptState: ts?.promptState, agent: ts?.agent,
-    }).displayName;
+    const displayName = sessionLabels.get(session.id) ?? sessionOption({ ...session,
+      sessionId: session.id, lastActivity: 0 }, ts, useSessionDirectoryStore.getState().shellNames).displayName;
     const tuiProgressActive = shouldShowTuiLoading(ts);
     return (
       <SwipeToCloseSession
@@ -1717,14 +1717,14 @@ export function LeftSidebar(
                       }`}
                     >
                       {renderSessionRowBody(session, memberProvided.dragHandleProps, true, section.workspace && id === section.sessionIds[0] ? renderSplitLayoutControl(section.workspace) : undefined,
-                        completedIds.has(id) ? <button type="button" aria-label={`归档 ${session.name}`} title="保存 Agent 会话 ID 并停止终端；只回收干净的执行目录，结果和分支保留" disabled={archiveBusy !== null} className="sidebar-session-action inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-muted-foreground hover:bg-primary/15 hover:text-primary disabled:opacity-40 md:h-6 md:min-w-6 md:px-1" onClick={event => {
+                        completedIds.has(id) ? <button type="button" aria-label={`归档 ${sessionDisplayName(session)}`} title="保存 Agent 会话 ID 并停止终端；只回收干净的执行目录，结果和分支保留" disabled={archiveBusy !== null} className="sidebar-session-action inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-muted-foreground hover:bg-primary/15 hover:text-primary disabled:opacity-40 md:h-6 md:min-w-6 md:px-1" onClick={event => {
                           event.stopPropagation(); if (archivePending.current) return; archivePending.current = true; setArchiveBusy(id); setCollaborationActionError(null);
                           void archiveExecutionSession(id).then(async () => { setArchivesVersion(value => value + 1); await refreshCollaborationGroups(); }).catch(error => setCollaborationActionError(error instanceof Error ? error.message : '归档失败，终端已保留')).finally(() => { archivePending.current = false; setArchiveBusy(null); });
                         }}>{archiveBusy === id ? <RefreshCw size={13} className="animate-spin" /> : <Archive size={13} />}<span className="text-[10px] md:sr-only">归档</span></button> : undefined)}
                       {!section.workspace && splitSessionIds.has(session.id) && (
                         <button type="button" className="shrink-0 px-1 text-[10px] text-primary"
-                          title={`与 ${splitWorkspaces.find((workspace) => workspace.sessionIds.includes(session.id))?.sessionIds.filter((id) => id !== session.id).map((id) => sessionsById.get(id)?.name ?? id).join('、')} 分屏`}
-                          aria-label={`查看 ${session.name} 的跨组分屏`}
+                          title={`与 ${splitWorkspaces.find((workspace) => workspace.sessionIds.includes(session.id))?.sessionIds.filter((id) => id !== session.id).map((id) => (sessionsById.get(id) ? sessionDisplayName(sessionsById.get(id)!) : '终端会话')).join('、')} 分屏`}
+                          aria-label={`查看 ${sessionDisplayName(session)} 的跨组分屏`}
                           onClick={() => { setNewSessionComposerOpen(false); useCollaborationNavigation.getState().terminal(); window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id })); closeIfOverlay(); }}>
                           <RiSplitLine size={10} />
                         </button>
@@ -1746,7 +1746,7 @@ export function LeftSidebar(
           const connected = connection === 'connected';
           const connectionLabel = connection === 'unknown' ? '连接状态未知' : '连接已断开';
           return <CollaborationSessionMenu key={remote.sessionId} sessionId={remote.sessionId} groupId={collaboration.id}
-            label={remote.name} detail={`${collaborationServiceLabel(remote)} · ${connected ? '服务已连接' : connectionLabel}`}
+            label={getSessionSnapshotPresentation(remote).displayName} detail={`${collaborationServiceLabel(remote)} · ${connected ? '服务已连接' : connectionLabel}`}
             onOpen={() => { void openAgentOperations(collaboration.id); }}><button
           type="button" title={`${collaborationServiceLabel(remote)} · ${connected ? '服务已连接' : connectionLabel}`}
           className="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-surface-2"
@@ -1757,7 +1757,7 @@ export function LeftSidebar(
             });
           }}>
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${connected ? 'bg-primary' : 'bg-muted-foreground'}`} />
-          <span className="min-w-0 flex-1 truncate">{remote.name}</span>
+          <span className="min-w-0 flex-1 truncate">{getSessionSnapshotPresentation(remote).displayName}</span>
           <span className="max-w-20 truncate rounded border border-border/20 px-1 text-[9px]">{collaborationServiceLabel(remote)}</span>
           {!connected && <span className="shrink-0 text-[9px]">{connectionLabel}</span>}
         </button></CollaborationSessionMenu>; })}

@@ -1,9 +1,15 @@
 /* Native scrolling needs both the page and the session swiper to permit x pans. */
 .swiper.session-chat-swiper { touch-action: pan-x pan-y; }
-.session-chat-input { min-height: 44px; max-height: 176px; }
+/* The replica and real editor share one grid cell. A trailing space in the
+   replica preserves the last empty line, without resetting the live height. */
+.session-chat-composer div:has(> .session-chat-input) { display: grid; }
+.session-chat-input, .session-chat-input-sizer { min-height: 44px; max-height: 176px; }
+.session-chat-input { overscroll-behavior-y: contain; touch-action: pan-y; }
+.session-chat-composer { overscroll-behavior-y: none; }
 html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display: none; }
 
 .session-chat-input { transition: none; }
+.session-chat-input[data-rich-draft='true']::placeholder { color: transparent; }
 
 /* Move only the highlight; keep skeleton geometry stable while loading. */
 .chat-loading-skeleton { position: relative; overflow: hidden; }
@@ -11,18 +17,13 @@ html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display:
 @keyframes chat-skeleton-sweep { to { transform: translateX(100%); } }
 @media (prefers-reduced-motion: reduce) { .chat-loading-skeleton::after { animation: none; } }
 
-/* Keep message boundaries quiet and stable when their actions are revealed. */
+/* Keep message actions available without a hover or tap to reveal them. */
 .chat-reply + .chat-reply { margin-top: 12px; }
 .chat-reply-meta { height: 24px; margin-top: 2px; }
 .chat-reply-meta > .chat-message-tools { height: 24px; }
 .chat-reply-meta .chat-message-action { height: 24px; min-height: 24px; min-width: 28px; }
 .chat-reply-divider { height: 1px; background: color-mix(in srgb, var(--border) 45%, transparent); }
-.chat-message-tools { display: inline-flex; align-items: center; gap: 4px; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
-[data-chat-message]:focus-within > [data-chat-message-actions] > .chat-message-tools,
-[data-chat-message][data-actions-open] > [data-chat-message-actions] > .chat-message-tools { opacity: 1; pointer-events: auto; }
-@media (hover: hover) {
-  [data-chat-message]:hover > [data-chat-message-actions] > .chat-message-tools { opacity: 1; pointer-events: auto; }
-}
+.chat-message-tools { display: inline-flex; align-items: center; gap: 4px; }
 @media (hover: none), (pointer: coarse) {
   .chat-reply-meta, .chat-reply-meta > .chat-message-tools { height: 32px; }
   .chat-user-meta { min-height: 44px; }
@@ -30,7 +31,6 @@ html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display:
   .chat-reply-meta .chat-message-action { height: 32px; min-height: 32px; min-width: 32px; }
   .chat-reply + .chat-reply { margin-top: 12px; }
 }
-@media (prefers-reduced-motion: reduce) { .chat-message-tools { transition: none; } }
 
 /* The separator shares the compact actions/time row above the next reply. */
 .chat-replies > [data-chat-viewport-row] + [data-chat-viewport-row] { margin-top: 4px; }

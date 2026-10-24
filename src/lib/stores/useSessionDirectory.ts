@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
-import { DEFAULT_SESSION_DISPLAY_SHELL_NAMES, getSessionPresentation, type SessionDisplaySource } from '../terminal/display';
+import { DEFAULT_SESSION_DISPLAY_SHELL_NAMES, getSessionPresentation, getSessionSnapshotPresentation, type SessionDisplaySource, type SessionPresentation, type SessionPresentationSnapshot } from '../terminal/display';
 import type { AgentIdentity, TerminalSessionState } from '../terminal/types';
 import { getCachedAgentIdentity, getCachedShellTitle, useTerminalStore } from './useTerminalStore';
 
@@ -50,4 +50,19 @@ export function useSessionDirectory(): SessionOption[] {
     return [live?.terminalSessionId, live?.activeProgram, live?.cwd, live?.shellTitle, live?.promptState, live?.agent];
   })));
   return useMemo(() => getSessionDirectorySnapshot(), [records, metadata, shellNames]);
+}
+
+/** Join feature-specific facts to the main directory's titles without owning another inventory.
+ * Remote/offline snapshots retain the title projected by their owning service.
+ */
+export function useSessionPresentations<T extends SessionPresentationSnapshot>(snapshots: T[]): (T & SessionPresentation)[] {
+  const directory = useSessionDirectory();
+  return useMemo(() => {
+    const byId = new Map(directory.map(session => [session.sessionId, session]));
+    return snapshots.map(snapshot => {
+      const local = snapshot.sessionId ? byId.get(snapshot.sessionId) : undefined;
+      const { displayName, displaySubtitle } = local ?? getSessionSnapshotPresentation(snapshot);
+      return { ...snapshot, displayName, displaySubtitle };
+    });
+  }, [snapshots, directory]);
 }
