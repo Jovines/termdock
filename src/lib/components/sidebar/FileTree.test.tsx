@@ -1,7 +1,7 @@
 import type { DownloadResult } from '../../terminal/api';
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useRef } from 'react';
 import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
@@ -16,7 +16,8 @@ import * as browserScope from '../../federation/browserIntegration';
 
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
 
-const { deleteFileMock, downloadFileMock, searchFilesStreamMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
+const { cancelIoSlotMock, deleteFileMock, downloadFileMock, searchFilesStreamMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
+  cancelIoSlotMock: vi.fn(),
   deleteFileMock: vi.fn(async (_path:string,_current?:()=>boolean):Promise<void> => undefined),
   downloadFileMock: vi.fn(async (_path: string, _signal?: AbortSignal): Promise<DownloadResult> => 'saved'),
   searchFilesStreamMock: vi.fn(),
@@ -32,6 +33,7 @@ vi.mock('../../terminal/api', async (importOriginal) => ({
   deleteFile: deleteFileMock,
   downloadFile: downloadFileMock,
   searchFilesStream: searchFilesStreamMock,
+  cancelIoSlot: cancelIoSlotMock,
   getSettings: getSettingsMock,
   listDirectory: listDirectoryMock,
   updateSettings: updateSettingsMock,
@@ -77,10 +79,46 @@ describe('FileTree file deletion', () => {
     deleteFileMock.mockClear();
     downloadFileMock.mockReset();
     searchFilesStreamMock.mockReset();
+    cancelIoSlotMock.mockReset();
+    vi.useRealTimers();
     listDirectoryMock.mockClear();
     getSettingsMock.mockClear();
     updateSettingsMock.mockClear();
     vi.unstubAllGlobals();
+  });
+
+  it.each(['name', 'content'] as const)('debounces rapid %s searches and cancels previous work without accepting stale results', async mode => {
+    const requests: { query: string; progress: (value: object) => void; signal: AbortSignal; slot: string }[] = [];
+    searchFilesStreamMock.mockImplementation((_root, query, progress, signal, _hidden, _mode, slot) => {
+      requests.push({ query, progress, signal, slot });
+      return new Promise(() => {});
+    });
+    const fixture = (query: string) => <I18nProvider><FileTree rootPath="/workspace" selectedFilePath={null} onFileSelect={vi.fn()} query={query} searchMode={mode} /></I18nProvider>;
+    const view = await renderFixture(fixture(''));
+    vi.useFakeTimers();
+    for (const query of ['A', 'AB', 'ABC', 'ABCD']) {
+      view.rerender(fixture(query));
+      await act(() => vi.advanceTimersByTimeAsync(40));
+    }
+    expect(requests).toHaveLength(0);
+    await act(() => vi.advanceTimersByTimeAsync(180));
+    expect(requests.map(request => request.query)).toEqual(['ABCD']);
+    const previous = requests[0];
+    view.rerender(fixture('ABCDE'));
+    expect(previous.signal.aborted).toBe(true);
+    expect(cancelIoSlotMock).toHaveBeenCalledWith(previous.slot);
+    const entry = { name: 'stale.txt', path: '/workspace/stale.txt', type: 'file' };
+    act(() => previous.progress(mode === 'name' ? { entries: [entry] } : { contentEntries: [{ ...entry, matches: [{ line: 1, text: 'stale' }] }] }));
+    expect(screen.queryByText('stale.txt')).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(180));
+    expect(requests.map(request => request.query)).toEqual(['ABCD', 'ABCDE']);
+    expect(requests[1].slot).not.toBe(previous.slot);
+    view.rerender(fixture(''));
+    expect(requests[1].signal.aborted).toBe(true);
+    view.rerender(fixture('pending'));
+    view.unmount();
+    await act(() => vi.advanceTimersByTimeAsync(180));
+    expect(requests).toHaveLength(2);
   });
 
   it('offers one cancel action for a pending tree download and reports cancellation without opening the file', async () => {

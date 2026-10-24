@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Inbox, PanelLeft, Pencil, Plus, Search, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowLeft, Inbox, PanelLeft, Pencil, Plus, Search, Settings2, Sparkles, Trash2, X } from 'lucide-react';
 import { getAgentLaunchers, getSettings, type AgentLauncherInfo } from '../../terminal/api';
 import { getSessionDirectorySnapshot, useSessionDirectory } from '../../stores/useSessionDirectory';
 import { getSessionPresentation } from '../../terminal/display';
-import { collectTodos, createTodo, listTodos, removeTodoCollector, saveTodoCollector, handoffTodos, updateTodo, type TodoCollector, type TodoItem, type TodoLaunchConfig, type TodoRun, type TodoSnapshot } from '../../todos/api';
+import { collectTodos, releaseTodoClaim, createTodo, listTodos, removeTodoCollector, saveTodoCollector, handoffTodos, updateTodo, type TodoCollector, type TodoItem, type TodoLaunchConfig, type TodoRun, type TodoSnapshot } from '../../todos/api';
 import { emptyTodoView, latestTodoRun, matchesTodo, useTodoWorkspace, type TodoModal } from '../../todos/workspace';
 import { useCollaborationNavigation } from '../../stores/useCollaborationNavigation';
 import { savedConnection, SECURE_STATE_EVENT } from '../../federation/browserIntegration';
@@ -187,15 +187,9 @@ export default function TodoWorkspace({ onOpenSidebar, leftSidebarVisible, activ
     } },
     { label: '多选待办', action: () => patch({ selecting: true, column: 'open', mobileDetail: false, checked: [] }), disabled: !visible.some(canBatch) },
     { label: '已忽略', action: () => patch({ filter: 'ignored', mobileDetail: false, checked: [] }) },
-    { label: '收集方向', action: () => patch({ tab: 'collectors', mobileDetail: false }) },
     { label: '外部接入', action: () => show({ kind: 'integration' }) },
   ];
-  const requestCollection = () => {
-    if (!data) return;
-    if (enabledCollectors.length) void act(() => collect(enabledCollectors));
-    else if (data.collectors.length) patch({ tab: 'collectors', mobileDetail: false });
-    else show({ kind: 'collector' });
-  };
+  const manageCollectors = () => patch({ tab: 'collectors', mobileDetail: false });
   const collectionPending = data?.collectors.filter(item => {
     const run = data.runs.filter(run => run.collectorId === item.id).at(-1);
     return run && (run.status === 'launching' || run.status === 'delivered');
@@ -214,7 +208,7 @@ export default function TodoWorkspace({ onOpenSidebar, leftSidebarVisible, activ
         {!leftSidebarVisible && <button type="button" className={`${ghost} hidden sm:inline-flex`} aria-label="打开会话侧栏" onClick={onOpenSidebar}><PanelLeft size={18} /></button>}
         <button type="button" className={`${ghost} px-2`} aria-label="返回终端" title="返回终端" onClick={() => useCollaborationNavigation.getState().terminal()}><ArrowLeft size={18} /></button>
         <h1 className="min-w-0 flex-1 text-base font-semibold">待办{data && <span className="ml-2 text-xs font-normal tabular-nums text-muted-foreground">{data.todos.filter(todo => todo.status === 'open').length}</span>}</h1>
-        <button type="button" className={`${ghost} px-2 text-primary`} aria-label="收集待办" disabled={!data || busy} onClick={requestCollection}><Sparkles size={16} /><span>收集</span></button>
+        <button type="button" className={`${ghost} px-2`} aria-label="管理收集方向" title="管理收集方向" disabled={!data || busy} onClick={manageCollectors}><Settings2 size={16} /><span>管理</span></button>
         <button type="button" className={`${ghost} px-2`} aria-label="新增待办" title="新增待办" disabled={!data} onClick={() => show({ kind: 'edit' })}><Plus size={21} /></button>
         <TodoMoreMenu label="待办菜单" items={workspaceActions} disabled={!data || busy} />
       </>}
@@ -222,7 +216,7 @@ export default function TodoWorkspace({ onOpenSidebar, leftSidebarVisible, activ
     {(loadError || error && !modal) && <div role="alert" className="flex shrink-0 items-start gap-3 border-b border-border/30 px-5 py-3 text-sm text-destructive"><span className="min-w-0 flex-1 break-words">{error || loadError}</span>{loadError && <button type="button" className="shrink-0 underline" onClick={() => void refresh(true)}>重试</button>}<button type="button" aria-label="关闭提示" onClick={() => { setError(''); setLoadError(''); }}>×</button></div>}
     {notice && <div role="status" className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] left-1/2 z-toast flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-4 rounded-xl border border-border bg-surface-elevated px-4 py-3 text-sm shadow-lg"><span className="min-w-0 break-words">{notice}</span>{undo && <button type="button" className="min-h-9 shrink-0 text-primary" onClick={() => void act(async () => { await updateTodo(undo.todo, { status: undo.previous }); if (current()) setNotice('已撤销'); })}>撤销</button>}</div>}
     {!data ? <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">{loadError ? '加载失败，请重试' : '正在加载待办…'}</div> : view.tab === 'collectors' ? <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-3"><p className="text-sm leading-6 text-muted-foreground">配置一次，之后从清单一键收集。</p>{enabledCollectors.length > 1 && <button type="button" className={secondary} disabled={busy} onClick={() => void act(() => collect(enabledCollectors))}>全部收集</button>}</div>
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3"><p className="text-sm leading-6 text-muted-foreground">按方向发起收集、编辑或删除。</p>{enabledCollectors.length > 1 && <button type="button" className={secondary} disabled={busy} onClick={() => void act(() => collect(enabledCollectors))}>全部收集</button>}</div>
       {!data.collectors.length ? <Empty title="让 Agent 帮你发现下一件事" text="添加一个收集方向，写下关注的内容和筛选要求。" /> : <div className={`grid items-start gap-4 ${wide ? 'grid-cols-2' : ''}`}>{data.collectors.map(item => <CollectorCard key={item.id} collector={item} runs={data.runs.filter(run => run.collectorId === item.id)} busy={busy} onRun={() => void act(() => collect([item]))} onEdit={() => show({ kind: 'collector', id: item.id })} onOpen={openSession} onRemove={() => void act(async () => { await removeTodoCollector(item); })} />)}</div>}
     </div> : <div className="flex min-h-0 flex-1 flex-col">
       {toolsVisible && <div aria-label="搜索和筛选" className="shrink-0 space-y-2 border-b border-border/30 px-4 py-3">
@@ -230,7 +224,8 @@ export default function TodoWorkspace({ onOpenSidebar, leftSidebarVisible, activ
         <div className="flex gap-2"><select aria-label="待办状态" className="min-h-11 min-w-0 flex-1 rounded-lg bg-surface-2 px-3 text-base sm:text-sm" value={view.filter} onChange={event => patch({ filter: event.target.value as typeof view.filter, checked: [] })}><option value="all">全部待办</option><option value="open">待完成</option><option value="completed">已完成</option><option value="ignored">已忽略</option></select>
           <select aria-label="按来源筛选" className="min-h-11 min-w-0 flex-1 rounded-lg bg-surface-2 px-3 text-base sm:text-sm" value={view.source} onChange={event => patch({ source: event.target.value, checked: [] })}><option value="">全部来源</option>{[...new Set(data.todos.map(todo => todo.source))].map(source => <option key={source}>{source}</option>)}</select></div>
       </div>}
-      {!!collectionPending && <button type="button" className="flex min-h-11 shrink-0 items-center justify-between gap-3 px-5 text-left text-xs text-muted-foreground hover:bg-surface" onClick={() => patch({ tab: 'collectors' })}><span>已发起 {collectionPending} 个收集任务</span><span className="text-primary">查看</span></button>}
+      {!!directory.filter(session => session.collectionRunId).length && <details className="shrink-0 border-b border-border/20 px-5 text-sm text-muted-foreground"><summary className="min-h-11 cursor-pointer py-3">收集会话 · {directory.filter(session => session.collectionRunId).length}</summary><div className="max-h-48 space-y-1 overflow-y-auto pb-3">{directory.filter(session => session.collectionRunId).map(session => <button key={session.sessionId} type="button" className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left hover:bg-surface-2" onClick={() => { window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.sessionId })); useCollaborationNavigation.getState().terminal(); }}><span className="min-w-0 flex-1 truncate">{session.displayName}<span className="ml-2 text-xs">{session.displaySubtitle}</span></span><span className="shrink-0 text-xs text-primary">打开终端</span></button>)}</div></details>}
+      {!!collectionPending && <button type="button" className="flex min-h-11 shrink-0 items-center justify-between gap-3 px-5 text-left text-xs text-muted-foreground hover:bg-surface" onClick={manageCollectors}><span>已发起 {collectionPending} 个收集任务</span><span className="text-primary">查看</span></button>}
       {!wide && view.filter === 'all' && !view.selecting && <div role="tablist" aria-label="待办分类" className="flex shrink-0 gap-1 border-b border-border/30 px-4 pt-1">
         {(['open', 'completed'] as const).map(column => <button key={column} type="button" role="tab" aria-selected={(view.column ?? 'open') === column} className={`min-h-12 flex-1 border-b-2 px-3 text-sm ${ (view.column ?? 'open') === column ? 'border-primary text-primary' : 'border-transparent text-muted-foreground'}`} onClick={() => patch({ column })}>{columnLabel(column)} <span className="ml-1 text-xs tabular-nums">{visible.filter(todo => todo.status === column).length}</span></button>)}
       </div>}
@@ -245,7 +240,7 @@ export default function TodoWorkspace({ onOpenSidebar, leftSidebarVisible, activ
                 const run = runs.at(-1);
                 return <TodoItemCard key={todo.id} todo={todo} runs={runs} workspace={workspace} sessionName={run ? sessionNameFor(run) : undefined} busy={busy}
                   expanded={view.selectedId === todo.id} selecting={view.selecting} checked={view.checked.includes(todo.id)} canSelect={canBatch(todo)} handoff={modal?.kind === 'recipient' && modal.ids.includes(todo.id) ? <div role="group" aria-label={`选择接收会话 ${todo.title}`} className="flex flex-wrap items-center gap-2"><span className="min-w-0 flex-1 text-xs text-primary">正在选择会话…</span><button type="button" className={ghost} disabled={busy} onClick={() => chooseTodoRecipient(workspace, modal.ids, '__new__')}>新建会话</button><button type="button" className={ghost} disabled={busy} onClick={() => show(null)}>取消</button></div> : undefined}
-                  onToggle={() => select(todo)} onCheck={checked => patch({ checked: checked ? [...view.checked, todo.id] : view.checked.filter(id => id !== todo.id) })}
+                  onReleaseClaim={() => void act(async () => { await releaseTodoClaim(todo); })} onToggle={() => select(todo)} onCheck={checked => patch({ checked: checked ? [...view.checked, todo.id] : view.checked.filter(id => id !== todo.id) })}
                   onHandoff={() => requestHandoff([todo.id])} onOpen={run => openSession(run, todo)} onStatus={next => status(todo, next)} onEdit={() => show({ kind: 'edit', todo })} />;
               })}
             </div>
@@ -276,12 +271,14 @@ function Empty({ title, text }: { title: string; text: string }) { return <div c
 function CollectorCard({ collector: c, runs, busy, onRun, onEdit, onRemove, onOpen }: { collector: TodoCollector; runs: TodoRun[]; busy: boolean; onRun: () => void; onEdit: () => void; onRemove: () => void; onOpen: (run: TodoRun) => void }) {
   const [removing, setRemoving] = useState(false), latest = runs.at(-1);
   return <article className="rounded-xl border border-border/30 bg-surface p-4 sm:p-5">
-    <div className="flex items-center gap-2"><h2 className="min-w-0 flex-1 break-words text-base font-semibold">{c.name}</h2><button type="button" className={ghost} aria-label={`编辑 ${c.name}`} disabled={busy} onClick={onEdit}><Pencil size={16} /></button><button type="button" className={ghost} aria-label={`移除 ${c.name}`} disabled={busy} onClick={() => setRemoving(true)}><Trash2 size={16} /></button></div>
+    <div className="flex items-center gap-2"><h2 className="min-w-0 flex-1 break-words text-base font-semibold">{c.name}</h2><button type="button" className={ghost} aria-label={`编辑 ${c.name}`} disabled={busy} onClick={onEdit}><Pencil size={16} /></button><button type="button" className={ghost} aria-label={`删除 ${c.name}`} title="删除收集方向" disabled={busy} onClick={() => setRemoving(true)}><Trash2 size={16} /></button></div>
     <p className="mt-1 text-xs leading-6 text-muted-foreground">{c.config.agentSlug} · {!c.enabled ? '已停用' : !c.schedule ? '手动运行' : c.schedule.kind === 'interval' ? `每 ${c.schedule.everyMinutes} 分钟` : `每天 ${c.schedule.time}`}</p>
+    <p className="mt-1 text-xs leading-6 text-muted-foreground">{c.session?.mode === 'reuse' ? '复用会话' : '每次新建'} · {c.session?.targetSessionId ? '现有会话不自动回收' : (c.session?.idleMinutes ?? 10) ? `无输出 ${c.session?.idleMinutes ?? 10} 分钟后回收` : '不自动回收'}</p>
+    <p className="mt-1 text-xs leading-6 text-muted-foreground">{c.processing?.mode === 'new' ? '新待办自动新建 Agent 处理' : c.processing?.mode === 'existing' ? '新待办自动发送到现有 Agent' : '仅收集，支持按来源领取'}{c.webhook?.enabled ? ' · Webhook' : ''}</p>
     <p className="my-3 line-clamp-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">{c.config.prompt}</p>
-    {removing ? <div className="rounded-lg bg-surface-2 p-3"><p className="text-sm leading-6">移除此方向？已有待办、终端和结果会保留。</p><div className="mt-2 flex justify-end gap-2"><button type="button" className={ghost} onClick={() => setRemoving(false)}>取消</button><button type="button" className={`${secondary} text-destructive`} disabled={busy} onClick={onRemove}>确认移除</button></div></div> : <div className="flex flex-wrap gap-2"><button type="button" className={primary} disabled={busy || latest?.status === 'launching'} onClick={onRun}><Sparkles size={16} />{latest ? '再次收集' : '开始收集'}</button></div>}
+    {removing ? <div className="rounded-lg bg-surface-2 p-3"><p className="text-sm leading-6">删除此收集方向？已有待办、终端和结果会保留。</p><div className="mt-2 flex justify-end gap-2"><button type="button" className={ghost} onClick={() => setRemoving(false)}>取消</button><button type="button" className={`${secondary} text-destructive`} disabled={busy} onClick={onRemove}>确认删除</button></div></div> : <div className="flex flex-wrap gap-2"><button type="button" className={primary} disabled={busy || latest?.status === 'launching'} onClick={onRun}><Sparkles size={16} />{latest ? '再次收集' : '开始收集'}</button></div>}
     {latest && <>
-      <div className="mt-4 flex items-center gap-2 text-xs leading-6 text-muted-foreground"><span className="flex-1">{latest.status === 'complete' ? '已收到收集结果' : todoRunLabel[latest.status]}</span>{latest.sessionId && latest.status !== 'complete' && <button type="button" className={ghost} disabled={busy} onClick={() => onOpen(latest)}>打开终端</button>}</div>
+      <div className="mt-4 flex items-center gap-2 text-xs leading-6 text-muted-foreground"><span className="flex-1">{latest.collectionSession?.recycledAt ? '收集终端已回收' : latest.status === 'complete' ? '已收到收集结果' : todoRunLabel[latest.status]}</span>{latest.sessionId && !latest.collectionSession?.recycledAt && latest.status !== 'complete' && <button type="button" className={ghost} disabled={busy} onClick={() => onOpen(latest)}>打开终端</button>}</div>
       <details className="mt-2 text-sm text-muted-foreground"><summary className="min-h-11 cursor-pointer py-2.5">收集记录 · {runs.length} 次</summary><div className="space-y-3 pt-2">{runs.slice().reverse().map(run => <TodoRunCard key={run.id} run={run} onOpen={() => onOpen(run)} busy={busy} />)}</div></details>
     </>}
   </article>;

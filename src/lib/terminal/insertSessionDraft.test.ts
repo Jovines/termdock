@@ -15,6 +15,8 @@ function host(id: string, ready = true) { const element = document.createElement
 it('inserts short CLI guidance once into the exact session through owned paste, without submitting', async () => {
   host('other'); const target = host('target');
   expect(TODO_GUIDANCE).toContain('td todo --help'); expect(TODO_GUIDANCE.length).toBeLessThan(80); expect(TODO_GUIDANCE).not.toContain('\n');
+  expect(TODO_GUIDANCE).toContain('待办用法');
+  expect(TODO_GUIDANCE).not.toContain('需要添加待办时');
   expect(await insertSessionDraft('target', TODO_GUIDANCE)).toBe('inserted');
   expect(state.insert).toHaveBeenCalledOnce();
   expect(state.insert).toHaveBeenCalledWith(TODO_GUIDANCE, 'target', expect.any(Function), target, { paste: true, submitAfterPaste: false, focus: true });

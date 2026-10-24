@@ -116,6 +116,7 @@ import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
 import { ConnectionQualitySettings } from './lib/components/settings/ConnectionQualitySettings';
 import { ServerHealthSettings } from './lib/components/settings/ServerHealthSettings';
+import { NewSessionShortcut } from './lib/components/NewSessionShortcut';
 import { WorkspaceRetentionSettings } from './lib/components/settings/WorkspaceRetentionSettings';
 import { useServiceWorkspaceActivity } from './lib/components/ServiceSwitcher';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
@@ -1909,6 +1910,7 @@ function App() {
     userSelectedNewSessionMode,
     setNewSessionMode,
   } = useNewSessionDefaults();
+  const [newSessionShortcutSettingsOpen, setNewSessionShortcutSettingsOpen] = useState(false);
   const [newSessionShortcutConfirmMode, setNewSessionShortcutConfirmMode] = useState<'shell' | 'tmux' | null>(null);
 
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
@@ -3675,6 +3677,12 @@ function App() {
       />}
 
       {/* Settings modal (single page) */}
+      <NewSessionShortcut
+        onCreate={dispatchNewSession}
+        disabled={!activeSessionId || isDrawerOpen || quickSessionPending || !!mainCollaborationGroup || todoWorkspaceOpen}
+        configureOpen={newSessionShortcutSettingsOpen}
+        onConfigureClose={() => setNewSessionShortcutSettingsOpen(false)}
+      />
       {isDrawerOpen && (
         <>
           <button
@@ -3826,6 +3834,11 @@ function App() {
                     })}
                   </div>
                 </div>
+
+                <button type="button" onClick={() => setNewSessionShortcutSettingsOpen(true)} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-xl bg-surface-2 px-3 py-2 text-left text-[12px] hover:bg-surface-elevated">
+                  <span className="font-medium">{locale === 'zh' ? 'Command+D 新建会话' : 'Command+D new session'}</span>
+                  <span className="shrink-0 text-primary">{locale === 'zh' ? '配置' : 'Configure'}</span>
+                </button>
 
                 {/* Toggles row */}
                 <div className="grid grid-cols-2 gap-2">

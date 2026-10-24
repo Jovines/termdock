@@ -223,6 +223,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isWindowFocused, setIsWindowFocused] = React.useState(() => typeof document === 'undefined' ? true : document.hasFocus());
   const [isStreamReady, setIsStreamReady] = React.useState(false);
   const [tmuxScreenSessionId, setTmuxScreenSessionId] = React.useState<string | null>(null);
+  const tmuxViewportNeedsScreenRef = React.useRef(false);
   const isStreamReadyRef = React.useRef(isStreamReady);
   isStreamReadyRef.current = isStreamReady;
   const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
@@ -473,6 +474,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       acknowledgeTerminalOutput(terminalIdRef.current);
       scheduleSnapshot();
     }
+    state.releaseWrittenTmuxOutput(sessionId, writtenChunkId);
     if (!awaitingInitialWritesRef.current) return;
     if (!isInitialContentWriteSettled({
       writtenChunkId,
@@ -1161,6 +1163,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, []);
 
   const disconnectStream = React.useCallback(() => {
+    if (sessionIdRef.current) useTerminalStore.getState().clearTerminalOutputActivity(sessionIdRef.current);
     streamVersionRef.current += 1;
     terminalOperationEpochRef.current += 1;
     viewportInputChainRef.current = Promise.resolve();
@@ -1235,6 +1238,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             switch (event.type) {
               case 'connected': {
+                useTerminalStore.getState().clearTerminalOutputActivity(storeSessionId);
                 terminalOperationEpochRef.current += 1;
                 // Old async controls retain their epoch checks, but cannot
                 // keep new-connection input waiting for their timeout/reply.
@@ -1344,12 +1348,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   historyLength: sessionState?.history?.length ?? 0,
                 });
 
-                if (sessionState?.history && sessionState.history.length > 0) {
-                  debugSession(`[Terminal] Restoring ${sessionState.history.length} history chunks to frontend session ${storeSessionId}`);
-                  const totalHistoryBytes = sessionState.history.reduce((total, chunk) => total + chunk.length, 0);
+                const shellHistory = event.mode !== 'tmux' ? sessionState?.history : undefined;
+                if (shellHistory && shellHistory.length > 0) {
+                  debugSession(`[Terminal] Restoring ${shellHistory.length} history chunks to frontend session ${storeSessionId}`);
+                  const totalHistoryBytes = shellHistory.reduce((total, chunk) => total + chunk.length, 0);
                   const suppressionMs = Math.max(300, Math.min(2000, Math.ceil(totalHistoryBytes / 200)));
                   suppressInputUntilRef.current = Date.now() + suppressionMs;
-                  sessionState.history.forEach((chunk) => {
+                  shellHistory.forEach((chunk) => {
                     appendToBuffer(storeSessionId, chunk, { markActivity: false });
                   });
                   useTerminalStore.getState().setSessionHistory(storeSessionId, []);
@@ -1364,7 +1369,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 //   错位拼接，也不把 reset 后的空终端暴露成中间帧。
                 // - 否则直接 append，与现有 buffer 衔接。
                 const replayChunks = event.replayChunks;
-                const hasInitialWrites = Boolean(sessionState?.history?.length)
+                const hasInitialWrites = Boolean(shellHistory?.length)
                   || Boolean(replayChunks?.length);
                 if (hasInitialWrites) {
                   awaitingInitialWritesRef.current = true;
@@ -1383,7 +1388,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   } else {
                     debugSession(`[Terminal] Replay incremental: ${replayChunks.length} chunks`);
                     for (const chunk of replayChunks) {
-                      appendToBuffer(storeSessionId, chunk);
+                      appendToBuffer(storeSessionId, chunk, { markActivity: false });
                     }
                   }
                   // 抑制 replay 期间的用户输入，避免 echo 顺序错乱。
@@ -1404,6 +1409,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 break;
               }
               case 'reconnecting': {
+                useTerminalStore.getState().clearTerminalOutputActivity(storeSessionId);
                 isStreamReadyRef.current = false;
                 setIsStreamReady(false);
                 setReconnectStartedAt((startedAt) => startedAt ?? Date.now());
@@ -1413,10 +1419,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               }
               case 'data': {
                 if (event.data) {
+                  useTerminalStore.getState().recordTerminalOutput(storeSessionId);
                   if (flowPausedRef.current) {
                     flowPausedBufferRef.current.push(event.data);
                   } else {
-                    appendToBuffer(storeSessionId, event.data);
+                    appendToBuffer(storeSessionId, event.data, { markActivity: false });
                     if (interactiveOutputRef.current.consume(event.data.length, performance.now(),
                       isActiveRef.current && !document.hidden && isWorkspaceActive())) {
                       useTerminalStore.getState().flushPendingBufferWrites(storeSessionId);
@@ -1553,7 +1560,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   storeSessionId,
                   `\r\n[Process exited${
                     exitCode !== null ? ` with code ${exitCode}` : ''
-                  }${signal !== null ? ` (signal ${signal})` : ''}]\r\n`
+                  }${signal !== null ? ` (signal ${signal})` : ''}]\r\n`,
+                  { markActivity: false },
                 );
                 clearTerminalSession(storeSessionId);
                 setConnecting(storeSessionId, false);
@@ -1581,6 +1589,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             const isInputRejected = error.name === 'TerminalInputError'
               && 'code' in error && error.code === 'TERMINAL_INPUT_REJECTED';
+            if (!isInputRejected) useTerminalStore.getState().clearTerminalOutputActivity(storeSessionId);
             const isAuthenticationFailure = fatal && error.message === 'Authentication required';
             const isRecoverableBackendMiss = !isInputRejected && isTransientBackendSessionMiss(error);
             const errorMsg = isInputRejected
@@ -2327,7 +2336,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         const buffered = flowPausedBufferRef.current;
         flowPausedBufferRef.current = [];
         for (const chunk of buffered) {
-          appendToBuffer(storeSessionId, chunk);
+          appendToBuffer(storeSessionId, chunk, { markActivity: false });
         }
       }
     }
@@ -2373,9 +2382,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalControllerRef.current = controller;
   }, []);
   const handleViewportReadyChange = React.useCallback((ready: boolean) => {
+    if (isTmuxMode && !ready) {
+      // Dispose the old display connection before rebuilding xterm. Its
+      // incremental bytes cannot initialize an empty terminal at a new grid.
+      if (activeTerminalIdRef.current) {
+        tmuxViewportNeedsScreenRef.current = true;
+        disconnectStream();
+      }
+      setTmuxScreenSessionId(null);
+      useTerminalStore.getState().clearBuffer(sessionId);
+    }
     setIsViewportInitialized(ready);
     onViewportReadyChange?.(sessionId, ready);
-  }, [onViewportReadyChange, sessionId]);
+    if (ready && isTmuxMode && tmuxViewportNeedsScreenRef.current && terminalIdRef.current) {
+      tmuxViewportNeedsScreenRef.current = false;
+      // The existing encrypted attach handshake supplies one current tmux
+      // screen, including copy mode, instead of replaying previous output.
+      void startStream(terminalIdRef.current);
+    }
+  }, [disconnectStream, isTmuxMode, onViewportReadyChange, sessionId, startStream]);
 
   const handleMobileKeyPress = React.useCallback(
     (key: 'esc' | 'enter' | 'home' | 'end' | 'ctrl-c' | 'ctrl-d' | 'ctrl-w' | 'ctrl-u') => {

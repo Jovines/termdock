@@ -2,14 +2,17 @@ import { useMemo } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import { DEFAULT_SESSION_DISPLAY_SHELL_NAMES, getSessionPresentation, getSessionSnapshotPresentation, type SessionDisplaySource, type SessionPresentation, type SessionPresentationSnapshot } from '../terminal/display';
-import type { AgentIdentity, TerminalSessionState } from '../terminal/types';
+import type { AgentIdentity, TerminalSessionState, TerminalMode } from '../terminal/types';
 import { getCachedAgentIdentity, getCachedShellTitle, useTerminalStore } from './useTerminalStore';
 
 export interface SessionDirectoryRecord extends SessionDisplaySource {
+  collectionRunId?: string | null;
   sessionId: string; backendSessionId?: string | null; lastActivity: number; agent?: AgentIdentity | null;
 }
 /** UI consumers receive a label, never the persistence/transport `name` field. */
 export interface SessionOption {
+  mode: TerminalMode | null;
+  collectionRunId?: string | null;
   sessionId: string; displayName: string; displaySubtitle: string | null; cwd: string | null;
   agent: AgentIdentity | null; lastActivity: number;
 }
@@ -33,7 +36,7 @@ export function sessionOption(record: SessionDirectoryRecord, live?: Partial<Ter
     ...(matches ? { activeProgram: live.activeProgram ?? record.activeProgram, cwd: live.cwd ?? record.cwd,
       shellTitle: live.shellTitle ?? record.shellTitle ?? getCachedShellTitle(record.sessionId), promptState: live.promptState ?? record.promptState,
       agent: live.agent ?? record.agent ?? getCachedAgentIdentity(record.sessionId) } : {}) };
-  return { sessionId: record.sessionId, ...getSessionPresentation(source, shellNames), cwd: source.cwd ?? null,
+  return { sessionId: record.sessionId, mode: record.mode ?? null, collectionRunId: record.collectionRunId ?? null, ...getSessionPresentation(source, shellNames), cwd: source.cwd ?? null,
     agent: source.agent ?? null, lastActivity: record.lastActivity };
 }
 export function getSessionDirectorySnapshot(): SessionOption[] {

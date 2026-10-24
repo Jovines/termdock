@@ -13,15 +13,26 @@ interface PeekContext {
 export const TerminalPeekContext = createContext<PeekContext | null>(null);
 
 /** An interactive popover, rather than a tooltip or a second terminal client. */
-export function TerminalPeekTrigger({ children, className }: { children: ReactNode; className: string }) {
+export function TerminalPeekTrigger({ children, className, hoverDelay = 0, label = '查看会话终端' }: { children: ReactNode; className: string; hoverDelay?: number; label?: string }) {
   const peek = useContext(TerminalPeekContext);
+  const latestPeek = useRef(peek); latestPeek.current = peek;
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelHover = useCallback(() => { if (hoverTimer.current !== null) { clearTimeout(hoverTimer.current); hoverTimer.current = null; } }, []);
+  useEffect(() => cancelHover, [cancelHover]);
+  const available = !!peek;
+  useEffect(() => { if (!available) cancelHover(); }, [available, cancelHover]);
   if (!peek) return <div className={className}>{children}</div>;
-  return <button type="button" data-terminal-peek-trigger aria-label="查看会话终端" aria-haspopup="dialog" aria-expanded={peek.open} aria-controls={peek.open ? peek.id : undefined}
+  return <button type="button" data-terminal-peek-trigger data-terminal-peek-delay={hoverDelay || undefined} aria-label={label} aria-haspopup="dialog" aria-expanded={peek.open} aria-controls={peek.open ? peek.id : undefined}
     className={`${className} text-left transition-colors hover:border-primary/40 hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
-    onPointerDown={event => event.preventDefault()}
-    onPointerEnter={event => { if (event.pointerType === 'mouse' && window.matchMedia('(hover: hover) and (pointer: fine)').matches) peek.show(event.currentTarget); }}
-    onPointerLeave={event => peek.leave(event.relatedTarget)}
-    onClick={event => { if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) peek.show(event.currentTarget); else peek.expand(); }}>{children}</button>;
+    onPointerDown={event => { cancelHover(); event.preventDefault(); }}
+    onPointerEnter={event => {
+      if (event.pointerType !== 'mouse' || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+      cancelHover(); const source = event.currentTarget;
+      if (!hoverDelay) peek.show(source);
+      else hoverTimer.current = setTimeout(() => { hoverTimer.current = null; if (source.isConnected) latestPeek.current?.show(source); }, hoverDelay);
+    }}
+    onPointerLeave={event => { cancelHover(); peek.leave(event.relatedTarget); }}
+    onClick={event => { cancelHover(); if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) peek.show(event.currentTarget); else peek.expand(); }}>{children}</button>;
 }
 
 export function terminalPeekPosition(anchor: DOMRect, width: number, height: number) {

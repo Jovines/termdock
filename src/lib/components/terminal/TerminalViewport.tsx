@@ -3635,6 +3635,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const resizeGeneration = presentation?.generation;
       term.write(chunk, () => {
         if (replayToken) replayToken.depth -= 1;
+        if (terminalRef.current !== term) return;
         if (resizeGeneration !== undefined) presentation?.written(resizeGeneration);
         isWritingRef.current = false;
         pendingBytesRef.current -= chunkBytes;
@@ -3768,7 +3769,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               cursorBlink: !shouldUseWebgl,
               cursorStyle: 'block',
               cursorInactiveStyle: cursorVisibleRef.current ? 'bar' : 'none',
-              scrollback: onTmuxScroll ? 2000 : 5000,
+              scrollback: onTmuxScroll ? 0 : 5000,
               // FitAddon reads this option without changing the line buffer.
               // Temporarily setting scrollback=0 during measurement trims
               // history and triggers buffer resize/scroll events on every fit.
@@ -4410,7 +4411,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
 
       if (chunks.length === 0) {
-        if (lastProcessedChunkIdRef.current !== null) {
+        if (!onTmuxScroll && lastProcessedChunkIdRef.current !== null) {
           terminal.reset();
           resetWriteState();
           requestRefresh('buffer-reset', { skipResizePush: true, skipScrollToBottom: true });
@@ -4425,7 +4426,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       // 走一遍解析器。
       let bufferReplaced = false;
 
-      if (lastProcessedId === null) {
+      if (onTmuxScroll) {
+        // The tmux queue drops parsed chunks. A missing previous id means
+        // consumption, not a request to replay the remaining transcript.
+        pending = chunks.filter(chunk => lastProcessedId === null || chunk.id > lastProcessedId);
+      } else if (lastProcessedId === null) {
         pending = chunks;
       } else {
         const lastProcessedIndex = chunks.findIndex((chunk) => chunk.id === lastProcessedId);
@@ -4449,9 +4454,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         enqueueWrite(rawChunk, pending[pending.length - 1].id, isReplayBatch);
       }
 
-      lastProcessedChunkIdRef.current = chunks[chunks.length - 1].id;
+      if (pending.length) lastProcessedChunkIdRef.current = pending[pending.length - 1].id;
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [chunks, terminalReadyVersion, enqueueWrite, requestRefresh, resetWriteState]);
+    }, [chunks, terminalReadyVersion, enqueueWrite, requestRefresh, resetWriteState, onTmuxScroll]);
 
     React.useImperativeHandle(
       ref,

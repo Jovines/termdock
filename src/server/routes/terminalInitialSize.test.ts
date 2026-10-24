@@ -55,7 +55,8 @@ it('retains the window throughout refresh and presents the measured grid without
   };
   try {
     await runTmux(['-f', '/dev/null', 'new-session', '-d', '-s', 'task', '-x', '60', '-y', '20',
-      "sh -c 'printf SESSION_CONTENT; exec sleep 30'"]);
+      `sh -c 'i=0; while [ "$i" -lt 1500 ]; do printf "OLDER_%s\\n" "$i"; i=$((i + 1)); done; printf "\\033[H\\033[2JSESSION_CONTENT"; exec sleep 30'`]);
+    await vi.waitFor(async () => expect(await runTmux(['capture-pane', '-p', '-t', 'task'])).toContain('SESSION_CONTENT'));
     await runTmux(['set-option', '-t', 'task', 'status', 'off']);
     await runTmux(['set-window-option', '-t', 'task', 'window-size', 'latest']);
     const metadata = spawn(60, 20, ['-u', '-T', 'RGB,sync', 'attach-session', '-t', 'task']);
@@ -99,6 +100,7 @@ it('retains the window throughout refresh and presents the measured grid without
       await new Promise<void>(resolve => terminal.write(buildAtomicTerminalReplay(connected.replayChunks ?? []).join(''), resolve));
       const lines = Array.from({ length: rows }, (_, row) => terminal.buffer.active.getLine(row)?.translateToString(true) ?? '');
       expect(lines.join('\n')).toContain('SESSION_CONTENT');
+      expect(lines.join('\n')).not.toContain('OLDER_');
       expect(lines.join('\n'), 'the first presented grid must have no old-size tmux padding').not.toContain('·');
       expect((await runTmux(['display-message', '-p', '-t', 'task', '#{window_width}x#{window_height}'])).trim(), 'tmux must already use the destination grid before presentation').toBe(`${cols}x${rows}`);
     };
@@ -163,6 +165,22 @@ it('retains the window throughout refresh and presents the measured grid without
     releaseProvider(); await resuming;
     await vi.waitFor(() => expect(interrupted.frames.filter(frame => frame.type === 'connected')).toHaveLength(1));
     await present(interrupted, 100, 32);
+    interrupted.close(); await onlyObserver();
+
+    // The browser no longer retains output history: it remains in tmux,
+    // including the copy-mode viewport when a fresh display client attaches.
+    expect(Number((await runTmux(['display-message', '-p', '-t', 'task', '#{history_size}'])).trim())).toBeGreaterThan(1000);
+    await runTmux(['copy-mode', '-t', 'task']);
+    await runTmux(['send-keys', '-t', 'task', '-X', 'history-top']);
+    const historyViewer = await connect('history-viewer', 100, 32);
+    const screen = historyViewer.frames.find(frame => frame.type === 'connected')!;
+    await new Promise<void>(resolve => terminal.write(buildAtomicTerminalReplay(screen.replayChunks ?? []).join(''), resolve));
+    const historyScreen = Array.from({ length: terminal.rows }, (_, row) => terminal.buffer.active.getLine(row)?.translateToString(true) ?? '').join('\n');
+    expect(historyScreen).toContain('OLDER_0');
+    expect((await runTmux(['display-message', '-p', '-t', 'task', '#{pane_in_mode}'])).trim()).toBe('1');
+    historyViewer.close(); await onlyObserver();
+    await runTmux(['send-keys', '-t', 'task', '-X', 'cancel']);
+    await present(await connect('after-history', 100, 32), 100, 32);
   } finally {
     sockets.forEach(socket => socket.close()); terminal.dispose();
     processes.forEach(display => { try { display.kill(); } catch {} });

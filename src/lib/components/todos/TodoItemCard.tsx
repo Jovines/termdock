@@ -4,14 +4,15 @@ import { TodoMoreMenu, type TodoMenuItem } from './TodoMoreMenu';
 import { startTodoDrag } from './TodoSessionDropTarget';
 import type { ReactNode } from 'react';
 
-export function TodoItemCard({ todo, runs, workspace, sessionName, busy, expanded, selecting, checked, canSelect, handoff, onToggle, onCheck, onHandoff, onOpen, onStatus, onEdit }: {
+export function TodoItemCard({ todo, runs, workspace, sessionName, busy, expanded, selecting, checked, canSelect, handoff, onToggle, onCheck, onHandoff, onOpen, onStatus, onEdit, onReleaseClaim }: {
   todo: TodoItem; runs: TodoRun[]; workspace: string; sessionName?: string; busy: boolean; expanded: boolean; selecting: boolean; checked: boolean; canSelect: boolean; handoff?: ReactNode;
-  onToggle: () => void; onCheck: (checked: boolean) => void; onHandoff: () => void; onOpen: (run: TodoRun) => void; onStatus: (status: TodoItem['status']) => void; onEdit: () => void;
+  onReleaseClaim?: () => void; onToggle: () => void; onCheck: (checked: boolean) => void; onHandoff: () => void; onOpen: (run: TodoRun) => void; onStatus: (status: TodoItem['status']) => void; onEdit: () => void;
 }) {
   const latest = runs.at(-1), linked = !!latest?.sessionId && latest.status !== 'failed';
   const history = runs.filter(run => run.result);
   const hasDetails = !!(todo.description || latest?.handoff?.note || history.length);
   const menu: TodoMenuItem[] = todo.status === 'open' ? [
+    ...(todo.claim && onReleaseClaim ? [{ label: '释放领取', action: onReleaseClaim }] : []),
     ...(linked ? [{ label: '交给其他会话', action: onHandoff, disabled: latest?.status === 'launching' }] : []),
     { label: '忽略这条待办', action: () => onStatus('ignored'), danger: true },
   ] : [];
@@ -31,6 +32,8 @@ export function TodoItemCard({ todo, runs, workspace, sessionName, busy, expande
       {!selecting && !!menu.length && <TodoMoreMenu label={`更多操作 ${todo.title}`} items={menu} disabled={busy || !!handoff} />}
     </div>
     {todo.description && <p className={`termdock-native-select ml-11 whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground ${expanded ? 'mt-1' : 'line-clamp-2'}`}>{todo.description}</p>}
+    {todo.claim && <p className="ml-11 mt-1 text-xs leading-6 text-muted-foreground">{todo.claim.expiresAt > Date.now() ? '已领取' : '领取已过期'} · {sessionName || todo.claim.sessionName}</p>}
+    {todo.autoProcessing?.state === 'failed' && <p role="alert" className="ml-11 mt-2 text-sm leading-6 text-destructive">自动交接失败：{todo.autoProcessing.error}。可以手动交给会话。</p>}
     {latest?.error && <p role="alert" className="ml-11 mt-2 break-words text-sm leading-6 text-destructive">{latest.error}</p>}
     {expanded && latest?.handoff?.note && <div className="ml-11 mt-3 text-sm leading-6"><p className="text-xs text-muted-foreground">发送时的补充</p><p className="mt-1 whitespace-pre-wrap break-words">{latest.handoff.note}</p></div>}
     {expanded && !!history.length && <details className="ml-11 mt-3 text-sm text-muted-foreground"><summary className="min-h-11 cursor-pointer py-2.5">此前的处理记录</summary>{history.slice().reverse().map(run => <p key={run.id} className="mt-2 whitespace-pre-wrap break-words leading-7">{run.result}</p>)}</details>}

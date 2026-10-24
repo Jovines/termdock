@@ -226,7 +226,7 @@ systemd 启动 `td --supervise` 时，如需服务重启后保留 TD 管理的 t
 Termdock 的登录用户拥有运行服务的系统账户权限，终端可以执行任意命令。
 Host 白名单、CSRF 和文件路径检查不能代替认证，也不是操作系统沙箱。
 
-先运行 `td --set-password` 设置至少 16 位、唯一的高强度密码，再配置：
+先运行 `td --set-password` 设置至少 8 位、唯一的高强度密码，再配置：
 
 ```dotenv
 TERMDOCK_PUBLIC_ORIGIN=https://term.example.com:9834

@@ -87,3 +87,23 @@ it('allows an already-launched collector to finish injection after its direction
   store.removeCollector(c.id, store.collector(c.id).revision);
   expect(store.create({ title: '迟到的收集结果', collectorId: c.id }).source).toBe('临时方向');
 });
+it('projects collection session provenance after restarts and direction deletion without using titles', () => {
+  const collector = store.saveCollector({ name: '定时巡检', config });
+  const run = store.begin('collect', collector.id, config, 'collect-provenance').run;
+  store.mark(run.id, { status: 'delivered', sessionId: 'collector-session' });
+  const todo = store.create({ title: '收集 · 手动创建的事项' });
+  const manual = store.begin('execute', todo.id, config, 'manual-provenance').run;
+  store.mark(manual.id, { status: 'delivered', sessionId: 'ordinary-session' });
+  expect([...store.collectionSessions()]).toEqual([['collector-session', run.id]]);
+  store.removeCollector(collector.id, store.collector(collector.id).revision);
+  expect([...new TodoStore(file).collectionSessions()]).toEqual([['collector-session', run.id]]);
+});
+
+it('keeps deduplication scoped to stable collector IDs through identical source names and renames', () => {
+  const a = store.saveCollector({ name: '同名渠道', config }), b = store.saveCollector({ name: '同名渠道', config });
+  const first = store.create({ title: 'A', collectorId: a.id, externalId: 'one' });
+  expect(store.create({ title: 'B', collectorId: b.id, externalId: 'one' }).id).not.toBe(first.id);
+  store.saveCollector({ ...a, name: '改名渠道' });
+  expect(store.create({ title: 'A renamed', collectorId: a.id, externalId: 'one' }).id).toBe(first.id);
+  expect(store.create({ title: '外部同名', source: '同名渠道', externalId: 'one' }).id).not.toBe(first.id);
+});

@@ -4,6 +4,7 @@ import { Check, FolderOpen, Play, X } from 'lucide-react';
 import { useKeyboardLayer } from '../../hooks/useKeyboardLayer';
 import type { AgentLauncherInfo } from '../../terminal/api';
 import type { TodoCollector, TodoItem, TodoLaunchConfig } from '../../todos/api';
+import { useSessionDirectory } from '../../stores/useSessionDirectory';
 import { useTodoDraft } from '../../todos/workspace';
 import { directoryName } from '../../todos/preferences';
 import { DirectoryPickerDialog } from '../sidebar/DirectoryPickerDialog';
@@ -80,15 +81,21 @@ const templates = [
   { name: '技术动态', prompt: '收集我关注方向的技术动态，筛选值得进一步调研或尝试的事项。每条待办附来源和后续建议，避免重复。' },
 ];
 export function CollectorEditor({ workspace, collector, config, agents, loading, service, directories, currentCwd, busy, onSave, onCancel }: { workspace: string; collector?: TodoCollector; config: TodoLaunchConfig; agents: AgentLauncherInfo[]; loading: boolean; service: string; directories: string[]; currentCwd: string; busy: boolean; onSave: (input: Partial<TodoCollector> & { name: string; config: TodoLaunchConfig }, start: boolean) => void; onCancel: () => void }) {
-  const [draft, setDraft] = useTodoDraft(workspace, `collector:${collector?.id ?? 'new'}`, { name: collector?.name ?? '', config: collector?.config ?? { ...config, prompt: '' }, enabled: collector?.enabled ?? true, schedule: collector?.schedule?.kind ?? 'manual', minutes: collector?.schedule?.kind === 'interval' ? collector.schedule.everyMinutes : 60, daily: collector?.schedule?.kind === 'daily' ? collector.schedule.time : '09:00' });
+  const sessions = useSessionDirectory();
+  const [draft, setDraft] = useTodoDraft(workspace, `collector:${collector?.id ?? 'new'}`, { processing: collector?.processing ?? { mode: 'manual' as const, sessionId: null, config: null, note: '' }, webhook: collector?.webhook ?? { enabled: false, secret: '' }, session: collector?.session ?? { mode: 'new' as 'new' | 'reuse', targetSessionId: null as string | null, beforePrompt: '', idleMinutes: 10 }, name: collector?.name ?? '', config: collector?.config ?? { ...config, prompt: '' }, enabled: collector?.enabled ?? true, schedule: collector?.schedule?.kind ?? 'manual', minutes: collector?.schedule?.kind === 'interval' ? collector.schedule.everyMinutes : 60, daily: collector?.schedule?.kind === 'daily' ? collector.schedule.time : '09:00' });
   const chosen = draft.config.agentSlug ? draft.config : { ...resolveTodoConfig(draft.config, agents, config.agentSlug, config.cwd), prompt: draft.config.prompt };
-  const valid = draft.name.trim() && chosen.prompt.trim() && !loading && agents.some(a => a.slug === chosen.agentSlug);
-  const submit = (start: boolean) => { if (busy || !valid) return; onSave({ id: collector?.id, revision: collector?.revision, name: draft.name.trim(), config: chosen, enabled: draft.enabled, schedule: draft.schedule === 'manual' ? null : draft.schedule === 'interval' ? { kind: 'interval', everyMinutes: draft.minutes } : { kind: 'daily', time: draft.daily, weekdays: collector?.schedule?.kind === 'daily' ? collector.schedule.weekdays : [0, 1, 2, 3, 4, 5, 6] } }, start); };
+  const processing = draft.processing;
+  const processingReady = !processing || processing.mode === 'manual' || (processing.mode === 'existing' ? sessions.some(s => s.sessionId === processing.sessionId && s.agent) : agents.some(a => a.slug === (processing.config?.agentSlug || chosen.agentSlug)));
+  const valid = draft.name.trim() && chosen.prompt.trim() && !loading && agents.some(a => a.slug === chosen.agentSlug) && processingReady;
+  const submit = (start: boolean) => { if (busy || !valid) return; onSave({ id: collector?.id, revision: collector?.revision, name: draft.name.trim(), config: chosen, processing: draft.processing?.mode === 'new' ? { ...draft.processing, config: draft.processing.config ?? { ...chosen, prompt: '' } } : draft.processing, webhook: draft.webhook, session: draft.session ?? { mode: 'new', targetSessionId: null, beforePrompt: '', idleMinutes: 10 }, enabled: draft.enabled, schedule: draft.schedule === 'manual' ? null : draft.schedule === 'interval' ? { kind: 'interval', everyMinutes: draft.minutes } : { kind: 'daily', time: draft.daily, weekdays: collector?.schedule?.kind === 'daily' ? collector.schedule.weekdays : [0, 1, 2, 3, 4, 5, 6] } }, start); };
   return <form className="flex min-h-0 flex-1 flex-col" onSubmit={e => { e.preventDefault(); submit(true); }}>
     <FormBody><fieldset disabled={busy} className="min-w-0 space-y-5">
       {!collector && <div className="flex flex-wrap gap-2">{templates.map(t => <button key={t.name} type="button" className={todoSecondary} onClick={() => setDraft({ ...draft, name: t.name, config: { ...draft.config, prompt: t.prompt } })}>{t.name}</button>)}</div>}
       <label className={label}>收集方向<input required className={input} maxLength={200} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder="例如：项目巡检、技术动态" /></label>
       <ConfigFields collect config={chosen} agents={agents} loading={loading} service={service} directories={directories} currentCwd={currentCwd} onChange={config => setDraft({ ...draft, config })} />
+      <CollectorProcessingFields processing={draft.processing ?? { mode: 'manual', sessionId: null, config: null, note: '' }} config={chosen} agents={agents} sessions={sessions} onChange={processing => setDraft({ ...draft, processing })} />
+      <CollectorWebhookFields collectorId={collector?.id} webhook={draft.webhook ?? { enabled: false, secret: '' }} onChange={webhook => setDraft({ ...draft, webhook })} />
+      <CollectorSessionFields session={draft.session ?? { mode: 'new', targetSessionId: null, beforePrompt: '', idleMinutes: 10 }} sessions={sessions} onChange={session => setDraft({ ...draft, session })} />
       <details className="rounded-lg border border-border/20 px-3 text-sm text-muted-foreground"><summary className="cursor-pointer py-3">定时与启用 · {draft.schedule === 'manual' ? '手动运行' : draft.schedule === 'interval' ? `每 ${draft.minutes} 分钟` : `每天 ${draft.daily}`}</summary><div className="space-y-4 pb-3">
         <label className={label}>运行频率<select className={input} value={draft.schedule} onChange={e => setDraft({ ...draft, schedule: e.target.value as typeof draft.schedule })}><option value="manual">手动运行</option><option value="interval">按间隔运行</option><option value="daily">每天定时</option></select></label>
         {draft.schedule === 'interval' && <label className={label}>间隔（分钟）<input className={input} required type="number" min={1} max={43200} step={1} value={draft.minutes} onChange={e => setDraft({ ...draft, minutes: Number(e.target.value) })} /></label>}
@@ -98,6 +105,43 @@ export function CollectorEditor({ workspace, collector, config, agents, loading,
     </fieldset></FormBody>
     <FormFooter><button type="button" className={todoGhost} disabled={busy} onClick={onCancel}>取消</button><button type="button" className={todoSecondary} disabled={busy || !valid} onClick={() => submit(false)}>仅保存</button><button className={todoPrimary} disabled={busy || !valid}><Play size={16} />{busy ? '正在保存…' : '保存并收集'}</button></FormFooter>
   </form>;
+}
+function CollectorProcessingFields({ processing, config, agents, sessions, onChange }: { processing: NonNullable<TodoCollector['processing']>; config: TodoLaunchConfig; agents: AgentLauncherInfo[]; sessions: ReturnType<typeof useSessionDirectory>; onChange: (value: NonNullable<TodoCollector['processing']>) => void }) {
+  const launch = processing.config ?? { ...config, prompt: '' }, agent = agents.find(a => a.slug === launch.agentSlug);
+  return <details className="rounded-lg border border-border/20 px-3 text-sm text-muted-foreground"><summary className="cursor-pointer py-3">收集后 · {processing.mode === 'manual' ? '仅入清单，手动交接或按来源领取' : processing.mode === 'new' ? '自动新建 Agent 处理' : '自动发送到现有 Agent'}</summary><div className="space-y-4 pb-3">
+    <label className={label}>待办处理方式<select className={input} value={processing.mode} onChange={e => onChange({ ...processing, mode: e.target.value as typeof processing.mode, sessionId: null })}><option value="manual">仅入清单</option><option value="new">自动新建 Agent 处理</option><option value="existing">自动发送到现有 Agent</option></select></label>
+    {processing.mode === 'manual' ? <p className="text-xs leading-6">可以手动交给会话，也可以让现有 Agent 通过 CLI 按来源领取。</p> : <>
+      {processing.mode === 'existing' ? <label className={label}>自动处理会话<select required className={input} value={processing.sessionId ?? ''} onChange={e => onChange({ ...processing, sessionId: e.target.value || null })}><option value="">选择接收待办的 Agent</option>{sessions.filter(s => s.agent).map(s => <option key={s.sessionId} value={s.sessionId}>{s.displayName}{s.displaySubtitle ? ` · ${s.displaySubtitle}` : ''}</option>)}{processing.sessionId && !sessions.some(s => s.sessionId === processing.sessionId) && <option value={processing.sessionId}>原会话已关闭，请重新选择</option>}</select></label> : <>
+        <label className={label}>处理 Agent<select required className={input} value={launch.agentSlug} onChange={e => { const a = agents.find(a => a.slug === e.target.value); onChange({ ...processing, config: { ...launch, agentSlug: e.target.value, command: a ? getAgentLaunchCommand(a.slug, a.command) : '' } }); }}>{agents.map(a => <option key={a.slug} value={a.slug}>{a.displayName}</option>)}</select></label>
+        {agent && <AgentCommandPicker key={agent.slug} agent={agent} value={launch.command} onChange={command => onChange({ ...processing, config: { ...launch, command } })} />}
+        <label className={label}>处理工作目录<input className={input} value={launch.cwd} onChange={e => onChange({ ...processing, config: { ...launch, cwd: e.target.value } })} /></label>
+      </>}
+      <label className={label}>自动处理要求（可选）<textarea className={`${input} min-h-24`} maxLength={4000} value={processing.note} onChange={e => onChange({ ...processing, note: e.target.value })} placeholder="例如：先调查并给出方案，暂不修改文件" /></label>
+      <p className="text-xs leading-6">保存后，此来源新注入的待办会直接交给 Agent{processing.mode === 'new' ? '，每条待办创建一个会话' : ''}；已有待办保持原状。</p>
+    </>}
+  </div></details>;
+}
+function CollectorWebhookFields({ collectorId, webhook, onChange }: { collectorId?: string; webhook: NonNullable<TodoCollector['webhook']>; onChange: (value: NonNullable<TodoCollector['webhook']>) => void }) {
+  const [copied, setCopied] = useState(false);
+  const command = collectorId && webhook.secret ? `curl -X POST 'https://你的服务地址/hooks/todo/${collectorId}' -H 'Authorization: Bearer ${webhook.secret}' -H 'Content-Type: application/json' -H 'Idempotency-Key: <通知唯一标识>' -d '{"event":"updated"}'` : '';
+  return <details className="rounded-lg border border-border/20 px-3 text-sm text-muted-foreground"><summary className="cursor-pointer py-3">外部通知 · {webhook.enabled ? 'Webhook 已启用' : '未启用'}</summary><div className="space-y-3 pb-3">
+    <label className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={webhook.enabled} onChange={e => onChange({ ...webhook, enabled: e.target.checked })} />允许 Webhook 通知触发此来源的收集</label>
+    {webhook.enabled && <>
+      <p className="text-xs leading-6">通知发送 JSON，作为本轮收集的补充上下文。可与定时收集同时启用。停用此来源也会停止 Webhook 触发。</p>
+      {command ? <><code className="block break-all rounded-lg bg-surface-2 p-3 text-xs">POST /hooks/todo/{collectorId}</code><button type="button" className={todoSecondary} onClick={() => { void navigator.clipboard.writeText(command).then(() => setCopied(true)).catch(() => setCopied(false)); }}>{copied ? '已复制' : '复制调用示例（含凭据）'}</button><p className="text-xs leading-6">将示例中的服务地址换为该服务可访问的 HTTPS 地址。凭据仅能触发本来源，请只提供给对应的通知服务。</p></> : <p className="text-xs leading-6">保存后生成本来源专用的调用凭据；重新编辑可复制调用示例。</p>}
+    </>}
+  </div></details>;
+}
+function CollectorSessionFields({ session, sessions, onChange }: { session: NonNullable<TodoCollector['session']>; sessions: ReturnType<typeof useSessionDirectory>; onChange: (session: NonNullable<TodoCollector['session']>) => void }) {
+  return <details className="rounded-lg border border-border/20 px-3 text-sm text-muted-foreground"><summary className="cursor-pointer py-3">会话与回收 · {session.mode === 'reuse' ? '复用' : '每次新建'} · {session.targetSessionId ? '现有会话不自动回收' : session.idleMinutes ? `无输出 ${session.idleMinutes} 分钟后回收` : '不自动回收'}</summary><div className="space-y-4 pb-3">
+    <label className={label}>会话策略<select className={input} value={session.mode} onChange={e => onChange({ ...session, mode: e.target.value as 'new' | 'reuse', targetSessionId: null })}><option value="new">每次新建收集会话</option><option value="reuse">复用同一会话</option></select></label>
+    {session.mode === 'reuse' && <>
+      <label className={label}>复用会话<select className={input} value={session.targetSessionId ?? ''} onChange={e => onChange({ ...session, targetSessionId: e.target.value || null })}><option value="">自动创建并复用本方向的会话</option>{sessions.filter(s => s.agent && s.mode === 'tmux').map(s => <option key={s.sessionId} value={s.sessionId}>{s.displayName}{s.displaySubtitle ? ` · ${s.displaySubtitle}` : ''}</option>)}{session.targetSessionId && !sessions.some(s => s.sessionId === session.targetSessionId) && <option value={session.targetSessionId}>原会话已关闭，请重新选择</option>}</select></label>
+      <label className={label}>复用前命令（可选）<input className={input} value={session.beforePrompt} maxLength={4000} onChange={e => onChange({ ...session, beforePrompt: e.target.value })} placeholder="例如 /clear；留空则直接发送收集要求" /></label>
+    </>}
+    {session.mode === 'reuse' && !session.targetSessionId && <p className="text-xs leading-6">上一轮报告结束后复用；会话被回收时，下次自动新建。</p>}
+    {session.targetSessionId ? <p className="text-xs leading-6">你指定的现有会话不会自动关闭。</p> : <label className={label}>无输出多久后回收（分钟）<input className={input} type="number" aria-label="无输出多久后回收（分钟）" min={0} max={43200} step={1} required value={session.idleMinutes} onChange={e => onChange({ ...session, idleMinutes: Number(e.target.value) })} /><span className="block text-xs leading-6">默认 10 分钟，填 0 关闭。任何终端输出都会重新计时；静默思考也会计时。回收会关闭终端，保留待办和记录。</span></label>}
+  </div></details>;
 }
 export function IntegrationHelp() {
   const [copied, setCopied] = useState(false);

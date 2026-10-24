@@ -8,8 +8,10 @@ import { readChatEditor, setChatEditorCaret } from './ChatRichEditor';
 const markdownRender = vi.hoisted(() => vi.fn());
 import type { ChatMessage } from './chatMessages';
 import { SessionChatView } from './SessionChatView';
+import { useTerminalStore } from '../../stores/useTerminalStore';
+function liveOutput(id: string) { act(() => { const store = useTerminalStore.getState(); store.setTerminalSession(id, { sessionId: `backend-${id}`, cols: 80, rows: 24 }); store.recordTerminalOutput(id); store.flushPendingBufferWrites(id); }); }
 vi.mock('../markdown/Markdown', () => ({ Markdown: ({ content }: { content: string }) => { markdownRender(content); return <p data-testid="chat-markdown">{content}</p>; } }));
-afterEach(() => { cleanup(); clearChatSnapshots(); sessionStorage.clear(); markdownRender.mockClear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); useTerminalStore.getState().clearAllTerminalSessions(); clearChatSnapshots(); sessionStorage.clear(); markdownRender.mockClear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 function composer() { return screen.getByRole('textbox') as HTMLElement; }
 function composerText() { return readChatEditor(composer()).text; }
 function setComposer(value: string, caret = value.length) { const node = composer(); node.replaceChildren(document.createTextNode(value)); setChatEditorCaret(node, caret); fireEvent.input(node); }
@@ -141,7 +143,7 @@ it('clears the composer and quote immediately while preserving an identical next
   fireEvent.keyDown(input, { key: 'Enter' });
   expect(composerText()).toBe('');
   expect(screen.queryByRole('button', { name: '移除消息引用' })).toBeNull();
-  expect(screen.getByText('发送中…')).toBeTruthy();
+  expect(screen.getAllByText('发送中…').some(node => node.closest('[data-chat-turn="user"]'))).toBe(true);
   expect(posts[0].content).toContain('需要解释的原话');
   setComposer('请解释');
   fireEvent.click(screen.getByRole('button', { name: '引用消息' }));
@@ -165,17 +167,22 @@ it('keeps read-only recipients from sending or accepting references', async () =
   expect((screen.getByRole('textbox') as HTMLElement).getAttribute('aria-readonly')).toBe('true'); expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(true);
 });
 
-it('keeps reply feedback through progress, renders consecutive updates together, and clears it on the final reply', async () => {
+it('observes terminal output independently of progress and final replies', async () => {
   let messages = [{ id: 'u', role: 'user', content: '帮我整理', createdAt: 1, status: 'delivered' }];
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, agent: { slug: 'codex', displayName: 'Codex' }, messages })));
   const { container } = render(<SessionChatView sessionId="waiting" onTerminal={() => {}} />);
+  await screen.findByText('帮我整理');
+  expect(screen.queryByText('工作中…')).toBeNull();
+  liveOutput('waiting');
   await screen.findByText('工作中…');
   expect(screen.getByRole('status', { name: 'Codex工作中' })).toBeTruthy();
   messages = [...messages, { id: 'a1', role: 'assistant', content: '先整理资料', createdAt: 2, status: 'stored', replyTo: 'u', responseKind: 'progress' } as typeof messages[number]];
   fireEvent(window, new Event('online')); await screen.findByText('先整理资料'); expect(screen.getByText('工作中…')).toBeTruthy();
   messages = [...messages, { id: 'a2', role: 'assistant', content: '这是结果', createdAt: 3, status: 'stored', replyTo: 'u', responseKind: 'result' } as typeof messages[number]];
   fireEvent(window, new Event('online')); await screen.findByText('这是结果');
-  await waitFor(() => expect(screen.queryByText('工作中…')).toBeNull());
+  expect(screen.getByText('工作中…')).toBeTruthy();
+  act(() => useTerminalStore.getState().clearTerminalOutputActivity('waiting'));
+  expect(screen.queryByText('工作中…')).toBeNull();
   expect(container.querySelectorAll('[data-chat-turn="assistant"]')).toHaveLength(1);
   const bodies = container.querySelectorAll('[data-chat-turn="assistant"] [data-chat-message]');
   expect(bodies).toHaveLength(2);
@@ -341,7 +348,69 @@ it('acknowledges an earlier pending request and retains reply feedback when only
   const messages = Array.from({ length: 30 }, (_, index) => ({ id: `progress-${index}`, role: 'assistant', content: `正在处理第 ${index} 步`, createdAt: index + 2, status: 'stored', responseKind: 'progress' }));
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, messages, confirmedRequestId: requestId, replyPending: true, page: { mode: 'latest', hasOlder: true, hasNewer: false } })));
   render(<SessionChatView sessionId="paged-pending" onTerminal={() => {}} />);
-  await screen.findByText('工作中…');
+  await screen.findByText('正在处理第 29 步');
+  expect(screen.queryByText('工作中…')).toBeNull();
   expect(screen.queryByText('已经送达的原请求')).toBeNull();
   expect(screen.queryByRole('button', { name: '重试发送' })).toBeNull();
+});
+
+it('shows the agent author immediately on send, puts feedback below it, and merges the author into the reply', async () => {
+  let acknowledge!: (response: Response) => void;
+  let messages: ChatMessage[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => {
+    if (init?.method === 'POST') return new Promise<Response>(resolve => { acknowledge = resolve; });
+    return Response.json({ agentAvailable: true, agent: { slug: 'codex', displayName: 'Codex' }, messages, replyPending: messages.length > 0 });
+  }));
+  const view = render(<SessionChatView sessionId="instant-author" onTerminal={() => {}} />);
+  await screen.findByText('想一起完成什么？');
+  setComposer('检查结果'); fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  const header = view.container.querySelector('[data-chat-agent-header]')!;
+  const feedback = screen.getByRole('status', { name: 'Codex发送中' });
+  expect(header.textContent).toBe('Codex');
+  expect(header.querySelector('[aria-hidden="true"]')).toBeTruthy();
+  expect(header.compareDocumentPosition(feedback) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(feedback.textContent).toBe('发送中…');
+  messages = [{ id: 'sent', role: 'user', content: '检查结果', createdAt: 1, status: 'delivered' }];
+  await act(async () => acknowledge(Response.json({ id: 'sent', status: 'delivered' })));
+  expect(screen.queryByRole('status', { name: 'Codex工作中' })).toBeNull();
+  liveOutput('instant-author');
+  await screen.findByRole('status', { name: 'Codex工作中' });
+  expect(screen.getAllByText('Codex')).toHaveLength(1);
+  messages.push({ id: 'progress', role: 'assistant', content: '正在核对结果', createdAt: 2, status: 'stored', replyTo: 'sent', responseKind: 'progress' });
+  fireEvent(window, new Event('online')); await screen.findByText('正在核对结果');
+  expect(screen.getAllByText('Codex')).toHaveLength(1);
+  expect(screen.getByRole('status', { name: 'Codex工作中' }).textContent).toBe('工作中…');
+});
+it('removes optimistic agent feedback when sending fails', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => {
+    if (init?.method === 'POST') throw new Error('offline');
+    return Response.json({ agentAvailable: true, agent: { slug: 'codex', displayName: 'Codex' }, messages: [] });
+  }));
+  const view = render(<SessionChatView sessionId="failed-author" onTerminal={() => {}} />);
+  await screen.findByText('想一起完成什么？');
+  setComposer('检查结果'); fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  expect(view.container.querySelector('[data-chat-agent-header]')?.textContent).toBe('Codex');
+  await screen.findByRole('button', { name: '重试发送' });
+  expect(view.container.querySelector('[data-chat-reply-feedback]')).toBeNull();
+});
+
+it('shows terminal activity without a recognized agent or pending chat reply', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: false, messages: [], replyPending: false })));
+  render(<SessionChatView sessionId="unknown-agent" onTerminal={() => {}} />);
+  await screen.findByText('当前对话暂不可用。');
+  expect(screen.queryByText('工作中…')).toBeNull();
+  liveOutput('unknown-agent'); expect(screen.getByText('工作中…')).toBeTruthy();
+  act(() => useTerminalStore.getState().clearTerminalSession('unknown-agent'));
+  expect(screen.queryByText('工作中…')).toBeNull();
+});
+it('does not let a failed chat submission hide actual terminal output', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => {
+    if (init?.method === 'POST') throw new Error('offline');
+    return Response.json({ agentAvailable: true, agent: { displayName: 'Other agent' }, messages: [] });
+  }));
+  render(<SessionChatView sessionId="active-send-failure" onTerminal={() => {}} />);
+  await screen.findByText('想一起完成什么？'); liveOutput('active-send-failure');
+  setComposer('消息'); fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  await screen.findByRole('button', { name: '重试发送' });
+  expect(screen.getByText('工作中…')).toBeTruthy();
 });

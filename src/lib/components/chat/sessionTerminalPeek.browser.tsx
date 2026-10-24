@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { commands, page, userEvent } from 'vitest/browser';
 import '../../../index.css';
 import { SessionWorkspace } from './SessionWorkspace';
+import { SplitPaneTitle } from '../SplitPaneTitle';
 import { SessionModeSwitch } from './SessionModeSwitch';
 import { TerminalView } from '../views/TerminalView';
 import { useTerminalStore } from '../../stores/useTerminalStore';
@@ -13,7 +14,7 @@ const backend = vi.hoisted(() => ({ inputs: vi.fn(), connect: vi.fn(), resize: v
 vi.mock('../../terminal/factory', () => ({ createTermdockAPI: () => ({
   connect: (_id: string, handlers: TerminalHandlers) => {
     backend.connect(); backend.handlers = handlers;
-    queueMicrotask(() => handlers.onEvent({ type: 'connected', mode: 'shell', cwd: '/tmp' }));
+    queueMicrotask(() => { handlers.onEvent({ type: 'connected', mode: 'shell', cwd: '/tmp' }); handlers.onEvent({ type: 'data', data: '\r\nlive attach output\r\n' }); });
     return { close: backend.close };
   },
   sendInput: async (_id: string, text: string) => { backend.inputs(text); if (!/[\x00-\x1f\x7f]/.test(text)) backend.handlers?.onEvent({ type: 'data', data: text }); },
@@ -27,20 +28,20 @@ afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks(); document.body.replaceChildren(); localStorage.clear(); sessionStorage.clear();
   await page.viewport(1280, 900);
 });
-async function mount(width = 1280) {
+async function mount(width = 1280, withAssistant = false, paneTitle = false) {
   await page.viewport(width, 900);
   sessionId = `peek-${Date.now()}`; let mode = 'chat', replyPending = true;
   localStorage.setItem(`termdock:session-view:${location.origin}:${sessionId}`, mode);
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     if (String(url).includes('/view-mode')) { if (init?.body) mode = JSON.parse(String(init.body)).mode; return Response.json({ mode }); }
-    if (String(url).includes('/chat')) return Response.json({ agentAvailable: true, agent: { displayName: 'Codex', slug: 'codex' }, replyPending, messages: [{ id: 'u1', role: 'user', content: '检查构建输出', createdAt: 1, status: 'delivered' }] });
+    if (String(url).includes('/chat')) return Response.json({ agentAvailable: true, agent: { displayName: 'Codex', slug: 'codex' }, replyPending, messages: [{ id: 'u1', role: 'user', content: '检查构建输出', createdAt: 1, status: 'delivered' }, ...(withAssistant ? [{ id: 'a1', role: 'assistant', content: '正在检查构建输出', createdAt: 2, status: 'stored' }] : [])] });
     return Response.json({});
   }));
   useTerminalStore.getState().setTerminalSession(sessionId, { sessionId: 'backend-peek', mode: 'shell', cols: 120, rows: 32, cwd: '/tmp' });
   useTerminalStore.getState().replaceBuffer(sessionId, ['isolated terminal output\r\n$ ']);
   const host = document.createElement('div'); host.className = 'h-screen flex flex-col'; document.body.append(host);
   root = createRoot(host);
-  root.render(<><header className="h-12 shrink-0"><SessionModeSwitch sessionId={sessionId} /></header><main className="flex-1 min-h-0"><SessionWorkspace sessionId={sessionId} name="构建检查" active>{(visible, interactive) => <TerminalView sessionId={sessionId} mode="shell" isActive isLayoutVisible={visible} focusSuspended={!interactive} suppressKeyboard={!visible} terminalSettings={{ ...getDefaultTerminalSettings(), rendererMode: 'canvas', enableImages: false, fontLigatures: false }} />}</SessionWorkspace></main></>);
+  root.render(<><header data-test-session-header className={paneTitle ? 'h-6 shrink-0' : 'h-12 shrink-0'}>{paneTitle ? <SplitPaneTitle session={{ id: sessionId, name: '构建检查', customName: true, mode: 'shell', tmuxSessionName: null }} active onActivate={() => {}} /> : <SessionModeSwitch sessionId={sessionId} />}</header><main className="flex-1 min-h-0"><SessionWorkspace sessionId={sessionId} name="构建检查" active>{(visible, interactive) => <TerminalView sessionId={sessionId} mode="shell" isActive isLayoutVisible={visible} focusSuspended={!interactive} suppressKeyboard={!visible} terminalSettings={{ ...getDefaultTerminalSettings(), rendererMode: 'canvas', enableImages: false, fontLigatures: false }} />}</SessionWorkspace></main></>);
   await expect.element(page.getByText('工作中…')).toBeVisible(); await frame();
   return { completeReply: () => { replyPending = false; window.dispatchEvent(new Event('online')); } };
 }
@@ -72,7 +73,7 @@ it('moves the same complete terminal into a hover bubble, accepts input, and clo
   expect(panel.getBoundingClientRect().right).toBeLessThanOrEqual(innerWidth);
   expect(panel.getBoundingClientRect().bottom).toBeLessThanOrEqual(innerHeight);
   const below = parseFloat(panel.style.paddingTop) > 0;
-  await commands.peekMove('[data-terminal-peek-trigger]', .5, below ? 1.1 : -.1);
+  await commands.peekMove('[data-chat-reply-status] [data-terminal-peek-trigger]', .5, below ? 1.1 : -.1);
   expect(document.querySelector('[data-terminal-peek]')).toBe(panel);
   await commands.peekMove('[data-terminal-peek] .xterm');
   expect(document.activeElement).toBe(editor);
@@ -86,7 +87,7 @@ it('moves the same complete terminal into a hover bubble, accepts input, and clo
   await page.screenshot({ path: `/tmp/termdock-terminal-peek-dpr${devicePixelRatio}.png` });
   await page.getByRole('button', { name: '查看会话终端' }).hover();
   expect(document.querySelector('[data-terminal-peek]')).toBe(panel);
-  await commands.peekMove('[data-chat-composer]');
+  await commands.peekMove('body', .99, .005);
   await expect.poll(() => document.querySelector('[data-terminal-peek]')).toBeNull();
   await expect.poll(() => document.activeElement === editor).toBe(true);
   expect(document.querySelector('textarea[data-terminal-input-anchor]')).toBe(input);
@@ -101,7 +102,7 @@ it('reopens and expands the retained terminal without losing state or reconnecti
   await expect.poll(() => backend.resize.mock.calls.length).toBeGreaterThan(0);
   const peekCols = backend.resize.mock.lastCall![0].cols;
   expect(peekCols).toBeGreaterThan(40);
-  await commands.peekMove('[data-chat-composer]');
+  await commands.peekMove('body', .99, .005);
   await expect.poll(() => document.querySelector('[data-terminal-peek]')).toBeNull();
   await page.getByRole('button', { name: '查看会话终端' }).hover();
   await page.getByRole('button', { name: '在完整会话中打开终端' }).click();
@@ -129,12 +130,12 @@ it('keeps toolbar shortcuts, live output and reconnect handling working while ho
   await expect.poll(() => panel.querySelector('.xterm-rows')?.textContent).toContain('reconnected live output');
   await commands.peekMove('[data-terminal-peek] .xterm');
   completeReply();
-  await expect.poll(() => document.querySelector('[data-terminal-peek-trigger]')).toBeNull();
+  await expect.element(page.getByText('工作中…')).toBeVisible();
   expect(document.querySelector('[data-terminal-peek]')).toBe(panel);
   await page.elementLocator(panel.querySelector('.xterm')!).click();
   await userEvent.keyboard('after-reconnect');
   await expect.poll(() => backend.inputs.mock.calls.map(([text]) => text).join('')).toContain('after-reconnect');
-  await commands.peekMove('[data-chat-composer]');
+  await commands.peekMove('body', .99, .005);
   await expect.poll(() => document.querySelector('[data-terminal-peek]')).toBeNull();
 });
 
@@ -146,4 +147,68 @@ it('uses the normal terminal view on devices without hover', async () => {
   await expect.element(page.getByRole('button', { name: '切换到对话' })).toBeVisible();
   expect(document.querySelector('[data-terminal-peek]')).toBeNull();
   await expect.poll(() => document.querySelector('.xterm-rows')?.textContent).toContain('isolated terminal output');
+});
+
+it('opens the terminal after dwelling on the agent avatar or name and cancels a brief hover', async () => {
+  await mount(1280, true);
+  const editor = document.querySelector('[data-session-chat] [role="textbox"]') as HTMLElement;
+  editor.focus();
+  const input = document.querySelector('textarea[data-terminal-input-anchor]');
+  const trigger = page.getByRole('button', { name: '查看Codex的终端' });
+  await trigger.hover();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  expect(document.querySelector('[data-terminal-peek]')).toBeNull();
+  await commands.peekMove('body', .99, .005);
+  await new Promise(resolve => setTimeout(resolve, 550));
+  expect(document.querySelector('[data-terminal-peek]')).toBeNull();
+  const button = document.querySelector('[data-terminal-peek-delay="500"]')!;
+  await page.elementLocator(button.querySelector('[aria-hidden="true"]')!).hover();
+  await expect.element(page.getByRole('dialog', { name: '会话终端预览' })).toBeVisible();
+  const panel = document.querySelector('[data-terminal-peek]')!;
+  expect(panel.querySelector('textarea[data-terminal-input-anchor]')).toBe(input);
+  expect(document.activeElement).toBe(editor);
+  await commands.peekMove('[data-terminal-peek] .xterm');
+  expect(document.querySelector('[data-terminal-peek]')).toBe(panel);
+  await commands.peekMove('body', .99, .005);
+  await expect.poll(() => document.querySelector('[data-terminal-peek]')).toBeNull();
+  await trigger.hover();
+  await expect.element(page.getByRole('dialog', { name: '会话终端预览' })).toBeVisible();
+  expect(backend.connect).toHaveBeenCalledTimes(1);
+});
+
+it('fits the view toggle into a split pane title and switches without reconnecting', async () => {
+  await mount(1280, false, true);
+  const header = document.querySelector('[data-pane-titlebar]')!;
+  const input = document.querySelector('textarea[data-terminal-input-anchor]');
+  const toTerminal = page.elementLocator(header).getByRole('button', { name: '切换到终端' });
+  expect(header.getBoundingClientRect().height).toBe(24);
+  const button = header.querySelector<HTMLButtonElement>('[aria-label="切换到终端"]')!;
+  expect(button.getBoundingClientRect().height).toBe(header.clientHeight);
+  expect(header.querySelector('[data-split-pane-title]')?.contains(button)).toBe(false);
+  await toTerminal.click();
+  await expect.poll(() => document.querySelector('.xterm-rows')?.textContent).toContain('isolated terminal output');
+  await page.elementLocator(header).getByRole('button', { name: '切换到对话' }).click();
+  await expect.element(page.getByText('工作中…')).toBeVisible();
+  expect(document.querySelector('textarea[data-terminal-input-anchor]')).toBe(input);
+  expect(backend.connect).toHaveBeenCalledTimes(1);
+});
+
+it('expires on silence despite a pending reply, recovers on output, and ignores reconnect replay', async () => {
+  await mount();
+  await page.getByRole('button', { name: '查看会话终端' }).hover();
+  await commands.peekMove('[data-terminal-peek] .xterm');
+  const panel = document.querySelector('[data-terminal-peek]');
+  // Keep the real input/renderer/timers running while the terminal is silent.
+  await expect.poll(() => document.querySelector('[data-chat-reply-status]'), { timeout: 7000 }).toBeNull();
+  expect(document.querySelector('[data-terminal-peek]')).toBe(panel);
+  backend.handlers!.onEvent({ type: 'data', data: '\r\nnew real output\r\n' });
+  await expect.element(page.getByText('工作中…')).toBeVisible();
+  backend.handlers!.onEvent({ type: 'reconnecting' });
+  await expect.poll(() => document.querySelector('[data-chat-reply-status]')).toBeNull();
+  backend.handlers!.onEvent({ type: 'connected', mode: 'shell', replayChunks: ['history-only'], replayOutOfWindow: true });
+  await frame(); expect(document.querySelector('[data-chat-reply-status]')).toBeNull();
+  backend.handlers!.onEvent({ type: 'data', data: '\r\nlive after replay\r\n' });
+  await expect.element(page.getByText('工作中…')).toBeVisible();
+  await commands.peekMove('body', .99, .005);
+  await expect.poll(() => document.querySelector('[data-terminal-peek]')).toBeNull();
 });

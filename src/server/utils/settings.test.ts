@@ -318,3 +318,16 @@ it('preserves a bracketed IPv6 Android selection and its physical identity acros
   saveSettingsFile(settings, file);
   expect(loadSettingsFile(file).androidPanel).toMatchObject({ deviceSerial: '[fd00::2]:5555', devicePhysicalId: 'a'.repeat(64) });
 });
+
+it('persists the new-session shortcut choice and asks again for unknown legacy values', () => {
+  const file = tempSettingsPath();
+  expect(loadSettingsFile(file).newSessionShortcutAction).toBeNull();
+  for (const action of ['agent', 'terminal', null] as const) {
+    const settings = loadSettingsFile(file);
+    settings.newSessionShortcutAction = action;
+    saveSettingsFile(settings, file);
+    expect(loadSettingsFile(file).newSessionShortcutAction).toBe(action);
+  }
+  fs.writeFileSync(file, JSON.stringify({ newSessionShortcutAction: 'unsupported' }));
+  expect(loadSettingsFile(file).newSessionShortcutAction).toBeNull();
+});

@@ -4,7 +4,9 @@ import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { TerminalChunk, TerminalHandlers } from '../../terminal/types';
 
-const mocks = vi.hoisted(() => ({ connect: vi.fn(), frames: [] as string[] }));
+const mocks = vi.hoisted(() => ({ connect: vi.fn(), frames: [] as string[], viewport: null as null | {
+  onReadyChange: (ready: boolean) => void; onWriteProgress: (id: number) => void;
+} }));
 vi.mock('../../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../terminal/factory', () => ({ createTermdockAPI: () => ({ connect: mocks.connect, sendInput: async () => {} }) }));
 vi.mock('../../terminal/api', async original => ({
@@ -14,8 +16,9 @@ vi.mock('../../terminal/api', async original => ({
 }));
 vi.mock('../terminal/TerminalViewport', () => ({
   TerminalViewport: React.forwardRef(function Viewport(props: {
-    chunks: TerminalChunk[]; onReadyChange: (ready: boolean) => void;
+    chunks: TerminalChunk[]; onReadyChange: (ready: boolean) => void; onWriteProgress: (id: number) => void;
   }, ref) {
+    mocks.viewport = props;
     React.useImperativeHandle(ref, () => ({
       requestRefresh() {}, setSessionReady() {}, prepareScreenReplacement() {},
       getDimensions: () => ({ cols: 120, rows: 40 }),
@@ -65,4 +68,29 @@ it('keeps immediate cached output for shell sessions', () => {
   cache('shell-initial-screen', 'shell');
   render(<TerminalView sessionId="shell-initial-screen" mode="shell" initialConnectEnabled={false} />);
   expect(mocks.frames.at(-1)).toContain('OLD_FRAME');
+});
+
+it('releases parsed tmux output and gets a new screen when the inner terminal is rebuilt', async () => {
+  cache('tmux-rebuild', 'tmux');
+  const close = vi.fn(); mocks.connect.mockReturnValue({ close });
+  render(<TerminalView sessionId="tmux-rebuild" mode="tmux" />);
+  await waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+  const first = mocks.connect.mock.calls[0][1] as TerminalHandlers;
+  act(() => first.onEvent({ type: 'connected', mode: 'tmux', replayChunks: ['BEFORE_LAYOUT'], replayOutOfWindow: true }));
+  const writtenId = useTerminalStore.getState().getTerminalSession('tmux-rebuild')!.bufferChunks.at(-1)!.id;
+  act(() => mocks.viewport!.onWriteProgress(writtenId));
+  expect(useTerminalStore.getState().getTerminalSession('tmux-rebuild')!.bufferLength).toBe(0);
+  act(() => first.onEvent({ type: 'data', data: 'UNPARSED_OLD_GRID' }));
+  act(() => mocks.viewport!.onReadyChange(false));
+  expect(close).toHaveBeenCalledOnce();
+  expect(useTerminalStore.getState().hasPendingBufferWrites('tmux-rebuild')).toBe(false);
+  expect(mocks.frames.at(-1)).toBe('');
+  // Late data from the detached stream must not seed the empty renderer.
+  act(() => first.onEvent({ type: 'data', data: 'LATE_OLD_GRID' }));
+  act(() => mocks.viewport!.onReadyChange(true));
+  expect(mocks.connect).toHaveBeenCalledTimes(2);
+  const second = mocks.connect.mock.calls[1][1] as TerminalHandlers;
+  act(() => second.onEvent({ type: 'connected', mode: 'tmux', replayChunks: ['AFTER_LAYOUT'], replayOutOfWindow: true }));
+  expect(mocks.frames.at(-1)).toContain('AFTER_LAYOUT');
+  expect(mocks.frames.at(-1)).not.toMatch(/OLD_GRID|BEFORE_LAYOUT/);
 });

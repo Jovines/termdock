@@ -39,3 +39,14 @@ it('validates configuration and persists two independently runnable directions',
   expect(store.snapshot().runs).toHaveLength(2);
   expect((await post('/runs/missing/report', { status: 'complete', content: 'x' })).status).toBe(404);
 });
+it('persists configurable session reuse and rejects invalid silence periods before saving', async () => {
+  const session = { mode: 'reuse', targetSessionId: null, beforePrompt: '/clear', idleMinutes: 20 };
+  const response = await post('/collectors', { name: '复用巡检', config, session });
+  expect(response.status).toBe(200); expect(response.data.collector.session).toEqual(session);
+  expect((await post('/collectors', { name: 'invalid', config, session: { ...session, idleMinutes: 1.5 } })).status).toBe(400);
+  expect((await post('/collectors', { name: 'missing target', config, session: { ...session, targetSessionId: 'missing' } })).status).toBe(409);
+  expect(store.snapshot().collectors).toHaveLength(1);
+  const saved = response.data.collector;
+  const updated = await post('/collectors', { ...saved, session: { ...session, idleMinutes: 0 } });
+  expect(updated.data.collector.session.idleMinutes).toBe(0);
+});

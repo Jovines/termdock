@@ -10,11 +10,15 @@ import { parseChatDisplayDraft } from './chatDisplayContent';
 import { ChatAttachmentCards } from './ChatAttachmentCards';
 import { useChatAttachmentPreview } from './useChatAttachmentPreview';
 import { ChatInlineContent } from './ChatInlineContent';
+import { TerminalPeekTrigger } from './SessionTerminalPeek';
 export const chatTime = (at: number) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const builtInIcons = new Set(['amp', 'claude', 'codex', 'copilot', 'cursor', 'droid', 'gemini', 'goose', 'grok', 'kimi', 'opencode']);
 export function ChatAgentLabel({ name, slug }: { name: string; slug?: string }) {
   const icon = slug && builtInIcons.has(slug) ? `url(/icons/agents/${slug}.svg) center / contain no-repeat` : undefined;
   return <span className="inline-flex items-center gap-2 font-medium text-foreground/75">{icon ? <span aria-hidden="true" className="h-4 w-4 shrink-0 bg-current" style={{ mask: icon, WebkitMask: icon }} /> : <Bot size={15} aria-hidden="true" />}<span>{name}</span></span>;
+}
+export function ChatAgentHeader({ name, slug }: { name: string; slug?: string }) {
+  return <div data-chat-agent-header className="mb-2 flex min-h-8 items-center text-[11px] leading-4"><TerminalPeekTrigger hoverDelay={500} label={`查看${name}的终端`} className="inline-flex items-center rounded-md"><ChatAgentLabel name={name} slug={slug} /></TerminalPeekTrigger></div>;
 }
 export function ChatReferenceCard({ reference, onRemove }: { reference: ChatReference; onRemove?: () => void }) {
   return <blockquote className="mb-2 min-w-0 rounded-lg border-l-2 border-primary/50 bg-surface px-3 py-2 text-left">
@@ -84,7 +88,7 @@ export const ChatTimeline = memo(function ChatTimeline({ messages, agentName, ag
       <button type="button" className={action} aria-label="复制消息" title="复制" onClick={() => onCopy(text, turn.id)}>{copied === turn.id ? <Check size={13} /> : <Copy size={13} />}{copied === turn.id && <span className="text-[10px]">已复制</span>}</button>
     </span></ChatUserMessage></ChatMessageViewport>;
     return <article key={turn.id} data-chat-turn="assistant" className="w-full">
-      <div className="mb-2 flex min-h-8 items-center text-[11px] leading-4"><ChatAgentLabel name={agentName} slug={agentSlug} /></div>
+      <ChatAgentHeader name={agentName} slug={agentSlug} />
       <div className="chat-replies min-w-0">{turn.messages.map((message, index) => <ChatMessageViewport key={message.id} id={message.id} root={scrollRoot} heights={rowHeights} nearby={nearbyIds} estimate={estimate(message)} eager={eager.has(message.id)} preserve={!!message.ui}><div data-chat-message={message.id} data-actions-open={openActions === message.id || undefined} className="chat-reply min-w-0">
         <div className="session-chat-markdown min-w-0 break-words">
           {message.ui && RichContent ? <RichContent key={message.id} message={message} sessionId={sessionId} canWrite={uiWritable} onAction={onAction} /> : <ChatMarkdown content={message.content} />}

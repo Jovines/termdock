@@ -2,7 +2,7 @@ import { IntegrationRuntime, integrationSocketPath } from './agent/integrationSe
 import { CollaborationService } from './agent/collaborationService.js';
 import { X509Certificate } from 'node:crypto';
 import { CollaborationPeerTransport, connectCollaborationRpc, type CollaborationRpc } from './agent/collaborationPeerTransport.js';
-import { collaborationStore, collaborationTaskStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions, prepareCollaborationTaskWorker, integrationSessionAdapter } from './routes/terminal.js';
+import { collaborationStore, collaborationTaskStore, deliverPeerCollaboration, collaborationLocalActivity, collaborationDirectorySessions, todoWebhookRouter, prepareCollaborationTaskWorker, integrationSessionAdapter } from './routes/terminal.js';
 import { CollaborationTaskService } from './agent/collaborationTaskService.js';
 import { setPushTargetPeerId } from './notifications/pushService.js';
 import { desktopServiceTargets } from './federation/desktopTargets.js';
@@ -214,6 +214,8 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use(securityHeaders);
 
   app.use(validateHostMiddleware);
+  // External senders have only a per-source webhook capability; no private API bypass.
+  app.use('/hooks/todo', todoWebhookRouter());
   if (options.secureRequired) app.use('/api/auth/open', createOpenAccessRouter(() => app.locals.passwordRuntime?.serviceId));
   if (options.secureRequired) app.use('/api/auth/password', createPasswordLoginRouter(() => app.locals.passwordRuntime));
 

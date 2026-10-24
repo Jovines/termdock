@@ -16,6 +16,12 @@ describe('collaboration CLI contract', () => {
     expect(f.output.join('\n')).toContain('DatePicker(');
     expect(f.output.join('\n')).toContain('Slider(');
     expect(f.output.join('\n')).not.toContain('支持 OpenUI');
+    expect(f.output.join('\n')).toContain('自行选择合适的表达方式');
+    expect(f.output.join('\n')).not.toContain('比较用表格');
+    expect(f.output.join('\n')).not.toContain('不要为每句话套卡片');
+    expect(f.output.join('\n')).not.toContain('Use Cards to wrap charts');
+    expect(f.output.join('\n')).not.toContain('realistic/plausible data');
+    expect(f.output.join('\n')).not.toContain('use it only when the user');
     expect(f.output.join('\n')).toContain('其他协作组');
     expect(f.output.join('\n')).toContain('"openui":{"version":2}');
     expect(() => parseCollaborationCommand(['ui', '--group', 'private'])).toThrow();

@@ -1403,7 +1403,8 @@ function FileTreeContent({ rootPath, onFileSelect, directoriesOnly = false, onPa
     setSearchMeta({ truncated: false, total: 0, engine: 'rg', limited: false, done: false });
 
     const requestSlotId = `file-search:${referenceNamespace}:${activeSearchRoot}:${++searchRequestSeqRef.current}`;
-    searchFilesStream(activeSearchRoot, query.trim(), (progress) => {
+    let started = false;
+    const runSearch = () => searchFilesStream(activeSearchRoot, query.trim(), (progress) => {
       if (cancelled) return;
       if (progress.engine) {
         setSearchMeta((current) => ({
@@ -1461,11 +1462,17 @@ function FileTreeContent({ rootPath, onFileSelect, directoriesOnly = false, onPa
       .finally(() => {
         if (!cancelled) setSearchLoading(false);
       });
+    // Cancel immediately on input changes; only launching the new scan waits.
+    const timer = window.setTimeout(() => {
+      started = true;
+      void runSearch();
+    }, 180);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
       controller.abort();
-      cancelIoSlot(requestSlotId);
+      if (started) cancelIoSlot(requestSlotId);
     };
   }, [activeSearchRoot, excludeKey, isContentMode, query, queryLower, searchMode, searchOptions.caseSensitive, searchOptions.regex, searchOptions.wholeWord, showHiddenFiles, !!referenceSelection, referenceNamespace]);
 

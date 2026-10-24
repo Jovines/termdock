@@ -59,9 +59,12 @@ export interface TerminalStore {
   setAgentResumeRecovered: (sessionId: string, recovered: boolean) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
+  recordTerminalOutput: (sessionId: string) => void;
+  clearTerminalOutputActivity: (sessionId: string) => void;
   appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => void;
   hasPendingBufferWrites: (sessionId: string) => boolean;
   flushPendingBufferWrites: (sessionId: string) => number | null;
+  releaseWrittenTmuxOutput: (sessionId: string, throughChunkId: number) => void;
   replaceBuffer: (sessionId: string, chunks: string[]) => number | null;
   clearTerminalSession: (sessionId: string) => void;
   clearBuffer: (sessionId: string) => void;
@@ -88,7 +91,7 @@ const TERMINAL_BUFFER_LIMIT = 1_000_000;
 // setState,等于没优化。挂在 create 闭包里(set 函数可访问)。
 interface BatchState {
   pendingChunksBySession: Map<string, string[]>;
-  activitySessionIds: Set<string>;
+  outputAtBySession: Map<string, number>;
   batchFlushRafRef: number | null;
 }
 
@@ -230,24 +233,25 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   // 闭包内批处理状态。详见顶部 BatchState 接口注释。
   const batch: BatchState = {
     pendingChunksBySession: new Map(),
-    activitySessionIds: new Set(),
+    outputAtBySession: new Map(),
     batchFlushRafRef: null,
   };
 
   const applyBufferedChunks = (
     batches: Map<string, string[]>,
-    activitySessionIds: ReadonlySet<string>,
+    outputAtBySession: ReadonlyMap<string, number>,
   ): Map<string, number> => {
     const lastChunkIds = new Map<string, number>();
     set((state) => {
       const newSessions = new Map(state.sessions);
       let nextChunkId = state.nextChunkId;
       const now = Date.now();
-      for (const [sessionId, chunks] of batches) {
+      for (const sessionId of new Set([...batches.keys(), ...outputAtBySession.keys()])) {
+        const chunks = batches.get(sessionId) ?? [];
         const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
-        let bufferChunks: TerminalChunk[] = existing.bufferChunks.length > 0
+        const bufferChunks: TerminalChunk[] = chunks.length > 0
           ? [...existing.bufferChunks]
-          : [];
+          : existing.bufferChunks;
         let bufferLength = existing.bufferLength;
 
         for (const data of chunks) {
@@ -257,7 +261,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
           bufferLength += data.length;
         }
 
-        while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
+        // tmux holds only unconsumed delivery, never a replay transcript. Do
+        // not trim unparsed bytes: the stream's ACK budget bounds delivery.
+        while (chunks.length > 0 && existing.mode !== 'tmux' && bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
           const removed = bufferChunks.shift();
           if (!removed) break;
           bufferLength -= removed.data.length;
@@ -267,7 +273,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
           ...existing,
           bufferChunks,
           bufferLength,
-          lastOutputAt: activitySessionIds.has(sessionId) ? now : existing.lastOutputAt,
+          lastOutputAt: outputAtBySession.get(sessionId) ?? existing.lastOutputAt,
           updatedAt: now,
         });
       }
@@ -289,17 +295,11 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   };
 
   const flushPendingBatches = () => {
-    if (batch.pendingChunksBySession.size === 0) return;
+    if (batch.pendingChunksBySession.size === 0 && batch.outputAtBySession.size === 0) return;
     const batches = drainTerminalOutputFrame(batch.pendingChunksBySession);
-    const activitySessionIds = new Set(
-      [...batches.keys()].filter((sessionId) => batch.activitySessionIds.has(sessionId)),
-    );
-    for (const sessionId of batches.keys()) {
-      if (!batch.pendingChunksBySession.has(sessionId)) {
-        batch.activitySessionIds.delete(sessionId);
-      }
-    }
-    applyBufferedChunks(batches, activitySessionIds);
+    const outputAtBySession = new Map(batch.outputAtBySession);
+    batch.outputAtBySession.clear();
+    applyBufferedChunks(batches, outputAtBySession);
     if (batch.pendingChunksBySession.size > 0) scheduleBatchFlush();
   };
 
@@ -337,12 +337,14 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         !existing ||
         existing.terminalSessionId !== terminalSession.sessionId;
 
+      if (shouldResetBuffer) batch.outputAtBySession.delete(sessionId);
       const baseState = shouldResetBuffer
         ? createEmptySessionState(sessionId)
         : existing ?? createEmptySessionState(sessionId);
 
       // Preserve history if provided, otherwise keep existing history
-      const history = terminalSession.history ?? existing?.history ?? [];
+      const history = (terminalSession.mode ?? baseState.mode) === 'tmux'
+        ? [] : terminalSession.history ?? existing?.history ?? [];
 
       // 展示元数据（程序名/目录）延续旧值作为占位：换绑后端连接时 buffer 应重置，
       // 但 tab 名不应塌空。新连接的 connected/active-program 事件会随后覆盖。
@@ -644,6 +646,23 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     });
   },
 
+  // Observation time is captured at receipt, independent of renderer/flow-control delay.
+  recordTerminalOutput: (sessionId: string) => {
+    if (!get().sessions.get(sessionId)?.terminalSessionId) return;
+    batch.outputAtBySession.set(sessionId, Date.now());
+    scheduleBatchFlush();
+  },
+  clearTerminalOutputActivity: (sessionId: string) => {
+    batch.outputAtBySession.delete(sessionId);
+    set(state => {
+      const session = state.sessions.get(sessionId);
+      if (!session || session.lastOutputAt === null) return state;
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...session, lastOutputAt: null });
+      return { sessions };
+    });
+  },
+
   appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => {
     if (!chunk) {
       return;
@@ -658,7 +677,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     }
     list.push(...splitTerminalOutputChunk(chunk));
     if (options?.markActivity !== false) {
-      batch.activitySessionIds.add(sessionId);
+      batch.outputAtBySession.set(sessionId, Date.now());
     }
     scheduleBatchFlush();
   },
@@ -668,29 +687,39 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   ),
 
   flushPendingBufferWrites: (sessionId: string) => {
-    const chunks = batch.pendingChunksBySession.get(sessionId);
-    if (!chunks?.length) {
-      return get().sessions.get(sessionId)?.bufferChunks.at(-1)?.id ?? null;
-    }
+    const chunks = batch.pendingChunksBySession.get(sessionId) ?? [];
+    const outputAt = batch.outputAtBySession.get(sessionId);
+    if (!chunks.length && outputAt === undefined) return get().sessions.get(sessionId)?.bufferChunks.at(-1)?.id ?? null;
     batch.pendingChunksBySession.delete(sessionId);
-    const marksActivity = batch.activitySessionIds.delete(sessionId);
-    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+    batch.outputAtBySession.delete(sessionId);
+    if (batch.pendingChunksBySession.size === 0 && batch.outputAtBySession.size === 0 && batch.batchFlushRafRef !== null) {
       window.cancelAnimationFrame(batch.batchFlushRafRef);
       batch.batchFlushRafRef = null;
     }
     const lastChunkIds = applyBufferedChunks(
       new Map([[sessionId, chunks]]),
-      marksActivity ? new Set([sessionId]) : new Set(),
+      outputAt === undefined ? new Map() : new Map([[sessionId, outputAt]]),
     );
     return lastChunkIds.get(sessionId) ?? null;
+  },
+
+  releaseWrittenTmuxOutput: (sessionId: string, throughChunkId: number) => {
+    set((state) => {
+      const existing = state.sessions.get(sessionId);
+      if (existing?.mode !== 'tmux' || !existing.bufferChunks.some(chunk => chunk.id <= throughChunkId)) return state;
+      const bufferChunks = existing.bufferChunks.filter(chunk => chunk.id > throughChunkId);
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...existing, bufferChunks,
+        bufferLength: bufferChunks.reduce((total, chunk) => total + chunk.data.length, 0) });
+      return { sessions };
+    });
   },
 
   replaceBuffer: (sessionId: string, chunks: string[]) => {
     // 清掉这个 session 的 pending batch:replaceBuffer 是一次性整体替换,
     // 之前的 pending chunks 不能 flush 进 state(否则新旧数据混在一起)。
     batch.pendingChunksBySession.delete(sessionId);
-    batch.activitySessionIds.delete(sessionId);
-    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+    if (batch.pendingChunksBySession.size === 0 && batch.outputAtBySession.size === 0 && batch.batchFlushRafRef !== null) {
       window.cancelAnimationFrame(batch.batchFlushRafRef);
       batch.batchFlushRafRef = null;
     }
@@ -727,7 +756,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         }
       }
 
-      while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
+      while (existing.mode !== 'tmux' && bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
         const removed = bufferChunks.shift();
         if (!removed) break;
         bufferLength -= removed.data.length;
@@ -748,8 +777,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   clearTerminalSession: (sessionId: string) => {
     // 清掉这个 session 的 pending batch,避免 stale chunk 复活
     batch.pendingChunksBySession.delete(sessionId);
-    batch.activitySessionIds.delete(sessionId);
-    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+    batch.outputAtBySession.delete(sessionId);
+    if (batch.pendingChunksBySession.size === 0 && batch.outputAtBySession.size === 0 && batch.batchFlushRafRef !== null) {
       window.cancelAnimationFrame(batch.batchFlushRafRef);
       batch.batchFlushRafRef = null;
     }
@@ -763,6 +792,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         newSessions.set(sessionId, {
           ...existing,
           terminalSessionId: null,
+          lastOutputAt: null,
           isConnecting: false,
           agentStatus: null,
           agentIndicator: null,
@@ -780,8 +810,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   clearBuffer: (sessionId: string) => {
     // 清掉 pending batch
     batch.pendingChunksBySession.delete(sessionId);
-    batch.activitySessionIds.delete(sessionId);
-    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+    batch.outputAtBySession.delete(sessionId);
+    if (batch.pendingChunksBySession.size === 0 && batch.outputAtBySession.size === 0 && batch.batchFlushRafRef !== null) {
       window.cancelAnimationFrame(batch.batchFlushRafRef);
       batch.batchFlushRafRef = null;
     }
@@ -803,7 +833,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
 
   removeTerminalSession: (sessionId: string) => {
     batch.pendingChunksBySession.delete(sessionId);
-    batch.activitySessionIds.delete(sessionId);
+    batch.outputAtBySession.delete(sessionId);
     set((state) => {
       const newSessions = new Map(state.sessions);
       newSessions.delete(sessionId);
@@ -816,7 +846,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   clearAllTerminalSessions: () => {
     // 清掉所有 pending batch
     batch.pendingChunksBySession.clear();
-    batch.activitySessionIds.clear();
+    batch.outputAtBySession.clear();
     if (batch.batchFlushRafRef !== null) {
       window.cancelAnimationFrame(batch.batchFlushRafRef);
       batch.batchFlushRafRef = null;

@@ -1891,8 +1891,17 @@ function toSearchPath(filePath: string): string {
 function searchEntryMatches(rootPath: string, candidatePath: string, queryLower: string): boolean {
   if (!queryLower) return false;
   const name = path.basename(candidatePath).toLowerCase();
-  const relative = path.relative(rootPath, candidatePath) || name;
-  return name.includes(queryLower) || toSearchPath(relative).includes(queryLower) || toSearchPath(candidatePath).includes(queryLower);
+  const relative = toSearchPath(path.relative(rootPath, candidatePath) || name);
+  if (relative.includes(queryLower) || toSearchPath(candidatePath).includes(queryLower)) return true;
+  // Match abbreviations in order, within the search scope. Including the root
+  // here would let unrelated ancestor names turn every file into a match.
+  let offset = 0;
+  for (const char of queryLower) {
+    const index = relative.indexOf(char, offset);
+    if (index < 0) return false;
+    offset = index + char.length;
+  }
+  return true;
 }
 
 function addSearchEntry(entries: Map<string, FileSearchEntry>, entryPath: string, type: FileSearchEntry['type']): void {
@@ -1990,6 +1999,7 @@ function addMatchingParentDirectories(rootPath: string, absoluteFilePath: string
 
 function searchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, excludePatterns: string[], signal: AbortSignal): Promise<FileSearchPayload> {
   return new Promise((resolve, reject) => {
+    throwIfAborted(signal, 'fs.search');
     const args = ['--files', '--color', 'never', '--no-messages', '--null'];
     if (showHidden) args.push('--hidden', '-g', '!.git/');
     appendRipgrepExcludeArgs(args, excludePatterns);
@@ -2015,6 +2025,7 @@ function searchWithRipgrep(rootPath: string, queryLower: string, showHidden: boo
 
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', (chunk: string) => {
+      if (settled || signal.aborted) return;
       stdout += chunk;
       let boundary = stdout.lastIndexOf('\0');
       if (boundary < 0) return;
@@ -2070,6 +2081,7 @@ async function searchWithFallback(rootPath: string, queryLower: string, showHidd
       continue;
     }
     for (const dirent of dirents) {
+      throwIfAborted(signal, 'fs.search');
       if (!showHidden && dirent.name.startsWith('.')) continue;
       if (dirent.name === '.git') continue;
       const fullPath = path.join(dirPath, dirent.name);
@@ -2119,6 +2131,7 @@ function createSearchBatchEmitter(res: Response) {
 
 function streamSearchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, excludePatterns: string[], signal: AbortSignal, res: Response): Promise<number> {
   return new Promise((resolve, reject) => {
+    throwIfAborted(signal, 'fs.search');
     const args = ['--files', '--color', 'never', '--no-messages', '--null'];
     if (showHidden) args.push('--hidden', '-g', '!.git/');
     appendRipgrepExcludeArgs(args, excludePatterns);
@@ -2160,6 +2173,7 @@ function streamSearchWithRipgrep(rootPath: string, queryLower: string, showHidde
 
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', (chunk: string) => {
+      if (settled || signal.aborted) return;
       stdout += chunk;
       const boundary = stdout.lastIndexOf('\0');
       if (boundary < 0) return;
@@ -2214,6 +2228,7 @@ async function streamSearchWithFallback(rootPath: string, queryLower: string, sh
       continue;
     }
     for (const dirent of dirents) {
+      throwIfAborted(signal, 'fs.search');
       if (!showHidden && dirent.name.startsWith('.')) continue;
       if (dirent.name === '.git') continue;
       const fullPath = path.join(dirPath, dirent.name);
@@ -2265,6 +2280,7 @@ function streamContentSearchWithRipgrep(
   res: Response,
 ): Promise<{ total: number; limited: boolean }> {
   return new Promise((resolve, reject) => {
+    throwIfAborted(signal, 'fs.search');
     const args = [
       '--json',
       '--no-messages',
@@ -2347,6 +2363,7 @@ function streamContentSearchWithRipgrep(
 
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', (chunk: string) => {
+      if (settled || signal.aborted) return;
       stdout += chunk;
       let newlineIndex = stdout.indexOf('\n');
       while (newlineIndex >= 0) {
@@ -3342,6 +3359,10 @@ router.get('/search', async (req: Request, res: Response) => {
     });
   };
   req.on('close', () => controller.abort(new SupersededRequestError('fs.search')));
+  res.on('close', () => controller.abort(new SupersededRequestError('fs.search')));
+  controller.signal.addEventListener('abort', () => {
+    if (isResponseWritable(res)) res.end();
+  }, { once: true });
   registerIoSlot({ requestId, op: 'fs.search', action, slotId: requestSlotId, controller, path: requestedPath });
   try {
     if (!requestedPath) {

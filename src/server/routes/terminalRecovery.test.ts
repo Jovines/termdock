@@ -103,6 +103,7 @@ it('passes failed and unavailable inventory scans as unknown to recovery detecti
   const list = vi.fn().mockRejectedValue(new Error('tmux query timed out'));
   const observe = vi.fn();
   const context = routeFunctions(['buildSessionInventory'], '', {
+    todoStore: { collectionSessions: () => new Map() },
     getTmuxStatus: vi.fn().mockResolvedValue({ available: true }),
     listLiveTmuxInventorySessions: list, observeTmuxServerGeneration: observe,
     globalSessionState: { sessions: [], updatedAt: 1 }, terminalSessions: new Map(),
@@ -183,6 +184,7 @@ it('does not flag 44 surviving sessions on PID changes and clears their persiste
 it('uses refreshed pane argv for recovery reconciliation instead of cached tmux options', async () => {
   const observe = vi.fn();
   const context = routeFunctions(['buildSessionInventory'], '', {
+    todoStore: { collectionSessions: () => new Map() },
     getTmuxStatus: async () => ({ available: true }),
     listLiveTmuxInventorySessions: async () => [{ name: 'original', program: 'zsh' }],
     observeTmuxServerGeneration: observe,

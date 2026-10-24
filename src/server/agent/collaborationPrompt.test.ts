@@ -431,6 +431,8 @@ it('always identifies nonterminal principals and teaches correlated stored repli
 
 it('describes varied answer formats to chat agents without announcing the rendering implementation', () => {
   const prompt = render([message({ kind: 'ask', integrationOrigin: { integrationId: 'webchat-user', source: 'session-chat' } })]);
-  expect(prompt).toContain('方案比较用表格'); expect(prompt).toContain('趋势和分布用图表');
+  expect(prompt).toContain('可使用 Markdown、卡片、表格、图表、交互表单、图片、文件预览和链接');
+  expect(prompt).toContain('自行选择合适的表达方式');
+  expect(prompt).not.toContain('方案比较用表格'); expect(prompt).not.toContain('简短说明直接回复 Markdown');
   expect(prompt).toContain('td collab ui --text'); expect(prompt).not.toContain('支持 OpenUI');
 });

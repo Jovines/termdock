@@ -83,6 +83,7 @@ export interface SettingsDoc {
   autoRenamePromptPayloadChars: number;
   /** Agent launched by default from the left-sidebar new-session action. */
   newSessionAgentSlug: string | null;
+  newSessionShortcutAction: 'agent' | 'terminal' | null;
   /** Show the floating shortcut used to cycle through running agent sessions. */
   runningSessionButtonEnabled: boolean;
   /** Show the yellow floating shortcut for sessions awaiting attention. */
@@ -364,6 +365,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
       ? raw.autoRenamePromptPayloadChars
       : 12_000,
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
+    newSessionShortcutAction: raw.newSessionShortcutAction === 'agent' || raw.newSessionShortcutAction === 'terminal' ? raw.newSessionShortcutAction : null,
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
     attentionButtonEnabled: raw.attentionButtonEnabled !== false,
     collaborationPanels: normalizeCollaborationPanels(raw.collaborationPanels),
@@ -705,6 +707,14 @@ export function setAutoRenameModelsSetting(models: Record<string, string>): Sett
         && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(model)
       )));
   });
+}
+
+export function getNewSessionShortcutActionSetting(): SettingsDoc['newSessionShortcutAction'] {
+  return loadSettings().newSessionShortcutAction;
+}
+
+export function setNewSessionShortcutActionSetting(action: SettingsDoc['newSessionShortcutAction']): SettingsDoc {
+  return updateSettings(settings => { settings.newSessionShortcutAction = action; });
 }
 
 export function getNewSessionAgentSlugSetting(): string | null {

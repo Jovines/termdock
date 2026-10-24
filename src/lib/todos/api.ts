@@ -12,3 +12,5 @@ export const removeTodoCollector = (collector: TodoCollector) => post('/collecto
 export const startTodo = (id: string, config: TodoLaunchConfig, idempotencyKey: string) => post<{ run: TodoRun }>(`/${encodeURIComponent(id)}/run`, { config, idempotencyKey });
 export const handoffTodos = (input: TodoHandoffInput) => post<{ run: TodoRun }>('/handoff', input);
 export const collectTodos = (id: string, idempotencyKey: string) => post<{ run: TodoRun }>(`/collectors/${encodeURIComponent(id)}/run`, { idempotencyKey });
+
+export const releaseTodoClaim = (todo: TodoItem) => post<{ todo: TodoItem }>(`/${encodeURIComponent(todo.id)}/release`, { revision: todo.revision });

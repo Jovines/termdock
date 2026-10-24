@@ -19,7 +19,8 @@ const clientStateMocks = vi.hoisted(() => ({
 vi.mock('../terminal', () => terminalMocks);
 vi.mock('../utils/clientStateSync', () => clientStateMocks);
 
-import { useSessionPersistence } from './useSessionPersistence';
+import { useSessionPersistence, readCachedSessionPersistenceSnapshot } from './useSessionPersistence';
+import { getSessionDirectorySnapshot } from '../stores/useSessionDirectory';
 
 const cachedSession = {
   sessionId: 'frontend-1',
@@ -72,6 +73,16 @@ describe('useSessionPersistence deletion races', () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it('carries collection provenance through the existing inventory, cache and shared directory', async () => {
+    terminalMocks.getSessionInventory.mockResolvedValue({ ...staleInventory, updatedAt: 2,
+      clientSessions: [{ ...staleInventory.clientSessions[0], collectionRunId: 'collection-run', name: '任意自定义名称' }] });
+    const { result } = renderHook(() => useSessionPersistence());
+    await waitFor(() => expect(result.current.sessions[0]?.collectionRunId).toBe('collection-run'));
+    expect(getSessionDirectorySnapshot()[0]?.collectionRunId).toBe('collection-run');
+    expect(readCachedSessionPersistenceSnapshot().sessions[0]?.collectionRunId).toBe('collection-run');
+    expect(terminalMocks.getSessionInventory).toHaveBeenCalledOnce();
   });
 
   it('does not resurrect a deleted session when the cold-start GET resolves late', async () => {

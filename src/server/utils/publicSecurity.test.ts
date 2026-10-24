@@ -5,24 +5,37 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertPublicSecurity, getPublicOrigin, securityHeaders } from './publicSecurity.js';
 import { isAllowedOrigin, isUpgradeOriginAllowed } from './requestSecurity.js';
 import { getCookieSecurityOptions, setSecureCookieMode } from './cookieSecurity.js';
+import { readAuthFile } from './authProtection.js';
 
-vi.mock('./authProtection.js', () => ({ isAuthEnabled: () => Boolean(process.env.TERMDOCK_PASSWORD), readAuthFile: () => null }));
+vi.mock('./authProtection.js', () => ({ isAuthEnabled: () => Boolean(process.env.TERMDOCK_PASSWORD || readAuthFile()), readAuthFile: vi.fn(() => null) }));
 vi.mock('./localAccess.js', () => ({ getLanIPv4Addresses: () => ['192.168.1.2'], localAccessManager: { getState: () => ({ hostname: 'test.termdock.local' }) } }));
-afterEach(() => { vi.unstubAllEnvs(); setSecureCookieMode(false); });
+afterEach(() => { vi.unstubAllEnvs(); vi.mocked(readAuthFile).mockReset(); setSecureCookieMode(false); });
 
 describe('public ingress security', () => {
   it('fails closed without auth and for weak env passwords or non-HTTPS origins', () => {
     vi.stubEnv('TERMDOCK_PUBLIC_ORIGIN', 'https://term.example.com');
     vi.stubEnv('TERMDOCK_PASSWORD', '');
     expect(assertPublicSecurity).toThrow(/requires authentication/);
-    vi.stubEnv('TERMDOCK_PASSWORD', 'short');
-    expect(assertPublicSecurity).toThrow(/16 characters/);
-    vi.stubEnv('TERMDOCK_PASSWORD', 'a sufficiently strong password');
+    vi.stubEnv('TERMDOCK_PASSWORD', '1234567');
+    expect(assertPublicSecurity).toThrow(/8 characters/);
+    vi.stubEnv('TERMDOCK_PASSWORD', '12345678');
     expect(assertPublicSecurity).not.toThrow();
     for (const value of ['http://term.example.com', 'https://user@term.example.com', 'https://term.example.com/path']) {
       vi.stubEnv('TERMDOCK_PUBLIC_ORIGIN', value);
       expect(getPublicOrigin).toThrow();
     }
+  });
+
+  it('requires at least 8 characters in stored password metadata', () => {
+    vi.stubEnv('TERMDOCK_PUBLIC_ORIGIN', 'https://term.example.com');
+    vi.stubEnv('TERMDOCK_PASSWORD', '');
+    const authFile = { version: 1 as const, passwordHash: 'fixture-hash', createdAt: 0 };
+    for (const passwordLength of [undefined, 7]) {
+      vi.mocked(readAuthFile).mockReturnValue({ ...authFile, passwordLength });
+      expect(assertPublicSecurity).toThrow(/8-character password/);
+    }
+    vi.mocked(readAuthFile).mockReturnValue({ ...authFile, passwordLength: 8 });
+    expect(assertPublicSecurity).not.toThrow();
   });
 
   it('requires exact HTTPS origin including port in public mode', () => {

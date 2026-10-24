@@ -468,6 +468,14 @@ export function LeftSidebar(
     () => normalizeSessionOrderGroups(rawCollaborationGroups.filter(group => group.archivedAt !== undefined), new Set(sessionsById.keys())),
     [rawCollaborationGroups, sessionsById],
   );
+  const collectionSessions = useMemo(() => {
+    const automatic = new Set(sessionDirectory.filter(session => session.collectionRunId).map(session => session.sessionId));
+    // Explicit grouping wins when a collection session has been reused by the user.
+    const assigned = new Set([...splitWorkspaces.flatMap(workspace => workspace.sessionIds), ...rawCollaborationGroups.flatMap(group => group.sessionIds)]);
+    return sessions.filter(session => automatic.has(session.id) && !assigned.has(session.id));
+  }, [sessionDirectory, sessions, splitWorkspaces, rawCollaborationGroups]);
+  const collectionSessionIds = useMemo(() => new Set(collectionSessions.map(session => session.id)), [collectionSessions]);
+  const regularSessions = useMemo(() => sessions.filter(session => !collectionSessionIds.has(session.id)), [sessions, collectionSessionIds]);
   const refreshCollaborationGroups = useCallback(async () => {
     const refreshId = ++collaborationRefreshIdRef.current;
     try {
@@ -649,8 +657,8 @@ export function LeftSidebar(
   }, []);
   // Flat 模式中分屏 workspace 占一个顶层 item；目录模式由各目录自己决定是否合并。
   const visibleSessions = useMemo(
-    () => sessions.filter((session) => !splitSessionIds.has(session.id)),
-    [sessions, splitSessionIds],
+    () => regularSessions.filter((session) => !splitSessionIds.has(session.id)),
+    [regularSessions, splitSessionIds],
   );
 
 
@@ -703,10 +711,10 @@ export function LeftSidebar(
   // 当前 active session 所在的分组 key（按 cwd 派生），用于「翻页→自动展开/收起」机制。
   // 关闭分组开关或无 active session 时返回 null，不参与自动管理。
   const activeSessionGroupKey = useMemo<string | null>(() => {
-    if (!groupByFolder || !activeSessionId) return null;
+    if (!groupByFolder || !activeSessionId || collectionSessionIds.has(activeSessionId)) return null;
     const cwd = sessionStates.get(activeSessionId)?.cwd ?? null;
     return folderGroupKeyForCwd(cwd);
-  }, [groupByFolder, activeSessionId, sessionStates]);
+  }, [groupByFolder, activeSessionId, sessionStates, collectionSessionIds]);
 
   // 翻页联动：active session 切换时同步它所在分组的展开状态。
   //  - 当前所在组若收起 → 自动展开，并记入 auto-expanded 集合（用户翻走后允许自动收起）。
@@ -1067,17 +1075,17 @@ export function LeftSidebar(
   // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
   // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
   const folderGroups = useMemo(() => deriveGroupedOrder(
-    sessions,
+    regularSessions,
     (session) => sessionStates.get(session.id)?.cwd ?? null,
     groupByFolder,
     t('sidebar.ungrouped'),
     splitWorkspaces,
     collaborationGroups,
-  ).groups, [collaborationGroups, groupByFolder, sessions, sessionStates, splitWorkspaces, t]);
+  ).groups, [collaborationGroups, groupByFolder, regularSessions, sessionStates, splitWorkspaces, t]);
 
   const flatSidebarEntities = useMemo(
-    () => buildSidebarEntities(sessions, splitWorkspaces, sessionsById, collaborationGroups),
-    [collaborationGroups, sessions, sessionsById, splitWorkspaces],
+    () => buildSidebarEntities(regularSessions, splitWorkspaces, sessionsById, collaborationGroups),
+    [collaborationGroups, regularSessions, sessionsById, splitWorkspaces],
   );
 
   const handleSidebarDragStart = useCallback((start: DragStart) => {
@@ -1914,7 +1922,7 @@ export function LeftSidebar(
           {archivedGroupsExpanded && <div className="space-y-1">{archivedCollaborationGroups.map(group => <DragDropContext key={group.id} onDragEnd={() => {}}>{renderCollaborationGroupItem(group, group.sessionIds.flatMap(id => sessionsById.get(id) ?? []))}</DragDropContext>)}</div>}
         </section>}
         {collaborationGroups.filter(group => !group.sessionIds.length).map(group => <DragDropContext key={group.id} onDragEnd={() => {}}>{renderCollaborationGroupItem(group, [])}</DragDropContext>)}
-        {sessions.length === 0 ? (
+        {regularSessions.length === 0 ? collectionSessions.length ? null : (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={26} className="mx-auto mb-2 text-muted-foreground" />
             <p className="text-[12px] text-muted-foreground">{t('sidebar.noSessions')}</p>

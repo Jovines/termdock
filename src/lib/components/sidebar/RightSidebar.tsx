@@ -8159,8 +8159,8 @@ export function RightSidebar(
               >
                 <RiGitCompare size={12} />
                 {t('rightSidebar.tabChanges')}
-                {changedFiles.size > 0 ? (
-                  <span className="text-[10px] text-accent">{changedFiles.size}</span>
+                {activeGitRepoSwitcherItem.count > 0 ? (
+                  <span className="text-[10px] text-accent">{activeGitRepoSwitcherItem.count}</span>
                 ) : null}
               </button>
             </>
@@ -8393,7 +8393,7 @@ export function RightSidebar(
                   onFilePinToggle={togglePinnedFile}
                   pinnedPaths={pinnedExplorerRootSet}
                   selectedFilePath={selectedFilePath}
-                  query={deferredFileQuery}
+                  query={fileQuery}
                   searchRootPath={resolvedSearchRoot}
                   searchOptions={fileSearchOptions}
                   searchMode={searchMode}
@@ -8516,7 +8516,7 @@ export function RightSidebar(
                     onFilePinToggle={togglePinnedFile}
                     pinnedPaths={pinnedExplorerRootSet}
                     selectedFilePath={selectedFilePath}
-                    query={deferredFileQuery}
+                    query={fileQuery}
                     searchRootPath={resolvedSearchRoot}
                     searchOptions={fileSearchOptions}
                     searchMode={searchMode}
@@ -8620,7 +8620,7 @@ export function RightSidebar(
                       {t('rightSidebar.allChanges')}
                     </span>
                     <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                      <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{activeGitRepoSwitcherItem.count}</span>
                     </div>
                   </div>
                   <ChangesToolbar key={rootPath} actions={changesSecondaryActions}>
@@ -8717,7 +8717,7 @@ export function RightSidebar(
                             {t('rightSidebar.allChanges')}
                           </div>
                         </div>
-                        <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                        <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{activeGitRepoSwitcherItem.count}</span>
                       </div>
                       <ChangesToolbar key={rootPath} actions={changesSecondaryActions}>
                         {renderRepoSwitcherButton()}

@@ -1261,7 +1261,7 @@ async function runSetPassword(): Promise<void> {
 
   if (isTty) {
     console.log(`${ICON.lock} ${c.bold('Termdock — set access password')}`);
-    console.log(c.dim('  Password must be at least 16 characters. Input is hidden.'));
+    console.log(c.dim('  Password must be at least 8 characters. Input is hidden.'));
     console.log('');
   }
 
@@ -1271,8 +1271,8 @@ async function runSetPassword(): Promise<void> {
     process.exit(1);
   }
 
-  if (password.length < 16) {
-    console.error(`\n${ICON.err} ${c.red('Password must be at least 16 characters.')}`);
+  if (password.length < 8) {
+    console.error(`\n${ICON.err} ${c.red('Password must be at least 8 characters.')}`);
     process.exit(1);
   }
 
@@ -1436,6 +1436,16 @@ async function runNotify(command: NotifyCommand): Promise<void> {
   }
 }
 
+async function resolveCurrentLocalSessionId(baseUrl: string, localToken: string): Promise<string> {
+      const context = await detectLocalSessionContext();
+      if (!context.backendSessionId && !context.tmuxSessionName) throw new Error('--self requires a Termdock-managed session');
+      const query = new URLSearchParams(Object.fromEntries(Object.entries(context).filter((entry): entry is [string, string] => typeof entry[1] === 'string')));
+      const response = await getLocalJson(baseUrl, localToken, `/api/terminal/operations/orchestration/peers?${query}`);
+      const data = JSON.parse(response.body);
+      if (response.statusCode !== 200 || !data.source?.sessionId) throw new Error(data.error || 'Current session could not be resolved');
+      return data.source.sessionId;
+}
+
 async function runAutomation(command: AutomationCommand): Promise<void> {
   if (command.action === 'help') { console.log(AUTOMATION_HELP); return; }
   const state = getRunningState();
@@ -1448,15 +1458,7 @@ async function runAutomation(command: AutomationCommand): Promise<void> {
     request: (method, endpoint, body) => method === 'POST'
       ? postLocalJson(baseUrl, state.localApiToken!, endpoint, body)
       : getLocalJson(baseUrl, state.localApiToken!, endpoint, 30_000, method),
-    self: async () => {
-      const context = await detectLocalSessionContext();
-      if (!context.backendSessionId && !context.tmuxSessionName) throw new Error('--self requires a Termdock-managed session');
-      const query = new URLSearchParams(Object.fromEntries(Object.entries(context).filter((entry): entry is [string, string] => typeof entry[1] === 'string')));
-      const response = await getLocalJson(baseUrl, state.localApiToken!, `/api/terminal/operations/orchestration/peers?${query}`);
-      const data = JSON.parse(response.body);
-      if (response.statusCode !== 200 || !data.source?.sessionId) throw new Error(data.error || 'Current session could not be resolved');
-      return data.source.sessionId;
-    },
+    self: () => resolveCurrentLocalSessionId(baseUrl, state.localApiToken!),
     stdin: readStdinText, write: (line) => console.log(line),
   });
 }
@@ -3684,6 +3686,7 @@ async function main(): Promise<void> {
       request: (method, endpoint, body) => method === 'POST'
         ? postLocalJson(baseUrl, state.localApiToken!, endpoint, body)
         : getLocalJson(baseUrl, state.localApiToken!, endpoint),
+      self: () => resolveCurrentLocalSessionId(baseUrl, state.localApiToken!),
       stdin: readStdinText, write: line => console.log(line),
     });
     return;

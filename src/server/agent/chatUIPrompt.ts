@@ -1,11 +1,10 @@
 import { generateSystemPrompt } from '@openuidev/lang-core';
 import { chatUILibrary } from '../shared/chatUILibrary.js';
-import { chatFullUISpec, chatFullUIOptions } from '../shared/chatFullUICatalog.js';
+import { chatFullUISpec } from '../shared/chatFullUICatalog.js';
 export function chatUIPrompt(): string {
   const legacy = chatUILibrary.toSpec();
   return [
-    '请按信息特点选择清楚、多样的表达：比较用表格，趋势、占比和分布用图表；多组内容用卡片、标签页或折叠区；步骤用步骤条；需要用户填写或选择时用表单、日期、滑块、单选或多选；文件和链接提供可点击入口。简单说明用 Markdown。',
-    '排版紧凑，优先保证内容完整、可读和方便操作。不要为每句话套卡片，不为装饰重复同一组事实；图表只使用实际数据。',
+    '可使用 Markdown、布局与卡片、表格、图表、表单及交互组件、图片、文件预览和链接，支持状态绑定、工具调用和逐步更新。自行选择合适的表达方式。',
     '适用边界：仅回复明确标记“来自用户的普通对话界面”的原消息。其他协作组或后台集成按原话题和接收方回复。',
     '将回复写入 UTF-8 JSON 文件，格式 {"text":"完整、可独立阅读的 Markdown 说明","ui":"界面表达程序"}。text 包含全部关键事实，供引用、复制、旧客户端和降级显示。',
     '通过 td collab --session <你的会话id> reply <原消息id> --file <文件路径> --metadata \'{"openui":{"version":2}}\' --response-kind result --idempotency-key <稳定唯一key> --text 回复。不要把 JSON 或程序打印到聊天正文。',
@@ -14,9 +13,14 @@ export function chatUIPrompt(): string {
     'Resource(label, kind, target, description?) 提供文件预览或外部链接；文件使用当前服务已授权绝对路径，链接仅 http/https。本地图片沿用页面加密读取，勿自行构造业务接口。',
     'Query 可调用 read_file({path})、list_directory({path}) 读取获准文件和目录。Mutation 可调用 continue_conversation({message})，只在用户点击的 @Run 中执行；查询不能发送消息。未知工具会明确报错，勿编造工具。',
     '只展示实际数据和明确报告，不推断 Agent 内部进度。ui 最长64000字符，text 最长32000字符。',
-    generateSystemPrompt({ ...chatFullUISpec, components: { ...chatFullUISpec.components, Resource: legacy.components.Resource },
-      ...chatFullUIOptions, bindings: true, builtinFunctions: true, toolCalls: true,
+    generateSystemPrompt({ ...chatFullUISpec,
+      // Keep the catalog factual; expression and layout choices belong to the agent.
+      componentGroups: chatFullUISpec.componentGroups?.map(({ name, components }) => ({ name, components })),
+      components: { ...chatFullUISpec.components,
+        HorizontalBarChart: { ...chatFullUISpec.components.HorizontalBarChart, description: 'Horizontal bar chart.' },
+        Resource: legacy.components.Resource },
+      bindings: true, builtinFunctions: true, toolCalls: true,
       tools: ['read_file({path: string}) -> {path, content, size, binary}', 'list_directory({path: string}) -> {path, entries}', 'continue_conversation({message: string}) -> {submitted: boolean}; Mutation only, never Query'],
-      preamble: '使用下列组件和表达式把答案组织成可阅读、可操作的界面。' }),
+      preamble: '以下是结构化表达的组件与语法说明。' }),
   ].join('\n\n');
 }

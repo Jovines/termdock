@@ -17,11 +17,11 @@ export function assertPublicSecurity(): void {
   if (!isAuthEnabled() || (!process.env.TERMDOCK_PASSWORD && !readAuthFile())) {
     throw new Error('Public access requires authentication. Run td --set-password before starting.');
   }
-  if (!process.env.TERMDOCK_PASSWORD && (readAuthFile()?.passwordLength ?? 0) < 16) {
-    throw new Error('Public access requires a verified 16-character password. Run td --set-password again.');
+  if (!process.env.TERMDOCK_PASSWORD && (readAuthFile()?.passwordLength ?? 0) < 8) {
+    throw new Error('Public access requires a verified 8-character password. Run td --set-password again.');
   }
-  if (process.env.TERMDOCK_PASSWORD && process.env.TERMDOCK_PASSWORD.length < 16) {
-    throw new Error('Public access requires TERMDOCK_PASSWORD to contain at least 16 characters.');
+  if (process.env.TERMDOCK_PASSWORD && process.env.TERMDOCK_PASSWORD.length < 8) {
+    throw new Error('Public access requires TERMDOCK_PASSWORD to contain at least 8 characters.');
   }
 }
 

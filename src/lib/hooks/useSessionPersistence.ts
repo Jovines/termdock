@@ -73,6 +73,7 @@ function clearSessionsCache(): void {
 }
 
 export interface PersistedSession {
+  collectionRunId?: string | null;
   sessionId: string;  // 前端生成的 session ID
   name: string;
   customName: boolean;
@@ -114,7 +115,7 @@ type NormalizableSession = Omit<PersistedSession, 'customName'> & { customName?:
 // without letting a delayed HTTP response replace facts observed since it began.
 const BACKEND_FACT_KEYS = [
   'backendSessionId', 'mode', 'tmuxSessionName', 'lastActivity',
-  'connected', 'live', 'restorable', 'activeProgram', 'cwd', 'shellTitle', 'agent',
+  'connected', 'live', 'restorable', 'activeProgram', 'cwd', 'shellTitle', 'agent', 'collectionRunId',
 ] as const;
 type BackendFacts = Partial<Pick<SessionInventoryClientSession, typeof BACKEND_FACT_KEYS[number]>>;
 interface ConfirmedBackendFacts {
@@ -149,12 +150,13 @@ function normalizeInventorySessionList(sessionList: SessionInventoryClientSessio
     cwd: sessionList[index]?.cwd ?? null,
     shellTitle: sessionList[index]?.shellTitle ?? null,
     agent: sessionList[index]?.agent,
+    collectionRunId: sessionList[index]?.collectionRunId ?? null,
   }));
 }
 
 function sessionListKey(sessionList: PersistedSession[]): string {
   return sessionList
-    .map((s) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}:${s.lastActivity}:${s.activeProgram ?? ''}:${s.cwd ?? ''}:${s.shellTitle ?? ''}:${JSON.stringify(s.agent) ?? ''}`)
+    .map((s) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}:${s.lastActivity}:${s.activeProgram ?? ''}:${s.cwd ?? ''}:${s.shellTitle ?? ''}:${JSON.stringify(s.agent) ?? ''}:${s.collectionRunId ?? ''}`)
     .join('|');
 }
 

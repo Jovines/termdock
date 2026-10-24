@@ -95,6 +95,7 @@ export interface TmuxSessionSummary {
 }
 
 export interface SessionInventoryClientSession {
+  collectionRunId?: string | null;
   frontendSessionId: string;
   sessionId: string;
   name: string;

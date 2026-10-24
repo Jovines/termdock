@@ -7,9 +7,9 @@ import { useCollaborationNavigation } from '../../stores/useCollaborationNavigat
 import { useSessionDirectoryStore } from '../../stores/useSessionDirectory';
 import { useTodoWorkspace } from '../../todos/workspace';
 import type { TodoRun, TodoSnapshot } from '../../todos/api';
-const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), update: vi.fn(), start: vi.fn(), handoff: vi.fn(), collect: vi.fn(), save: vi.fn(), defaults: vi.fn(), agents: vi.fn(), settings: vi.fn(), inventory: vi.fn(), peer: 'local' }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), update: vi.fn(), start: vi.fn(), handoff: vi.fn(), collect: vi.fn(), remove: vi.fn(), releaseClaim: vi.fn(), save: vi.fn(), defaults: vi.fn(), agents: vi.fn(), settings: vi.fn(), inventory: vi.fn(), peer: 'local' }));
 vi.mock('../../terminal/api', () => ({ getAgentLaunchers: mocks.agents, getSettings: mocks.settings, getSessionInventory: mocks.inventory }));
-vi.mock('../../todos/api', () => ({ listTodos: mocks.list, createTodo: mocks.create, updateTodo: mocks.update, startTodo: mocks.start, handoffTodos: mocks.handoff, collectTodos: mocks.collect, saveTodoCollector: mocks.save, removeTodoCollector: vi.fn(), saveTodoDefaults: mocks.defaults }));
+vi.mock('../../todos/api', () => ({ listTodos: mocks.list, releaseTodoClaim: mocks.releaseClaim, createTodo: mocks.create, updateTodo: mocks.update, startTodo: mocks.start, handoffTodos: mocks.handoff, collectTodos: mocks.collect, saveTodoCollector: mocks.save, removeTodoCollector: mocks.remove, saveTodoDefaults: mocks.defaults }));
 vi.mock('../../federation/browserIntegration', () => ({ savedConnection: () => ({ targetPeerId: mocks.peer, serviceName: '测试电脑' }), SECURE_STATE_EVENT: 'test-service-change' }));
 vi.mock('../sidebar/DirectoryPickerDialog', () => ({ DirectoryPickerDialog: () => null }));
 const todo = { id: 'one', title: '检查移动端输入', description: '补充输入法的复现条件', source: '项目巡检', sourceUrl: '', externalId: '', collectorId: null, status: 'open' as const, createdAt: 1, updatedAt: 1, revision: 1 };
@@ -116,10 +116,37 @@ it('offers a new handoff when the previously linked session has closed', async (
   expect(within(screen.getByRole('dialog')).getByText('新建会话')).toBeTruthy();
   expect(mocks.handoff).not.toHaveBeenCalled();
 });
-it('keeps one-click collection for multiple enabled directions', async () => {
+it('opens collection management without starting jobs, then runs only the chosen direction', async () => {
   data.collectors = ['one', 'two'].map(id => ({ id, name: id, config: data.defaults, enabled: true, schedule: null, nextRunAt: null, revision: 1, createdAt: 1, updatedAt: 1 }));
-  mocks.collect.mockResolvedValue({ run: {} }); setup(); await loaded(); fireEvent.click(screen.getByRole('button', { name: '收集待办' }));
-  await waitFor(() => expect(mocks.collect).toHaveBeenCalledTimes(2)); expect(useTodoWorkspace.getState().views.local?.tab ?? 'todos').toBe('todos');
+  mocks.collect.mockResolvedValue({ run: {} }); setup(); await loaded();
+  fireEvent.click(screen.getByRole('button', { name: '管理收集方向' }));
+  expect(screen.getByRole('heading', { name: '收集方向' })).toBeTruthy();
+  expect(mocks.collect).not.toHaveBeenCalled();
+  const card = screen.getByRole('heading', { name: 'one' }).closest('article')!;
+  fireEvent.click(within(card).getByRole('button', { name: '开始收集' }));
+  await waitFor(() => expect(mocks.collect).toHaveBeenCalledOnce());
+  expect(mocks.collect.mock.calls[0][0]).toBe('one');
+  expect(screen.getByRole('heading', { name: '收集方向' })).toBeTruthy();
+});
+it('opens the empty management page without immediately creating or running a direction', async () => {
+  setup(); await loaded(); fireEvent.click(screen.getByRole('button', { name: '管理收集方向' }));
+  expect(screen.getByRole('button', { name: '添加方向' })).toBeTruthy();
+  expect(screen.queryByRole('dialog')).toBeNull(); expect(mocks.collect).not.toHaveBeenCalled();
+});
+it('confirms deletion of one collection direction and preserves existing todos', async () => {
+  data.collectors = ['one', 'two'].map(id => ({ id, name: id, config: data.defaults, enabled: true, schedule: null, nextRunAt: null, revision: 1, createdAt: 1, updatedAt: 1 }));
+  mocks.remove.mockImplementation(async collector => { data.collectors = data.collectors.filter(item => item.id !== collector.id); });
+  setup(); await loaded(); fireEvent.click(screen.getByRole('button', { name: '管理收集方向' }));
+  const card = screen.getByRole('heading', { name: 'one' }).closest('article')!;
+  fireEvent.click(within(card).getByRole('button', { name: '删除 one' }));
+  expect(mocks.remove).not.toHaveBeenCalled();
+  fireEvent.click(within(card).getByRole('button', { name: '取消' }));
+  expect(mocks.remove).not.toHaveBeenCalled();
+  fireEvent.click(within(card).getByRole('button', { name: '删除 one' }));
+  fireEvent.click(within(card).getByRole('button', { name: '确认删除' }));
+  await waitFor(() => expect(screen.queryByRole('heading', { name: 'one' })).toBeNull());
+  expect(mocks.remove).toHaveBeenCalledOnce(); expect(mocks.remove.mock.calls[0][0].id).toBe('one');
+  expect(screen.getByRole('heading', { name: 'two' })).toBeTruthy(); expect(data.todos).toHaveLength(2);
 });
 it('does not navigate on a delayed handoff response after switching services', async () => {
   let complete!: (value: { run: TodoRun }) => void;
@@ -287,4 +314,49 @@ it('keeps sidebar recipient selection and places only new/cancel controls under 
   const dialog = await screen.findByRole('dialog');
   expect(within(dialog).getByText('新建会话')).toBeTruthy();
   expect(mocks.handoff).not.toHaveBeenCalled();
+});
+it('opens automatic collection terminals from the todo workspace with the shared display name', async () => {
+  useSessionDirectoryStore.getState().replace([{ sessionId: 'auto', name: '巡检终端标题', customName: true, lastActivity: 1, collectionRunId: 'collect-run' }]);
+  const navigate = vi.fn(); window.addEventListener('switch-terminal-session', navigate);
+  setup(); await loaded();
+  fireEvent.click(screen.getByText('收集会话 · 1'));
+  fireEvent.click(screen.getByRole('button', { name: /巡检终端标题.*打开终端/ }));
+  expect(navigate.mock.calls[0][0].detail).toBe('auto'); expect(useCollaborationNavigation.getState().todoOpen).toBe(false);
+  window.removeEventListener('switch-terminal-session', navigate);
+});
+it('saves reusable terminal configuration, a separate reset command, and the configurable silence timeout', async () => {
+  const collector = { id: 'direction', name: '巡检', config: data.defaults, enabled: true, schedule: null, nextRunAt: null, revision: 1, createdAt: 1, updatedAt: 1 };
+  data.collectors.push(collector); mocks.save.mockImplementation(async input => ({ collector: { ...collector, ...input } }));
+  setup(); await loaded(); fireEvent.click(screen.getByRole('button', { name: '管理收集方向' }));
+  fireEvent.click(screen.getByRole('button', { name: '编辑 巡检' }));
+  fireEvent.click(screen.getByText(/会话与回收 ·/));
+  expect((screen.getByRole('spinbutton', { name: '无输出多久后回收（分钟）' }) as HTMLInputElement).value).toBe('10');
+  fireEvent.change(screen.getByRole('combobox', { name: '会话策略' }), { target: { value: 'reuse' } });
+  fireEvent.change(screen.getByRole('textbox', { name: '复用前命令（可选）' }), { target: { value: '/clear' } });
+  fireEvent.change(screen.getByRole('spinbutton', { name: '无输出多久后回收（分钟）' }), { target: { value: '20' } });
+  fireEvent.click(screen.getByRole('button', { name: '仅保存' }));
+  await waitFor(() => expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ session: { mode: 'reuse', targetSessionId: null, beforePrompt: '/clear', idleMinutes: 20 } })));
+  expect(mocks.collect).not.toHaveBeenCalled();
+});
+
+it('configures source-specific automatic handling and webhook without triggering collection on save', async () => {
+  const c = { id: 'source', name: '渠道来源', config: data.defaults, enabled: true, schedule: null, nextRunAt: null, revision: 1, createdAt: 1, updatedAt: 1 };
+  data.collectors.push(c); mocks.save.mockImplementation(async input => ({ collector: { ...c, ...input } }));
+  setup(); await loaded(); fireEvent.click(screen.getByRole('button', { name: '管理收集方向' }));
+  fireEvent.click(screen.getByRole('button', { name: '编辑 渠道来源' })); fireEvent.click(screen.getByText(/收集后 ·/));
+  fireEvent.change(screen.getByRole('combobox', { name: '待办处理方式' }), { target: { value: 'existing' } });
+  expect((screen.getByRole('button', { name: '仅保存' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(screen.getByRole('combobox', { name: '自动处理会话' }), { target: { value: 'terminal-one' } });
+  fireEvent.change(screen.getByRole('textbox', { name: '自动处理要求（可选）' }), { target: { value: '先调查，不改代码' } });
+  fireEvent.click(screen.getByText(/外部通知 ·/)); fireEvent.click(screen.getByRole('checkbox', { name: '允许 Webhook 通知触发此来源的收集' }));
+  fireEvent.click(screen.getByRole('button', { name: '仅保存' }));
+  await waitFor(() => expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ processing: expect.objectContaining({ mode: 'existing', sessionId: 'terminal-one', note: '先调查，不改代码' }), webhook: expect.objectContaining({ enabled: true }) })));
+  expect(mocks.collect).not.toHaveBeenCalled(); expect(mocks.handoff).not.toHaveBeenCalled();
+});
+it('shows claim ownership and releases it from the item menu without selecting another session', async () => {
+  data.todos = [{ ...todo, claim: { id: 'claim', sessionId: 'terminal-one', sessionName: '旧标题', claimedAt: 1, expiresAt: Date.now() + 60000, runId: 'run-one' } }]; data.runs = [run()];
+  mocks.releaseClaim.mockImplementation(async item => { data.todos = [{ ...item, claim: null, revision: 2 }]; return { todo: data.todos[0] }; });
+  setup(); await loaded(); expect(screen.getByText('已领取 · 项目会话')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '更多操作 检查移动端输入' })); fireEvent.click(screen.getByRole('menuitem', { name: '释放领取' }));
+  await waitFor(() => expect(mocks.releaseClaim).toHaveBeenCalledOnce()); expect(mocks.handoff).not.toHaveBeenCalled();
 });

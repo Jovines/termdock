@@ -3,6 +3,7 @@ import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { sessionOption, useSessionDirectory, useSessionDirectoryStore } from '../stores/useSessionDirectory';
 import type { TerminalSessionInfo } from './MultiTerminalView';
+import { SessionModeSwitch } from './chat/SessionModeSwitch';
 
 /** Subscribe per pane so background title changes remain visible without focus. */
 export function SplitPaneTitle({ session, active, onActivate, onToggleRightSidebar }: {
@@ -34,6 +35,7 @@ export function SplitPaneTitle({ session, active, onActivate, onToggleRightSideb
       <span className="min-w-0 flex-1 truncate">{title}</span>
       <GripVertical size={12} aria-hidden="true" className="shrink-0 opacity-60" />
     </button>
+    <SessionModeSwitch sessionId={session.id} compact onActivate={active ? undefined : onActivate} />
     {onToggleRightSidebar && (
       <button
         type="button"

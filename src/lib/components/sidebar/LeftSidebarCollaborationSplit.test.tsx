@@ -499,3 +499,16 @@ it('cancels recipient selection with Escape and restores normal sidebar navigati
   expect(screen.getByRole('region', { name: 'Agent 工作组：Release team' })).toBeTruthy();
   window.removeEventListener('switch-terminal-session', navigate);
 });
+it.each([false, true])('keeps collection sessions out of the sidebar in folder mode %s while respecting user groups', async folderMode => {
+  useSessionDirectoryStore.getState().replace([
+    { sessionId: 'd', name: '自定义收集标题', customName: true, lastActivity: 1, collectionRunId: 'run-d' },
+    { sessionId: 'a', name: 'A', customName: true, lastActivity: 1, collectionRunId: 'run-a' },
+    { sessionId: 'c', name: '收集 · 手动命名', customName: true, lastActivity: 1 },
+  ]);
+  const handlers = await setup(folderMode);
+  expect(screen.queryByRole('region', { name: '收集会话' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '自定义收集标题' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'A' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '收集 · 手动命名' })).toBeTruthy();
+  expect(handlers.onCloseSession).not.toHaveBeenCalled();
+});

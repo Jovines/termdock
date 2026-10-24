@@ -1,3 +1,4 @@
+import { useTerminalStore } from '../../stores/useTerminalStore';
 import { createRoot, type Root } from 'react-dom/client';
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -22,10 +23,10 @@ declare module 'vitest/browser' {
   interface BrowserCommands { touchDrag(selector: string, dx: number, dy: number): Promise<void> }
 }
 let root: Root | undefined, swiper: SwiperInstance | undefined;
-afterEach(async () => { root?.unmount(); root = undefined; clearChatSnapshots(); sessionStorage.clear(); vi.unstubAllGlobals(); document.body.replaceChildren(); useSessionDirectoryStore.getState().replace([]); await page.viewport(390, 844); });
+afterEach(async () => { root?.unmount(); root = undefined; useTerminalStore.getState().clearAllTerminalSessions(); clearChatSnapshots(); sessionStorage.clear(); vi.unstubAllGlobals(); document.body.replaceChildren(); useSessionDirectoryStore.getState().replace([]); await page.viewport(390, 844); });
 const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-async function mount(messages: object[] = []) {
-  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, messages })));
+async function mount(messages: object[] = [], agent?: { displayName: string; slug: string }) {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, messages, agent })));
   const host = document.createElement('div'); host.style.height = '100dvh'; document.body.append(host);
   function App() {
     const [index, setIndex] = useState(0);
@@ -296,4 +297,36 @@ it.each([390, 1280])('previews a video in the editor and sent message at width %
     }
   }
   expect(saved).toHaveLength(1);
+});
+
+it.each([390, 1280])('shows the author immediately above the pending reply card at width %i', async width => {
+  await page.viewport(width, 844);
+  const agent = { displayName: 'Codex', slug: 'codex' };
+  await mount([], agent);
+  let acknowledge!: (response: Response) => void;
+  const messages: object[] = [];
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    if (init?.method === 'POST' && String(url).includes('/chat')) return new Promise<Response>(resolve => { acknowledge = resolve; });
+    return Response.json({ agentAvailable: true, agent, messages, replyPending: messages.length > 0 });
+  });
+  const input = document.querySelector('[role="textbox"]') as HTMLElement;
+  await page.getByRole('textbox').fill('检查本次构建');
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await expect.element(page.getByRole('status', { name: 'Codex发送中' })).toBeVisible();
+  const header = document.querySelector<HTMLElement>('[data-chat-agent-header]')!, card = document.querySelector<HTMLElement>('[data-chat-reply-status]')!;
+  expect(header.textContent).toBe('Codex');
+  expect(header.querySelector('[aria-hidden="true"]')).not.toBeNull();
+  expect(card.getBoundingClientRect().top).toBeGreaterThanOrEqual(header.getBoundingClientRect().bottom);
+  expect(document.activeElement).toBe(input);
+  messages.push({ id: 'sent-author', role: 'user', content: '检查本次构建', createdAt: Date.now(), status: 'delivered' });
+  acknowledge(Response.json({ id: 'sent-author', status: 'delivered' }));
+  await expect.element(page.getByRole('status', { name: 'Codex发送中' })).not.toBeInTheDocument();
+  expect(document.querySelector('[data-chat-reply-status]')).toBeNull();
+  const store = useTerminalStore.getState();
+  store.setTerminalSession('browser-composer', { sessionId: 'backend-composer', cols: 80, rows: 24 });
+  store.recordTerminalOutput('browser-composer'); store.flushPendingBufferWrites('browser-composer');
+  await expect.element(page.getByRole('status', { name: 'Codex工作中' })).toBeVisible();
+  expect(document.querySelectorAll('[data-chat-agent-header]')).toHaveLength(1);
+  expect(document.querySelector('[data-chat-reply-status]')?.textContent).toBe('工作中…');
+  await page.screenshot({ path: `/tmp/termdock-agent-waiting-${width}.png` });
 });

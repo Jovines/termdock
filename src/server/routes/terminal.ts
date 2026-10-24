@@ -1,3 +1,5 @@
+import { createTodoWebhookRouter } from '../todos/webhook.js';
+import { readCollectionOutputTime } from '../todos/tmuxOutput.js';
 import { sessionViewModeRoutes, SessionViewModeStore } from '../agent/sessionViewModeRoutes.js';
 import { incompleteOscSuffix } from '../utils/oscBuffer.js';
 import { terminalProgramStatus, PROGRAM_STATUS_REPLY, type TerminalProgressReport } from '../shared/programStatus.js';
@@ -66,6 +68,8 @@ import {
   setAutoRenamePromptPreferenceSetting,
   getAutoRenamePromptPayloadCharsSetting,
   setAutoRenamePromptPayloadCharsSetting,
+  getNewSessionShortcutActionSetting,
+  setNewSessionShortcutActionSetting,
   getNewSessionAgentSlugSetting,
   setNewSessionAgentSlugSetting,
   getRunningSessionButtonEnabledSetting,
@@ -496,6 +500,7 @@ interface TmuxInventoryMeta {
 }
 
 interface SessionInventoryClientSession extends PersistedClientSession {
+  collectionRunId: string | null;
   displayName: string;
   displaySubtitle: string | null;
   frontendSessionId: string;
@@ -3869,6 +3874,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     schedulePersistGlobalState();
   }
 
+  const collectionSessions = todoStore.collectionSessions();
   const clientSessions = globalSessionState.sessions.map((session): SessionInventoryClientSession => {
     const backendLive = !!session.backendSessionId && terminalSessions.has(session.backendSessionId);
     const tmuxLive = session.mode === 'tmux' && !!session.tmuxSessionName && liveTmuxByName.has(session.tmuxSessionName);
@@ -3897,6 +3903,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     return {
       ...session,
       frontendSessionId: session.sessionId,
+      collectionRunId: collectionSessions.get(session.sessionId) ?? null,
       customName: session.customName === true,
       connected: backendLive,
       live,
@@ -7337,7 +7344,99 @@ router.get('/session-inventory', async (_req, res) => {
   }
 });
 
+// Collection runtimes use the same inventory, pane writer and delivery barrier as normal sessions.
+const todoCollectionSessions: NonNullable<TodoRuntime['collectionSessions']> = {
+  async observe(id) {
+    const record = globalSessionState.sessions.find(candidate => candidate.sessionId === id);
+    if (!record) return null;
+    if (record.mode !== 'tmux' || !record.tmuxSessionName) throw new TodoError('收集会话须为 tmux 终端', 409);
+    if (collaborationStore.list().some(group => group.sessionIds.includes(id))) throw new TodoError('会话已加入协作组，不再自动回收或复用', 409);
+    let layout: TmuxLayout;
+    try { layout = await getTmuxLayout(record.tmuxSessionName); }
+    catch (error) { if (isTmuxSessionMissingMessage(getErrorMessage(error)) || isTmuxServerMissingMessage(getErrorMessage(error))) return null; throw error; }
+    const serverStart = layout.serverPid ? await processStartIdentity(layout.serverPid) : null;
+    if (!serverStart) throw new Error('无法确认收集终端身份');
+    const existingBackend = record.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+    const backend = existingBackend ?? terminalSessions.get((await openInventorySession({} as express.Request, { preferredFrontendSessionId: id, requireExisting: true, mode: 'tmux' })).terminalSession.sessionId);
+    if (!backend) throw new Error('无法观测收集终端');
+    const current = globalSessionState.sessions.find(candidate => candidate.sessionId === id);
+    if (!current || current.tmuxSessionName !== record.tmuxSessionName) throw new Error('收集终端已变化');
+    return { identity: JSON.stringify([layout.serverPid, serverStart, layout.sessionId,
+      layout.windows.flatMap(window => window.panes.map(pane => [pane.id, pane.pid])), current.backendSessionId,
+      backend.ptyProcess.pid, current.agentLaunchGeneration ?? null]),
+      ownershipIdentity: JSON.stringify([layout.serverPid, serverStart, layout.sessionId, layout.windows.flatMap(window => window.panes.map(pane => [pane.id, pane.pid]))]), lastOutputAt: await readCollectionOutputTime(runTmux, layout.sessionId, layout.windows.map(window => window.id)), observedAt: Date.now() };
+  },
+  async reuse(run, id, prompt, beforePrompt) {
+    await collaborationDeliveryWorker.reconfigure(id, async () => {
+      if (collaborationStore.pendingCount(id)) throw new TodoError('收集会话有待发送消息，请稍后重试', 409);
+      const target = await todoRuntime.target!(id);
+      if (target.config.agentSlug !== run.config.agentSlug) throw new TodoError('会话中的 Agent 已变化，请重新选择', 409);
+      const record = globalSessionState.sessions.find(candidate => candidate.sessionId === id)!;
+      const guard = terminalInputGuard(record), write = await automaticTerminalInput(record, guard);
+      if (beforePrompt) {
+        await write(beforePrompt);
+        const started = Date.now(), layout = await getTmuxLayout(record.tmuxSessionName!);
+        // Submit reset separately, then give the terminal time to apply it before sending the collection prompt.
+        while (true) {
+          guard();
+          const backend = record.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+          if (!backend) throw new Error('收集终端已关闭');
+          const lastOutputAt = await readCollectionOutputTime(runTmux, layout.sessionId, layout.windows.map(window => window.id));
+          if (Date.now() - Math.max(started, lastOutputAt) >= 1000) break;
+          if (Date.now() - started > 30_000) throw new TodoError('复用前命令仍有输出，请检查终端后重试', 409);
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      }
+      guard(); await todoRuntime.target!(id); guard();
+      await write(prompt);
+    });
+  },
+  async close(id, expected) {
+    let closed = false;
+    await collaborationDeliveryWorker.reconfigure(id, async () => {
+      if (collaborationStore.pendingCount(id) || !todoStore.collectionSessions().has(id)) return;
+      const observed = await todoCollectionSessions.observe(id);
+      if (!observed || observed.identity !== expected.identity || observed.lastOutputAt !== expected.lastOutputAt) return;
+      const record = globalSessionState.sessions.find(candidate => candidate.sessionId === id)!;
+      const backend = record.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+      if (!backend || !record.tmuxSessionName || !record.backendSessionId) return;
+      const guard = terminalInputGuard(record), rawName = record.tmuxSessionName;
+      const immutableSessionId = (JSON.parse(expected.identity) as unknown[])[2] as string;
+      await enqueueTmuxIo(backend, async () => {
+        guard();
+        const identity = JSON.parse(expected.identity) as [number, string, string, [string, number][], string, number, string | null];
+        const layout = await getTmuxLayout(rawName);
+        if (layout.sessionId !== immutableSessionId || layout.serverPid !== identity[0]
+          || await processStartIdentity(layout.serverPid) !== identity[1]
+          || JSON.stringify(layout.windows.flatMap(window => window.panes.map(pane => [pane.id, pane.pid]))) !== JSON.stringify(identity[3])) return;
+        const lastOutputAt = await readCollectionOutputTime(runTmux, immutableSessionId, layout.windows.map(window => window.id));
+        guard();
+        if (lastOutputAt !== expected.lastOutputAt || !todoStore.collectionSessions().has(id)
+          || collaborationStore.pendingCount(id) || collaborationStore.list().some(group => group.sessionIds.includes(id))) return;
+        intentionallyDeletingTmuxSessions.add(rawName);
+        try { await runTmux(['kill-session', '-t', immutableSessionId]); }
+        finally { intentionallyDeletingTmuxSessions.delete(rawName); }
+        archiveAgentResumeRecord(record, 'closed');
+        cleanupSession(record.backendSessionId!, { killProcess: true });
+        dynamicTmuxMetadata.forget(rawName);
+        collaborationStore.archiveSession(id); collaborationRouting.remove(id);
+        removeGlobalSessionRecord(id);
+        await persistGlobalStateNow(); broadcastClientState();
+        closed = true;
+      });
+    });
+    return closed;
+  },
+};
+
 const todoRuntime: TodoRuntime = {
+  collectionSessions: todoCollectionSessions,
+  async claimTarget(input) {
+    const record = globalSessionState.sessions.find(candidate => input.sessionId ? candidate.sessionId === input.sessionId : input.backendSessionId && candidate.backendSessionId === input.backendSessionId);
+    if (!record) throw new TodoError('找不到当前 Agent 会话，请用 --session 指定会话 ID', 409);
+    const target = await todoRuntime.target!(record.sessionId);
+    return { sessionId: record.sessionId, name: target.name, config: target.config };
+  },
   async target(id) {
     const record = globalSessionState.sessions.find(session => session.sessionId === id);
     if (!record) throw new TodoError('这个会话已关闭，请重新选择', 409);
@@ -7345,7 +7444,7 @@ const todoRuntime: TodoRuntime = {
     const facts = orchestrationSessionSnapshot(record);
     if (route.state !== 'ready' || route.isShell || !facts.agent) throw new TodoError('这个会话暂时无法接收待办，请先在终端启动 Agent', 409);
     const launcher = (await listDetectedAgentLaunchers()).find(agent => agent.slug === facts.agent!.slug);
-    return { name: facts.name, config: { agentSlug: facts.agent.slug, command: launcher?.command ?? facts.agent.slug, cwd: record.cwd ?? '', prompt: '' } };
+    return { name: facts.name, mode: record.mode, config: { agentSlug: facts.agent.slug, command: launcher?.command ?? facts.agent.slug, cwd: record.cwd ?? '', prompt: '' } };
   },
   async deliver(run, prompt) {
     const route = await resolveCollaborationRoute(run.sessionId!);
@@ -7365,6 +7464,11 @@ const todoRuntime: TodoRuntime = {
     });
     const sessionId = opened.session.sessionId;
     onSession(sessionId);
+    if (run.kind === 'collect') {
+      const observed = await todoCollectionSessions.observe(sessionId);
+      if (!observed) throw new Error('收集终端已关闭');
+      todoStore.bindCollectionSession(sessionId, observed.ownershipIdentity);
+    }
     const launchGuard = await beginAgentLaunchCheck(sessionId, run.config.agentSlug);
     await writeAutomaticTerminalPrompt(sessionId, run.config.command, undefined, launchGuard);
     await deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, prompt);
@@ -7372,6 +7476,7 @@ const todoRuntime: TodoRuntime = {
 };
 const todoRunner = new TodoRunner(todoStore, todoRuntime);
 router.use('/operations/todos', todoRoutes(todoStore, todoRunner, todoRuntime));
+export function todoWebhookRouter() { return createTodoWebhookRouter(todoStore, todoRunner); }
 
 router.get('/operations/automations', (_req, res) => {
   res.json({ automations: automationStore.list(), runs: automationStore.listRuns() });
@@ -8301,6 +8406,7 @@ async function getSettingsPayload() {
     autoRenamePromptPreference: getAutoRenamePromptPreferenceSetting(),
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
+    newSessionShortcutAction: getNewSessionShortcutActionSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
     attentionButtonEnabled: getAttentionButtonEnabledSetting(),
     collaborationPanels: getCollaborationPanelsSetting(),
@@ -8460,6 +8566,12 @@ router.put('/settings', async (req, res) => {
     setAutoRenamePromptPayloadCharsSetting(body.autoRenamePromptPayloadChars);
   }
 
+  if (Object.hasOwn(body, 'newSessionShortcutAction') && body.newSessionShortcutAction !== null
+    && body.newSessionShortcutAction !== 'agent' && body.newSessionShortcutAction !== 'terminal') {
+    res.status(400).json({ error: 'Unsupported new-session shortcut action' });
+    return;
+  }
+
   if (body.newSessionAgentSlug === null) {
     setNewSessionAgentSlugSetting(null);
   } else if (typeof body.newSessionAgentSlug === 'string') {
@@ -8469,6 +8581,10 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setNewSessionAgentSlugSetting(slug);
+  }
+
+  if (Object.hasOwn(body, 'newSessionShortcutAction')) {
+    setNewSessionShortcutActionSetting(body.newSessionShortcutAction);
   }
 
   if (body.rightSidebarTabs && typeof body.rightSidebarTabs === 'object') {

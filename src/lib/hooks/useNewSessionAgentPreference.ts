@@ -81,12 +81,19 @@ export function useNewSessionAgentPreference() {
     return () => window.removeEventListener('termdock:initial-viewport-presented', start);
   }, [refresh]);
 
+  useEffect(() => {
+    const changed = () => { void refresh().catch(() => {}); };
+    window.addEventListener('termdock:new-session-preference-changed', changed);
+    return () => window.removeEventListener('termdock:new-session-preference-changed', changed);
+  }, [refresh]);
+
   const selectAgent = useCallback(async (next: NewSessionAgentPreference) => {
     const previous = preference;
     setPreference(next);
     cacheNewSessionAgentPreference(next);
     try {
       await updateSettings({ newSessionAgentSlug: next?.slug ?? null });
+      window.dispatchEvent(new Event('termdock:new-session-preference-changed'));
     } catch (error) {
       setPreference(previous);
       cacheNewSessionAgentPreference(previous);
