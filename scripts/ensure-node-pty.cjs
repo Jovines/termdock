@@ -3,14 +3,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { nativeBuildEnvironment } = require('./native-build-env.cjs');
 const hash = data => createHash('sha256').update(data).digest('hex');
 const upstreamHash = '5e1005d6bdcfbe97b486ee415419fe7adae99035047f07340fbad36419e0bae6';
 
 function rebuildNodePty(ptyRoot, { timeout = 180_000, patched = false } = {}) {
+  const env = nativeBuildEnvironment();
   // npm install -g passes npm_config_global=true to lifecycle scripts. Do not
   // let it turn npx's temporary dependency installation into a global install.
   const result = spawnSync('npx', ['--global=false', '--yes', 'node-gyp', 'rebuild'], {
-    cwd: ptyRoot, stdio: 'inherit', timeout,
+    cwd: ptyRoot, stdio: 'inherit', timeout, env,
   });
   if (result.error || result.status !== 0) {
     const context = [
@@ -18,6 +20,8 @@ function rebuildNodePty(ptyRoot, { timeout = 180_000, patched = false } = {}) {
       `exit status=${result.status ?? 'none'}`,
       ...(result.signal ? [`signal=${result.signal}`] : []),
       ...(result.error ? [`${result.error.code || 'spawn error'}: ${result.error.message}`] : []),
+      ...(process.platform === 'darwin'
+        ? ['DEVELOPER_DIR', 'SDKROOT', 'CC', 'CXX'].map(key => `${key}=${env[key] || '(unset)'}`) : []),
     ].join('; ');
     throw new Error(`${patched ? 'Patched node-pty' : 'node-pty'} rebuild failed (${context}). `
       + 'See the npx/node-gyp output above for the cause. Check npm/cache errors before changing build tools; '

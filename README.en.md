@@ -52,6 +52,14 @@ sudo apt-get install -y tmux
 
 If `node-pty` needs compilation, install Xcode Command Line Tools on macOS (`xcode-select --install`), or `build-essential` and `python3` on Ubuntu / Debian. Behavior on WSL2, other Linux distributions, and mobile devices depends on the actual environment.
 
+On macOS, installation, startup repair, and automatic updates resolve the SDK, `clang`, and `clang++` from the selected Xcode / Command Line Tools, preserving explicit `DEVELOPER_DIR`, `SDKROOT`, `CC`, and `CXX` settings. To select Xcode for one installation without changing the global selection:
+
+```bash
+DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" npm install -g termdock --foreground-scripts
+```
+
+For `tapi error` / `unknown architecture`, check the toolchain paths in the failure log, `xcode-select -p`, and `xcrun --sdk macosx --show-sdk-path`. Explicit SDK or compiler overrides must also belong to a compatible toolchain.
+
 ### Install and launch
 
 ```bash

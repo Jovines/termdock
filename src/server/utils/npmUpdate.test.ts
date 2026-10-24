@@ -66,8 +66,15 @@ describe('npmUpdate', () => {
 describe('running installation update target', () => {
   it('executes npm against the verified running prefix and requires fresh matching on-disk metadata', async () => {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'td npm target '));
-    const previous = { PATH: process.env.PATH, TD_NPM_RECORD: process.env.TD_NPM_RECORD, TD_NPM_MODE: process.env.TD_NPM_MODE, TD_NPM_OTHER: process.env.TD_NPM_OTHER };
+    const previous = { PATH: process.env.PATH, TD_NPM_RECORD: process.env.TD_NPM_RECORD, TD_NPM_MODE: process.env.TD_NPM_MODE, TD_NPM_OTHER: process.env.TD_NPM_OTHER,
+      DEVELOPER_DIR: process.env.DEVELOPER_DIR, SDKROOT: process.env.SDKROOT, CC: process.env.CC, CXX: process.env.CXX, CPLUS_INCLUDE_PATH: process.env.CPLUS_INCLUDE_PATH };
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const toolchain = { DEVELOPER_DIR: '/explicit/Xcode', SDKROOT: '/explicit/SDK', CC: 'custom clang', CXX: 'custom clang++', CPLUS_INCLUDE_PATH: '/explicit/headers' };
     try {
+      // A fully explicit Darwin environment must reach npm unchanged, without
+      // requiring the host's xcrun (this regression runs on Linux too).
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      Object.assign(process.env, toolchain);
       const prefix = path.join(temporary, 'running prefix');
       const packageRoot = path.join(prefix, 'lib/node_modules/termdock');
       const moduleFile = path.join(packageRoot, 'dist/server/utils/npmUpdate.js');
@@ -88,7 +95,7 @@ describe('running installation update target', () => {
       process.env.TD_NPM_OTHER = path.join(temporary, 'unrelated-package.json');
       fs.writeFileSync(path.join(bin, 'npm'), `#!${process.execPath}
 const fs = require('node:fs'), path = require('node:path');
-const args = process.argv.slice(2); fs.writeFileSync(process.env.TD_NPM_RECORD, JSON.stringify(args));
+const args = process.argv.slice(2); fs.writeFileSync(process.env.TD_NPM_RECORD, JSON.stringify({ args, toolchain: Object.fromEntries(['DEVELOPER_DIR', 'SDKROOT', 'CC', 'CXX', 'CPLUS_INCLUDE_PATH'].map(key => [key, process.env[key]])) }));
 if (process.env.TD_NPM_MODE === 'fail') process.exit(2);
 const dest = process.env.TD_NPM_MODE === 'wrong' ? process.env.TD_NPM_OTHER : path.join(args[args.indexOf('--prefix')+1], 'lib/node_modules/termdock/package.json');
 if (process.env.TD_NPM_MODE !== 'noop') fs.writeFileSync(dest, JSON.stringify({ name:'termdock', version: args[2].split('@')[1] }));
@@ -100,7 +107,7 @@ if (process.env.TD_NPM_MODE !== 'noop') fs.writeFileSync(dest, JSON.stringify({ 
       }
       process.env.TD_NPM_MODE = 'correct';
       await installTermdockVersion('1.4.319', OFFICIAL_NPM_REGISTRY, installation, path.join(bin, 'npm'));
-      expect(JSON.parse(fs.readFileSync(process.env.TD_NPM_RECORD, 'utf8'))).toEqual(buildNpmInstallArgs('1.4.319', OFFICIAL_NPM_REGISTRY, prefix));
+      expect(JSON.parse(fs.readFileSync(process.env.TD_NPM_RECORD, 'utf8'))).toEqual({ args: buildNpmInstallArgs('1.4.319', OFFICIAL_NPM_REGISTRY, prefix), toolchain });
       expect(() => verifyRunningTermdockInstallation('1.4.319', installation)).not.toThrow();
       writeVersion('1.4.318');
       expect(() => verifyRunningTermdockInstallation('1.4.319', installation)).toThrow(/not completed/);
@@ -110,6 +117,7 @@ if (process.env.TD_NPM_MODE !== 'noop') fs.writeFileSync(dest, JSON.stringify({ 
       expect(() => resolveRunningTermdockInstallation(pathToFileURL(moduleFile).href, entry)).toThrow(/invalid package/);
       expect(() => resolveRunningTermdockInstallation()).toThrow(/supported global/);
     } finally {
+      Object.defineProperty(process, 'platform', platformDescriptor);
       for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
       fs.rmSync(temporary, { recursive: true, force: true });
     }

@@ -52,6 +52,14 @@ sudo apt-get install -y tmux
 
 如果 `node-pty` 需要本机编译，macOS 安装 `xcode-select --install`，Ubuntu / Debian 安装 `build-essential` 和 `python3`。WSL2、不同 Linux 发行版和手机系统的具体行为请以实际环境为准。
 
+macOS 安装、启动修复和自动更新会从当前选中的 Xcode / Command Line Tools 解析配套的 SDK、`clang` 和 `clang++`，保留显式设置的 `DEVELOPER_DIR`、`SDKROOT`、`CC`、`CXX`。多套工具共存时，可仅为本次安装选择 Xcode（无需修改全局设置）：
+
+```bash
+DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" npm install -g termdock --foreground-scripts
+```
+
+若出现 `tapi error` / `unknown architecture`，检查失败日志中的工具链路径，以及 `xcode-select -p` 和 `xcrun --sdk macosx --show-sdk-path`；已有的 SDK 或编译器覆盖也需要来自配套工具链。
+
 ### 安装并启动
 
 ```bash

@@ -36,10 +36,20 @@ it('rebuilds replaced binaries, survives skipped install scripts, and fails clos
       const binary = path.join(root, 'build/Release/pty.node');
       let builds=0, fail=false;
       process.env.npm_config_global = 'true';
+      for (const key of ['DEVELOPER_DIR', 'SDKROOT', 'CC', 'CXX']) delete process.env[key];
       require('node:child_process').spawnSync = (command, args, options) => {
+        if (command === '/usr/bin/xcode-select') return { status: 0, stdout: root };
+        if (command === '/usr/bin/xcrun') {
+          assert.equal(options.env.DEVELOPER_DIR, root);
+          assert.deepEqual(args.slice(0,2), ['--sdk', 'macosx']);
+          return { status: 0, stdout: args.includes('--find') ? process.execPath : root };
+        }
         assert.equal(command, 'npx');
         assert.deepEqual(args, ['--global=false', '--yes', 'node-gyp', 'rebuild']);
         assert.equal(options.cwd, root);
+        assert.ok(options.env.SDKROOT);
+        assert.ok(options.env.CC);
+        assert.ok(options.env.CXX);
         builds++;
         if (fail) return {status:1};
         fs.mkdirSync(path.dirname(binary), {recursive:true});

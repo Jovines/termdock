@@ -3,8 +3,10 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 export const OFFICIAL_NPM_REGISTRY = 'https://registry.npmjs.org';
 const TERMDOCK_PACKAGE = 'termdock';
@@ -138,20 +140,10 @@ export function npmRuntimeEnvironment(execPath = process.execPath, env = process
 }
 
 async function installEnvironment(): Promise<NodeJS.ProcessEnv> {
-  const env = npmRuntimeEnvironment();
-  if (process.platform === 'darwin') {
-    // New CLT releases can leave node-gyp's implicit libc++ search path stale.
-    // Use the SDK selected by xcrun without changing the user's global setup.
-    const { stdout } = await execFileAsync('/usr/bin/xcrun', ['--show-sdk-path'], { timeout: 5000, env });
-    const sdk = stdout.trim();
-    const headers = path.join(sdk, 'usr/include/c++/v1');
-    if (!path.isAbsolute(sdk) || !fs.existsSync(path.join(headers, 'functional'))) {
-      throw new Error('macOS C++ SDK headers are unavailable. Install or repair Command Line Tools, then retry.');
-    }
-    env.SDKROOT = sdk;
-    env.CPLUS_INCLUDE_PATH = [headers, env.CPLUS_INCLUDE_PATH].filter(Boolean).join(path.delimiter);
-  }
-  return env;
+  const { nativeBuildEnvironment } = require('../../../scripts/native-build-env.cjs') as {
+    nativeBuildEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+  };
+  return nativeBuildEnvironment(npmRuntimeEnvironment());
 }
 
 function npmExecutable(): string {

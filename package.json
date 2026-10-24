@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.362",
+  "version": "1.4.363",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -44,7 +44,7 @@
     "trace:fsio": "node scripts/inspect-fs-io.mjs",
     "release:classify": "node scripts/classify-release.mjs",
     "test": "vitest --passWithNoTests",
-    "test:initialization": "node --test tests/nodePtyInstall.test.mjs tests/installUtils.test.mjs && node --import tsx --test tests/initialization.process.test.mjs && vitest run --maxWorkers=2 src/server/utils/bootCheck.test.ts src/server/utils/localHttpsSetup.test.ts src/server/utils/nodePtyCleanup.test.ts",
+    "test:initialization": "node --test tests/nodePtyInstall.test.mjs tests/installUtils.test.mjs && node --import tsx --test tests/initialization.process.test.mjs && vitest run --maxWorkers=2 src/server/utils/bootCheck.test.ts src/server/utils/localHttpsSetup.test.ts src/server/utils/nodePtyCleanup.test.ts src/server/utils/npmUpdate.test.ts",
     "test:initialization:real": "node --import tsx --test tests/initialization.real.test.mjs",
     "test:webgl": "vitest run --config vitest.webgl.config.ts",
     "test:terminal-geometry": "vitest run src/lib/terminal/geometry.test.ts src/lib/terminal/geometryBoundary.test.ts src/lib/terminal/fitHysteresis.test.ts src/lib/terminal/api.continuousReconnect.test.ts src/lib/components/terminal/TerminalViewportPasteOwnership.test.tsx src/lib/federation/SessionAccessView.test.tsx src/server/utils/tmuxDisplayGeometry.test.ts src/server/utils/tmuxObserverSize.test.ts src/server/utils/tmuxSizeOwnership.test.ts src/server/utils/terminalHandshakeDimensions.test.ts src/server/routes/terminalInitialSize.test.ts src/server/routes/terminalSampling.test.ts",
