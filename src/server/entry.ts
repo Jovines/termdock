@@ -567,12 +567,13 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     (subjectId, targetServiceId) => routeInvitations?.allows(subjectId, targetServiceId) === true || collaborationTransport?.canRoute(subjectId, targetServiceId) === true,
     desktopTargets, () => activeRouteIds());
   const relayRouter = new RelayRouter<RoutePrincipal>({
+    requirePasswordProtectedTargets: true,
     isLocalTarget: id => id === federationServiceId,
     authenticate: context => context as RoutePrincipal,
     allowRegister: (principal, serviceId) => routeAccess.allowRegister(principal, serviceId),
     allowRoute: (principal, serviceId) => routeAccess.allowRoute(principal, serviceId),
   });
-  activeRouteIds = () => relayRouter.activeRouteIds();
+  activeRouteIds = () => relayRouter.registeredRouteIds();
   const directTargetRegistry = new DirectTargetRegistry(relayRouter, path.join(homedir(), '.termdock', 'federation'));
   const refreshDirectTargets = () => {
     directTargetRegistry.refresh(routeAccess.configuredDirectTargets().filter(target => target.serviceId !== federationServiceId));
@@ -618,6 +619,8 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     listRouteAccess: () => routeInvitations?.list() || [],
     grantRouteAccess: async (issuerId, targetServiceId, subjectId, url) => {
       if (!routeInvitations) throw new Error('ROUTE_NOT_AVAILABLE');
+      const failure = relayRouter.routeError(targetServiceId) || directTargetRegistry.error(targetServiceId);
+      if (failure === 'TARGET_PASSWORD_REQUIRED' || failure === 'TARGET_SECURITY_UPGRADE_REQUIRED') throw new Error(failure);
       if (!routeAccess.hasConfiguredTarget(targetServiceId)) {
         if (!url) throw new Error('ROUTE_TARGET_NOT_CONFIGURED');
         const target = { serviceId: targetServiceId, url };
@@ -630,7 +633,11 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       return routeInvitations.grant(issuerId, targetServiceId, subjectId);
     },
     revokeRouteAccess: id => routeInvitations?.revoke(id) || false,
-    issueRouteTicket: (subjectId: string, serviceId: string) => routeAccess.issueRouteTicket(subjectId, serviceId),
+    issueRouteTicket: (subjectId: string, serviceId: string) => {
+      const failure = relayRouter.routeError(serviceId) || directTargetRegistry.error(serviceId);
+      if (failure === 'TARGET_PASSWORD_REQUIRED' || failure === 'TARGET_SECURITY_UPGRADE_REQUIRED') throw new Error(failure);
+      return routeAccess.issueRouteTicket(subjectId, serviceId);
+    },
     issueSelfRelayTicket: (serviceId: string) => routeAccess.issueSelfRelayTicket(serviceId),
     hasRouteGrant: (subjectId: string, serviceId: string) => routeInvitations?.allows(subjectId, serviceId) === true || collaborationTransport?.canRoute(subjectId, serviceId) === true,
     createRouteInvitation: (issuerId: string, serviceId: string) => {
@@ -822,14 +829,14 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       });
       return;
     }
-    if (pathname === '/api/federation/secure') {
+    if (pathname === '/api/federation/secure' || pathname === '/api/federation/relay-target') {
       // This exception applies only to the cookie-independent Noise handshake.
       // Target pinning and device authorization remain mandatory inside it.
       if (!secureChannelOriginAllowed(request.headers.origin, () => isUpgradeOriginAllowed(request.headers.origin, request.headers.host))) {
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
       }
       wss.handleUpgrade(request, socket, head, (ws) => {
-        void federation.then(runtime => runtime.accept(ws, { allowOpenAccess: !!request.headers.origin && isUpgradeOriginAllowed(request.headers.origin, request.headers.host) })).catch(() => ws.close(1011, 'Encrypted access unavailable'));
+        void federation.then(runtime => runtime.accept(ws, { relayed: pathname === '/api/federation/relay-target', allowOpenAccess: pathname === '/api/federation/secure' && !!request.headers.origin && isUpgradeOriginAllowed(request.headers.origin, request.headers.host) })).catch(() => ws.close(1011, 'Encrypted access unavailable'));
       });
       return;
     }

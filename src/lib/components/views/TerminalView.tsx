@@ -1238,7 +1238,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             switch (event.type) {
               case 'connected': {
-                useTerminalStore.getState().clearTerminalOutputActivity(storeSessionId);
+                useTerminalStore.getState().setTerminalOutputActivity(storeSessionId, event.terminalOutputActive === true);
                 terminalOperationEpochRef.current += 1;
                 // Old async controls retain their epoch checks, but cannot
                 // keep new-connection input waiting for their timeout/reply.
@@ -1278,7 +1278,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // 之前没有这个 gate，reload 时 ResizeObserver 在 ensureSession
                 // 跑完前就拿 OLD terminalId POST 出去，server 直接 404 + WS 4001
                 // 触发 auto-recreate，必须完全重连才能用。
-                terminalControllerRef.current?.setSessionReady(true);
+                terminalControllerRef.current?.setSessionReady(true,
+                  typeof event.cols === 'number' && typeof event.rows === 'number'
+                    ? { cols: event.cols, rows: event.rows } : undefined);
 
                 // WS 重连后服务端的 per-client flow 状态是新的，补发当前水位状态，
                 // 避免前端仍处于 paused 而服务端继续灌输出。
@@ -1415,6 +1417,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setReconnectStartedAt((startedAt) => startedAt ?? Date.now());
                 setConnectionError('Reconnecting...');
                 setIsFatalError(false);
+                break;
+              }
+              case 'terminal-output-activity': {
+                useTerminalStore.getState().setTerminalOutputActivity(storeSessionId, event.active === true);
                 break;
               }
               case 'data': {

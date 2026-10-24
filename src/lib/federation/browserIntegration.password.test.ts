@@ -5,8 +5,10 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { createIdentity, secureConnection } from '../../server/federation/secureProtocol';
 import { PacketChannel } from '../../server/federation/packets';
 import { socketDuplex } from '../../server/federation/socketDuplex';
+import { RelayRouter } from '../../server/federation/relay';
+import type { ConnectionIntent } from './browserIntegration';
 
-const state = vi.hoisted(() => ({ target: null as null | { url: string; targetPeerId: string }, identity: vi.fn(), save: vi.fn() }));
+const state = vi.hoisted(() => ({ target: null as ConnectionIntent | null, identity: vi.fn(), save: vi.fn() }));
 vi.mock('./deviceIdentity', () => ({ getIdentity: state.identity }));
 vi.mock('./clientScope', () => ({
   get BOOT_SERVICE_ID() { return state.target?.targetPeerId; }, ENTRY_KEY: 'entry',
@@ -140,3 +142,89 @@ it.each(['https://attacker.test', 'file:///tmp', 'https://service.test/', 'https
   await expect(integration.connectServiceAddress('https://service.test', 'known-password')).rejects.toThrow();
   expect(transport).not.toHaveBeenCalled();
 });
+
+it('recovers the exact relayed target with real Noise and OPAQUE, while explicit entry-address login never authenticates that target', async () => {
+  vi.resetModules(); state.save.mockClear();
+  const { PasswordBootstrapServer } = await import('../../server/federation/passwordBootstrap');
+  const device = await createIdentity(), target = await createIdentity(), entry = await createIdentity();
+  state.identity.mockResolvedValue(device);
+  const verifier = (password: string) => {
+    const salt = '34'.repeat(16);
+    return `scrypt$${salt}$${scryptSync(password, Buffer.from(salt, 'hex'), 64, { N: 32768, r: 8, p: 1, maxmem: 67108864 }).toString('hex')}`;
+  };
+  let configured = false, granted = false, targetParameters = 0;
+  const targetVerifier = verifier('target-password');
+  const targetBootstrap = new PasswordBootstrapServer({ getPasswordHash: () => configured ? targetVerifier : null, serverIdentity: target.peerId });
+  const entryBootstrap = new PasswordBootstrapServer({ getPasswordHash: () => verifier('entry-password'), serverIdentity: entry.peerId });
+  const router = new RelayRouter<string>({ requirePasswordProtectedTargets: true, authenticate: () => 'phone', allowRegister: () => false, allowRoute: () => true });
+  cleanups.push(() => router.close());
+  const targetServer = new WebSocketServer({ host: '127.0.0.1', port: 0 }), entryServer = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await Promise.all([once(targetServer, 'listening'), once(entryServer, 'listening')]);
+  for (const server of [targetServer, entryServer]) cleanups.push(() => { for (const socket of server.clients) socket.terminate(); server.close(); });
+  const origin = `http://127.0.0.1:${(entryServer.address() as { port: number }).port}`;
+  cleanups.push(router.registerDirect(target.peerId, async () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${(targetServer.address() as { port: number }).port}`);
+    await once(socket, 'open'); return socket;
+  }));
+  targetServer.on('connection', socket => void (async () => {
+    const secure = await secureConnection({ identity: target, initiator: false, duplex: socketDuplex(socket) });
+    const channel = new PacketChannel(secure.duplex);
+    for await (const packet of channel.read()) {
+      try {
+        if (packet.type === 'password-parameters') { targetParameters++; channel.send({ id: packet.id, type: 'result', ...targetBootstrap.parameters() }); }
+        else if (packet.type === 'password-start') channel.send({ id: packet.id, type: 'result', ...await targetBootstrap.start({ startLoginRequest: String(packet.startLoginRequest), clientIdentity: secure.authenticatedPeerId, origin: String(packet.origin) }) });
+        else if (packet.type === 'password-finish') {
+          await targetBootstrap.finish({ attemptId: String(packet.attemptId), finishLoginRequest: String(packet.finishLoginRequest) });
+          granted = true; channel.send({ id: packet.id, type: 'result', ok: true });
+        } else if (packet.type === 'permissions') channel.send({ id: packet.id, type: 'result', fullService: granted, grants: granted ? [{ actions: ['service:*'] }] : [] });
+      } catch (error) { channel.send({ id: packet.id, type: 'error', error: error instanceof Error ? error.message : 'FAILED' }); }
+    }
+  })().catch(() => socket.close()));
+  entryServer.on('connection', (socket, req) => {
+    if (req.url?.startsWith('/api/federation/relay?')) { void router.attach(socket, null).then(ok => { if (ok) socket.send(JSON.stringify({ type: 'ready' })); }); return; }
+    void (async () => {
+      const secure = await secureConnection({ identity: entry, initiator: false, duplex: socketDuplex(socket) });
+      const channel = new PacketChannel(secure.duplex);
+      for await (const packet of channel.read()) {
+        if (packet.type !== 'route-ticket' || packet.serviceId !== target.peerId) throw new Error('Unexpected entry request');
+        channel.send({ id: packet.id, type: 'result', routeToken: 'fixture-ticket' });
+      }
+    })().catch(() => socket.close());
+  });
+  state.target = { url: origin, targetPeerId: target.peerId, serviceName: 'Mac target', entryServiceId: entry.peerId, routes: [{ url: origin, targetPeerId: entry.peerId }] };
+  vi.stubGlobal('WebSocket', WebSocket);
+  vi.stubGlobal('CloseEvent', class extends Event { code: number; reason: string; wasClean = false; constructor(type: string, init: { code: number; reason: string }) { super(type); this.code = init.code; this.reason = init.reason; } });
+  vi.stubGlobal('navigator', { onLine: true, serviceWorker: Object.assign(new EventTarget(), { controller: null }) });
+  vi.stubGlobal('location', { origin, host: new URL(origin).host, hostname: '127.0.0.1', href: origin + '/', reload: vi.fn() });
+  const oldUpload = vi.fn();
+  vi.stubGlobal('window', Object.assign(new EventTarget(), { location, crypto: globalThis.crypto, electronAPI: { uploadClipboardImage: oldUpload, uploadDroppedFiles: oldUpload } }));
+  let entryProved = false;
+  const nativeFetch = vi.fn(async (raw: string, init?: RequestInit) => {
+    const path = new URL(raw, origin).pathname;
+    if (path === '/api/auth/password/parameters') return Response.json(entryBootstrap.parameters());
+    if (path === '/api/auth/password/start') return Response.json(await entryBootstrap.start({ ...JSON.parse(String(init?.body)), origin }));
+    if (path === '/api/auth/password/finish') {
+      const result = await entryBootstrap.finish(JSON.parse(String(init?.body)));
+      expect(result.clientIdentity).toBe(device.peerId); entryProved = true;
+      return Response.json({ error: 'Stop fixture after verifying explicit entry proof' }, { status: 503 });
+    }
+    throw new Error('Plaintext business request forbidden');
+  });
+  vi.stubGlobal('fetch', nativeFetch);
+  const integration = await import('./browserIntegration'); cleanups.push(() => integration.invalidateSecureTransport());
+  integration.installEncryptedFetch(); vi.stubGlobal('fetch', window.fetch);
+  const { loginWithPassword } = await import('../terminal/api');
+  expect(await loginWithPassword('entry-password')).toMatchObject({ ok: false, reason: 'passwordNotConfigured' });
+  await expect(integration.inspectConnectionAccess(state.target)).rejects.toMatchObject({ code: 'TARGET_PASSWORD_REQUIRED' });
+  expect(nativeFetch).not.toHaveBeenCalled(); expect(granted).toBe(false); expect(state.save).not.toHaveBeenCalled();
+  configured = true;
+  expect(await integration.inspectConnectionAccess(state.target)).toBe('passwordRequired');
+  expect(await loginWithPassword('entry-password')).toMatchObject({ ok: false, reason: 'invalidPassword' });
+  expect(granted).toBe(false);
+  expect(await loginWithPassword('target-password')).toEqual({ ok: true });
+  expect(granted).toBe(true); expect(state.save).toHaveBeenLastCalledWith(expect.objectContaining({ targetPeerId: target.peerId, entryServiceId: entry.peerId }));
+  const beforeEntryLogin = targetParameters;
+  await expect(integration.connectServiceAddress(origin, 'entry-password')).rejects.toThrow();
+  expect(entryProved).toBe(true); expect(targetParameters).toBe(beforeEntryLogin);
+  expect(oldUpload).not.toHaveBeenCalled(); expect(location.reload).not.toHaveBeenCalled();
+}, 20_000);

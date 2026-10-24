@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { SessionAccessView } from './SessionAccessView';
 import type { SecureClient } from './secureClient';
-const mocks = vi.hoisted(() => ({ writes: [] as Array<{ data: string; callback?: () => void }>, resize: vi.fn(), options: {} as Record<string, unknown>, fit: vi.fn(), fontsReady: Promise.resolve() }));
+const mocks = vi.hoisted(() => ({ writes: [] as Array<{ data: string; callback?: () => void }>, resize: vi.fn(), options: {} as Record<string, unknown>, fit: vi.fn(), fontsReady: Promise.resolve(), dimensions: { cols: 120, rows: 40 } }));
 vi.mock('../terminal/fontLoading', () => ({ ensureTerminalFontsReady: () => mocks.fontsReady }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
   cols = 80; rows = 24;
@@ -16,10 +16,34 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
   scrollToBottom() {} refresh() {}
   onData() { return { dispose() {} }; }
 } }));
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { proposeDimensions() { mocks.fit(); return { cols: 120, rows: 40 }; } } }));
-beforeEach(() => { mocks.fontsReady = Promise.resolve(); });
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { proposeDimensions() { mocks.fit(); return mocks.dimensions; } } }));
+beforeEach(() => { mocks.fontsReady = Promise.resolve(); mocks.dimensions = { cols: 120, rows: 40 }; });
 afterEach(() => { cleanup(); mocks.writes.length = 0; vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('scoped encrypted terminal viewer', () => {
+  it('sends resize only when its measured grid differs from the connected or pending grid', async () => {
+    let notify = () => {};
+    vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { notify = callback; } observe() {} disconnect() {} });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1000);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
+    const socket = { readyState: 1, send: vi.fn(), close: vi.fn(), onopen: null as (() => void) | null, onmessage: null as ((event: { data: string }) => void) | null };
+    const client = { targetPeerId: 'resize-dedup', request: vi.fn(async () => ({ items: [{ sessionId: 'backend', name: 'task', live: true, canWrite: true, canResize: true }] })), openSocket: vi.fn(() => socket) };
+    render(<SessionAccessView client={client as unknown as SecureClient} />);
+    await waitFor(() => expect(client.openSocket).toHaveBeenCalledOnce());
+    act(() => socket.onopen!());
+    expect(socket.send).not.toHaveBeenCalled();
+    act(() => {
+      socket.onmessage!({ data: JSON.stringify({ type: 'connected', cols: 120, rows: 40 }) });
+      mocks.writes.at(-1)!.callback!(); notify(); notify();
+    });
+    expect(socket.send).not.toHaveBeenCalled();
+    act(() => { mocks.dimensions = { cols: 121, rows: 40 }; notify(); notify(); });
+    expect(socket.send).toHaveBeenCalledOnce();
+    const request = JSON.parse(socket.send.mock.calls[0][0]);
+    expect(request).toMatchObject({ type: 'resize', cols: 121, rows: 40 });
+    act(() => { socket.onmessage!({ data: JSON.stringify({ type: 'resize-ack', ok: true, seq: request.seq, cols: 121, rows: 40 }) }); notify(); });
+    expect(socket.send).toHaveBeenCalledOnce();
+  });
   it('waits for fonts and advertises measured geometry on its first encrypted socket', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);

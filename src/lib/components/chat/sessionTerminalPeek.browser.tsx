@@ -14,7 +14,7 @@ const backend = vi.hoisted(() => ({ inputs: vi.fn(), connect: vi.fn(), resize: v
 vi.mock('../../terminal/factory', () => ({ createTermdockAPI: () => ({
   connect: (_id: string, handlers: TerminalHandlers) => {
     backend.connect(); backend.handlers = handlers;
-    queueMicrotask(() => { handlers.onEvent({ type: 'connected', mode: 'shell', cwd: '/tmp' }); handlers.onEvent({ type: 'data', data: '\r\nlive attach output\r\n' }); });
+    queueMicrotask(() => { handlers.onEvent({ type: 'connected', mode: 'shell', cwd: '/tmp' }); handlers.onEvent({ type: 'data', data: '\r\nlive attach output\r\n' }); handlers.onEvent({ type: 'terminal-output-activity', active: true }); });
     return { close: backend.close };
   },
   sendInput: async (_id: string, text: string) => { backend.inputs(text); if (!/[\x00-\x1f\x7f]/.test(text)) backend.handlers?.onEvent({ type: 'data', data: text }); },
@@ -127,6 +127,7 @@ it('keeps toolbar shortcuts, live output and reconnect handling working while ho
   backend.handlers!.onEvent({ type: 'reconnecting' }); await frame();
   backend.handlers!.onEvent({ type: 'connected', mode: 'shell' });
   backend.handlers!.onEvent({ type: 'data', data: '\r\nreconnected live output\r\n$ ' });
+  backend.handlers!.onEvent({ type: 'terminal-output-activity', active: true });
   await expect.poll(() => panel.querySelector('.xterm-rows')?.textContent).toContain('reconnected live output');
   await commands.peekMove('[data-terminal-peek] .xterm');
   completeReply();
@@ -193,21 +194,23 @@ it('fits the view toggle into a split pane title and switches without reconnecti
   expect(backend.connect).toHaveBeenCalledTimes(1);
 });
 
-it('expires on silence despite a pending reply, recovers on output, and ignores reconnect replay', async () => {
+it('follows server transitions independently of reply flags, raw data and reconnect replay', async () => {
   await mount();
   await page.getByRole('button', { name: '查看会话终端' }).hover();
   await commands.peekMove('[data-terminal-peek] .xterm');
   const panel = document.querySelector('[data-terminal-peek]');
-  // Keep the real input/renderer/timers running while the terminal is silent.
-  await expect.poll(() => document.querySelector('[data-chat-reply-status]'), { timeout: 7000 }).toBeNull();
+  backend.handlers!.onEvent({ type: 'terminal-output-activity', active: false });
+  await expect.poll(() => document.querySelector('[data-chat-reply-status]')).toBeNull();
   expect(document.querySelector('[data-terminal-peek]')).toBe(panel);
   backend.handlers!.onEvent({ type: 'data', data: '\r\nnew real output\r\n' });
+  await frame(); expect(document.querySelector('[data-chat-reply-status]')).toBeNull();
+  backend.handlers!.onEvent({ type: 'terminal-output-activity', active: true });
   await expect.element(page.getByText('工作中…')).toBeVisible();
   backend.handlers!.onEvent({ type: 'reconnecting' });
   await expect.poll(() => document.querySelector('[data-chat-reply-status]')).toBeNull();
   backend.handlers!.onEvent({ type: 'connected', mode: 'shell', replayChunks: ['history-only'], replayOutOfWindow: true });
   await frame(); expect(document.querySelector('[data-chat-reply-status]')).toBeNull();
-  backend.handlers!.onEvent({ type: 'data', data: '\r\nlive after replay\r\n' });
+  backend.handlers!.onEvent({ type: 'terminal-output-activity', active: true });
   await expect.element(page.getByText('工作中…')).toBeVisible();
   await commands.peekMove('body', .99, .005);
   await expect.poll(() => document.querySelector('[data-terminal-peek]')).toBeNull();

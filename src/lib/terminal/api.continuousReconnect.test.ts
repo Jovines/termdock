@@ -57,6 +57,17 @@ class FakeWebSocket {
 }
 
 describe('connectTerminalStream reconnect policy', () => {
+  it('forwards server activity snapshots and transitions through the existing secure stream facade', () => {
+    const onEvent = vi.fn();
+    const disconnect = connectTerminalStream('output-activity', onEvent);
+    const socket = FakeWebSocket.instances[0]; socket.readyState = FakeWebSocket.OPEN; socket.onopen?.();
+    const connected = { type: 'connected', terminalOutputActive: true, replayChunks: ['old'] };
+    for (const payload of [connected, { type: 'terminal-output-activity', active: false }, { type: 'data', data: 'unqualified' }, { type: 'terminal-output-activity', active: true }]) {
+      socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify(payload) }));
+      expect(onEvent).toHaveBeenLastCalledWith(payload);
+    }
+    disconnect();
+  });
   it('sends copy-mode exit and its first key in one record only after capability negotiation', async () => {
     const disconnect = connectTerminalStream('atomic-copy', vi.fn());
     const socket = FakeWebSocket.instances[0]; socket.readyState = FakeWebSocket.OPEN; socket.onopen?.();

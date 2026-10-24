@@ -8,10 +8,15 @@ function fixture(measured = true) {
   const order: string[] = [];
   const observer = { cols: 80, rows: 24, ptyProcess: { pid: 1, resize: vi.fn(() => { order.push('observer'); }) } };
   const display = { pid: 2, attached: true, resize: vi.fn(() => { order.push('display'); return true; }) };
-  const run = vi.fn(async (args: string[]) => { if (args[0] === 'list-clients') return clients; order.push('ownership'); return ''; });
+  let externalSize: { cols: number; rows: number } | undefined;
+  const run = vi.fn(async (args: string[]) => {
+    if (args[0] === 'list-clients') return clients;
+    if (args[0] === 'display-message') { const size = externalSize ?? observer; return `${size.cols} ${size.rows} off`; }
+    order.push('ownership'); return '';
+  });
   const geometry = new TmuxDisplayGeometry(observer, run, 'work', () => new Set([2]), measured ? { cols: 120, rows: 40 } : undefined);
   return { geometry, observer, display: display as unknown as TerminalClientAttachment, run, order,
-    clients: (value: string) => { clients = value; } };
+    clients: (value: string) => { clients = value; }, serverSize: (value: typeof externalSize) => { externalSize = value; } };
 }
 
 it('prepares a replacement display at measured size before any output is attached', async () => {
@@ -30,16 +35,26 @@ it('cannot overwrite another display owner or elect an unmeasured background vie
   expect(passive.observer.cols).toBe(80);
 });
 
-it('resizes display and fallback together, preserving first-ACK and recovery redraw semantics', async () => {
+it('resizes display and fallback together but never redraws an unchanged grid', async () => {
   const f = fixture(); f.clients('1 /dev/observer ignore-size\n2 /dev/display ignore-size\n');
   expect(await f.geometry.resize(f.display, { cols: 120, rows: 40 }, true)).toMatchObject({ ok: true, redraw: false });
   f.order.length = 0;
-  expect(await f.geometry.resize(f.display, { cols: 140, rows: 45 }, true)).toEqual({ ok: true, cols: 140, rows: 45, redraw: false });
+  expect(await f.geometry.resize(f.display, { cols: 140, rows: 45 }, true)).toEqual({ ok: true, cols: 140, rows: 45, redraw: false, changed: true });
   expect(f.order).toEqual(['ownership', 'display', 'observer']);
   expect(f.observer).toMatchObject({ cols: 140, rows: 45 });
-  expect(await f.geometry.resize(f.display, { cols: 140, rows: 45 }, true)).toMatchObject({ redraw: true });
-  f.geometry.reset();
-  expect(await f.geometry.resize(f.display, { cols: 140, rows: 45 }, true)).toMatchObject({ redraw: false });
+  f.order.length = 0;
+  expect(await f.geometry.resize(f.display, { cols: 140, rows: 45 }, true)).toMatchObject({ redraw: false, changed: false });
+  expect(f.order).toEqual([]);
+});
+
+it('checks the live tmux window before suppressing a same-display resize after another client took over', async () => {
+  const f = fixture();
+  f.clients('1 /dev/observer ignore-size\n2 /dev/display ignore-size\n');
+  f.serverSize({ cols: 60, rows: 20 });
+  expect(await f.geometry.readServerSize()).toEqual({ cols: 60, rows: 20 });
+  expect(await f.geometry.resize(f.display, { cols: 120, rows: 40 }, true)).toMatchObject({ ok: true, changed: true });
+  expect(f.order).toContain('ownership');
+  expect(f.display.resize).not.toHaveBeenCalled();
 });
 
 it('does not retain failed or invalid display resizes as real geometry', async () => {

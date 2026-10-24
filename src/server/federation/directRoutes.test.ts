@@ -29,7 +29,7 @@ describe('registered direct targets', () => {
     const dir = mkdtempSync(join(tmpdir(), 'td-direct-')); cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'ca.pem'), '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost'], { stdio: 'ignore' });
     const target = createServer({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'ca.pem')) });
-    const wss = new WebSocketServer({ server: target, path: '/api/federation/secure' });
+    const wss = new WebSocketServer({ server: target, path: '/api/federation/relay-target' });
     target.listen(0, '127.0.0.1'); await once(target, 'listening');
     cleanups.push(() => { for (const ws of wss.clients) ws.terminate(); wss.close(); target.close(); });
     const address = target.address(); if (!address || typeof address === 'string') throw new Error('No address');
@@ -60,7 +60,7 @@ describe('registered direct targets', () => {
       if (req.url !== '/onboarding/ca.crt') { res.writeHead(404).end(); return; }
       caRequests++; res.end(ca);
     });
-    const wss = new WebSocketServer({ server: target, path: '/api/federation/secure' });
+    const wss = new WebSocketServer({ server: target, path: '/api/federation/relay-target' });
     target.listen(0, '127.0.0.1'); await once(target, 'listening');
     cleanups.push(() => { for (const ws of wss.clients) ws.terminate(); wss.close(); target.close(); });
     const address = target.address(); if (!address || typeof address === 'string') throw new Error('No address');

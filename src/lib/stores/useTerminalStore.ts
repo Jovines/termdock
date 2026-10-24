@@ -61,6 +61,7 @@ export interface TerminalStore {
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   recordTerminalOutput: (sessionId: string) => void;
   clearTerminalOutputActivity: (sessionId: string) => void;
+  setTerminalOutputActivity: (sessionId: string, active: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => void;
   hasPendingBufferWrites: (sessionId: string) => boolean;
   flushPendingBufferWrites: (sessionId: string) => number | null;
@@ -127,6 +128,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     bufferChunks: [],
     bufferLength: 0,
     lastOutputAt: null,
+    terminalOutputActive: false,
     updatedAt: Date.now(),
   };
 }
@@ -652,13 +654,22 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     batch.outputAtBySession.set(sessionId, Date.now());
     scheduleBatchFlush();
   },
+  setTerminalOutputActivity: (sessionId: string, active: boolean) => {
+    set(state => {
+      const session = state.sessions.get(sessionId);
+      if (!session?.terminalSessionId || session.terminalOutputActive === active) return state;
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...session, terminalOutputActive: active });
+      return { sessions };
+    });
+  },
   clearTerminalOutputActivity: (sessionId: string) => {
     batch.outputAtBySession.delete(sessionId);
     set(state => {
       const session = state.sessions.get(sessionId);
-      if (!session || session.lastOutputAt === null) return state;
+      if (!session || (session.lastOutputAt === null && !session.terminalOutputActive)) return state;
       const sessions = new Map(state.sessions);
-      sessions.set(sessionId, { ...session, lastOutputAt: null });
+      sessions.set(sessionId, { ...session, lastOutputAt: null, terminalOutputActive: false });
       return { sessions };
     });
   },
@@ -793,6 +804,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
           ...existing,
           terminalSessionId: null,
           lastOutputAt: null,
+          terminalOutputActive: false,
           isConnecting: false,
           agentStatus: null,
           agentIndicator: null,

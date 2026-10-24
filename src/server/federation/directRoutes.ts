@@ -4,6 +4,7 @@ import WebSocket from 'ws';
 import { RelayRouter } from './relay.js';
 import { openServiceSocket } from './serviceTransport.js';
 import { serviceEndpoint } from './connectionModel.js';
+import { PacketChannel } from './packets.js';
 export interface DirectTargetConfig { serviceId: string; url: string; caPath?: string; caFingerprint256?: string; certificateFingerprint256?: string; label?: string }
 function endpoint(config: DirectTargetConfig): string {
   if (!config || typeof config !== 'object' || Object.keys(config).some(key => !['serviceId', 'url', 'caPath', 'caFingerprint256', 'certificateFingerprint256', 'label'].includes(key)) || !/^[a-zA-Z0-9_.:-]{1,160}$/.test(config.serviceId) || typeof config.url !== 'string' || (config.caPath !== undefined && typeof config.caPath !== 'string')) throw new Error('Invalid direct target configuration');
@@ -31,7 +32,8 @@ export function attachRegisteredDirectTargets<P>(router: RelayRouter<P>, configs
   try {
     for (const target of targets) cleanups.push(router.registerDirect(target.serviceId, async signal => {
       if (stopped) throw new Error('Direct target stopped');
-      const ws = await openServiceSocket(target.url, target.config, { baseDir, maxPayload: 256 * 1024, handshakeTimeout: 10000, signal: AbortSignal.any([signal, lifetime.signal]) });
+      const relayUrl = new URL(target.url); relayUrl.pathname = '/api/federation/relay-target';
+      const ws = await openServiceSocket(relayUrl.href, target.config, { baseDir, maxPayload: 256 * 1024, handshakeTimeout: 10000, signal: AbortSignal.any([signal, lifetime.signal]) });
       if (stopped) { ws.terminate(); throw new Error('Direct target stopped'); }
       sockets.add(ws); ws.once('close', () => sockets.delete(ws)); return ws;
     }));
@@ -46,6 +48,21 @@ export async function verifyDirectTarget(config: DirectTargetConfig, baseDir = p
   const ws = await openServiceSocket(url, config, { baseDir, maxPayload: 256 * 1024, signal });
   const duplex = socketDuplex(ws);
   try {
-    await secureConnection({ identity: await createIdentity(), initiator: true, targetPinnedPeerId: config.serviceId, duplex, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) });
+    const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000);
+    const abort = () => ws.terminate(); timeout.addEventListener('abort', abort, { once: true });
+    try {
+      const secure = await secureConnection({ identity: await createIdentity(), initiator: true, targetPinnedPeerId: config.serviceId, duplex, signal: timeout });
+      const channel = new PacketChannel(secure.duplex);
+      try {
+        channel.send({ type: 'password-parameters', id: 'relay-policy' });
+        for await (const packet of channel.read()) {
+          if (packet.id !== 'relay-policy') continue;
+          if (packet.type === 'error' && packet.error === 'PASSWORD_NOT_CONFIGURED') throw new Error('TARGET_PASSWORD_REQUIRED');
+          if (packet.type !== 'result' || typeof packet.saltHex !== 'string' || !/^[0-9a-f]{32}$/.test(packet.saltHex)) throw new Error('TARGET_SECURITY_UPGRADE_REQUIRED');
+          return;
+        }
+        throw new Error('TARGET_SECURITY_UPGRADE_REQUIRED');
+      } finally { channel.close(); }
+    } finally { timeout.removeEventListener('abort', abort); }
   } finally { ws.close(); }
 }

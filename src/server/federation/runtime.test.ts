@@ -15,7 +15,7 @@ import type { CollaborationStore } from '../agent/collaborationStore.js';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
-async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenAccess = false, onComputer?: (socket: WebSocket) => void) {
+async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenAccess = false, onComputer?: (socket: WebSocket) => void, relayed = false) {
   const directory = mkdtempSync(join(tmpdir(), 'termdock-e2ee-test-'));
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   const app = express(); app.use(express.json());
@@ -52,7 +52,7 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
   cleanup.push(() => runtime.close());
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise<void>(resolve => server.once('listening', resolve));
-  server.on('connection', socket => { void runtime.accept(socket, { allowOpenAccess }); });
+  server.on('connection', socket => { void runtime.accept(socket, { allowOpenAccess, relayed }); });
   cleanup.push(() => { for (const socket of server.clients) socket.terminate(); server.close(); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No listener');
   const url = `ws://127.0.0.1:${address.port}`;
@@ -91,7 +91,7 @@ async function fixture(runtimeOptions: FederationRuntimeOptions = {}, allowOpenA
         if (packet.type === 'end' || packet.type === 'error') return packets;
       }
     }
-    return { identity, channel, take, pair, http, wire, pendingPackets: () => pending,
+    return { identity, channel, take, pair, http, wire, socket, pendingPackets: () => pending,
       pauseReads() { (socket as unknown as { _socket?: { pause(): void } })._socket?.pause(); },
       resumeReads() { (socket as unknown as { _socket?: { resume(): void } })._socket?.resume(); } };
   }
@@ -737,4 +737,39 @@ it('reports actual scoped connections and stops one shared Session without revok
   owner.channel.send({ type: 'grants-list', id: 'remaining-invites' });
   const pending = await owner.take('remaining-invites');
   expect(JSON.stringify(pending.invitations)).not.toContain('"one"'); expect(JSON.stringify(pending.invitations)).toContain('"two"');
+});
+
+it('denies passwordless relay requests even with full device authorization, an invitation, or open-access context', async () => {
+  const verifier = vi.spyOn(authProtection, 'getPasswordVerifier').mockReturnValue(null);
+  cleanup.push(() => verifier.mockRestore());
+  const f = await fixture({}, true, undefined, true), client = await f.connect();
+  f.runtime.store.grant({ subjectId: client.identity.peerId, scope: { kind: 'service' }, actions: ['service:*'], canDelegate: true });
+  for (const [id, packet] of [
+    ['permissions', { type: 'permissions' }],
+    ['http', { type: 'http', method: 'GET', path: '/api/terminal/one/health' }],
+    ['terminal', { type: 'ws-open', path: '/api/terminal/one/ws' }],
+    ['password', { type: 'password-parameters' }],
+  ] as const) {
+    client.channel.send({ id, ...packet });
+    expect(await client.take(id)).toMatchObject({ type: 'error', error: 'TARGET_PASSWORD_REQUIRED' });
+  }
+  expect(await client.pair()).toMatchObject({ type: 'error', error: 'TARGET_PASSWORD_REQUIRED' });
+  expect(f.terminal()).toBeUndefined(); expect(f.received).not.toHaveBeenCalled();
+});
+
+it('closes an established relay and stops terminal input when the password is removed', async () => {
+  vi.stubEnv('TERMDOCK_PASSWORD', 'relay-password-before-removal'); cleanup.push(() => vi.unstubAllEnvs());
+  const original = authProtection.getPasswordVerifier;
+  let configured = true;
+  const verifier = vi.spyOn(authProtection, 'getPasswordVerifier').mockImplementation(() => configured ? original() : null);
+  cleanup.push(() => verifier.mockRestore());
+  const f = await fixture({}, false, undefined, true), client = await f.connect();
+  await client.pair();
+  client.channel.send({ id: 'terminal', type: 'ws-open', path: '/api/terminal/one/ws' });
+  expect(await client.take('terminal', 'ws-ready')).toMatchObject({ type: 'ws-ready' });
+  configured = false;
+  client.channel.send({ id: 'terminal', type: 'ws-data', data: JSON.stringify({ type: 'input', data: 'forbidden-after-removal' }) });
+  expect(await client.take('terminal', 'error')).toMatchObject({ error: 'TARGET_PASSWORD_REQUIRED' });
+  expect(f.received).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(client.socket.readyState).toBe(WebSocket.CLOSED), { timeout: 2000 });
 });

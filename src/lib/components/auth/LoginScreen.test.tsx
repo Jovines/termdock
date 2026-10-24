@@ -67,3 +67,22 @@ it('shows the current destination and opens service management before sign-in', 
   fireEvent.click(screen.getByRole('button', { name: 'Manage services / use another address' }));
   expect(onManageServices).toHaveBeenCalledOnce(); expect(mocks.login).not.toHaveBeenCalled();
 });
+
+it('labels the final target separately from the relay entry address', () => {
+  render(<LoginScreen serviceName="Mac target" entryName="Home entry" entryOrigin="https://entry.example" onLoginSuccess={() => {}} />);
+  expect(screen.getByText('Signing in to Mac target')).toBeTruthy();
+  expect(screen.getByText('Via relay Home entry (entry.example). Use the target service password.')).toBeTruthy();
+  expect(screen.queryByText('Signing in to entry.example')).toBeNull();
+});
+
+it.each(['passwordNotConfigured', 'targetPasswordRequired', 'securityUpgradeRequired'])('removes the unusable password form for %s', async reason => {
+  mocks.login.mockResolvedValue({ ok: false, reason });
+  const manage = vi.fn();
+  render(<LoginScreen serviceName="Mac" onManageServices={manage} onLoginSuccess={() => {}} />);
+  const input = screen.getByLabelText('Enter password');
+  fireEvent.change(input, { target: { value: 'entry-password' } }); fireEvent.submit(input.closest('form')!);
+  await screen.findByRole('alert');
+  expect(screen.queryByLabelText('Enter password')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Manage services / use another address' }));
+  expect(manage).toHaveBeenCalledOnce();
+});

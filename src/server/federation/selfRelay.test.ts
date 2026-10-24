@@ -17,9 +17,11 @@ import { connectCollaborationRpc } from '../agent/collaborationPeerTransport.js'
 import { desktopServiceTargets } from './desktopTargets.js';
 import { connect } from '../../lib/federation/secureClient.js';
 import { RelaySocket } from '../../lib/federation/relaySocket.js';
+import * as authProtection from '../utils/authProtection.js';
 const cleanups: (() => void)[] = [];
-afterEach(() => { for (const close of cleanups.splice(0).reverse()) close(); vi.unstubAllGlobals(); });
+afterEach(() => { for (const close of cleanups.splice(0).reverse()) close(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 it.each(['configured', 'preview'] as const)('keeps A reachable through B using an A-initiated tunnel with %s configuration and no public B-to-A dial', async source => {
+  vi.stubEnv('TERMDOCK_PASSWORD', 'reverse-relay-password');
   vi.stubGlobal('CloseEvent', class extends Event { code: number; reason: string; constructor(type: string, init: { code: number; reason: string }) { super(type); this.code = init.code; this.reason = init.reason; } });
   const dir = mkdtempSync(join(tmpdir(), 'td-reverse-relay-')); cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'ca.pem'), '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost'], { stdio: 'ignore' });
@@ -42,20 +44,20 @@ it.each(['configured', 'preview'] as const)('keeps A reachable through B using a
   a.store.grant({ subjectId: phone.peerId, scope: { kind: 'service' }, actions: ['service:*'] });
   const local = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(local, 'listening');
   cleanups.push(() => { for (const ws of local.clients) ws.terminate(); local.close(); });
-  local.on('connection', ws => void a.accept(ws));
+  local.on('connection', (ws, req) => void a.accept(ws, { relayed: req.url === '/api/federation/relay-target' }));
   const localOrigin = `http://127.0.0.1:${(local.address() as { port: number }).port}`;
   let router: RelayRouter<RoutePrincipal>;
   let revoked = false;
   const access = new RouteAccess(join(dir, 'routes.json'), Date.now, subject => subject === phone.peerId && !revoked,
-    () => [], () => router.activeRouteIds());
+    () => [], () => router.registeredRouteIds());
   const b = await createFederationRuntime(express(), join(dir, 'b'), handlers, {
     issueSelfRelayTicket: id => access.issueSelfRelayTicket(id),
     hasRouteGrant: subject => subject === phone.peerId && !revoked,
     issueRouteTicket: (subject, target) => access.issueRouteTicket(subject, target),
-    listRouteTargets: () => access.configuredTargets().map(target => ({ ...target, available: router.hasRoute(target.serviceId) })),
+    listRouteTargets: () => access.configuredTargets().map(target => ({ ...target, available: router.hasRoute(target.serviceId), ...(router.routeError(target.serviceId) ? { error: router.routeError(target.serviceId) } : {}) })),
   }); cleanups.push(() => b.close());
   b.store.grant({ subjectId: phone.peerId, scope: { kind: 'service' }, actions: ['service:*'] });
-  router = new RelayRouter<RoutePrincipal>({ authenticate: principal => principal as RoutePrincipal,
+  router = new RelayRouter<RoutePrincipal>({ requirePasswordProtectedTargets: true, authenticate: principal => principal as RoutePrincipal,
     allowRegister: (p, id) => access.allowRegister(p, id), allowRoute: (p, id) => access.allowRoute(p, id), heartbeatMs: 200 });
   cleanups.push(() => router.close());
   const entry = createServer({ cert: leaf, key: leafKey }, (req, res) => { if (req.url === '/onboarding/ca.crt') res.end(ca); else res.writeHead(404).end(); });
@@ -95,7 +97,7 @@ it.each(['configured', 'preview'] as const)('keeps A reachable through B using a
   }
   const entryNode = { serviceId: b.serviceId, origin, caFingerprint256: new X509Certificate(ca).fingerprint256 };
   await expect(connectCollaborationRpc(phone, { serviceId: a.serviceId, origin: 'https://127.0.0.1:1' })).rejects.toThrow();
-  const entryClient = await connectCollaborationRpc(phone, entryNode); cleanups.push(() => entryClient.close());
+  let entryClient = await connectCollaborationRpc(phone, entryNode); cleanups.push(() => entryClient.close());
   expect(await entryClient.request({ type: 'route-targets' })).toMatchObject({ canManage: true, items: [{ serviceId: a.serviceId, available: true }] });
   const phoneConnect = async () => {
     const ticket = await entryClient.request({ type: 'route-ticket', serviceId: a.serviceId });
@@ -146,6 +148,7 @@ it.each(['configured', 'preview'] as const)('keeps A reachable through B using a
     await vi.waitFor(() => expect(router.hasRoute(a.serviceId)).toBe(true), { timeout: 4000 });
   }
   const finalEntry = await connectCollaborationRpc(phone, entryNode); cleanups.push(() => finalEntry.close());
+  entryClient = finalEntry;
   const ticket = await finalEntry.request({ type: 'route-ticket', serviceId: a.serviceId });
   const url = new URL('/api/federation/relay', origin.replace('https:', 'wss:')); url.searchParams.set('routeToken', String(ticket.routeToken));
   const throughB = await connectCollaborationRpc(phone, { ...entryNode, serviceId: a.serviceId }, url.href); cleanups.push(() => throughB.close());
@@ -154,5 +157,16 @@ it.each(['configured', 'preview'] as const)('keeps A reachable through B using a
   expect(a.store.authorize({ subjectId: b.serviceId, serviceId: a.serviceId, action: 'authorization.manage' }).allowed).toBe(false);
   revoked = true;
   await vi.waitFor(() => expect(throughB.closed).toBe(true));
+  revoked = false;
+  const beforeRemoval = await phoneConnect();
+  const verifier = vi.spyOn(authProtection, 'getPasswordVerifier').mockReturnValue(null); cleanups.push(() => verifier.mockRestore());
+  await vi.waitFor(() => expect(beforeRemoval.closed).toBe(true), { timeout: 4000 });
+  await vi.waitFor(() => expect(router.routeError(a.serviceId)).toBe('TARGET_PASSWORD_REQUIRED'), { timeout: 4000 });
+  expect(router.hasRoute(a.serviceId)).toBe(false);
+  expect(router.registeredRouteIds()).toContain(a.serviceId);
+  expect(await finalEntry.request({ type: 'route-targets' })).toMatchObject({ items: [{ serviceId: a.serviceId, available: false, error: 'TARGET_PASSWORD_REQUIRED' }] });
+  await expect(phoneConnect()).rejects.toMatchObject({ code: 'TARGET_PASSWORD_REQUIRED' });
+  verifier.mockRestore();
+  await vi.waitFor(() => expect(router.hasRoute(a.serviceId)).toBe(true), { timeout: 4000 });
   selfRelay.close(); await vi.waitFor(() => expect(router.hasRoute(a.serviceId)).toBe(false));
-}, 15000);
+}, 20000);

@@ -372,6 +372,10 @@ export type TranslationDictionary = {
     identityMismatch: string;
     unavailable: string;
     authorizationRequired: string;
+    passwordNotConfigured: string;
+    targetPasswordRequired: string;
+    securityUpgradeRequired: string;
+    viaEntry: (params: TranslatorParams) => string;
     currentTarget: (params: TranslatorParams) => string;
     manageServices: string;
     failed: string;

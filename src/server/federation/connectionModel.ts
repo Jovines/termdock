@@ -72,7 +72,7 @@ export function canonicalConnectionRouting<T extends ConnectionRecord>(record: T
   return result;
 }
 
-export function serviceEndpoint(address: string, kind: 'secure' | 'relay' = 'secure'): URL {
+export function serviceEndpoint(address: string, kind: 'secure' | 'relay' | 'relay-target' = 'secure'): URL {
   const url = new URL(normalizeServiceAddress(address));
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = `/api/federation/${kind}`;

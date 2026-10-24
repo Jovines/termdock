@@ -45,7 +45,7 @@ it('rejects a malformed first entry frame and cleans up a cancelled ready wait',
 });
 it('rejects ambiguous TLS trust and endpoints before contacting the service', async () => {
   await expect(serviceTlsOptions('https://b.example', { ca: Buffer.from('unused'), caFingerprint256: '00'.repeat(32) })).rejects.toThrow('Conflicting');
-  for (const url of ['ws://b.example/api/federation/relay', 'wss://user:secret@b.example/api/federation/relay', 'wss://b.example/arbitrary', 'wss://b.example/api/federation/relay?routeToken=x&selfRelayToken=y']) {
+  for (const url of ['ws://b.example/api/federation/relay', 'wss://user:secret@b.example/api/federation/relay', 'wss://b.example/arbitrary', 'wss://b.example/api/federation/relay?routeToken=x&selfRelayToken=y', 'wss://b.example/api/federation/relay-target?routeToken=x']) {
     await expect(createServiceSocket(url)).rejects.toThrow();
   }
 });

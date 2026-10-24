@@ -9,7 +9,7 @@ const markdownRender = vi.hoisted(() => vi.fn());
 import type { ChatMessage } from './chatMessages';
 import { SessionChatView } from './SessionChatView';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-function liveOutput(id: string) { act(() => { const store = useTerminalStore.getState(); store.setTerminalSession(id, { sessionId: `backend-${id}`, cols: 80, rows: 24 }); store.recordTerminalOutput(id); store.flushPendingBufferWrites(id); }); }
+function liveOutput(id: string) { act(() => { const store = useTerminalStore.getState(); store.setTerminalSession(id, { sessionId: `backend-${id}`, cols: 80, rows: 24 }); store.setTerminalOutputActivity(id, true); }); }
 vi.mock('../markdown/Markdown', () => ({ Markdown: ({ content }: { content: string }) => { markdownRender(content); return <p data-testid="chat-markdown">{content}</p>; } }));
 afterEach(() => { cleanup(); useTerminalStore.getState().clearAllTerminalSessions(); clearChatSnapshots(); sessionStorage.clear(); markdownRender.mockClear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 function composer() { return screen.getByRole('textbox') as HTMLElement; }
@@ -354,7 +354,7 @@ it('acknowledges an earlier pending request and retains reply feedback when only
   expect(screen.queryByRole('button', { name: '重试发送' })).toBeNull();
 });
 
-it('shows the agent author immediately on send, puts feedback below it, and merges the author into the reply', async () => {
+it('shows status beside the initial author, then below real replies', async () => {
   let acknowledge!: (response: Response) => void;
   let messages: ChatMessage[] = [];
   vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => {
@@ -366,9 +366,9 @@ it('shows the agent author immediately on send, puts feedback below it, and merg
   setComposer('检查结果'); fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
   const header = view.container.querySelector('[data-chat-agent-header]')!;
   const feedback = screen.getByRole('status', { name: 'Codex发送中' });
-  expect(header.textContent).toBe('Codex');
+  expect(header.textContent).toContain('Codex');
   expect(header.querySelector('[aria-hidden="true"]')).toBeTruthy();
-  expect(header.compareDocumentPosition(feedback) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(header.contains(feedback)).toBe(true);
   expect(feedback.textContent).toBe('发送中…');
   messages = [{ id: 'sent', role: 'user', content: '检查结果', createdAt: 1, status: 'delivered' }];
   await act(async () => acknowledge(Response.json({ id: 'sent', status: 'delivered' })));
@@ -380,6 +380,7 @@ it('shows the agent author immediately on send, puts feedback below it, and merg
   fireEvent(window, new Event('online')); await screen.findByText('正在核对结果');
   expect(screen.getAllByText('Codex')).toHaveLength(1);
   expect(screen.getByRole('status', { name: 'Codex工作中' }).textContent).toBe('工作中…');
+  expect(view.container.querySelector('[data-chat-agent-header]')?.contains(screen.getByRole('status', { name: 'Codex工作中' }))).toBe(false);
 });
 it('removes optimistic agent feedback when sending fails', async () => {
   vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => {
@@ -389,7 +390,7 @@ it('removes optimistic agent feedback when sending fails', async () => {
   const view = render(<SessionChatView sessionId="failed-author" onTerminal={() => {}} />);
   await screen.findByText('想一起完成什么？');
   setComposer('检查结果'); fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
-  expect(view.container.querySelector('[data-chat-agent-header]')?.textContent).toBe('Codex');
+  expect(view.container.querySelector('[data-chat-agent-header]')?.textContent).toContain('Codex');
   await screen.findByRole('button', { name: '重试发送' });
   expect(view.container.querySelector('[data-chat-reply-feedback]')).toBeNull();
 });

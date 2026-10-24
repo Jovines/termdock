@@ -299,7 +299,7 @@ it.each([390, 1280])('previews a video in the editor and sent message at width %
   expect(saved).toHaveLength(1);
 });
 
-it.each([390, 1280])('shows the author immediately above the pending reply card at width %i', async width => {
+it.each([390, 1280])('shows compact status next to the initial author at width %i', async width => {
   await page.viewport(width, 844);
   const agent = { displayName: 'Codex', slug: 'codex' };
   await mount([], agent);
@@ -314,9 +314,11 @@ it.each([390, 1280])('shows the author immediately above the pending reply card 
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
   await expect.element(page.getByRole('status', { name: 'Codex发送中' })).toBeVisible();
   const header = document.querySelector<HTMLElement>('[data-chat-agent-header]')!, card = document.querySelector<HTMLElement>('[data-chat-reply-status]')!;
-  expect(header.textContent).toBe('Codex');
+  expect(header.textContent).toContain('Codex');
   expect(header.querySelector('[aria-hidden="true"]')).not.toBeNull();
-  expect(card.getBoundingClientRect().top).toBeGreaterThanOrEqual(header.getBoundingClientRect().bottom);
+  expect(header.contains(card)).toBe(true);
+  const label = header.querySelector('[data-terminal-peek-trigger], span')!.getBoundingClientRect();
+  expect(card.getBoundingClientRect().left).toBeGreaterThanOrEqual(label.right);
   expect(document.activeElement).toBe(input);
   messages.push({ id: 'sent-author', role: 'user', content: '检查本次构建', createdAt: Date.now(), status: 'delivered' });
   acknowledge(Response.json({ id: 'sent-author', status: 'delivered' }));
@@ -324,9 +326,17 @@ it.each([390, 1280])('shows the author immediately above the pending reply card 
   expect(document.querySelector('[data-chat-reply-status]')).toBeNull();
   const store = useTerminalStore.getState();
   store.setTerminalSession('browser-composer', { sessionId: 'backend-composer', cols: 80, rows: 24 });
-  store.recordTerminalOutput('browser-composer'); store.flushPendingBufferWrites('browser-composer');
+  store.setTerminalOutputActivity('browser-composer', true);
   await expect.element(page.getByRole('status', { name: 'Codex工作中' })).toBeVisible();
   expect(document.querySelectorAll('[data-chat-agent-header]')).toHaveLength(1);
   expect(document.querySelector('[data-chat-reply-status]')?.textContent).toBe('工作中…');
   await page.screenshot({ path: `/tmp/termdock-agent-waiting-${width}.png` });
+  messages.push({ id: 'progress-author', role: 'assistant', content: Array.from({ length: 24 }, (_, index) => `正在核对第 ${index} 项结果。`).join('\n\n'), createdAt: Date.now(), status: 'stored', responseKind: 'progress' });
+  window.dispatchEvent(new Event('online'));
+  await expect.element(page.getByText('正在核对第 23 项结果。')).toBeVisible();
+  const tailStatus = document.querySelector<HTMLElement>('[data-chat-reply-status]')!;
+  expect(tailStatus.hasAttribute('data-chat-reply-inline')).toBe(false);
+  expect(document.querySelector('[data-chat-agent-header]')?.contains(tailStatus)).toBe(false);
+  await expect.element(page.getByRole('status', { name: 'Codex工作中' })).toBeVisible();
+  await page.screenshot({ path: `/tmp/termdock-agent-reply-status-${width}.png` });
 });

@@ -25,10 +25,11 @@ let lastDirectProbe = 0;
 let renewing = false;
 let lastRenewalAttemptAt = -Infinity;
 const accessBlocks = new Map<string, ConnectionAccessError>();
+const relayBlock = (error?: ConnectionAccessError) => !!error && ['RELAY_AUTHORIZATION_REQUIRED', 'TARGET_PASSWORD_REQUIRED', 'TARGET_SECURITY_UPGRADE_REQUIRED'].includes(error.code);
 const deniedEntries = new Map<string, Set<string>>();
 function rememberDeniedEntry(error: ConnectionAccessError): void {
   const { targetServiceId, entryServiceId } = error.context;
-  if (error.code !== 'RELAY_AUTHORIZATION_REQUIRED' || !targetServiceId || !entryServiceId) return;
+  if (!relayBlock(error) || !targetServiceId || !entryServiceId) return;
   if (deniedEntries.size > 32) deniedEntries.clear();
   const entries = deniedEntries.get(targetServiceId) || new Set<string>(); entries.add(entryServiceId); deniedEntries.set(targetServiceId, entries);
 }
@@ -125,7 +126,7 @@ async function authenticateServicePasswordDirect(url: string, password: string):
     if (!response.ok) {
       const data = await response.json().catch(() => null);
       const retryAfterMs = typeof data?.retryAfterMs === 'number' && Number.isFinite(data.retryAfterMs) && data.retryAfterMs >= 0 ? data.retryAfterMs : undefined;
-      throw new PasswordLoginFailure(response.status === 429 ? 'RATE_LIMITED' : response.status === 401 ? 'INVALID_PASSWORD' : 'LOGIN_UNAVAILABLE', retryAfterMs);
+      throw new PasswordLoginFailure(response.status === 429 ? 'RATE_LIMITED' : data?.code === 'PASSWORD_NOT_CONFIGURED' ? 'PASSWORD_NOT_CONFIGURED' : response.status === 401 ? 'INVALID_PASSWORD' : 'LOGIN_UNAVAILABLE', retryAfterMs);
     }
     return response.json();
   };
@@ -142,14 +143,14 @@ async function authenticateServicePasswordDirect(url: string, password: string):
 }
 async function authenticateServicePassword(url: string, password: string): Promise<ConnectionIntent> {
   const selected = savedConnection();
-  if (selected && (selected.serviceOrigin || selected.url) === url) {
+  if (selected && connectionAddresses(selected).includes(url)) {
     await authenticatePinnedPassword(selected, password);
     return selected;
   }
   try { return await authenticateServicePasswordDirect(url, password); }
   catch (error) {
     if (!(error instanceof TypeError) && !(error instanceof DOMException)) throw error;
-    const known = (await listServiceConnections()).find(item => item.targetPeerId && (item.serviceOrigin || item.url) === url);
+    const known = (await listServiceConnections()).find(item => item.targetPeerId && connectionAddresses({ ...item, targetPeerId: item.targetPeerId }).includes(url));
     if (!known?.targetPeerId) throw passwordLoginFailure(error);
     const intent = { ...known, targetPeerId: known.targetPeerId, serviceName: known.label };
     await authenticatePinnedPassword(intent, password);
@@ -175,9 +176,9 @@ async function passwordLogin(password: string): Promise<Response> {
   try {
     // On an expired remote target, sign back into that target, not the page host.
     const selected = savedConnection();
-    const url = selected?.serviceOrigin || location.origin;
-    const intent = await authenticateServicePassword(url, password);
-    await connectDevice({ ...intent, routes: selected?.routes, serviceName: selected?.serviceName || intent.serviceName });
+    if (selected) await authenticatePinnedPassword(selected, password);
+    const intent = selected || await authenticateServicePassword(location.origin, password);
+    await connectDevice(intent);
     return Response.json({ ok: true });
   } catch (error) {
     const failure = passwordLoginFailure(error);
@@ -187,7 +188,7 @@ async function passwordLogin(password: string): Promise<Response> {
 /** An address is sufficient for one's own service; an invitation is optional. */
 export async function connectServiceAddress(address: string, password?: string): Promise<{ passwordRequired?: boolean }> {
   const url = normalizeServiceAddress(address);
-  const saved = (await listServiceConnections()).find(item => (item.serviceOrigin || item.url) === url && item.targetPeerId);
+  const saved = (await listServiceConnections()).find(item => item.targetPeerId && connectionAddresses({ ...item, targetPeerId: item.targetPeerId }).includes(url));
   if (password === undefined && saved?.targetPeerId) {
     try { await connectDevice({ ...saved, targetPeerId: saved.targetPeerId, serviceName: saved.label }); return {}; }
     catch (error) { if (!(error instanceof DeviceAuthorizationRequired)) throw error; }
@@ -307,6 +308,32 @@ export async function openAuthorizedServiceClient(intent: ConnectionIntent, sign
   } catch (error) { client.close(); throw error; }
   finally { signal.removeEventListener('abort', abort); }
 }
+export type ConnectionAccessStatus = 'authorized' | 'passwordRequired' | 'invitationRequired';
+/** Inspect the target as this device over existing routes. Never pair, grant,
+ * discover reverse routes, or change the current workspace during inspection. */
+export async function inspectConnectionAccess(intent: ConnectionIntent, signal?: AbortSignal): Promise<ConnectionAccessStatus> {
+  let relayed = false;
+  const client = await openTargetForAuthentication(intent, signal, { connected(key) { relayed = key.startsWith('relay:'); } });
+  const abort = () => client.close();
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    if (signal?.aborted) throw signal.reason;
+    let authorized = false;
+    try { await readDeviceAuthorization(client); authorized = true; }
+    catch (error) { if (!(error instanceof DeviceAuthorizationRequired)) throw error; }
+    if (authorized && !relayed) return 'authorized';
+    try { await client.request({ type: 'password-parameters' }, { timeoutMs: 5000 }); return authorized ? 'authorized' : 'passwordRequired'; }
+    catch (error) {
+      if (passwordLoginFailure(error).code === 'PASSWORD_NOT_CONFIGURED') {
+        if (relayed) throw new ConnectionAccessError('TARGET_PASSWORD_REQUIRED', { targetServiceId: intent.targetPeerId, entryServiceId: intent.entryServiceId });
+        return 'invitationRequired';
+      }
+      throw error;
+    }
+  } catch (error) {
+    throw relayAuthorizationError(error, { targetServiceId: intent.targetPeerId, entryServiceId: intent.entryServiceId });
+  } finally { signal?.removeEventListener('abort', abort); client.close(); }
+}
 export async function connectDevice(intent: ConnectionIntent, options: { rememberOnly?: boolean; renewIfCurrent?: SecureClient; directOnly?: boolean } = {}): Promise<SecureClient> {
   if (intent.entryServiceId) assertRelayTarget(intent.entryServiceId, intent.targetPeerId);
   const previous = active, previousEntry = entryClient;
@@ -315,7 +342,7 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
   const known = (await listServiceConnections()).find(item => item.targetPeerId === intent.targetPeerId);
   const savedIntent = { ...intent, routes: intent.routes ?? known?.routes };
   if (intent.routeCode && intent.entryServiceId) deniedEntries.get(intent.targetPeerId)?.delete(intent.entryServiceId);
-  const reverseRoutes = options.directOnly || accessBlocks.get(intent.targetPeerId)?.code === 'RELAY_AUTHORIZATION_REQUIRED' ? [] : await reverseConnectionRoutes(savedIntent);
+  const reverseRoutes = options.directOnly || relayBlock(accessBlocks.get(intent.targetPeerId)) ? [] : await reverseConnectionRoutes(savedIntent);
   const routes = options.directOnly ? [] : [...connectionRoutes(savedIntent), ...reverseRoutes].filter(route => allowedEntry(intent.targetPeerId, route.targetPeerId));
   const addresses = connectionAddresses(savedIntent);
   let next: SecureClient | undefined, nextEntry: SecureClient | undefined;
@@ -377,8 +404,7 @@ export async function connectDevice(intent: ConnectionIntent, options: { remembe
       } catch (error) {
         client?.close();
         if (candidateEntry && candidateEntry !== previousEntry && candidateEntry !== previous) candidateEntry.close();
-        const access = connectionAccessError(error, { targetServiceId: intent.targetPeerId,
-          ...(error instanceof ConnectionAccessError && error.code === 'RELAY_AUTHORIZATION_REQUIRED' ? { entryServiceId: route.targetPeerId, entryUrl: route.url } : {}) });
+        const access = connectionAccessError(error, { targetServiceId: intent.targetPeerId, entryServiceId: route.targetPeerId, entryUrl: route.url });
         if (access) rememberDeniedEntry(access);
         throw access || error;
       }
@@ -537,7 +563,7 @@ export async function getActiveClient(): Promise<SecureClient> {
 export async function retryDirectConnection(): Promise<SecureClient> {
   const selected = savedConnection();
   const blocked = accessBlocks.get(selected?.targetPeerId || '');
-  if (!selected || blocked?.code !== 'RELAY_AUTHORIZATION_REQUIRED' || !connectionAddresses(selected).length) {
+  if (!selected || !relayBlock(blocked) || !connectionAddresses(selected).length) {
     throw blocked || new Error('没有可用的直连地址。');
   }
   if (connecting) return connecting;
@@ -556,12 +582,14 @@ export async function retryDirectConnection(): Promise<SecureClient> {
 /** A revoked entry is excluded across all its addresses. Recovery may use an
  * already-saved independent entry; it never discovers or grants a new route. */
 export function canRetryConnectionAccess(selected = savedConnection(), blocked = accessBlocks.get(selected?.targetPeerId || '')): boolean {
+  if (selected && relayBlock(blocked) && blocked?.code !== 'RELAY_AUTHORIZATION_REQUIRED') return connectionAddresses(selected).length > 0;
   return !!selected && blocked?.code === 'RELAY_AUTHORIZATION_REQUIRED'
     && hasIndependentConnectionRoute(selected, blocked.context.entryServiceId, deniedEntries.get(selected.targetPeerId));
 }
 export async function retryConnectionAccess(): Promise<SecureClient> {
   const selected = savedConnection(), blocked = accessBlocks.get(selected?.targetPeerId || '');
   if (!selected || !canRetryConnectionAccess(selected, blocked)) throw blocked || new Error('没有独立的已保存连接路线。');
+  if (blocked?.code !== 'RELAY_AUTHORIZATION_REQUIRED') return retryDirectConnection();
   const alternatives = connectionRoutes(selected).filter(route => allowedEntry(selected.targetPeerId, route.targetPeerId));
   if (!alternatives.length) return retryDirectConnection();
   if (connecting) return connecting;

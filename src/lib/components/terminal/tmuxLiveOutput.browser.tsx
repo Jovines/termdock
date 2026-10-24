@@ -8,13 +8,15 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getDefaultTerminalSettings } from '../../terminal/settings';
 import type { TerminalHandlers } from '../../terminal/types';
 
-const backend = vi.hoisted(() => ({ connect: vi.fn(), close: vi.fn(), inputs: vi.fn(), handlers: undefined as TerminalHandlers | undefined }));
+const backend = vi.hoisted(() => ({ connect: vi.fn(), close: vi.fn(), inputs: vi.fn(), resize: vi.fn(), handlers: undefined as TerminalHandlers | undefined,
+  dimensions: undefined as (() => { cols: number; rows: number } | null) | undefined }));
 vi.mock('../../terminal/factory', () => ({ createTermdockAPI: () => ({
-  connect: (_id: string, handlers: TerminalHandlers) => {
-    backend.connect(); backend.handlers = handlers; return { close: backend.close };
+  connect: (_id: string, handlers: TerminalHandlers, options: { getDimensions?: typeof backend.dimensions }) => {
+    backend.connect(); backend.handlers = handlers; backend.dimensions = options.getDimensions; return { close: backend.close };
   },
   sendInput: async (_id: string, text: string) => { backend.inputs(text); },
   resize: async (size: { seq: number; cols: number; rows: number }) => {
+    backend.resize(size);
     queueMicrotask(() => backend.handlers?.onEvent({ type: 'resize-ack', ok: true, ...size }));
   },
 }) }));
@@ -41,7 +43,9 @@ it('keeps only live tmux delivery across resizing and gets a fresh screen after 
   for (let n = 0; n < 4; n++) await frame();
   expect(write.mock.calls).toHaveLength(0);
   const first = backend.handlers!;
-  first.onEvent({ type: 'connected', mode: 'tmux', replayChunks: ['\x1b[HBEFORE_LAYOUT'], replayOutOfWindow: true });
+  const measured = backend.dimensions!()!;
+  expect(measured.cols).toBeGreaterThan(0);
+  first.onEvent({ type: 'connected', mode: 'tmux', ...measured, replayChunks: ['\x1b[HBEFORE_LAYOUT'], replayOutOfWindow: true });
   await expect.poll(() => document.querySelector('.xterm-rows')?.textContent).toContain('BEFORE_LAYOUT');
   await expect.poll(() => store.getTerminalSession(sessionId)!.bufferLength).toBe(0);
   first.onEvent({ type: 'data', data: '\x1b[2;1HLIVE_OUTPUT' });
@@ -52,6 +56,7 @@ it('keeps only live tmux delivery across resizing and gets a fresh screen after 
   await new Promise(resolve => setTimeout(resolve, 250));
   first.onEvent({ type: 'data', data: '\x1b[6n' });
   await expect.poll(() => backend.inputs.mock.calls.some(([data]) => /\x1b\[\d+;\d+R/.test(String(data)))).toBe(true);
+  expect(backend.resize).not.toHaveBeenCalled();
   const terminal = document.querySelector('.xterm');
   write.mockClear();
   await page.viewport(900, 700); await frame();

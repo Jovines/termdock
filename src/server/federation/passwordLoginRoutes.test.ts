@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'node:http';
 import { createPasswordLoginRouter } from './passwordLoginRoutes.js';
 import { startPasswordBootstrap, finishPasswordBootstrap } from './passwordBootstrap.js';
 import { recordLoginSuccess } from '../utils/authProtection.js';
 import type { FederationRuntime } from './runtime.js';
+import * as authProtection from '../utils/authProtection.js';
 const originalPassword = process.env.TERMDOCK_PASSWORD;
 const originalOrigin = process.env.TERMDOCK_PUBLIC_ORIGIN;
 let listener: Server | undefined;
@@ -13,6 +14,7 @@ afterEach(async () => {
   if (originalOrigin === undefined) delete process.env.TERMDOCK_PUBLIC_ORIGIN; else process.env.TERMDOCK_PUBLIC_ORIGIN = originalOrigin;
   recordLoginSuccess('127.0.0.1');
   if (listener) await new Promise<void>(resolve => listener!.close(() => resolve()));
+  vi.restoreAllMocks();
 });
 async function fixture(ready = true) {
   process.env.TERMDOCK_PASSWORD = 'existing-password'; delete process.env.TERMDOCK_PUBLIC_ORIGIN;
@@ -50,5 +52,13 @@ describe('public password proof routes', () => {
   });
   it('fails closed before runtime ready', async () => {
     const f = await fixture(false); expect((await f.request('parameters')).status).toBe(503);
+  });
+  it('reports an absent password without creating a device grant', async () => {
+    vi.spyOn(authProtection, 'getPasswordVerifier').mockReturnValue(null);
+    const f = await fixture();
+    const response = await f.request('parameters');
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ code: 'PASSWORD_NOT_CONFIGURED', error: 'Password not configured' });
+    expect(f.grants).toEqual([]);
   });
 });

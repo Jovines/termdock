@@ -40,3 +40,10 @@ describe('password authenticated Noise identity bootstrap', () => {
     await expect(server().start({ startLoginRequest: 'x'.repeat(8193), ...binding })).rejects.toThrow();
   });
 });
+
+it('distinguishes absent passwords from malformed credentials before accepting a login', async () => {
+  const unconfigured = new PasswordBootstrapServer({ getPasswordHash: () => null, serverIdentity: 'target' });
+  expect(() => unconfigured.parameters()).toThrow('PASSWORD_NOT_CONFIGURED');
+  const corrupted = new PasswordBootstrapServer({ getPasswordHash: () => 'malformed', serverIdentity: 'target' });
+  expect(() => corrupted.parameters()).toThrow('Password authentication unavailable');
+});

@@ -217,6 +217,40 @@ describe('TerminalViewport async paste ownership', () => {
     expect(onResize).toHaveBeenCalledTimes(2);
   });
 
+  it('uses the connected grid as the baseline and never requests it again for refresh or cursor recovery', async () => {
+    const ref = createRef<TerminalController>();
+    const onResize = vi.fn(), onSizeSynchronizedChange = vi.fn();
+    const view = render(<TerminalViewport ref={ref} sessionKey="unchanged-grid" sessionId="unchanged-grid" chunks={[]} onInput={vi.fn()}
+      onResize={onResize} onSizeSynchronizedChange={onSizeSynchronizedChange} terminalSettings={{ rendererMode: 'dom' } as never} theme={{} as never} autoFocus={false} />);
+    await waitFor(() => expect(terminalModel.instance?._core.coreService.isCursorInitialized).toBe(true));
+    vi.spyOn(view.container.querySelector('.terminal-viewport-container')!, 'getBoundingClientRect').mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+    vi.useFakeTimers();
+    act(() => {
+      ref.current!.setSessionReady(true, { cols: 80, rows: 24 });
+      ref.current!.requestRefresh('connected', { reconcileServerSize: true });
+      ref.current!.requestPtyRedraw();
+      ref.current!.ensureSizeMatches('pointerdown');
+      vi.advanceTimersByTime(3000);
+    });
+    expect(onResize).not.toHaveBeenCalled();
+    expect(onSizeSynchronizedChange).toHaveBeenLastCalledWith(true);
+    act(() => {
+      terminalModel.dimensions = { cols: 100, rows: 30 };
+      ref.current!.requestRefresh('resize');
+      vi.advanceTimersByTime(200);
+    });
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(100, 30, expect.any(Number));
+    act(() => {
+      ref.current!.acknowledgeResize({ seq: onResize.mock.calls[0][2], ok: true, cols: 100, rows: 30 });
+      ref.current!.setSessionReady(false);
+      ref.current!.setSessionReady(true, { cols: 100, rows: 30 });
+      ref.current!.requestRefresh('connected', { reconcileServerSize: true });
+      ref.current!.requestPtyRedraw();
+      vi.advanceTimersByTime(3000);
+    });
+    expect(onResize).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps idle fits, reconnects and cursor recovery passive until local interaction', async () => {
     const ref = createRef<TerminalController>();
     const onResize = vi.fn();

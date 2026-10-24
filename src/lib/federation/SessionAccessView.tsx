@@ -9,6 +9,7 @@ const Chat = lazy(() => import('../components/chat/SessionChatView').then(m => (
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { FitAddon } from '@xterm/addon-fit';
 import { createBrowserTerminal, TerminalGeometry, type TerminalGeometryPhase } from '../terminal/geometry';
+import { acknowledgeResize, createResizeSyncState, observeServerSize, requestResize } from '../terminal/resizeSync';
 import '@xterm/xterm/css/xterm.css';
 import { getTerminalTheme, type TermdockColorTheme } from '../terminal/theme';
 import type { SecureClient } from './secureClient';
@@ -96,6 +97,8 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
       setStatus('正在连接…');
       const query = new URLSearchParams({ flow: '2', ...(canResize ? { transport: 'tmux-client', ...(measured ? { cols: String(measured.cols), rows: String(measured.rows) } : {}) } : {}) });
       const socket = client.openSocket(`/api/terminal/${encodeURIComponent(selected.sessionId)}/ws?${query}`);
+      let streamReady = false;
+      let resizeState = createResizeSyncState();
       disposables.push(() => { socket.onclose = null; socket.onerror = null; socket.close(); });
       const resize = (phase: TerminalGeometryPhase = 'update') => {
         if (disposed || modeRef.current !== 'terminal' || !element.current?.clientWidth || !element.current?.clientHeight) return;
@@ -106,7 +109,11 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
         }
         geometry.fit(phase, true, 'resize');
         const size = geometry.dimensions;
-        if (size && socket.readyState === 1) socket.send(JSON.stringify({ type: 'resize', ...size }));
+        if (size && streamReady && socket.readyState === 1) {
+          const next = requestResize(resizeState, size);
+          resizeState = next.state;
+          if (next.request) socket.send(JSON.stringify({ type: 'resize', ...size, seq: next.request.seq }));
+        }
       };
       resizeTerminal.current = resize;
       socket.onopen = () => { setStatus(canWrite ? '' : '只读'); resize(); };
@@ -115,18 +122,25 @@ export function SessionAccessView({ client, initialSessionId, initialViewMode }:
           const frame = JSON.parse(event.data);
           if (disposed) return;
           if (frame.type === 'connected') {
+            streamReady = true;
+            resizeState = observeServerSize(createResizeSyncState(), frame);
             epoch = typeof frame.streamEpoch === 'string' ? frame.streamEpoch : undefined;
             lastSeq = Number.isSafeInteger(frame.replayLastSeq) ? frame.replayLastSeq : 0;
             if (!canResize) geometry.applyRemoteSize(frame);
             const replay = Array.isArray(frame.replayChunks) ? frame.replayChunks.filter((chunk: unknown) => typeof chunk === 'string').join('') : '';
             // Reset in xterm's write queue, preserving order with earlier writes and subsequent output.
             terminal.write((frame.replayOutOfWindow ? '\x1bc' : '') + replay, () => resize());
+          } else if (frame.type === 'resize-ack') {
+            resizeState = acknowledgeResize(resizeState, { ...frame, ok: frame.ok !== false }).state;
           } else if (frame.type === 'data' && typeof frame.data === 'string') terminal.write(frame.data, () => {
             if (disposed) return;
             if (Number.isSafeInteger(frame.seq)) lastSeq = Math.max(lastSeq, frame.seq);
             if (socket.readyState === 1 && Number.isSafeInteger(frame.flowSeq)) socket.send(JSON.stringify({ type: 'output-ack', flowSeq: frame.flowSeq, since: lastSeq, epoch }));
           });
-          else if (frame.type === 'pty-size' && !canResize && Number.isSafeInteger(frame.cols) && Number.isSafeInteger(frame.rows) && frame.cols > 0 && frame.rows > 0) { geometry.applyRemoteSize(frame); requestAnimationFrame(() => resize()); }
+          else if (frame.type === 'pty-size' && Number.isSafeInteger(frame.cols) && Number.isSafeInteger(frame.rows) && frame.cols > 0 && frame.rows > 0) {
+            resizeState = observeServerSize(resizeState, frame);
+            if (!canResize) { geometry.applyRemoteSize(frame); requestAnimationFrame(() => resize()); }
+          }
           else if (frame.type === 'error') setStatus('无法连接，请联系分享者');
         } catch { setStatus('终端数据无效'); socket.close(); }
       };

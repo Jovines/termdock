@@ -25,6 +25,7 @@ import { socketDuplex } from './socketDuplex.js';
 import { markEncryptedRequest } from './requestContext.js';
 import { readTerminalHandshakeDimensions } from '../utils/terminalHandshakeDimensions.js';
 import { openAccessAllowed } from './openAccess.js';
+import { relayPasswordConfigured, requireRelayPassword } from './relaySecurity.js';
 import { isAuthEnabled, getPasswordCredentialFingerprint, getPasswordVerifier, getLoginBlockMs, recordLoginFailure, recordLoginSuccess } from '../utils/authProtection.js';
 import { MAX_OPEN_SECURE_SOCKETS, MAX_SERVER_HTTP_REQUESTS } from './streamLimits.js';
 import { MAX_TRANSFER_WINDOW, TRANSFER_CHUNK_BYTES, TransferWindow, transferWindow } from './transferWindow.js';
@@ -150,10 +151,10 @@ export async function createFederationRuntime(app: express.Express, directory: s
     return Array.isArray(inventory.clientSessions) ? inventory.clientSessions : [];
   }
 
-  async function acceptDuplex(duplex: ByteDuplex, context: { allowOpenAccess?: boolean; singleOperation?: boolean } = {}): Promise<void> {
+  async function acceptDuplex(duplex: ByteDuplex, context: { allowOpenAccess?: boolean; singleOperation?: boolean; relayed?: boolean } = {}): Promise<void> {
     let collaborationRpc: CollaborationRpc | undefined;
     let unregisterCollaboration: (() => void) | undefined;
-    const open = (action?: string) => openAccessAllowed(context.allowOpenAccess === true, isAuthEnabled(), action);
+    const open = (action?: string) => openAccessAllowed(!context.relayed && context.allowOpenAccess === true, isAuthEnabled(), action);
     const stableSessionId = (id: string): string | undefined => {
       try {
         const resolved = options.resolveSessionId?.(id);
@@ -161,6 +162,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
       } catch { return undefined; }
     };
     const allowed = (subjectId: string, action: string, sessionId?: string) => {
+      if (context.relayed && !relayPasswordConfigured()) return false;
       if (open(action) || store.authorize({ subjectId, serviceId, action, sessionId }).allowed) return true;
       // The wire may still carry the transient backend PTY id while the grant
       // is bound to the stable client session id (or an older backend id).
@@ -168,10 +170,10 @@ export async function createFederationRuntime(app: express.Express, directory: s
       const stable = stableSessionId(sessionId);
       return stable !== undefined && store.authorize({ subjectId, serviceId, action, sessionId: stable }).allowed;
     };
-    const resources = (subjectId: string) => mergeShareResources(store.listEffective({ subjectId, serviceId }).map(g => g.resources));
+    const resources = (subjectId: string) => mergeShareResources(context.relayed && !relayPasswordConfigured() ? [] : store.listEffective({ subjectId, serviceId }).map(g => g.resources));
     const androidAllowed = (subjectId: string, serial: string, control = false) => full(subjectId) || (control ? androidRouteAccess(resources(subjectId).android, serial) === 'control' : !!androidRouteAccess(resources(subjectId).android, serial));
     const computerAllowed = (subjectId: string, target: { host: string; protocol: string; port: number }) => full(subjectId) || !!computerResource(resources(subjectId), target.host, target.protocol, target.port);
-    const full = (subjectId: string) => open() || store.hasFullServiceAccess({ subjectId, serviceId });
+    const full = (subjectId: string) => (!context.relayed || relayPasswordConfigured()) && (open() || store.hasFullServiceAccess({ subjectId, serviceId }));
     let channel: PacketChannel | undefined;
     const operations = new Map<string, HttpOperation>();
     const sockets = new Map<string, { socket: LogicalSocket; sessionId?: string; android?: string; computer?: boolean; computerTarget?: { host: string; protocol: string; port: number }; computerProtocol?: string; computerControl?: boolean }>();
@@ -184,6 +186,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
       const send = (packet: Packet) => channel!.send(packet);
       const check = (action: string, sessionId?: string) => { if (!allowed(subjectId, action, sessionId)) throw new Error('AUTHORIZATION_DENIED'); };
       const httpAllowed = (head: Packet) => {
+        if (context.relayed) requireRelayPassword();
         if (typeof head.method !== 'string' || typeof head.path !== 'string' || !isBusinessApiPath(head.method, head.path)) throw new Error('API_NOT_ALLOWED');
         const policy = resolveAccessRequest(head.method, head.path);
         if (!full(subjectId) && !resourceHttpAllowed(resources(subjectId), head.method, head.path)) { if (!policy) throw new Error('API_NOT_ALLOWED'); check(policy.action, policy.sessionId); }
@@ -241,6 +244,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
         finally { cancelHttp(operation); if (operations.get(id) === operation) operations.delete(id); }
       }
       revokeTimer = setInterval(() => {
+        if (context.relayed && !relayPasswordConfigured()) { duplex.close?.(new Error('TARGET_PASSWORD_REQUIRED')); return; }
         for (const { socket: logical, sessionId, android, computer, computerTarget, computerControl } of sockets.values()) {
           if (android || computer) { if (android ? !androidAllowed(subjectId, android) : !computerTarget || !computerAllowed(subjectId, computerTarget) || (computerControl && !full(subjectId) && !resources(subjectId).computers?.some(c => c.host.toLowerCase() === computerTarget.host.toLowerCase() && c.protocol === computerTarget.protocol && c.port === computerTarget.port && c.access === 'control'))) logical.close(4003, 'Authorization revoked'); continue; }
           if (!allowed(subjectId, sessionId ? 'session.view' : 'service.view', sessionId)) logical.close(4003, 'Authorization revoked');
@@ -256,6 +260,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
       for await (const packet of channel.read()) {
         try {
           if (packet.id.length > 128) throw new Error('INVALID_ID');
+          if (context.relayed) requireRelayPassword();
           if (collaborationRpc?.accept(packet)) continue;
           if (packet.type === 'collaboration-connect') {
             if (!options.collaborationService || !options.collaborationConnected) throw new Error('COLLABORATION_UPGRADE_REQUIRED');
@@ -541,7 +546,7 @@ export async function createFederationRuntime(app: express.Express, directory: s
     }
   }
   return { serviceId, identity, store, acceptDuplex,
-    accept(socket: WebSocket, context: { allowOpenAccess?: boolean } = {}) { return acceptDuplex(socketDuplex(socket), context); },
+    accept(socket: WebSocket, context: { allowOpenAccess?: boolean; relayed?: boolean } = {}) { return acceptDuplex(socketDuplex(socket), context); },
     close() { for (const channel of channels) channel.close(); internal.close(); } };
 }
 export type FederationRuntime = Awaited<ReturnType<typeof createFederationRuntime>>;

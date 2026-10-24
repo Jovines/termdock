@@ -45,3 +45,13 @@ describe('confirmed access failures and saved route selection', () => {
     ], vi.fn())).rejects.toMatchObject({ code: 'TARGET_IDENTITY_MISMATCH' });
   });
 });
+
+it.each(['TARGET_PASSWORD_REQUIRED', 'TARGET_SECURITY_UPGRADE_REQUIRED'] as const)('keeps the confirmed relay security denial %s through target permission reads and failed direct alternatives', async code => {
+  const context = { targetServiceId: 'target', entryServiceId: 'entry', entryUrl: 'https://entry.example' };
+  const denial = connectionAccessError(new Error(code), context);
+  expect(denial).toMatchObject({ code, context });
+  await expect(raceConnectionAttempts([
+    { key: 'relay:entry', run: async () => { throw denial; } },
+    { key: 'direct:offline', run: async () => { throw new TypeError('offline'); } },
+  ], vi.fn())).rejects.toBe(denial);
+});

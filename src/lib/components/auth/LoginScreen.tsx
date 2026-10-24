@@ -9,6 +9,9 @@ interface LoginScreenProps {
   onLoginSuccess: () => void;
   focusEnabled?: boolean;
   serviceOrigin?: string;
+  serviceName?: string;
+  entryOrigin?: string;
+  entryName?: string;
   onManageServices?: () => void;
 }
 
@@ -25,7 +28,7 @@ const ASCII_LOGO = String.raw`
 
 // Renders a fullscreen password form. Stays mounted for the lifetime of the
 // "logged out" state — the parent App swaps it in/out based on auth status.
-export function LoginScreen({ onLoginSuccess, focusEnabled = true, serviceOrigin, onManageServices }: LoginScreenProps) {
+export function LoginScreen({ onLoginSuccess, focusEnabled = true, serviceOrigin, serviceName, entryOrigin, entryName, onManageServices }: LoginScreenProps) {
   const { t } = useI18n();
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -48,7 +51,8 @@ export function LoginScreen({ onLoginSuccess, focusEnabled = true, serviceOrigin
   }, [retrySecondsLeft]);
 
   const blocked = retrySecondsLeft > 0;
-  const canSubmit = focusEnabled && !submitting && !blocked && password.length > 0;
+  const invitationRequired = error === 'login.passwordNotConfigured' || error === 'login.targetPasswordRequired' || error === 'login.securityUpgradeRequired';
+  const canSubmit = focusEnabled && !submitting && !blocked && !invitationRequired && password.length > 0;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -67,7 +71,11 @@ export function LoginScreen({ onLoginSuccess, focusEnabled = true, serviceOrigin
         : result.reason === 'identityMismatch' ? 'login.identityMismatch'
         : result.reason === 'unavailable' ? 'login.unavailable'
         : result.reason === 'authorizationRequired' ? 'login.authorizationRequired'
+        : result.reason === 'passwordNotConfigured' ? 'login.passwordNotConfigured'
+        : result.reason === 'targetPasswordRequired' ? 'login.targetPasswordRequired'
+        : result.reason === 'securityUpgradeRequired' ? 'login.securityUpgradeRequired'
         : 'login.invalidPassword');
+      if (result.reason === 'passwordNotConfigured') setPassword('');
       if (result.rateLimited && typeof result.retryAfterMs === 'number') {
         setRetrySecondsLeft(Math.max(1, Math.ceil(result.retryAfterMs / 1000)));
       }
@@ -118,7 +126,7 @@ export function LoginScreen({ onLoginSuccess, focusEnabled = true, serviceOrigin
       </div>
 
       <form onSubmit={handleSubmit} className="w-full max-w-xs">
-        <div
+        {!invitationRequired && <div
           className={`flex items-center gap-1 rounded-full border bg-surface-2 p-1 pl-4 transition ${
             error ? 'border-destructive/60' : 'border-border'
           }`}
@@ -152,15 +160,17 @@ export function LoginScreen({ onLoginSuccess, focusEnabled = true, serviceOrigin
               <RiArrowRightLine size={16} />
             )}
           </button>
-        </div>
+        </div>}
 
         {error && !blocked ? (
           <div role="alert" className="mt-3 text-center text-xs text-destructive">{t(error)}</div>
         ) : null}
       </form>
 
-      {serviceOrigin && <div className="w-full max-w-xs text-center text-xs leading-5 text-muted-foreground">
-        <p className="break-all" title={serviceOrigin}>{t('login.currentTarget', { address: new URL(serviceOrigin).host })}</p>
+      {(serviceName || serviceOrigin) && <div className="w-full max-w-xs text-center text-xs leading-5 text-muted-foreground">
+        <p className="break-all" title={serviceOrigin}>{t('login.currentTarget', { address: serviceName || new URL(serviceOrigin!).host })}</p>
+        {serviceName && serviceOrigin && <p className="break-all">{new URL(serviceOrigin).host}</p>}
+        {entryOrigin && <p className="break-all">{t('login.viaEntry', { entry: entryName || new URL(entryOrigin).host, address: new URL(entryOrigin).host })}</p>}
         {onManageServices && <button type="button" disabled={!focusEnabled || submitting} className="mt-1 min-h-11 rounded-lg px-3 text-xs underline underline-offset-4 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50" onClick={onManageServices}>{t('login.manageServices')}</button>}
       </div>}
 

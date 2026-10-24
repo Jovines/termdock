@@ -213,7 +213,9 @@ export interface TerminalSession {
 // Stream Event Types
 export interface TerminalStreamEvent {
   copyModeInput?: boolean;
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'tmux-screen-sync' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress' | 'git-status';
+  terminalOutputActive?: boolean;
+  active?: boolean;
+  type: 'connected' | 'terminal-output-activity' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'tmux-screen-sync' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress' | 'git-status';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -426,6 +428,7 @@ export interface TerminalSessionState {
   bufferChunks: TerminalChunk[];
   bufferLength: number;
   lastOutputAt: number | null;
+  terminalOutputActive: boolean;
   updatedAt: number;
   history?: string[];  // 从后端恢复的历史输出，仅 shell 模式使用
 }

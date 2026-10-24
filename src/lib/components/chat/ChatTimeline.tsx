@@ -17,8 +17,8 @@ export function ChatAgentLabel({ name, slug }: { name: string; slug?: string }) 
   const icon = slug && builtInIcons.has(slug) ? `url(/icons/agents/${slug}.svg) center / contain no-repeat` : undefined;
   return <span className="inline-flex items-center gap-2 font-medium text-foreground/75">{icon ? <span aria-hidden="true" className="h-4 w-4 shrink-0 bg-current" style={{ mask: icon, WebkitMask: icon }} /> : <Bot size={15} aria-hidden="true" />}<span>{name}</span></span>;
 }
-export function ChatAgentHeader({ name, slug }: { name: string; slug?: string }) {
-  return <div data-chat-agent-header className="mb-2 flex min-h-8 items-center text-[11px] leading-4"><TerminalPeekTrigger hoverDelay={500} label={`查看${name}的终端`} className="inline-flex items-center rounded-md"><ChatAgentLabel name={name} slug={slug} /></TerminalPeekTrigger></div>;
+export function ChatAgentHeader({ name, slug, children }: { name: string; slug?: string; children?: ReactNode }) {
+  return <div data-chat-agent-header className="mb-2 flex min-h-8 flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] leading-4"><TerminalPeekTrigger hoverDelay={500} label={`查看${name}的终端`} className="inline-flex items-center rounded-md"><ChatAgentLabel name={name} slug={slug} /></TerminalPeekTrigger>{children}</div>;
 }
 export function ChatReferenceCard({ reference, onRemove }: { reference: ChatReference; onRemove?: () => void }) {
   return <blockquote className="mb-2 min-w-0 rounded-lg border-l-2 border-primary/50 bg-surface px-3 py-2 text-left">

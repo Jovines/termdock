@@ -1,3 +1,4 @@
+import { TerminalOutputActivity } from '../utils/terminalOutputActivity.js';
 import { createTodoWebhookRouter } from '../todos/webhook.js';
 import { readCollectionOutputTime } from '../todos/tmuxOutput.js';
 import { sessionViewModeRoutes, SessionViewModeStore } from '../agent/sessionViewModeRoutes.js';
@@ -28,7 +29,6 @@ import { TerminalClientAttachment } from '../utils/terminalClientAttachment.js';
 import { TerminalPasteBuffer } from '../utils/terminalPasteBuffer.js';
 import { SharedSessionSampler, SharedSnapshotCache, type SampleEvent } from '../utils/sharedSampling.js';
 import { batchTmuxOptions, TmuxMetadataWriter } from '../utils/tmuxMetadataWriter.js';
-import { redrawTmuxClient } from '../utils/tmuxClientRedraw.js';
 import { TmuxDisplayGeometry } from '../utils/tmuxDisplayGeometry.js';
 import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
 import { readTmuxObserverSize } from '../utils/tmuxObserverSize.js';
@@ -381,6 +381,7 @@ interface TerminalSession {
   rows: number;
   lastActivity: number;
   lastOutputAt: number;
+  outputActivity?: TerminalOutputActivity;
   clients: Map<string, express.Response>;
   createdAt: number;
   hasWrittenData: boolean;
@@ -5988,6 +5989,7 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   const sampler = terminalSamplers.get(sessionId);
   sampler?.sampler.stop();
   terminalSamplers.delete(sessionId);
+  session.outputActivity?.dispose();
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
   cancelLongRunningAutoTitle(session);
@@ -6100,6 +6102,7 @@ function applyPtyResize(
   const cleanCols = Math.floor(cols);
   const cleanRows = Math.floor(rows);
   const changed = session.cols !== cleanCols || session.rows !== cleanRows;
+  if (!changed) return true;
   try {
     session.ptyProcess.resize(cleanCols, cleanRows);
   } catch (error) {
@@ -6292,6 +6295,13 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
     session.lastActivity = Date.now();
     session.lastOutputAt = Date.now();
     session.hasWrittenData = true;
+    // Observe the persistent session PTY once, never each display client or replay.
+    if (data.length > 0 && terminalSessions.get(sessionId) === session) {
+      session.outputActivity ??= new TerminalOutputActivity(active => {
+        if (terminalSessions.get(sessionId) === session) broadcastEvent(sessionId, { type: 'terminal-output-activity', active });
+      });
+      session.outputActivity.record();
+    }
   }
   let seq: number | undefined;
   if (session.mode === 'shell') {
@@ -9310,6 +9320,7 @@ router.get('/:sessionId/stream', async (req, res) => {
   const ptyBackend = session.ptyBackend || 'unknown';
   writeSse(res, {
     type: 'connected',
+    terminalOutputActive: session.outputActivity?.active ?? false,
     runtime,
     ptyBackend,
     mode: session.mode,
@@ -9988,7 +9999,6 @@ export function handleTerminalWebSocket(
       attachment.close();
       initialScreen?.cancel();
       initialScreen = null;
-      displayGeometry!.reset();
       delivery.setActive(false); // Discard only this observer's obsolete stream.
     }
     replayRequest = (async () => {
@@ -10062,14 +10072,17 @@ export function handleTerminalWebSocket(
       replayOutOfWindow = true;
     }
     // Send connected event (after initial detection)
+    const connectedSize = displayGeometry ? await displayGeometry.readServerSize() : session;
+    if (ws.readyState !== ws.OPEN) return;
     const runtime = (globalThis as Record<string, unknown>).Bun ? 'bun' : 'node';
     ws.send(JSON.stringify({
       type: 'connected',
+      terminalOutputActive: session.outputActivity?.active ?? false,
       streamEpoch: TERMINAL_STREAM_EPOCH,
       outputProtocol: options.flowControl ? 2 : undefined,
       copyModeInput: ownTmux,
-      cols: displayGeometry?.size.cols ?? session.cols,
-      rows: displayGeometry?.size.rows ?? session.rows,
+      cols: connectedSize.cols,
+      rows: connectedSize.rows,
       runtime,
       ptyBackend: session.ptyBackend || 'unknown',
       mode: session.mode,
@@ -10195,12 +10208,11 @@ export function handleTerminalWebSocket(
             if (attachment) {
               await enqueueTmuxIo(session, async () => {
                 const result = await displayGeometry!.resize(attachment, { cols, rows }, tmuxSizeOwnershipSupported);
-                if (result.ok) {
+                if (result.ok && result.changed) {
                   session.lastActivity = Date.now();
                   broadcastJsonWs(sessionId, {
                     type: 'pty-size', cols: result.cols, rows: result.rows, source: `ws-resize:${clientId}`,
                   }, clientId);
-                  if (result.redraw) await redrawTmuxClient(runTmux, session.tmuxSessionName!, attachment.pid);
                 }
                 if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({
                   type: 'resize-ack', seq: typeof msg.seq === 'number' ? msg.seq : undefined,
@@ -10209,7 +10221,6 @@ export function handleTerminalWebSocket(
               });
               break;
             }
-            const sameSize = session.cols === Math.floor(cols) && session.rows === Math.floor(rows);
             const ok = session.mode === 'tmux'
               ? await enqueueTmuxIo(session, () => applyPtyResize(
                   sessionId,
@@ -10220,11 +10231,6 @@ export function handleTerminalWebSocket(
                   clientId,
                 ))
               : applyPtyResize(sessionId, session, cols, rows, `ws-resize:${clientId}`, clientId);
-            // Same-size requests explicitly recover the display; actual geometry
-            // changes already cause tmux to redraw its attached client.
-            if (ok && session.mode === 'tmux' && sameSize) {
-              await enqueueTmuxIo(session, () => redrawTmuxClient(runTmux, session.tmuxSessionName!, session.ptyProcess.pid));
-            }
             ws.send(JSON.stringify({
               type: 'resize-ack',
               seq: typeof msg.seq === 'number' ? msg.seq : undefined,

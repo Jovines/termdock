@@ -46,7 +46,7 @@ export async function createServiceSocket(address: string, trust: ServiceTlsTrus
   const url = new URL(address);
   const origin = normalizeServiceAddress(url.origin.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:'));
   if (!['wss:', 'ws:'].includes(url.protocol) || url.username || url.password || url.hash
-    || !['/api/federation/secure', '/api/federation/relay'].includes(url.pathname)
+    || !['/api/federation/secure', '/api/federation/relay', '/api/federation/relay-target'].includes(url.pathname)
     || [...url.searchParams.keys()].length > 1
     || [...url.searchParams.keys()].some(key => url.pathname !== '/api/federation/relay' || !['routeToken', 'selfRelayToken'].includes(key))
     || url.search && Object.keys(options.headers || {}).some(key => key.toLowerCase() === 'authorization')) throw new Error('Invalid service transport endpoint');

@@ -47,6 +47,7 @@ export class PasswordBootstrapServer {
   private now() { return this.options.now?.() ?? Date.now(); }
   private credential() {
     const hash = this.options.getPasswordHash();
+    if (!hash) throw new Error('PASSWORD_NOT_CONFIGURED');
     if (!hash || !/^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/.test(hash)) throw new Error('Password authentication unavailable');
     return hash;
   }

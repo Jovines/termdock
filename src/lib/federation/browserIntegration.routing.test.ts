@@ -920,3 +920,15 @@ describe('browser federation entry routing', () => {
     expect(JSON.stringify(nativeFetch.mock.calls)).not.toContain('existing-password');
   });
 });
+
+it.each(['TARGET_PASSWORD_REQUIRED', 'TARGET_SECURITY_UPGRADE_REQUIRED'] as const)('recovers only an independently authorized direct path after the relay security block %s', async code => {
+  const selected = { url: 'https://target.example', targetPeerId: 'B', routes: [{ url: 'https://entry.example', targetPeerId: 'A' }] };
+  mocks.saved.mockReturnValue(selected);
+  const integration = await import('./browserIntegration');
+  integration.pauseConnectionAccess(new ConnectionAccessError(code, { targetServiceId: 'B', entryServiceId: 'A', entryUrl: 'https://entry.example' }));
+  expect(integration.canRetryConnectionAccess()).toBe(true);
+  await integration.retryConnectionAccess();
+  expect(integration.currentConnectionPath()).toBe('direct');
+  expect(mocks.connect.mock.calls.every(([args]) => args.targetPeerId === 'B' && !args.socketFactory)).toBe(true);
+  expect(nativeFetch).not.toHaveBeenCalled();
+});

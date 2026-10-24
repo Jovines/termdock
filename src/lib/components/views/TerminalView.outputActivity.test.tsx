@@ -81,3 +81,17 @@ it('screen snapshots do not create activity or erase a genuine live receipt, and
   view.unmount();
   act(() => { view.handlers.onEvent({ type: 'data', data: 'late old stream' }); store().flushPendingBufferWrites('tmux-output'); }); expect(view.time()).toBeNull();
 });
+it('restores server activity on connect and follows server transitions rather than data or agent hooks', async () => {
+  const view = await mount('authoritative');
+  const active = () => store().sessions.get('authoritative')?.terminalOutputActive;
+  view.emit({ type: 'connected', mode: 'shell', terminalOutputActive: true, replayChunks: ['old'] }); expect(active()).toBe(true);
+  view.emit({ type: 'terminal-output-activity', active: false }); expect(active()).toBe(false);
+  view.emit({ type: 'data', data: 'unqualified output' }); view.emit({ type: 'agent-status', agentStatus: 'working' }); expect(active()).toBe(false);
+  view.emit({ type: 'terminal-output-activity', active: true }); expect(active()).toBe(true);
+  view.emit({ type: 'tmux-screen-sync', generation: 1, chunks: ['screen'] }); expect(active()).toBe(true);
+  view.emit({ type: 'reconnecting' }); expect(active()).toBe(false);
+  view.emit({ type: 'connected', mode: 'shell', replayChunks: ['old again'] }); expect(active()).toBe(false);
+  view.emit({ type: 'terminal-output-activity', active: true }); expect(active()).toBe(true);
+  view.unmount(); expect(active()).toBe(false);
+  view.emit({ type: 'terminal-output-activity', active: true }); expect(active()).toBe(false);
+});

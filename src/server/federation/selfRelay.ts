@@ -8,6 +8,7 @@ import { openServiceSocket } from './serviceTransport.js';
 import { serviceEndpoint, normalizeServiceAddress } from './connectionModel.js';
 import type { Identity } from './secureProtocol.js';
 import { connectCollaborationRpc } from '../agent/collaborationPeerTransport.js';
+import { relayPasswordConfigured, requireRelayPassword } from './relaySecurity.js';
 
 interface SelfRelayTarget {
   serviceId: string;
@@ -129,9 +130,12 @@ export class DesktopSelfRelay {
     state.upstream = upstream;
     try {
       if (this.stopped || state.stopped) return;
-      const client = new RelayClient(upstream, { targets: new Map([[this.options.serviceId,
-        (signal: AbortSignal) => openServiceSocket(serviceEndpoint(typeof this.options.localOrigin === 'function' ? this.options.localOrigin() : this.options.localOrigin).href,
-          { ca: this.options.localCa }, { signal: AbortSignal.any([signal, state.lifetime.signal]) })]]) });
+      const client = new RelayClient(upstream, { routeTtlMs: 4000, isPasswordProtected: () => relayPasswordConfigured(), targets: new Map([[this.options.serviceId,
+        (signal: AbortSignal) => {
+          requireRelayPassword();
+          return openServiceSocket(serviceEndpoint(typeof this.options.localOrigin === 'function' ? this.options.localOrigin() : this.options.localOrigin, 'relay-target').href,
+            { ca: this.options.localCa }, { signal: AbortSignal.any([signal, state.lifetime.signal]) });
+        }]]) });
       state.client = client;
       await new Promise<void>(resolve => {
         if (upstream.readyState !== WebSocket.OPEN) resolve();

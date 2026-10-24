@@ -5,11 +5,11 @@ import type { WebSocket, RawData } from 'ws';
 
 /** This layer routes opaque application ciphertext; it never authorizes terminal operations. */
 export type RelayFrame =
-  | { type: 'register'; serviceIds: string[]; ttlMs: number }
+  | { type: 'register'; serviceIds: string[]; ttlMs: number; protectedServiceIds?: string[] }
   | { type: 'open'; streamId: string; serviceId: string }
   | { type: 'opened'; streamId: string }
   | { type: 'data'; streamId: string; payload: string; encoding?: 'base64' }
-  | { type: 'close'; streamId: string; reason?: string; code?: 'RELAY_AUTHORIZATION_REQUIRED' | 'RELAY_SELF_TARGET' };
+  | { type: 'close'; streamId: string; reason?: string; code?: 'RELAY_AUTHORIZATION_REQUIRED' | 'RELAY_SELF_TARGET' | 'TARGET_PASSWORD_REQUIRED' | 'TARGET_SECURITY_UPGRADE_REQUIRED' };
 export interface RelayLimits {
   maxFrameBytes?: number; maxBufferedBytes?: number; maxStreams?: number;
   heartbeatMs?: number; maxRouteTtlMs?: number; connectTimeoutMs?: number; routeTimeoutMs?: number;
@@ -23,7 +23,8 @@ function parse(raw: RawData, limits: Limits): RelayFrame {
   const f = JSON.parse(raw.toString()) as RelayFrame;
   if (f.type === 'register') {
     if (!Array.isArray(f.serviceIds) || f.serviceIds.length > 64 || !f.serviceIds.every(identifier)
-      || !Number.isFinite(f.ttlMs) || f.ttlMs <= 0) throw new Error('Invalid registration');
+      || !Number.isFinite(f.ttlMs) || f.ttlMs <= 0
+      || (f.protectedServiceIds !== undefined && (!Array.isArray(f.protectedServiceIds) || f.protectedServiceIds.length > 64 || !f.protectedServiceIds.every(id => identifier(id) && f.serviceIds.includes(id))))) throw new Error('Invalid registration');
   } else if (!identifier(f.streamId) || !['open', 'opened', 'data', 'close'].includes(f.type)
     || (f.type === 'open' && !identifier(f.serviceId))
     || (f.type === 'data' && (typeof f.payload !== 'string' || (f.encoding !== undefined && f.encoding !== 'base64')))) throw new Error('Invalid frame');
@@ -79,6 +80,7 @@ interface Stream<P> {
   opened: boolean; expires: number; attempted: Set<Peer<P>>; deadline?: ReturnType<typeof setTimeout>;
 }
 export interface RelayRouterOptions<P> extends RelayLimits {
+  requirePasswordProtectedTargets?: boolean;
   isLocalTarget?: (serviceId: string) => boolean;
   /** Authenticate every incoming connection, before accepting registrations or opens. */
   authenticate: (context: unknown) => Promise<P | null> | P | null;
@@ -89,7 +91,7 @@ export interface RelayRouterOptions<P> extends RelayLimits {
 export class RelayRouter<P = string> {
   private limits: Limits;
   private peers = new Set<Peer<P>>();
-  private routes = new Map<string, Map<Peer<P>, { expires: number; retryAfter: number }>>();
+  private routes = new Map<string, Map<Peer<P>, { expires: number; retryAfter: number; error?: 'TARGET_PASSWORD_REQUIRED' | 'TARGET_SECURITY_UPGRADE_REQUIRED' }>>();
   private sweep: ReturnType<typeof setInterval>;
   private directPeers = new WeakMap<Peer<P>, string>();
   private stopped = false;
@@ -113,7 +115,7 @@ export class RelayRouter<P = string> {
   }
   private providers(serviceId: string): Peer<P>[] {
     return [...(this.routes.get(serviceId) || [])]
-      .filter(([peer, route]) => route.expires > Date.now() && peer.ws.readyState === 1 && this.canRegister(peer, serviceId))
+      .filter(([peer, route]) => !route.error && route.expires > Date.now() && peer.ws.readyState === 1 && this.canRegister(peer, serviceId))
       // Recent target failures lower priority but never make the only route disappear.
       .sort((a, b) => Math.max(0, a[1].retryAfter - Date.now()) - Math.max(0, b[1].retryAfter - Date.now()))
       .map(([peer]) => peer);
@@ -124,6 +126,14 @@ export class RelayRouter<P = string> {
   providerCount(serviceId: string): number { return this.stopped ? 0 : this.providers(serviceId).length; }
   activeRouteIds(): string[] {
     return [...this.routes.keys()].filter(serviceId => this.hasRoute(serviceId));
+  }
+  registeredRouteIds(): string[] {
+    return [...this.routes.keys()].filter(id => [...this.routes.get(id)!].some(([peer, route]) => route.expires > Date.now() && peer.ws.readyState === 1 && this.canRegister(peer, id)));
+  }
+  routeError(serviceId: string): 'TARGET_PASSWORD_REQUIRED' | 'TARGET_SECURITY_UPGRADE_REQUIRED' | undefined {
+    if (this.hasRoute(serviceId)) return;
+    const routes = [...(this.routes.get(serviceId) || [])].filter(([peer, route]) => route.expires > Date.now() && peer.ws.readyState === 1 && this.canRegister(peer, serviceId));
+    return routes.some(([, route]) => route.error === 'TARGET_PASSWORD_REQUIRED') ? 'TARGET_PASSWORD_REQUIRED' : routes.find(([, route]) => route.error)?.[1].error;
   }
   /** Trusted local configuration only. Clients never supply a target URL or factory. */
   registerDirect(serviceId: string, connect: (signal: AbortSignal) => Promise<WebSocket>): () => void {
@@ -182,7 +192,8 @@ export class RelayRouter<P = string> {
       send(s.provider.ws, { type: 'close', streamId: s.providerId, reason }, this.limits);
     }
     send(s.owner.ws, { type: 'close', streamId: s.ownerId, reason,
-      ...(!this.canRoute(s.owner, s.serviceId) ? { code: 'RELAY_AUTHORIZATION_REQUIRED' as const } : {}) }, this.limits);
+      ...(!this.canRoute(s.owner, s.serviceId) ? { code: 'RELAY_AUTHORIZATION_REQUIRED' as const }
+        : reason === 'TARGET_PASSWORD_REQUIRED' || reason === 'TARGET_SECURITY_UPGRADE_REQUIRED' ? { code: reason } : {}) }, this.limits);
   }
   private providerFailed(s: Stream<P>, reason: string) {
     if (s.owner.streams.get(s.ownerId) !== s) return;
@@ -224,7 +235,11 @@ export class RelayRouter<P = string> {
       for (const id of f.serviceIds) {
         let routes = this.routes.get(id);
         if (!routes) { routes = new Map(); this.routes.set(id, routes); }
-        routes.set(peer, { expires: Date.now() + Math.min(f.ttlMs, this.limits.maxRouteTtlMs), retryAfter: routes.get(peer)?.retryAfter ?? 0 });
+        const error = this.options.requirePasswordProtectedTargets && !this.directPeers.has(peer)
+          ? f.protectedServiceIds === undefined ? 'TARGET_SECURITY_UPGRADE_REQUIRED' as const
+            : !f.protectedServiceIds.includes(id) ? 'TARGET_PASSWORD_REQUIRED' as const : undefined : undefined;
+        routes.set(peer, { expires: Date.now() + Math.min(f.ttlMs, this.limits.maxRouteTtlMs), retryAfter: routes.get(peer)?.retryAfter ?? 0, error });
+        if (error) for (const stream of [...peer.streams.values()]) if (stream.provider === peer && stream.serviceId === id) this.closeStream(stream, error);
       }
       return;
     }
@@ -235,7 +250,7 @@ export class RelayRouter<P = string> {
       if (peer.streams.has(f.streamId)) throw new Error('Duplicate stream');
       if (!this.canRoute(peer, f.serviceId) || !this.hasRoute(f.serviceId)) {
         send(peer.ws, { type: 'close', streamId: f.streamId, reason: 'Route unavailable or denied',
-          ...(!this.canRoute(peer, f.serviceId) ? { code: 'RELAY_AUTHORIZATION_REQUIRED' as const } : {}) }, this.limits); return;
+          ...(!this.canRoute(peer, f.serviceId) ? { code: 'RELAY_AUTHORIZATION_REQUIRED' as const } : this.routeError(f.serviceId) ? { code: this.routeError(f.serviceId) } : {}) }, this.limits); return;
       }
       if (peer.streams.size >= this.limits.maxStreams) throw new Error('Stream budget exceeded');
       const s: Stream<P> = { owner: peer, ownerId: f.streamId, provider: peer, providerId: '', serviceId: f.serviceId, opened: false, expires: Date.now() + this.limits.routeTimeoutMs, attempted: new Set() };
@@ -251,7 +266,7 @@ export class RelayRouter<P = string> {
       this.withdraw(s.serviceId, s.provider); return;
     }
     if (f.type === 'close') {
-      if (peer === s.provider) this.providerFailed(s, 'Channel closed');
+      if (peer === s.provider) this.providerFailed(s, f.code === 'TARGET_PASSWORD_REQUIRED' ? 'TARGET_PASSWORD_REQUIRED' : 'Channel closed');
       else this.closeStream(s, 'Channel closed');
       return;
     }
@@ -267,6 +282,7 @@ export class RelayRouter<P = string> {
 }
 
 export interface RelayClientOptions extends RelayLimits {
+  isPasswordProtected?: (serviceId: string) => boolean;
   /** Fixed service-ID registry. Each factory connects only to its configured secure endpoint. */
   targets: ReadonlyMap<string, (signal: AbortSignal) => Promise<WebSocket>>;
   routeTtlMs?: number;
@@ -282,7 +298,8 @@ export class RelayClient {
   constructor(private upstream: WebSocket, private options: RelayClientOptions) {
     this.limits = { ...defaults, ...options };
     const ttl = Math.min(options.routeTtlMs ?? 60_000, this.limits.maxRouteTtlMs);
-    const register = () => send(upstream, { type: 'register', serviceIds: [...options.targets.keys()], ttlMs: ttl }, this.limits);
+    const register = () => send(upstream, { type: 'register', serviceIds: [...options.targets.keys()], ttlMs: ttl,
+      ...(options.isPasswordProtected ? { protectedServiceIds: [...options.targets.keys()].filter(id => options.isPasswordProtected!(id)) } : {}) }, this.limits);
     register(); this.renewal = setInterval(register, Math.max(1, Math.floor(ttl / 2))); this.renewal.unref?.();
     watch(upstream, this.limits, () => this.close());
     upstream.on('message', raw => { void this.receive(raw).catch(() => upstream.close(1008, 'Invalid relay frame')); });
@@ -291,13 +308,14 @@ export class RelayClient {
     clearTimeout(this.pending.get(id)); this.pending.delete(id);
     this.connecting.get(id)?.abort(); this.connecting.delete(id);
     const target = this.streams.get(id); this.streams.delete(id); target?.close();
-    send(this.upstream, { type: 'close', streamId: id, reason }, this.limits);
+    send(this.upstream, { type: 'close', streamId: id, reason, ...(reason === 'TARGET_PASSWORD_REQUIRED' ? { code: 'TARGET_PASSWORD_REQUIRED' as const } : {}) }, this.limits);
   }
   private async receive(raw: RawData) {
     const f = parse(raw, this.limits);
     if (f.type === 'register') throw new Error('Unexpected registration');
     if (f.type === 'open') {
       const connect = this.options.targets.get(f.serviceId);
+      if (this.options.isPasswordProtected && !this.options.isPasswordProtected(f.serviceId)) { this.drop(f.streamId, 'TARGET_PASSWORD_REQUIRED'); return; }
       if (this.streams.has(f.streamId)) throw new Error('Duplicate stream');
       if (!connect || this.streams.size >= this.limits.maxStreams) { this.drop(f.streamId, 'Target unavailable'); return; }
       this.streams.set(f.streamId, null);
@@ -305,8 +323,8 @@ export class RelayClient {
       this.pending.set(f.streamId, timer);
       const controller = new AbortController(); this.connecting.set(f.streamId, controller);
       let target: WebSocket;
-      try { target = await connect(controller.signal); } catch {
-        if (this.pending.get(f.streamId) === timer) this.drop(f.streamId, 'Target unavailable');
+      try { target = await connect(controller.signal); } catch (error) {
+        if (this.pending.get(f.streamId) === timer) this.drop(f.streamId, error instanceof Error && error.message === 'TARGET_PASSWORD_REQUIRED' ? 'TARGET_PASSWORD_REQUIRED' : 'Target unavailable');
         return;
       }
       // A canceled attempt may complete after the same ID has been reused.

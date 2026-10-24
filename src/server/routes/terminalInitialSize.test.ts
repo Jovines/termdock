@@ -67,13 +67,14 @@ it('retains the window throughout refresh and presents the measured grid without
     const tmuxAttachments = new WeakMap();
     const session = { mode: 'tmux', tmuxSessionName: 'task', ptyProcess: metadata, cols: 60, rows: 20, cwd: os.tmpdir() };
     const redraw = vi.fn(redrawTmuxClient);
+    const claimSize = vi.fn(claimTmuxSize);
     const provider = { spawn: (_binary: string, args: string[], options: { cols: number; rows: number }) => spawn(options.cols, options.rows, args) };
     const getProvider = vi.fn(async () => provider);
     let io = Promise.resolve<unknown>(undefined);
     const context = vm.createContext({
       Date, Buffer, performance, setTimeout, clearTimeout, console, process, os,
       TerminalClientAttachment, TerminalInputQueue, TerminalPasteBuffer, TmuxInitialScreen, TmuxDisplayGeometry,
-      TerminalOutputDelivery, resolveTerminalReplayCursor, buildTmuxAttachArgs, claimTmuxSize, redrawTmuxClient: redraw, PtySpawnDeferredError,
+      TerminalOutputDelivery, resolveTerminalReplayCursor, buildTmuxAttachArgs, claimTmuxSize: claimSize, redrawTmuxClient: redraw, PtySpawnDeferredError,
       terminalSessions: new Map([['backend', session]]), wsClients, tmuxAttachments,
       outputDeliveries: new WeakMap(), independentTmuxClients: new WeakSet(), independentTmuxReplays: new WeakMap(),
       TERMINAL_STREAM_EPOCH: 'test', attachmentSpawnBackoff: { check() {}, spawn: (fn: () => unknown) => fn() },
@@ -112,6 +113,10 @@ it('retains the window throughout refresh and presents the measured grid without
     expect(redraw, 'initial opening must not wait for a forced second redraw').not.toHaveBeenCalled();
     await first.message({ type: 'resize', cols: 120, rows: 40, seq: 1 });
     expect(first.frames.at(-1)).toMatchObject({ type: 'resize-ack', ok: true, cols: 120, rows: 40 });
+    await first.message({ type: 'resize', cols: 120, rows: 40, seq: 2 });
+    expect(first.frames.at(-1)).toMatchObject({ type: 'resize-ack', ok: true, cols: 120, rows: 40 });
+    expect(claimSize, 'same-size retries must not re-elect the display or redraw it').not.toHaveBeenCalled();
+    expect(redraw).not.toHaveBeenCalled();
     expect(session).toMatchObject({ cols: 120, rows: 40 });
     first.close();
     await onlyObserver();
@@ -187,3 +192,19 @@ it('retains the window throughout refresh and presents the measured grid without
     await runTmux(['kill-server']).catch(() => {});
   }
 }, 15000);
+
+it('does not touch the legacy HTTP/WS PTY when its current grid already matches', () => {
+  const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'applyPtyResize')!.getText(ast);
+  const broadcast = vi.fn();
+  const context = vm.createContext({ Number, Math, Date, console, broadcastJsonWs: broadcast, getErrorMessage: String });
+  vm.runInContext(ts.transpileModule(declaration, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  const session = { cols: 100, rows: 30, ptyProcess: { resize: vi.fn() }, autoTitleTerminal: { resize: vi.fn() }, lastActivity: 0 };
+  expect(context.applyPtyResize('task', session, 100, 30, 'http-resize')).toBe(true);
+  expect(session.ptyProcess.resize).not.toHaveBeenCalled();
+  expect(session.autoTitleTerminal.resize).not.toHaveBeenCalled();
+  expect(broadcast).not.toHaveBeenCalled();
+  expect(context.applyPtyResize('task', session, 101, 30, 'ws-resize:viewer')).toBe(true);
+  expect(session.ptyProcess.resize).toHaveBeenCalledExactlyOnceWith(101, 30);
+  expect(context.applyPtyResize('task', session, 101, 30, 'http-resize')).toBe(true);
+  expect(session.ptyProcess.resize).toHaveBeenCalledTimes(1);
+});

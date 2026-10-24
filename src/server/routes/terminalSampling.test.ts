@@ -11,6 +11,7 @@ import { TerminalInputQueue } from '../utils/terminalInputQueue.js';
 import { TmuxDisplayGeometry } from '../utils/tmuxDisplayGeometry.js';
 import { TerminalOutputDelivery, resolveTerminalReplayCursor } from '../utils/terminalOutputDelivery.js';
 import { TmuxInitialScreen } from '../utils/tmuxInitialScreen.js';
+import { TerminalOutputActivity } from '../utils/terminalOutputActivity.js';
 
 // Execute the route's actual functions without importing its boot-time tmux
 // configuration or reading/writing the developer's persisted session state.
@@ -117,7 +118,9 @@ it('keeps the real WS handler PTYs through flow pauses, while unsubscribe/reconn
     };
     ptys.push(pty); return pty;
   });
-  const session = { mode: 'tmux', tmuxSessionName: 'task', ptyProcess: { pid: 1 },
+  const outputActivity = new TerminalOutputActivity(() => {});
+  outputActivity.record(); vi.advanceTimersByTime(1800); outputActivity.record(); vi.advanceTimersByTime(200);
+  const session = { outputActivity, mode: 'tmux', tmuxSessionName: 'task', ptyProcess: { pid: 1 },
     clients: new Map(), cols: 80, rows: 24, cwd: '/work', activeProgram: null, agentLeftAt: null, lastPromptState: 'idle' };
   const pane = { command: 'codex', currentPath: '/work', title: 'task' };
   const layout = vi.fn(async () => ({ activePane: pane }));
@@ -134,7 +137,7 @@ it('keeps the real WS handler PTYs through flow pauses, while unsubscribe/reconn
     outputDeliveries: new WeakMap(), independentTmuxClients: new WeakSet(), independentTmuxReplays: new WeakMap(),
     TERMINAL_STREAM_EPOCH: 'test', attachmentSpawnBackoff: { check: () => {}, spawn: (fn: () => unknown) => fn() },
     getPtyProvider: async () => ({ spawn }), getTmuxBinary: () => 'tmux', supportsTmuxClientFeatures: async () => true,
-    runTmux: async () => '1 /dev/metadata', buildInteractiveColorEnvironment: (env: unknown) => env,
+    runTmux: async (args: string[]) => args[0] === 'display-message' ? '80 24 off' : '1 /dev/metadata', buildInteractiveColorEnvironment: (env: unknown) => env,
     enqueueTmuxIo: (_session: unknown, operation: () => unknown) => Promise.resolve().then(operation),
     buildAugmentedPath: () => '', buildTmuxAttachArgs: () => [], process, os: { homedir: () => '/tmp' },
     getCachedTmuxLayout: layout, getActivePaneFromLayout: (value: { activePane: unknown }) => value.activePane,
@@ -157,6 +160,8 @@ it('keeps the real WS handler PTYs through flow pauses, while unsubscribe/reconn
   const request = Object.assign(new EventEmitter(), { params: { sessionId: 'backend' }, query: {} });
   const response = { events: [] as Array<{ type: string; cwd?: string; title?: string }>, setHeader: vi.fn() };
   await context.attachSse(request, response);
+  expect(response.events).toContainEqual(expect.objectContaining({ type: 'connected', terminalOutputActive: true }));
+  for (const socket of sockets) expect(socket.send.mock.calls.map(([data]) => JSON.parse(data))).toContainEqual(expect.objectContaining({ type: 'connected', terminalOutputActive: true }));
   expect(response.events.some(event => event.type === 'tmux-layout')).toBe(true);
   layout.mockClear();
   await vi.advanceTimersByTimeAsync(500);
@@ -191,6 +196,8 @@ it('keeps the real WS handler PTYs through flow pauses, while unsubscribe/reconn
   await vi.advanceTimersByTimeAsync(0);
   expect(spawn).toHaveBeenCalledTimes(27);
   expect(reconnect.send.mock.calls.some(([data]) => JSON.parse(data).type === 'connected')).toBe(true);
+  expect(reconnect.send.mock.calls.map(([data]) => JSON.parse(data))).toContainEqual(expect.objectContaining({ type: 'connected', terminalOutputActive: true }));
+  outputActivity.dispose();
   reconnect.close();
   request.emit('close');
   expect(vi.getTimerCount()).toBe(0);

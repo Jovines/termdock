@@ -11,10 +11,12 @@ import { createFederationRuntime } from './runtime.js';
 import { createIdentity } from './secureProtocol.js';
 import { RelayRouter } from './relay.js';
 import { DirectTargetRegistry } from './directTargetRegistry.js';
+import * as authProtection from '../utils/authProtection.js';
 
 const cleanups: (() => void)[] = [];
-afterEach(() => { for (const close of cleanups.splice(0).reverse()) close(); });
+afterEach(() => { for (const close of cleanups.splice(0).reverse()) close(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 async function fixture(delayAcceptance = false) {
+  vi.stubEnv('TERMDOCK_PASSWORD', 'registry-password');
   const dir = mkdtempSync(join(tmpdir(), 'td-registry-proof-')); cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem'), '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost'], { stdio: 'ignore' });
   const runtime = await createFederationRuntime(express(), join(dir, 'b'), { terminal() {}, control() {} });
@@ -119,4 +121,22 @@ it.each(['remove', 'shutdown'] as const)('never registers a late successful prob
   void f.runtime.accept(socket);
   await vi.waitFor(() => expect(f.wss.clients.size).toBe(0));
   expect(f.router.hasRoute(f.target.serviceId)).toBe(false);
+});
+
+it('keeps a verified passwordless target visible but unavailable, withdraws existing providers, and restores only after password configuration', async () => {
+  const original = authProtection.getPasswordVerifier;
+  let configured = true;
+  vi.spyOn(authProtection, 'getPasswordVerifier').mockImplementation(() => configured ? original() : null);
+  const f = await fixture();
+  f.registry.refresh([f.target]);
+  await vi.waitFor(() => expect(f.router.hasRoute(f.target.serviceId)).toBe(true));
+  configured = false;
+  f.advance(30_001); f.registry.refresh([f.target]);
+  await vi.waitFor(() => expect(f.registry.describe({ ...f.target, label: 'Target' })).toMatchObject({
+    serviceId: f.target.serviceId, url: f.target.url, available: false, error: 'TARGET_PASSWORD_REQUIRED',
+  }));
+  expect(f.router.hasRoute(f.target.serviceId)).toBe(false);
+  configured = true;
+  f.advance(5001); f.registry.refresh([f.target]);
+  await vi.waitFor(() => expect(f.router.hasRoute(f.target.serviceId)).toBe(true));
 });

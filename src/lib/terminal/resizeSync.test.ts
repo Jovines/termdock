@@ -3,7 +3,6 @@ import {
   acknowledgeResize,
   createResizePushGate,
   createResizeSyncState,
-  forceResize,
   markResizePushSent,
   observeServerSize,
   planResizePush,
@@ -28,11 +27,9 @@ describe('terminal resize synchronization', () => {
     expect(returned.request).toMatchObject({ seq: 2, cols: 100, rows: 30 });
   });
 
-  it('can explicitly re-send an already confirmed size to redraw a TUI', () => {
+  it('does not resend an already confirmed size for a redraw or repeated layout event', () => {
     const confirmed = observeServerSize(createResizeSyncState(), { cols: 100, rows: 30 });
-    const forced = forceResize(confirmed, { cols: 100, rows: 30 });
-    expect(forced.request).toMatchObject({ seq: 1, cols: 100, rows: 30, attempt: 0 });
-    expect(forced.state.pending).toEqual(forced.request);
+    expect(requestResize(confirmed, { cols: 100, rows: 30 })).toEqual({ state: confirmed, request: null });
   });
 
   it('ignores an old acknowledgement after a newer resize was requested', () => {

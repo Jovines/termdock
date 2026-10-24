@@ -256,3 +256,35 @@ describe('RelayRouter and RelayClient', () => {
     expect((await closed)[0]).toBe(1008);
   });
 });
+
+describe('password protection at the relay boundary', () => {
+  it('retains blocked targets in the directory, rejects old providers, and closes live streams when protection is removed', async () => {
+    const router = new RelayRouter<string>({ requirePasswordProtectedTargets: true,
+      authenticate: value => String(value), allowRegister: (p, id) => p === 'provider' && id === 'target', allowRoute: p => p === 'phone' });
+    cleanups.push(() => router.close());
+    const provider = await pair(), phone = await pair();
+    await router.attach(provider.server, 'provider'); await router.attach(phone.server, 'phone');
+    const register = async (protectedServiceIds?: string[]) => {
+      const received = once(provider.server, 'message');
+      provider.client.send(JSON.stringify({ type: 'register', serviceIds: ['target'], ttlMs: 10000,
+        ...(protectedServiceIds === undefined ? {} : { protectedServiceIds }) })); await received;
+    };
+    await register();
+    expect(router.registeredRouteIds()).toEqual(['target']); expect(router.activeRouteIds()).toEqual([]);
+    let reply = next(phone.client); phone.client.send(JSON.stringify({ type: 'open', streamId: 'old', serviceId: 'target' }));
+    expect(await reply).toMatchObject({ code: 'TARGET_SECURITY_UPGRADE_REQUIRED' });
+    await register([]);
+    expect(router.routeError('target')).toBe('TARGET_PASSWORD_REQUIRED');
+    reply = next(phone.client); phone.client.send(JSON.stringify({ type: 'open', streamId: 'blocked', serviceId: 'target' }));
+    expect(await reply).toMatchObject({ code: 'TARGET_PASSWORD_REQUIRED' });
+    await register(['target']);
+    expect(router.hasRoute('target')).toBe(true);
+    const forwarded = next(provider.client); phone.client.send(JSON.stringify({ type: 'open', streamId: 'live', serviceId: 'target' }));
+    const stream = await forwarded;
+    reply = next(phone.client); provider.client.send(JSON.stringify({ type: 'opened', streamId: stream.streamId }));
+    expect(await reply).toMatchObject({ type: 'opened' });
+    reply = next(phone.client); await register([]);
+    expect(await reply).toMatchObject({ type: 'close', code: 'TARGET_PASSWORD_REQUIRED' });
+    expect(router.hasRoute('target')).toBe(false); expect(router.registeredRouteIds()).toEqual(['target']);
+  });
+});

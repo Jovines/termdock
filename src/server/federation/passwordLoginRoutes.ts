@@ -25,7 +25,10 @@ export function createPasswordLoginRouter(getRuntime: () => Runtime | undefined)
     next();
   });
   router.get('/parameters', (_req, res) => {
-    try { res.json(bootstrap!.parameters()); } catch { res.status(503).json({ error: 'Password login unavailable' }); }
+    try { res.json(bootstrap!.parameters()); } catch (error) {
+      if (error instanceof Error && error.message === 'PASSWORD_NOT_CONFIGURED') res.status(403).json({ code: 'PASSWORD_NOT_CONFIGURED', error: 'Password not configured' });
+      else res.status(503).json({ error: 'Password login unavailable' });
+    }
   });
   router.use(express.json({ limit: '8kb' }));
   router.post('/start', async (req, res) => {

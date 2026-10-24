@@ -1,6 +1,6 @@
 import type { TerminalClientAttachment } from './terminalClientAttachment.js';
 import { claimTmuxSize } from './tmuxSizeOwnership.js';
-import { retainTmuxObserverSize } from './tmuxObserverSize.js';
+import { readTmuxObserverSize, retainTmuxObserverSize } from './tmuxObserverSize.js';
 
 type Size = { cols: number; rows: number };
 type Observer = Size & { ptyProcess: { pid?: number; resize(cols: number, rows: number): void } };
@@ -11,7 +11,6 @@ type Observer = Size & { ptyProcess: { pid?: number; resize(cols: number, rows: 
  */
 export class TmuxDisplayGeometry {
   private current: Size;
-  private firstResize = true;
 
   constructor(
     private readonly observer: Observer,
@@ -22,7 +21,7 @@ export class TmuxDisplayGeometry {
   ) { this.current = { cols: initialSize?.cols ?? observer.cols, rows: initialSize?.rows ?? observer.rows }; }
 
   get size(): Size { return { cols: this.current.cols, rows: this.current.rows }; }
-  reset(): void { this.firstResize = true; }
+  readServerSize(): Promise<Size> { return readTmuxObserverSize(this.run, this.sessionName); }
 
   async prepareAttach(size: Size, supportsOwnership: boolean): Promise<void> {
     const clients = (await this.run(['list-clients', '-t', this.sessionName, '-F', '#{client_pid} #{client_tty} #{client_flags}']))
@@ -38,17 +37,21 @@ export class TmuxDisplayGeometry {
 
   async resize(display: TerminalClientAttachment, requested: Size, supportsOwnership: boolean) {
     if (!display.attached || !Number.isFinite(requested.cols) || !Number.isFinite(requested.rows) || requested.cols < 1 || requested.rows < 1) {
-      return { ok: false, ...this.size, redraw: false };
+      return { ok: false, ...this.size, redraw: false, changed: false };
     }
     const size = { cols: Math.floor(requested.cols), rows: Math.floor(requested.rows) };
-    if (supportsOwnership) await claimTmuxSize(this.run, this.sessionName, display.pid, this.displayPids());
     const same = this.current.cols === size.cols && this.current.rows === size.rows;
+    const server = await this.readServerSize();
+    const serverMatches = server.cols === size.cols && server.rows === size.rows;
+    if (same && serverMatches) {
+      retainTmuxObserverSize(this.observer, size.cols, size.rows);
+      return { ok: true, ...this.size, redraw: false, changed: false };
+    }
+    if (supportsOwnership && !serverMatches) await claimTmuxSize(this.run, this.sessionName, display.pid, this.displayPids());
     const ok = same ? display.attached : display.resize(size.cols, size.rows);
-    if (!ok) return { ok: false, ...this.size, redraw: false };
+    if (!ok) return { ok: false, ...this.size, redraw: false, changed: false };
     retainTmuxObserverSize(this.observer, size.cols, size.rows);
-    const redraw = same && !this.firstResize;
-    this.firstResize = false;
     this.current = size;
-    return { ok: true, ...this.size, redraw };
+    return { ok: true, ...this.size, redraw: false, changed: !serverMatches };
   }
 }

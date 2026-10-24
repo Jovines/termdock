@@ -6,6 +6,7 @@ import QRCode from 'qrcode';
 import { RelayClient } from './relay.js';
 import { openServiceSocket } from './serviceTransport.js';
 import { serviceEndpoint } from './connectionModel.js';
+import { verifyDirectTarget } from './directRoutes.js';
 
 export interface FederationRelayConfig {
   entryUrl: string;
@@ -93,9 +94,47 @@ export async function runFederationCli(args: string[]): Promise<number> {
         try {
           const upstream = await connect(secureEndpoint(config.entryUrl, '/api/federation/relay'), entryCa, sockets, config.relayToken, true, lifetime.signal);
           if (stopped) { upstream.terminate(); break; }
-          client = new RelayClient(upstream, { targets: new Map(targets.map(t => [t.serviceId, (signal: AbortSignal) => connect(secureEndpoint(t.url, '/api/federation/secure'), t.ca, sockets, undefined, false, AbortSignal.any([signal, lifetime.signal]))])) });
-          process.stderr.write('加密中继已连接。\n'); delay = 1000;
-          await new Promise<void>(done => { if (upstream.readyState !== WebSocket.OPEN) done(); else upstream.once('close', () => done()); });
+          const protectedTargets = new Set<string>();
+          const verify = (t: typeof targets[number], signal: AbortSignal) => verifyDirectTarget({ serviceId: t.serviceId, url: t.url,
+            ...(t.caPath ?? config.caPath ? { caPath: t.caPath ?? config.caPath } : {}) }, dirname(configPath), signal);
+          const targetFactories = new Map<string, (signal: AbortSignal) => Promise<WebSocket>>();
+          const verification = new AbortController();
+          const verificationSignal = AbortSignal.any([lifetime.signal, verification.signal]);
+          upstream.once('close', () => verification.abort());
+          let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+          // A failed proof withdraws the route. A confirmed missing password
+          // remains advertised as blocked, so the directory can explain it.
+          const refreshTargets = async () => {
+            let index = 0;
+            await Promise.all(Array.from({ length: Math.min(4, targets.length) }, async () => {
+              while (!verificationSignal.aborted && index < targets.length) {
+                const target = targets[index++];
+                let configured: boolean;
+                try { await verify(target, verificationSignal); configured = true; }
+                catch (error) {
+                  if (!(error instanceof Error) || error.message !== 'TARGET_PASSWORD_REQUIRED') {
+                    protectedTargets.delete(target.serviceId); targetFactories.delete(target.serviceId); continue;
+                  }
+                  configured = false;
+                }
+                if (verificationSignal.aborted) return;
+                if (configured) protectedTargets.add(target.serviceId); else protectedTargets.delete(target.serviceId);
+                targetFactories.set(target.serviceId, async signal => {
+                  await verify(target, AbortSignal.any([signal, verificationSignal]));
+                  return connect(serviceEndpoint(target.url, 'relay-target').href, target.ca, sockets, undefined, false, AbortSignal.any([signal, verificationSignal]));
+                });
+              }
+            }));
+          };
+          try {
+            await refreshTargets();
+            if (verificationSignal.aborted) throw new Error('Relay disconnected');
+            client = new RelayClient(upstream, { routeTtlMs: 4000, isPasswordProtected: id => protectedTargets.has(id), targets: targetFactories });
+            const poll = async () => { await refreshTargets(); if (!verificationSignal.aborted) refreshTimer = setTimeout(() => void poll(), 2000); };
+            refreshTimer = setTimeout(() => void poll(), 2000);
+            process.stderr.write('加密中继已连接。\n'); delay = 1000;
+            await new Promise<void>(done => { if (upstream.readyState !== WebSocket.OPEN) done(); else upstream.once('close', () => done()); });
+          } finally { verification.abort(); clearTimeout(refreshTimer); }
         } catch { if (!stopped) process.stderr.write('中继连接失败或已断开，将重试；请检查授权和证书。\n'); }
         client?.close(); client = undefined;
         for (const socket of sockets) socket.terminate();

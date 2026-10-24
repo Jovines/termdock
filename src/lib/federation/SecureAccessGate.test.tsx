@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => { const request = vi.fn(), fetch = vi.fn(); retur
 vi.mock('./browserIntegration', () => ({
   SECURE_STATE_EVENT: 'termdock:secure-state',
   preferDirectConnection: vi.fn(), currentConnectionPath: () => 'direct', connectionRoutes: () => [],
+  inspectConnectionAccess: async () => 'passwordRequired',
   connectionAddresses: (item: { url: string; serviceOrigin?: string; targetPeerId: string; routes?: { url: string; targetPeerId: string }[] }) => [item.serviceOrigin || item.url, ...(item.routes || []).filter(route => route.targetPeerId === item.targetPeerId).map(route => route.url)],
   authenticateKnownConnection:mocks.authenticate,connectDevice: mocks.connect, connectOpenService: vi.fn(), getIdentity: async () => ({ peerId: 'phone' }),
   currentSecureClient: () => mocks.client, currentEntryClient: () => undefined,
@@ -387,7 +388,7 @@ describe('device authorization lifecycle', () => {
     await screen.findByText('Active terminal');
     mocks.request.mockResolvedValue({ type: 'result', id: 'permissions', fullService: false, grants: [] });
     fireEvent.focus(window);
-    await screen.findByText('“目标服务”需要重新登录');
+    await screen.findByText('“目标服务”需要设备访问授权');
     expect(screen.queryByText('Password login')).toBeNull();
     expect(screen.getByText('Active terminal').closest('[inert]')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '登录目标服务' }));
@@ -503,7 +504,7 @@ describe('native target display without authorization side effects', () => {
     const newer = { url: 'https://new.example', serviceOrigin: 'https://new.example', serviceName: 'Newer target', ...(pinned ? { targetPeerId: 'new-target' } : {}) };
     mocks.saved.mockReturnValue(newer); mocks.request.mockResolvedValue({ type: 'result', fullService: false, grants: [] });
     await act(async () => finish({ url: 'https://stale.example', serviceOrigin: 'https://stale.example', label: 'Stale target', ...(pinned ? { targetPeerId: 'stale-target' } : {}) }));
-    await screen.findByText('“Newer target”需要重新登录');
+    await screen.findByText('“Newer target”需要设备访问授权');
     fireEvent.click(screen.getByRole('button', { name: '登录目标服务' }));
     await screen.findByText('Password login');
     expect(screen.getByText(newer.url)).toBeTruthy(); expect(screen.queryByText('https://stale.example')).toBeNull();

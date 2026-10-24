@@ -57,7 +57,6 @@ import {
   clearPendingResize,
   createResizePushGate,
   createResizeSyncState,
-  forceResize as forceResizeSync,
   markResizePushSent,
   observeServerSize,
   planResizePush,
@@ -267,7 +266,7 @@ export type TerminalController = {
    * 必须在 TerminalView 的 `connected` 事件回调里调一次。
    * 后端 session id 变化由 `session-key-change` refresh reason 额外处理。
    */
-  setSessionReady: (ready: boolean) => void;
+  setSessionReady: (ready: boolean, serverSize?: { cols: number; rows: number }) => void;
   /** Confirm or reject the latest sequenced PTY resize request. */
   acknowledgeResize: (ack: {
     seq?: number;
@@ -292,7 +291,7 @@ export type TerminalController = {
    * 仅在 document.visibilityState === 'visible' 时才会真正推。
    */
   ensureSizeMatches: (reason: string) => void;
-  /** Re-signal the current PTY size once so a cold TUI redraws its cursor. */
+  /** Reconcile a cold TUI's geometry without re-signalling an unchanged size. */
   requestPtyRedraw: () => void;
 };
 
@@ -4523,8 +4522,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         },
         getDimensions: () => geometryRef.current?.dimensions ?? null,
         requestRefresh,
-        setSessionReady: (ready: boolean) => {
+        setSessionReady: (ready: boolean, serverSize?: { cols: number; rows: number }) => {
           sessionReadyRef.current = ready;
+          if (ready && serverSize) {
+            clearResizeAckTimer();
+            clearResizePushTimer();
+            resizeSyncStateRef.current = observeServerSize(
+              clearPendingResize(resizeSyncStateRef.current), serverSize,
+            );
+            const terminal = terminalRef.current;
+            const confirmed = resizeSyncStateRef.current.confirmed;
+            onSizeSynchronizedChangeRef.current?.(Boolean(terminal && confirmed
+              && terminal.cols === confirmed.cols && terminal.rows === confirmed.rows));
+          }
           if (!ready) {
             resizePresentationRef.current?.cancel();
             clearResizeAckTimer();
@@ -4607,12 +4617,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // The pending resize already promises an authoritative screen. A
           // cursor recovery request must not restart that same transaction.
           if (resizeSyncStateRef.current.pending || pendingScreenSyncGenerationRef.current !== null) return;
-          const forced = forceResizeSync(resizeSyncStateRef.current, {
-            cols: terminal.cols,
-            rows: terminal.rows,
-          });
-          resizeSyncStateRef.current = forced.state;
-          sendResizeRequestRef.current(forced.request);
+          pushResizeToServer(terminal.cols, terminal.rows);
         },
       }),
       [

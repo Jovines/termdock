@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ inspect: vi.fn(), authorize: vi.fn(), settings: vi.fn(), recovered: vi.fn() }));
+const mocks = vi.hoisted(() => ({ inspect: vi.fn(), access: vi.fn(), authorize: vi.fn(), settings: vi.fn(), recovered: vi.fn() }));
 vi.mock('./browserIntegration', () => ({
   inspectEntryRoute: mocks.inspect, authorizeEntryRoute: mocks.authorize,
-  connectionRoutes: () => [], connectionAddresses: () => [],
+  connectionRoutes: () => [], connectionAddresses: (target: { entryServiceId?: string; url: string }) => target.entryServiceId ? [] : [target.url], inspectConnectionAccess: mocks.access,
   addServiceAddress: vi.fn(), createEntryInvitation: vi.fn(), revokeEntryRoute: vi.fn(), saveServiceRoutes: vi.fn(),
 }));
 vi.mock('../components/auth/LoginScreen', () => ({ LoginScreen: (props: { serviceOrigin: string; onLoginSuccess: () => void }) => <div><span>{props.serviceOrigin}</span><button onClick={props.onLoginSuccess}>Submit target login</button></div> }));
@@ -16,6 +16,7 @@ beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear();
   localStorage.setItem('termdock.federation.connections.v1', JSON.stringify([{ id: 'entry', ...route, label: '工作' }]));
   mocks.inspect.mockResolvedValue({ canManage: true, grants: [] }); mocks.authorize.mockResolvedValue(undefined); mocks.recovered.mockResolvedValue(undefined);
+  mocks.access.mockResolvedValue('passwordRequired');
 });
 afterEach(cleanup);
 const mount = (code: ConstructorParameters<typeof ConnectionAccessError>[0] = 'RELAY_AUTHORIZATION_REQUIRED') => render(<AccessRecoveryScreen target={target}
@@ -62,7 +63,7 @@ describe('explicit recovery for the correct access boundary', () => {
   });
   it('opens only the final target login after the user chooses it and rechecks after login', async () => {
     mount('TARGET_AUTHORIZATION_REQUIRED'); expect(screen.queryByText(target.url)).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '登录目标服务' }));
+    fireEvent.click(await screen.findByRole('button', { name: '登录目标服务' }));
     expect(screen.getByText(target.url)).toBeTruthy(); expect(screen.queryByText(route.url)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Submit target login' }));
     await waitFor(() => expect(mocks.recovered).toHaveBeenCalledOnce());
@@ -75,4 +76,33 @@ describe('explicit recovery for the correct access boundary', () => {
     expect(screen.queryByRole('button', { name: '登录目标服务' })).toBeNull();
     await act(async () => {});
   });
+});
+
+it('offers an invitation instead of a password for an unconfigured direct target, and explicitly rechecks authorization', async () => {
+  mocks.access.mockResolvedValueOnce('invitationRequired').mockResolvedValue('authorized');
+  mount('TARGET_AUTHORIZATION_REQUIRED');
+  await screen.findByText(/目标服务未配置访问密码，且此设备尚未获得访问授权/);
+  expect(screen.queryByRole('button', { name: '登录目标服务' })).toBeNull();
+  expect(mocks.authorize).not.toHaveBeenCalled(); expect(mocks.recovered).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '重新检查授权' }));
+  fireEvent.click(await screen.findByRole('button', { name: '重新连接' }));
+  await waitFor(() => expect(mocks.recovered).toHaveBeenCalledOnce());
+});
+
+it('passes the target identity and entry separately to login when no direct target address exists', async () => {
+  const relayTarget = { ...target, url: route.url, entryServiceId: 'entry', routes: [route] };
+  render(<AccessRecoveryScreen target={relayTarget} failure={new ConnectionAccessError('TARGET_AUTHORIZATION_REQUIRED', {
+    targetServiceId: 'target', entryServiceId: 'entry', entryUrl: route.url,
+  })} onSettings={mocks.settings} onRecovered={mocks.recovered} />);
+  fireEvent.click(await screen.findByRole('button', { name: '登录目标服务' }));
+  expect(screen.queryByText(route.url)).toBeNull();
+  expect(mocks.access).toHaveBeenCalledWith(relayTarget, expect.any(AbortSignal));
+});
+
+it.each(['TARGET_PASSWORD_REQUIRED', 'TARGET_SECURITY_UPGRADE_REQUIRED'] as const)('shows the relay security block %s without offering a password or invitation bypass', async code => {
+  mount(code);
+  await screen.findByText('“Devbox”已禁用中转');
+  expect(screen.queryByRole('button', { name: '登录目标服务' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '重新授权' })).toBeNull();
+  expect(mocks.access).not.toHaveBeenCalled(); expect(mocks.authorize).not.toHaveBeenCalled();
 });

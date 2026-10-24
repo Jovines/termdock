@@ -2,7 +2,7 @@ import { attachRegisteredDirectTargets, verifyDirectTarget, type DirectTargetCon
 import type { RelayRouter } from './relay.js';
 import { normalizeServiceAddress } from './connectionModel.js';
 
-export type DirectTargetError = 'TARGET_CHECKING' | 'TARGET_IDENTITY_MISMATCH' | 'TARGET_UNREACHABLE';
+export type DirectTargetError = 'TARGET_CHECKING' | 'TARGET_IDENTITY_MISMATCH' | 'TARGET_UNREACHABLE' | 'TARGET_PASSWORD_REQUIRED' | 'TARGET_SECURITY_UPGRADE_REQUIRED';
 interface State {
   target: DirectTargetConfig;
   signature: string;
@@ -53,17 +53,17 @@ export class DirectTargetRegistry<P> {
   error(serviceId: string): DirectTargetError | undefined {
     const states = this.providers(serviceId);
     if (states.some(state => state.close)) return;
-    return ['TARGET_CHECKING', 'TARGET_IDENTITY_MISMATCH', 'TARGET_UNREACHABLE'].find(error => states.some(state => state.error === error)) as DirectTargetError | undefined;
+    return ['TARGET_PASSWORD_REQUIRED', 'TARGET_SECURITY_UPGRADE_REQUIRED', 'TARGET_CHECKING', 'TARGET_IDENTITY_MISMATCH', 'TARGET_UNREACHABLE'].find(error => states.some(state => state.error === error)) as DirectTargetError | undefined;
   }
 
   describe(target: { serviceId: string; url?: string; label?: string }) {
-    const state = this.providers(target.serviceId).find(provider => provider.close);
+    const state = this.providers(target.serviceId).find(provider => provider.close || provider.error === 'TARGET_PASSWORD_REQUIRED');
     const available = this.router.hasRoute(target.serviceId);
     // A valid reverse tunnel may coexist with an incorrect static URL. Do not
     // borrow the unverified URL/name and make A look like the entry B.
     const metadata = state ? { serviceId: target.serviceId, url: normalizeServiceAddress(state.target.url), ...(state.target.label ? { label: state.target.label } : {}) }
       : target.url ? { serviceId: target.serviceId } : target;
-    const error = this.error(target.serviceId);
+    const error = this.router.routeError(target.serviceId) || this.error(target.serviceId);
     return { ...metadata, available, ...(!available && error ? { error } : {}) };
   }
 
@@ -81,7 +81,8 @@ export class DirectTargetRegistry<P> {
     } catch (error) {
       if (!current()) return;
       state.close?.(); state.close = undefined;
-      state.error = error instanceof Error && error.name === 'UnexpectedPeerError' ? 'TARGET_IDENTITY_MISMATCH' : 'TARGET_UNREACHABLE';
+      state.error = error instanceof Error && error.name === 'UnexpectedPeerError' ? 'TARGET_IDENTITY_MISMATCH'
+        : error instanceof Error && ['TARGET_PASSWORD_REQUIRED', 'TARGET_SECURITY_UPGRADE_REQUIRED'].includes(error.message) ? error.message as DirectTargetError : 'TARGET_UNREACHABLE';
       state.nextCheck = this.now() + 5000;
     } finally { state.checking = false; state.controller = undefined; this.activeChecks--; this.pump(); }
   }

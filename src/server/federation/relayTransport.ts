@@ -63,6 +63,7 @@ export class RelayTransport extends EventTarget {
             this.transportFailure = new ConnectionAccessError('RELAY_AUTHORIZATION_REQUIRED', { ...context, targetServiceId });
           }
           if (frame.code === 'RELAY_SELF_TARGET') this.transportFailure = new ConnectionAccessError('RELAY_SELF_TARGET', { ...context, targetServiceId });
+          if (frame.code === 'TARGET_PASSWORD_REQUIRED' || frame.code === 'TARGET_SECURITY_UPGRADE_REQUIRED') this.transportFailure = new ConnectionAccessError(frame.code, { ...context, targetServiceId });
           this.finish(1001, this.transportFailure?.message || 'Relay route closed'); this.upstream.close(); return;
         }
         if (frame.type !== 'data' || this.readyState !== 1 || frame.encoding !== 'base64' || typeof frame.payload !== 'string'

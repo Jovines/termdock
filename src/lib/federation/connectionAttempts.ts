@@ -70,7 +70,7 @@ export function raceConnectionAttempts<T>(attempts: ConnectionAttempt<T>[], disp
         // Still allow another route to succeed with that same pinned identity.
         if (error instanceof Error && error.name === 'UnexpectedPeerError') identityError = error;
         if (error instanceof ConnectionAccessError && ['TARGET_IDENTITY_MISMATCH', 'RELAY_SELF_TARGET'].includes(error.code)) identityError = error;
-        if (error instanceof ConnectionAccessError && error.code === 'RELAY_AUTHORIZATION_REQUIRED') relayAccessError = error;
+        if (error instanceof ConnectionAccessError && ['RELAY_AUTHORIZATION_REQUIRED', 'TARGET_PASSWORD_REQUIRED', 'TARGET_SECURITY_UPGRADE_REQUIRED'].includes(error.code)) relayAccessError = error;
         if (invitationDenial(error) || error instanceof DeviceAuthorizationRequired || error instanceof ConnectionAccessError && error.code === 'TARGET_AUTHORIZATION_REQUIRED') { settled = true; finish(); reject(error); return; }
         start();
       });
