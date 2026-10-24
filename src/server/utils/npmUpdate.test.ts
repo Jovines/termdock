@@ -65,7 +65,7 @@ describe('npmUpdate', () => {
 
 describe('running installation update target', () => {
   it('executes npm against the verified running prefix and requires fresh matching on-disk metadata', async () => {
-    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'td npm target '));
+    const temporary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'td npm target ')));
     const previous = { PATH: process.env.PATH, TD_NPM_RECORD: process.env.TD_NPM_RECORD, TD_NPM_MODE: process.env.TD_NPM_MODE, TD_NPM_OTHER: process.env.TD_NPM_OTHER,
       DEVELOPER_DIR: process.env.DEVELOPER_DIR, SDKROOT: process.env.SDKROOT, CC: process.env.CC, CXX: process.env.CXX, CPLUS_INCLUDE_PATH: process.env.CPLUS_INCLUDE_PATH };
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
