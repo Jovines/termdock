@@ -26,7 +26,8 @@ describe('RelaySocket', () => {
       const channel = new PacketChannel(secure.duplex);
       for await (const packet of channel.read()) if (packet.type === 'probe') channel.send({ id: packet.id, type: 'result' });
     })().catch(() => {}); });
-    const router = new RelayRouter({ authenticate: context => String(context), allowRegister: p => p === 'provider', allowRoute: p => p === 'phone' && authorized, heartbeatMs: 20 });
+    // Exercise authorization revocation without treating cold Noise startup or CI event-loop stalls as heartbeat loss.
+    const router = new RelayRouter({ authenticate: context => String(context), allowRegister: p => p === 'provider', allowRoute: p => p === 'phone' && authorized, heartbeatMs: 500 });
     cleanups.push(() => router.close());
     entry.server.on('connection', (socket, request) => { void router.attach(socket, request.url === '/provider' ? 'provider' : 'phone').then(ok => { if (ok) socket.send(JSON.stringify({ type: 'ready' })); }); });
     const provider = await dial(entry.url + '/provider');
