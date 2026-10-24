@@ -3,11 +3,11 @@ import { useEffect, type RefObject } from 'react';
 /** Preserve the existing editor focus during touch browsing. Cancel only the
  * compatibility mouse focus action; never cancel native touch scrolling, call
  * focus/blur, restore a selection, or intercept an intentional input/control. */
-export function usePreserveInputFocus(surface: RefObject<HTMLElement>, input: RefObject<HTMLTextAreaElement>, enabled: boolean) {
+export function usePreserveInputFocus(surface: RefObject<HTMLElement>, input: RefObject<HTMLElement>, enabled: boolean) {
   useEffect(() => {
     const root = surface.current;
     if (!enabled || !root) return;
-    let touched: { input: HTMLTextAreaElement; at: number } | undefined;
+    let touched: { input: HTMLElement; at: number } | undefined;
     const remember = () => {
       const field = input.current;
       touched = field && document.activeElement === field ? { input: field, at: performance.now() } : undefined;

@@ -9,7 +9,7 @@ import { isIOSDevice } from '../utils/touchTerminalLayout';
  * an aria-hidden, pointer-events-none draft mirror while the return value is true.
  * This guard does not measure or position anything; keyboard state comes from
  * useViewportKeyboardState. Ordinary dialogs do not need it by default. */
-export function useKeyboardFocusGuard(input: RefObject<HTMLTextAreaElement | HTMLInputElement>, enabled: boolean, keyboard: { isOpen: boolean; isSettled: boolean }): boolean {
+export function useKeyboardFocusGuard(input: RefObject<HTMLElement>, enabled: boolean, keyboard: { isOpen: boolean; isSettled: boolean }): boolean {
   const [masked, setMasked] = useState(false);
   const state = useRef(keyboard); state.current = keyboard;
   const finish = useRef<() => void>();

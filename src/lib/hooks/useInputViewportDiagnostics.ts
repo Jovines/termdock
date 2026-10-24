@@ -6,7 +6,7 @@ import { VIEWPORT_LAYOUT_CHANGE_EVENT } from './useViewportHeight';
 
 /** Numeric evidence for session-persistent native viewport faults. Never changes
  * focus, scroll, styles or input data. At most three samples per focus session. */
-export function useInputViewportDiagnostics(input: RefObject<HTMLTextAreaElement>, enabled: boolean) {
+export function useInputViewportDiagnostics(input: RefObject<HTMLElement>, enabled: boolean) {
   useEffect(() => {
     const element = input.current;
     if (!enabled || !isIOSDevice() || !element) return;

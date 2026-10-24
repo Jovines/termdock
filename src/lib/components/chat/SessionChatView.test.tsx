@@ -4,11 +4,16 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { clearChatSnapshots } from './chatSnapshot';
 import { AppFeedbackHost } from '../ui/AppFeedback';
 import { SECURE_READY_EVENT } from '../../federation/connectionRecovery';
+import { readChatEditor, setChatEditorCaret } from './ChatRichEditor';
 const markdownRender = vi.hoisted(() => vi.fn());
 import type { ChatMessage } from './chatMessages';
 import { SessionChatView } from './SessionChatView';
 vi.mock('../markdown/Markdown', () => ({ Markdown: ({ content }: { content: string }) => { markdownRender(content); return <p data-testid="chat-markdown">{content}</p>; } }));
 afterEach(() => { cleanup(); clearChatSnapshots(); sessionStorage.clear(); markdownRender.mockClear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+function composer() { return screen.getByRole('textbox') as HTMLElement; }
+function composerText() { return readChatEditor(composer()).text; }
+function setComposer(value: string, caret = value.length) { const node = composer(); node.replaceChildren(document.createTextNode(value)); setChatEditorCaret(node, caret); fireEvent.input(node); }
+function selectComposer(start: number, end: number) { const node = composer(), text = node.firstChild!; const range = document.createRange(); range.setStart(text, start); range.setEnd(text, end); const selection = getSelection()!; selection.removeAllRanges(); selection.addRange(range); }
 function pagedHistory(url: unknown, all: ChatMessage[]) {
   const params = new URL(String(url), location.origin).searchParams;
   const before = params.get('before'), after = params.get('after');
@@ -61,7 +66,7 @@ it('keeps an explicitly added quote in the composer after its text selection is 
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, messages: [{ id: 'a', role: 'assistant', content: '需要引用的原话', createdAt: 1, status: 'stored' }] })));
   render(<SessionChatView sessionId="selected-quote" onTerminal={() => {}} />);
   const text = await screen.findByTestId('chat-markdown');
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: '请解释这一句' } });
+  setComposer('请解释这一句');
   act(() => {
     const range = document.createRange(); range.selectNodeContents(text);
     window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range); document.dispatchEvent(new Event('selectionchange'));
@@ -71,7 +76,7 @@ it('keeps an explicitly added quote in the composer after its text selection is 
   act(() => document.dispatchEvent(new Event('selectionchange')));
   expect(screen.queryByRole('button', { name: '引用选中内容' })).toBeNull();
   expect(screen.getByRole('button', { name: '移除消息引用' })).toBeTruthy();
-  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('请解释这一句');
+  expect(composerText()).toBe('请解释这一句');
 });
 it('retains a failed message across remounts and restores it for editing', async () => {
   const posts: { content: string; requestId: string }[] = [];
@@ -82,9 +87,9 @@ it('retains a failed message across remounts and restores it for editing', async
   vi.stubGlobal('fetch', fetch);
   const { unmount } = render(<SessionChatView sessionId="one" onTerminal={() => {}} />);
   await waitFor(() => expect(screen.queryByText('正在读取对话…')).toBeNull());
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: '请解释结果' } }); fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  setComposer('请解释结果'); fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
   await screen.findByRole('button', { name: '重试发送' });
-  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+  expect(composerText()).toBe('');
   expect(screen.getByText('请解释结果')).toBeTruthy();
   expect(JSON.parse(sessionStorage.getItem(`termdock:chat:${location.origin}:one:pending`) || 'null')?.content).toBe('请解释结果');
   unmount();
@@ -92,7 +97,7 @@ it('retains a failed message across remounts and restores it for editing', async
   await screen.findByRole('button', { name: '重试发送' });
   expect(screen.getByText('请解释结果')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '修改草稿' }));
-  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('请解释结果');
+  expect(composerText()).toBe('请解释结果');
   fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
   await waitFor(() => expect(posts).toHaveLength(2));
 });
@@ -108,15 +113,14 @@ it('retries the retained message without clearing a new draft', async () => {
   }));
   render(<SessionChatView sessionId="retry" onTerminal={() => {}} />);
   await screen.findByText('想一起完成什么？');
-  const input = screen.getByRole('textbox') as HTMLTextAreaElement;
-  fireEvent.change(input, { target: { value: '请解释结果' } });
+  setComposer('请解释结果');
   fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
   await screen.findByRole('button', { name: '重试发送' });
-  fireEvent.change(input, { target: { value: '下一条补充' } });
+  setComposer('下一条补充');
   fireEvent.click(screen.getByRole('button', { name: '重试发送' }));
   await waitFor(() => expect(posts).toHaveLength(2)); expect(posts[0].requestId).toBe(posts[1].requestId);
   await waitFor(() => expect(screen.queryByText('发送中…')).toBeNull());
-  expect(input.value).toBe('下一条补充');
+  expect(composerText()).toBe('下一条补充');
 });
 it('clears the composer and quote immediately while preserving an identical next draft after acknowledgement', async () => {
   let acknowledge!: (response: Response) => void;
@@ -131,20 +135,20 @@ it('clears the composer and quote immediately while preserving an identical next
   }));
   render(<SessionChatView sessionId="delayed" onTerminal={() => {}} />);
   await screen.findByText('需要解释的原话');
-  const input = screen.getByRole('textbox') as HTMLTextAreaElement;
-  fireEvent.change(input, { target: { value: '请解释' } });
+  const input = composer();
+  setComposer('请解释');
   fireEvent.click(screen.getByRole('button', { name: '引用消息' }));
   fireEvent.keyDown(input, { key: 'Enter' });
-  expect(input.value).toBe('');
+  expect(composerText()).toBe('');
   expect(screen.queryByRole('button', { name: '移除消息引用' })).toBeNull();
   expect(screen.getByText('发送中…')).toBeTruthy();
   expect(posts[0].content).toContain('需要解释的原话');
-  fireEvent.change(input, { target: { value: '请解释' } });
+  setComposer('请解释');
   fireEvent.click(screen.getByRole('button', { name: '引用消息' }));
   fireEvent.keyDown(input, { key: 'Enter' });
   expect(posts).toHaveLength(1);
   await act(async () => acknowledge(Response.json({ id: 'sent', status: 'pending' })));
-  expect(input.value).toBe('请解释');
+  expect(composerText()).toBe('请解释');
   expect(screen.getByRole('button', { name: '移除消息引用' })).toBeTruthy();
 });
 it('routes references into the active chat draft and acknowledges without sending terminal input', async () => {
@@ -152,13 +156,13 @@ it('routes references into the active chat draft and acknowledges without sendin
   render(<SessionChatView sessionId="one" onTerminal={() => {}} />); await screen.findByText('想一起完成什么？');
   const ack = vi.fn(), terminal = vi.fn(); window.addEventListener('termdock-insert-reference-ack', ack); window.addEventListener('termdock-insert-reference', terminal);
   fireEvent(window, new CustomEvent('termdock-insert-reference', { detail: { text: '/tmp/shared/spec.md', sessionId: 'one', nonce: 'ref' } }));
-  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('/tmp/shared/spec.md'); expect(ack.mock.calls[0][0].detail).toEqual({ nonce: 'ref', ok: true }); expect(terminal).not.toHaveBeenCalled();
+  expect(composerText()).toBe('/tmp/shared/spec.md'); expect(ack.mock.calls[0][0].detail).toEqual({ nonce: 'ref', ok: true }); expect(terminal).not.toHaveBeenCalled();
   window.removeEventListener('termdock-insert-reference-ack', ack); window.removeEventListener('termdock-insert-reference', terminal);
 });
 it('keeps read-only recipients from sending or accepting references', async () => {
   const fetch = vi.fn(async () => Response.json({ agentAvailable: true, messages: [] })); vi.stubGlobal('fetch', fetch);
   render(<SessionChatView sessionId="readonly" canWrite={false} onTerminal={() => {}} />); await screen.findByText('想一起完成什么？');
-  expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(true); expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('textbox') as HTMLElement).getAttribute('aria-readonly')).toBe('true'); expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 it('keeps reply feedback through progress, renders consecutive updates together, and clears it on the final reply', async () => {
@@ -186,7 +190,7 @@ it('sends with Enter, keeps Shift+Enter for newlines, and never sends IME confir
   const post = vi.fn();
   vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => { if (init?.method === 'POST') { post(JSON.parse(String(init.body))); return Response.json({ id: 'sent', status: 'pending' }); } return Response.json({ agentAvailable: true, messages: [] }); }));
   render(<SessionChatView sessionId="keyboard" onTerminal={() => {}} />); await screen.findByText('想一起完成什么？');
-  const input = screen.getByRole('textbox'); fireEvent.change(input, { target: { value: '中文消息' } });
+  const input = composer(); setComposer('中文消息');
   expect(fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })).toBe(true);
   fireEvent.keyDown(input, { key: 'Enter', isComposing: true }); fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 }); expect(post).not.toHaveBeenCalled();
   fireEvent.keyDown(input, { key: 'Enter' }); await waitFor(() => expect(post).toHaveBeenCalledOnce()); expect(post.mock.calls[0][0].content).toBe('中文消息');
@@ -196,8 +200,8 @@ it('quotes a message without sending it, preserves the draft, and persists the q
   const messages = [{ id: 'a', role: 'assistant', content: '这里是需要解释的原话', createdAt: 1, status: 'stored' }];
   vi.stubGlobal('fetch', vi.fn(async (_url, init?: RequestInit) => { if (init?.method === 'POST') { posts.push(JSON.parse(String(init.body))); return Response.json({ id: 'u', status: 'pending' }); } return Response.json({ agentAvailable: true, agent: { displayName: 'Codex' }, messages }); }));
   render(<SessionChatView sessionId="quote" onTerminal={() => {}} />); await screen.findByText('这里是需要解释的原话'); expect(screen.getByText('Codex')).toBeTruthy();
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: '请解释这句话' } }); fireEvent.click(screen.getByRole('button', { name: '引用消息' }));
-  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('请解释这句话'); expect(posts).toHaveLength(0);
+  setComposer('请解释这句话'); fireEvent.click(screen.getByRole('button', { name: '引用消息' }));
+  expect(composerText()).toBe('请解释这句话'); expect(posts).toHaveLength(0);
   expect(screen.getByRole('button', { name: '移除消息引用' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '发送消息' })); await waitFor(() => expect(posts).toHaveLength(1));
   expect(posts[0].content).toContain('> Codex'); expect(posts[0].content).toContain('> 这里是需要解释的原话'); expect(posts[0].content).toContain('请解释这句话');
@@ -205,10 +209,9 @@ it('quotes a message without sending it, preserves the draft, and persists the q
 it('replaces the current draft selection when inserting an existing file reference', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ agentAvailable: true, messages: [] })));
   render(<SessionChatView sessionId="caret" onTerminal={() => {}} />); await screen.findByText('想一起完成什么？');
-  const input = screen.getByRole('textbox') as HTMLTextAreaElement;
-  fireEvent.change(input, { target: { value: '前文替换后文' } }); input.setSelectionRange(2, 4);
+  setComposer('前文替换后文'); selectComposer(2, 4);
   fireEvent(window, new CustomEvent('termdock-insert-reference', { detail: { text: '/tmp/spec.md ', sessionId: 'caret', nonce: 'ref', focus: false } }));
-  expect(input.value).toBe('前文/tmp/spec.md 后文');
+  expect(composerText()).toBe('前文/tmp/spec.md 后文');
 });
 
 it('does not render history again while typing a draft', async () => {
@@ -216,8 +219,8 @@ it('does not render history again while typing a draft', async () => {
   render(<SessionChatView sessionId="memo-history" onTerminal={() => {}} />);
   await screen.findByTestId('chat-markdown');
   const renders = markdownRender.mock.calls.length;
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: '新的草稿' } });
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: '新的草稿继续输入' } });
+  setComposer('新的草稿');
+  setComposer('新的草稿继续输入');
   expect(markdownRender).toHaveBeenCalledTimes(renders);
 });
 
@@ -284,7 +287,7 @@ it('keeps a failed send actionable when background history refresh succeeds', as
   vi.stubGlobal('fetch', fetch);
   render(<><AppFeedbackHost /><SessionChatView sessionId="send-sync-failure" onTerminal={() => {}} /></>);
   await act(async () => {});
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: '需要重试的消息' } });
+  setComposer('需要重试的消息');
   fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
   await act(async () => {});
   expect(screen.getByRole('alert').textContent).toContain('发送失败');
@@ -298,12 +301,12 @@ it('ignores a response from the previous session and keeps drafts separate', asy
   let resolveOld!: (value: Response) => void;
   vi.stubGlobal('fetch', vi.fn((url: string) => url.includes('old-session') ? new Promise<Response>(resolve => { resolveOld = resolve; }) : Promise.resolve(Response.json({ agentAvailable: true, messages: [] }))));
   const view = render(<SessionChatView sessionId="old-session" onTerminal={() => {}} />);
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: '原会话的草稿' } });
+  setComposer('原会话的草稿');
   view.rerender(<SessionChatView sessionId="new-session" onTerminal={() => {}} />);
   await screen.findByText('想一起完成什么？');
   await act(async () => resolveOld(Response.json({ agentAvailable: true, messages: [{ id: 'old', role: 'user', content: '过期响应', status: 'stored', createdAt: 1 }] })));
   expect(screen.queryByText('过期响应')).toBeNull();
-  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+  expect(composerText()).toBe('');
 });
 
 it('keeps the first visible row when new replies arrive during history reading', async () => {

@@ -4,6 +4,7 @@ import { commands, page } from 'vitest/browser';
 import '../../../index.css';
 import { syncInitialViewportCssVars, useViewportHeight } from '../../hooks/useViewportHeight';
 import { SessionChatView } from './SessionChatView';
+import { readChatEditor } from './ChatRichEditor';
 import { clearChatSnapshots } from './chatSnapshot';
 
 // This suite retains coverage for the legacy height-based layout (Android).
@@ -59,7 +60,7 @@ it.each([0, 34])('uses the terminal layout to keep navigation and the conversati
     expect(composer.getBoundingClientRect().bottom).toBeLessThanOrEqual(height);
     expect(getComputedStyle(composer).transform).toBe('none');
     if (height < 700) expect(list.getBoundingClientRect().height).toBeLessThan(initial.height);
-    expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('草稿\n第二行');
+    expect(readChatEditor(document.querySelector('[role="textbox"]') as HTMLElement).text).toBe('草稿\n第二行');
   }
   expect(scrollTo).not.toHaveBeenCalled();
   expect(document.documentElement.dataset.termdockNativeChatLayout).toBeUndefined();
@@ -99,7 +100,7 @@ it('retains the original layout base through native pan and subsequent keyboard 
   const viewport = Object.assign(new EventTarget(), { height: 844, width: 390, offsetTop: 0, scale: 1 });
   vi.stubGlobal('visualViewport', viewport);
   await mountChat();
-  const input = document.querySelector('textarea')!, header = document.querySelector('header')!;
+  const input = document.querySelector('[role="textbox"]') as HTMLElement, header = document.querySelector('header')!;
   const list = document.querySelector('.session-chat-scroll')!, composer = document.querySelector('.session-chat-composer')!;
   const initialTop = list.getBoundingClientRect().top;
   for (const [height, offsetTop, focused] of [[470, 330, true], [844, 44, false], [470, 0, true], [844, 44, false], [460, 44, true]] as const) {
@@ -114,12 +115,12 @@ it('retains the original layout base through native pan and subsequent keyboard 
   }
 });
 
-it('grows the composer in normal flow without moving the empty-state anchor or resetting the live textarea', async () => {
+it('grows the composer in normal flow without moving the empty-state anchor or resetting the live contenteditable editor', async () => {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone');
   const viewport = Object.assign(new EventTarget(), { height: 844, width: 390, offsetTop: 0, scale: 1 });
   vi.stubGlobal('visualViewport', viewport);
   await mountChat();
-  const input = document.querySelector('textarea')!, welcome = document.querySelector('.session-chat-welcome')!;
+  const input = document.querySelector('[role="textbox"]') as HTMLElement, welcome = document.querySelector('.session-chat-welcome')!;
   const list = document.querySelector('.session-chat-scroll')!, composer = document.querySelector('.session-chat-composer')!;
   await page.getByRole('textbox').click();
   viewport.height = 470; viewport.dispatchEvent(new Event('resize')); await frame();
@@ -162,7 +163,7 @@ it('keeps an older reading position while the composer grows and shrinks', async
 it('reflows the editor from its content when available width changes', async () => {
   await mountChat();
   await page.getByRole('textbox').fill('自然换行的中文内容 mixed text '.repeat(18)); await frame();
-  const input = document.querySelector('textarea')!;
+  const input = document.querySelector('[role="textbox"]') as HTMLElement;
   const narrow = input.getBoundingClientRect().height;
   await page.viewport(1280, 900); await frame();
   expect(input.getBoundingClientRect().height).toBeLessThan(narrow);
@@ -171,21 +172,21 @@ it('reflows the editor from its content when available width changes', async () 
 
 it('contains touch drags at the editor boundary while keeping long drafts natively scrollable', async () => {
   await mountChat();
-  const input = document.querySelector('textarea')!;
+  const input = document.querySelector('[role="textbox"]') as HTMLElement;
   let prevented = false;
   const observe = (event: TouchEvent) => { prevented ||= event.defaultPrevented; };
   document.addEventListener('touchmove', observe);
   try {
-    await commands.inputPanelDrag('textarea', -80);
+    await commands.inputPanelDrag('[role="textbox"]', -80);
     expect(prevented).toBe(true);
     expect(window.scrollY).toBe(0);
     await page.getByRole('textbox').fill(Array.from({ length: 25 }, (_, i) => `草稿第${i + 1}行`).join('\n')); await frame();
     input.scrollTop = 0;
-    await commands.inputPanelDrag('textarea', -80);
+    await commands.inputPanelDrag('[role="textbox"]', -80);
     await expect.poll(() => input.scrollTop).toBeGreaterThan(0);
     input.scrollTop = input.scrollHeight;
     prevented = false;
-    await commands.inputPanelDrag('textarea', -80);
+    await commands.inputPanelDrag('[role="textbox"]', -80);
     expect(prevented).toBe(true);
     expect(window.scrollY).toBe(0);
   } finally { document.removeEventListener('touchmove', observe); }

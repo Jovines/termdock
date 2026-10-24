@@ -28,8 +28,7 @@ import { useShareAccess, useSessionCapabilities } from '../../federation/ShareAc
 import { readFileReferenceDrag } from './fileReferenceTransfer';
 import { getActiveKeyboardLayer } from '../../hooks/useKeyboardLayer';
 import { activeChatMentions, attachmentToken, chatAttachmentKind, chatDraftSummary, composeChatDraft, mentionToken, parseChatDraft, type ChatAttachment, type ChatInsertionPoint, type ChatMention } from './chatComposerContent';
-import { ChatAttachmentCards } from './ChatAttachmentCards';
-import { ChatDraftText } from './ChatDraftText';
+import { ChatRichEditor, readChatEditor, setChatEditorCaret } from './ChatRichEditor';
 import { useChatMentions } from './useChatMentions';
 interface Pending { content: string; requestId: string; createdAt: number }
 const button = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-3 text-sm transition hover:bg-surface-2 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
@@ -52,8 +51,6 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
   const [draft, setDraft] = useState(() => { try { return sessionStorage.getItem(`${storageKey}:draft`) || ''; } catch { return ''; } });
   const [extras, setExtras] = useState(() => { try { return parseChatDraft(sessionStorage.getItem(`${storageKey}:extras`) || ''); } catch { return parseChatDraft(''); } });
   const attachments = extras.attachments, mentions = activeChatMentions(draft, extras.mentions);
-  const [composing, setComposing] = useState(false);
-  const paintDraft = !composing && (attachments.some(file => file.reference) || mentions.length > 0);
   const [caret, setCaret] = useState(draft.length), [dismissedMention, setDismissedMention] = useState<string | null>(null);
   const [memberIndex, setMemberIndex] = useState(0);
   const mentionListId = useId();
@@ -83,20 +80,19 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
   const [sending, setSending] = useState(false);
   const [unseen, setUnseen] = useState(false);
   const [copied, setCopied] = useState('');
-  const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null), draftMirror = useRef<HTMLDivElement>(null);
+  const scroll = useRef<HTMLDivElement>(null), input = useRef<HTMLDivElement>(null);
+  const pendingEditorCaret = useRef<number | null>(null), focusEditorAfterUpdate = useRef(false);
   usePreserveInputFocus(scroll, input, active && touchLayout);
   const composer = useRef<HTMLDivElement>(null);
   const inputMasked = useKeyboardFocusGuard(input, active && touchLayout && !usesNativeKeyboardLayout(), keyboard);
   useInputViewportDiagnostics(input, active && touchLayout);
   useLayoutEffect(() => {
-    const node = input.current, mirror = draftMirror.current;
-    if (!node || !mirror) return;
-    const sync = () => { mirror.style.width = `${node.clientWidth}px`; mirror.scrollTop = node.scrollTop; };
-    sync();
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(sync); observer.observe(node);
-    return () => observer.disconnect();
-  }, [paintDraft, inputMasked]);
+    const node = input.current, caret = pendingEditorCaret.current;
+    if (!node || caret === null) return;
+    pendingEditorCaret.current = null;
+    if (focusEditorAfterUpdate.current) { focusEditorAfterUpdate.current = false; focusKeyboardInput(node); }
+    setChatEditorCaret(node, caret);
+  }, [draft, attachments, mentions]);
   const nearBottom = useRef(snapshot?.nearBottom ?? true), busy = useRef(false), generation = useRef(0), refreshSequence = useRef(0);
   const content = useRef<HTMLDivElement>(null), section = useRef<HTMLElement>(null), filePicker = useRef<HTMLInputElement>(null), dragDepth = useRef(0);
   useTouchScrollBoundary(section, active && touchLayout);
@@ -112,19 +108,52 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
   const prepend = useRef<{ top: number; height: number }>();
   const inputScope = useRef({ active, canWrite, sessionId }); inputScope.current = { active, canWrite, sessionId };
   const access = useShareAccess();
-  const insertText = useCallback((text: string, focus = true, insertion?: ChatInsertionPoint) => {
-    const node = input.current, start = node?.selectionStart, end = node?.selectionEnd, scope = inputScope.current, client = currentSecureClient(), layer = getActiveKeyboardLayer();
+  const writeEditorDraft = (value: string, caret: number, focus = false) => {
+    pendingEditorCaret.current = caret;
+    focusEditorAfterUpdate.current = focus;
+    setDraft(value);
+  };
+  const updateFromEditor = (value: string, start: number, end = start) => {
+    setDraft(value); setCaret(end); setDismissedMention(null);
+    setExtras(current => ({ ...current,
+      attachments: current.attachments.filter(file => !file.reference || value.includes(attachmentToken(file))),
+      mentions: current.mentions.filter(member => value.includes(mentionToken(member))),
+    }));
+  };
+  const insertText = (text: string, focus = true, insertion?: ChatInsertionPoint) => {
+    const node = input.current, scope = inputScope.current, client = currentSecureClient(), layer = getActiveKeyboardLayer();
+    const selection = insertion ?? (node ? readChatEditor(node) : { value: draft, start: draft.length, end: draft.length });
     setDraft(current => {
       // A late upload can insert at its original anchor, but cannot erase text
       // typed while it was in flight. If that anchor changed, append instead.
-      const anchored = insertion && current.startsWith(insertion.value.slice(0, insertion.start));
-      const at = insertion ? current === insertion.value || anchored ? Math.min(insertion.start, current.length) : current.length : Math.min(start ?? current.length, current.length);
-      const until = insertion ? current === insertion.value ? Math.min(insertion.end, current.length) : at : Math.min(end ?? at, current.length);
+      const anchored = current.startsWith(selection.value.slice(0, selection.start));
+      const at = current === selection.value || anchored ? Math.min(selection.start, current.length) : current.length;
+      const until = current === selection.value ? Math.min(selection.end, current.length) : at;
       const next = current.slice(0, at) + text + current.slice(until);
-      requestAnimationFrame(() => { if (node?.isConnected && node.value === next && inputScope.current.active && inputScope.current.canWrite && inputScope.current.sessionId === scope.sessionId && currentSecureClient() === client && getActiveKeyboardLayer() === layer) { if (focus) focusKeyboardInput(node); node.setSelectionRange(at + text.length, at + text.length); } });
+      pendingEditorCaret.current = at + text.length;
+      focusEditorAfterUpdate.current = focus;
+      requestAnimationFrame(() => { if (node?.isConnected && inputScope.current.active && inputScope.current.canWrite && inputScope.current.sessionId === scope.sessionId && currentSecureClient() === client && getActiveKeyboardLayer() === layer && document.activeElement !== node) { pendingEditorCaret.current = null; focusEditorAfterUpdate.current = false; } });
       return next;
     });
-  }, []);
+  };
+  const removeComposerToken = (token: string) => {
+    const start = draft.indexOf(token), next = draft.split(token).join('');
+    writeEditorDraft(next, start < 0 ? draft.length : start, true);
+    setExtras(current => ({ ...current, attachments: current.attachments.filter(file => attachmentToken(file) !== token), mentions: current.mentions.filter(member => mentionToken(member) !== token) }));
+  };
+  useEffect(() => {
+    if (!attachments.length) return;
+    let number = Math.max(0, ...attachments.map(file => Number(file.reference?.match(/\d+$/)?.[0]) || 0));
+    const normalized = attachments.map(file => file.reference ? file : { ...file, reference: `${chatAttachmentKind(file)}${++number}` });
+    const addition = normalized.filter(file => !draft.includes(attachmentToken(file))).map(attachmentToken).join(' ');
+    if (normalized.some((file, index) => file.reference !== attachments[index]?.reference)) {
+      setExtras(current => ({ ...current, attachments: normalized }));
+    }
+    if (addition) setDraft(current => current ? `${current} ${addition}` : addition);
+  // Restore older drafts that stored attachment metadata without inline refs.
+  // New uploads insert both atomically and do not pass through this migration.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey]);
   const attachFiles = (files: ChatAttachment[], focus: boolean, at: ChatInsertionPoint) => {
     let number = Math.max(0, ...attachments.map(file => Number(file.reference?.match(/\d+$/)?.[0]) || 0));
     const labeled = files.map(file => ({ ...file, reference: `${chatAttachmentKind(file)}${++number}` }));
@@ -135,11 +164,10 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
     if (!mentionMatch || !active || !canMention) return;
     const start = caret - mentionMatch[1].length - 1, token = `${mentionToken(member)} `;
     const next = draft.slice(0, start) + token + draft.slice(caret);
-    setDraft(next); setCaret(start + token.length); setDismissedMention(mentionKey);
+    writeEditorDraft(next, start + token.length, true); setCaret(start + token.length); setDismissedMention(mentionKey);
     setExtras(current => ({ ...current, mentions: [...current.mentions.filter(item => item.sessionId !== member.sessionId || item.groupId !== member.groupId), member] }));
-    requestAnimationFrame(() => { focusKeyboardInput(input.current); input.current?.setSelectionRange(start + token.length, start + token.length); });
   };
-  const transfer = useChatInputTransfer({ sessionId, active, canWrite, input, insert: insertText, attach: attachFiles, error: setError,
+  const transfer = useChatInputTransfer({ sessionId, active, canWrite, input, selection: () => input.current ? readChatEditor(input.current) : { value: draft, start: draft.length, end: draft.length }, insert: insertText, attach: attachFiles, error: setError,
     sessionAttachments: !!access,
     directory: access ? access.directories?.find(directory => directory.access === 'write')?.path : '/tmp' });
   const quoteMessage = useCallback((message: ChatMessage, selected?: string) => {
@@ -292,7 +320,7 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
     busy.current = true; setSending(true); setError(''); setReplyPending(undefined); setPending(item); nearBottom.current = true;
     // The pending message owns this content now. Acknowledgements must never
     // clear the next draft, including one with the same text as this message.
-    if (!retry && actionContent === undefined) { setDraft(''); setReference(null); setExtras(parseChatDraft('')); setDismissedMention(null); }
+    if (!retry && actionContent === undefined) { writeEditorDraft('', 0); setReference(null); setExtras(parseChatDraft('')); setDismissedMention(null); }
     const attempt = generation.current;
     try {
       const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: item.content, requestId: item.requestId }), signal: AbortSignal.timeout(20000) });
@@ -338,7 +366,7 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
     <div ref={scroll} style={keyboardLayout.contentStyle} className="session-chat-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 [overflow-anchor:none] sm:px-8" onScroll={() => { const el = scroll.current!; if (!active || !el.clientHeight) return; scrollPosition.current = el.scrollTop; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96; if (nearBottom.current && !pageState.current.hasNewer) setUnseen(false); if (el.scrollTop < el.clientHeight) void loadOlder(); }}>
       <div ref={content} className="mx-auto flex min-h-full w-full max-w-screen-2xl flex-col py-5 sm:py-8">
         {hasOlder && <div ref={olderEdge} data-chat-older-edge aria-hidden="true" className="h-12 shrink-0">{olderLoading && <div className="space-y-2 py-2"><div className="chat-loading-skeleton h-3 w-3/4 rounded bg-surface-2" /><div className="chat-loading-skeleton h-3 w-1/2 rounded bg-surface-2" /></div>}</div>}
-        {(loading || !historyReady) && !messages.length && !pending ? <ChatLoading /> : !messages.length && !pending ? <div className="session-chat-welcome shrink-0 py-6"><MessageCircle size={27} strokeWidth={1.5} className="mb-4 text-primary" /><h2 className="text-xl font-semibold tracking-tight sm:text-2xl">想一起完成什么？</h2><p className="mt-2 max-w-md text-[15px] leading-7 text-muted-foreground">直接描述你的目标，或从一个问题开始。</p><div className="mt-5 flex flex-wrap gap-2">{['帮我梳理一下当前工作', '请解释一下刚才的结果', '我们继续下一步'].map(text => <button type="button" key={text} className={`${button} border border-border/60 text-left text-xs text-muted-foreground`} disabled={!canWrite} onClick={() => { setDraft(text); focusKeyboardInput(input.current); }}>{text}</button>)}</div></div> : <ChatTimeline pendingMessage={pending && <ChatUserMessage content={pending.content} createdAt={pending.createdAt} status={sending ? '发送中…' : '待重试'}>{!sending && <><button type="button" className="min-h-9 rounded-lg px-2 hover:bg-surface-2" onClick={() => { const parsed = parseChatContent(pending.content); const restored = parseChatDraft(parsed.text); setDraft(restored.text); setExtras(restored); setReference(parsed.reference); setPending(null); setError(''); focusKeyboardInput(input.current); }}>修改草稿</button><button type="button" className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-primary hover:bg-surface-2" disabled={!canWrite || agentAvailable !== true} onClick={() => void send(pending)}><RefreshCw size={12} />重试发送</button></>}</ChatUserMessage>} sessionId={sessionId} uiWritable={active && canWrite && !pending && !sending && agentAvailable === true} onAction={onAction} messages={messages} scrollRoot={scroll} rowHeights={rowHeights} nearbyIds={nearbyIds} initialVisibleIds={snapshot?.visibleMessageIds} agentName={agentName} agentSlug={agentSlug} canWrite={canWrite} copied={copied} onReference={quoteMessage} onCopy={onCopy} />}
+        {(loading || !historyReady) && !messages.length && !pending ? <ChatLoading /> : !messages.length && !pending ? <div className="session-chat-welcome shrink-0 py-6"><MessageCircle size={27} strokeWidth={1.5} className="mb-4 text-primary" /><h2 className="text-xl font-semibold tracking-tight sm:text-2xl">想一起完成什么？</h2><p className="mt-2 max-w-md text-[15px] leading-7 text-muted-foreground">直接描述你的目标，或从一个问题开始。</p><div className="mt-5 flex flex-wrap gap-2">{['帮我梳理一下当前工作', '请解释一下刚才的结果', '我们继续下一步'].map(text => <button type="button" key={text} className={`${button} border border-border/60 text-left text-xs text-muted-foreground`} disabled={!canWrite} onClick={() => { writeEditorDraft(text, text.length, true); }}>{text}</button>)}</div></div> : <ChatTimeline pendingMessage={pending && <ChatUserMessage content={pending.content} createdAt={pending.createdAt} status={sending ? '发送中…' : '待重试'}>{!sending && <><button type="button" className="min-h-9 rounded-lg px-2 hover:bg-surface-2" onClick={() => { const parsed = parseChatContent(pending.content); const restored = parseChatDraft(parsed.text); writeEditorDraft(restored.text, restored.text.length, true); setExtras(restored); setReference(parsed.reference); setPending(null); setError(''); focusKeyboardInput(input.current); }}>修改草稿</button><button type="button" className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-primary hover:bg-surface-2" disabled={!canWrite || agentAvailable !== true} onClick={() => void send(pending)}><RefreshCw size={12} />重试发送</button></>}</ChatUserMessage>} sessionId={sessionId} uiWritable={active && canWrite && !pending && !sending && agentAvailable === true} onAction={onAction} messages={messages} scrollRoot={scroll} rowHeights={rowHeights} nearbyIds={nearbyIds} initialVisibleIds={snapshot?.visibleMessageIds} agentName={agentName} agentSlug={agentSlug} canWrite={canWrite} copied={copied} onReference={quoteMessage} onCopy={onCopy} />}
 
         {waitingForReply && !error && <div data-chat-reply-status role="status" aria-label={`${agentName}工作中`} aria-live="polite" className="mt-6 inline-flex w-fit max-w-full items-center gap-3 self-start rounded-lg border border-border/50 bg-[color-mix(in_srgb,var(--surface)_35%,var(--chrome-bg))] px-3 py-2 text-xs text-muted-foreground"><ChatAgentLabel name={agentName} slug={agentSlug} /><span className="inline-flex shrink-0 items-center gap-1.5"><LoaderCircle size={14} className="animate-spin text-primary motion-reduce:animate-none" /><span>工作中…</span></span></div>}
       </div>
@@ -357,17 +385,35 @@ function SessionChatContent({ sessionId, name = '当前会话', canWrite: reques
       </div>}
       <form data-chat-composer className="rounded-2xl border border-border bg-surface p-2.5 transition-colors focus-within:border-primary/60" onSubmit={e => { e.preventDefault(); if (!pending) void send(); }}>
         {reference && <ChatReferenceCard reference={reference} onRemove={() => setReference(null)} />}
-        <ChatAttachmentCards files={attachments} onReference={canWrite ? file => insertText(attachmentToken(file) + ' ') : undefined} onRemove={canWrite ? index => { const token = attachmentToken(attachments[index]); if (token) setDraft(current => current.split(token).join('')); setExtras(current => ({ ...current, attachments: current.attachments.filter((_, at) => at !== index) })); } : undefined} />
-        {mentions.length > 0 && <ul aria-label="已提及的成员" className="mb-2 flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">{mentions.map(member => <li key={`${member.groupId}:${member.sessionId}`} className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-lg bg-primary/10 pl-2 text-xs text-primary"><span className="truncate">@{member.name} · {member.groupName}</span><button type="button" aria-label={`移除提及 ${member.name}`} disabled={!canWrite} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg hover:bg-primary/10" onPointerDown={event => event.preventDefault()} onClick={() => { setDraft(current => current.split(mentionToken(member)).join('')); setExtras(current => ({ ...current, mentions: current.mentions.filter(item => item !== member) })); }}><X size={12} /></button></li>)}</ul>}
         <input ref={filePicker} type="file" multiple tabIndex={-1} className="hidden" aria-label="选择附件" onChange={event => { transfer.addFiles(Array.from(event.currentTarget.files || [])); event.currentTarget.value = ''; }} />
         <div className="relative min-w-0 w-full">
         <div aria-hidden="true" className={`session-chat-input-sizer pointer-events-none col-start-1 row-start-1 overflow-hidden whitespace-pre-wrap break-words px-1 py-2 text-base leading-7 ${inputMasked ? '' : 'invisible'} ${draft ? '' : 'text-muted-foreground/60'}`}>{(draft || (inputMasked ? canWrite ? '输入消息…' : '此会话仅允许查看' : '')) + ' '}</div>
-        {paintDraft && !inputMasked && <div ref={draftMirror} aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-1 py-2 text-base leading-7"><ChatDraftText text={draft + (draft.endsWith('\n') ? '\u200b' : '')} files={attachments} mentions={mentions} /></div>}
-        <textarea ref={input} data-rich-draft={paintDraft || undefined} style={paintDraft ? { color: 'transparent', caretColor: 'var(--foreground)' } : undefined} onScroll={event => { if (draftMirror.current) draftMirror.current.scrollTop = event.currentTarget.scrollTop; }} onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} onFocus={() => setSelectedReference(null)} onPaste={event => { const { files, text } = clipboardEventContent(event.clipboardData); if (files.length || getTermdockDesktopBridge()?.readClipboardFiles || !text && (getTermdockDesktopBridge() || typeof navigator.clipboard?.read === 'function')) { event.preventDefault(); void transfer.paste({ files, text }); } }} rows={1} autoComplete="off" className="session-chat-input col-start-1 row-start-1 block w-full min-w-0 self-stretch resize-none overflow-y-auto break-words bg-transparent px-1 py-2 text-base leading-7 outline-none placeholder:text-muted-foreground/60" aria-label={`给${agentName}的消息`} placeholder={canWrite ? '输入消息…' : '此会话仅允许查看'} value={draft} disabled={!canWrite} aria-controls={mentionOpen ? mentionListId : undefined} aria-expanded={mentionOpen} aria-autocomplete={canMention ? 'list' : undefined} aria-activedescendant={mentionOpen && memberOptions.length ? `${mentionListId}-${selectedMemberIndex}` : undefined} onSelect={event => setCaret(event.currentTarget.selectionStart)} onChange={e => { setDraft(e.target.value); setCaret(e.target.selectionStart); setDismissedMention(null); }} onKeyDown={e => { e.stopPropagation(); if (mentionOpen && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) { if (e.key === 'Escape') { e.preventDefault(); setDismissedMention(mentionKey); return; } if (['ArrowDown', 'ArrowUp'].includes(e.key) && memberOptions.length) { e.preventDefault(); setMemberIndex((selectedMemberIndex + (e.key === 'ArrowDown' ? 1 : -1) + memberOptions.length) % memberOptions.length); return; } if ((e.key === 'Enter' && !e.shiftKey || e.key === 'Tab') && memberOptions.length && roster.status === 'ready') { e.preventDefault(); chooseMember(memberOptions[selectedMemberIndex]); return; } if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); return; } } if (e.key === 'Enter' && !touchLayout && !e.shiftKey && !e.altKey && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) { e.preventDefault(); if (!pending) void send(); } }} />
+        <ChatRichEditor input={input} value={draft} files={attachments} mentions={mentions} masked={inputMasked} readOnly={!canWrite} label={`给${agentName}的消息`} placeholder={canWrite ? '输入消息…' : '此会话仅允许查看'}
+          onInput={updateFromEditor} onFocus={() => setSelectedReference(null)} onTokenRemove={removeComposerToken}
+          onPaste={event => { const { files, text } = clipboardEventContent(event.clipboardData); const native = getTermdockDesktopBridge();
+            if (files.length || native?.readClipboardFiles || !text && (native || typeof navigator.clipboard?.read === 'function')) { event.preventDefault(); void transfer.paste({ files, text }); return; }
+            if (text) { event.preventDefault(); const selection = input.current ? readChatEditor(input.current) : { start: draft.length, end: draft.length }; const next = draft.slice(0, selection.start) + text + draft.slice(selection.end); writeEditorDraft(next, selection.start + text.length, true); }
+          }}
+          onKeyDown={event => { event.stopPropagation(); const selection = input.current ? readChatEditor(input.current) : { value: draft, start: draft.length, end: draft.length };
+            setCaret(selection.end);
+            if (mentionOpen && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+              if (event.key === 'Escape') { event.preventDefault(); setDismissedMention(mentionKey); return; }
+              if (['ArrowDown', 'ArrowUp'].includes(event.key) && memberOptions.length) { event.preventDefault(); setMemberIndex((selectedMemberIndex + (event.key === 'ArrowDown' ? 1 : -1) + memberOptions.length) % memberOptions.length); return; }
+              if ((event.key === 'Enter' && !event.shiftKey || event.key === 'Tab') && memberOptions.length && roster.status === 'ready') { event.preventDefault(); chooseMember(memberOptions[selectedMemberIndex]); return; }
+              if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); return; }
+            }
+            if ((event.key === 'Backspace' || event.key === 'Delete') && selection.start === selection.end) {
+              const tokens = [...attachments.map(attachmentToken), ...mentions.map(mentionToken)].filter(Boolean);
+              const token = tokens.find(item => event.key === 'Backspace' ? selection.start > draft.indexOf(item) && selection.start <= draft.indexOf(item) + item.length : selection.start >= draft.indexOf(item) && selection.start < draft.indexOf(item) + item.length);
+              if (token) { event.preventDefault(); removeComposerToken(token); return; }
+            }
+            if (event.key === 'Enter' && !touchLayout && !event.shiftKey && !event.altKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); if (!pending) void send(); return; }
+            if (event.key === 'Enter' && touchLayout) { event.preventDefault(); const next = `${draft.slice(0, selection.start)}\n${draft.slice(selection.end)}`; writeEditorDraft(next, selection.start + 1, false); }
+          }} />
         </div>
         <div data-chat-composer-toolbar className="mt-1 flex items-center gap-1">
         <button type="button" aria-label="添加文件" title="添加文件，也可拖入或粘贴" className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-2 disabled:opacity-30" disabled={!canWrite || transfer.busy} onPointerDown={event => event.preventDefault()} onClick={() => filePicker.current?.click()}><Paperclip size={18} /></button>
-        {canMention && <button type="button" aria-label="提及协作成员" title="提及协作成员" className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-2" onPointerDown={event => event.preventDefault()} onClick={() => { const node = input.current; const start = node?.selectionStart ?? draft.length, end = node?.selectionEnd ?? start; const prefix = start && !/\s$/.test(draft.slice(0, start)) ? ' @' : '@'; setDraft(draft.slice(0, start) + prefix + draft.slice(end)); setCaret(start + prefix.length); setDismissedMention(null); focusKeyboardInput(input.current); requestAnimationFrame(() => input.current?.setSelectionRange(start + prefix.length, start + prefix.length)); }}><AtSign size={18} /></button>}
+        {canMention && <button type="button" aria-label="提及协作成员" title="提及协作成员" className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface-2" onPointerDown={event => event.preventDefault()} onClick={() => { const node = input.current; const current = node ? readChatEditor(node) : { start: draft.length, end: draft.length }; const start = current.start, end = current.end; const prefix = start && !/\s$/.test(draft.slice(0, start)) ? ' @' : '@'; writeEditorDraft(draft.slice(0, start) + prefix + draft.slice(end), start + prefix.length, true); setCaret(start + prefix.length); setDismissedMention(null); focusKeyboardInput(input.current);  }}><AtSign size={18} /></button>}
         <span className="session-chat-keyboard-hint hidden min-w-0 flex-1 px-2 text-[11px] text-muted-foreground/60 sm:block">Enter 发送 · Shift + Enter 换行</span>
         <span className="flex-1 sm:hidden" aria-hidden="true" />
         <button type="submit" aria-label="发送消息" onPointerDown={e => { if (document.activeElement === input.current) e.preventDefault(); }} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground transition hover:opacity-90 disabled:opacity-30" disabled={sending || transfer.busy || !!pending || (!draft.trim() && !attachments.length) || tooLong || !canWrite || agentAvailable !== true}><ArrowUp size={19} /></button>

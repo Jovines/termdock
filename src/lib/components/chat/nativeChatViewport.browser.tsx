@@ -8,6 +8,7 @@ import { syncInitialViewportCssVars, useViewportHeight } from '../../hooks/useVi
 import { SessionChatView } from './SessionChatView';
 import { clearChatSnapshots } from './chatSnapshot';
 import { SESSION_NO_SWIPE, SESSION_SWIPER_FOCUSABLE_ELEMENTS } from './sessionSwipe';
+import { readChatEditor } from './ChatRichEditor';
 
 let root: Root | undefined;
 afterEach(async () => {
@@ -52,7 +53,7 @@ async function mount(mode: 'resize' | 'pan', safeBottom = 0, messages: object[] 
   }
   root = createRoot(host); root.render(<App />);
   await expect.element(page.getByRole('textbox')).toBeVisible(); await frame();
-  return document.querySelector('textarea')!;
+  return document.querySelector('[role="textbox"]') as HTMLElement;
 }
 
 it.each(['resize', 'pan'] as const)('lets native focus place the real chat input with incorrect viewport data (%s)', async mode => {
@@ -74,7 +75,9 @@ it.each(['resize', 'pan'] as const)('lets native focus place the real chat input
     if (visible < 600) expect(content.getBoundingClientRect().height).toBeLessThan(originalHeight);
   }
   await page.getByRole('textbox').fill('第一行\n第二行\n第三行'); await frame();
-  expect(header.getBoundingClientRect().top).toBe(0);
+  // Contenteditable growth can trigger another native scroll after input;
+  // wait for the shared viewport controller just as after focus above.
+  await expect.poll(() => header.getBoundingClientRect().top).toBe(0);
   expect(content.getBoundingClientRect().top).toBe(top);
   expect(input.getBoundingClientRect().bottom).toBeLessThanOrEqual(516);
   expect(document.querySelector('.session-chat-composer')!.getBoundingClientRect().bottom).toBeLessThanOrEqual(516);
@@ -119,7 +122,7 @@ it('scrolls and touches the conversation without blurring or refocusing the edit
   await expect.poll(() => document.querySelector('header')!.getBoundingClientRect().top).toBe(0);
   const list = document.querySelector<HTMLElement>('.session-chat-scroll')!;
   list.scrollTop = 500; list.dispatchEvent(new Event('scroll')); await frame();
-  input.setSelectionRange(2, 5);
+  const textNode = input.firstChild!; const range = document.createRange(); range.setStart(textNode, 2); range.setEnd(textNode, 5); const selection = getSelection()!; selection.removeAllRanges(); selection.addRange(range);
   const blur = vi.fn(); input.addEventListener('blur', blur);
   const focus = vi.spyOn(input, 'focus');
   const before = list.scrollTop;
@@ -129,8 +132,8 @@ it('scrolls and touches the conversation without blurring or refocusing the edit
   await commands.inputPanelDrag('.session-chat-scroll', 0);
   expect(document.activeElement).toBe(input);
   expect(blur).not.toHaveBeenCalled(); expect(focus).not.toHaveBeenCalled();
-  expect(input.value).toBe('保留这份中文草稿');
-  expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+  expect(readChatEditor(input).text).toBe('保留这份中文草稿');
+  expect([readChatEditor(input).start, readChatEditor(input).end]).toEqual([2, 5]);
   input.removeEventListener('blur', blur);
   input.blur(); await frame();
   expect(document.activeElement).not.toBe(input);

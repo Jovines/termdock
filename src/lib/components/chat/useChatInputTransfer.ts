@@ -9,7 +9,7 @@ import { getActiveKeyboardLayer } from '../../hooks/useKeyboardLayer';
 import type { ChatAttachment, ChatInsertionPoint } from './chatComposerContent';
 interface Options {
   sessionId: string; active: boolean; canWrite: boolean; directory?: string; sessionAttachments?: boolean;
-  input: RefObject<HTMLTextAreaElement>; insert: (text: string, focus?: boolean) => void; error: (message: string) => void;
+  input: RefObject<HTMLElement>; selection?: () => ChatInsertionPoint; insert: (text: string, focus?: boolean, insertion?: ChatInsertionPoint) => void; error: (message: string) => void;
   attach?: (files: ChatAttachment[], focus: boolean, at: ChatInsertionPoint) => void;
 }
 interface Transfer { stage: 'reading' | 'uploading' | 'failed' | 'cancelled'; percent?: number; files?: File[]; paths?: string[] }
@@ -23,7 +23,7 @@ export function useChatInputTransfer(options: Options) {
     const scope = latest.current, target = selectedTarget(), client = currentSecureClient(), layer = getActiveKeyboardLayer(), focused = document.activeElement;
     const controller = new AbortController();
     const node = scope.input.current;
-    const operation = { controller, at: { value: node?.value || '', start: node?.selectionStart ?? 0, end: node?.selectionEnd ?? 0 }, current: () => mounted.current && !controller.signal.aborted && work.current === operation
+    const operation = { controller, at: latest.current.selection?.() ?? { value: node?.textContent ?? '', start: (node?.textContent ?? '').length, end: (node?.textContent ?? '').length }, current: () => mounted.current && !controller.signal.aborted && work.current === operation
       && latest.current.active && latest.current.canWrite && latest.current.sessionId === scope.sessionId
       && selectedTarget() === target && currentSecureClient() === client && !client?.closed && getActiveKeyboardLayer() === layer,
       focus: () => document.activeElement === focused || document.activeElement === scope.input.current || document.activeElement === document.body };

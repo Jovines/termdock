@@ -34,3 +34,10 @@ html[data-termdock-touch-viewport='true'] .session-chat-keyboard-hint { display:
 
 /* The separator shares the compact actions/time row above the next reply. */
 .chat-replies > [data-chat-viewport-row] + [data-chat-viewport-row] { margin-top: 4px; }
+
+.session-chat-rich-editor { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; touch-action: pan-y; }
+.session-chat-rich-editor:empty::before { content: attr(data-placeholder); color: var(--muted-foreground); opacity: .6; pointer-events: none; }
+.session-chat-rich-editor [data-chat-inline-token] { user-select: none; -webkit-user-select: none; }
+.session-chat-rich-editor [data-chat-inline-token] button { user-select: auto; -webkit-user-select: auto; }
+/* Growing editable text must not become the page's scroll anchor. */
+.session-chat-composer { overflow-anchor: none; }
